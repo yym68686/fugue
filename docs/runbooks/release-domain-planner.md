@@ -232,6 +232,20 @@ readback. A pre-write intent artifact and a result artifact preserve the
 object identities. The baseline ref must remain at the previous object before
 and after materialization; carrier ref CAS remains a later checkpoint.
 
+The following independent hosted one-shot checkpoint advances only the
+baseline ref from the exact previous metadata object to that validated
+carrier. It binds the successful carrier result run and immutable artifact,
+revalidates the compact metadata bytes, one-file tree, sole Git parent, and
+unchanged runtime SHA, and requires both the carrier writer and deploy
+workflow to remain disabled. A pre-write intent artifact and five health
+samples complete before one GraphQL `updateRefs` attempt whose `beforeOid` and
+`afterOid` are exact and whose `force` value is false. Bounded exact readback
+is the sole settlement authority, including when the mutation response is
+lost or malformed. The CAS is the workflow's final semantic step: there is no
+post-mutation artifact upload, ref rewrite, runtime release, self-hosted
+runner, or cluster operation. Long-term recorder carrier compatibility remains
+a separate dormant checkpoint.
+
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.
 Evidence generation then uses that checksum-verified download cache as an

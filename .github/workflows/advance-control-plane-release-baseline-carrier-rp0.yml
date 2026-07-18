@@ -1,0 +1,399 @@
+name: advance-control-plane-release-baseline-carrier-rp0
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main SHA containing the carrier ref CAS policy
+        required: true
+        type: string
+      expected_previous_object_sha:
+        description: Exact current baseline ref object before the CAS
+        required: true
+        type: string
+      carrier_commit_sha:
+        description: Exact validated carrier commit that becomes the new ref object
+        required: true
+        type: string
+      carrier_result_run_id:
+        description: Exact successful carrier materialization workflow run ID
+        required: true
+        type: string
+      carrier_result_artifact_id:
+        description: Exact carrier materialization result artifact ID
+        required: true
+        type: string
+      carrier_result_artifact_digest:
+        description: Exact sha256 digest reported for the carrier result artifact
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-policy-rp0-carrier-ref-cas-v1
+  cancel-in-progress: false
+
+jobs:
+  advance-forward-carrier-ref:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout exact carrier ref CAS policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact carrier ref CAS authorization
+        id: verify
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_PREVIOUS_OBJECT_SHA: ${{ inputs.expected_previous_object_sha }}
+          CARRIER_COMMIT_SHA: ${{ inputs.carrier_commit_sha }}
+          CARRIER_RESULT_RUN_ID: ${{ inputs.carrier_result_run_id }}
+          CARRIER_RESULT_ARTIFACT_ID: ${{ inputs.carrier_result_artifact_id }}
+          CARRIER_RESULT_ARTIFACT_DIGEST: ${{ inputs.carrier_result_artifact_digest }}
+          HEALTH_URL: ${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
+          readonly writer_path='.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'
+          readonly deploy_path='.github/workflows/deploy-control-plane.yml'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${EXPECTED_PREVIOUS_OBJECT_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${CARRIER_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ && "${CARRIER_COMMIT_SHA}" != "${EXPECTED_PREVIOUS_OBJECT_SHA}" ]] || exit 1
+          [[ "${CARRIER_RESULT_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${CARRIER_RESULT_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${CARRIER_RESULT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${GITHUB_SHA}" ]] || exit 1
+
+          policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1
+          read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
+          [[ "${policy_commit}" == "${GITHUB_SHA}" && -n "${policy_parent:-}" && -z "${extra:-}" ]] || exit 1
+          expected_changes=(
+            $'A\t.github/workflows/advance-control-plane-release-baseline-carrier-rp0.yml'
+            $'M\tdocs/runbooks/release-domain-planner.md'
+            $'M\tdocs/runbooks/release-policy-recovery.md'
+            $'M\tinternal/platformsafety/release_workflow_test.go'
+          )
+          actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1
+          mapfile -t actual_changes <<<"${actual_changes_text}"
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[index]}" == "${expected_changes[index]}" ]] || exit 1
+          done
+          git diff --check "${policy_parent}" "${GITHUB_SHA}"
+
+          main_status=0
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || main_status=$?
+          [[ "${main_status}" == '0' && "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+
+          baseline_status=0
+          baseline_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" then [.[0].object.sha,.[0].object.type] | @tsv else error("missing or ambiguous baseline ref") end')" || baseline_status=$?
+          [[ "${baseline_status}" == '0' ]] || exit 1
+          IFS=$'\t' read -r baseline_object baseline_type extra <<<"${baseline_fields}" || exit 1
+          [[ -z "${extra:-}" && "${baseline_object}" == "${EXPECTED_PREVIOUS_OBJECT_SHA}" && "${baseline_type}" == 'commit' ]] || exit 1
+
+          writer_status=0
+          writer_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml" \
+            --jq '[.path,.state] | @tsv')" || writer_status=$?
+          [[ "${writer_status}" == '0' ]] || exit 1
+          IFS=$'\t' read -r observed_writer_path writer_state extra <<<"${writer_fields}" || exit 1
+          [[ -z "${extra:-}" && "${observed_writer_path}" == "${writer_path}" && "${writer_state}" == 'disabled_manually' ]] || exit 1
+
+          deploy_status=0
+          deploy_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" \
+            --jq '[.path,.state] | @tsv')" || deploy_status=$?
+          [[ "${deploy_status}" == '0' ]] || exit 1
+          IFS=$'\t' read -r observed_deploy_path deploy_state extra <<<"${deploy_fields}" || exit 1
+          [[ -z "${extra:-}" && "${observed_deploy_path}" == "${deploy_path}" && "${deploy_state}" == 'disabled_manually' ]] || exit 1
+
+          run_status=0
+          run_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CARRIER_RESULT_RUN_ID}" \
+            --jq '[.head_sha,.status,.conclusion,.run_attempt,.event,.path] | @tsv')" || run_status=$?
+          [[ "${run_status}" == '0' ]] || exit 1
+          IFS=$'\t' read -r run_head run_state run_conclusion run_attempt run_event run_path extra <<<"${run_fields}" || exit 1
+          [[ -z "${extra:-}" && "${run_state}" == 'completed' && "${run_conclusion}" == 'success' ]] || exit 1
+          [[ "${run_attempt}" == '1' && "${run_event}" == 'workflow_dispatch' && "${run_path}" == "${writer_path}" ]] || exit 1
+          [[ "${run_head}" == "${policy_parent}" ]] || exit 1
+
+          artifact_status=0
+          artifact_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${CARRIER_RESULT_ARTIFACT_ID}" \
+            --jq '[.id,.name,.expired,.digest,.workflow_run.id,.workflow_run.head_sha] | @tsv')" || artifact_status=$?
+          [[ "${artifact_status}" == '0' ]] || exit 1
+          IFS=$'\t' read -r artifact_id artifact_name artifact_expired artifact_digest artifact_run_id artifact_head extra <<<"${artifact_fields}" || exit 1
+          [[ -z "${extra:-}" && "${artifact_id}" == "${CARRIER_RESULT_ARTIFACT_ID}" ]] || exit 1
+          [[ "${artifact_name}" == "fugue-control-plane-rp0-carrier-result-${CARRIER_RESULT_RUN_ID}-1" ]] || exit 1
+          [[ "${artifact_expired}" == 'false' && "${artifact_digest}" == "${CARRIER_RESULT_ARTIFACT_DIGEST}" ]] || exit 1
+          [[ "${artifact_run_id}" == "${CARRIER_RESULT_RUN_ID}" && "${artifact_head}" == "${run_head}" ]] || exit 1
+
+          evidence_tmp="$(mktemp -d)" || exit 1
+          trap 'rm -rf "${evidence_tmp}"' EXIT
+          download_status=0
+          timeout --kill-after=5s 30s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${CARRIER_RESULT_ARTIFACT_ID}/zip" \
+            >"${evidence_tmp}/artifact.zip" || download_status=$?
+          [[ "${download_status}" == '0' && -s "${evidence_tmp}/artifact.zip" ]] || exit 1
+          carrier_fields="$(python3 - "${evidence_tmp}/artifact.zip" "${CARRIER_RESULT_RUN_ID}" "${CARRIER_COMMIT_SHA}" <<'PY'
+          import datetime, json, re, sys, zipfile
+          archive, run_id, expected_carrier = sys.argv[1:]
+          with zipfile.ZipFile(archive) as handle:
+              names = handle.namelist()
+              if names != ["intent.json"]:
+                  raise SystemExit("carrier result artifact inventory drifted")
+              info = handle.getinfo("intent.json")
+              if info.file_size <= 0 or info.file_size > 16384:
+                  raise SystemExit("carrier result artifact size is invalid")
+              payload_bytes = handle.read(info)
+          try:
+              payload = json.loads(payload_bytes)
+          except (UnicodeDecodeError, json.JSONDecodeError):
+              raise SystemExit("carrier result artifact is not JSON")
+          expected_keys = {
+              "carrier_commit_sha", "cluster_mutation_attempted", "metadata_blob_sha",
+              "metadata_tree_sha", "policy_sha", "previous_baseline_object_sha",
+              "recorded_at", "ref_mutation_attempted", "run_attempt", "run_id",
+              "runtime_sha", "schema_version", "transition", "transport_status", "workflow",
+          }
+          if type(payload) is not dict or set(payload) != expected_keys:
+              raise SystemExit("carrier result artifact schema drifted")
+          if payload["schema_version"] != 1 or payload["workflow"] != "materialize-control-plane-release-baseline-carrier-rp0":
+              raise SystemExit("carrier result artifact identity drifted")
+          if payload["run_id"] != run_id or payload["run_attempt"] != "1":
+              raise SystemExit("carrier result artifact run identity drifted")
+          if payload["carrier_commit_sha"] != expected_carrier:
+              raise SystemExit("carrier result artifact target drifted")
+          if payload["transition"] != "carrier-object-materialized-ref-unchanged":
+              raise SystemExit("carrier result transition drifted")
+          if payload["cluster_mutation_attempted"] is not False or payload["ref_mutation_attempted"] is not False:
+              raise SystemExit("carrier result reports an out-of-scope mutation")
+          if payload["transport_status"] != {"blob": 0, "tree": 0, "commit": 0}:
+              raise SystemExit("carrier object transport was not exact")
+          for key in ("carrier_commit_sha", "metadata_blob_sha", "metadata_tree_sha", "policy_sha", "previous_baseline_object_sha", "runtime_sha"):
+              if type(payload[key]) is not str or re.fullmatch(r"[0-9a-f]{40}", payload[key]) is None:
+                  raise SystemExit(f"carrier result {key} is invalid")
+          try:
+              recorded_at = datetime.datetime.fromisoformat(payload["recorded_at"])
+          except (TypeError, ValueError):
+              raise SystemExit("carrier result time is invalid")
+          if recorded_at.tzinfo is None or recorded_at.utcoffset() != datetime.timedelta(0):
+              raise SystemExit("carrier result time is not UTC")
+          print("\t".join(payload[key] for key in (
+              "policy_sha", "previous_baseline_object_sha", "runtime_sha",
+              "metadata_blob_sha", "metadata_tree_sha", "carrier_commit_sha",
+          )))
+          PY
+          )" || exit 1
+          IFS=$'\t' read -r carrier_policy_sha artifact_previous runtime_sha metadata_blob_sha metadata_tree_sha artifact_carrier extra <<<"${carrier_fields}" || exit 1
+          [[ -z "${extra:-}" && "${carrier_policy_sha}" == "${run_head}" ]] || exit 1
+          [[ "${artifact_previous}" == "${EXPECTED_PREVIOUS_OBJECT_SHA}" && "${artifact_carrier}" == "${CARRIER_COMMIT_SHA}" ]] || exit 1
+
+          commit_status=0
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${CARRIER_COMMIT_SHA}" \
+            >"${evidence_tmp}/commit.json" || commit_status=$?
+          tree_status=0
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/trees/${metadata_tree_sha}" \
+            >"${evidence_tmp}/tree.json" || tree_status=$?
+          blob_status=0
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/blobs/${metadata_blob_sha}" \
+            >"${evidence_tmp}/blob.json" || blob_status=$?
+          [[ "${commit_status}" == '0' && "${tree_status}" == '0' && "${blob_status}" == '0' ]] || exit 1
+          python3 - "${evidence_tmp}/commit.json" "${evidence_tmp}/tree.json" "${evidence_tmp}/blob.json" \
+            "${CARRIER_COMMIT_SHA}" "${EXPECTED_PREVIOUS_OBJECT_SHA}" "${runtime_sha}" \
+            "${metadata_tree_sha}" "${metadata_blob_sha}" <<'PY'
+          import base64, json, re, sys
+          commit = json.load(open(sys.argv[1], encoding="utf-8"))
+          tree = json.load(open(sys.argv[2], encoding="utf-8"))
+          blob = json.load(open(sys.argv[3], encoding="utf-8"))
+          carrier_sha, previous_sha, runtime_sha, tree_sha, blob_sha = sys.argv[4:]
+          if commit.get("sha") != carrier_sha or commit.get("message") != "fugue runtime baseline carrier " + runtime_sha:
+              raise SystemExit("carrier commit identity drifted")
+          if commit.get("tree", {}).get("sha") != tree_sha:
+              raise SystemExit("carrier commit tree drifted")
+          parents = commit.get("parents")
+          if type(parents) is not list or len(parents) != 1 or parents[0].get("sha") != previous_sha:
+              raise SystemExit("carrier commit parent drifted")
+          identity = {"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid"}
+          for field in ("author", "committer"):
+              if {key: commit.get(field, {}).get(key) for key in ("name", "email")} != identity:
+                  raise SystemExit(f"carrier commit {field} drifted")
+              if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", commit.get(field, {}).get("date", "")) is None:
+                  raise SystemExit(f"carrier commit {field} date drifted")
+          expected_tree = [{"path": "fugue-runtime-baseline.json", "mode": "100644", "type": "blob", "sha": blob_sha}]
+          actual_tree = [{key: item.get(key) for key in ("path", "mode", "type", "sha")} for item in tree.get("tree", [])]
+          if tree.get("sha") != tree_sha or tree.get("truncated") is not False or actual_tree != expected_tree:
+              raise SystemExit("carrier metadata tree drifted")
+          encoded = blob.get("content")
+          if blob.get("sha") != blob_sha or blob.get("encoding") != "base64" or type(encoded) is not str:
+              raise SystemExit("carrier metadata blob identity drifted")
+          content = base64.b64decode("".join(encoded.split()), validate=True)
+          expected_content = json.dumps(
+              {"previous_baseline_object_sha": previous_sha, "runtime_sha": runtime_sha, "schema_version": 1},
+              sort_keys=True,
+              separators=(",", ":"),
+          ).encode("utf-8") + b"\n"
+          if content != expected_content:
+              raise SystemExit("carrier metadata bytes drifted")
+          PY
+
+          git cat-file -e "${runtime_sha}^{commit}" || exit 1
+          git merge-base --is-ancestor "${runtime_sha}" "${GITHUB_SHA}" || exit 1
+          {
+            printf 'previous_object_sha=%s\n' "${EXPECTED_PREVIOUS_OBJECT_SHA}"
+            printf 'carrier_commit_sha=%s\n' "${CARRIER_COMMIT_SHA}"
+            printf 'runtime_sha=%s\n' "${runtime_sha}"
+            printf 'carrier_result_run_id=%s\n' "${CARRIER_RESULT_RUN_ID}"
+            printf 'carrier_result_artifact_id=%s\n' "${CARRIER_RESULT_ARTIFACT_ID}"
+            printf 'carrier_result_artifact_digest=%s\n' "${CARRIER_RESULT_ARTIFACT_DIGEST}"
+            printf 'health_url=%s\n' "${HEALTH_URL}"
+          } >>"${GITHUB_OUTPUT}" || exit 1
+
+      - name: Write carrier ref CAS intent evidence
+        env:
+          PREVIOUS_OBJECT_SHA: ${{ steps.verify.outputs.previous_object_sha }}
+          CARRIER_COMMIT_SHA: ${{ steps.verify.outputs.carrier_commit_sha }}
+          RUNTIME_SHA: ${{ steps.verify.outputs.runtime_sha }}
+          CARRIER_RESULT_RUN_ID: ${{ steps.verify.outputs.carrier_result_run_id }}
+          CARRIER_RESULT_ARTIFACT_ID: ${{ steps.verify.outputs.carrier_result_artifact_id }}
+          CARRIER_RESULT_ARTIFACT_DIGEST: ${{ steps.verify.outputs.carrier_result_artifact_digest }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/fugue-rp0-carrier-ref-cas"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          python3 - "${evidence_dir}/intent.json" <<'PY'
+          import json, os, sys
+          from datetime import datetime, timezone
+          payload = {
+              "schema_version": 1,
+              "workflow": "advance-control-plane-release-baseline-carrier-rp0",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "policy_sha": os.environ["GITHUB_SHA"],
+              "previous_baseline_object_sha": os.environ["PREVIOUS_OBJECT_SHA"],
+              "carrier_commit_sha": os.environ["CARRIER_COMMIT_SHA"],
+              "runtime_sha": os.environ["RUNTIME_SHA"],
+              "carrier_result_run_id": os.environ["CARRIER_RESULT_RUN_ID"],
+              "carrier_result_artifact_id": os.environ["CARRIER_RESULT_ARTIFACT_ID"],
+              "carrier_result_artifact_digest": os.environ["CARRIER_RESULT_ARTIFACT_DIGEST"],
+              "transition": "carrier-ref-cas-pending",
+              "ref_mutation_attempted": False,
+              "cluster_mutation_attempted": False,
+              "recorded_at": datetime.now(timezone.utc).isoformat(),
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Upload carrier ref CAS intent evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-control-plane-rp0-carrier-ref-cas-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-rp0-carrier-ref-cas/intent.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Observe unchanged health before carrier ref CAS
+        env:
+          PREVIOUS_OBJECT_SHA: ${{ steps.verify.outputs.previous_object_sha }}
+          CARRIER_COMMIT_SHA: ${{ steps.verify.outputs.carrier_commit_sha }}
+          HEALTH_URL: ${{ steps.verify.outputs.health_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for sample in 1 2 3 4 5; do
+            response="$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 10 "${HEALTH_URL}")" || exit 1
+            python3 - "${response}" <<'PY'
+          import json, sys
+          if json.loads(sys.argv[1]) != {"status": "ok"}:
+              raise SystemExit("production health payload drifted")
+          PY
+            baseline_status=0
+            baseline_object="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" \
+              --jq '.object.sha')" || baseline_status=$?
+            [[ "${baseline_status}" == '0' && "${baseline_object}" == "${PREVIOUS_OBJECT_SHA}" ]] || exit 1
+            carrier_status=0
+            observed_carrier="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/git/commits/${CARRIER_COMMIT_SHA}" \
+              --jq '.sha')" || carrier_status=$?
+            [[ "${carrier_status}" == '0' && "${observed_carrier}" == "${CARRIER_COMMIT_SHA}" ]] || exit 1
+            [[ "${sample}" == '5' ]] || sleep 15
+          done
+
+      - name: Advance baseline ref by one exact forward CAS
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          PREVIOUS_OBJECT_SHA: ${{ steps.verify.outputs.previous_object_sha }}
+          CARRIER_COMMIT_SHA: ${{ steps.verify.outputs.carrier_commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' && "${GITHUB_SHA}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${PREVIOUS_OBJECT_SHA}" =~ ^[0-9a-f]{40}$ && "${CARRIER_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${PREVIOUS_OBJECT_SHA}" != "${CARRIER_COMMIT_SHA}" ]] || exit 1
+
+          main_status=0
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || main_status=$?
+          [[ "${main_status}" == '0' && "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          baseline_status=0
+          before_object="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" \
+            --jq 'if .ref == "refs/heads/fugue-control-plane-release-baseline" and .object.type == "commit" then .object.sha else error("baseline ref drifted") end')" || baseline_status=$?
+          [[ "${baseline_status}" == '0' && "${before_object}" == "${PREVIOUS_OBJECT_SHA}" ]] || exit 1
+          writer_state="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml" \
+            --jq '.state')" || exit 1
+          deploy_state="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" \
+            --jq '.state')" || exit 1
+          [[ "${writer_state}" == 'disabled_manually' && "${deploy_state}" == 'disabled_manually' ]] || exit 1
+
+          repository_id="$(timeout --kill-after=2s 10s gh api graphql \
+            -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}' \
+            -f "owner=${GITHUB_REPOSITORY_OWNER}" -f "name=${GITHUB_REPOSITORY#*/}" \
+            --jq '.data.repository.id')" || exit 1
+          [[ "${repository_id}" =~ ^[A-Za-z0-9_=-]+$ ]] || exit 1
+          readonly mutation='mutation($repositoryId:ID!,$name:GitRefname!,$beforeOid:GitObjectID!,$afterOid:GitObjectID!,$force:Boolean!,$clientMutationId:String!){updateRefs(input:{repositoryId:$repositoryId,refUpdates:[{name:$name,beforeOid:$beforeOid,afterOid:$afterOid,force:$force}],clientMutationId:$clientMutationId}){clientMutationId}}'
+          mutation_id="fugue-rp0-carrier-ref-${PREVIOUS_OBJECT_SHA:0:12}-${CARRIER_COMMIT_SHA:0:12}"
+          mutation_status=0
+          echoed="$(timeout --kill-after=2s 10s gh api graphql \
+            -f "query=${mutation}" -f "repositoryId=${repository_id}" -f "name=${baseline_ref}" \
+            -f "beforeOid=${PREVIOUS_OBJECT_SHA}" -f "afterOid=${CARRIER_COMMIT_SHA}" -F 'force=false' \
+            -f "clientMutationId=${mutation_id}" --jq '.data.updateRefs.clientMutationId')" || mutation_status=$?
+
+          for attempt in 1 2 3 4 5; do
+            observe_status=0
+            observed="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+              --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" and .[0].object.type == "commit" then .[0].object.sha else "unknown" end')" || observe_status=$?
+            if [[ "${observe_status}" == '0' && "${observed}" == "${CARRIER_COMMIT_SHA}" ]]; then
+              exit 0
+            fi
+            [[ "${attempt}" == '5' ]] || sleep 2
+          done
+          exit 1

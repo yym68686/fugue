@@ -931,6 +931,352 @@ exec "$@"
 	})
 }
 
+func TestRP0CarrierRefCASIsHostedSingleMutationAndWriterLast(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "advance-control-plane-release-baseline-carrier-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 carrier ref CAS workflow: %v", err)
+	}
+	assertWorkflowSourceDigest(t, data, "92754dae6a1b8dae6af9dac9bdd0d5a103075de27ff7b105ec34c449f893b95e")
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string                `yaml:"runs-on"`
+			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+			Environment     string                `yaml:"environment"`
+			Permissions     map[string]string     `yaml:"permissions"`
+			ContinueOnError bool                  `yaml:"continue-on-error"`
+			Steps           []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 carrier ref CAS workflow: %v", err)
+	}
+	rootNode := workflowDocumentMapping(t, data)
+	assertWorkflowMappingKeys(t, rootNode, "name", "on", "permissions", "concurrency", "jobs")
+	assertWorkflowMappingKeys(t, workflowMappingValue(t, rootNode, "concurrency"), "group", "cancel-in-progress")
+	jobsNode := workflowMappingValue(t, rootNode, "jobs")
+	assertWorkflowMappingKeys(t, jobsNode, "advance-forward-carrier-ref")
+	jobNode := workflowMappingValue(t, jobsNode, "advance-forward-carrier-ref")
+	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
+
+	dispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("carrier ref CAS must be dispatch-only: %+v", workflow.On)
+	}
+	var dispatch releaseWorkflowDispatchTrigger
+	if err := dispatchNode.Decode(&dispatch); err != nil {
+		t.Fatalf("decode carrier ref CAS workflow_dispatch: %v", err)
+	}
+	wantInputs := []string{
+		"carrier_commit_sha", "carrier_result_artifact_digest", "carrier_result_artifact_id",
+		"carrier_result_run_id", "expected_previous_object_sha", "expected_sha",
+	}
+	if len(dispatch.Inputs) != len(wantInputs) {
+		t.Fatalf("carrier ref CAS input inventory drifted: %+v", dispatch.Inputs)
+	}
+	for _, name := range wantInputs {
+		node, exists := dispatch.Inputs[name]
+		if !exists {
+			t.Fatalf("carrier ref CAS input %s is absent", name)
+		}
+		var input releaseWorkflowDispatchInput
+		if err := node.Decode(&input); err != nil {
+			t.Fatalf("decode carrier ref CAS input %s: %v", name, err)
+		}
+		if !input.Required || input.Type != "string" || input.Default != nil {
+			t.Fatalf("carrier ref CAS input %s must be required string without default: %+v", name, input)
+		}
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("carrier ref CAS top-level boundary drifted: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["advance-forward-carrier-ref"]
+	if !ok {
+		t.Fatal("carrier ref CAS job is absent")
+	}
+	wantPermissions := map[string]string{"actions": "read", "contents": "write"}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 20 || job.Environment != "production" ||
+		job.ContinueOnError || !reflect.DeepEqual(job.Permissions, wantPermissions) {
+		t.Fatalf("carrier ref CAS job boundary drifted: %+v", job)
+	}
+	wantSteps := []string{
+		"Checkout exact carrier ref CAS policy SHA",
+		"Verify exact carrier ref CAS authorization",
+		"Write carrier ref CAS intent evidence",
+		"Upload carrier ref CAS intent evidence",
+		"Observe unchanged health before carrier ref CAS",
+		"Advance baseline ref by one exact forward CAS",
+	}
+	if len(job.Steps) != len(wantSteps) {
+		t.Fatalf("carrier ref CAS step inventory drifted: %+v", job.Steps)
+	}
+	for index, name := range wantSteps {
+		step := job.Steps[index]
+		if step.Name != name || step.If != "" || step.ContinueOnError {
+			t.Fatalf("carrier ref CAS step %d drifted: %+v", index, step)
+		}
+	}
+	checkout := job.Steps[0]
+	if checkout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+		checkout.With["ref"] != "${{ github.sha }}" || checkout.With["fetch-depth"] != "0" ||
+		checkout.With["persist-credentials"] != "false" {
+		t.Fatalf("carrier ref CAS checkout drifted: %+v", checkout)
+	}
+	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
+		"advance-forward-carrier-ref": {Steps: job.Steps},
+	}, map[string]string{
+		"advance-forward-carrier-ref/Verify exact carrier ref CAS authorization":      "6a07281a0f4dc39301172fbdf2d5e1a3591408e77baf0e3b4a171b8dbc7216d9",
+		"advance-forward-carrier-ref/Write carrier ref CAS intent evidence":           "66c982f564c8c5dd175e5840e8467e4157657977beea9b32fabb23782f8c6e3c",
+		"advance-forward-carrier-ref/Observe unchanged health before carrier ref CAS": "fc5ae03d78d5939860dee55790f46d2ce0b560114cf2a78b5d0fb4ace08c230e",
+		"advance-forward-carrier-ref/Advance baseline ref by one exact forward CAS":   "8eae6b19475d7182a1263f5f21cca7d55879396f98c2c5c23e5ff2b767828ef4",
+	})
+
+	verify := job.Steps[1]
+	wantVerifyEnv := map[string]string{
+		"EXPECTED_SHA":                   "${{ inputs.expected_sha }}",
+		"EXPECTED_PREVIOUS_OBJECT_SHA":   "${{ inputs.expected_previous_object_sha }}",
+		"CARRIER_COMMIT_SHA":             "${{ inputs.carrier_commit_sha }}",
+		"CARRIER_RESULT_RUN_ID":          "${{ inputs.carrier_result_run_id }}",
+		"CARRIER_RESULT_ARTIFACT_ID":     "${{ inputs.carrier_result_artifact_id }}",
+		"CARRIER_RESULT_ARTIFACT_DIGEST": "${{ inputs.carrier_result_artifact_digest }}",
+		"HEALTH_URL":                     "${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}",
+		"GH_TOKEN":                       "${{ github.token }}",
+	}
+	if verify.ID != "verify" || !reflect.DeepEqual(verify.Env, wantVerifyEnv) {
+		t.Fatalf("carrier ref CAS verifier boundary drifted: %+v", verify)
+	}
+	for _, required := range []string{
+		`policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1`,
+		`actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1`,
+		`A\t.github/workflows/advance-control-plane-release-baseline-carrier-rp0.yml`,
+		`"${writer_state}" == 'disabled_manually'`,
+		`"${deploy_state}" == 'disabled_manually'`,
+		`"${run_head}" == "${policy_parent}"`,
+		`"${artifact_digest}" == "${CARRIER_RESULT_ARTIFACT_DIGEST}"`,
+		`names != ["intent.json"]`,
+		`"carrier-object-materialized-ref-unchanged"`,
+		`payload["transport_status"] != {"blob": 0, "tree": 0, "commit": 0}`,
+		`parents[0].get("sha") != previous_sha`,
+		`content != expected_content`,
+		`git merge-base --is-ancestor "${runtime_sha}" "${GITHUB_SHA}"`,
+	} {
+		if !strings.Contains(verify.Run, required) {
+			t.Fatalf("carrier ref CAS verifier must contain %q", required)
+		}
+	}
+	if strings.Contains(verify.Run, `< <(`) {
+		t.Fatal("carrier ref CAS verifier must not hide command status through process substitution")
+	}
+
+	intentUpload := job.Steps[3]
+	if intentUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		intentUpload.With["if-no-files-found"] != "error" || intentUpload.With["retention-days"] != "90" {
+		t.Fatalf("carrier ref CAS intent upload drifted: %+v", intentUpload)
+	}
+	advance := job.Steps[len(job.Steps)-1]
+	for _, required := range []string{
+		`beforeOid:$beforeOid`, `afterOid:$afterOid`, `force:$force`,
+		`-f "beforeOid=${PREVIOUS_OBJECT_SHA}"`, `-f "afterOid=${CARRIER_COMMIT_SHA}"`,
+		`-F 'force=false'`, `"${writer_state}" == 'disabled_manually'`,
+		`"${deploy_state}" == 'disabled_manually'`,
+		`"${observed}" == "${CARRIER_COMMIT_SHA}"`, `exit 0`,
+	} {
+		if !strings.Contains(advance.Run, required) {
+			t.Fatalf("carrier ref CAS writer must contain %q", required)
+		}
+	}
+	if strings.Count(advance.Run, "updateRefs(input:") != 1 ||
+		strings.Count(advance.Run, "-F 'force=false'") != 1 ||
+		strings.Contains(advance.Run, "GITHUB_OUTPUT") {
+		t.Fatalf("carrier ref CAS mutation inventory drifted:\n%s", advance.Run)
+	}
+	source := string(data)
+	for _, forbidden := range []string{
+		"self-hosted", "${{ secrets.", "KUBECONFIG", "kubectl ", "helm ", "ssh ",
+		"git push", "git update-ref", "--force-with-lease", "--method PATCH", "--method PUT",
+		"--method DELETE", " -X ", "force=true", "createRef", "deleteRef", "docker ",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("carrier ref CAS contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
+func TestRP0CarrierRefCASReadbackSettlesOneMutation(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "advance-control-plane-release-baseline-carrier-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 carrier ref CAS workflow: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 carrier ref CAS workflow: %v", err)
+	}
+	job := workflow.Jobs["advance-forward-carrier-ref"]
+	if len(job.Steps) == 0 {
+		t.Fatal("carrier ref CAS steps are absent")
+	}
+	advance := job.Steps[len(job.Steps)-1]
+	if advance.Name != "Advance baseline ref by one exact forward CAS" || advance.Run == "" {
+		t.Fatalf("carrier ref CAS terminal step drifted: %+v", advance)
+	}
+
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create carrier ref CAS mock bin: %v", err)
+	}
+	ghMock := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${LOG_FILE}"
+arguments="$*"
+if [[ "${arguments}" == *'graphql'*'repository(owner:'* ]]; then
+  printf '%s\n' 'repository-node-id'
+  exit 0
+fi
+if [[ "${arguments}" == *'graphql'*'updateRefs(input:'* ]]; then
+  case "${MODE}" in
+    success)
+      printf '%s\n' "${CARRIER_COMMIT_SHA}" >"${STATE_FILE}"
+      printf '%s\n' "fugue-rp0-carrier-ref-${PREVIOUS_OBJECT_SHA:0:12}-${CARRIER_COMMIT_SHA:0:12}"
+      ;;
+    mutation_lost)
+      printf '%s\n' "${CARRIER_COMMIT_SHA}" >"${STATE_FILE}"
+      exit 7
+      ;;
+    wrong_echo)
+      printf '%s\n' "${CARRIER_COMMIT_SHA}" >"${STATE_FILE}"
+      printf '%s\n' 'wrong-echo'
+      ;;
+    no_settle)
+      exit 7
+      ;;
+    divergent)
+      printf '%040d\n' 3 >"${STATE_FILE}"
+      exit 7
+      ;;
+    unreadable)
+      printf '%s\n' "${CARRIER_COMMIT_SHA}" >"${STATE_FILE}"
+      exit 7
+      ;;
+    *) exit 98 ;;
+  esac
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/ref/heads/main'* ]]; then
+  printf '%s\n' "${GITHUB_SHA}"
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/ref/heads/fugue-control-plane-release-baseline'* ]]; then
+  value="$(<"${STATE_FILE}")"
+  printf '%s\n' "${value}"
+  exit 0
+fi
+if [[ "${arguments}" == *'/actions/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'* ]] ||
+   [[ "${arguments}" == *'/actions/workflows/deploy-control-plane.yml'* ]]; then
+  printf '%s\n' 'disabled_manually'
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/matching-refs/heads/fugue-control-plane-release-baseline'* ]]; then
+  [[ "${MODE}" != 'unreadable' ]] || exit 7
+  value="$(<"${STATE_FILE}")"
+  printf '%s\n' "${value}"
+  exit 0
+fi
+exit 97
+`
+	timeoutMock := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --kill-after=* ]]; then shift; fi
+[[ "${1:-}" =~ ^[0-9]+s$ ]] || exit 125
+shift
+exec "$@"
+`
+	sleepMock := "#!/usr/bin/env bash\nexit 0\n"
+	for name, source := range map[string]string{"gh": ghMock, "timeout": timeoutMock, "sleep": sleepMock} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(source), 0o700); err != nil {
+			t.Fatalf("write carrier ref CAS %s mock: %v", name, err)
+		}
+	}
+
+	previous := strings.Repeat("1", 40)
+	carrier := strings.Repeat("2", 40)
+	policy := strings.Repeat("4", 40)
+	type result struct {
+		mutations int
+		state     string
+		err       error
+		output    string
+	}
+	runCAS := func(t *testing.T, mode string) result {
+		t.Helper()
+		caseDir := t.TempDir()
+		statePath := filepath.Join(caseDir, "state")
+		logPath := filepath.Join(caseDir, "gh.log")
+		if err := os.WriteFile(statePath, []byte(previous+"\n"), 0o600); err != nil {
+			t.Fatalf("write carrier ref CAS state: %v", err)
+		}
+		command := exec.Command("bash")
+		command.Stdin = strings.NewReader(advance.Run)
+		command.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"MODE="+mode,
+			"STATE_FILE="+statePath,
+			"LOG_FILE="+logPath,
+			"GITHUB_RUN_ATTEMPT=1",
+			"GITHUB_SHA="+policy,
+			"EXPECTED_SHA="+policy,
+			"GITHUB_REPOSITORY=fugue-test/repository",
+			"GITHUB_REPOSITORY_OWNER=fugue-test",
+			"PREVIOUS_OBJECT_SHA="+previous,
+			"CARRIER_COMMIT_SHA="+carrier,
+			"GH_TOKEN=test-token",
+		)
+		output, runErr := command.CombinedOutput()
+		log, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read carrier ref CAS mock log: %v", err)
+		}
+		state, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatalf("read carrier ref CAS mock state: %v", err)
+		}
+		return result{
+			mutations: strings.Count(string(log), "updateRefs(input:"),
+			state:     strings.TrimSpace(string(state)),
+			err:       runErr,
+			output:    string(output),
+		}
+	}
+
+	for _, mode := range []string{"success", "mutation_lost", "wrong_echo"} {
+		t.Run(mode, func(t *testing.T) {
+			got := runCAS(t, mode)
+			if got.err != nil || got.mutations != 1 || got.state != carrier {
+				t.Fatalf("carrier ref CAS did not settle exact target: mode=%s err=%v mutations=%d state=%q output=%q", mode, got.err, got.mutations, got.state, got.output)
+			}
+		})
+	}
+	for _, mode := range []string{"no_settle", "divergent", "unreadable"} {
+		t.Run(mode, func(t *testing.T) {
+			got := runCAS(t, mode)
+			if got.err == nil || got.mutations != 1 {
+				t.Fatalf("carrier ref CAS did not fail closed: mode=%s err=%v mutations=%d state=%q output=%q", mode, got.err, got.mutations, got.state, got.output)
+			}
+		})
+	}
+}
+
 func TestRP0MetadataReaderIsHostedReadOnlyAndEvidenceBound(t *testing.T) {
 	t.Parallel()
 

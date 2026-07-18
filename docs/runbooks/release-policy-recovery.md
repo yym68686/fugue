@@ -168,6 +168,20 @@ response, settles ambiguous transport. It cannot create, update, or delete a
 ref and has no self-hosted or cluster path. Ref advancement is intentionally
 deferred to its own checkpoint.
 
+The carrier ref CAS checkpoint is a separate GitHub-hosted one-shot lane. It
+accepts the exact successful carrier result run, artifact ID and digest,
+revalidates the immutable carrier chain and unchanged runtime, uploads intent
+evidence, and completes five unchanged-health samples while the baseline still
+equals the exact previous object. Its final semantic step attempts one
+GraphQL `updateRefs` mutation with exact `beforeOid`, exact carrier `afterOid`,
+and `force: false`. Exact ref readback alone settles the attempt; no response
+echo can substitute for observed state and no second mutation is permitted.
+The workflow performs no fallible evidence publication after observing the
+new ref, so a successful state transition cannot be converted into a semantic
+failure by a later upload. The deploy lane remains disabled, no runtime or
+cluster state changes, and long-term recorder compatibility remains a later
+checkpoint.
+
 GitHub Actions deploys exact code SHAs only. It must never execute or
 orchestrate production rollback. After a future Fugue runtime write, rollback
 means Fugue itself detects the bad update and restores the previous verified
