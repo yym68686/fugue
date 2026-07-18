@@ -246,6 +246,18 @@ post-mutation artifact upload, ref rewrite, runtime release, self-hosted
 runner, or cluster operation. Long-term recorder carrier compatibility remains
 a separate dormant checkpoint.
 
+The following dormant recorder checkpoint changes only the disabled deploy
+workflow's post-success baseline writer. It revalidates the exact observed
+baseline object and represented runtime, materializes one canonical carrier
+whose sole parent and `previous_baseline_object_sha` both equal that observed
+object and whose `runtime_sha` equals the deployed target, then attempts one
+GraphQL `updateRefs` CAS from the observed object to the carrier with
+`force: false`. Blob, tree, commit, and mutation transport ambiguity is settled
+only by exact object or ref readback. Temporary materialization state is
+removed before the CAS, and exact ref readback plus an infallible diagnostic is
+the final boundary. The deploy workflow remains disabled, so this checkpoint
+does not run the self-hosted, cluster, runtime, or recorder paths.
+
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.
 Evidence generation then uses that checksum-verified download cache as an

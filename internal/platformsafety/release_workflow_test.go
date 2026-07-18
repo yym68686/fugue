@@ -2494,10 +2494,11 @@ func TestControlPlaneBaselineRecorderSettlementMockMatrix(t *testing.T) {
 	if err := os.Mkdir(seed, 0o700); err != nil {
 		t.Fatalf("create seed repository: %v", err)
 	}
-	runGit := func(dir string, args ...string) string {
+	runGit := func(dir, input string, args ...string) string {
 		t.Helper()
 		command := exec.Command("git", args...)
 		command.Dir = dir
+		command.Stdin = strings.NewReader(input)
 		command.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=Fugue Recorder Test",
 			"GIT_AUTHOR_EMAIL=recorder-test@fugue.invalid",
@@ -2513,26 +2514,66 @@ func TestControlPlaneBaselineRecorderSettlementMockMatrix(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 
-	runGit(root, "init", "--quiet", "--bare", origin)
-	runGit(root, "--git-dir="+origin, "symbolic-ref", "HEAD", "refs/heads/main")
-	runGit(seed, "init", "--quiet")
-	runGit(seed, "symbolic-ref", "HEAD", "refs/heads/main")
-	runGit(seed, "remote", "add", "origin", origin)
+	runGit(root, "", "init", "--quiet", "--bare", origin)
+	runGit(root, "", "--git-dir="+origin, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(seed, "", "init", "--quiet")
+	runGit(seed, "", "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(seed, "", "remote", "add", "origin", origin)
 	writeCommit := func(name, contents, message string) string {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(seed, name), []byte(contents), 0o600); err != nil {
 			t.Fatalf("write fixture %s: %v", name, err)
 		}
-		runGit(seed, "add", "--", name)
-		runGit(seed, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
-		return runGit(seed, "rev-parse", "HEAD")
+		runGit(seed, "", "add", "--", name)
+		runGit(seed, "", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
+		return runGit(seed, "", "rev-parse", "HEAD")
 	}
 	baseSHA := writeCommit("base.txt", "base\n", "base")
 	targetSHA := writeCommit("target.txt", "target\n", "target")
-	runGit(seed, "push", "--quiet", "origin", targetSHA+":refs/heads/main")
+	runGit(seed, "", "push", "--quiet", "origin", targetSHA+":refs/heads/main")
 	const baselineRef = "refs/heads/fugue-control-plane-release-baseline"
-	runGit(root, "--git-dir="+origin, "update-ref", baselineRef, baseSHA)
-	runGit(root, "clone", "--quiet", origin, checkout)
+	basePayload := fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`+"\n", baseSHA, baseSHA)
+	baseBlob := runGit(root, basePayload, "--git-dir="+origin, "hash-object", "-w", "--stdin")
+	baseTree := runGit(root, fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", baseBlob), "--git-dir="+origin, "mktree")
+	baseCarrier := runGit(root, "", "--git-dir="+origin, "commit-tree", baseTree, "-p", baseSHA, "-m", "fugue runtime baseline carrier "+baseSHA)
+
+	targetPayload := fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`+"\n", baseCarrier, targetSHA)
+	targetBlob := runGit(root, targetPayload, "--git-dir="+origin, "hash-object", "-w", "--stdin")
+	targetTree := runGit(root, fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", targetBlob), "--git-dir="+origin, "mktree")
+	const carrierDate = "2026-07-18T00:00:00Z"
+	carrierMessage := "fugue runtime baseline carrier " + targetSHA
+	identity := "Fugue Release Baseline <release-baseline@fugue.invalid> 1784332800 +0000"
+	carrierContent := fmt.Sprintf(
+		"tree %s\nparent %s\nauthor %s\ncommitter %s\n\n%s",
+		targetTree, baseCarrier, identity, identity, carrierMessage,
+	)
+	targetCarrier := runGit(root, carrierContent, "--git-dir="+origin, "hash-object", "-w", "-t", "commit", "--stdin")
+	runGit(root, "", "--git-dir="+origin, "update-ref", baselineRef, baseCarrier)
+	runGit(root, "", "clone", "--quiet", origin, checkout)
+
+	metadataPath := filepath.Join(root, "target-metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(targetPayload), 0o600); err != nil {
+		t.Fatalf("write recorder target metadata: %v", err)
+	}
+	commitResponsePath := filepath.Join(root, "target-commit-response.json")
+	commitResponse, err := json.Marshal(map[string]any{
+		"sha":     targetCarrier,
+		"message": carrierMessage,
+		"tree":    map[string]string{"sha": targetTree},
+		"parents": []map[string]string{{"sha": baseCarrier}},
+		"author": map[string]string{
+			"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid", "date": carrierDate,
+		},
+		"committer": map[string]string{
+			"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid", "date": carrierDate,
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode recorder commit response: %v", err)
+	}
+	if err := os.WriteFile(commitResponsePath, commitResponse, 0o600); err != nil {
+		t.Fatalf("write recorder commit response: %v", err)
+	}
 
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
@@ -2546,10 +2587,45 @@ if [[ "${arguments}" == *'repository(owner:'* ]]; then
   printf '%s\n' 'R_fugue_recorder_test'
   exit 0
 fi
+if [[ "${arguments}" == *'--method POST'*'/git/blobs'* ]]; then
+  [[ "${MODE}" != 'blob_post_exit7' ]] || exit 7
+  printf '%s\n' '{}'
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/blobs/'* ]]; then
+  if [[ "${MODE}" == 'blob_readback_drift' ]]; then
+    printf '%s\n' '{"sha":"drift","encoding":"base64","content":""}'
+    exit 0
+  fi
+  python3 - "${EXPECTED_METADATA_FILE}" "${EXPECTED_BLOB_SHA}" <<'PY'
+import base64, json, pathlib, sys
+print(json.dumps({"sha": sys.argv[2], "encoding": "base64", "content": base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode("ascii")}, separators=(",", ":")))
+PY
+  exit 0
+fi
+if [[ "${arguments}" == *'--method POST'*'/git/trees'* ]]; then
+  [[ "${MODE}" != 'tree_post_exit7' ]] || exit 7
+  printf '%s\n' '{}'
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/trees/'* ]]; then
+  printf '{"sha":"%s","truncated":false,"tree":[{"path":"fugue-runtime-baseline.json","mode":"100644","type":"blob","sha":"%s"}]}\n' \
+    "${EXPECTED_TREE_SHA}" "${EXPECTED_BLOB_SHA}"
+  exit 0
+fi
+if [[ "${arguments}" == *'--method POST'*'/git/commits'* ]]; then
+  [[ "${MODE}" != 'commit_post_exit7' ]] || exit 7
+  printf '%s\n' '{}'
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/commits/'* ]]; then
+  cat "${EXPECTED_COMMIT_RESPONSE_FILE}"
+  exit 0
+fi
 if [[ "${arguments}" == *'updateRefs('* ]]; then
   case "${MODE}" in
-    success|committed_exit7|committed_wrong_echo|readback_transient|readback_unavailable|readback_target_exit7)
-      git --git-dir="${ORIGIN_DIR}" update-ref "${BASELINE_REF}" "${TARGET_SHA}" "${BASE_SHA}"
+    success|committed_exit7|committed_wrong_echo|readback_transient|readback_unavailable|readback_target_exit7|blob_post_exit7|tree_post_exit7|commit_post_exit7)
+      git --git-dir="${ORIGIN_DIR}" update-ref "${BASELINE_REF}" "${TARGET_CARRIER_SHA}" "${BASE_REF_OBJECT}"
       ;;
     failed_no_update|success_no_update) ;;
     *) exit 96 ;;
@@ -2567,9 +2643,13 @@ if [[ "${arguments}" == *'/git/matching-refs/heads/fugue-control-plane-release-b
   [[ ! -f "${READBACK_COUNT_FILE}" ]] || count="$(<"${READBACK_COUNT_FILE}")"
   count=$((count + 1))
   printf '%s\n' "${count}" >"${READBACK_COUNT_FILE}"
-  if [[ "${MODE}" == 'readback_transient' && "${count}" == '1' ]]; then exit 7; fi
+  if [[ "${count}" == '1' ]]; then
+    if [[ "${MODE}" == 'pre_cas_ref_drift' ]]; then printf '%s\n' "${TARGET_SHA}"; else printf '%s\n' "${BASE_REF_OBJECT}"; fi
+    exit 0
+  fi
+  if [[ "${MODE}" == 'readback_transient' && "${count}" == '2' ]]; then exit 7; fi
   if [[ "${MODE}" == 'readback_unavailable' ]]; then exit 7; fi
-  if [[ "${MODE}" == 'readback_target_exit7' ]]; then printf '%s\n' "${TARGET_SHA}"; exit 7; fi
+  if [[ "${MODE}" == 'readback_target_exit7' ]]; then printf '%s\n' "${TARGET_CARRIER_SHA}"; exit 7; fi
   git --git-dir="${ORIGIN_DIR}" rev-parse --verify "${BASELINE_REF}"
   exit 0
 fi
@@ -2592,17 +2672,21 @@ exit 0
 		}
 	}
 
-	mutationID := fmt.Sprintf("fugue-runtime-baseline-%s-%s", baseSHA[:12], targetSHA[:12])
+	mutationID := fmt.Sprintf("fugue-runtime-baseline-%s-%s", baseCarrier[:12], targetCarrier[:12])
 	type result struct {
+		blobPosts     int
+		treePosts     int
+		commitPosts   int
 		mutationCalls int
 		readbackCalls string
 		refObject     string
+		log           string
 		output        []byte
 		err           error
 	}
 	runWriter := func(t *testing.T, mode string) result {
 		t.Helper()
-		runGit(root, "--git-dir="+origin, "update-ref", baselineRef, baseSHA)
+		runGit(root, "", "--git-dir="+origin, "update-ref", baselineRef, baseCarrier)
 		caseDir := t.TempDir()
 		logPath := filepath.Join(caseDir, "gh.log")
 		readbackCountPath := filepath.Join(caseDir, "readback-count")
@@ -2616,11 +2700,17 @@ exit 0
 			"READBACK_COUNT_FILE="+readbackCountPath,
 			"ORIGIN_DIR="+origin,
 			"BASELINE_REF="+baselineRef,
-			"BASE_SHA="+baseSHA,
+			"BASE_REF_OBJECT="+baseCarrier,
 			"TARGET_SHA="+targetSHA,
+			"TARGET_CARRIER_SHA="+targetCarrier,
 			"MUTATION_ID="+mutationID,
 			"EXPECTED_BASE_SHA="+baseSHA,
-			"EXPECTED_BASE_REF_OBJECT="+baseSHA,
+			"EXPECTED_BASE_REF_OBJECT="+baseCarrier,
+			"EXPECTED_METADATA_FILE="+metadataPath,
+			"EXPECTED_BLOB_SHA="+targetBlob,
+			"EXPECTED_TREE_SHA="+targetTree,
+			"EXPECTED_COMMIT_RESPONSE_FILE="+commitResponsePath,
+			"GITHUB_SHA="+targetSHA,
 			"GITHUB_REPOSITORY_OWNER=fugue-test",
 			"GITHUB_REPOSITORY=fugue-test/repository",
 			"GH_TOKEN=test-token",
@@ -2637,9 +2727,13 @@ exit 0
 			t.Fatalf("read recorder settlement count: %v", err)
 		}
 		return result{
+			blobPosts:     strings.Count(string(log), "--method POST repos/fugue-test/repository/git/blobs"),
+			treePosts:     strings.Count(string(log), "--method POST repos/fugue-test/repository/git/trees"),
+			commitPosts:   strings.Count(string(log), "--method POST repos/fugue-test/repository/git/commits"),
 			mutationCalls: strings.Count(string(log), "updateRefs("),
 			readbackCalls: readbackCalls,
-			refObject:     runGit(root, "--git-dir="+origin, "rev-parse", "--verify", baselineRef),
+			refObject:     runGit(root, "", "--git-dir="+origin, "rev-parse", "--verify", baselineRef),
+			log:           string(log),
 			output:        output,
 			err:           runErr,
 		}
@@ -2650,17 +2744,22 @@ exit 0
 		wantResponseExact string
 		wantReadbacks     string
 	}{
-		{mode: "success", wantResponseExact: "true", wantReadbacks: "1"},
-		{mode: "committed_exit7", wantResponseExact: "false", wantReadbacks: "1"},
-		{mode: "committed_wrong_echo", wantResponseExact: "false", wantReadbacks: "1"},
-		{mode: "readback_transient", wantResponseExact: "true", wantReadbacks: "2"},
+		{mode: "success", wantResponseExact: "true", wantReadbacks: "2"},
+		{mode: "committed_exit7", wantResponseExact: "false", wantReadbacks: "2"},
+		{mode: "committed_wrong_echo", wantResponseExact: "false", wantReadbacks: "2"},
+		{mode: "readback_transient", wantResponseExact: "true", wantReadbacks: "3"},
+		{mode: "blob_post_exit7", wantResponseExact: "true", wantReadbacks: "2"},
+		{mode: "tree_post_exit7", wantResponseExact: "true", wantReadbacks: "2"},
+		{mode: "commit_post_exit7", wantResponseExact: "true", wantReadbacks: "2"},
 	}
 	for _, test := range positive {
 		t.Run(test.mode, func(t *testing.T) {
 			got := runWriter(t, test.mode)
 			settled := fmt.Sprintf("response_exact=%s", test.wantResponseExact)
-			if got.err != nil || got.mutationCalls != 1 || got.readbackCalls != test.wantReadbacks || got.refObject != targetSHA || !strings.Contains(string(got.output), settled) {
-				t.Fatalf("recorder failed exact-readback settlement: mode=%s err=%v mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
+			if got.err != nil || got.blobPosts != 1 || got.treePosts != 1 || got.commitPosts != 1 ||
+				got.mutationCalls != 1 || got.readbackCalls != test.wantReadbacks || got.refObject != targetCarrier ||
+				!strings.Contains(string(got.output), settled) {
+				t.Fatalf("recorder failed carrier settlement: mode=%s err=%v posts=%d/%d/%d mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
 			}
 		})
 	}
@@ -2668,16 +2767,39 @@ exit 0
 		mode          string
 		wantRefObject string
 	}{
-		{mode: "failed_no_update", wantRefObject: baseSHA},
-		{mode: "success_no_update", wantRefObject: baseSHA},
-		{mode: "readback_unavailable", wantRefObject: targetSHA},
-		{mode: "readback_target_exit7", wantRefObject: targetSHA},
+		{mode: "failed_no_update", wantRefObject: baseCarrier},
+		{mode: "success_no_update", wantRefObject: baseCarrier},
+		{mode: "readback_unavailable", wantRefObject: targetCarrier},
+		{mode: "readback_target_exit7", wantRefObject: targetCarrier},
 	}
 	for _, test := range negative {
 		t.Run(test.mode, func(t *testing.T) {
 			got := runWriter(t, test.mode)
-			if got.err == nil || got.mutationCalls != 1 || got.readbackCalls != "5" || got.refObject != test.wantRefObject || strings.Contains(string(got.output), "baseline CAS settled") {
-				t.Fatalf("recorder failed closed incorrectly: mode=%s err=%v mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
+			if got.err == nil || got.blobPosts != 1 || got.treePosts != 1 || got.commitPosts != 1 ||
+				got.mutationCalls != 1 || got.readbackCalls != "6" || got.refObject != test.wantRefObject ||
+				strings.Contains(string(got.output), "baseline carrier CAS settled") {
+				t.Fatalf("recorder failed closed incorrectly: mode=%s err=%v posts=%d/%d/%d mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
+			}
+		})
+	}
+
+	preCASNegative := []struct {
+		mode            string
+		wantBlobPosts   int
+		wantTreePosts   int
+		wantCommitPosts int
+		wantReadbacks   string
+	}{
+		{mode: "blob_readback_drift", wantBlobPosts: 1},
+		{mode: "pre_cas_ref_drift", wantBlobPosts: 1, wantTreePosts: 1, wantCommitPosts: 1, wantReadbacks: "1"},
+	}
+	for _, test := range preCASNegative {
+		t.Run(test.mode, func(t *testing.T) {
+			got := runWriter(t, test.mode)
+			if got.err == nil || got.blobPosts != test.wantBlobPosts || got.treePosts != test.wantTreePosts ||
+				got.commitPosts != test.wantCommitPosts || got.mutationCalls != 0 || got.readbackCalls != test.wantReadbacks ||
+				got.refObject != baseCarrier || strings.Contains(string(got.output), "baseline carrier CAS settled") {
+				t.Fatalf("recorder crossed CAS boundary after pre-CAS failure: mode=%s err=%v posts=%d/%d/%d mutations=%d readbacks=%q ref=%s output=%q log=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.mutationCalls, got.readbackCalls, got.refObject, got.output, got.log)
 			}
 		})
 	}
@@ -2691,7 +2813,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "462af081575503e90a0809840520abdbfe35bf955a0cc01b7fdf5232ac3b1856")
+	assertWorkflowSourceDigest(t, data, "651a36adb35d57aafdc496cacc43cecb819001fef78f56bd915efe18e984ca97")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2720,7 +2842,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":             "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Upgrade Fugue control plane":                                             "0390f1a108338e637e594e6e64bb82bcccf3a85ad59f668ee6c1160ddee84e76",
 		"deploy/Remove stale release recovery proof":                                     "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
-		"record-release-baseline/Advance dedicated forward-only release baseline branch": "0b9edc087ac62d420570cd668f75fdfbf3f9466cf904796bbe8f6603fc747326",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch": "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":             "fcf21e0732d091de6e115386f2d55e88de2c0e49110bb7ebf7674c7c8e76e00a",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":     "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":            "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
@@ -3351,35 +3473,55 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"refs/heads/fugue-control-plane-release-baseline",
 		`"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"`,
-		`"${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}"`,
+		`"${EXPECTED_BASE_REF_OBJECT}" =~ ^[0-9a-f]{40}$`,
+		`"${TARGET_SHA}" == "${GITHUB_SHA}"`,
+		`"${EXPECTED_BASE_REF_OBJECT}" != "${EXPECTED_BASE_SHA}"`,
+		`"${represented_runtime}" == "${EXPECTED_BASE_SHA}"`,
+		`"${represented_parent}" == "${represented_previous}"`,
 		"git merge-base --is-ancestor",
+		`readonly metadata_path='fugue-runtime-baseline.json'`,
+		`"previous_baseline_object_sha": sys.argv[1]`,
+		`"runtime_sha": sys.argv[2]`,
+		`blob_sha="$(git hash-object -w --stdin`,
+		`"repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}"`,
+		`tree_sha="$(git mktree`,
+		`"repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}"`,
+		`carrier_message="fugue runtime baseline carrier ${TARGET_SHA}"`,
+		`).encode("utf-8") + message.encode("utf-8")`,
+		`carrier_sha="$(git hash-object -t commit --stdin`,
+		`"repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}"`,
+		`"${before_cas_object}" == "${EXPECTED_BASE_REF_OBJECT}" ]] || exit 1`,
+		`rm -rf "${object_tmp}" || exit 1`,
+		`trap - EXIT`,
 		"beforeOid:$beforeOid",
 		"afterOid:$afterOid",
 		"-F 'force=false'",
 		`-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}"`,
-		`-f "afterOid=${TARGET_SHA}"`,
+		`-f "afterOid=${carrier_sha}"`,
 		`settled='false'`,
-		`"${observe_status}" == '0' && "${observed}" == "${TARGET_SHA}"`,
+		`"${observe_status}" == '0' && "${observed}" == "${carrier_sha}"`,
 		`settled='true'`,
 		`[[ "${settled}" == 'true' ]] || exit 1`,
 		`response_exact='false'`,
 		`"${mutation_status}" == '0' && "${echoed}" == "${mutation_id}"`,
-		"baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)",
-		`"${mutation_status}" "${response_exact}" >&2 || true`,
+		"baseline carrier CAS settled by exact bounded readback",
+		`"${response_exact}" "${carrier_sha}" >&2 || true`,
 	} {
 		if !strings.Contains(advanceBaseline.Run, required) {
 			t.Fatalf("release baseline advancement must contain %q", required)
 		}
 	}
-	if strings.Count(advanceBaseline.Run, "gh api") != 3 ||
+	if strings.Count(advanceBaseline.Run, "gh api") != 10 ||
 		strings.Count(advanceBaseline.Run, "gh api graphql") != 2 ||
+		strings.Count(advanceBaseline.Run, "--method POST") != 3 ||
 		strings.Count(advanceBaseline.Run, "updateRefs(") != 1 ||
 		strings.Count(advanceBaseline.Run, "-F 'force=false'") != 1 {
 		t.Fatalf("release baseline writer API inventory drifted:\n%s", advanceBaseline.Run)
 	}
 	for _, forbidden := range []string{
-		"refs/tags/", "git push", "git update-ref", "--force-with-lease", "--method",
+		"refs/tags/", "git push", "git update-ref", "--force-with-lease",
 		" -X ", "createRef", "deleteRef", "force=true", "curl ", "wget ",
+		`-f "afterOid=${TARGET_SHA}"`, "--method PATCH", "--method DELETE",
 	} {
 		if strings.Contains(advanceBaseline.Run, forbidden) {
 			t.Fatalf("release baseline writer contains out-of-scope capability %q", forbidden)

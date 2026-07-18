@@ -913,9 +913,12 @@ jobs:
         run: |
           set -euo pipefail
           readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
+          readonly metadata_path='fugue-runtime-baseline.json'
           [[ "${EXPECTED_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}" ]]
+          [[ "${EXPECTED_BASE_REF_OBJECT}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${TARGET_SHA}" == "${GITHUB_SHA}" ]]
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${TARGET_SHA}" ]]
 
           remote_branch=''
           set +e
@@ -930,8 +933,182 @@ jobs:
           [[ "${remote_ref}" == "${baseline_ref}" ]]
           timeout --kill-after=5s 60s git fetch --no-tags origin "${baseline_ref}"
           [[ "$(git rev-parse --verify FETCH_HEAD)" == "${EXPECTED_BASE_REF_OBJECT}" ]]
-          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_BASE_SHA}" ]]
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_BASE_REF_OBJECT}" ]]
           git merge-base --is-ancestor "${EXPECTED_BASE_SHA}" "${TARGET_SHA}"
+
+          if [[ "${EXPECTED_BASE_REF_OBJECT}" != "${EXPECTED_BASE_SHA}" ]]; then
+            baseline_identity="$(git rev-list --parents -n 1 FETCH_HEAD)"
+            read -r baseline_commit baseline_parents <<<"${baseline_identity}"
+            [[ "${baseline_commit}" == "${EXPECTED_BASE_REF_OBJECT}" ]]
+            baseline_tree="$(git ls-tree --full-tree FETCH_HEAD)"
+            [[ "$(printf '%s\n' "${baseline_tree}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
+            read -r metadata_mode metadata_type metadata_blob observed_metadata_path extra <<<"${baseline_tree}"
+            [[ -z "${extra:-}" && "${metadata_mode}" == '100644' && "${metadata_type}" == 'blob' ]]
+            [[ "${metadata_blob}" =~ ^[0-9a-f]{40}$ && "${observed_metadata_path}" == "${metadata_path}" ]]
+            represented_fields="$(
+              git cat-file blob "${metadata_blob}" |
+                python3 -c '
+          import json, re, sys
+          payload = sys.stdin.buffer.read()
+          try:
+              value = json.loads(payload)
+          except (UnicodeDecodeError, json.JSONDecodeError):
+              raise SystemExit("baseline metadata is not exact JSON")
+          runtime_sha = value.get("runtime_sha") if type(value) is dict else None
+          previous_sha = value.get("previous_baseline_object_sha") if type(value) is dict else None
+          if type(runtime_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", runtime_sha) is None:
+              raise SystemExit("baseline metadata runtime SHA is invalid")
+          if previous_sha is not None and (
+              type(previous_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", previous_sha) is None
+          ):
+              raise SystemExit("baseline metadata previous object SHA is invalid")
+          expected = json.dumps(
+              {"previous_baseline_object_sha": previous_sha, "runtime_sha": runtime_sha, "schema_version": 1},
+              sort_keys=True,
+              separators=(",", ":"),
+          ).encode("utf-8") + b"\n"
+          if payload != expected:
+              raise SystemExit("baseline metadata bytes are not canonical")
+          sys.stdout.write(runtime_sha + "\t" + ("null" if previous_sha is None else previous_sha))
+          '
+            )"
+            IFS=$'\t' read -r represented_runtime represented_previous extra <<<"${represented_fields}"
+            [[ -z "${extra:-}" && "${represented_runtime}" == "${EXPECTED_BASE_SHA}" ]]
+            if [[ "${represented_previous}" == 'null' ]]; then
+              [[ -z "${baseline_parents:-}" ]]
+            else
+              read -r represented_parent extra_parent <<<"${baseline_parents:-}"
+              [[ "${represented_parent}" == "${represented_previous}" && -z "${extra_parent:-}" ]]
+            fi
+          fi
+
+          carrier_date="$(git show -s --format=%cI "${TARGET_SHA}" | python3 -c '
+          import datetime, sys
+          value = datetime.datetime.fromisoformat(sys.stdin.read().strip())
+          sys.stdout.write(value.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+          ')"
+          [[ "${carrier_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          object_tmp="$(mktemp -d)"
+          trap 'rm -rf "${object_tmp}"' EXIT
+
+          python3 - "${EXPECTED_BASE_REF_OBJECT}" "${TARGET_SHA}" \
+            "${object_tmp}/metadata.json" "${object_tmp}/blob-request.json" <<'PY'
+          import json, pathlib, sys
+          metadata = {
+              "previous_baseline_object_sha": sys.argv[1],
+              "runtime_sha": sys.argv[2],
+              "schema_version": 1,
+          }
+          content = json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n"
+          pathlib.Path(sys.argv[3]).write_text(content, encoding="utf-8")
+          pathlib.Path(sys.argv[4]).write_text(
+              json.dumps({"content": content, "encoding": "utf-8"}, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          PY
+          blob_sha="$(git hash-object -w --stdin <"${object_tmp}/metadata.json")"
+          [[ "${blob_sha}" =~ ^[0-9a-f]{40}$ ]]
+          blob_status=0
+          timeout --kill-after=2s 10s gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/blobs" \
+            --input "${object_tmp}/blob-request.json" >"${object_tmp}/blob-response.json" || blob_status=$?
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}" \
+            >"${object_tmp}/blob-readback.json"
+          python3 - "${object_tmp}/metadata.json" "${object_tmp}/blob-readback.json" "${blob_sha}" <<'PY'
+          import base64, pathlib, json, sys
+          expected = pathlib.Path(sys.argv[1]).read_bytes()
+          response = json.load(open(sys.argv[2], encoding="utf-8"))
+          encoded = response.get("content")
+          if response.get("sha") != sys.argv[3] or response.get("encoding") != "base64" or not isinstance(encoded, str):
+              raise SystemExit("carrier blob readback identity drifted")
+          if base64.b64decode("".join(encoded.split()), validate=True) != expected:
+              raise SystemExit("carrier blob readback bytes drifted")
+          PY
+
+          printf '100644 blob %s\t%s\n' "${blob_sha}" "${metadata_path}" >"${object_tmp}/tree-input"
+          tree_sha="$(git mktree <"${object_tmp}/tree-input")"
+          [[ "${tree_sha}" =~ ^[0-9a-f]{40}$ ]]
+          python3 - "${metadata_path}" "${blob_sha}" >"${object_tmp}/tree-request.json" <<'PY'
+          import json, sys
+          json.dump({"tree": [{"path": sys.argv[1], "mode": "100644", "type": "blob", "sha": sys.argv[2]}]}, sys.stdout, separators=(",", ":"))
+          PY
+          tree_status=0
+          timeout --kill-after=2s 10s gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/trees" \
+            --input "${object_tmp}/tree-request.json" >"${object_tmp}/tree-response.json" || tree_status=$?
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}" \
+            >"${object_tmp}/tree-readback.json"
+          python3 - "${object_tmp}/tree-readback.json" "${tree_sha}" "${metadata_path}" "${blob_sha}" <<'PY'
+          import json, sys
+          response = json.load(open(sys.argv[1], encoding="utf-8"))
+          expected = [{"path": sys.argv[3], "mode": "100644", "type": "blob", "sha": sys.argv[4]}]
+          actual = [{key: entry.get(key) for key in ("path", "mode", "type", "sha")} for entry in response.get("tree", [])]
+          if response.get("sha") != sys.argv[2] or response.get("truncated") is not False or actual != expected:
+              raise SystemExit("carrier tree readback drifted")
+          PY
+
+          carrier_message="fugue runtime baseline carrier ${TARGET_SHA}"
+          python3 - "${tree_sha}" "${EXPECTED_BASE_REF_OBJECT}" "${carrier_date}" \
+            "${carrier_message}" "${object_tmp}/commit-object" <<'PY'
+          import datetime, pathlib, sys
+          tree_sha, parent_sha, date, message, output_path = sys.argv[1:]
+          instant = datetime.datetime.fromisoformat(date.replace("Z", "+00:00"))
+          if instant.tzinfo != datetime.timezone.utc:
+              raise SystemExit("carrier commit date is not UTC")
+          timestamp = int(instant.timestamp())
+          identity = f"Fugue Release Baseline <release-baseline@fugue.invalid> {timestamp} +0000"
+          content = (
+              f"tree {tree_sha}\n"
+              f"parent {parent_sha}\n"
+              f"author {identity}\n"
+              f"committer {identity}\n"
+              "\n"
+          ).encode("utf-8") + message.encode("utf-8")
+          pathlib.Path(output_path).write_bytes(content)
+          PY
+          carrier_sha="$(git hash-object -t commit --stdin <"${object_tmp}/commit-object")"
+          [[ "${carrier_sha}" =~ ^[0-9a-f]{40}$ ]]
+          python3 - "${carrier_message}" "${tree_sha}" "${EXPECTED_BASE_REF_OBJECT}" "${carrier_date}" \
+            >"${object_tmp}/commit-request.json" <<'PY'
+          import json, sys
+          identity = {"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid", "date": sys.argv[4]}
+          payload = {"message": sys.argv[1], "tree": sys.argv[2], "parents": [sys.argv[3]], "author": identity, "committer": identity}
+          json.dump(payload, sys.stdout, separators=(",", ":"))
+          PY
+          commit_status=0
+          timeout --kill-after=2s 10s gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/commits" \
+            --input "${object_tmp}/commit-request.json" >"${object_tmp}/commit-response.json" || commit_status=$?
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}" \
+            >"${object_tmp}/commit-readback.json"
+          python3 - "${object_tmp}/commit-request.json" "${object_tmp}/commit-readback.json" \
+            "${carrier_sha}" "${tree_sha}" "${EXPECTED_BASE_REF_OBJECT}" <<'PY'
+          import json, sys
+          request = json.load(open(sys.argv[1], encoding="utf-8"))
+          response = json.load(open(sys.argv[2], encoding="utf-8"))
+          if response.get("sha") != sys.argv[3] or response.get("message") != request["message"]:
+              raise SystemExit("carrier commit readback identity drifted")
+          if response.get("tree", {}).get("sha") != sys.argv[4]:
+              raise SystemExit("carrier commit tree drifted")
+          parents = response.get("parents")
+          if not isinstance(parents, list) or len(parents) != 1 or parents[0].get("sha") != sys.argv[5]:
+              raise SystemExit("carrier commit parent drifted")
+          for field in ("author", "committer"):
+              actual = {key: response.get(field, {}).get(key) for key in ("name", "email", "date")}
+              if actual != request[field]:
+                  raise SystemExit(f"carrier commit {field} drifted")
+          PY
+
+          before_cas_status=0
+          before_cas_object="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" and .[0].object.type == "commit" then .[0].object.sha else "unknown" end')" || before_cas_status=$?
+          [[ "${before_cas_status}" == '0' && "${before_cas_object}" == "${EXPECTED_BASE_REF_OBJECT}" ]] || exit 1
+          rm -rf "${object_tmp}" || exit 1
+          trap - EXIT
 
           repository_id="$(timeout --kill-after=2s 10s gh api graphql \
             -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}' \
@@ -939,11 +1116,11 @@ jobs:
             --jq '.data.repository.id')"
           [[ "${repository_id}" =~ ^[A-Za-z0-9_=-]+$ ]]
           readonly mutation='mutation($repositoryId:ID!,$name:GitRefname!,$beforeOid:GitObjectID!,$afterOid:GitObjectID!,$force:Boolean!,$clientMutationId:String!){updateRefs(input:{repositoryId:$repositoryId,refUpdates:[{name:$name,beforeOid:$beforeOid,afterOid:$afterOid,force:$force}],clientMutationId:$clientMutationId}){clientMutationId}}'
-          mutation_id="fugue-runtime-baseline-${EXPECTED_BASE_SHA:0:12}-${TARGET_SHA:0:12}"
+          mutation_id="fugue-runtime-baseline-${EXPECTED_BASE_REF_OBJECT:0:12}-${carrier_sha:0:12}"
           mutation_status=0
           echoed="$(timeout --kill-after=2s 10s gh api graphql \
             -f "query=${mutation}" -f "repositoryId=${repository_id}" -f "name=${baseline_ref}" \
-            -f "beforeOid=${EXPECTED_BASE_REF_OBJECT}" -f "afterOid=${TARGET_SHA}" -F 'force=false' \
+            -f "beforeOid=${EXPECTED_BASE_REF_OBJECT}" -f "afterOid=${carrier_sha}" -F 'force=false' \
             -f "clientMutationId=${mutation_id}" --jq '.data.updateRefs.clientMutationId')" || mutation_status=$?
           observed='unknown'
           settled='false'
@@ -952,7 +1129,7 @@ jobs:
             observed="$(timeout --kill-after=2s 10s gh api \
               "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
               --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" and .[0].object.type == "commit" then .[0].object.sha else "unknown" end')" || observe_status=$?
-            if [[ "${observe_status}" == '0' && "${observed}" == "${TARGET_SHA}" ]]; then
+            if [[ "${observe_status}" == '0' && "${observed}" == "${carrier_sha}" ]]; then
               settled='true'
               break
             fi
@@ -963,8 +1140,8 @@ jobs:
           if [[ "${mutation_status}" == '0' && "${echoed}" == "${mutation_id}" ]]; then
             response_exact='true'
           fi
-          printf 'baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)\n' \
-            "${mutation_status}" "${response_exact}" >&2 || true
+          printf 'baseline carrier CAS settled by exact bounded readback (blob_status=%s tree_status=%s commit_status=%s mutation_status=%s response_exact=%s carrier=%s)\n' \
+            "${blob_status}" "${tree_status}" "${commit_status}" "${mutation_status}" "${response_exact}" "${carrier_sha}" >&2 || true
 
   freeze-release-lane-on-failure:
     needs:

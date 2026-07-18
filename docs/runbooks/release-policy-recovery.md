@@ -182,6 +182,18 @@ failure by a later upload. The deploy lane remains disabled, no runtime or
 cluster state changes, and long-term recorder compatibility remains a later
 checkpoint.
 
+The dormant long-term recorder checkpoint preserves that carrier chain after
+a future successful deploy. The disabled workflow revalidates the exact
+baseline ref object separately from its represented runtime, writes one
+canonical content-addressed carrier for the deployed target, and attempts one
+`force: false` expected-OID CAS to that carrier. Every object POST and the ref
+mutation is settled by bounded exact readback; a response echo is diagnostic
+only. Object scratch state is removed before the ref mutation and there is no
+fallible operation after successful settlement. Because the deploy workflow
+remains manually disabled in this checkpoint, compatibility, fail-closed
+behavior, no-op state, and a forward code revert are the matching recovery
+proofs; the runtime baseline does not advance.
+
 GitHub Actions deploys exact code SHAs only. It must never execute or
 orchestrate production rollback. After a future Fugue runtime write, rollback
 means Fugue itself detects the bad update and restores the previous verified
