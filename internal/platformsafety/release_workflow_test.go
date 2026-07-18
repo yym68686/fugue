@@ -463,6 +463,459 @@ func TestRP0MetadataObjectMaterializationIsHostedEvidenceBoundAndRefFree(t *test
 	}
 }
 
+func TestRP0CarrierMaterializerIsHostedRefFreeAndReadbackSettled(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "materialize-control-plane-release-baseline-carrier-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 carrier materializer workflow: %v", err)
+	}
+	assertWorkflowSourceDigest(t, data, "db52bc85e119027535ba0d3fabe4386a1579866e1a8a78c37a4237356b724500")
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string                `yaml:"runs-on"`
+			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+			Environment     string                `yaml:"environment"`
+			Permissions     map[string]string     `yaml:"permissions"`
+			ContinueOnError bool                  `yaml:"continue-on-error"`
+			Steps           []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 carrier materializer workflow: %v", err)
+	}
+	rootNode := workflowDocumentMapping(t, data)
+	assertWorkflowMappingKeys(t, rootNode, "name", "on", "permissions", "concurrency", "jobs")
+	assertWorkflowMappingKeys(t, workflowMappingValue(t, rootNode, "concurrency"), "group", "cancel-in-progress")
+	jobsNode := workflowMappingValue(t, rootNode, "jobs")
+	assertWorkflowMappingKeys(t, jobsNode, "materialize-forward-carrier")
+	jobNode := workflowMappingValue(t, jobsNode, "materialize-forward-carrier")
+	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
+
+	dispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("carrier materializer must be dispatch-only: %+v", workflow.On)
+	}
+	var dispatch releaseWorkflowDispatchTrigger
+	if err := dispatchNode.Decode(&dispatch); err != nil {
+		t.Fatalf("decode carrier workflow_dispatch: %v", err)
+	}
+	wantInputs := []string{"expected_previous_object_sha", "expected_sha", "runtime_sha"}
+	if len(dispatch.Inputs) != len(wantInputs) {
+		t.Fatalf("carrier materializer input inventory drifted: %+v", dispatch.Inputs)
+	}
+	for _, name := range wantInputs {
+		node, exists := dispatch.Inputs[name]
+		if !exists {
+			t.Fatalf("carrier materializer input %s is absent", name)
+		}
+		var input releaseWorkflowDispatchInput
+		if err := node.Decode(&input); err != nil {
+			t.Fatalf("decode carrier input %s: %v", name, err)
+		}
+		if !input.Required || input.Type != "string" || input.Default != nil {
+			t.Fatalf("carrier input %s must be required string without default: %+v", name, input)
+		}
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("carrier materializer top-level boundary drifted: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["materialize-forward-carrier"]
+	if !ok {
+		t.Fatal("carrier materializer job is absent")
+	}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 15 || job.Environment != "production" ||
+		job.ContinueOnError || !reflect.DeepEqual(job.Permissions, map[string]string{"contents": "write"}) {
+		t.Fatalf("carrier materializer job boundary drifted: %+v", job)
+	}
+	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
+		"materialize-forward-carrier": {Steps: job.Steps},
+	}, map[string]string{
+		"materialize-forward-carrier/Verify exact carrier materialization authorization":                 "898cf24b96df997884916203b9b1d86350a2ebe6c824dff1f5495589f3917174",
+		"materialize-forward-carrier/Write carrier materialization intent evidence":                      "686ab0004c352ef4b9840be7f75bbe902db1f80ddb789fb82070931318c0a124",
+		"materialize-forward-carrier/Observe unchanged production health before carrier object write":    "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
+		"materialize-forward-carrier/Materialize canonical forward carrier objects without moving a ref": "6d72f64232586f66b0a8718e4c417c0e17ec742167eab36ec2885bf2c551005e",
+		"materialize-forward-carrier/Write carrier materialization result evidence":                      "ab548801ade6ea482474ba6a7b1b9c5fff8a6d92e329fb2e4494f9eb7fd22a8f",
+	})
+	wantSteps := []string{
+		"Checkout exact carrier-writer policy SHA",
+		"Verify exact carrier materialization authorization",
+		"Write carrier materialization intent evidence",
+		"Upload carrier materialization intent evidence",
+		"Observe unchanged production health before carrier object write",
+		"Materialize canonical forward carrier objects without moving a ref",
+		"Write carrier materialization result evidence",
+		"Upload carrier materialization result evidence",
+	}
+	if len(job.Steps) != len(wantSteps) {
+		t.Fatalf("carrier materializer step inventory drifted: %+v", job.Steps)
+	}
+	for index, name := range wantSteps {
+		step := job.Steps[index]
+		if step.Name != name || step.If != "" || step.ContinueOnError {
+			t.Fatalf("carrier materializer step %d drifted: %+v", index, step)
+		}
+	}
+	checkout := job.Steps[0]
+	if checkout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+		checkout.With["ref"] != "${{ github.sha }}" || checkout.With["fetch-depth"] != "0" ||
+		checkout.With["persist-credentials"] != "false" {
+		t.Fatalf("carrier materializer checkout drifted: %+v", checkout)
+	}
+	verify := job.Steps[1]
+	wantVerifyEnv := map[string]string{
+		"EXPECTED_SHA":                 "${{ inputs.expected_sha }}",
+		"EXPECTED_PREVIOUS_OBJECT_SHA": "${{ inputs.expected_previous_object_sha }}",
+		"RUNTIME_SHA":                  "${{ inputs.runtime_sha }}",
+		"HEALTH_URL":                   "${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}",
+		"GH_TOKEN":                     "${{ github.token }}",
+	}
+	if verify.ID != "verify" || !reflect.DeepEqual(verify.Env, wantVerifyEnv) {
+		t.Fatalf("carrier verifier boundary drifted: %+v", verify)
+	}
+	for _, required := range []string{
+		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
+		`"${GITHUB_REF}" == 'refs/heads/main'`,
+		`policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1`,
+		`actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1`,
+		`mapfile -t actual_changes <<<"${actual_changes_text}"`,
+		`A\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml`,
+		`"${baseline_object}" == "${EXPECTED_PREVIOUS_OBJECT_SHA}"`,
+		`"${represented_runtime}" == "${RUNTIME_SHA}"`,
+		`"${represented_parent}" == "${represented_previous}"`,
+		`git merge-base --is-ancestor "${RUNTIME_SHA}" "${GITHUB_SHA}"`,
+		`carrier_date=%s`,
+	} {
+		if !strings.Contains(verify.Run, required) {
+			t.Fatalf("carrier verifier must contain %q", required)
+		}
+	}
+	if strings.Contains(verify.Run, `< <(`) {
+		t.Fatal("carrier verifier must not hide source command status through process substitution")
+	}
+	materialize := job.Steps[5]
+	wantMaterializeEnv := map[string]string{
+		"EXPECTED_SHA":        "${{ inputs.expected_sha }}",
+		"PREVIOUS_OBJECT_SHA": "${{ steps.verify.outputs.previous_object_sha }}",
+		"RUNTIME_SHA":         "${{ steps.verify.outputs.runtime_sha }}",
+		"CARRIER_DATE":        "${{ steps.verify.outputs.carrier_date }}",
+		"GH_TOKEN":            "${{ github.token }}",
+	}
+	if materialize.ID != "materialize" || materialize.Uses != "" || materialize.Run == "" ||
+		!reflect.DeepEqual(materialize.Env, wantMaterializeEnv) {
+		t.Fatalf("carrier materializer execution boundary drifted: %+v", materialize)
+	}
+	for _, required := range []string{
+		`"previous_baseline_object_sha": sys.argv[1]`,
+		`git hash-object -w --stdin`,
+		`git mktree`,
+		`git commit-tree "${tree_sha}" -p "${PREVIOUS_OBJECT_SHA}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}"`,
+		`"${after_object}" == "${PREVIOUS_OBJECT_SHA}"`,
+		`blob_transport_status=%s`,
+		`tree_transport_status=%s`,
+		`commit_transport_status=%s`,
+	} {
+		if !strings.Contains(materialize.Run, required) {
+			t.Fatalf("carrier materializer must contain %q", required)
+		}
+	}
+	if strings.Count(materialize.Run, "gh api --method POST") != 3 ||
+		strings.Count(materialize.Run, `"repos/${GITHUB_REPOSITORY}/git/blobs"`) != 1 ||
+		strings.Count(materialize.Run, `"repos/${GITHUB_REPOSITORY}/git/trees"`) != 1 ||
+		strings.Count(materialize.Run, `"repos/${GITHUB_REPOSITORY}/git/commits"`) != 1 {
+		t.Fatalf("carrier object write inventory drifted:\n%s", materialize.Run)
+	}
+	source := string(data)
+	for _, forbidden := range []string{
+		"self-hosted", "${{ secrets.", "KUBECONFIG", "kubectl ", "helm ", "ssh ",
+		"git push", "git update-ref", "--force-with-lease", "--method PATCH", "--method PUT",
+		"--method DELETE", " -X ", "graphql", "updateRefs", "createRef", "deleteRef",
+		`"repos/${GITHUB_REPOSITORY}/git/refs`, "force=", "docker ",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("carrier materializer contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
+func TestRP0CarrierMaterializerSourceBindingRejectsValidOutputThenFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		code int
+	}{
+		{
+			name: "commit identity",
+			body: `set -euo pipefail
+mock_identity() {
+  printf '%040d %040d\n' 1 2
+  return 7
+}
+policy_identity="$(mock_identity)" || exit 91
+read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 92
+`,
+			code: 91,
+		},
+		{
+			name: "changed files",
+			body: `set -euo pipefail
+mock_diff() {
+  printf '%s\n' $'A\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'
+  printf '%s\n' $'M\tdocs/runbooks/release-domain-planner.md'
+  printf '%s\n' $'M\tdocs/runbooks/release-policy-recovery.md'
+  printf '%s\n' $'M\tinternal/platformsafety/release_workflow_test.go'
+  return 7
+}
+actual_changes_text="$(mock_diff)" || exit 93
+mapfile -t actual_changes <<<"${actual_changes_text}"
+`,
+			code: 93,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command("bash")
+			command.Stdin = strings.NewReader(test.body)
+			output, err := command.CombinedOutput()
+			exitError, ok := err.(*exec.ExitError)
+			if !ok || exitError.ExitCode() != test.code {
+				t.Fatalf("valid source output followed by failure was not rejected at capture: err=%v output=%q", err, output)
+			}
+		})
+	}
+}
+
+func TestRP0CarrierMaterializerObjectReadbackSettlementMock(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "materialize-control-plane-release-baseline-carrier-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 carrier materializer workflow: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 carrier materializer workflow: %v", err)
+	}
+	job := workflow.Jobs["materialize-forward-carrier"]
+	var materialize releaseWorkflowStep
+	for _, step := range job.Steps {
+		if step.Name == "Materialize canonical forward carrier objects without moving a ref" {
+			materialize = step
+		}
+	}
+	if materialize.Run == "" {
+		t.Fatal("carrier materializer run body is absent")
+	}
+
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatalf("create carrier fixture repo: %v", err)
+	}
+	runGit := func(input string, args ...string) string {
+		t.Helper()
+		command := exec.Command("git", args...)
+		command.Dir = repo
+		command.Stdin = strings.NewReader(input)
+		command.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Fugue Carrier Test",
+			"GIT_AUTHOR_EMAIL=carrier-test@fugue.invalid",
+			"GIT_AUTHOR_DATE=2026-07-18T00:00:00Z",
+			"GIT_COMMITTER_NAME=Fugue Carrier Test",
+			"GIT_COMMITTER_EMAIL=carrier-test@fugue.invalid",
+			"GIT_COMMITTER_DATE=2026-07-18T00:00:00Z",
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v output=%q", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("", "init", "--quiet")
+	runGit("", "symbolic-ref", "HEAD", "refs/heads/main")
+	writeCommit := func(name, content string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("write carrier fixture: %v", err)
+		}
+		runGit("", "add", "--", name)
+		runGit("", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", name)
+		return runGit("", "rev-parse", "HEAD")
+	}
+	runtimeSHA := writeCommit("runtime.txt", "runtime\n")
+	policySHA := writeCommit("policy.txt", "policy\n")
+	rootPayload := fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":1}`+"\n", runtimeSHA)
+	rootBlob := runGit(rootPayload, "hash-object", "-w", "--stdin")
+	rootTree := runGit(fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", rootBlob), "mktree")
+	previousObject := runGit("", "commit-tree", rootTree, "-m", "fugue runtime baseline")
+
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create carrier mock bin: %v", err)
+	}
+	ghMock := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${LOG_FILE}"
+arguments="$*"
+if [[ "${arguments}" == *'--method POST'*'/git/blobs'* ]]; then
+  [[ "${MODE}" != 'blob_lost' && "${MODE}" != 'blob_absent' ]] || exit 7
+  printf '{}\n'
+  exit 0
+fi
+if [[ "${arguments}" == *'--method POST'*'/git/trees'* ]]; then
+  [[ "${MODE}" != 'tree_lost' ]] || exit 7
+  printf '{}\n'
+  exit 0
+fi
+if [[ "${arguments}" == *'--method POST'*'/git/commits'* ]]; then
+  [[ "${MODE}" != 'commit_lost' ]] || exit 7
+  printf '{}\n'
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/blobs/'* ]]; then
+  [[ "${MODE}" != 'blob_absent' ]] || exit 7
+  sha="${arguments##*/}"
+  python3 - "${sha}" <<'PY'
+import base64, json, subprocess, sys
+content = subprocess.check_output(["git", "cat-file", "blob", sys.argv[1]])
+print(json.dumps({"sha": sys.argv[1], "encoding": "base64", "content": base64.b64encode(content).decode("ascii")}))
+PY
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/trees/'* ]]; then
+  sha="${arguments##*/}"
+  python3 - "${sha}" <<'PY'
+import json, subprocess, sys
+line = subprocess.check_output(["git", "ls-tree", sys.argv[1]], text=True).rstrip("\n")
+metadata, path = line.split("\t", 1)
+mode, object_type, object_sha = metadata.split()
+print(json.dumps({"sha": sys.argv[1], "truncated": False, "tree": [{"path": path, "mode": mode, "type": object_type, "sha": object_sha}]}))
+PY
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/commits/'* ]]; then
+  sha="${arguments##*/}"
+  python3 - "${sha}" <<'PY'
+import json, os, subprocess, sys
+sha = sys.argv[1]
+tree = subprocess.check_output(["git", "show", "-s", "--format=%T", sha], text=True).strip()
+parent = subprocess.check_output(["git", "rev-parse", sha + "^"], text=True).strip()
+identity = {"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid", "date": os.environ["CARRIER_DATE"]}
+print(json.dumps({"sha": sha, "message": "fugue runtime baseline carrier " + os.environ["RUNTIME_SHA"], "tree": {"sha": tree}, "parents": [{"sha": parent}], "author": identity, "committer": identity}))
+PY
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/matching-refs/heads/fugue-control-plane-release-baseline'* ]]; then
+  printf '%s\n' "${PREVIOUS_OBJECT_SHA}"
+  exit 0
+fi
+exit 97
+`
+	timeoutMock := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --kill-after=* ]]; then shift; fi
+[[ "${1:-}" =~ ^[0-9]+s$ ]] || exit 125
+shift
+exec "$@"
+`
+	for name, source := range map[string]string{"gh": ghMock, "timeout": timeoutMock} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(source), 0o700); err != nil {
+			t.Fatalf("write carrier %s mock: %v", name, err)
+		}
+	}
+
+	type result struct {
+		posts  int
+		output string
+		log    string
+		err    error
+	}
+	runMaterializer := func(t *testing.T, mode string) result {
+		t.Helper()
+		caseDir := t.TempDir()
+		outputPath := filepath.Join(caseDir, "github-output")
+		logPath := filepath.Join(caseDir, "gh.log")
+		command := exec.Command("bash")
+		command.Dir = repo
+		command.Stdin = strings.NewReader(materialize.Run)
+		command.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"MODE="+mode,
+			"LOG_FILE="+logPath,
+			"GITHUB_RUN_ATTEMPT=1",
+			"GITHUB_SHA="+policySHA,
+			"EXPECTED_SHA="+policySHA,
+			"PREVIOUS_OBJECT_SHA="+previousObject,
+			"RUNTIME_SHA="+runtimeSHA,
+			"CARRIER_DATE=2026-07-18T00:00:00Z",
+			"GITHUB_REPOSITORY=fugue-test/repository",
+			"GITHUB_OUTPUT="+outputPath,
+			"GH_TOKEN=test-token",
+		)
+		combined, runErr := command.CombinedOutput()
+		log, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read carrier gh log: %v", err)
+		}
+		published := ""
+		if value, err := os.ReadFile(outputPath); err == nil {
+			published = string(value)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read carrier output: %v", err)
+		}
+		return result{posts: strings.Count(string(log), "--method POST"), output: published, log: string(combined), err: runErr}
+	}
+
+	for _, mode := range []string{"success", "blob_lost", "tree_lost", "commit_lost"} {
+		t.Run(mode, func(t *testing.T) {
+			got := runMaterializer(t, mode)
+			if got.err != nil || got.posts != 3 {
+				t.Fatalf("carrier object settlement failed: mode=%s err=%v posts=%d output=%q log=%q", mode, got.err, got.posts, got.output, got.log)
+			}
+			outputs := map[string]string{}
+			for _, line := range strings.Split(strings.TrimSpace(got.output), "\n") {
+				key, value, ok := strings.Cut(line, "=")
+				if !ok || outputs[key] != "" {
+					t.Fatalf("carrier output is malformed: %q", got.output)
+				}
+				outputs[key] = value
+			}
+			carrierSHA := outputs["carrier_commit_sha"]
+			if len(outputs) != 6 || len(carrierSHA) != 40 || runGit("", "rev-parse", carrierSHA+"^") != previousObject {
+				t.Fatalf("carrier output topology drifted: mode=%s output=%q", mode, got.output)
+			}
+			wantStatus := map[string]string{"blob_transport_status": "0", "tree_transport_status": "0", "commit_transport_status": "0"}
+			if mode != "success" {
+				wantStatus[strings.TrimSuffix(mode, "_lost")+"_transport_status"] = "7"
+			}
+			for key, want := range wantStatus {
+				if outputs[key] != want {
+					t.Fatalf("carrier transport status drifted: mode=%s key=%s got=%q want=%q", mode, key, outputs[key], want)
+				}
+			}
+		})
+	}
+	t.Run("blob absent after failed transport", func(t *testing.T) {
+		got := runMaterializer(t, "blob_absent")
+		if got.err == nil || got.posts != 1 || got.output != "" {
+			t.Fatalf("carrier writer did not fail closed for absent blob: err=%v posts=%d output=%q log=%q", got.err, got.posts, got.output, got.log)
+		}
+	})
+}
+
 func TestRP0MetadataReaderIsHostedReadOnlyAndEvidenceBound(t *testing.T) {
 	t.Parallel()
 

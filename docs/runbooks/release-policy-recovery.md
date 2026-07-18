@@ -160,6 +160,14 @@ second mutation. `deploy-control-plane-v2` is
 registered but intentionally fails on a GitHub-hosted runner before checkout,
 self-hosted scheduling, or any cluster command.
 
+The carrier creation checkpoint is a separate GitHub-hosted one-shot lane. It
+creates only immutable blob, tree, and commit objects for the runtime already
+represented by the current baseline object. Local Git plumbing fixes the exact
+expected object IDs before one POST per object; exact readback, not the POST
+response, settles ambiguous transport. It cannot create, update, or delete a
+ref and has no self-hosted or cluster path. Ref advancement is intentionally
+deferred to its own checkpoint.
+
 GitHub Actions deploys exact code SHAs only. It must never execute or
 orchestrate production rollback. After a future Fugue runtime write, rollback
 means Fugue itself detects the bad update and restores the previous verified

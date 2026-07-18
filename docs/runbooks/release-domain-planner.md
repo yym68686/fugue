@@ -223,6 +223,15 @@ remains an ordinary direct code baseline. Carrier creation and ref advancement
 are intentionally excluded, and the deploy workflow remains disabled, so no
 self-hosted or cluster path is exercised.
 
+The next hosted one-shot checkpoint materializes one no-op forward carrier
+without moving the baseline ref. It binds the exact current metadata object
+and the runtime SHA already represented by that object, derives the canonical
+blob, one-file tree, and one-parent commit with local Git plumbing, attempts
+each immutable Git database write once, and settles each write by exact object
+readback. A pre-write intent artifact and a result artifact preserve the
+object identities. The baseline ref must remain at the previous object before
+and after materialization; carrier ref CAS remains a later checkpoint.
+
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.
 Evidence generation then uses that checksum-verified download cache as an
