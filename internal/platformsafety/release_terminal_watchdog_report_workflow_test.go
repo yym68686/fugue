@@ -21,7 +21,7 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP2 terminal watchdog report workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "fd60cf74de2d1ca4ad04b7edc7811334be39657b5b6b3ebc9293bc0d038aaa3e")
+	assertWorkflowSourceDigest(t, data, "b47bd049375e624aad8944df9a2fa462a402090d736a0a33bcbe576def1d6329")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -46,8 +46,8 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
 
 	dispatchNode, ok := workflow.On["workflow_dispatch"]
-	if !ok || len(workflow.On) != 1 {
-		t.Fatalf("terminal watchdog report must be dispatch-only: %+v", workflow.On)
+	if !ok || len(workflow.On) != 2 {
+		t.Fatalf("terminal watchdog report triggers drifted: %+v", workflow.On)
 	}
 	var dispatch releaseWorkflowDispatchTrigger
 	if err := dispatchNode.Decode(&dispatch); err != nil {
@@ -66,6 +66,16 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 		if !input.Required || input.Type != "string" || input.Default != nil {
 			t.Fatalf("%s must be a required string without default: %+v", name, input)
 		}
+	}
+	var schedule []struct {
+		Cron string `yaml:"cron"`
+	}
+	scheduleNode := workflow.On["schedule"]
+	if err := scheduleNode.Decode(&schedule); err != nil {
+		t.Fatalf("decode terminal watchdog schedule: %v", err)
+	}
+	if len(schedule) != 1 || schedule[0].Cron != "17 * * * *" {
+		t.Fatalf("terminal watchdog schedule drifted: %+v", schedule)
 	}
 	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
 		t.Fatalf("terminal watchdog report top-level boundary drifted: %+v", workflow)
@@ -110,17 +120,23 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 		t.Fatalf("terminal watchdog report Go setup drifted: %+v", setup)
 	}
 	verify := job.Steps[2]
+	if verify.ID != "authorize" {
+		t.Fatalf("terminal watchdog verifier ID drifted: %+v", verify)
+	}
 	wantVerifyEnv := map[string]string{
 		"EXPECTED_SHA":           "${{ inputs.expected_sha }}",
 		"EXPECTED_TERMINAL_OID":  "${{ inputs.expected_terminal_oid }}",
 		"EXPECTED_TERMINAL_MODE": "${{ inputs.expected_terminal_mode }}",
 		"GH_TOKEN":               "${{ github.token }}",
+		"GITHUB_TOKEN":           "${{ github.token }}",
 	}
 	if !reflect.DeepEqual(verify.Env, wantVerifyEnv) {
 		t.Fatalf("terminal watchdog verifier environment drifted: %+v", verify.Env)
 	}
 	for _, required := range []string{
-		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
+		`workflow_dispatch)`,
+		`schedule)`,
+		`-z "${EXPECTED_SHA}" && -z "${EXPECTED_TERMINAL_OID}" && -z "${EXPECTED_TERMINAL_MODE}"`,
 		`"${GITHUB_REF}" == 'refs/heads/main'`,
 		`policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1`,
 		`git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1`,
@@ -129,7 +145,10 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 		`M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml`,
 		`M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go`,
 		`"${main_head}" == "${GITHUB_SHA}"`,
-		`"${terminal_oid}" == "${EXPECTED_TERMINAL_OID}"`,
+		`fugue-rp2-scheduled-terminal-reader.json`,
+		`"${terminal_oid}" == "${effective_terminal_oid}"`,
+		`expected_terminal_oid=%s`,
+		`expected_terminal_mode=%s`,
 		`cmd/fugue-release-terminal-read/main.go`,
 		`internal/releaseterminal/resolver.go`,
 	} {
@@ -139,8 +158,8 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	}
 	classify := job.Steps[3]
 	wantClassifyEnv := map[string]string{
-		"EXPECTED_TERMINAL_OID":  "${{ inputs.expected_terminal_oid }}",
-		"EXPECTED_TERMINAL_MODE": "${{ inputs.expected_terminal_mode }}",
+		"EXPECTED_TERMINAL_OID":  "${{ steps.authorize.outputs.expected_terminal_oid }}",
+		"EXPECTED_TERMINAL_MODE": "${{ steps.authorize.outputs.expected_terminal_mode }}",
 		"GITHUB_TOKEN":           "${{ github.token }}",
 	}
 	if !reflect.DeepEqual(classify.Env, wantClassifyEnv) {
@@ -180,7 +199,7 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	}
 	source := string(data)
 	for _, forbidden := range []string{
-		"self-hosted", "${{ secrets.", "schedule:", "cron:", "KUBECONFIG", "kubectl ", "helm ", "ssh ", "docker ",
+		"self-hosted", "${{ secrets.", "KUBECONFIG", "kubectl ", "helm ", "ssh ", "docker ",
 		"git push", "git update-ref", "git commit-tree", "updateRefs", "createRef", "deleteRef", "force=true",
 		"--method POST", "--method PATCH", "--method PUT", "--method DELETE", "contents: write", "fugue app ",
 	} {
@@ -268,6 +287,180 @@ func TestRP2TerminalWatchdogReportPolicyIdentitySurvivesUnrelatedDescendant(t *t
 	}
 	if got := runGit("diff", "--no-renames", "--name-status", driftCommit+"^", driftCommit); got == want {
 		t.Fatalf("one-file policy drift unexpectedly matched joint policy status: %q", got)
+	}
+}
+
+func TestRP2TerminalWatchdogScheduledAuthorizationHarness(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(rp2TerminalWatchdogReportWorkflow)
+	if err != nil {
+		t.Fatalf("read RP2 terminal watchdog report workflow: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP2 terminal watchdog report workflow: %v", err)
+	}
+	var authorize releaseWorkflowStep
+	for _, step := range workflow.Jobs["observe-terminal-watchdog"].Steps {
+		if step.Name == "Verify exact report-only watchdog authorization" {
+			authorize = step
+		}
+	}
+	if authorize.Run == "" {
+		t.Fatal("terminal watchdog authorization step is absent")
+	}
+	if authorize.Env["GITHUB_TOKEN"] != "${{ github.token }}" || authorize.Env["GH_TOKEN"] != "${{ github.token }}" {
+		t.Fatalf("terminal watchdog authorization token contract drifted: %+v", authorize.Env)
+	}
+
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatalf("create synthetic repository: %v", err)
+	}
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v output=%s", args, err, output)
+		}
+		return string(output)
+	}
+	write := func(path, value string) {
+		t.Helper()
+		fullPath := filepath.Join(repository, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+			t.Fatalf("create parent for %s: %v", path, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(value), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	policyPaths := []string{
+		".github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml",
+		"internal/platformsafety/release_terminal_watchdog_report_workflow_test.go",
+	}
+	runGit("init", "--quiet")
+	for _, path := range policyPaths {
+		write(path, "published\n")
+	}
+	write("cmd/fugue-release-terminal-read/main.go", "package main\n")
+	write("internal/releaseterminal/resolver.go", "package releaseterminal\n")
+	runGit("add", ".")
+	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "published")
+	for _, path := range policyPaths {
+		write(path, "scheduled report only\n")
+	}
+	runGit("add", ".")
+	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "scheduled")
+	executionSHA := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create mock bin: %v", err)
+	}
+	ghMock := `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *'/git/ref/heads/main'*) printf '%s\n' "${EXPECTED_MAIN_SHA}" ;;
+  *'/git/matching-refs/heads/fugue-control-plane-release-terminal-state'*)
+    if [[ "${MODE}" == 'schedule_absent' ]]; then printf '%s\n' 'absent'; else printf '%s\n' 'c5355438136ac167cf921928ceb86306a52b42e3'; fi
+    ;;
+  *) exit 97 ;;
+esac
+`
+	goMock := `#!/usr/bin/env bash
+set -euo pipefail
+case "${MODE}" in
+  manual) exit 91 ;;
+  schedule_absent) printf '%s\n' '{"schema_version":1,"ref":"refs/heads/fugue-control-plane-release-terminal-state","state":"absent"}' ;;
+  schedule_drift) printf '%s\n' '{"schema_version":1,"ref":"refs/heads/fugue-control-plane-release-terminal-state","state":"present","object_oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","document":{"terminal_mode":"frozen"}}' ;;
+  *) printf '%s\n' '{"schema_version":1,"ref":"refs/heads/fugue-control-plane-release-terminal-state","state":"present","object_oid":"c5355438136ac167cf921928ceb86306a52b42e3","document":{"terminal_mode":"frozen"}}' ;;
+esac
+`
+	timeoutMock := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --kill-after=* ]]; then shift; fi
+[[ "${1:-}" =~ ^[0-9]+s$ ]] || exit 125
+shift
+exec "$@"
+`
+	for name, source := range map[string]string{"gh": ghMock, "go": goMock, "timeout": timeoutMock} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(source), 0o700); err != nil {
+			t.Fatalf("write %s mock: %v", name, err)
+		}
+	}
+	bashEnv := filepath.Join(t.TempDir(), "bash-env")
+	bashEnvSource := `actual_changes=($'M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml' $'M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go')
+mapfile() { return 0; }
+`
+	if err := os.WriteFile(bashEnv, []byte(bashEnvSource), 0o600); err != nil {
+		t.Fatalf("write Bash 3 mapfile compatibility shim: %v", err)
+	}
+
+	cases := map[string]struct {
+		event   string
+		oid     string
+		mode    string
+		success bool
+		want    string
+	}{
+		"schedule_frozen": {"schedule", "", "", true, "expected_terminal_oid=c5355438136ac167cf921928ceb86306a52b42e3\nexpected_terminal_mode=frozen\n"},
+		"schedule_absent": {"schedule", "", "", true, "expected_terminal_oid=absent\nexpected_terminal_mode=absent\n"},
+		"schedule_drift":  {"schedule", "", "", false, ""},
+		"manual":          {"workflow_dispatch", "c5355438136ac167cf921928ceb86306a52b42e3", "frozen", true, "expected_terminal_oid=c5355438136ac167cf921928ceb86306a52b42e3\nexpected_terminal_mode=frozen\n"},
+	}
+	for name, test := range cases {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			outputPath := filepath.Join(t.TempDir(), "output")
+			command := exec.Command("bash")
+			command.Dir = repository
+			command.Stdin = strings.NewReader(authorize.Run)
+			expectedSHA := ""
+			if test.event == "workflow_dispatch" {
+				expectedSHA = executionSHA
+			}
+			command.Env = append(os.Environ(),
+				"PATH="+bin+":"+os.Getenv("PATH"),
+				"BASH_ENV="+bashEnv,
+				"MODE="+name,
+				"EXPECTED_MAIN_SHA="+executionSHA,
+				"EXPECTED_SHA="+expectedSHA,
+				"EXPECTED_TERMINAL_OID="+test.oid,
+				"EXPECTED_TERMINAL_MODE="+test.mode,
+				"GITHUB_EVENT_NAME="+test.event,
+				"GITHUB_REF=refs/heads/main",
+				"GITHUB_RUN_ATTEMPT=1",
+				"GITHUB_SHA="+executionSHA,
+				"GITHUB_REPOSITORY=test/repository",
+				"GITHUB_TOKEN=test-token",
+				"RUNNER_TEMP="+t.TempDir(),
+				"GITHUB_OUTPUT="+outputPath,
+			)
+			output, runErr := command.CombinedOutput()
+			if !test.success {
+				if runErr == nil {
+					t.Fatalf("expected authorization failure, output=%s", output)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatalf("authorization failed: %v output=%s", runErr, output)
+			}
+			got, err := os.ReadFile(outputPath)
+			if err != nil {
+				t.Fatalf("read authorization output: %v", err)
+			}
+			if string(got) != test.want {
+				t.Fatalf("authorization output = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

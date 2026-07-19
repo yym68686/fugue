@@ -15,6 +15,8 @@ on:
         description: Exact expected terminal mode
         required: true
         type: string
+  schedule:
+    - cron: '17 * * * *'
 
 permissions: {}
 
@@ -45,25 +47,33 @@ jobs:
           cache: false
 
       - name: Verify exact report-only watchdog authorization
+        id: authorize
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
           EXPECTED_TERMINAL_MODE: ${{ inputs.expected_terminal_mode }}
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           readonly terminal_ref='refs/heads/fugue-control-plane-release-terminal-state'
-          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_dispatch)
+              effective_sha="${EXPECTED_SHA}"
+              effective_terminal_oid="${EXPECTED_TERMINAL_OID}"
+              effective_terminal_mode="${EXPECTED_TERMINAL_MODE}"
+              ;;
+            schedule)
+              [[ -z "${EXPECTED_SHA}" && -z "${EXPECTED_TERMINAL_OID}" && -z "${EXPECTED_TERMINAL_MODE}" ]] || exit 1
+              effective_sha="${GITHUB_SHA}"
+              effective_terminal_oid=''
+              effective_terminal_mode=''
+              ;;
+            *) exit 1 ;;
+          esac
           [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
-          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
-          [[ "${EXPECTED_TERMINAL_OID}" == 'absent' || "${EXPECTED_TERMINAL_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          [[ "${EXPECTED_TERMINAL_MODE}" =~ ^(absent|reservation|success|frozen|indeterminate)$ ]] || exit 1
-          if [[ "${EXPECTED_TERMINAL_OID}" == 'absent' ]]; then
-            [[ "${EXPECTED_TERMINAL_MODE}" == 'absent' ]] || exit 1
-          else
-            [[ "${EXPECTED_TERMINAL_MODE}" != 'absent' ]] || exit 1
-          fi
+          [[ "${effective_sha}" =~ ^[0-9a-f]{40}$ && "${effective_sha}" == "${GITHUB_SHA}" ]] || exit 1
 
           readonly workflow_path='.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml'
           readonly test_path='internal/platformsafety/release_terminal_watchdog_report_workflow_test.go'
@@ -98,12 +108,55 @@ jobs:
           terminal_oid="$(timeout --kill-after=2s 10s gh api \
             "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-terminal-state" \
             --jq 'if length == 0 then "absent" elif length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-terminal-state" and .[0].object.type == "commit" then .[0].object.sha else "invalid" end')" || exit 1
-          [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+          if [[ "${GITHUB_EVENT_NAME}" == 'schedule' ]]; then
+            schedule_reader="${RUNNER_TEMP}/fugue-rp2-scheduled-terminal-reader.json"
+            timeout --kill-after=2s 90s go run ./cmd/fugue-release-terminal-read \
+              --repository "${GITHUB_REPOSITORY}" >"${schedule_reader}" || exit 1
+            scheduled_fields="$(python3 - "${schedule_reader}" <<'PY'
+          import json, pathlib, re, sys
+          raw = pathlib.Path(sys.argv[1]).read_bytes()
+          if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
+              raise SystemExit("scheduled terminal reader output is not canonical one-LF JSON")
+          value = json.loads(raw)
+          if value.get("schema_version") != 1 or value.get("ref") != "refs/heads/fugue-control-plane-release-terminal-state":
+              raise SystemExit("scheduled terminal reader identity drifted")
+          if value.get("state") == "absent":
+              if set(value) != {"schema_version", "ref", "state"}:
+                  raise SystemExit("scheduled absent terminal schema drifted")
+              print("absent\tabsent")
+          elif value.get("state") == "present":
+              if set(value) != {"schema_version", "ref", "state", "object_oid", "document"}:
+                  raise SystemExit("scheduled present terminal schema drifted")
+              oid, document = value.get("object_oid"), value.get("document")
+              mode = document.get("terminal_mode") if isinstance(document, dict) else None
+              if not isinstance(oid, str) or re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+                  raise SystemExit("scheduled terminal OID is invalid")
+              if mode not in {"reservation", "success", "frozen"}:
+                  raise SystemExit("scheduled terminal mode is invalid")
+              print(f"{oid}\t{mode}")
+          else:
+              raise SystemExit("scheduled terminal reader state is unsupported")
+          PY
+            )" || exit 1
+            IFS=$'\t' read -r effective_terminal_oid effective_terminal_mode extra <<<"${scheduled_fields}" || exit 1
+            [[ -z "${extra:-}" && "${terminal_oid}" == "${effective_terminal_oid}" ]] || exit 1
+          else
+            [[ "${terminal_oid}" == "${effective_terminal_oid}" ]] || exit 1
+          fi
+          [[ "${effective_terminal_oid}" == 'absent' || "${effective_terminal_oid}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${effective_terminal_mode}" =~ ^(absent|reservation|success|frozen|indeterminate)$ ]] || exit 1
+          if [[ "${effective_terminal_oid}" == 'absent' ]]; then
+            [[ "${effective_terminal_mode}" == 'absent' ]] || exit 1
+          else
+            [[ "${effective_terminal_mode}" != 'absent' ]] || exit 1
+          fi
+          printf 'expected_terminal_oid=%s\n' "${effective_terminal_oid}" >>"${GITHUB_OUTPUT}"
+          printf 'expected_terminal_mode=%s\n' "${effective_terminal_mode}" >>"${GITHUB_OUTPUT}"
 
       - name: Classify stable terminal state without mutation
         env:
-          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
-          EXPECTED_TERMINAL_MODE: ${{ inputs.expected_terminal_mode }}
+          EXPECTED_TERMINAL_OID: ${{ steps.authorize.outputs.expected_terminal_oid }}
+          EXPECTED_TERMINAL_MODE: ${{ steps.authorize.outputs.expected_terminal_mode }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
