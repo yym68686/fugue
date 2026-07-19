@@ -71,8 +71,8 @@ jobs:
           actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1
           mapfile -t actual_changes <<<"${actual_changes_text}"
           expected_changes=(
-            $'A\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml'
-            $'A\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go'
+            $'M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml'
+            $'M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go'
           )
           [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
           for index in "${!expected_changes[@]}"; do

@@ -21,7 +21,7 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP2 terminal watchdog report workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "e520114b4ced05444e9f3c8b6f64b916e7dcfb0cfd1c8b5d92eacb9db1d28cfd")
+	assertWorkflowSourceDigest(t, data, "32a2c6ea758ff690d1cda127d589602f837a49b5195584b2add7a49308958a6f")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -123,8 +123,8 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
 		`"${GITHUB_REF}" == 'refs/heads/main'`,
 		`policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1`,
-		`A\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml`,
-		`A\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go`,
+		`M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml`,
+		`M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go`,
 		`"${main_head}" == "${GITHUB_SHA}"`,
 		`"${terminal_oid}" == "${EXPECTED_TERMINAL_OID}"`,
 		`cmd/fugue-release-terminal-read/main.go`,
@@ -187,6 +187,54 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	}
 	if strings.Count(source, "actions/upload-artifact@") != 1 {
 		t.Fatal("terminal watchdog report must upload exactly one evidence artifact")
+	}
+}
+
+func TestRP2TerminalWatchdogReportForwardFixUsesModifiedStatus(t *testing.T) {
+	t.Parallel()
+
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatalf("create synthetic repository: %v", err)
+	}
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v output=%s", args, err, output)
+		}
+		return string(output)
+	}
+	write := func(path, value string) {
+		t.Helper()
+		fullPath := filepath.Join(repository, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+			t.Fatalf("create parent for %s: %v", path, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(value), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	runGit("init", "--quiet")
+	for _, path := range []string{
+		".github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml",
+		"internal/platformsafety/release_terminal_watchdog_report_workflow_test.go",
+	} {
+		write(path, "published\n")
+	}
+	runGit("add", ".")
+	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "published")
+	write(".github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml", "forward repair\n")
+	write("internal/platformsafety/release_terminal_watchdog_report_workflow_test.go", "forward repair\n")
+	runGit("add", ".")
+	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "forward repair")
+
+	want := "M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml\n" +
+		"M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go\n"
+	if got := runGit("diff", "--no-renames", "--name-status", "HEAD^", "HEAD"); got != want {
+		t.Fatalf("forward repair changed-file status = %q, want %q", got, want)
 	}
 }
 
