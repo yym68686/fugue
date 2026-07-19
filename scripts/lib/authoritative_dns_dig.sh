@@ -352,6 +352,7 @@ authoritative_dns_dig_wire_probe_one() {
   }
 
   python3 - "${port_file}" "${result_file}" "${stop_file}" "${transport}" >"${server_log}" 2>&1 <<'PY' &
+import errno
 import hashlib
 import json
 import os
@@ -461,13 +462,58 @@ def response_for(identifier):
     header = struct.pack("!HHHHHH", identifier, 0x8400, 1, 1, 0, 1)
     return header + question + answer + opt
 
-udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-udp.bind(("127.0.0.1", 0))
-port = udp.getsockname()[1]
-tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-tcp.bind(("127.0.0.1", port))
-tcp.listen(4)
+# FUGUE_SHARED_LOOPBACK_BINDER_BEGIN
+def bind_shared_loopback_sockets(socket_factory=None, max_attempts=64):
+    if socket_factory is None:
+        socket_factory = socket.socket
+    if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 1:
+        raise ValueError("shared loopback bind attempts must be a positive integer")
+
+    for _ in range(max_attempts):
+        udp_socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            udp_socket.bind(("127.0.0.1", 0))
+            candidate_port = udp_socket.getsockname()[1]
+        except BaseException:
+            udp_socket.close()
+            raise
+
+        try:
+            tcp_socket = socket_factory(socket.AF_INET, socket.SOCK_STREAM)
+        except BaseException:
+            udp_socket.close()
+            raise
+        try:
+            tcp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except BaseException:
+            tcp_socket.close()
+            udp_socket.close()
+            raise
+        try:
+            tcp_socket.bind(("127.0.0.1", candidate_port))
+        except OSError as exc:
+            tcp_socket.close()
+            udp_socket.close()
+            if exc.errno == errno.EADDRINUSE:
+                continue
+            raise
+        except BaseException:
+            tcp_socket.close()
+            udp_socket.close()
+            raise
+
+        try:
+            tcp_socket.listen(4)
+        except BaseException:
+            tcp_socket.close()
+            udp_socket.close()
+            raise
+        return udp_socket, tcp_socket, candidate_port
+
+    raise OSError(errno.EADDRINUSE, "could not acquire a shared UDP/TCP loopback port")
+# FUGUE_SHARED_LOOPBACK_BINDER_END
+
+udp, tcp, port = bind_shared_loopback_sockets()
 with open(port_file, "w", encoding="ascii") as handle:
     handle.write(str(port))
 

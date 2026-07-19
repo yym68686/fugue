@@ -2526,6 +2526,112 @@ run_e5b_wire_attestation_regressions() {
     "${AUTHORITATIVE_DNS_DIG_MODE}" "${AUTHORITATIVE_DNS_DIG_VERSION}"
 }
 
+run_e5b_shared_loopback_port_regressions() {
+  python3 - "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh" <<'PY'
+import errno
+from pathlib import Path
+import socket
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start_marker = "# FUGUE_SHARED_LOOPBACK_BINDER_BEGIN\n"
+end_marker = "# FUGUE_SHARED_LOOPBACK_BINDER_END\n"
+if source.count(start_marker) != 1 or source.count(end_marker) != 1:
+    raise SystemExit("shared loopback binder source markers must be unique")
+start = source.index(start_marker) + len(start_marker)
+end = source.index(end_marker, start)
+namespace = {"errno": errno, "socket": socket}
+exec(compile(source[start:end], sys.argv[1], "exec"), namespace)
+binder = namespace["bind_shared_loopback_sockets"]
+
+
+class FakeSocket:
+    def __init__(self, kind, port, bind_error=None):
+        self.kind = kind
+        self.port = port
+        self.bind_error = bind_error
+        self.bound_address = None
+        self.closed = False
+        self.listen_backlog = None
+        self.reuseaddr = None
+
+    def bind(self, address):
+        self.bound_address = address
+        if self.bind_error is not None:
+            raise self.bind_error
+
+    def getsockname(self):
+        return ("127.0.0.1", self.port)
+
+    def setsockopt(self, level, name, value):
+        if (level, name) != (socket.SOL_SOCKET, socket.SO_REUSEADDR):
+            raise AssertionError("unexpected socket option")
+        self.reuseaddr = value
+
+    def listen(self, backlog):
+        self.listen_backlog = backlog
+
+    def close(self):
+        self.closed = True
+
+
+class FakeFactory:
+    def __init__(self, tcp_errors):
+        self.tcp_errors = list(tcp_errors)
+        self.attempt = 0
+        self.sockets = []
+
+    def __call__(self, family, kind):
+        if family != socket.AF_INET or kind not in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+            raise AssertionError("binder requested an unexpected socket shape")
+        if kind == socket.SOCK_DGRAM:
+            self.attempt += 1
+            item = FakeSocket(kind, 41000 + self.attempt)
+        else:
+            error = self.tcp_errors[self.attempt - 1]
+            item = FakeSocket(kind, 41000 + self.attempt, error)
+        self.sockets.append(item)
+        return item
+
+
+collision = OSError(errno.EADDRINUSE, "forced cross-protocol collision")
+success_factory = FakeFactory([collision, None])
+udp, tcp, port = binder(socket_factory=success_factory, max_attempts=2)
+if port != 41002 or len(success_factory.sockets) != 4:
+    raise SystemExit("binder did not retry exactly once after address-in-use")
+if not all(item.closed for item in success_factory.sockets[:2]):
+    raise SystemExit("binder leaked sockets from the collided attempt")
+if udp.closed or tcp.closed or tcp.reuseaddr != 1 or tcp.listen_backlog != 4:
+    raise SystemExit("binder did not return the fully bound and listening socket pair")
+if udp.bound_address != ("127.0.0.1", 0) or tcp.bound_address != ("127.0.0.1", port):
+    raise SystemExit("binder did not restrict both sockets to the shared loopback port")
+
+exhausted_factory = FakeFactory([collision, collision, collision])
+try:
+    binder(socket_factory=exhausted_factory, max_attempts=3)
+except OSError as exc:
+    if exc.errno != errno.EADDRINUSE:
+        raise
+else:
+    raise SystemExit("binder did not fail closed after bounded collision exhaustion")
+if len(exhausted_factory.sockets) != 6 or not all(item.closed for item in exhausted_factory.sockets):
+    raise SystemExit("binder leaked sockets after collision exhaustion")
+
+denied = OSError(errno.EACCES, "forced non-collision bind failure")
+denied_factory = FakeFactory([denied, None])
+try:
+    binder(socket_factory=denied_factory, max_attempts=2)
+except OSError as exc:
+    if exc.errno != errno.EACCES:
+        raise
+else:
+    raise SystemExit("binder retried a non-address-in-use socket error")
+if len(denied_factory.sockets) != 2 or not all(item.closed for item in denied_factory.sockets):
+    raise SystemExit("binder leaked sockets after a non-retryable bind failure")
+PY
+  printf '[test_release_domain_safety] E5B shared UDP/TCP loopback port acquisition regressions ok\n'
+}
+
 run_e5b_shared_helper_integration_regressions() {
   python3 - \
     "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" \
@@ -3495,6 +3601,7 @@ PY
 )
 
 run_e4_edns_parser_regressions
+run_e5b_shared_loopback_port_regressions
 run_e5b_wire_attestation_regressions
 run_e5b_shared_helper_integration_regressions
 run_e5c_upgrade_dns_child_inherited_attestation_regression
