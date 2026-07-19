@@ -21,7 +21,7 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP2 terminal watchdog report workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "32a2c6ea758ff690d1cda127d589602f837a49b5195584b2add7a49308958a6f")
+	assertWorkflowSourceDigest(t, data, "fd60cf74de2d1ca4ad04b7edc7811334be39657b5b6b3ebc9293bc0d038aaa3e")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -122,7 +122,10 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	for _, required := range []string{
 		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
 		`"${GITHUB_REF}" == 'refs/heads/main'`,
-		`policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1`,
+		`policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1`,
+		`git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1`,
+		`"$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}"`,
+		`policy_identity="$(git rev-list --parents -n 1 "${policy_commit}")" || exit 1`,
 		`M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml`,
 		`M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go`,
 		`"${main_head}" == "${GITHUB_SHA}"`,
@@ -190,7 +193,7 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	}
 }
 
-func TestRP2TerminalWatchdogReportForwardFixUsesModifiedStatus(t *testing.T) {
+func TestRP2TerminalWatchdogReportPolicyIdentitySurvivesUnrelatedDescendant(t *testing.T) {
 	t.Parallel()
 
 	repository := filepath.Join(t.TempDir(), "repository")
@@ -218,10 +221,11 @@ func TestRP2TerminalWatchdogReportForwardFixUsesModifiedStatus(t *testing.T) {
 	}
 
 	runGit("init", "--quiet")
-	for _, path := range []string{
+	policyPaths := []string{
 		".github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml",
 		"internal/platformsafety/release_terminal_watchdog_report_workflow_test.go",
-	} {
+	}
+	for _, path := range policyPaths {
 		write(path, "published\n")
 	}
 	runGit("add", ".")
@@ -230,11 +234,40 @@ func TestRP2TerminalWatchdogReportForwardFixUsesModifiedStatus(t *testing.T) {
 	write("internal/platformsafety/release_terminal_watchdog_report_workflow_test.go", "forward repair\n")
 	runGit("add", ".")
 	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "forward repair")
+	policyCommit := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+
+	write("README.md", "unrelated descendant\n")
+	runGit("add", ".")
+	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "unrelated descendant")
+	executionCommit := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+	if got := strings.TrimSpace(runGit("log", "--format=%H", "-n", "1", "--", policyPaths[0], policyPaths[1])); got != policyCommit {
+		t.Fatalf("latest joint policy commit = %q, want %q", got, policyCommit)
+	}
+	for _, path := range policyPaths {
+		if got := strings.TrimSpace(runGit("log", "--format=%H", "-n", "1", "--", path)); got != policyCommit {
+			t.Fatalf("latest commit for %s = %q, want %q", path, got, policyCommit)
+		}
+	}
+	runGit("merge-base", "--is-ancestor", policyCommit, executionCommit)
 
 	want := "M\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml\n" +
 		"M\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go\n"
-	if got := runGit("diff", "--no-renames", "--name-status", "HEAD^", "HEAD"); got != want {
-		t.Fatalf("forward repair changed-file status = %q, want %q", got, want)
+	if got := runGit("diff", "--no-renames", "--name-status", policyCommit+"^", policyCommit); got != want {
+		t.Fatalf("policy changed-file status = %q, want %q", got, want)
+	}
+
+	write(policyPaths[0], "independent drift\n")
+	runGit("add", ".")
+	runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", "independent policy drift")
+	driftCommit := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+	if got := strings.TrimSpace(runGit("log", "--format=%H", "-n", "1", "--", policyPaths[0], policyPaths[1])); got != driftCommit {
+		t.Fatalf("latest joint commit after drift = %q, want %q", got, driftCommit)
+	}
+	if got := strings.TrimSpace(runGit("log", "--format=%H", "-n", "1", "--", policyPaths[1])); got == driftCommit {
+		t.Fatalf("independently unchanged policy file unexpectedly resolved to drift commit %q", got)
+	}
+	if got := runGit("diff", "--no-renames", "--name-status", driftCommit+"^", driftCommit); got == want {
+		t.Fatalf("one-file policy drift unexpectedly matched joint policy status: %q", got)
 	}
 }
 
