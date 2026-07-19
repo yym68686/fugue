@@ -260,6 +260,7 @@ const (
 	AppPersistentStorageMountKindFile        = "file"
 	AppRolloutIntentOnlineLifecycleUpdate    = "online_lifecycle_update"
 	AppRolloutIntentOnlineImageUpdate        = "online_image_update"
+	AppRolloutIntentOnlineEnvironmentUpdate  = "online_environment_update"
 	AppRolloutIntentOnlineRestart            = "online_restart"
 	AppRolloutIntentOnlineResourceUpdate     = "online_resource_update"
 	AppRolloutIntentOnlineConfigUpdate       = "online_config_update"
@@ -2065,11 +2066,18 @@ func ValidateAppZeroDowntimePolicy(policy *AppZeroDowntimePolicy) error {
 }
 
 func AppSafeZeroDowntimeRolloutEnabled(spec AppSpec) bool {
+	if !AppZeroDowntimeEnabled(spec) {
+		return false
+	}
+	policy := NormalizeAppContinuityPolicy(spec.Continuity)
+	return policy.ZeroDowntime.Mode == AppZeroDowntimeModeSafe
+}
+
+func AppZeroDowntimeEnabled(spec AppSpec) bool {
 	policy := NormalizeAppContinuityPolicy(spec.Continuity)
 	return policy != nil &&
 		policy.ZeroDowntime != nil &&
-		policy.ZeroDowntime.Enabled &&
-		policy.ZeroDowntime.Mode == AppZeroDowntimeModeSafe
+		policy.ZeroDowntime.Enabled
 }
 
 type AppPostgresSpec struct {

@@ -16,5 +16,6 @@ const (
 	FugueLabelOwnerAppID         = "fugue.pro/owner-app-id"
 	FugueLabelFenceEpoch         = "fugue.pro/fence-epoch"
 
-	FugueAnnotationReleaseKey = "fugue.pro/release-key"
+	FugueAnnotationReleaseKey           = "fugue.pro/release-key"
+	FugueAnnotationZeroDowntimeRequired = "fugue.pro/zero-downtime-required"
 )

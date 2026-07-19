@@ -1,6 +1,6 @@
 # Fugue 用户服务 Safe Zero Downtime Rollout 方案
 
-最后更新：2026-07-07
+最后更新：2026-07-19
 
 本文把“用户服务开启 zero downtime 后，发布新版本时必须先验证新 Pod / candidate release 正常；旧 Pod 只有在没有连接且新版本正常时才允许关闭；新版本异常时自动 abort/rollback 并保留未关闭旧 Pod”的完整设计固定下来。
 
@@ -83,7 +83,7 @@ safe zero downtime = 不切断旧连接 + 新版本异常不接管生产 + 可�
 
 当前行为：
 
-- `deploymentStrategy(app)` 对可在线滚动的 app 返回 `RollingUpdate`。
+- `deploymentStrategy(app)` 对可在线滚动的 app 返回 `RollingUpdate`；服务一旦启用任一 zero downtime 模式，渲染层禁止返回 `Recreate`。
 - `rollingUpdateDeploymentStrategy()` 使用 `maxUnavailable=0`、`maxSurge=1`。
 - `buildAppTCPReadinessProbe()` 默认只做 TCP readiness。
 - `buildStrictZeroDowntimeDrainLifecycle()` 给业务容器注入 `preStop`。
@@ -229,8 +229,10 @@ continuity:
 兼容层：
 
 - `mode: off`：保持当前行为。
-- `mode: drain_only`：当前 strict drain 语义，只保护旧连接。
+- `mode: drain_only`：使用 `RollingUpdate(maxUnavailable=0,maxSurge=1)` 和 strict drain，保证新 Pod Ready 后才关闭旧 Pod，并保护旧连接。
 - `mode: safe`：启用本文 stable/candidate 两阶段发布。
+
+所有启用模式共享同一条硬不变量：计划内 restart / redeploy 不得自动降级为 `Recreate`。如果 Fugue 无法为当前存储或拓扑证明可同时保留旧 Pod 和启动 replacement Pod，controller 必须在修改任何 Kubernetes desired state 前拒绝操作并记录原因。Kubernetes apply 的 immutable selector、遗留 volume reference 等修复旁路也不得删除并重建该 Deployment。只有一次独立的策略关闭操作本身能以在线方式完成后，后续操作才可以恢复允许停机的行为。
 
 默认策略：
 
@@ -299,7 +301,7 @@ ManagedApp
 对有持久化存储的 app：
 
 - 如果存储不支持双实例并发挂载，不能直接运行 stable + candidate 两个 Deployment。
-- 对 `movable_rwo` / direct RWO，需要走同节点 online rollout 或明确降级为 `drain_only` / downtime-required。
+- 对 `movable_rwo` / direct RWO，需要走经过验证的同节点 online rollout；无法验证时拒绝发布，不能在 zero downtime 仍启用时降级为 downtime-required。
 - 对 `shared_project_rwx` 或明确支持并发访问的存储，可以使用 stable/candidate 双 revision。
 - 对需要 migration 的 app，必须引入 release phase / migration policy，不能默认假设数据层可回滚。
 
@@ -337,7 +339,7 @@ failure after partial canary
 
 关键不变量：
 
-- 任何时候 traffic policy 至少有一个 healthy stable upstream，除非用户显式接受 downtime-required 发布。
+- zero downtime 启用期间，任何时候 traffic policy 至少有一个 healthy stable upstream；允许停机的发布必须先通过独立操作显式关闭该策略。
 - candidate 不 ready 时 candidate weight 必须为 0。
 - gate fail 时不能 promote。
 - stable 未 drain 完之前不能 retired。
@@ -647,11 +649,11 @@ Debug bundle 必须包含：
 
 ## Backward compatibility
 
-- 未开启 safe rollout 的 app 行为不变。
+- 未开启 zero downtime 的 app 行为不变，包括原有需要 `Recreate` 的单写存储发布。
 - 现有 `AppRelease` API 保持兼容。
 - 现有 traffic policy 手动 canary 继续可用。
-- 现有 zero downtime drain 继续作为 `drain_only` 模式存在。
-- 对不支持 stable/candidate 双 revision 的存储类型，系统必须明确降级或拒绝 safe mode，而不是假装支持。
+- 现有 zero downtime drain 继续作为 `drain_only` 模式存在，但同样受“禁止 Recreate”的服务级硬约束保护。
+- 对不支持 stable/candidate 双 revision 的存储类型，系统必须拒绝 safe mode；不得在策略仍开启时自动降级。
 - 所有 API 新字段必须可选。
 - 所有 CLI 输出新增字段不能破坏 `--json` 现有字段。
 
@@ -662,14 +664,14 @@ Debug bundle 必须包含：
 应对：
 
 - safe rollout 前做 candidate capacity preflight。
-- 资源不足时拒绝 safe rollout，提示用户扩容或选择 drain_only。
+- 资源不足时拒绝 safe rollout，提示用户扩容；切换模式必须是用户显式的独立策略变更。
 
 ### 风险：持久化存储不支持并发运行
 
 应对：
 
 - 根据 storage spec 做 hard gate。
-- 不支持并发的 app 先使用 rolling_update + auto rollback 过渡方案。
+- 不支持 replacement Pod 并发运行的 app 在 zero downtime 启用时拒绝发布并保留旧 Pod。
 - 对需要真正双 revision 的 app，要求 RWX 或用户显式声明可并发。
 
 ### 风险：probe 不代表真实业务健康

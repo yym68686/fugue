@@ -54,3 +54,25 @@ func TestAppSafeZeroDowntimeRolloutEnabled(t *testing.T) {
 		t.Fatal("safe zero downtime policy should enable safe rollout")
 	}
 }
+
+func TestAppZeroDowntimeEnabledForEveryEnabledMode(t *testing.T) {
+	spec := AppSpec{}
+	if AppZeroDowntimeEnabled(spec) {
+		t.Fatal("zero downtime should be disabled by default")
+	}
+
+	for _, mode := range []string{AppZeroDowntimeModeDrainOnly, AppZeroDowntimeModeSafe} {
+		spec.Continuity = &AppContinuityPolicy{ZeroDowntime: &AppZeroDowntimePolicy{
+			Enabled: true,
+			Mode:    mode,
+		}}
+		if !AppZeroDowntimeEnabled(spec) {
+			t.Fatalf("enabled %s policy should enable zero downtime", mode)
+		}
+	}
+
+	spec.Continuity.ZeroDowntime.Enabled = false
+	if AppZeroDowntimeEnabled(spec) {
+		t.Fatal("disabled policy should not enable zero downtime")
+	}
+}

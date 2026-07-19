@@ -922,10 +922,15 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if err != nil {
 		return err
 	}
+	baseScheduling := scheduling
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app.Spec.RolloutIntent = rolloutIntentForManagedOperation(op, currentApp, app)
 	scheduling = s.onlineDurableRolloutScheduling(ctx, currentApp, app, scheduling)
 	timer.Mark("scheduling")
+	if err := s.refuseNonZeroDowntimeRolloutIfNeeded(ctx, op, currentApp, app, scheduling); err != nil {
+		return err
+	}
+	timer.Mark("zero_downtime_rollout_preflight")
 	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 		if err := s.ensureDeployableImage(ctx, op, app, scheduling); err != nil {
 			return err
@@ -946,6 +951,13 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		}
 	}
 	timer.Mark("movable_rwo_storage")
+
+	app.Spec.RolloutIntent = rolloutIntentForManagedOperation(op, currentApp, app)
+	scheduling = s.onlineDurableRolloutScheduling(ctx, currentApp, app, baseScheduling)
+	if err := s.refuseNonZeroDowntimeRolloutIfNeeded(ctx, op, currentApp, app, scheduling); err != nil {
+		return err
+	}
+	timer.Mark("zero_downtime_rollout_revalidation")
 
 	if err := s.refuseRightSizingDowntimeIfNeeded(ctx, op, app, scheduling, postgresPlacements); err != nil {
 		return err

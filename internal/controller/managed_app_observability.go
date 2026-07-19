@@ -212,6 +212,16 @@ func managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, stored model
 			return []string{"Spec.Image"}
 		}
 		return reflectMismatchFields("Spec", comparableImageOnlySpec(managedSnapshot.Spec), comparableImageOnlySpec(stored.Spec))
+	case model.AppRolloutIntentOnlineEnvironmentUpdate:
+		managedSpec, _ := model.StripFugueInjectedAppEnvFromSpec(managedSnapshot.Spec)
+		storedSpec, _ := model.StripFugueInjectedAppEnvFromSpec(stored.Spec)
+		if !reflect.DeepEqual(managedSpec.Env, storedSpec.Env) {
+			return []string{"Spec.Env"}
+		}
+		if !reflect.DeepEqual(managedSpec.GeneratedEnv, storedSpec.GeneratedEnv) {
+			return []string{"Spec.GeneratedEnv"}
+		}
+		return reflectMismatchFields("Spec", comparableEnvironmentOnlySpec(managedSnapshot.Spec), comparableEnvironmentOnlySpec(stored.Spec))
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		if managedDeployOperationResourcesDiffer(managedSnapshot.Spec, stored.Spec) {
 			return []string{"Spec.Resources"}
@@ -223,10 +233,12 @@ func managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, stored model
 		}
 		return reflectMismatchFields("Spec", comparableLifecycleOnlySpec(managedSnapshot.Spec), comparableLifecycleOnlySpec(stored.Spec))
 	case model.AppRolloutIntentOnlineRestart:
-		if strings.TrimSpace(managedSnapshot.Spec.RestartToken) == "" || strings.TrimSpace(managedSnapshot.Spec.RestartToken) != strings.TrimSpace(stored.Spec.RestartToken) {
+		managedToken := strings.TrimSpace(managedSnapshot.Spec.RestartToken)
+		storedToken := strings.TrimSpace(stored.Spec.RestartToken)
+		if managedToken != storedToken {
 			return []string{"Spec.RestartToken"}
 		}
-		return reflectMismatchFields("Spec", comparableRestartSpec(managedSnapshot.Spec), comparableRestartSpec(stored.Spec))
+		return reflectMismatchFields("Spec", comparableOnlineRestartSnapshotSpec(managedSnapshot.Spec), comparableOnlineRestartSnapshotSpec(stored.Spec))
 	case model.AppRolloutIntentOnlineConfigUpdate:
 		return reflectMismatchFields("Snapshot", comparableManagedAppRolloutSnapshot(managedSnapshot), comparableManagedAppRolloutSnapshot(stored))
 	default:

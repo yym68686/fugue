@@ -1023,6 +1023,90 @@ func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T)
 	}
 }
 
+func TestApplyObjectRefusesDeploymentRecreateWhenZeroDowntimeIsRequired(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo" {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusUnprocessableEntity,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"uni-api-demo\" is invalid: spec.selector: field is immutable"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	obj := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata": map[string]any{
+			"name": "uni-api-demo",
+			"annotations": map[string]string{
+				runtime.FugueAnnotationZeroDowntimeRequired: "true",
+			},
+		},
+	}
+
+	err := client.applyObject(context.Background(), obj, nil)
+	if err == nil || !strings.Contains(err.Error(), "refusing deployment delete/recreate") {
+		t.Fatalf("expected zero-downtime recreate refusal, got %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected no destructive follow-up requests, got %v", requests)
+	}
+}
+
+func TestApplyObjectRefusesDestructiveVolumeRepairWhenZeroDowntimeIsRequired(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo" {
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusUnprocessableEntity,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"uni-api-demo\" is invalid: spec.template.spec.containers[0].volumeMounts[0].name: Not found: \"app-files\""}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	obj := map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata": map[string]any{
+			"name": "uni-api-demo",
+			"annotations": map[string]string{
+				runtime.FugueAnnotationZeroDowntimeRequired: "true",
+			},
+		},
+	}
+
+	err := client.applyObject(context.Background(), obj, nil)
+	if err == nil || !strings.Contains(err.Error(), "refusing destructive deployment volume repair") {
+		t.Fatalf("expected zero-downtime volume repair refusal, got %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected no destructive follow-up requests, got %v", requests)
+	}
+}
+
 func TestApplyObjectRemovesStaleAppFileVolumeReferencesBeforeRetry(t *testing.T) {
 	t.Parallel()
 

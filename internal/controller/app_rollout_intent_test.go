@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
 
 func TestRolloutIntentForManagedOperationDetectsRestartOnlyDeploy(t *testing.T) {
@@ -119,6 +120,150 @@ func TestRolloutIntentForManagedOperationRejectsImageAndLifecycleDeploy(t *testi
 
 	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
 		t.Fatalf("expected no rollout intent for mixed image and lifecycle deploy, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationDetectsEnvironmentOnlyDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env:       map[string]string{"ROUTING_MODE": "old"},
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+				},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Env = map[string]string{"ROUTING_MODE": "new"}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineEnvironmentUpdate {
+		t.Fatalf("expected online environment rollout intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationIgnoresInjectedEnvironmentDrift(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env:       map[string]string{"ROUTING_MODE": "stable", "FUGUE_APP_ID": "old"},
+		},
+	}
+	desired := current
+	desired.Spec.Env = map[string]string{"ROUTING_MODE": "stable", "FUGUE_APP_ID": "new"}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected injected environment drift to be ignored, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationUsesOnlineRestartForMixedZeroDowntimeChange(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:                         "ghcr.io/example/demo:v1",
+			Ports:                         []int{8080},
+			Replicas:                      1,
+			RuntimeID:                     "runtime_demo",
+			TerminationGracePeriodSeconds: 30,
+			Continuity: &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+				Enabled: true,
+				Mode:    model.AppZeroDowntimeModeDrainOnly,
+			}},
+		},
+	}
+	desired := current
+	desired.Spec.Image = "ghcr.io/example/demo:v2"
+	desired.Spec.TerminationGracePeriodSeconds = 60
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected mixed zero-downtime restart intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsStructuralChangeUnderZeroDowntime(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env:       map[string]string{"MODE": "old"},
+			Continuity: &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+				Enabled: true,
+				Mode:    model.AppZeroDowntimeModeDrainOnly,
+			}},
+		},
+	}
+	desired := current
+	desired.Spec.Env = map[string]string{"MODE": "new"}
+	desired.Spec.Ports = []int{9090}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected structural change to have no online rollout plan, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationDoesNotRestartForSafePolicyTuning(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Continuity: &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+				Enabled:               true,
+				Mode:                  model.AppZeroDowntimeModeSafe,
+				RollbackWindowSeconds: 60,
+			}},
+		},
+	}
+	desired := current
+	policy := *current.Spec.Continuity.ZeroDowntime
+	continuity := *current.Spec.Continuity
+	policy.RollbackWindowSeconds = 120
+	continuity.ZeroDowntime = &policy
+	desired.Spec.Continuity = &continuity
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected policy tuning not to restart the app, got %q", got)
+	}
+	decision := (&Service{Renderer: runtime.Renderer{}}).zeroDowntimeRolloutGuardDecision(
+		op,
+		current,
+		desired,
+		runtime.SchedulingConstraints{},
+	)
+	if decision.Refused || decision.PodTemplateChanged {
+		t.Fatalf("expected policy tuning to avoid a pod rollout: %+v", decision)
 	}
 }
 

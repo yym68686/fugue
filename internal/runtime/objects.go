@@ -2128,6 +2128,9 @@ func legacyComposeAppNameAliasLabels(app model.App) map[string]string {
 }
 
 func deploymentStrategy(app model.App) map[string]any {
+	if appRequiresZeroDowntimeRollout(app) {
+		return rollingUpdateDeploymentStrategy()
+	}
 	if appUsesOnlineDurableRolloutStrategy(app) {
 		return rollingUpdateDeploymentStrategy()
 	}
@@ -2152,7 +2155,7 @@ func appUsesOnlineRestartStrategy(app model.App) bool {
 }
 
 func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
-	if !appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) ||
+	if (!appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) && !model.AppZeroDowntimeEnabled(app.Spec)) ||
 		!model.AppHasClusterService(app.Spec) ||
 		app.Spec.Replicas <= 0 {
 		return false
@@ -2174,6 +2177,7 @@ func appRolloutIntentIsOnlineDurable(intent string) bool {
 	switch strings.TrimSpace(intent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate,
 		model.AppRolloutIntentOnlineImageUpdate,
+		model.AppRolloutIntentOnlineEnvironmentUpdate,
 		model.AppRolloutIntentOnlineConfigUpdate,
 		model.AppRolloutIntentOnlineRestart,
 		model.AppRolloutIntentOnlineResourceUpdate:
@@ -2187,6 +2191,9 @@ func appUsesStrictZeroDowntimeDrain(app model.App) bool {
 	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
 		return false
 	}
+	if model.AppZeroDowntimeEnabled(app.Spec) {
+		return true
+	}
 	if appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) {
 		return !appUsesDurableStorage(app) || appUsesOnlineDurableRolloutStrategy(app)
 	}
@@ -2194,15 +2201,20 @@ func appUsesStrictZeroDowntimeDrain(app model.App) bool {
 }
 
 func deploymentRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]string {
-	if !appUsesOnlineDurableRolloutStrategy(app) {
+	validatedOnlineRollout := appUsesValidatedOnlineRollout(app)
+	if !validatedOnlineRollout && !appRequiresZeroDowntimeRollout(app) {
 		return appRolloutAnnotations(app, config)
 	}
-	return mergeStringMaps(map[string]string{
+	annotations := map[string]string{
 		"fugue.io/rollout-mode":    "rolling-restart",
 		"fugue.io/downtime-class":  "online-required",
 		"fugue.io/rollout-reason":  onlineDurableRolloutReason(app.Spec.RolloutIntent),
 		"fugue.io/rollout-surface": "tenant-app",
-	}, strictZeroDowntimeDrainAnnotations(app, config))
+	}
+	if validatedOnlineRollout || appRequiresZeroDowntimeRollout(app) {
+		annotations[FugueAnnotationZeroDowntimeRequired] = "true"
+	}
+	return mergeStringMaps(annotations, strictZeroDowntimeDrainAnnotations(app, config))
 }
 
 func onlineDurableRolloutReason(intent string) string {
@@ -2211,13 +2223,32 @@ func onlineDurableRolloutReason(intent string) string {
 		return "lifecycle-only"
 	case model.AppRolloutIntentOnlineImageUpdate:
 		return "image-only"
+	case model.AppRolloutIntentOnlineEnvironmentUpdate:
+		return "environment-only"
 	case model.AppRolloutIntentOnlineConfigUpdate:
 		return "config-file-only"
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return "resource-only"
+	case "":
+		return "zero-downtime-policy"
 	default:
 		return "restart-only"
 	}
+}
+
+func appRequiresZeroDowntimeRollout(app model.App) bool {
+	return model.AppZeroDowntimeEnabled(app.Spec) &&
+		model.AppHasClusterService(app.Spec) &&
+		app.Spec.Replicas > 0
+}
+
+func appUsesValidatedOnlineRollout(app model.App) bool {
+	if !appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) ||
+		!model.AppHasClusterService(app.Spec) ||
+		app.Spec.Replicas <= 0 {
+		return false
+	}
+	return !appUsesDurableStorage(app) || appUsesOnlineDurableRolloutStrategy(app)
 }
 
 func appRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]string {

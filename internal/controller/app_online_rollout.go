@@ -60,6 +60,7 @@ func appHasOnlineRolloutIntent(app model.App) bool {
 	switch strings.TrimSpace(app.Spec.RolloutIntent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate,
 		model.AppRolloutIntentOnlineImageUpdate,
+		model.AppRolloutIntentOnlineEnvironmentUpdate,
 		model.AppRolloutIntentOnlineConfigUpdate,
 		model.AppRolloutIntentOnlineRestart,
 		model.AppRolloutIntentOnlineResourceUpdate:

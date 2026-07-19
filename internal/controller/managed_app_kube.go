@@ -288,6 +288,9 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	if err := c.applyObjectAtPathWithRetry(ctx, apiPath, obj, out); err == nil {
 		return nil
 	} else if shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj, err) {
+		if deploymentRequiresZeroDowntime(obj) {
+			return fmt.Errorf("refusing destructive deployment volume repair because zero downtime is required: %w", err)
+		}
 		name, namespace := objectNameAndNamespace(c.namespace, obj)
 		if cleanupErr := c.removeDeploymentVolumeReferencesByName(ctx, namespace, name, runtime.AppFilesVolumeName); cleanupErr != nil {
 			return fmt.Errorf("remove stale app file volume references after deployment apply failure: %w (original apply error: %v)", cleanupErr, err)
@@ -299,6 +302,9 @@ func (c *kubeClient) applyObject(ctx context.Context, obj map[string]any, out an
 	} else if !shouldRecreateDeploymentAfterImmutableSelector(obj, err) {
 		return err
 	} else {
+		if deploymentRequiresZeroDowntime(obj) {
+			return fmt.Errorf("refusing deployment delete/recreate after immutable selector failure because zero downtime is required: %w", err)
+		}
 		name, namespace := objectNameAndNamespace(c.namespace, obj)
 		if err := c.deleteDeployment(ctx, namespace, name); err != nil {
 			return fmt.Errorf("delete deployment %s/%s after immutable selector apply failure: %w", namespace, name, err)
@@ -1498,6 +1504,11 @@ func shouldRecreateDeploymentAfterImmutableSelector(obj map[string]any, err erro
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "spec.selector") && strings.Contains(message, "immutable")
+}
+
+func deploymentRequiresZeroDowntime(obj map[string]any) bool {
+	annotations := objectStringMapValue(nestedObjectValue(obj, "metadata", "annotations"))
+	return strings.EqualFold(strings.TrimSpace(annotations[runtime.FugueAnnotationZeroDowntimeRequired]), "true")
 }
 
 func shouldRetryDeploymentAfterStaleAppFilesVolumeMounts(obj map[string]any, err error) bool {

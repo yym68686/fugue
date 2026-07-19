@@ -511,6 +511,8 @@ func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model
 	switch strings.TrimSpace(managedSnapshot.Spec.RolloutIntent) {
 	case model.AppRolloutIntentOnlineImageUpdate:
 		return managedAppImageRolloutSnapshotMatchesStored(managedSnapshot, stored)
+	case model.AppRolloutIntentOnlineEnvironmentUpdate:
+		return managedAppEnvironmentRolloutSnapshotMatchesStored(managedSnapshot, stored)
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return managedAppResourceRolloutSnapshotMatchesStored(managedSnapshot, stored)
 	case model.AppRolloutIntentOnlineLifecycleUpdate:
@@ -616,6 +618,19 @@ func managedAppImageRolloutSnapshotMatchesStored(managedSnapshot, stored model.A
 	return reflect.DeepEqual(left, right)
 }
 
+func managedAppEnvironmentRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
+	managedSpec, _ := model.StripFugueInjectedAppEnvFromSpec(managedSnapshot.Spec)
+	storedSpec, _ := model.StripFugueInjectedAppEnvFromSpec(stored.Spec)
+	if !reflect.DeepEqual(managedSpec.Env, storedSpec.Env) ||
+		!reflect.DeepEqual(managedSpec.GeneratedEnv, storedSpec.GeneratedEnv) {
+		return false
+	}
+	return reflect.DeepEqual(
+		comparableEnvironmentOnlySpec(managedSnapshot.Spec),
+		comparableEnvironmentOnlySpec(stored.Spec),
+	)
+}
+
 func managedAppResourceRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
 	if managedDeployOperationResourcesDiffer(managedSnapshot.Spec, stored.Spec) {
 		return false
@@ -635,13 +650,21 @@ func managedAppLifecycleRolloutSnapshotMatchesStored(managedSnapshot, stored mod
 }
 
 func managedAppRestartRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
-	if strings.TrimSpace(managedSnapshot.Spec.RestartToken) == "" ||
-		strings.TrimSpace(managedSnapshot.Spec.RestartToken) != strings.TrimSpace(stored.Spec.RestartToken) {
+	managedToken := strings.TrimSpace(managedSnapshot.Spec.RestartToken)
+	storedToken := strings.TrimSpace(stored.Spec.RestartToken)
+	if managedToken != storedToken {
 		return false
 	}
-	left := comparableRestartSpec(managedSnapshot.Spec)
-	right := comparableRestartSpec(stored.Spec)
+	left := comparableOnlineRestartSnapshotSpec(managedSnapshot.Spec)
+	right := comparableOnlineRestartSnapshotSpec(stored.Spec)
 	return reflect.DeepEqual(left, right)
+}
+
+func comparableOnlineRestartSnapshotSpec(spec model.AppSpec) model.AppSpec {
+	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
+	normalized.RolloutIntent = ""
+	model.ApplyAppSpecDefaults(&normalized)
+	return normalized
 }
 
 func managedAppConfigRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
