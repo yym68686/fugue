@@ -35,9 +35,10 @@ const (
 type Workflow string
 
 const (
-	WorkflowDeployV2       Workflow = ".github/workflows/deploy-control-plane-v2.yml"
-	WorkflowPromotion      Workflow = ".github/workflows/promote-control-plane-release-policy.yml"
-	WorkflowTerminalWriter Workflow = ".github/workflows/write-control-plane-release-terminal-rp1.yml"
+	WorkflowDeployV2                            Workflow = ".github/workflows/deploy-control-plane-v2.yml"
+	WorkflowPromotion                           Workflow = ".github/workflows/promote-control-plane-release-policy.yml"
+	WorkflowTerminalWriter                      Workflow = ".github/workflows/write-control-plane-release-terminal-rp1.yml"
+	WorkflowTerminalNextReservationMaterializer Workflow = ".github/workflows/materialize-control-plane-release-terminal-next-reservation-rp1.yml"
 )
 
 // Document is the complete canonical terminal-state payload. ReservationOID
@@ -130,7 +131,8 @@ func Validate(document Document) error {
 	}
 	if document.SourceWorkflow != WorkflowDeployV2 &&
 		document.SourceWorkflow != WorkflowPromotion &&
-		document.SourceWorkflow != WorkflowTerminalWriter {
+		document.SourceWorkflow != WorkflowTerminalWriter &&
+		document.SourceWorkflow != WorkflowTerminalNextReservationMaterializer {
 		return fmt.Errorf("terminal state source workflow is unsupported")
 	}
 	if document.PreviousTerminalStateOID != AbsentOID && !isLowerHexOID(document.PreviousTerminalStateOID) {

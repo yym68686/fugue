@@ -115,7 +115,12 @@ func TestValidateDocumentModes(t *testing.T) {
 }
 
 func TestValidateSourceWorkflowIdentities(t *testing.T) {
-	for _, workflow := range []Workflow{WorkflowDeployV2, WorkflowPromotion, WorkflowTerminalWriter} {
+	for _, workflow := range []Workflow{
+		WorkflowDeployV2,
+		WorkflowPromotion,
+		WorkflowTerminalWriter,
+		WorkflowTerminalNextReservationMaterializer,
+	} {
 		t.Run(string(workflow), func(t *testing.T) {
 			document := reservation(AbsentOID, "101", testHeadSHA)
 			document.SourceWorkflow = workflow
@@ -130,6 +135,10 @@ func TestValidateSourceWorkflowIdentities(t *testing.T) {
 		".github/workflows/WRITE-control-plane-release-terminal-rp1.yml",
 		".github/workflows/../workflows/write-control-plane-release-terminal-rp1.yml",
 		".github/workflows/write-control-plane-release-terminal-rp1.yaml",
+		".github/workflows/materialize-control-plane-release-terminal-next-reservation-rp1.yml ",
+		".github/workflows/MATERIALIZE-control-plane-release-terminal-next-reservation-rp1.yml",
+		".github/workflows/../workflows/materialize-control-plane-release-terminal-next-reservation-rp1.yml",
+		".github/workflows/materialize-control-plane-release-terminal-next-reservation-rp1.yaml",
 	} {
 		t.Run("reject "+string(workflow), func(t *testing.T) {
 			document := reservation(AbsentOID, "101", testHeadSHA)
