@@ -1,0 +1,519 @@
+name: materialize-control-plane-release-terminal-success-rp1
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main policy SHA authorized to materialize the success finalization objects
+        required: true
+        type: string
+      reservation_oid:
+        description: Exact current genesis reservation commit
+        required: true
+        type: string
+      source_run_id:
+        description: Exact successful genesis materializer run ID
+        required: true
+        type: string
+      materializer_artifact_id:
+        description: Exact immutable genesis materializer result artifact ID
+        required: true
+        type: string
+      materializer_artifact_digest:
+        description: Exact sha256 digest of the genesis materializer result artifact ZIP
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-terminal-success-object-materialization-rp1
+  cancel-in-progress: false
+
+jobs:
+  materialize-success-finalization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout exact success materializer policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact success materialization authorization
+        id: verify
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RESERVATION_OID: ${{ inputs.reservation_oid }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          MATERIALIZER_ARTIFACT_ID: ${{ inputs.materializer_artifact_id }}
+          MATERIALIZER_ARTIFACT_DIGEST: ${{ inputs.materializer_artifact_digest }}
+          HEALTH_URL: ${{ vars.FUGUE_CONTROL_PLANE_RP1_HEALTH_URL || 'https://api.fugue.pro/healthz' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly terminal_ref='refs/heads/fugue-control-plane-release-terminal-state'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${RESERVATION_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${MATERIALIZER_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${MATERIALIZER_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+
+          policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1
+          read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
+          [[ -z "${extra:-}" && "${policy_commit}" == "${GITHUB_SHA}" && "${policy_parent}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1
+          mapfile -t actual_changes <<<"${actual_changes_text}"
+          expected_changes=(
+            $'A\t.github/workflows/materialize-control-plane-release-terminal-success-rp1.yml'
+            $'A\tinternal/platformsafety/release_terminal_success_materializer_workflow_test.go'
+          )
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[${index}]}" == "${expected_changes[${index}]}" ]] || exit 1
+          done
+          git diff --exit-code --ignore-submodules "${GITHUB_SHA}" -- || exit 1
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-terminal-state" \
+            --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-terminal-state" and .[0].object.type == "commit" then .[0].object.sha else error("missing or ambiguous terminal reservation") end')" || exit 1
+          [[ "${terminal_oid}" == "${RESERVATION_OID}" ]] || exit 1
+
+          run_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" \
+            --jq '[.head_sha,.status,.conclusion,.run_attempt,.event,.path] | @tsv')" || exit 1
+          IFS=$'\t' read -r run_head run_status run_conclusion run_attempt run_event run_path extra \
+            <<<"${run_fields}" || exit 1
+          [[ -z "${extra:-}" && "${run_head}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git merge-base --is-ancestor "${run_head}" "${policy_parent}" || exit 1
+          [[ "${run_status}" == 'completed' && "${run_conclusion}" == 'success' ]] || exit 1
+          [[ "${run_attempt}" == '1' && "${run_event}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${run_path}" == '.github/workflows/write-control-plane-release-terminal-rp1.yml' ]] || exit 1
+
+          expected_artifact="fugue-rp1-terminal-genesis-result-${SOURCE_RUN_ID}-${run_attempt}"
+          artifact_fields="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts" \
+            --jq "[.artifacts[] | select(.id == ${MATERIALIZER_ARTIFACT_ID} and .name == \"${expected_artifact}\")] | if length == 1 then [.[0].id,.[0].digest,.[0].name,.[0].expired] | @tsv else error(\"missing or ambiguous materializer artifact\") end")" || exit 1
+          IFS=$'\t' read -r artifact_id artifact_digest artifact_name artifact_expired extra \
+            <<<"${artifact_fields}" || exit 1
+          [[ -z "${extra:-}" && "${artifact_id}" == "${MATERIALIZER_ARTIFACT_ID}" ]] || exit 1
+          [[ "${artifact_digest}" == "${MATERIALIZER_ARTIFACT_DIGEST}" ]] || exit 1
+          [[ "${artifact_name}" == "${expected_artifact}" && "${artifact_expired}" == 'false' ]] || exit 1
+
+          evidence_tmp="$(mktemp -d)" || exit 1
+          trap 'rm -rf "${evidence_tmp}"' EXIT
+          timeout --kill-after=2s 20s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${MATERIALIZER_ARTIFACT_ID}/zip" \
+            >"${evidence_tmp}/result.zip" || exit 1
+          [[ "sha256:$(sha256sum "${evidence_tmp}/result.zip" | awk '{print $1}')" == \
+             "${MATERIALIZER_ARTIFACT_DIGEST}" ]] || exit 1
+          unzip -q "${evidence_tmp}/result.zip" -d "${evidence_tmp}/content" || exit 1
+          materializer_parent="$(git rev-parse "${run_head}^")" || exit 1
+          [[ "${materializer_parent}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          artifact_values="$(python3 - "${evidence_tmp}/content" "${run_head}" \
+            "${SOURCE_RUN_ID}" "${RESERVATION_OID}" "${GITHUB_REPOSITORY}" \
+            "${materializer_parent}" <<'PY'
+          import datetime, json, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          paths = list(root.rglob("*"))
+          if set(paths) != {root / "intent.json"} or any(path.is_symlink() for path in paths):
+              raise SystemExit("materializer artifact inventory drifted")
+          value = json.loads((root / "intent.json").read_text(encoding="utf-8"))
+          expected_keys = {
+              "cluster_mutation_attempted", "git_history_rewritten", "head_sha", "payload_blob_sha",
+              "payload_tree_sha", "policy_parent_sha", "repository", "reservation_oid", "run_attempt",
+              "run_id", "schema_version", "terminal_date", "terminal_ref", "transition",
+              "transport_status", "workflow",
+          }
+          if set(value) != expected_keys:
+              raise SystemExit("materializer result key set drifted")
+          if value.get("schema_version") != 1 or type(value.get("schema_version")) is not int:
+              raise SystemExit("materializer schema version drifted")
+          if value.get("workflow") != "write-control-plane-release-terminal-rp1":
+              raise SystemExit("materializer workflow identity drifted")
+          if value.get("repository") != sys.argv[5] or value.get("head_sha") != sys.argv[2]:
+              raise SystemExit("materializer repository/head attribution drifted")
+          if value.get("run_id") != sys.argv[3] or value.get("run_attempt") != 1:
+              raise SystemExit("materializer run attribution drifted")
+          if value.get("reservation_oid") != sys.argv[4] or value.get("policy_parent_sha") != sys.argv[6]:
+              raise SystemExit("materializer reservation/parent binding drifted")
+          if value.get("terminal_ref") != "refs/heads/fugue-control-plane-release-terminal-state":
+              raise SystemExit("materializer terminal ref drifted")
+          if value.get("transition") != "genesis-reservation-object-materialized-ref-absent":
+              raise SystemExit("materializer transition drifted")
+          if value.get("transport_status") != {"blob": 0, "tree": 0, "commit": 0}:
+              raise SystemExit("materializer transport was not fully settled")
+          if value.get("cluster_mutation_attempted") is not False or value.get("git_history_rewritten") is not False:
+              raise SystemExit("materializer crossed a forbidden boundary")
+          oid = re.compile(r"^[0-9a-f]{40}$")
+          for key in ("payload_blob_sha", "payload_tree_sha", "reservation_oid", "policy_parent_sha"):
+              if not isinstance(value.get(key), str) or not oid.fullmatch(value[key]):
+                  raise SystemExit(f"materializer {key} is malformed")
+          date = value.get("terminal_date")
+          if not isinstance(date, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", date):
+              raise SystemExit("materializer terminal date is not canonical UTC")
+          if datetime.datetime.fromisoformat(date.replace("Z", "+00:00")).utcoffset() != datetime.timedelta(0):
+              raise SystemExit("materializer terminal date is not UTC")
+          print("\t".join((value["payload_blob_sha"], value["payload_tree_sha"], value["terminal_date"])))
+          PY
+          )" || exit 1
+          IFS=$'\t' read -r reservation_blob reservation_tree terminal_date extra \
+            <<<"${artifact_values}" || exit 1
+          [[ -z "${extra:-}" ]] || exit 1
+          [[ "${reservation_blob}" == '0b5b82ddd3184402d723df60beb53129b6ed6a35' ]] || exit 1
+          [[ "${reservation_tree}" == '1b439fb6e1ab969a6cfe77cad4d76f4272b64d3a' ]] || exit 1
+          [[ "${terminal_date}" == '2026-07-19T00:52:33Z' ]] || exit 1
+
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/blobs/${reservation_blob}" >"${evidence_tmp}/blob.json" || exit 1
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/trees/${reservation_tree}" >"${evidence_tmp}/tree.json" || exit 1
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${RESERVATION_OID}" >"${evidence_tmp}/commit.json" || exit 1
+          python3 - "${evidence_tmp}" "${reservation_blob}" "${reservation_tree}" "${RESERVATION_OID}" \
+            "${SOURCE_RUN_ID}" "${run_head}" "${terminal_date}" <<'PY' || exit 1
+          import base64, datetime, hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          blob_sha, tree_sha, commit_sha, run_id, head_sha, terminal_date = sys.argv[2:]
+          blob = json.loads((root / "blob.json").read_text(encoding="utf-8"))
+          tree = json.loads((root / "tree.json").read_text(encoding="utf-8"))
+          commit = json.loads((root / "commit.json").read_text(encoding="utf-8"))
+          document = {
+              "schema_version": 1,
+              "certificate_kind": "fugue-control-plane-release-policy-terminal-reservation",
+              "terminal_mode": "reservation",
+              "source_run_id": run_id,
+              "source_run_attempt": 1,
+              "source_head_sha": head_sha,
+              "source_workflow": ".github/workflows/write-control-plane-release-terminal-rp1.yml",
+              "source_conclusion": "in_progress",
+              "previous_terminal_state_oid": "absent",
+          }
+          canonical = (json.dumps(document, separators=(",", ":")) + "\n").encode("utf-8")
+          encoded = blob.get("content")
+          if blob.get("sha") != blob_sha or blob.get("encoding") != "base64" or not isinstance(encoded, str):
+              raise SystemExit("reservation blob identity drifted")
+          actual = base64.b64decode("".join(encoded.split()), validate=True)
+          if actual != canonical:
+              raise SystemExit("reservation blob content drifted")
+          if hashlib.sha1(b"blob " + str(len(actual)).encode() + b"\0" + actual).hexdigest() != blob_sha:
+              raise SystemExit("reservation blob OID drifted")
+          expected_tree = [{"path": ".fugue-release-terminal-state.json", "mode": "100644", "type": "blob", "sha": blob_sha}]
+          actual_tree = [{key: entry.get(key) for key in ("path", "mode", "type", "sha")} for entry in tree.get("tree", [])]
+          if tree.get("sha") != tree_sha or tree.get("truncated") is not False or actual_tree != expected_tree:
+              raise SystemExit("reservation tree drifted")
+          raw_tree = b"100644 .fugue-release-terminal-state.json\0" + bytes.fromhex(blob_sha)
+          if hashlib.sha1(b"tree " + str(len(raw_tree)).encode() + b"\0" + raw_tree).hexdigest() != tree_sha:
+              raise SystemExit("reservation tree OID drifted")
+          identity = {"name": "Fugue Release Terminal", "email": "release-terminal@fugue.invalid", "date": terminal_date}
+          message = f"fugue release terminal reservation {run_id}"
+          if commit.get("sha") != commit_sha or commit.get("message") != message:
+              raise SystemExit("reservation commit identity drifted")
+          if commit.get("tree", {}).get("sha") != tree_sha or commit.get("parents") != []:
+              raise SystemExit("reservation commit is not the expected root")
+          for field in ("author", "committer"):
+              if {key: commit.get(field, {}).get(key) for key in identity} != identity:
+                  raise SystemExit(f"reservation commit {field} drifted")
+          timestamp = int(datetime.datetime.fromisoformat(terminal_date.replace("Z", "+00:00")).timestamp())
+          line = f"Fugue Release Terminal <release-terminal@fugue.invalid> {timestamp} +0000"
+          raw_commit = f"tree {tree_sha}\nauthor {line}\ncommitter {line}\n\n{message}".encode("utf-8")
+          if hashlib.sha1(b"commit " + str(len(raw_commit)).encode() + b"\0" + raw_commit).hexdigest() != commit_sha:
+              raise SystemExit("reservation commit OID drifted")
+          PY
+          python3 - "${HEALTH_URL}" <<'PY' || exit 1
+          import sys, urllib.parse
+          parsed = urllib.parse.urlsplit(sys.argv[1])
+          if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+              raise SystemExit("health URL must be credential-free HTTPS")
+          PY
+          {
+            printf 'health_url=%s\n' "${HEALTH_URL}"
+            printf 'materializer_head=%s\n' "${run_head}"
+            printf 'reservation_blob=%s\n' "${reservation_blob}"
+            printf 'reservation_tree=%s\n' "${reservation_tree}"
+            printf 'terminal_date=%s\n' "${terminal_date}"
+          } >>"${GITHUB_OUTPUT}" || exit 1
+
+      - name: Write success finalization intent evidence
+        id: intent
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RESERVATION_OID: ${{ inputs.reservation_oid }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          MATERIALIZER_HEAD: ${{ steps.verify.outputs.materializer_head }}
+          TERMINAL_DATE: ${{ steps.verify.outputs.terminal_date }}
+        run: |
+          set -euo pipefail
+          readonly object_dir="${RUNNER_TEMP}/fugue-rp1-terminal-success"
+          readonly payload_path='.fugue-release-terminal-state.json'
+          readonly expected_blob='6f02bd3684b1cbee348db49a140938b9cfcc7998'
+          readonly expected_tree='321f2bf24ff5a33681baa30600531313af5e3616'
+          readonly expected_commit='8686c3e867dbdbd98bfc77afb374d88007b045d7'
+          install -d -m 0700 "${object_dir}"
+          umask 077
+          python3 - "${object_dir}" "${payload_path}" "${expected_blob}" "${expected_tree}" "${expected_commit}" <<'PY'
+          import datetime, hashlib, json, os, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          payload_path, expected_blob, expected_tree, expected_commit = sys.argv[2:]
+          reservation = os.environ["RESERVATION_OID"]
+          run_id = os.environ["SOURCE_RUN_ID"]
+          head_sha = os.environ["MATERIALIZER_HEAD"]
+          terminal_date = os.environ["TERMINAL_DATE"]
+          document = {
+              "schema_version": 1,
+              "certificate_kind": "fugue-control-plane-release-policy-terminal-finalization",
+              "terminal_mode": "success",
+              "source_run_id": run_id,
+              "source_run_attempt": 1,
+              "source_head_sha": head_sha,
+              "source_workflow": ".github/workflows/write-control-plane-release-terminal-rp1.yml",
+              "source_conclusion": "success",
+              "previous_terminal_state_oid": reservation,
+              "reservation_oid": reservation,
+          }
+          payload = (json.dumps(document, separators=(",", ":")) + "\n").encode("utf-8")
+          blob_oid = hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+          raw_tree = b"100644 " + payload_path.encode() + b"\0" + bytes.fromhex(blob_oid)
+          tree_oid = hashlib.sha1(b"tree " + str(len(raw_tree)).encode() + b"\0" + raw_tree).hexdigest()
+          instant = datetime.datetime.fromisoformat(terminal_date.replace("Z", "+00:00"))
+          if instant.utcoffset() != datetime.timedelta(0):
+              raise SystemExit("terminal date is not UTC")
+          timestamp = int(instant.timestamp())
+          identity_line = f"Fugue Release Terminal <release-terminal@fugue.invalid> {timestamp} +0000"
+          message = f"fugue release terminal success {run_id}"
+          raw_commit = (
+              f"tree {tree_oid}\n"
+              f"parent {reservation}\n"
+              f"author {identity_line}\n"
+              f"committer {identity_line}\n"
+              f"\n{message}"
+          ).encode("utf-8")
+          commit_oid = hashlib.sha1(b"commit " + str(len(raw_commit)).encode() + b"\0" + raw_commit).hexdigest()
+          if (blob_oid, tree_oid, commit_oid) != (expected_blob, expected_tree, expected_commit):
+              raise SystemExit("success finalization object identity drifted")
+          (root / "terminal-state.json").write_bytes(payload)
+          (root / "blob-request.json").write_text(
+              json.dumps({"content": payload.decode("utf-8"), "encoding": "utf-8"}, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          (root / "tree-request.json").write_text(
+              json.dumps({"tree": [{"path": payload_path, "mode": "100644", "type": "blob", "sha": blob_oid}]}, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          identity = {"name": "Fugue Release Terminal", "email": "release-terminal@fugue.invalid", "date": terminal_date}
+          (root / "commit-request.json").write_text(
+              json.dumps({"message": message, "tree": tree_oid, "parents": [reservation], "author": identity, "committer": identity}, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          intent = {
+              "schema_version": 1,
+              "workflow": "materialize-control-plane-release-terminal-success-rp1",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "head_sha": os.environ["EXPECTED_SHA"],
+              "source_run_id": run_id,
+              "source_head_sha": head_sha,
+              "reservation_oid": reservation,
+              "terminal_date": terminal_date,
+              "success_blob_oid": blob_oid,
+              "success_tree_oid": tree_oid,
+              "success_commit_oid": commit_oid,
+              "transition": "reservation-to-success-object-pending-ref-unchanged",
+              "cluster_mutation_attempted": False,
+              "ref_mutation_attempted": False,
+              "git_history_rewritten": False,
+          }
+          (root / "intent.json").write_text(json.dumps(intent, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          {
+            printf 'object_dir=%s\n' "${object_dir}"
+            printf 'expected_blob=%s\n' "${expected_blob}"
+            printf 'expected_tree=%s\n' "${expected_tree}"
+            printf 'expected_commit=%s\n' "${expected_commit}"
+          } >>"${GITHUB_OUTPUT}" || exit 1
+
+      - name: Upload success finalization intent evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
+        with:
+          name: fugue-rp1-terminal-success-intent-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-rp1-terminal-success/intent.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Observe unchanged production health before success object write
+        env:
+          HEALTH_URL: ${{ steps.verify.outputs.health_url }}
+        run: |
+          set -euo pipefail
+          for sample in 1 2 3 4 5; do
+            response="$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 10 "${HEALTH_URL}")"
+            python3 - "${response}" <<'PY'
+          import json, sys
+          if json.loads(sys.argv[1]) != {"status": "ok"}:
+              raise SystemExit("production health payload drifted")
+          PY
+            [[ "${sample}" == '5' ]] || sleep 15
+          done
+
+      - name: Materialize canonical success finalization objects without moving a ref
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RESERVATION_OID: ${{ inputs.reservation_oid }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          MATERIALIZER_HEAD: ${{ steps.verify.outputs.materializer_head }}
+          TERMINAL_DATE: ${{ steps.verify.outputs.terminal_date }}
+          OBJECT_DIR: ${{ steps.intent.outputs.object_dir }}
+          EXPECTED_BLOB: ${{ steps.intent.outputs.expected_blob }}
+          EXPECTED_TREE: ${{ steps.intent.outputs.expected_tree }}
+          EXPECTED_COMMIT: ${{ steps.intent.outputs.expected_commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly terminal_ref='refs/heads/fugue-control-plane-release-terminal-state'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' && "${GITHUB_SHA}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${RESERVATION_OID}" =~ ^[0-9a-f]{40}$ && "${MATERIALIZER_HEAD}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EXPECTED_BLOB}" == '6f02bd3684b1cbee348db49a140938b9cfcc7998' ]] || exit 1
+          [[ "${EXPECTED_TREE}" == '321f2bf24ff5a33681baa30600531313af5e3616' ]] || exit 1
+          [[ "${EXPECTED_COMMIT}" == '8686c3e867dbdbd98bfc77afb374d88007b045d7' ]] || exit 1
+          [[ -d "${OBJECT_DIR}" && ! -L "${OBJECT_DIR}" ]] || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-terminal-state" \
+            --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-terminal-state" and .[0].object.type == "commit" then .[0].object.sha else error("missing or ambiguous terminal reservation") end')" || exit 1
+          [[ "${terminal_oid}" == "${RESERVATION_OID}" ]] || exit 1
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
+          python3 - "${OBJECT_DIR}" "${EXPECTED_BLOB}" "${EXPECTED_TREE}" "${EXPECTED_COMMIT}" \
+            "${RESERVATION_OID}" "${SOURCE_RUN_ID}" "${MATERIALIZER_HEAD}" "${TERMINAL_DATE}" <<'PY' || exit 1
+          import datetime, hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          expected_blob, expected_tree, expected_commit, reservation, run_id, head_sha, terminal_date = sys.argv[2:]
+          expected_names = {"terminal-state.json", "blob-request.json", "tree-request.json", "commit-request.json", "intent.json"}
+          if {path.name for path in root.iterdir()} != expected_names or any(path.is_symlink() for path in root.iterdir()):
+              raise SystemExit("success object request inventory drifted")
+          payload = (root / "terminal-state.json").read_bytes()
+          document = json.loads(payload)
+          expected_document = {
+              "schema_version": 1,
+              "certificate_kind": "fugue-control-plane-release-policy-terminal-finalization",
+              "terminal_mode": "success",
+              "source_run_id": run_id,
+              "source_run_attempt": 1,
+              "source_head_sha": head_sha,
+              "source_workflow": ".github/workflows/write-control-plane-release-terminal-rp1.yml",
+              "source_conclusion": "success",
+              "previous_terminal_state_oid": reservation,
+              "reservation_oid": reservation,
+          }
+          canonical = (json.dumps(expected_document, separators=(",", ":")) + "\n").encode("utf-8")
+          if payload != canonical or document != expected_document:
+              raise SystemExit("success payload drifted")
+          blob_oid = hashlib.sha1(b"blob " + str(len(payload)).encode() + b"\0" + payload).hexdigest()
+          raw_tree = b"100644 .fugue-release-terminal-state.json\0" + bytes.fromhex(blob_oid)
+          tree_oid = hashlib.sha1(b"tree " + str(len(raw_tree)).encode() + b"\0" + raw_tree).hexdigest()
+          instant = datetime.datetime.fromisoformat(terminal_date.replace("Z", "+00:00"))
+          timestamp = int(instant.timestamp())
+          identity_line = f"Fugue Release Terminal <release-terminal@fugue.invalid> {timestamp} +0000"
+          message = f"fugue release terminal success {run_id}"
+          raw_commit = (
+              f"tree {tree_oid}\nparent {reservation}\nauthor {identity_line}\ncommitter {identity_line}\n\n{message}"
+          ).encode("utf-8")
+          commit_oid = hashlib.sha1(b"commit " + str(len(raw_commit)).encode() + b"\0" + raw_commit).hexdigest()
+          if (blob_oid, tree_oid, commit_oid) != (expected_blob, expected_tree, expected_commit):
+              raise SystemExit("success object OID drifted")
+          blob_request = json.loads((root / "blob-request.json").read_text(encoding="utf-8"))
+          tree_request = json.loads((root / "tree-request.json").read_text(encoding="utf-8"))
+          commit_request = json.loads((root / "commit-request.json").read_text(encoding="utf-8"))
+          identity = {"name": "Fugue Release Terminal", "email": "release-terminal@fugue.invalid", "date": terminal_date}
+          if blob_request != {"content": payload.decode("utf-8"), "encoding": "utf-8"}:
+              raise SystemExit("success blob request drifted")
+          if tree_request != {"tree": [{"path": ".fugue-release-terminal-state.json", "mode": "100644", "type": "blob", "sha": blob_oid}]}:
+              raise SystemExit("success tree request drifted")
+          if commit_request != {"message": message, "tree": tree_oid, "parents": [reservation], "author": identity, "committer": identity}:
+              raise SystemExit("success commit request drifted")
+          PY
+
+          blob_status=0
+          timeout --kill-after=2s 10s gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/blobs" \
+            --input "${OBJECT_DIR}/blob-request.json" >/dev/null || blob_status=$?
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/blobs/${EXPECTED_BLOB}" \
+            >"${OBJECT_DIR}/blob-readback.json" || exit 1
+          python3 - "${OBJECT_DIR}/terminal-state.json" "${OBJECT_DIR}/blob-readback.json" "${EXPECTED_BLOB}" <<'PY' || exit 1
+          import base64, json, pathlib, sys
+          expected = pathlib.Path(sys.argv[1]).read_bytes()
+          response = json.load(open(sys.argv[2], encoding="utf-8"))
+          encoded = response.get("content")
+          if response.get("sha") != sys.argv[3] or response.get("encoding") != "base64" or not isinstance(encoded, str):
+              raise SystemExit("success blob readback identity drifted")
+          if base64.b64decode("".join(encoded.split()), validate=True) != expected:
+              raise SystemExit("success blob readback bytes drifted")
+          PY
+
+          tree_status=0
+          timeout --kill-after=2s 10s gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/trees" \
+            --input "${OBJECT_DIR}/tree-request.json" >/dev/null || tree_status=$?
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/trees/${EXPECTED_TREE}" \
+            >"${OBJECT_DIR}/tree-readback.json" || exit 1
+          python3 - "${OBJECT_DIR}/tree-readback.json" "${EXPECTED_TREE}" "${EXPECTED_BLOB}" <<'PY' || exit 1
+          import json, sys
+          response = json.load(open(sys.argv[1], encoding="utf-8"))
+          expected = [{"path": ".fugue-release-terminal-state.json", "mode": "100644", "type": "blob", "sha": sys.argv[3]}]
+          actual = [{key: entry.get(key) for key in ("path", "mode", "type", "sha")} for entry in response.get("tree", [])]
+          if response.get("sha") != sys.argv[2] or response.get("truncated") is not False or actual != expected:
+              raise SystemExit("success tree readback drifted")
+          PY
+
+          commit_status=0
+          timeout --kill-after=2s 10s gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/commits" \
+            --input "${OBJECT_DIR}/commit-request.json" >/dev/null || commit_status=$?
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${EXPECTED_COMMIT}" \
+            >"${OBJECT_DIR}/commit-readback.json" || exit 1
+          python3 - "${OBJECT_DIR}/commit-readback.json" "${EXPECTED_COMMIT}" "${EXPECTED_TREE}" \
+            "${RESERVATION_OID}" "${SOURCE_RUN_ID}" "${TERMINAL_DATE}" "${blob_status}" "${tree_status}" "${commit_status}" <<'PY' || exit 1
+          import datetime, hashlib, json, sys
+          response = json.load(open(sys.argv[1], encoding="utf-8"))
+          commit_oid, tree_oid, reservation, run_id, terminal_date = sys.argv[2:7]
+          statuses = [int(value) for value in sys.argv[7:]]
+          message = f"fugue release terminal success {run_id}"
+          identity = {"name": "Fugue Release Terminal", "email": "release-terminal@fugue.invalid", "date": terminal_date}
+          if response.get("sha") != commit_oid or response.get("message") != message:
+              raise SystemExit("success commit readback identity drifted")
+          parents = response.get("parents")
+          if response.get("tree", {}).get("sha") != tree_oid:
+              raise SystemExit("success commit readback tree drifted")
+          if not isinstance(parents, list) or len(parents) != 1 or not isinstance(parents[0], dict) or parents[0].get("sha") != reservation:
+              raise SystemExit("success commit readback topology drifted")
+          for field in ("author", "committer"):
+              if {key: response.get(field, {}).get(key) for key in identity} != identity:
+                  raise SystemExit(f"success commit {field} drifted")
+          timestamp = int(datetime.datetime.fromisoformat(terminal_date.replace("Z", "+00:00")).timestamp())
+          line = f"Fugue Release Terminal <release-terminal@fugue.invalid> {timestamp} +0000"
+          raw_commit = f"tree {tree_oid}\nparent {reservation}\nauthor {line}\ncommitter {line}\n\n{message}".encode("utf-8")
+          if hashlib.sha1(b"commit " + str(len(raw_commit)).encode() + b"\0" + raw_commit).hexdigest() != commit_oid:
+              raise SystemExit("success commit raw OID drifted")
+          if any(status < 0 or status > 255 for status in statuses):
+              raise SystemExit("success object transport status drifted")
+          PY
+          printf 'success finalization objects settled at exact commit %s\n' "${EXPECTED_COMMIT}" || true
