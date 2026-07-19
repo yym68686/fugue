@@ -1,0 +1,323 @@
+name: enforce-control-plane-release-watchdog-rp2
+
+on:
+  workflow_run:
+    workflows:
+      - observe-control-plane-release-terminal-watchdog-rp2
+    types:
+      - completed
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-terminal-watchdog-freeze-rp2
+  cancel-in-progress: false
+
+jobs:
+  enforce-release-lane-freeze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout exact freeze policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact freeze enforcer authorization
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_run' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' && "${SOURCE_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${SOURCE_HEAD_SHA}" =~ ^[0-9a-f]{40}$ && "${SOURCE_HEAD_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${SOURCE_HEAD_BRANCH}" == 'main' ]] || exit 1
+          [[ "${SOURCE_EVENT}" =~ ^(schedule|workflow_dispatch)$ ]] || exit 1
+          [[ "${SOURCE_WORKFLOW_PATH}" == '.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml' ]] || exit 1
+          [[ "${SOURCE_CONCLUSION}" =~ ^(success|failure|cancelled|timed_out|action_required|stale|startup_failure|neutral|skipped)$ ]] || exit 1
+
+          readonly workflow_path='.github/workflows/enforce-control-plane-release-watchdog-rp2.yml'
+          readonly test_path='internal/platformsafety/release_terminal_watchdog_freeze_workflow_test.go'
+          policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
+          [[ "${policy_commit}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1
+          for policy_path in "${workflow_path}" "${test_path}"; do
+            [[ "$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}" ]] || exit 1
+          done
+          policy_identity="$(git rev-list --parents -n 1 "${policy_commit}")" || exit 1
+          read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
+          [[ -z "${extra:-}" && "${policy_parent}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${policy_commit}")" || exit 1
+          actual_changes=()
+          while IFS= read -r change; do
+            actual_changes+=("${change}")
+          done <<<"${actual_changes_text}"
+          expected_changes=(
+            $'A\t.github/workflows/enforce-control-plane-release-watchdog-rp2.yml'
+            $'A\tinternal/platformsafety/release_terminal_watchdog_freeze_workflow_test.go'
+          )
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[${index}]}" == "${expected_changes[${index}]}" ]] || exit 1
+          done
+          git diff --check "${policy_parent}" "${policy_commit}" || exit 1
+          git diff --exit-code --ignore-submodules "${GITHUB_SHA}" -- || exit 1
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+
+      - name: Verify observer evidence and choose freeze decision
+        id: decide
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-rp2-terminal-watchdog-freeze"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          classification='observer_failure'
+          action='freeze_required'
+          artifact_id=''
+          artifact_digest=''
+          if [[ "${SOURCE_CONCLUSION}" == 'success' ]]; then
+            artifact_status=0
+            timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" \
+              >"${evidence_dir}/artifacts.json" || artifact_status=$?
+            if [[ "${artifact_status}" == '0' ]]; then
+              set +e
+              artifact_fields="$(python3 - "${evidence_dir}/artifacts.json" "${SOURCE_RUN_ID}" \
+                "${SOURCE_RUN_ATTEMPT}" "${SOURCE_HEAD_SHA}" <<'PY'
+          import json, re, sys
+          path, run_id, run_attempt, head_sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as handle:
+              value = json.load(handle)
+          expected_name = f"fugue-rp2-terminal-watchdog-report-{run_id}-{run_attempt}"
+          matches = [
+              item for item in value.get("artifacts", [])
+              if item.get("name") == expected_name and item.get("expired") is False
+          ]
+          if len(matches) != 1:
+              raise SystemExit("observer evidence artifact cardinality drifted")
+          artifact = matches[0]
+          workflow_run = artifact.get("workflow_run")
+          digest = artifact.get("digest")
+          if (not isinstance(workflow_run, dict) or str(workflow_run.get("id")) != run_id or
+                  workflow_run.get("head_sha") != head_sha):
+              raise SystemExit("observer evidence artifact attribution drifted")
+          if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+              raise SystemExit("observer evidence artifact digest drifted")
+          print(f"{artifact['id']}\t{digest}")
+          PY
+              )"
+              artifact_status=$?
+              set -e
+            fi
+            if [[ "${artifact_status}" == '0' ]]; then
+              IFS=$'\t' read -r artifact_id artifact_digest extra <<<"${artifact_fields}" || artifact_status=$?
+              [[ -z "${extra:-}" && "${artifact_id}" =~ ^[1-9][0-9]*$ ]] || artifact_status=1
+            fi
+            if [[ "${artifact_status}" == '0' ]]; then
+              set +e
+              timeout --kill-after=2s 10s gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+                >"${evidence_dir}/observer.zip"
+              artifact_status=$?
+              set -e
+            fi
+            if [[ "${artifact_status}" == '0' ]]; then
+              observed_digest="sha256:$(sha256sum "${evidence_dir}/observer.zip" | awk '{print $1}')" || artifact_status=$?
+              [[ "${observed_digest}" == "${artifact_digest}" ]] || artifact_status=1
+            fi
+            if [[ "${artifact_status}" == '0' ]]; then
+              set +e
+              decision_fields="$(python3 - "${evidence_dir}/observer.zip" "${SOURCE_RUN_ID}" \
+                "${SOURCE_RUN_ATTEMPT}" "${SOURCE_HEAD_SHA}" "${GITHUB_REPOSITORY}" <<'PY'
+          import json, sys, zipfile
+          archive, run_id, run_attempt, head_sha, repository = sys.argv[1:]
+          with zipfile.ZipFile(archive) as bundle:
+              names = bundle.namelist()
+              if names != ["observation.json"]:
+                  raise SystemExit("observer evidence archive inventory drifted")
+              raw = bundle.read("observation.json")
+          if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
+              raise SystemExit("observer evidence is not canonical one-LF JSON")
+          value = json.loads(raw)
+          expected_keys = {
+              "action", "classification", "cluster_mutation_attempted", "expected_terminal_mode",
+              "expected_terminal_oid", "git_history_rewritten", "object_mutation_attempted",
+              "observed_state", "policy_sha", "reader_status", "recorded_at", "ref_mutation_attempted",
+              "repository", "run_attempt", "run_id", "schema_version", "source_document_conclusion",
+              "source_run_conclusion", "source_run_id", "source_run_status", "terminal_mode",
+              "terminal_oid", "terminal_ref", "workflow",
+          }
+          if set(value) != expected_keys:
+              raise SystemExit("observer evidence schema drifted")
+          if (value.get("schema_version") != 1 or
+                  value.get("workflow") != "observe-control-plane-release-terminal-watchdog-rp2" or
+                  value.get("repository") != repository or str(value.get("run_id")) != run_id or
+                  str(value.get("run_attempt")) != run_attempt or value.get("policy_sha") != head_sha):
+              raise SystemExit("observer evidence identity drifted")
+          if value.get("terminal_ref") != "refs/heads/fugue-control-plane-release-terminal-state":
+              raise SystemExit("observer evidence terminal ref drifted")
+          for field in ("ref_mutation_attempted", "object_mutation_attempted",
+                        "cluster_mutation_attempted", "git_history_rewritten"):
+              if value.get(field) is not False:
+                  raise SystemExit(f"observer evidence mutation flag {field} drifted")
+          allowed = {
+              "settled_frozen": "none",
+              "settled_success": "none",
+              "reservation_active": "none",
+              "freeze_candidate_missing": "freeze_required",
+              "reservation_stale_success": "freeze_required",
+              "reservation_terminal_failure": "freeze_required",
+              "indeterminate_reader_failure": "manual_evidence_required",
+              "indeterminate_source_run": "manual_evidence_required",
+              "indeterminate_source_identity": "manual_evidence_required",
+              "indeterminate_source_state": "manual_evidence_required",
+          }
+          classification, action = value.get("classification"), value.get("action")
+          if allowed.get(classification) != action:
+              raise SystemExit("observer evidence classification/action drifted")
+          print(f"{classification}\t{action}")
+          PY
+              )"
+              artifact_status=$?
+              set -e
+            fi
+            if [[ "${artifact_status}" == '0' ]]; then
+              IFS=$'\t' read -r classification action extra <<<"${decision_fields}" || artifact_status=$?
+              [[ -z "${extra:-}" ]] || artifact_status=1
+            fi
+            if [[ "${artifact_status}" != '0' ]]; then
+              classification='indeterminate_source_evidence'
+              action='manual_evidence_required'
+            fi
+          fi
+          decision='freeze'
+          if [[ "${action}" == 'none' ]]; then
+            decision='no_op'
+          fi
+          printf 'classification=%s\n' "${classification}" >>"${GITHUB_OUTPUT}"
+          printf 'action=%s\n' "${action}" >>"${GITHUB_OUTPUT}"
+          printf 'decision=%s\n' "${decision}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_id=%s\n' "${artifact_id}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_digest=%s\n' "${artifact_digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Enforce freeze decision with exact readback
+        env:
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CLASSIFICATION: ${{ steps.decide.outputs.classification }}
+          ACTION: ${{ steps.decide.outputs.action }}
+          DECISION: ${{ steps.decide.outputs.decision }}
+          ARTIFACT_ID: ${{ steps.decide.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ steps.decide.outputs.artifact_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly workflow_id='deploy-control-plane.yml'
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-rp2-terminal-watchdog-freeze"
+          install -d -m 0700 "${evidence_dir}"
+          [[ "${DECISION}" =~ ^(freeze|no_op)$ ]] || exit 1
+          [[ "${ACTION}" =~ ^(none|freeze_required|manual_evidence_required)$ ]] || exit 1
+          if [[ "${DECISION}" == 'no_op' ]]; then
+            [[ "${ACTION}" == 'none' ]] || exit 1
+          else
+            [[ "${ACTION}" != 'none' ]] || exit 1
+          fi
+          state_before="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+          [[ "${state_before}" =~ ^(active|disabled_manually|disabled_inactivity)$ ]] || exit 1
+          mutation_attempted='false'
+          mutation_status='not_attempted'
+          if [[ "${DECISION}" == 'freeze' && "${state_before}" != 'disabled_manually' ]]; then
+            mutation_attempted='true'
+            mutation_status=0
+            set +e
+            timeout --kill-after=2s 10s gh api --method PUT \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/disable" >/dev/null
+            mutation_status=$?
+            set -e
+          fi
+          state_after="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+          if [[ "${DECISION}" == 'freeze' ]]; then
+            [[ "${state_after}" == 'disabled_manually' ]] || exit 1
+          else
+            [[ "${mutation_attempted}" == 'false' && "${state_after}" == "${state_before}" ]] || exit 1
+          fi
+          python3 - "${evidence_dir}/freeze-result.json" "${SOURCE_RUN_ID}" "${SOURCE_RUN_ATTEMPT}" \
+            "${SOURCE_HEAD_SHA}" "${SOURCE_CONCLUSION}" "${CLASSIFICATION}" "${ACTION}" "${DECISION}" \
+            "${ARTIFACT_ID}" "${ARTIFACT_DIGEST}" "${state_before}" "${state_after}" \
+            "${mutation_attempted}" "${mutation_status}" <<'PY'
+          import datetime, json, os, sys
+          (output, source_run_id, source_run_attempt, source_head_sha, source_conclusion,
+           classification, action, decision, artifact_id, artifact_digest, state_before,
+           state_after, mutation_attempted, mutation_status) = sys.argv[1:]
+          payload = {
+              "schema_version": 1,
+              "workflow": "enforce-control-plane-release-watchdog-rp2",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "policy_sha": os.environ["GITHUB_SHA"],
+              "source_run_id": source_run_id,
+              "source_run_attempt": int(source_run_attempt),
+              "source_head_sha": source_head_sha,
+              "source_conclusion": source_conclusion,
+              "source_artifact_id": artifact_id or None,
+              "source_artifact_digest": artifact_digest or None,
+              "classification": classification,
+              "action": action,
+              "decision": decision,
+              "deploy_workflow_state_before": state_before,
+              "deploy_workflow_state_after": state_after,
+              "workflow_mutation_attempted": mutation_attempted == "true",
+              "workflow_mutation_response_status": (
+                  None if mutation_status == "not_attempted" else int(mutation_status)
+              ),
+              "ref_mutation_attempted": False,
+              "object_mutation_attempted": False,
+              "cluster_mutation_attempted": False,
+              "runtime_mutation_attempted": False,
+              "git_history_rewritten": False,
+              "production_write": False,
+              "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          }
+          with open(output, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+          result_digest="sha256:$(sha256sum "${evidence_dir}/freeze-result.json" | awk '{print $1}')" || exit 1
+          printf 'freeze enforcement evidence digest: %s\n' "${result_digest}" >>"${GITHUB_STEP_SUMMARY}" || exit 1
+
+      - name: Upload freeze enforcement evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-rp2-terminal-watchdog-freeze-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-rp2-terminal-watchdog-freeze/freeze-result.json
+          if-no-files-found: error
+          retention-days: 90
