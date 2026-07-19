@@ -1,0 +1,482 @@
+name: promote-control-plane-release-lane-rp5
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main policy SHA authorized for this one-shot lane promotion
+        required: true
+        type: string
+      expected_runner_name:
+        description: Exact healthy control-plane runner identity
+        required: true
+        type: string
+      expected_baseline_oid:
+        description: Exact forward-only baseline ref object
+        required: true
+        type: string
+      expected_runtime_sha:
+        description: Exact runtime represented by the baseline object
+        required: true
+        type: string
+      expected_terminal_oid:
+        description: Exact frozen terminal ref object
+        required: true
+        type: string
+      expected_api_health_url:
+        description: Exact public API health URL
+        required: true
+        type: string
+      expected_coredns_status:
+        description: Exact observedGeneration/generation ready/desired updated CoreDNS status
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-control-plane-release-lane-promotion-rp5
+  cancel-in-progress: false
+
+jobs:
+  qualify-control-plane-lane:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - fugue
+      - control-plane
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.evidence.outputs.artifact_name }}
+      artifact_digest: ${{ steps.normalize.outputs.artifact_digest }}
+    steps:
+      - name: Checkout exact lane promotion policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact read-only lane qualification authorization
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${EXPECTED_RUNNER_NAME}" == 'ovhvpsuswest-fugue' && "${RUNNER_NAME}" == "${EXPECTED_RUNNER_NAME}" ]] || exit 1
+          [[ "${RUNNER_OS}" == 'Linux' && "${RUNNER_ARCH}" == 'X64' ]] || exit 1
+          [[ "${EXPECTED_BASELINE_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EXPECTED_RUNTIME_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EXPECTED_TERMINAL_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+
+          readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
+          readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
+          [[ "${policy_commit}" == "${GITHUB_SHA}" ]] || exit 1
+          for policy_path in "${workflow_path}" "${test_path}"; do
+            [[ "$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}" ]] || exit 1
+          done
+          policy_identity="$(git rev-list --parents -n 1 "${policy_commit}")" || exit 1
+          read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
+          [[ -z "${extra:-}" && "${policy_parent}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${policy_commit}")" || exit 1
+          actual_changes=()
+          while IFS= read -r change; do
+            actual_changes+=("${change}")
+          done <<<"${actual_changes_text}"
+          expected_changes=(
+            $'A\t.github/workflows/promote-control-plane-release-lane-rp5.yml'
+            $'A\tinternal/platformsafety/release_lane_promotion_workflow_test.go'
+          )
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[${index}]}" == "${expected_changes[${index}]}" ]] || exit 1
+          done
+          git diff --check "${policy_parent}" "${policy_commit}" || exit 1
+          git diff --exit-code --ignore-submodules "${GITHUB_SHA}" -- || exit 1
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          deploy_state="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" --jq '.state')" || exit 1
+          [[ "${deploy_state}" == 'disabled_manually' ]] || exit 1
+          baseline_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-terminal-state" --jq '.object.sha')" || exit 1
+          [[ "${baseline_oid}" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
+          [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+
+          timeout --kill-after=5s 60s git fetch --no-tags origin \
+            'refs/heads/fugue-control-plane-release-baseline' || exit 1
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
+          baseline_identity="$(git rev-list --parents -n 1 FETCH_HEAD)" || exit 1
+          read -r baseline_commit baseline_parent extra <<<"${baseline_identity}" || exit 1
+          [[ "${baseline_commit}" == "${EXPECTED_BASELINE_OID}" && "${baseline_parent}" =~ ^[0-9a-f]{40}$ && -z "${extra:-}" ]] || exit 1
+          baseline_tree="$(git ls-tree --full-tree FETCH_HEAD)" || exit 1
+          [[ "$(printf '%s\n' "${baseline_tree}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]] || exit 1
+          read -r metadata_mode metadata_type metadata_blob metadata_path extra <<<"${baseline_tree}" || exit 1
+          [[ -z "${extra:-}" && "${metadata_mode}" == '100644' && "${metadata_type}" == 'blob' ]] || exit 1
+          [[ "${metadata_path}" == 'fugue-runtime-baseline.json' && "${metadata_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          metadata_fields="$(git cat-file blob "${metadata_blob}" | python3 -c '
+          import json, re, sys
+          raw = sys.stdin.buffer.read()
+          value = json.loads(raw)
+          runtime = value.get("runtime_sha") if type(value) is dict else None
+          previous = value.get("previous_baseline_object_sha") if type(value) is dict else None
+          if type(runtime) is not str or re.fullmatch(r"[0-9a-f]{40}", runtime) is None:
+              raise SystemExit("runtime SHA drifted")
+          if type(previous) is not str or re.fullmatch(r"[0-9a-f]{40}", previous) is None:
+              raise SystemExit("previous baseline OID drifted")
+          expected = json.dumps(
+              {"previous_baseline_object_sha": previous, "runtime_sha": runtime, "schema_version": 1},
+              sort_keys=True, separators=(",", ":"),
+          ).encode() + b"\n"
+          if raw != expected:
+              raise SystemExit("baseline metadata is not canonical")
+          print(runtime + "\t" + previous)
+          ')" || exit 1
+          IFS=$'\t' read -r represented_runtime represented_previous extra <<<"${metadata_fields}" || exit 1
+          [[ -z "${extra:-}" && "${represented_runtime}" == "${EXPECTED_RUNTIME_SHA}" ]] || exit 1
+          [[ "${represented_previous}" == "${baseline_parent}" ]] || exit 1
+          git merge-base --is-ancestor "${EXPECTED_RUNTIME_SHA}" "${GITHUB_SHA}" || exit 1
+
+          timeout --kill-after=5s 60s git fetch --no-tags origin \
+            'refs/heads/fugue-control-plane-release-terminal-state' || exit 1
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+          terminal_identity="$(git rev-list --parents -n 1 FETCH_HEAD)" || exit 1
+          read -r terminal_commit terminal_parent extra <<<"${terminal_identity}" || exit 1
+          [[ "${terminal_commit}" == "${EXPECTED_TERMINAL_OID}" && "${terminal_parent}" =~ ^[0-9a-f]{40}$ && -z "${extra:-}" ]] || exit 1
+          terminal_tree="$(git ls-tree --full-tree FETCH_HEAD)" || exit 1
+          [[ "$(printf '%s\n' "${terminal_tree}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]] || exit 1
+          read -r terminal_mode terminal_type terminal_blob terminal_path extra <<<"${terminal_tree}" || exit 1
+          [[ -z "${extra:-}" && "${terminal_mode}" == '100644' && "${terminal_type}" == 'blob' ]] || exit 1
+          [[ "${terminal_path}" == '.fugue-release-terminal-state.json' && "${terminal_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          terminal_fields="$(git cat-file blob "${terminal_blob}" | python3 -c '
+          import json, re, sys
+          raw = sys.stdin.buffer.read()
+          def unique_object(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError("duplicate terminal key")
+                  value[key] = item
+              return value
+          value = json.loads(raw, object_pairs_hook=unique_object)
+          expected_keys = {
+              "schema_version", "certificate_kind", "terminal_mode", "source_run_id",
+              "source_run_attempt", "source_head_sha", "source_workflow", "source_conclusion",
+              "previous_terminal_state_oid", "reservation_oid", "freeze_reason",
+          }
+          if type(value) is not dict or set(value) != expected_keys:
+              raise SystemExit("frozen terminal key set drifted")
+          if raw != (json.dumps(value, separators=(",", ":")) + "\n").encode():
+              raise SystemExit("frozen terminal document is not canonical")
+          if value["schema_version"] != 1 or type(value["schema_version"]) is not int:
+              raise SystemExit("frozen terminal schema drifted")
+          if value["certificate_kind"] != "fugue-control-plane-release-policy-terminal-finalization":
+              raise SystemExit("frozen terminal certificate drifted")
+          if value["terminal_mode"] != "frozen" or value["source_conclusion"] != "success":
+              raise SystemExit("terminal is not frozen")
+          if type(value["source_run_id"]) is not str or re.fullmatch(r"[1-9][0-9]*", value["source_run_id"]) is None:
+              raise SystemExit("frozen terminal run id drifted")
+          if value["source_run_attempt"] != 1 or type(value["source_run_attempt"]) is not int:
+              raise SystemExit("frozen terminal run attempt drifted")
+          if type(value["source_head_sha"]) is not str or re.fullmatch(r"[0-9a-f]{40}", value["source_head_sha"]) is None:
+              raise SystemExit("frozen terminal source SHA drifted")
+          allowed_workflows = {
+              ".github/workflows/deploy-control-plane-v2.yml",
+              ".github/workflows/promote-control-plane-release-policy.yml",
+              ".github/workflows/write-control-plane-release-terminal-rp1.yml",
+              ".github/workflows/materialize-control-plane-release-terminal-next-reservation-rp1.yml",
+          }
+          if value["source_workflow"] not in allowed_workflows:
+              raise SystemExit("frozen terminal source workflow drifted")
+          previous, reservation = value["previous_terminal_state_oid"], value["reservation_oid"]
+          if type(previous) is not str or re.fullmatch(r"[0-9a-f]{40}", previous) is None or reservation != previous:
+              raise SystemExit("frozen terminal reservation drifted")
+          if value["freeze_reason"] != "reservation_stale":
+              raise SystemExit("frozen terminal reason drifted")
+          print(value["terminal_mode"] + "\t" + previous)
+          ')" || exit 1
+          IFS=$'\t' read -r observed_terminal_mode terminal_previous extra <<<"${terminal_fields}" || exit 1
+          [[ -z "${extra:-}" && "${observed_terminal_mode}" == 'frozen' && "${terminal_previous}" == "${terminal_parent}" ]] || exit 1
+
+          for run_status in queued in_progress waiting pending requested; do
+            other_runs="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" \
+              --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id")" || exit 1
+            [[ -z "${other_runs}" ]] || exit 1
+          done
+
+      - name: Qualify runner and control plane without mutation
+        id: evidence
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          EXPECTED_API_HEALTH_URL: ${{ inputs.expected_api_health_url }}
+          EXPECTED_COREDNS_STATUS: ${{ inputs.expected_coredns_status }}
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_API_HEALTH_URL}" == 'https://api.fugue.pro/healthz' ]] || exit 1
+          [[ "${EXPECTED_COREDNS_STATUS}" =~ ^[1-9][0-9]*/[1-9][0-9]*' '[1-9][0-9]*/[1-9][0-9]*' '[1-9][0-9]*$ ]] || exit 1
+          if command -v kubectl >/dev/null 2>&1; then
+            KUBECTL=(kubectl)
+          else
+            KUBECTL=(k3s kubectl)
+          fi
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-rp5-lane-qualification"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          "${KUBECTL[@]}" config current-context >"${evidence_dir}/kube-context.txt" || exit 1
+          "${KUBECTL[@]}" get --raw='/readyz?verbose' >"${evidence_dir}/kubernetes-readyz.txt" || exit 1
+          coredns_status="$("${KUBECTL[@]}" -n kube-system get deployment coredns \
+            -o jsonpath='{.status.observedGeneration}/{.metadata.generation} {.status.readyReplicas}/{.spec.replicas} {.status.updatedReplicas}')" || exit 1
+          [[ "${coredns_status}" == "${EXPECTED_COREDNS_STATUS}" ]] || exit 1
+          api_status="$(curl --fail --silent --show-error --max-time 10 "${EXPECTED_API_HEALTH_URL}" |
+            python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')" || exit 1
+          [[ "${api_status}" == 'ok' ]] || exit 1
+          helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" -o json \
+            >"${evidence_dir}/helm-status.json" || exit 1
+          helm_fields="$(python3 - "${evidence_dir}/helm-status.json" <<'PY'
+          import json, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          status = value.get("info", {}).get("status")
+          revision = value.get("version", value.get("revision"))
+          if status != "deployed" or type(revision) is not int or revision < 1:
+              raise SystemExit("Helm release is not deployed")
+          print(f"{status}\t{revision}")
+          PY
+          )" || exit 1
+          IFS=$'\t' read -r helm_status helm_revision extra <<<"${helm_fields}" || exit 1
+          [[ -z "${extra:-}" ]] || exit 1
+          python3 - "${evidence_dir}/qualification.json" "${coredns_status}" "${api_status}" \
+            "${helm_status}" "${helm_revision}" <<'PY'
+          import datetime, json, os, sys
+          output, coredns, api, helm_status, helm_revision = sys.argv[1:]
+          payload = {
+              "schema_version": 1,
+              "workflow": "promote-control-plane-release-lane-rp5",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "policy_sha": os.environ["EXPECTED_SHA"],
+              "runner_name": os.environ["RUNNER_NAME"],
+              "runner_os": os.environ["RUNNER_OS"],
+              "runner_arch": os.environ["RUNNER_ARCH"],
+              "baseline_ref_object": os.environ["EXPECTED_BASELINE_OID"],
+              "represented_runtime_sha": os.environ["EXPECTED_RUNTIME_SHA"],
+              "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
+              "terminal_mode": "frozen",
+              "deploy_workflow_state": "disabled_manually",
+              "api_health_url": os.environ["EXPECTED_API_HEALTH_URL"],
+              "api_health": api,
+              "central_coredns": coredns,
+              "helm_status": helm_status,
+              "helm_revision": int(helm_revision),
+              "workflow_mutation_attempted": False,
+              "deploy_dispatch_attempted": False,
+              "ref_mutation_attempted": False,
+              "object_mutation_attempted": False,
+              "cluster_mutation_attempted": False,
+              "runtime_mutation_attempted": False,
+              "production_write": False,
+              "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          }
+          with open(output, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+          PY
+          artifact_name="fugue-rp5-lane-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_path=%s\n' "${evidence_dir}/qualification.json" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload read-only lane qualification evidence
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.evidence.outputs.artifact_name }}
+          path: ${{ steps.evidence.outputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Normalize qualification artifact digest
+        id: normalize
+        env:
+          RAW_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          [[ "${RAW_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          printf 'artifact_digest=sha256:%s\n' "${RAW_ARTIFACT_DIGEST}" >>"${GITHUB_OUTPUT}"
+
+  promote-deploy-lane:
+    needs:
+      - qualify-control-plane-lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout exact lane promotion policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify one-shot promotion policy identity
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
+          readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
+          [[ "${policy_commit}" == "${GITHUB_SHA}" ]] || exit 1
+          for policy_path in "${workflow_path}" "${test_path}"; do
+            [[ "$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}" ]] || exit 1
+          done
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          for run_status in queued in_progress waiting pending requested; do
+            other_runs="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" \
+              --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id")" || exit 1
+            [[ -z "${other_runs}" ]] || exit 1
+          done
+
+      - name: Download exact read-only qualification evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.qualify-control-plane-lane.outputs.artifact_name }}
+          path: ${{ runner.temp }}/fugue-rp5-lane-qualification-consume
+
+      - name: Consume exact read-only qualification evidence
+        env:
+          ARTIFACT_DIGEST: ${{ needs.qualify-control-plane-lane.outputs.artifact_digest }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          EXPECTED_API_HEALTH_URL: ${{ inputs.expected_api_health_url }}
+          EXPECTED_COREDNS_STATUS: ${{ inputs.expected_coredns_status }}
+        run: |
+          set -euo pipefail
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-rp5-lane-qualification-consume"
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          files="$(find "${evidence_dir}" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)" || exit 1
+          [[ "${files}" == 'qualification.json' ]] || exit 1
+          python3 - "${evidence_dir}/qualification.json" <<'PY'
+          import json, os, sys
+          raw = open(sys.argv[1], "rb").read()
+          if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
+              raise SystemExit("qualification is not canonical one-LF JSON")
+          value = json.loads(raw)
+          required = {
+              "api_health": "ok",
+              "api_health_url": os.environ["EXPECTED_API_HEALTH_URL"],
+              "baseline_ref_object": os.environ["EXPECTED_BASELINE_OID"],
+              "central_coredns": os.environ["EXPECTED_COREDNS_STATUS"],
+              "deploy_workflow_state": "disabled_manually",
+              "policy_sha": os.environ["EXPECTED_SHA"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "represented_runtime_sha": os.environ["EXPECTED_RUNTIME_SHA"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "runner_arch": "X64",
+              "runner_name": os.environ["EXPECTED_RUNNER_NAME"],
+              "runner_os": "Linux",
+              "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
+              "terminal_mode": "frozen",
+              "workflow": "promote-control-plane-release-lane-rp5",
+          }
+          if value.get("schema_version") != 1 or any(value.get(k) != v for k, v in required.items()):
+              raise SystemExit("qualification identity drifted")
+          if value.get("helm_status") != "deployed" or type(value.get("helm_revision")) is not int:
+              raise SystemExit("qualification Helm status drifted")
+          for field in (
+              "workflow_mutation_attempted", "deploy_dispatch_attempted", "ref_mutation_attempted",
+              "object_mutation_attempted", "cluster_mutation_attempted", "runtime_mutation_attempted",
+              "production_write",
+          ):
+              if value.get(field) is not False:
+                  raise SystemExit(f"qualification mutation field {field} drifted")
+          PY
+
+      - name: Enable deploy workflow with exact readback
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly workflow_id='deploy-control-plane.yml'
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          baseline_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-terminal-state" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${baseline_oid}" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
+          [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+          for run_status in queued in_progress waiting pending requested; do
+            other_runs="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" \
+              --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id")" || exit 1
+            [[ -z "${other_runs}" ]] || exit 1
+          done
+          state_before="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+          [[ "${state_before}" == 'disabled_manually' ]] || exit 1
+          mutation_status=0
+          set +e
+          timeout --kill-after=2s 10s gh api --method PUT \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/enable" >/dev/null
+          mutation_status=$?
+          set -e
+          state_after='unknown'
+          settled='false'
+          for attempt in 1 2 3 4 5; do
+            read_status=0
+            state_after="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || read_status=$?
+            if [[ "${read_status}" == '0' && "${state_after}" == 'active' ]]; then
+              settled='true'
+              break
+            fi
+            [[ "${attempt}" == '5' ]] || sleep 2
+          done
+          [[ "${settled}" == 'true' ]] || exit 1
+          printf 'deploy lane promotion settled by exact readback (before=%s after=%s mutation_status=%s)\n' \
+            "${state_before}" "${state_after}" "${mutation_status}" >>"${GITHUB_STEP_SUMMARY}" || true
