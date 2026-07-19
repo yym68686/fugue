@@ -31,6 +31,14 @@ const (
 	ModeFrozen      Mode = "frozen"
 )
 
+// FreezeReason is an administrative reason for freezing a reservation when
+// the immutable source run itself completed successfully.
+type FreezeReason string
+
+const (
+	FreezeReasonReservationStale FreezeReason = "reservation_stale"
+)
+
 // Workflow is an allowed source of a release-policy terminal state.
 type Workflow string
 
@@ -45,16 +53,17 @@ const (
 // is absent on reservations and equals PreviousTerminalStateOID on a success
 // or frozen finalization.
 type Document struct {
-	SchemaVersion            uint64   `json:"schema_version"`
-	CertificateKind          string   `json:"certificate_kind"`
-	TerminalMode             Mode     `json:"terminal_mode"`
-	SourceRunID              string   `json:"source_run_id"`
-	SourceRunAttempt         uint64   `json:"source_run_attempt"`
-	SourceHeadSHA            string   `json:"source_head_sha"`
-	SourceWorkflow           Workflow `json:"source_workflow"`
-	SourceConclusion         string   `json:"source_conclusion"`
-	PreviousTerminalStateOID string   `json:"previous_terminal_state_oid"`
-	ReservationOID           string   `json:"reservation_oid,omitempty"`
+	SchemaVersion            uint64       `json:"schema_version"`
+	CertificateKind          string       `json:"certificate_kind"`
+	TerminalMode             Mode         `json:"terminal_mode"`
+	SourceRunID              string       `json:"source_run_id"`
+	SourceRunAttempt         uint64       `json:"source_run_attempt"`
+	SourceHeadSHA            string       `json:"source_head_sha"`
+	SourceWorkflow           Workflow     `json:"source_workflow"`
+	SourceConclusion         string       `json:"source_conclusion"`
+	PreviousTerminalStateOID string       `json:"previous_terminal_state_oid"`
+	ReservationOID           string       `json:"reservation_oid,omitempty"`
+	FreezeReason             FreezeReason `json:"freeze_reason,omitempty"`
 }
 
 // Encode validates and returns the only accepted byte representation: compact
@@ -150,6 +159,9 @@ func Validate(document Document) error {
 		if document.ReservationOID != "" {
 			return fmt.Errorf("terminal reservation must omit reservation OID")
 		}
+		if document.FreezeReason != "" {
+			return fmt.Errorf("terminal reservation must omit freeze reason")
+		}
 	case ModeSuccess:
 		if err := validateFinalization(document); err != nil {
 			return err
@@ -157,12 +169,23 @@ func Validate(document Document) error {
 		if document.SourceConclusion != "success" {
 			return fmt.Errorf("terminal success source conclusion must be success")
 		}
+		if document.FreezeReason != "" {
+			return fmt.Errorf("terminal success must omit freeze reason")
+		}
 	case ModeFrozen:
 		if err := validateFinalization(document); err != nil {
 			return err
 		}
-		if !isFrozenConclusion(document.SourceConclusion) {
+		if document.FreezeReason == "" && !isFrozenConclusion(document.SourceConclusion) {
 			return fmt.Errorf("terminal frozen source conclusion is unsupported")
+		}
+		if document.FreezeReason != "" {
+			if document.FreezeReason != FreezeReasonReservationStale {
+				return fmt.Errorf("terminal administrative freeze reason is unsupported")
+			}
+			if document.SourceConclusion != "success" {
+				return fmt.Errorf("terminal stale-reservation freeze requires a successful source conclusion")
+			}
 		}
 	default:
 		return fmt.Errorf("terminal state mode is unsupported")

@@ -77,10 +77,13 @@ func TestValidateDocumentModes(t *testing.T) {
 	validReservation := reservation(AbsentOID, "101", testHeadSHA)
 	validSuccess := finalization(ModeSuccess, "success", testReservationOID, "101", testHeadSHA)
 	validFrozen := finalization(ModeFrozen, "timed_out", testReservationOID, "101", testHeadSHA)
+	validAdministrativeFrozen := finalization(ModeFrozen, "success", testReservationOID, "101", testHeadSHA)
+	validAdministrativeFrozen.FreezeReason = FreezeReasonReservationStale
 	for name, document := range map[string]Document{
-		"reservation": validReservation,
-		"success":     validSuccess,
-		"frozen":      validFrozen,
+		"reservation":           validReservation,
+		"success":               validSuccess,
+		"frozen":                validFrozen,
+		"administrative frozen": validAdministrativeFrozen,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := Validate(document); err != nil {
@@ -90,25 +93,76 @@ func TestValidateDocumentModes(t *testing.T) {
 	}
 
 	tests := map[string]Document{
-		"schema":                              mutate(validReservation, func(value *Document) { value.SchemaVersion = 2 }),
-		"run ID zero":                         mutate(validReservation, func(value *Document) { value.SourceRunID = "0" }),
-		"run ID leading zero":                 mutate(validReservation, func(value *Document) { value.SourceRunID = "0101" }),
-		"rerun":                               mutate(validReservation, func(value *Document) { value.SourceRunAttempt = 2 }),
-		"uppercase SHA":                       mutate(validReservation, func(value *Document) { value.SourceHeadSHA = strings.Repeat("A", 40) }),
-		"workflow":                            mutate(validReservation, func(value *Document) { value.SourceWorkflow = ".github/workflows/other.yml" }),
-		"reservation kind":                    mutate(validReservation, func(value *Document) { value.CertificateKind = CertificateKindFinalization }),
-		"reservation conclusion":              mutate(validReservation, func(value *Document) { value.SourceConclusion = "success" }),
-		"reservation self OID":                mutate(validReservation, func(value *Document) { value.ReservationOID = testReservationOID }),
-		"success conclusion":                  mutate(validSuccess, func(value *Document) { value.SourceConclusion = "failure" }),
-		"frozen success":                      mutate(validFrozen, func(value *Document) { value.SourceConclusion = "success" }),
-		"finalization absent parent":          mutate(validSuccess, func(value *Document) { value.PreviousTerminalStateOID = AbsentOID }),
-		"finalization mismatched reservation": mutate(validSuccess, func(value *Document) { value.ReservationOID = testPreviousOID }),
-		"mode":                                mutate(validReservation, func(value *Document) { value.TerminalMode = "pending" }),
+		"schema":                               mutate(validReservation, func(value *Document) { value.SchemaVersion = 2 }),
+		"run ID zero":                          mutate(validReservation, func(value *Document) { value.SourceRunID = "0" }),
+		"run ID leading zero":                  mutate(validReservation, func(value *Document) { value.SourceRunID = "0101" }),
+		"rerun":                                mutate(validReservation, func(value *Document) { value.SourceRunAttempt = 2 }),
+		"uppercase SHA":                        mutate(validReservation, func(value *Document) { value.SourceHeadSHA = strings.Repeat("A", 40) }),
+		"workflow":                             mutate(validReservation, func(value *Document) { value.SourceWorkflow = ".github/workflows/other.yml" }),
+		"reservation kind":                     mutate(validReservation, func(value *Document) { value.CertificateKind = CertificateKindFinalization }),
+		"reservation conclusion":               mutate(validReservation, func(value *Document) { value.SourceConclusion = "success" }),
+		"reservation self OID":                 mutate(validReservation, func(value *Document) { value.ReservationOID = testReservationOID }),
+		"reservation freeze reason":            mutate(validReservation, func(value *Document) { value.FreezeReason = FreezeReasonReservationStale }),
+		"success conclusion":                   mutate(validSuccess, func(value *Document) { value.SourceConclusion = "failure" }),
+		"success freeze reason":                mutate(validSuccess, func(value *Document) { value.FreezeReason = FreezeReasonReservationStale }),
+		"frozen success":                       mutate(validFrozen, func(value *Document) { value.SourceConclusion = "success" }),
+		"frozen unknown administrative reason": mutate(validAdministrativeFrozen, func(value *Document) { value.FreezeReason = "operator_override" }),
+		"frozen stale reason with failure":     mutate(validAdministrativeFrozen, func(value *Document) { value.SourceConclusion = "failure" }),
+		"finalization absent parent":           mutate(validSuccess, func(value *Document) { value.PreviousTerminalStateOID = AbsentOID }),
+		"finalization mismatched reservation":  mutate(validSuccess, func(value *Document) { value.ReservationOID = testPreviousOID }),
+		"mode":                                 mutate(validReservation, func(value *Document) { value.TerminalMode = "pending" }),
 	}
 	for name, document := range tests {
 		t.Run(name, func(t *testing.T) {
 			if err := Validate(document); err == nil {
 				t.Fatal("Validate() unexpectedly accepted invalid document")
+			}
+		})
+	}
+}
+
+func TestEncodeAdministrativeStaleFreezeIsCanonical(t *testing.T) {
+	document := finalization(ModeFrozen, "success", testReservationOID, "101", testHeadSHA)
+	document.FreezeReason = FreezeReasonReservationStale
+	encoded, err := Encode(document)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	want := "{\"schema_version\":1,\"certificate_kind\":\"fugue-control-plane-release-policy-terminal-finalization\",\"terminal_mode\":\"frozen\",\"source_run_id\":\"101\",\"source_run_attempt\":1,\"source_head_sha\":\"1111111111111111111111111111111111111111\",\"source_workflow\":\".github/workflows/deploy-control-plane-v2.yml\",\"source_conclusion\":\"success\",\"previous_terminal_state_oid\":\"3333333333333333333333333333333333333333\",\"reservation_oid\":\"3333333333333333333333333333333333333333\",\"freeze_reason\":\"reservation_stale\"}\n"
+	if string(encoded) != want {
+		t.Fatalf("Encode() = %q, want %q", encoded, want)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if decoded != document {
+		t.Fatalf("Decode() = %#v, want %#v", decoded, document)
+	}
+}
+
+func TestEncodeLegacyFinalizationsRemainByteStable(t *testing.T) {
+	tests := map[string]struct {
+		document Document
+		want     string
+	}{
+		"success": {
+			document: finalization(ModeSuccess, "success", testReservationOID, "101", testHeadSHA),
+			want:     "{\"schema_version\":1,\"certificate_kind\":\"fugue-control-plane-release-policy-terminal-finalization\",\"terminal_mode\":\"success\",\"source_run_id\":\"101\",\"source_run_attempt\":1,\"source_head_sha\":\"1111111111111111111111111111111111111111\",\"source_workflow\":\".github/workflows/deploy-control-plane-v2.yml\",\"source_conclusion\":\"success\",\"previous_terminal_state_oid\":\"3333333333333333333333333333333333333333\",\"reservation_oid\":\"3333333333333333333333333333333333333333\"}\n",
+		},
+		"non-success frozen": {
+			document: finalization(ModeFrozen, "timed_out", testReservationOID, "101", testHeadSHA),
+			want:     "{\"schema_version\":1,\"certificate_kind\":\"fugue-control-plane-release-policy-terminal-finalization\",\"terminal_mode\":\"frozen\",\"source_run_id\":\"101\",\"source_run_attempt\":1,\"source_head_sha\":\"1111111111111111111111111111111111111111\",\"source_workflow\":\".github/workflows/deploy-control-plane-v2.yml\",\"source_conclusion\":\"timed_out\",\"previous_terminal_state_oid\":\"3333333333333333333333333333333333333333\",\"reservation_oid\":\"3333333333333333333333333333333333333333\"}\n",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := Encode(test.document)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if string(encoded) != test.want {
+				t.Fatalf("Encode() = %q, want %q", encoded, test.want)
 			}
 		})
 	}
@@ -168,6 +222,11 @@ func TestValidateTransitionChain(t *testing.T) {
 	frozen := finalization(ModeFrozen, "failure", testReservationOID, "101", testHeadSHA)
 	if err := ValidateTransition(&firstReservation, testReservationOID, frozen); err != nil {
 		t.Fatalf("reservation to frozen: %v", err)
+	}
+	administrativeFrozen := finalization(ModeFrozen, "success", testReservationOID, "101", testHeadSHA)
+	administrativeFrozen.FreezeReason = FreezeReasonReservationStale
+	if err := ValidateTransition(&firstReservation, testReservationOID, administrativeFrozen); err != nil {
+		t.Fatalf("reservation to administrative frozen: %v", err)
 	}
 	if err := ValidateTransition(&frozen, testPreviousOID, nextReservation); err == nil {
 		t.Fatal("frozen terminal state unexpectedly advanced")
