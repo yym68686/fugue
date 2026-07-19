@@ -35,8 +35,9 @@ const (
 type Workflow string
 
 const (
-	WorkflowDeployV2  Workflow = ".github/workflows/deploy-control-plane-v2.yml"
-	WorkflowPromotion Workflow = ".github/workflows/promote-control-plane-release-policy.yml"
+	WorkflowDeployV2       Workflow = ".github/workflows/deploy-control-plane-v2.yml"
+	WorkflowPromotion      Workflow = ".github/workflows/promote-control-plane-release-policy.yml"
+	WorkflowTerminalWriter Workflow = ".github/workflows/write-control-plane-release-terminal-rp1.yml"
 )
 
 // Document is the complete canonical terminal-state payload. ReservationOID
@@ -127,7 +128,9 @@ func Validate(document Document) error {
 	if !isLowerHexOID(document.SourceHeadSHA) {
 		return fmt.Errorf("terminal state source head SHA must be lowercase 40-hex")
 	}
-	if document.SourceWorkflow != WorkflowDeployV2 && document.SourceWorkflow != WorkflowPromotion {
+	if document.SourceWorkflow != WorkflowDeployV2 &&
+		document.SourceWorkflow != WorkflowPromotion &&
+		document.SourceWorkflow != WorkflowTerminalWriter {
 		return fmt.Errorf("terminal state source workflow is unsupported")
 	}
 	if document.PreviousTerminalStateOID != AbsentOID && !isLowerHexOID(document.PreviousTerminalStateOID) {
