@@ -20,7 +20,7 @@ jobs:
       contents: read
     outputs:
       artifact_name: ${{ steps.materialize.outputs.artifact_name }}
-      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact_digest: ${{ steps.normalize.outputs.artifact_digest }}
       baseline_sha256: ${{ steps.materialize.outputs.baseline_sha256 }}
       expected_sha: ${{ steps.materialize.outputs.expected_sha }}
       expected_tree: ${{ steps.materialize.outputs.expected_tree }}
@@ -231,6 +231,15 @@ jobs:
           path: ${{ steps.materialize.outputs.artifact_dir }}
           if-no-files-found: error
           retention-days: 90
+
+      - name: Normalize uploaded artifact digest
+        id: normalize
+        env:
+          RAW_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          [[ "${RAW_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          printf 'artifact_digest=sha256:%s\n' "${RAW_ARTIFACT_DIGEST}" >>"${GITHUB_OUTPUT}"
 
   consume:
     needs: materialize

@@ -36,7 +36,7 @@ func TestPolicyBaselineReadyActivationWorkflowContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read policy baseline activation workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "88a6866d7712bf3f2b309ed9758e5a1818f59cd47fc562b65f456258f87e053d")
+	assertWorkflowSourceDigest(t, data, "92adca2ec2172cc2c2fbdd0fe6703183d330d8a7a64909eb08f1b01d7b08768e")
 	var workflow struct {
 		On          map[string]yaml.Node                      `yaml:"on"`
 		Permissions map[string]string                         `yaml:"permissions"`
@@ -81,7 +81,7 @@ func TestPolicyBaselineReadyActivationWorkflowContract(t *testing.T) {
 	}
 	wantOutputs := map[string]string{
 		"artifact_name":   "${{ steps.materialize.outputs.artifact_name }}",
-		"artifact_digest": "${{ steps.upload.outputs.artifact-digest }}",
+		"artifact_digest": "${{ steps.normalize.outputs.artifact_digest }}",
 		"baseline_sha256": "${{ steps.materialize.outputs.baseline_sha256 }}",
 		"expected_sha":    "${{ steps.materialize.outputs.expected_sha }}",
 		"expected_tree":   "${{ steps.materialize.outputs.expected_tree }}",
@@ -95,6 +95,7 @@ func TestPolicyBaselineReadyActivationWorkflowContract(t *testing.T) {
 		"Verify exact automatic activation and decode attested inputs",
 		"Materialize canonical exact-main baseline readiness",
 		"Upload exact-main baseline readiness artifact",
+		"Normalize uploaded artifact digest",
 	}
 	assertPolicyBaselineReadySteps(t, materialize.Steps, wantMaterializeSteps)
 	checkout := materialize.Steps[0]
@@ -149,6 +150,39 @@ func TestPolicyBaselineReadyActivationWorkflowContract(t *testing.T) {
 	if upload.ID != "upload" || upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
 		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != "90" {
 		t.Fatalf("policy baseline upload drifted: %+v", upload)
+	}
+	normalize := materialize.Steps[5]
+	if normalize.ID != "normalize" || !reflect.DeepEqual(normalize.Env, map[string]string{
+		"RAW_ARTIFACT_DIGEST": "${{ steps.upload.outputs.artifact-digest }}",
+	}) || !strings.Contains(normalize.Run, `"${RAW_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$`) ||
+		!strings.Contains(normalize.Run, `artifact_digest=sha256:%s`) {
+		t.Fatalf("artifact digest normalization drifted: %+v", normalize)
+	}
+	normalizeOutput := filepath.Join(t.TempDir(), "output")
+	normalizeCommand := exec.Command("bash")
+	normalizeCommand.Stdin = strings.NewReader(normalize.Run)
+	normalizeCommand.Env = append(os.Environ(),
+		"RAW_ARTIFACT_DIGEST="+strings.Repeat("a", 64),
+		"GITHUB_OUTPUT="+normalizeOutput,
+	)
+	if output, err := normalizeCommand.CombinedOutput(); err != nil {
+		t.Fatalf("normalize real bare upload-artifact digest: %v output=%s", err, output)
+	}
+	normalized, err := os.ReadFile(normalizeOutput)
+	if err != nil {
+		t.Fatalf("read normalized artifact digest: %v", err)
+	}
+	if string(normalized) != "artifact_digest=sha256:"+strings.Repeat("a", 64)+"\n" {
+		t.Fatalf("normalized artifact digest drifted: %q", normalized)
+	}
+	rejectPrefixed := exec.Command("bash")
+	rejectPrefixed.Stdin = strings.NewReader(normalize.Run)
+	rejectPrefixed.Env = append(os.Environ(),
+		"RAW_ARTIFACT_DIGEST=sha256:"+strings.Repeat("a", 64),
+		"GITHUB_OUTPUT="+filepath.Join(t.TempDir(), "output"),
+	)
+	if output, err := rejectPrefixed.CombinedOutput(); err == nil {
+		t.Fatalf("normalizer unexpectedly accepted a prefixed action output: %s", output)
 	}
 
 	consume := workflow.Jobs["consume"]
