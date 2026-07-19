@@ -21,7 +21,7 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP2 terminal watchdog report workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "1b4051f3e18cb650956256be98eebc71e0394fee0073842e8e88caf7680f44d8")
+	assertWorkflowSourceDigest(t, data, "e520114b4ced05444e9f3c8b6f64b916e7dcfb0cfd1c8b5d92eacb9db1d28cfd")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -138,10 +138,17 @@ func TestRP2TerminalWatchdogReportIsHostedReadOnly(t *testing.T) {
 	wantClassifyEnv := map[string]string{
 		"EXPECTED_TERMINAL_OID":  "${{ inputs.expected_terminal_oid }}",
 		"EXPECTED_TERMINAL_MODE": "${{ inputs.expected_terminal_mode }}",
-		"GH_TOKEN":               "${{ github.token }}",
+		"GITHUB_TOKEN":           "${{ github.token }}",
 	}
 	if !reflect.DeepEqual(classify.Env, wantClassifyEnv) {
 		t.Fatalf("terminal watchdog classifier environment drifted: %+v", classify.Env)
+	}
+	readerSource, err := os.ReadFile("../../cmd/fugue-release-terminal-read/main.go")
+	if err != nil {
+		t.Fatalf("read terminal reader source: %v", err)
+	}
+	if !strings.Contains(string(readerSource), `os.Getenv("GITHUB_TOKEN")`) {
+		t.Fatal("terminal watchdog classifier token must match the production reader contract")
 	}
 	for _, required := range []string{
 		`go run ./cmd/fugue-release-terminal-read`,
@@ -286,7 +293,7 @@ exec "$@"
 				"GITHUB_SHA="+strings.Repeat("c", 40),
 				"EXPECTED_TERMINAL_OID="+want.oid,
 				"EXPECTED_TERMINAL_MODE="+want.mode,
-				"GH_TOKEN=test-token",
+				"GITHUB_TOKEN=test-token",
 			)
 			output, runErr := command.CombinedOutput()
 			if !want.success {

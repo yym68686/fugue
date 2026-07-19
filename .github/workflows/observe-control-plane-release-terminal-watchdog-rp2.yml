@@ -95,7 +95,7 @@ jobs:
         env:
           EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
           EXPECTED_TERMINAL_MODE: ${{ inputs.expected_terminal_mode }}
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           readonly evidence_dir="${RUNNER_TEMP}/fugue-rp2-terminal-watchdog-report"
