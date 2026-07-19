@@ -22,7 +22,7 @@ func TestRP1TerminalSuccessMaterializerIsHostedObjectOnlyAndSourceBound(t *testi
 	if err != nil {
 		t.Fatalf("read RP1 terminal success materializer: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "0f2f0ed9d90b8abe1a8423491c13bb8d6aa160c9d2f066b7a449f3c85c50e2b7")
+	assertWorkflowSourceDigest(t, data, "a7fef98206a29f51f34e8a1b7d7abf4171c51bffa809b06282144388e76d1a30")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -85,7 +85,7 @@ func TestRP1TerminalSuccessMaterializerIsHostedObjectOnlyAndSourceBound(t *testi
 	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
 		"materialize-success-finalization": {Steps: job.Steps},
 	}, map[string]string{
-		"materialize-success-finalization/Verify exact success materialization authorization":                      "dc5457fb554ca9ad3c5407a706800e0a6a3357d985f285792697251dae0e5bda",
+		"materialize-success-finalization/Verify exact success materialization authorization":                      "9aee34b20d0ee32876e08d1fd6fe7254929c1dbd3a0b2a806409a180b0e28f01",
 		"materialize-success-finalization/Write success finalization intent evidence":                              "7bd3e21a0efc0d2080b58c88ceb9783c1a7cd62e275defc0062c1fc1ff1e1b53",
 		"materialize-success-finalization/Observe unchanged production health before success object write":         "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
 		"materialize-success-finalization/Materialize canonical success finalization objects without moving a ref": "f39b03869293af3d91c304dff04e8619b630bde5e8dc51997a6d07ed77bf44fa",
@@ -131,8 +131,8 @@ func TestRP1TerminalSuccessMaterializerIsHostedObjectOnlyAndSourceBound(t *testi
 		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
 		`"${GITHUB_REF}" == 'refs/heads/main'`,
 		`policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1`,
-		`A\t.github/workflows/materialize-control-plane-release-terminal-success-rp1.yml`,
-		`A\tinternal/platformsafety/release_terminal_success_materializer_workflow_test.go`,
+		`M\t.github/workflows/materialize-control-plane-release-terminal-success-rp1.yml`,
+		`M\tinternal/platformsafety/release_terminal_success_materializer_workflow_test.go`,
 		`"${terminal_oid}" == "${RESERVATION_OID}"`,
 		`"${run_status}" == 'completed' && "${run_conclusion}" == 'success'`,
 		`.github/workflows/write-control-plane-release-terminal-rp1.yml`,
@@ -147,6 +147,10 @@ func TestRP1TerminalSuccessMaterializerIsHostedObjectOnlyAndSourceBound(t *testi
 	}
 	if strings.Contains(verify.Run, `< <(`) {
 		t.Fatal("success materializer verifier must not hide source command status through process substitution")
+	}
+	upload := job.Steps[3]
+	if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" {
+		t.Fatalf("success materializer upload action must use the full reviewed SHA: %+v", upload)
 	}
 
 	intent := job.Steps[2]
