@@ -1,0 +1,264 @@
+name: observe-control-plane-release-terminal-watchdog-rp2
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main policy SHA authorized for one report-only watchdog observation
+        required: true
+        type: string
+      expected_terminal_oid:
+        description: Exact terminal object OID or absent
+        required: true
+        type: string
+      expected_terminal_mode:
+        description: Exact expected terminal mode
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-terminal-watchdog-report-rp2
+  cancel-in-progress: false
+
+jobs:
+  observe-terminal-watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout exact terminal watchdog policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify exact report-only watchdog authorization
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          EXPECTED_TERMINAL_MODE: ${{ inputs.expected_terminal_mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly terminal_ref='refs/heads/fugue-control-plane-release-terminal-state'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${EXPECTED_TERMINAL_OID}" == 'absent' || "${EXPECTED_TERMINAL_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EXPECTED_TERMINAL_MODE}" =~ ^(absent|reservation|success|frozen|indeterminate)$ ]] || exit 1
+          if [[ "${EXPECTED_TERMINAL_OID}" == 'absent' ]]; then
+            [[ "${EXPECTED_TERMINAL_MODE}" == 'absent' ]] || exit 1
+          else
+            [[ "${EXPECTED_TERMINAL_MODE}" != 'absent' ]] || exit 1
+          fi
+
+          policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1
+          read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
+          [[ -z "${extra:-}" && "${policy_commit}" == "${GITHUB_SHA}" && "${policy_parent}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1
+          mapfile -t actual_changes <<<"${actual_changes_text}"
+          expected_changes=(
+            $'A\t.github/workflows/observe-control-plane-release-terminal-watchdog-rp2.yml'
+            $'A\tinternal/platformsafety/release_terminal_watchdog_report_workflow_test.go'
+          )
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[${index}]}" == "${expected_changes[${index}]}" ]] || exit 1
+          done
+          git diff --check "${policy_parent}" "${GITHUB_SHA}" || exit 1
+          git diff --exit-code --ignore-submodules "${GITHUB_SHA}" -- || exit 1
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+          [[ -f cmd/fugue-release-terminal-read/main.go && -f internal/releaseterminal/resolver.go ]] || exit 1
+
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-terminal-state" \
+            --jq 'if length == 0 then "absent" elif length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-terminal-state" and .[0].object.type == "commit" then .[0].object.sha else "invalid" end')" || exit 1
+          [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+
+      - name: Classify stable terminal state without mutation
+        env:
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          EXPECTED_TERMINAL_MODE: ${{ inputs.expected_terminal_mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-rp2-terminal-watchdog-report"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+
+          reader_status=0
+          set +e
+          timeout --kill-after=2s 90s go run ./cmd/fugue-release-terminal-read \
+            --repository "${GITHUB_REPOSITORY}" >"${evidence_dir}/reader.json" 2>"${evidence_dir}/reader.err"
+          reader_status=$?
+          set -e
+
+          observed_state='indeterminate'
+          terminal_oid='unknown'
+          terminal_mode='indeterminate'
+          source_run_id=''
+          source_run_attempt=''
+          source_head_sha=''
+          source_workflow=''
+          source_document_conclusion=''
+          if [[ "${reader_status}" == '0' ]]; then
+            reader_fields="$(python3 - "${evidence_dir}/reader.json" \
+              "${EXPECTED_TERMINAL_OID}" "${EXPECTED_TERMINAL_MODE}" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          expected_oid, expected_mode = sys.argv[2:]
+          raw = path.read_bytes()
+          if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
+              raise SystemExit("terminal reader output is not canonical one-LF JSON")
+          value = json.loads(raw)
+          if value.get("schema_version") != 1 or value.get("ref") != "refs/heads/fugue-control-plane-release-terminal-state":
+              raise SystemExit("terminal reader identity drifted")
+          state = value.get("state")
+          if state == "absent":
+              if set(value) != {"schema_version", "ref", "state"} or expected_oid != "absent" or expected_mode != "absent":
+                  raise SystemExit("absent terminal observation drifted")
+              print("\t".join(("absent", "absent", "absent", "", "", "", "", "")))
+          elif state == "present":
+              if set(value) != {"schema_version", "ref", "state", "object_oid", "document"}:
+                  raise SystemExit("present terminal observation schema drifted")
+              oid = value.get("object_oid")
+              document = value.get("document")
+              if not isinstance(oid, str) or re.fullmatch(r"[0-9a-f]{40}", oid) is None or not isinstance(document, dict):
+                  raise SystemExit("present terminal observation is malformed")
+              mode = document.get("terminal_mode")
+              if oid != expected_oid or mode != expected_mode:
+                  raise SystemExit("terminal expectation drifted")
+              fields = (
+                  "present", oid, mode, str(document.get("source_run_id", "")),
+                  str(document.get("source_run_attempt", "")), str(document.get("source_head_sha", "")),
+                  str(document.get("source_workflow", "")), str(document.get("source_conclusion", "")),
+              )
+              if any("\t" in field or "\n" in field for field in fields):
+                  raise SystemExit("terminal observation contains control characters")
+              print("\t".join(fields))
+          else:
+              raise SystemExit("terminal reader state is unsupported")
+          PY
+            )" || exit 1
+            IFS=$'\t' read -r observed_state terminal_oid terminal_mode source_run_id source_run_attempt \
+              source_head_sha source_workflow source_document_conclusion extra <<<"${reader_fields}" || exit 1
+            [[ -z "${extra:-}" ]] || exit 1
+          else
+            [[ "${EXPECTED_TERMINAL_MODE}" == 'indeterminate' ]] || exit 1
+            [[ "${EXPECTED_TERMINAL_OID}" != 'absent' ]] || exit 1
+            terminal_oid="${EXPECTED_TERMINAL_OID}"
+          fi
+
+          source_read_status=0
+          source_run_fields=''
+          if [[ "${terminal_mode}" == 'reservation' ]]; then
+            set +e
+            source_run_fields="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${source_run_id}" \
+              --jq '[.head_sha,.status,(.conclusion // ""),.run_attempt,.event,.path] | @tsv')"
+            source_read_status=$?
+            set -e
+          fi
+
+          python3 - "${evidence_dir}/observation.json" "${reader_status}" "${observed_state}" \
+            "${terminal_oid}" "${terminal_mode}" "${source_run_id}" "${source_run_attempt}" \
+            "${source_head_sha}" "${source_workflow}" "${source_document_conclusion}" \
+            "${source_read_status}" "${source_run_fields}" <<'PY' || exit 1
+          import datetime, json, os, re, sys
+          (output, reader_status, observed_state, terminal_oid, terminal_mode, source_run_id,
+           source_run_attempt, source_head, source_workflow, source_document_conclusion,
+           source_read_status, source_run_fields) = sys.argv[1:]
+          reader_status = int(reader_status)
+          source_read_status = int(source_read_status)
+          classification = "indeterminate_reader_failure"
+          action = "manual_evidence_required"
+          source_status = None
+          source_conclusion = None
+          if reader_status == 0:
+              if terminal_mode == "absent":
+                  classification, action = "freeze_candidate_missing", "freeze_required"
+              elif terminal_mode == "frozen":
+                  classification, action = "settled_frozen", "none"
+              elif terminal_mode == "success":
+                  classification, action = "settled_success", "none"
+              elif terminal_mode == "reservation":
+                  if source_read_status != 0:
+                      classification, action = "indeterminate_source_run", "manual_evidence_required"
+                  else:
+                      fields = source_run_fields.split("\t")
+                      if len(fields) != 6:
+                          raise SystemExit("source run evidence field count drifted")
+                      run_head, source_status, source_conclusion, run_attempt, event, path = fields
+                      if (run_head != source_head or run_attempt != source_run_attempt or
+                              event != "workflow_dispatch" or path != source_workflow):
+                          classification, action = "indeterminate_source_identity", "manual_evidence_required"
+                      elif source_status in {"queued", "in_progress", "pending", "requested", "waiting"} and source_conclusion == "":
+                          classification, action = "reservation_active", "none"
+                      elif source_status == "completed" and source_conclusion == "success":
+                          classification, action = "reservation_stale_success", "freeze_required"
+                      elif source_status == "completed" and source_conclusion != "":
+                          classification, action = "reservation_terminal_failure", "freeze_required"
+                      else:
+                          classification, action = "indeterminate_source_state", "manual_evidence_required"
+              else:
+                  raise SystemExit("terminal mode is unsupported")
+          payload = {
+              "schema_version": 1,
+              "workflow": "observe-control-plane-release-terminal-watchdog-rp2",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "policy_sha": os.environ["GITHUB_SHA"],
+              "terminal_ref": "refs/heads/fugue-control-plane-release-terminal-state",
+              "expected_terminal_oid": os.environ["EXPECTED_TERMINAL_OID"],
+              "expected_terminal_mode": os.environ["EXPECTED_TERMINAL_MODE"],
+              "reader_status": reader_status,
+              "observed_state": observed_state,
+              "terminal_oid": terminal_oid,
+              "terminal_mode": terminal_mode,
+              "classification": classification,
+              "action": action,
+              "source_run_id": source_run_id or None,
+              "source_document_conclusion": source_document_conclusion or None,
+              "source_run_status": source_status,
+              "source_run_conclusion": source_conclusion,
+              "ref_mutation_attempted": False,
+              "object_mutation_attempted": False,
+              "cluster_mutation_attempted": False,
+              "git_history_rewritten": False,
+              "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          }
+          if payload["expected_terminal_oid"] != terminal_oid:
+              raise SystemExit("watchdog evidence terminal OID drifted")
+          if payload["expected_terminal_mode"] != terminal_mode:
+              raise SystemExit("watchdog evidence terminal mode drifted")
+          with open(output, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+          observation_digest="sha256:$(sha256sum "${evidence_dir}/observation.json" | awk '{print $1}')" || exit 1
+          printf 'watchdog observation digest: %s\n' "${observation_digest}" >>"${GITHUB_STEP_SUMMARY}" || exit 1
+
+      - name: Upload report-only terminal watchdog evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-rp2-terminal-watchdog-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-rp2-terminal-watchdog-report/observation.json
+          if-no-files-found: error
+          retention-days: 90
