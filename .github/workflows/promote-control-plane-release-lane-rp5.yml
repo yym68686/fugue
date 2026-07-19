@@ -69,7 +69,7 @@ jobs:
           EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
           EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
           EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
@@ -84,6 +84,15 @@ jobs:
 
           readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
           readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          github_api_get() {
+            local path="${1:?GitHub API path is required}"
+            timeout --kill-after=2s 10s curl \
+              --fail --silent --show-error --location \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/${path}"
+          }
           policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
           [[ "${policy_commit}" == "${GITHUB_SHA}" ]] || exit 1
           for policy_path in "${workflow_path}" "${test_path}"; do
@@ -98,8 +107,8 @@ jobs:
             actual_changes+=("${change}")
           done <<<"${actual_changes_text}"
           expected_changes=(
-            $'A\t.github/workflows/promote-control-plane-release-lane-rp5.yml'
-            $'A\tinternal/platformsafety/release_lane_promotion_workflow_test.go'
+            $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml'
+            $'M\tinternal/platformsafety/release_lane_promotion_workflow_test.go'
           )
           [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
           for index in "${!expected_changes[@]}"; do
@@ -109,16 +118,40 @@ jobs:
           git diff --exit-code --ignore-submodules "${GITHUB_SHA}" -- || exit 1
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || exit 1
 
-          main_head="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          main_head="$(github_api_get "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" | python3 -c '
+          import json, re, sys
+          value = json.load(sys.stdin)
+          oid = value.get("object", {}).get("sha") if type(value) is dict else None
+          if type(oid) is not str or re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+              raise SystemExit("main ref response drifted")
+          print(oid)
+          ')" || exit 1
           [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
-          deploy_state="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" --jq '.state')" || exit 1
+          deploy_state="$(github_api_get "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" | python3 -c '
+          import json, sys
+          value = json.load(sys.stdin)
+          state = value.get("state") if type(value) is dict else None
+          if type(state) is not str:
+              raise SystemExit("deploy workflow response drifted")
+          print(state)
+          ')" || exit 1
           [[ "${deploy_state}" == 'disabled_manually' ]] || exit 1
-          baseline_oid="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
-          terminal_oid="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-terminal-state" --jq '.object.sha')" || exit 1
+          baseline_oid="$(github_api_get "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" | python3 -c '
+          import json, re, sys
+          value = json.load(sys.stdin)
+          oid = value.get("object", {}).get("sha") if type(value) is dict else None
+          if type(oid) is not str or re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+              raise SystemExit("baseline ref response drifted")
+          print(oid)
+          ')" || exit 1
+          terminal_oid="$(github_api_get "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-terminal-state" | python3 -c '
+          import json, re, sys
+          value = json.load(sys.stdin)
+          oid = value.get("object", {}).get("sha") if type(value) is dict else None
+          if type(oid) is not str or re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+              raise SystemExit("terminal ref response drifted")
+          print(oid)
+          ')" || exit 1
           [[ "${baseline_oid}" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
           [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
 
@@ -218,9 +251,24 @@ jobs:
           [[ -z "${extra:-}" && "${observed_terminal_mode}" == 'frozen' && "${terminal_previous}" == "${terminal_parent}" ]] || exit 1
 
           for run_status in queued in_progress waiting pending requested; do
-            other_runs="$(timeout --kill-after=2s 10s gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" \
-              --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id")" || exit 1
+            other_runs="$(github_api_get \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" | \
+              python3 -c '
+          import json, sys
+          value = json.load(sys.stdin)
+          current = int(sys.argv[1])
+          runs = value.get("workflow_runs") if type(value) is dict else None
+          if type(runs) is not list:
+              raise SystemExit("Actions runs response drifted")
+          identifiers = []
+          for run in runs:
+              identifier = run.get("id") if type(run) is dict else None
+              if type(identifier) is not int:
+                  raise SystemExit("Actions run identity drifted")
+              if identifier != current:
+                  identifiers.append(str(identifier))
+          print("\n".join(identifiers))
+          ' "${GITHUB_RUN_ID}")" || exit 1
             [[ -z "${other_runs}" ]] || exit 1
           done
 

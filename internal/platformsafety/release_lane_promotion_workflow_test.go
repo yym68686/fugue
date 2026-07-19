@@ -20,7 +20,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "598b7a8b6644f5a2e4ec2cbcdeef8af86c80e5de6fc9e3fa4e5a14562eaa0f54")
+	assertWorkflowSourceDigest(t, data, "63ad76296a83211127ad01d64ce39ba708af36c402d0e811fe815e378f2be1ef")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -150,8 +150,12 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
 		`"${GITHUB_REF}" == 'refs/heads/main'`,
 		`"${policy_commit}" == "${GITHUB_SHA}"`,
-		`A\t.github/workflows/promote-control-plane-release-lane-rp5.yml`,
-		`A\tinternal/platformsafety/release_lane_promotion_workflow_test.go`,
+		`M\t.github/workflows/promote-control-plane-release-lane-rp5.yml`,
+		`M\tinternal/platformsafety/release_lane_promotion_workflow_test.go`,
+		`github_api_get()`,
+		`curl \`,
+		`--header "Authorization: Bearer ${GITHUB_TOKEN}"`,
+		`--header 'X-GitHub-Api-Version: 2022-11-28'`,
 		`"${RUNNER_NAME}" == "${EXPECTED_RUNNER_NAME}"`,
 		`"${RUNNER_OS}" == 'Linux'`,
 		`"${RUNNER_ARCH}" == 'X64'`,
@@ -167,11 +171,14 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"${represented_previous}" == "${baseline_parent}"`,
 		`git merge-base --is-ancestor "${EXPECTED_RUNTIME_SHA}" "${GITHUB_SHA}"`,
 		`for run_status in queued in_progress waiting pending requested`,
-		`select(.id != ${GITHUB_RUN_ID})`,
+		`if identifier != current:`,
 	} {
 		if !strings.Contains(authorize.Run, required) {
 			t.Fatalf("lane qualification authorization must contain %q", required)
 		}
+	}
+	if strings.Contains(authorize.Run, "gh api") {
+		t.Fatal("self-hosted lane qualification must not depend on the absent gh CLI")
 	}
 
 	qualifyRuntime := qualify.Steps[2]
@@ -298,6 +305,61 @@ func TestRP5ReleaseLanePromotionFrozenTerminalWorkflowEnum(t *testing.T) {
 				t.Fatalf("frozen terminal parser accepted unsupported workflow: output=%s", output)
 			}
 		})
+	}
+}
+
+func TestRP5ReleaseLanePromotionSelfHostedGitHubClientUsesCurl(t *testing.T) {
+	t.Parallel()
+
+	authorize := rp5PromotionWorkflowStep(t, "qualify-control-plane-lane", "Verify exact read-only lane qualification authorization")
+	const startMarker = "github_api_get() {\n"
+	const endMarker = "\n}\npolicy_commit="
+	start := strings.Index(authorize.Run, startMarker)
+	if start < 0 {
+		t.Fatal("self-hosted GitHub API client start marker is absent")
+	}
+	endOffset := strings.Index(authorize.Run[start:], endMarker)
+	if endOffset < 0 {
+		t.Fatal("self-hosted GitHub API client end marker is absent")
+	}
+	client := authorize.Run[start : start+endOffset+2]
+
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "bin")
+	if err := os.Mkdir(mockBin, 0o700); err != nil {
+		t.Fatalf("create mock bin: %v", err)
+	}
+	argumentsPath := filepath.Join(tempDir, "curl-arguments")
+	writeRP5PromotionExecutable(t, filepath.Join(mockBin, "timeout"), "#!/usr/bin/env bash\nset -euo pipefail\nshift 2\nexec \"$@\"\n")
+	writeRP5PromotionExecutable(t, filepath.Join(mockBin, "curl"), `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >"${CURL_ARGUMENTS}"
+printf '%s\n' '{"object":{"sha":"1111111111111111111111111111111111111111"}}'
+`)
+	command := exec.Command("bash", "-c", client+"\ngithub_api_get repos/example/ref")
+	command.Env = append(os.Environ(),
+		"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"CURL_ARGUMENTS="+argumentsPath,
+		"GITHUB_TOKEN=test-token",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("self-hosted curl GitHub client failed without gh: %v output=%s", err, output)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatalf("read curl arguments: %v", err)
+	}
+	for _, required := range []string{
+		"--fail", "--silent", "--show-error", "--location",
+		"Accept: application/vnd.github+json",
+		"Authorization: Bearer test-token",
+		"X-GitHub-Api-Version: 2022-11-28",
+		"https://api.github.com/repos/example/ref",
+	} {
+		if !strings.Contains(string(arguments), required) {
+			t.Fatalf("self-hosted curl arguments must contain %q: %s", required, arguments)
+		}
 	}
 }
 
