@@ -189,23 +189,38 @@ run_failure_case dig_version_mismatch TEST_DIG_VERSION_OUTPUT 'DiG 9.98.0'
 
 python3 - \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" \
-  "${REPO_ROOT}/.github/workflows/release-public-data-plane.yml" <<'PY'
+  "${REPO_ROOT}/.github/workflows/release-public-data-plane.yml" \
+  "${REPO_ROOT}/.github/actions/operational-domain-guarded-deploy/action.yml" <<'PY'
 from pathlib import Path
 import sys
 
-deploy_path, public_path = map(Path, sys.argv[1:])
+deploy_path, public_path, action_path = map(Path, sys.argv[1:])
 deploy = deploy_path.read_text(encoding="utf-8")
 public = public_path.read_text(encoding="utf-8")
+action = action_path.read_text(encoding="utf-8")
 prepare = "run: ./scripts/prepare_authoritative_dns_dig.sh"
+guarded_deploy = "uses: ./.github/actions/operational-domain-guarded-deploy"
+upgrade = "run: ./scripts/upgrade_fugue_control_plane.sh"
 
 if deploy.count(prepare) != 1:
     raise SystemExit("control-plane deploy workflow must invoke the shared DiG prerequisite exactly once")
 if public.count(prepare) != 1:
     raise SystemExit("public data-plane workflow must invoke the shared DiG prerequisite exactly once")
-if deploy.index(prepare) > deploy.index("run: ./scripts/upgrade_fugue_control_plane.sh"):
+if deploy.count(guarded_deploy) != 1:
+    raise SystemExit("control-plane deploy workflow must invoke the guarded deploy action exactly once")
+if deploy.index(prepare) > deploy.index(guarded_deploy):
     raise SystemExit("control-plane DiG prerequisite must run before the release mutation entrypoint")
 if public.index(prepare) > public.index("run: ./scripts/release_fugue_public_data_plane.sh"):
     raise SystemExit("public data-plane DiG prerequisite must run before the release mutation entrypoint")
+if action.count(upgrade) != 2:
+    raise SystemExit("guarded deploy action must invoke exactly one prepare and one apply upgrade phase")
+prepare_phase = action.index("FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE: prepare")
+prepare_run = action.index(upgrade, prepare_phase)
+upload = action.index("uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", prepare_run)
+apply_phase = action.index("FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE: apply", upload)
+apply_run = action.index(upgrade, apply_phase)
+if not prepare_phase < prepare_run < upload < apply_phase < apply_run:
+    raise SystemExit("guarded deploy action must order prepare, pinned upload, and apply")
 for label, workflow in (("control-plane", deploy), ("public data-plane", public)):
     if "apt-get download" in workflow or "dpkg-deb --extract" in workflow:
         raise SystemExit(f"{label} workflow duplicated DiG provisioning logic instead of using the shared script")
