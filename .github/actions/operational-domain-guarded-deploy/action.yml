@@ -1,5 +1,5 @@
 name: Operational-domain guarded control-plane deploy
-description: Uploads report-only operational-domain evidence before the atomic adapter may mutate production.
+description: Uploads report-only operational-domain and build-vs-activation evidence before the atomic adapter may mutate production.
 
 runs:
   using: composite
@@ -22,6 +22,18 @@ runs:
         include-hidden-files: false
         overwrite: false
 
+    - name: Upload build-vs-activation report-only evidence
+      id: image-activation-report-upload
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fugue-control-plane-build-activation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}
+        if-no-files-found: error
+        retention-days: 90
+        include-hidden-files: false
+        overwrite: false
+
     - name: Apply exact authorized control-plane release
       shell: bash
       env:
@@ -29,4 +41,7 @@ runs:
         FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID: ${{ steps.operational-report-upload.outputs.artifact-id }}
         FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST: ${{ steps.operational-report-upload.outputs.artifact-digest }}
         FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL: ${{ steps.operational-report-upload.outputs.artifact-url }}
+        FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID: ${{ steps.image-activation-report-upload.outputs.artifact-id }}
+        FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST: ${{ steps.image-activation-report-upload.outputs.artifact-digest }}
+        FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL: ${{ steps.image-activation-report-upload.outputs.artifact-url }}
       run: ./scripts/upgrade_fugue_control_plane.sh

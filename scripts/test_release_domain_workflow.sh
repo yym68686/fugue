@@ -286,6 +286,8 @@ upgrade_env = upgrade.fetch("env")
   "FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL" => "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
   "FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE" => "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
   "FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE" => "${{ runner.temp }}/fugue-release-domain-public/operational-domain-evidence.json",
+  "FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR" => "${{ runner.temp }}/fugue-release-domain-public/build-activation-evidence",
+  "FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST" => "${{ needs.build.outputs.verified_image_artifacts_digest }}",
   "FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS" => "${{ needs.build.outputs.image_targets }}",
   "FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
   "FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST" => "${{ needs.build.outputs.api_image_digest }}",
@@ -323,6 +325,7 @@ assert_equal(
   [
     "Prepare operational-domain report-only evidence",
     "Upload operational-domain report-only evidence",
+    "Upload build-vs-activation report-only evidence",
     "Apply exact authorized control-plane release",
   ],
   "operational action step order",
@@ -348,6 +351,24 @@ assert_equal(operational_upload.fetch("with").fetch("if-no-files-found"), "error
 assert_equal(operational_upload.fetch("with").fetch("retention-days"), 90, "operational report retention")
 assert_equal(operational_upload.fetch("with").fetch("include-hidden-files"), false, "operational report hidden-file policy")
 assert_equal(operational_upload.fetch("with").fetch("overwrite"), false, "operational report overwrite policy")
+activation_upload = action_step(operational_action, "Upload build-vs-activation report-only evidence")
+assert_equal(activation_upload["id"], "image-activation-report-upload", "build-activation upload id")
+assert_equal(activation_upload["if"], "always()", "build-activation upload condition")
+assert_equal(activation_upload["continue-on-error"], nil, "build-activation upload continue-on-error")
+assert_equal(
+  activation_upload["uses"],
+  "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  "build-activation upload pin",
+)
+assert_equal(
+  activation_upload.fetch("with").fetch("path"),
+  "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}",
+  "build-activation upload path",
+)
+assert_equal(activation_upload.fetch("with").fetch("if-no-files-found"), "error", "build-activation missing-file policy")
+assert_equal(activation_upload.fetch("with").fetch("retention-days"), 90, "build-activation retention")
+assert_equal(activation_upload.fetch("with").fetch("include-hidden-files"), false, "build-activation hidden-file policy")
+assert_equal(activation_upload.fetch("with").fetch("overwrite"), false, "build-activation overwrite policy")
 apply = action_step(operational_action, "Apply exact authorized control-plane release")
 assert_equal(apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE"), "apply", "apply phase")
 assert_equal(
@@ -364,6 +385,21 @@ assert_equal(
   apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL"),
   "${{ steps.operational-report-upload.outputs.artifact-url }}",
   "apply artifact URL proof",
+)
+assert_equal(
+  apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID"),
+  "${{ steps.image-activation-report-upload.outputs.artifact-id }}",
+  "apply build-activation artifact id proof",
+)
+assert_equal(
+  apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST"),
+  "${{ steps.image-activation-report-upload.outputs.artifact-digest }}",
+  "apply build-activation artifact digest proof",
+)
+assert_equal(
+  apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL"),
+  "${{ steps.image-activation-report-upload.outputs.artifact-url }}",
+  "apply build-activation artifact URL proof",
 )
 assert_equal(apply.fetch("run"), "./scripts/upgrade_fugue_control_plane.sh", "apply entrypoint")
 deploy_uploads = Array(deploy["steps"]).select { |candidate| candidate["uses"].to_s.start_with?("actions/upload-artifact@") }
@@ -533,9 +569,14 @@ all_uploads.insert(
   1,
   ["deploy", operational_upload.fetch("with").fetch("path")],
 )
+all_uploads.insert(
+  2,
+  ["deploy", activation_upload.fetch("with").fetch("path")],
+)
 allowed_uploads = [
   ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
+  ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
   ["freeze-release-lane-on-failure", "${{ runner.temp }}/fugue-release-lane-freeze/lane-freeze.json"],
 ]
 assert_equal(all_uploads, allowed_uploads, "public artifact allowlist")

@@ -17,12 +17,17 @@
 #   FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL
 #   FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE
 #   FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE
+#   FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR
+#   FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST
 #   FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE
 # Apply additionally consumes the immutable outputs of the immediately prior
 # pinned upload-artifact step:
 #   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID
 #   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST
 #   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL
+#   FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID
+#   FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST
+#   FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL
 #
 # Changed-file evidence is regenerated inside the private work directory. The
 # production implementation of control_plane_release_verify_repository_snapshot
@@ -53,21 +58,81 @@ control_plane_release_domain_validate_operational_phase() {
   local artifact_id="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID:-}"
   local artifact_digest="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST:-}"
   local artifact_url="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL:-}"
+  local activation_artifact_id="${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID:-}"
+  local activation_artifact_digest="${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST:-}"
+  local activation_artifact_url="${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL:-}"
   local expected_url=""
+  local expected_activation_url=""
 
   case "${phase}" in
     prepare)
-      [[ -z "${artifact_id}" && -z "${artifact_digest}" && -z "${artifact_url}" ]]
+      [[ -z "${artifact_id}" && -z "${artifact_digest}" && -z "${artifact_url}" &&
+        -z "${activation_artifact_id}" && -z "${activation_artifact_digest}" &&
+        -z "${activation_artifact_url}" ]]
       ;;
     apply)
       [[ "${artifact_id}" =~ ^[1-9][0-9]*$ &&
         "${artifact_digest}" =~ ^[0-9a-f]{64}$ &&
+        "${activation_artifact_id}" =~ ^[1-9][0-9]*$ &&
+        "${activation_artifact_digest}" =~ ^[0-9a-f]{64}$ &&
         -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" ]] || return 2
       expected_url="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${artifact_id}"
-      [[ "${artifact_url}" == "${expected_url}" ]]
+      expected_activation_url="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${activation_artifact_id}"
+      [[ "${artifact_url}" == "${expected_url}" &&
+        "${activation_artifact_url}" == "${expected_activation_url}" ]]
       ;;
     *) return 2 ;;
   esac
+}
+
+control_plane_release_domain_compare_build_activation_reports() {
+  (( $# == 2 )) || return 2
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+expected_names = [
+    "build-artifact-plan.json",
+    "image-activation-evidence.json",
+    "image-activation-plan.json",
+]
+payloads = []
+for directory in map(os.path.abspath, sys.argv[1:]):
+    metadata = os.lstat(directory)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise SystemExit(1)
+    if sorted(os.listdir(directory)) != expected_names:
+        raise SystemExit(1)
+    directory_payload = []
+    for name in expected_names:
+        path = os.path.join(directory, name)
+        at_path = os.lstat(path)
+        if (
+            not stat.S_ISREG(at_path.st_mode)
+            or stat.S_ISLNK(at_path.st_mode)
+            or stat.S_IMODE(at_path.st_mode) != 0o600
+            or at_path.st_uid != os.geteuid()
+            or at_path.st_nlink != 1
+        ):
+            raise SystemExit(1)
+        with open(path, "rb") as handle:
+            data = handle.read()
+            opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            at_path.st_dev, at_path.st_ino, at_path.st_size
+        ):
+            raise SystemExit(1)
+        directory_payload.append(data)
+    payloads.append(directory_payload)
+if payloads[0] != payloads[1]:
+    raise SystemExit(1)
+PY
 }
 
 control_plane_release_domain_compare_uploaded_operational_report() {
@@ -1221,9 +1286,12 @@ control_plane_release_domain_materialize_operational_report() {
   local target=""
   local source_base=""
   local artifact_digest=""
+  local activation_output=""
   local -a targets=()
   local -a target_args=()
+  local -a activation_artifact_args=()
   local -a image_plan_command=()
+  local -a activation_plan_command=()
 
   [[ -f "${plan_file}" && ! -L "${plan_file}" ]] || return 2
   [[ ! -e "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}" &&
@@ -1233,12 +1301,19 @@ control_plane_release_domain_materialize_operational_report() {
       [[ ! -e "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" &&
         ! -L "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || return 2
       report_output="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+      [[ ! -e "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" &&
+        ! -L "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" ]] || return 2
+      activation_output="${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
       ;;
     apply)
       [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" &&
         ! -L "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || return 2
       report_output="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/operational-domain-evidence.apply.json"
       [[ ! -e "${report_output}" && ! -L "${report_output}" ]] || return 2
+      [[ -d "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" &&
+        ! -L "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" ]] || return 2
+      activation_output="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/build-activation-evidence.apply"
+      [[ ! -e "${activation_output}" && ! -L "${activation_output}" ]] || return 2
       ;;
     *) return 2 ;;
   esac
@@ -1282,6 +1357,7 @@ control_plane_release_domain_materialize_operational_report() {
     control_plane_release_domain_validate_sha "${source_base}" || return 2
     control_plane_release_domain_validate_digest "${artifact_digest}" || return 2
     target_args+=(--target "${target}=${source_base}=${artifact_digest}")
+    activation_artifact_args+=(--artifact "${target}=${source_base}=${artifact_digest}")
   done
 
   image_plan_command=("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-image-plan \
@@ -1309,6 +1385,22 @@ PY
 )" || return 2
   control_plane_release_domain_validate_digest "${plan_digest}" || return 2
 
+  activation_plan_command=("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" image-activation-plans \
+    --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
+    --ownership "${CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE}" \
+    --plan "${plan_file}" \
+    --plan-digest "${plan_digest}" \
+    --base-manifest "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/base-manifest.yaml" \
+    --target-manifest "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/target-manifest.yaml" \
+    --trusted-base "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" \
+    --trusted-target "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" \
+    --provenance-digest "${FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST}" \
+    --output-dir "${activation_output}")
+  if (( ${#activation_artifact_args[@]} > 0 )); then
+    activation_plan_command+=("${activation_artifact_args[@]}")
+  fi
+  "${activation_plan_command[@]}" || return
+
   "${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-report \
     --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
     --image-plan "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}" \
@@ -1319,6 +1411,8 @@ PY
     --output "${report_output}" || return
 
   if [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" ]]; then
+    control_plane_release_domain_compare_build_activation_reports \
+      "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" "${activation_output}" || return
     control_plane_release_domain_compare_uploaded_operational_report \
       "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" "${report_output}"
   fi
@@ -2180,6 +2274,8 @@ control_plane_release_run_atomic_domain_release() {
     FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL \
     FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE \
     FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE \
+    FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR \
+    FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST \
     FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE GITHUB_RUN_ID GITHUB_RUN_ATTEMPT; do
     [[ -n "${!required:-}" ]] || {
       control_plane_release_domain_production_error "${required} is required"
@@ -2194,6 +2290,12 @@ control_plane_release_run_atomic_domain_release() {
   [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" == /* &&
     "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" != "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] || return 2
   [[ "$(dirname "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}")" == "$(dirname "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}")" ]] || return 2
+  [[ "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" == /* &&
+    "$(dirname "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}")" == "$(dirname "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}")" &&
+    "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" != "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" &&
+    "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" != "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || return 2
+  control_plane_release_domain_validate_digest \
+    "${FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST}" || return 2
   control_plane_release_domain_validate_operational_phase || return 2
   [[ "${PREVIOUS_REVISION:-}" =~ ^[1-9][0-9]*$ ]] || return 2
   control_plane_release_domain_validate_dependencies || return

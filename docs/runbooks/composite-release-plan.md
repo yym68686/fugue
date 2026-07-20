@@ -44,3 +44,25 @@ MD0 intentionally does not add:
 Existing single-domain plans remain the only executable release path. Later
 checkpoints must independently bind these contracts to exact production
 evidence before enabling any composite mutation.
+
+## MD1 report-only production evidence
+
+MD1 adds one read-only producer to the formal release prepare/apply boundary.
+Prepare derives `BuildArtifactPlan` from the exact changed-file digest and
+verified build provenance. It derives `ImageActivationPlan` independently from
+the canonical live and target manifests, matching changed container image
+digests to fixed object ownership and adapters. A shared image is assigned per
+rendered workload, not by a static image-to-domain shortcut; extra build
+outputs remain build-only.
+
+Three canonical files are uploaded as a separate artifact: the build plan, the
+resolved activation plan, and `ImageActivationEvidence`. Apply receives the
+pinned artifact identity, rederives all three files from the same sealed
+inputs, and requires byte equality. Missing ownership and other unresolved
+rendered image changes remain explicit gaps with `complete=false`; they are
+never relabeled as built-only or admitted to the resolved plan. Malformed or
+unrepresentable evidence still fails production closed.
+
+This report is not an authorization input. It is not passed to plan activation,
+transaction envelopes, adapters, Helm dispatch, rollback, or runtime baseline
+advancement. Multi-domain decomposition remains a later checkpoint.

@@ -29,6 +29,16 @@ fake_tool_log() {
 case "$(basename "$0")" in
   fake-release-evidence)
     fake_tool_log "evidence:$*"
+    if [[ "${1:-}" == "image-activation-plans" ]]; then
+      output_dir="$(fake_flag_value --output-dir "$@")" || exit 2
+      mkdir "${output_dir}" || exit 1
+      chmod 700 "${output_dir}" || exit 1
+      printf '{}\n' >"${output_dir}/build-artifact-plan.json" || exit 1
+      printf '{}\n' >"${output_dir}/image-activation-evidence.json" || exit 1
+      printf '{}\n' >"${output_dir}/image-activation-plan.json" || exit 1
+      chmod 600 "${output_dir}"/*.json || exit 1
+      exit 0
+    fi
     output="$(fake_flag_value --output "$@")" || exit 2
     if [[ "${1:-}" == "canonicalize-manifest" ]]; then
       input="$(fake_flag_value --input "$@")" || exit 2
@@ -577,14 +587,25 @@ setup_case() {
   RUNNER_TEMP="${CASE_DIR}/runner"
   FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE="${CASE_DIR}/public/evidence.json"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE="${CASE_DIR}/public/operational-domain-evidence.json"
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR="${CASE_DIR}/public/build-activation-evidence"
   mkdir "${CASE_DIR}/public"
   chmod 700 "${CASE_DIR}/public"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
   chmod 600 "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  mkdir "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
+  chmod 700 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
+  printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/build-artifact-plan.json"
+  printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json"
+  printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json"
+  chmod 600 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"/*.json
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID="5678"
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/5678"
+  FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS=""
   FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${CASE_DIR}/fake-release-evidence"
   FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL="${CASE_DIR}/fake-release-dispatch"
@@ -687,21 +708,36 @@ run_release_status() {
 assert_public_parent_and_cleanup() {
   [[ -f "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] || fail_test "public evidence is missing"
   [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || fail_test "operational report is missing"
+  [[ -d "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" ]] || fail_test "build-activation report is missing"
   python3 - "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" \
-    "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" "${RUNNER_TEMP}" <<'PY'
+    "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" \
+    "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}" "${RUNNER_TEMP}" <<'PY'
 import os
 import stat
 import sys
-evidence, operational, runner = sys.argv[1:]
+evidence, operational, activation, runner = sys.argv[1:]
 parent = os.lstat(os.path.dirname(evidence))
 artifact = os.lstat(evidence)
 operational_artifact = os.lstat(operational)
+activation_directory = os.lstat(activation)
 if stat.S_IMODE(parent.st_mode) != 0o700 or parent.st_uid != os.geteuid():
     raise SystemExit(1)
 if stat.S_IMODE(artifact.st_mode) != 0o600 or artifact.st_uid != os.geteuid():
     raise SystemExit(1)
 if stat.S_IMODE(operational_artifact.st_mode) != 0o600 or operational_artifact.st_uid != os.geteuid():
     raise SystemExit(1)
+if stat.S_IMODE(activation_directory.st_mode) != 0o700 or activation_directory.st_uid != os.geteuid():
+    raise SystemExit(1)
+if sorted(os.listdir(activation)) != [
+    "build-artifact-plan.json",
+    "image-activation-evidence.json",
+    "image-activation-plan.json",
+]:
+    raise SystemExit(1)
+for name in os.listdir(activation):
+    item = os.lstat(os.path.join(activation, name))
+    if stat.S_IMODE(item.st_mode) != 0o600 or item.st_uid != os.geteuid():
+        raise SystemExit(1)
 if os.listdir(runner):
     raise SystemExit(1)
 PY
@@ -1168,6 +1204,12 @@ case_operational_report_binds_build_target_before_dispatch() {
     "evidence:operational-image-plan --changed-evidence"
   assert_file_contains "${FAKE_LOG}" \
     "--target controller=3333333333333333333333333333333333333333=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  assert_file_contains "${FAKE_LOG}" \
+    "evidence:image-activation-plans --changed-evidence"
+  assert_file_contains "${FAKE_LOG}" \
+    "--artifact controller=3333333333333333333333333333333333333333=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  assert_file_contains "${FAKE_LOG}" \
+    "--provenance-digest sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   assert_log_order "evidence:operational-report" "dispatch:verify:"
   assert_public_parent_and_cleanup
 }
@@ -1176,13 +1218,21 @@ case_operational_prepare_stops_before_dispatch() {
   setup_case
   trap cleanup_case EXIT
   rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  rm -rf "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID=""
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST=""
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL=""
   [[ "$(run_release_status)" == "0" ]] || fail_test "operational prepare phase failed"
   [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] ||
     fail_test "operational prepare phase did not materialize its report"
+  [[ -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/build-artifact-plan.json" &&
+    -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json" &&
+    -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json" ]] ||
+    fail_test "operational prepare phase did not materialize build-activation evidence"
   [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
     fail_test "operational prepare phase unexpectedly published final evidence"
   assert_log_count 0 "helm-upgrade:"
@@ -1207,6 +1257,17 @@ case_operational_apply_requires_upload_proof() {
     fail_test "missing artifact proof unexpectedly published evidence"
 }
 
+case_build_activation_apply_requires_upload_proof() {
+  setup_case
+  trap cleanup_case EXIT
+  FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID=""
+  [[ "$(run_release_status)" == "2" ]] ||
+    fail_test "operational apply accepted missing build-activation artifact proof"
+  assert_log_count 0 "helm-upgrade:"
+  [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+    fail_test "missing build-activation artifact proof unexpectedly published evidence"
+}
+
 case_operational_apply_rejects_report_drift() {
   setup_case
   trap cleanup_case EXIT
@@ -1219,6 +1280,18 @@ case_operational_apply_rejects_report_drift() {
     fail_test "report drift unexpectedly published final evidence"
 }
 
+case_operational_apply_rejects_build_activation_drift() {
+  setup_case
+  trap cleanup_case EXIT
+  printf '{"drift":true}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json"
+  chmod 600 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json"
+  [[ "$(run_release_status)" == "2" ]] ||
+    fail_test "operational apply accepted build-activation report drift after upload"
+  assert_log_count 0 "helm-upgrade:"
+  [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+    fail_test "build-activation drift unexpectedly published final evidence"
+}
+
 case_operational_apply_activates_complete_single_domain() {
 	setup_case
 	trap cleanup_case EXIT
@@ -1227,10 +1300,14 @@ case_operational_apply_activates_complete_single_domain() {
 	FAKE_OPERATIONAL_REPORT_ELIGIBLE="true"
 	export FAKE_OUTCOME FAKE_DOMAIN FAKE_OPERATIONAL_REPORT_ELIGIBLE
 	rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	rm -rf "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL=""
 	[[ "$(run_release_status)" == "0" ]] ||
 	  fail_test "blocked prepare did not reach the durable upload boundary"
 	[[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] ||
@@ -1242,6 +1319,9 @@ case_operational_apply_activates_complete_single_domain() {
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID="5678"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/5678"
 	[[ "$(run_release_status)" == "0" ]] ||
 	  fail_test "complete operational single-domain report did not activate"
 	assert_log_count 3 "dispatch:authorize:"
@@ -1271,7 +1351,9 @@ run_case unknown case_blocked unknown
 run_case blocked-public-failure case_blocked_public_failure
 run_case operational-prepare-before-dispatch case_operational_prepare_stops_before_dispatch
 run_case operational-apply-upload-proof case_operational_apply_requires_upload_proof
+run_case build-activation-apply-upload-proof case_build_activation_apply_requires_upload_proof
 run_case operational-apply-report-drift case_operational_apply_rejects_report_drift
+run_case build-activation-apply-report-drift case_operational_apply_rejects_build_activation_drift
 run_case operational-apply-activation case_operational_apply_activates_complete_single_domain
 run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch
 for domain in node-local authoritative-dns control-plane image-cache backup; do

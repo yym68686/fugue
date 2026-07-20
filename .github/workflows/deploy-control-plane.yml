@@ -890,6 +890,8 @@ jobs:
           FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL: ${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch
           FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE: ${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json
           FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE: ${{ runner.temp }}/fugue-release-domain-public/operational-domain-evidence.json
+          FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR: ${{ runner.temp }}/fugue-release-domain-public/build-activation-evidence
+          FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST: ${{ needs.build.outputs.verified_image_artifacts_digest }}
           FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS: ${{ needs.build.outputs.image_targets }}
           FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA: ${{ needs.release-baseline.outputs.api_image_baseline_ref }}
           FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST: ${{ needs.build.outputs.api_image_digest }}
