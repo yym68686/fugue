@@ -166,6 +166,30 @@ func TestBuildImageActivationPlanKeepsAbsentCreateOutOfImageReplacement(t *testi
 	}
 }
 
+func TestBuildImageActivationReportPreservesAbsentNonImmutableTarget(t *testing.T) {
+	input := md1ActivationFixture(
+		t,
+		"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: preserved\n  namespace: fugue-system\ndata:\n  value: stable\n",
+		md1Deployment("fugue-api", "api", "registry.test/api:unreleased"),
+		[]md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}},
+		[]BuildArtifact{{Name: "api", SourceBaseCommit: md0BaseCommit, ArtifactDigest: md0Digest("d"), ProvenanceDigest: md0Digest("f")}},
+	)
+
+	activation, evidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatalf("derive report for absent non-immutable target: %v", err)
+	}
+	if len(activation.Activations) != 0 || evidence.Complete || len(evidence.Unresolved) != 1 {
+		t.Fatalf("absent non-immutable target was hidden or promoted: plan=%#v evidence=%#v", activation, evidence)
+	}
+	gap := evidence.Unresolved[0]
+	if gap.Reason != ImageActivationGapTargetNotImmutable || gap.LiveImageRef != "" ||
+		gap.ReverseRenderedDigest != "" || gap.ArtifactDigest != "" ||
+		len(gap.MatchingBuildArtifacts) != 0 {
+		t.Fatalf("absent non-immutable target evidence drifted: %#v", gap)
+	}
+}
+
 type md1OwnershipRule struct {
 	name   string
 	domain Domain

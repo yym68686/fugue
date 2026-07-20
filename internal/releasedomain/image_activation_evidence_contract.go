@@ -184,7 +184,13 @@ func verifyImageActivationGap(gap ImageActivationGap) error {
 		return err
 	}
 
-	requiresExisting := gap.Reason != ImageActivationGapAbsentCreate
+	// A non-immutable target cannot be bound to a build artifact, but the
+	// rendered workload may also be new relative to the live manifest. Keep
+	// that absence explicit as an empty live/reverse pair instead of rejecting
+	// the report before it can be archived.
+	nonImmutableAbsent := gap.Reason == ImageActivationGapTargetNotImmutable &&
+		gap.LiveImageRef == "" && gap.ReverseRenderedDigest == ""
+	requiresExisting := gap.Reason != ImageActivationGapAbsentCreate && !nonImmutableAbsent
 	if requiresExisting {
 		if !validContractText(gap.LiveImageRef, 1024) {
 			return fmt.Errorf("activation gap live image reference is invalid")
@@ -218,6 +224,9 @@ func verifyImageActivationGap(gap ImageActivationGap) error {
 			return fmt.Errorf("absent-create gap must bind one build artifact")
 		}
 	case ImageActivationGapTargetNotImmutable:
+		if (gap.LiveImageRef == "") != (gap.ReverseRenderedDigest == "") {
+			return fmt.Errorf("non-immutable target gap live and reverse evidence must be both present or both absent")
+		}
 	case ImageActivationGapArtifactNotBuilt:
 		if len(gap.MatchingBuildArtifacts) != 0 {
 			return fmt.Errorf("artifact-not-built gap must have no matching build artifact")
