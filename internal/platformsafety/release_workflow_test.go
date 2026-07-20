@@ -2813,7 +2813,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "46ec285dbd6b3fd13771f78853cd2317040b29351b34266b119ebb016074053f")
+	assertWorkflowSourceDigest(t, data, "13f8d2da63086b79bdb884d116e69250a1d95e31e5aeda01ed1ac7103c7d06c6")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2825,7 +2825,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"release-baseline/Resolve release-domain baseline":                               "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
 		"release-baseline/Resolve live image metadata":                                   "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                  "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-gate/Prepare pinned ripgrep for release safety contracts":               "dcb08a53e442e44403e37b067774b9eefa71dff30677b19df21f652f4a38b83a",
+		"release-gate/Prepare pinned ripgrep for release safety contracts":               "fd3284573ed17f45090180e1d168e8c0f143e088586882168e5cf60637390761",
 		"release-gate/Verify generated OpenAPI artifacts":                                "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
 		"release-gate/Verify release-domain safety contracts":                            "0a71d9858c02ceb5aa8aa188313276dc4a63db5dae5cc856323c533fd1051144",
 		"release-gate/Run Go tests":                                                      "1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3",

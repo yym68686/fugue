@@ -121,7 +121,7 @@ expected_ripgrep_setup = <<~'BASH'
   chmod 0500 "${tools_dir}/rg"
   [[ -f "${tools_dir}/rg" && ! -L "${tools_dir}/rg" && -x "${tools_dir}/rg" ]]
   [[ "$(stat -c '%a' "${tools_dir}/rg")" == '500' ]]
-  [[ "$("${tools_dir}/rg" --version | head -n 1)" == "ripgrep ${RIPGREP_VERSION}" ]]
+  [[ "$("${tools_dir}/rg" --version | head -n 1)" == "ripgrep ${RIPGREP_VERSION} (rev ${RIPGREP_BUILD_REV})" ]]
   [[ -f "${GITHUB_PATH}" && ! -L "${GITHUB_PATH}" ]]
   printf '%s\n' "${tools_dir}" >> "${GITHUB_PATH}"
 BASH
@@ -145,6 +145,7 @@ expected_steps = [
     "name" => "Prepare pinned ripgrep for release safety contracts",
     "env" => {
       "RIPGREP_VERSION" => "14.1.1",
+      "RIPGREP_BUILD_REV" => "4649aa9700",
       "RIPGREP_ARCHIVE_SHA256" => "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e",
     },
     "run" => expected_ripgrep_setup,
@@ -158,6 +159,12 @@ expected_steps = [
 ]
 abort("retirement tombstone: release-gate complete step specification drifted") unless
   steps == expected_steps
+ripgrep_step = steps.fetch(3)
+ripgrep_env = ripgrep_step.fetch("env")
+official_archive_version = "ripgrep 14.1.1 (rev 4649aa9700)"
+configured_archive_version = "ripgrep #{ripgrep_env.fetch("RIPGREP_VERSION")} (rev #{ripgrep_env.fetch("RIPGREP_BUILD_REV")})"
+abort("retirement tombstone: pinned ripgrep version contract rejects the official archive") unless
+  configured_archive_version == official_archive_version
 safety_step = steps.fetch(5)
 occurrences = jobs.flat_map do |_job_name, job|
   Array(job["steps"]).flat_map do |step|
