@@ -76,8 +76,12 @@ type OperationalDomainEvidence struct {
 	AdapterDomains        []Domain                        `json:"adapterDomains"`
 	IntersectionDomains   []Domain                        `json:"intersectionDomains"`
 	AdapterBindings       []OperationalAdapterBinding     `json:"adapterBindings"`
+	ConservativeOutcome   Outcome                         `json:"conservativeOutcome"`
+	ConservativeDomains   []Domain                        `json:"conservativeDomains"`
+	ConservativeDomain    Domain                          `json:"conservativeDomain,omitempty"`
 	Observation           Outcome                         `json:"observation"`
 	CandidateDomain       Domain                          `json:"candidateDomain,omitempty"`
+	ClassificationAgrees  bool                            `json:"classificationAgrees"`
 	Issues                []string                        `json:"issues"`
 	AuthorizationEligible bool                            `json:"authorizationEligible"`
 	Digest                string                          `json:"digest"`
@@ -266,6 +270,9 @@ func BuildOperationalDomainEvidence(changed ChangedFileEvidence, imagePlan Opera
 		AdapterDomains:        canonicalDomains(adapterDomains),
 		IntersectionDomains:   canonicalDomains(intersection),
 		AdapterBindings:       bindings,
+		ConservativeOutcome:   plan.Result,
+		ConservativeDomains:   canonicalDomains(plan.Domains),
+		ConservativeDomain:    plan.SelectedDomain,
 		Observation:           OutcomeUnknown,
 		Issues:                issues,
 		AuthorizationEligible: false,
@@ -281,6 +288,7 @@ func BuildOperationalDomainEvidence(changed ChangedFileEvidence, imagePlan Opera
 			report.Observation = OutcomeMultiple
 		}
 	}
+	report.ClassificationAgrees = operationalClassificationAgrees(report)
 	report.Digest = operationalEvidenceDigest(report)
 	return report, nil
 }
@@ -351,6 +359,7 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 		"rendered":      report.RenderedDomains,
 		"adapter":       report.AdapterDomains,
 		"intersection":  report.IntersectionDomains,
+		"conservative":  report.ConservativeDomains,
 	} {
 		if err := verifyCanonicalOperationalDomains(domains, label); err != nil {
 			return err
@@ -402,10 +411,51 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 			}
 		}
 	}
+	if err := verifyOperationalConservativeClassification(report); err != nil {
+		return err
+	}
+	if report.ClassificationAgrees != operationalClassificationAgrees(report) {
+		return fmt.Errorf("operational evidence classification comparison mismatch")
+	}
 	if report.Digest != operationalEvidenceDigest(report) {
 		return fmt.Errorf("operational domain evidence digest mismatch")
 	}
 	return nil
+}
+
+func verifyOperationalConservativeClassification(report OperationalDomainEvidence) error {
+	switch report.ConservativeOutcome {
+	case OutcomeZero:
+		if len(report.ConservativeDomains) != 0 || report.ConservativeDomain != "" {
+			return fmt.Errorf("conservative zero classification mismatch")
+		}
+	case OutcomeSingle:
+		if len(report.ConservativeDomains) != 1 || report.ConservativeDomain != report.ConservativeDomains[0] {
+			return fmt.Errorf("conservative single classification mismatch")
+		}
+	case OutcomeMultiple:
+		if len(report.ConservativeDomains) < 2 || report.ConservativeDomain != "" {
+			return fmt.Errorf("conservative multiple classification mismatch")
+		}
+	case OutcomeUnknown:
+		if report.ConservativeDomain != "" {
+			return fmt.Errorf("conservative unknown classification selected a domain")
+		}
+	default:
+		return fmt.Errorf("conservative classification outcome is unsupported")
+	}
+	return nil
+}
+
+func operationalClassificationAgrees(report OperationalDomainEvidence) bool {
+	if report.ConservativeOutcome != report.Observation ||
+		!equalDomains(report.ConservativeDomains, report.IntersectionDomains) {
+		return false
+	}
+	if report.Observation == OutcomeSingle {
+		return report.ConservativeDomain == report.CandidateDomain
+	}
+	return report.ConservativeDomain == "" && report.CandidateDomain == ""
 }
 
 func operationalConsumerDomains(changes []ChangedFile, targets []OperationalImageRolloutTarget, issues *[]string) []Domain {

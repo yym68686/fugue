@@ -155,12 +155,29 @@ coverage gaps, digest drift or disagreement stays `unknown`; no caller can
 provide a domain hint. Non-production command consumers are ignored only when
 the exact rollout plan proves their image is not selected.
 
-This checkpoint does not wire the report into a workflow and does not change
-`ClassifyFiles`, `BuildPlan`, `ExecutionAuthorization`, reverse ownership,
-adapter dispatch or any production mutation decision. A later report-only
-checkpoint must bind the image-plan input to the actual build job and compare
-the operational observation with the conservative planner before any separate
-activation checkpoint may be considered.
+The formal workflow now runs this contract in report-only mode before adapter
+dispatch. The image targets come only from the existing build job outputs; each
+selected target is bound to its live component source baseline and the verified
+OCI digest produced by that same build job. The ordinary conservative planner
+still renders and persists its verified bundle for `multiple` and `unknown`, but
+does so with every production surface in preserve mode. The operational report
+records the conservative outcome/domains beside the operational
+consumer/build/render/adapter intersection and a digest-bound
+`classificationAgrees` result.
+
+The report is uploaded as a separate formal artifact before any production
+write. The guarded deploy action first runs a prepare phase that cannot invoke
+an adapter, then requires the pinned upload action to return the current run's
+artifact ID, digest and URL. The apply phase rederives the report from fresh
+exact inputs and byte-matches it with the already uploaded local report before
+adapter dispatch. Missing upload proof, report drift, malformed target
+bindings, render evidence, plan digest or report output freezes the lane.
+`ClassifyFiles`, `BuildPlan`,
+`ExecutionAuthorization`, reverse ownership and adapter dispatch remain the
+sole conservative authorization path; the operational report retains
+`authorizationEligible: false` and cannot select or invoke an adapter. A later
+activation checkpoint is required before an operational single-domain result
+may affect authorization.
 
 ## Production entrypoint
 

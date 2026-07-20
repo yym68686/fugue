@@ -32,6 +32,9 @@ func TestOperationalDomainEvidenceReportsSingleWithoutAuthorizing(t *testing.T) 
 	if report.AuthorizationEligible {
 		t.Fatal("report-only evidence became authorization eligible")
 	}
+	if report.ConservativeOutcome != OutcomeUnknown || report.ClassificationAgrees {
+		t.Fatalf("conservative/operational comparison was not preserved: %#v", report)
+	}
 	if len(report.Issues) != 0 {
 		t.Fatalf("unexpected operational issues: %v", report.Issues)
 	}
@@ -52,6 +55,34 @@ func TestOperationalDomainEvidenceReportsSingleWithoutAuthorizing(t *testing.T) 
 	}
 	if !reflect.DeepEqual(decoded, report) {
 		t.Fatalf("decoded report drifted\n got=%#v\nwant=%#v", decoded, report)
+	}
+}
+
+func TestOperationalDomainEvidenceReportsClassificationAgreement(t *testing.T) {
+	changed, imagePlan, plan := operationalEvidenceFixture(t,
+		[]ChangedFile{{Status: ChangeModified, Path: "internal/controller/controller.go", ConsumerDomains: []Domain{DomainControlPlane}}},
+		[]string{"controller"},
+		[]Domain{DomainControlPlane},
+		nil,
+	)
+	plan.Result = OutcomeSingle
+	plan.Domains = []Domain{DomainControlPlane}
+	plan.SelectedDomain = DomainControlPlane
+	plan.PlanDigest = computePlanDigest(plan)
+
+	report, err := BuildOperationalDomainEvidence(changed, imagePlan, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.ClassificationAgrees || report.ConservativeOutcome != OutcomeSingle ||
+		report.ConservativeDomain != DomainControlPlane {
+		t.Fatalf("matching classifications did not agree: %#v", report)
+	}
+
+	report.ClassificationAgrees = false
+	report.Digest = operationalEvidenceDigest(report)
+	if err := VerifyOperationalDomainEvidence(report); err == nil {
+		t.Fatal("mutated comparison flag unexpectedly verified")
 	}
 }
 

@@ -68,6 +68,9 @@ func main() {
 	if len(args) > 0 && args[0] == "operational-report" {
 		os.Exit(runOperationalReport(args[1:], os.Stdout, os.Stderr))
 	}
+	if len(args) > 0 && args[0] == "operational-image-plan" {
+		os.Exit(runOperationalImagePlan(args[1:], os.Stdout, os.Stderr))
+	}
 	os.Exit(run(context.Background(), args, os.Stdout, os.Stderr))
 }
 

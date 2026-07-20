@@ -1,0 +1,32 @@
+name: Operational-domain guarded control-plane deploy
+description: Uploads report-only operational-domain evidence before the atomic adapter may mutate production.
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare operational-domain report-only evidence
+      shell: bash
+      env:
+        FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE: prepare
+      run: ./scripts/upgrade_fugue_control_plane.sh
+
+    - name: Upload operational-domain report-only evidence
+      id: operational-report-upload
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fugue-control-plane-operational-domain-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}
+        if-no-files-found: error
+        retention-days: 90
+        include-hidden-files: false
+        overwrite: false
+
+    - name: Apply exact authorized control-plane release
+      shell: bash
+      env:
+        FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE: apply
+        FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID: ${{ steps.operational-report-upload.outputs.artifact-id }}
+        FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST: ${{ steps.operational-report-upload.outputs.artifact-digest }}
+        FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL: ${{ steps.operational-report-upload.outputs.artifact-url }}
+      run: ./scripts/upgrade_fugue_control_plane.sh

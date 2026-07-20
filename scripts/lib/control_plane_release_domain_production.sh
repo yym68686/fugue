@@ -16,6 +16,13 @@
 #   FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL
 #   FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL
 #   FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE
+#   FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE
+#   FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE
+# Apply additionally consumes the immutable outputs of the immediately prior
+# pinned upload-artifact step:
+#   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID
+#   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST
+#   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL
 #
 # Changed-file evidence is regenerated inside the private work directory. The
 # production implementation of control_plane_release_verify_repository_snapshot
@@ -39,6 +46,76 @@ control_plane_release_domain_validate_sha() {
 
 control_plane_release_domain_validate_digest() {
   [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+control_plane_release_domain_validate_operational_phase() {
+  local phase="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE:-}"
+  local artifact_id="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID:-}"
+  local artifact_digest="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST:-}"
+  local artifact_url="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL:-}"
+  local expected_url=""
+
+  case "${phase}" in
+    prepare)
+      [[ -z "${artifact_id}" && -z "${artifact_digest}" && -z "${artifact_url}" ]]
+      ;;
+    apply)
+      [[ "${artifact_id}" =~ ^[1-9][0-9]*$ &&
+        "${artifact_digest}" =~ ^[0-9a-f]{64}$ &&
+        -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" ]] || return 2
+      expected_url="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${artifact_id}"
+      [[ "${artifact_url}" == "${expected_url}" ]]
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+control_plane_release_domain_compare_uploaded_operational_report() {
+  (( $# == 2 )) || return 2
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+paths = [os.path.abspath(value) for value in sys.argv[1:]]
+payloads = []
+for path in paths:
+    at_path = os.lstat(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(at_path.st_mode)
+            or (opened.st_dev, opened.st_ino) != (at_path.st_dev, at_path.st_ino)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_size > 8 << 20
+        ):
+            raise SystemExit(1)
+        data = bytearray()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) != opened.st_size:
+            raise SystemExit(1)
+        after = os.lstat(path)
+        if (after.st_dev, after.st_ino, after.st_size) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ):
+            raise SystemExit(1)
+        payloads.append(bytes(data))
+    finally:
+        os.close(fd)
+if payloads[0] != payloads[1]:
+    raise SystemExit(1)
+PY
 }
 
 control_plane_release_domain_private_parent() {
@@ -72,6 +149,7 @@ control_plane_release_domain_setup_private_workdir() {
   CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorize.result"
   CONTROL_PLANE_RELEASE_DOMAIN_VERIFY_RESULT="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/verify.result"
   CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/changed-file-evidence.json"
+  CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/operational-image-plan.json"
   CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_SNAPSHOT="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/upgrade-argv.source.snapshot"
   CONTROL_PLANE_RELEASE_DOMAIN_ARGV_INPUT_IDENTITIES="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/upgrade-argv-input-identities.json"
   CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/runtime"
@@ -1056,6 +1134,116 @@ control_plane_release_domain_render_and_authorize() {
     control_plane_release_domain_capture_frozen_argv
 }
 
+control_plane_release_domain_materialize_operational_report() {
+  local plan_file="${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/release-domain-plan.json"
+  local plan_digest=""
+  local report_output=""
+  local target=""
+  local source_base=""
+  local artifact_digest=""
+  local -a targets=()
+  local -a target_args=()
+  local -a image_plan_command=()
+
+  [[ -f "${plan_file}" && ! -L "${plan_file}" ]] || return 2
+  [[ ! -e "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}" &&
+    ! -L "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}" ]] || return 2
+  case "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" in
+    prepare)
+      [[ ! -e "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" &&
+        ! -L "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || return 2
+      report_output="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+      ;;
+    apply)
+      [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" &&
+        ! -L "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || return 2
+      report_output="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/operational-domain-evidence.apply.json"
+      [[ ! -e "${report_output}" && ! -L "${report_output}" ]] || return 2
+      ;;
+    *) return 2 ;;
+  esac
+
+  if [[ -n "${FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS:-}" ]]; then
+    read -r -a targets <<<"${FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS}"
+  fi
+  for target in "${targets[@]-}"; do
+    [[ -n "${target}" ]] || continue
+    case "${target}" in
+      api)
+        source_base="${FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA:-}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST:-}"
+        ;;
+      controller)
+        source_base="${FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA:-}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST:-}"
+        ;;
+      drain_agent)
+        source_base="${FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_BASE_SHA:-}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_DIGEST:-}"
+        ;;
+      telemetry_agent)
+        source_base="${FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_BASE_SHA:-}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST:-}"
+        ;;
+      image_cache)
+        source_base="${FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA:-}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST:-}"
+        ;;
+      edge)
+        source_base="${FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA:-}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST:-}"
+        ;;
+      app_ssh)
+        source_base="${FUGUE_RELEASE_DOMAIN_BASE_SHA}"
+        artifact_digest="${FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST:-}"
+        ;;
+      *) return 2 ;;
+    esac
+    control_plane_release_domain_validate_sha "${source_base}" || return 2
+    control_plane_release_domain_validate_digest "${artifact_digest}" || return 2
+    target_args+=(--target "${target}=${source_base}=${artifact_digest}")
+  done
+
+  image_plan_command=("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-image-plan \
+    --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
+    --trusted-base "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" \
+    --trusted-target "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}")
+  if (( ${#target_args[@]} > 0 )); then
+    image_plan_command+=("${target_args[@]}")
+  fi
+  image_plan_command+=(--output "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}")
+  "${image_plan_command[@]}" || return
+
+  plan_digest="$(python3 - "${plan_file}" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+digest = document.get("planDigest")
+if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+    raise SystemExit(1)
+print(digest)
+PY
+)" || return 2
+  control_plane_release_domain_validate_digest "${plan_digest}" || return 2
+
+  "${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-report \
+    --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
+    --image-plan "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}" \
+    --plan "${plan_file}" \
+    --plan-digest "${plan_digest}" \
+    --trusted-base "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" \
+    --trusted-target "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" \
+    --output "${report_output}" || return
+
+  if [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" ]]; then
+    control_plane_release_domain_compare_uploaded_operational_report \
+      "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" "${report_output}"
+  fi
+}
+
 control_plane_release_domain_read_exact_result() {
   local path="$1"
   local output=""
@@ -1903,13 +2091,16 @@ control_plane_release_run_atomic_domain_release() {
   local authorize_result=""
   local dispatch_status=0
   local final_status=0
+  local prepare_complete="false"
 
   (( $# == 0 )) || return 2
   CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE="${REPO_ROOT}/deploy/release-domains/ownership-v1.yaml"
   for required in \
     FUGUE_RELEASE_DOMAIN_BASE_SHA FUGUE_RELEASE_DOMAIN_TARGET_SHA \
     FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL \
-    FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE GITHUB_RUN_ID GITHUB_RUN_ATTEMPT; do
+    FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE \
+    FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE \
+    FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE GITHUB_RUN_ID GITHUB_RUN_ATTEMPT; do
     [[ -n "${!required:-}" ]] || {
       control_plane_release_domain_production_error "${required} is required"
       return 2
@@ -1920,6 +2111,10 @@ control_plane_release_run_atomic_domain_release() {
   [[ -x "${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" &&
     -x "${FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL}" &&
     -f "${CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE}" ]] || return 2
+  [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" == /* &&
+    "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" != "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] || return 2
+  [[ "$(dirname "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}")" == "$(dirname "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}")" ]] || return 2
+  control_plane_release_domain_validate_operational_phase || return 2
   [[ "${PREVIOUS_REVISION:-}" =~ ^[1-9][0-9]*$ ]] || return 2
   control_plane_release_domain_validate_dependencies || return
   control_plane_release_verify_repository_snapshot \
@@ -1963,14 +2158,7 @@ control_plane_release_run_atomic_domain_release() {
     if control_plane_release_domain_classify_files; then
       if control_plane_release_domain_build_binding_args; then
         case "${CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME}" in
-          multiple|unknown)
-            if control_plane_release_domain_publish_blocked_evidence; then
-              final_status=2
-            else
-              final_status=2
-            fi
-            ;;
-          zero|single)
+          multiple|unknown|zero|single)
             if control_plane_release_domain_set_preservation_modes; then
               if control_plane_release_domain_with_private_tmp \
                 control_plane_release_domain_prepare_render_inputs; then
@@ -1995,6 +2183,46 @@ control_plane_release_run_atomic_domain_release() {
   fi
 
   if (( final_status == 0 )); then
+    if ! control_plane_release_domain_materialize_operational_report; then
+      final_status=2
+    fi
+  fi
+
+  if (( final_status == 0 )) &&
+    [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "prepare" ]] &&
+    [[ ! -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked" ]]; then
+    authorize_result="$(control_plane_release_domain_read_exact_result \
+      "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT}")" || final_status=2
+    if (( final_status == 0 )); then
+      case "${authorize_result}" in
+        $'zero\t'sha256:*)
+          IFS=$'\t' read -r outcome CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST <<<"${authorize_result}"
+          control_plane_release_domain_validate_digest \
+            "${CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST}" || final_status=2
+          [[ "${CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME}" == "zero" ]] || final_status=2
+          ;;
+        $'single\tnode-local\t'sha256:*|$'single\tauthoritative-dns\t'sha256:*|\
+        $'single\tcontrol-plane\t'sha256:*|$'single\timage-cache\t'sha256:*|\
+        $'single\tbackup\t'sha256:*)
+          IFS=$'\t' read -r outcome CONTROL_PLANE_RELEASE_DOMAIN_SELECTED \
+            CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST <<<"${authorize_result}"
+          control_plane_release_domain_validate_digest \
+            "${CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST}" || final_status=2
+          [[ "${CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME}" == "single" &&
+            -n "${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED}" ]] || final_status=2
+          if (( final_status == 0 )); then
+            control_plane_release_domain_verify_bundle_command || final_status=$?
+          fi
+          ;;
+        *) final_status=2 ;;
+      esac
+    fi
+    if (( final_status == 0 )); then
+      prepare_complete="true"
+    fi
+  fi
+
+  if (( final_status == 0 )) && [[ "${prepare_complete}" != "true" ]]; then
     if [[ -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked" ]]; then
       if control_plane_release_domain_publish_bundle_evidence; then
         final_status=2

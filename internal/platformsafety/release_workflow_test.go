@@ -83,6 +83,13 @@ type releaseWorkflowStep struct {
 	ContinueOnError bool              `yaml:"continue-on-error"`
 }
 
+type compositeReleaseAction struct {
+	Runs struct {
+		Using string                `yaml:"using"`
+		Steps []releaseWorkflowStep `yaml:"steps"`
+	} `yaml:"runs"`
+}
+
 func workflowDocumentMapping(t *testing.T, data []byte) *yaml.Node {
 	t.Helper()
 	var document yaml.Node
@@ -2813,10 +2820,20 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "13f8d2da63086b79bdb884d116e69250a1d95e31e5aeda01ed1ac7103c7d06c6")
+	assertWorkflowSourceDigest(t, data, "cc2ef0ac991945b157a7397554dc9f78e47c1d397fed04826e130298a4d44b68")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	actionPath := filepath.Join("..", "..", ".github", "actions", "operational-domain-guarded-deploy", "action.yml")
+	actionData, err := os.ReadFile(actionPath)
+	if err != nil {
+		t.Fatalf("read operational-domain guarded deploy action: %v", err)
+	}
+	assertWorkflowSourceDigest(t, actionData, "0133402e03e5e03a6b33e757433b03b1191838cc1e63f6727607b6ba26c10b12")
+	var operationalAction compositeReleaseAction
+	if err := yaml.Unmarshal(actionData, &operationalAction); err != nil {
+		t.Fatalf("parse operational-domain guarded deploy action: %v", err)
 	}
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
@@ -2834,14 +2851,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"build/Publish verified control-plane image provenance":                          "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
 		"deploy/Record deploy job budget origin":                                         "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
 		"deploy/Build private release-domain tools":                                      "1017c0bb023803233350b68c1b434ca34c01e82d04bc0ad8a80b03f2c437ead2",
-		"deploy/Write genesis public release evidence":                                   "6b376d82302f8a146582de5125a6de541bd52d93e3f6696b559b58b1f9990cd5",
+		"deploy/Write genesis public release evidence":                                   "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
 		"deploy/Guard stateful component files":                                          "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
 		"deploy/Prepare authoritative DNS DiG runtime":                                   "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
 		"deploy/Verify local deploy prerequisites":                                       "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
 		"deploy/Explain runner and fail closed target":                                   "afab1c1aa3b6305ac3fdf982640fce8d81781c339cea714f11e2bde65a3b4475",
 		"deploy/Resolve live image metadata":                                             "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":             "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
-		"deploy/Upgrade Fugue control plane":                                             "0390f1a108338e637e594e6e64bb82bcccf3a85ad59f668ee6c1160ddee84e76",
 		"deploy/Remove stale release recovery proof":                                     "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch": "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":             "fcf21e0732d091de6e115386f2d55e88de2c0e49110bb7ebf7674c7c8e76e00a",
@@ -2903,7 +2919,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "if", "env", "run"},
 				{"name", "id", "if", "env", "run"},
 				{"name", "if", "env", "run"},
-				{"name", "if", "env", "run"},
+				{"name", "if", "env", "uses"},
 				{"name", "if", "run"},
 				{"name", "if", "uses", "with"},
 			},
@@ -3230,6 +3246,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 	expectedGenesisChanges := []string{
+		".github/actions/operational-domain-guarded-deploy/action.yml",
 		".github/workflows/deploy-control-plane.yml",
 		"cmd/fugue-release-domain-dispatch/classify_files.go",
 		"cmd/fugue-release-domain-dispatch/main.go",
@@ -3283,8 +3300,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"scripts/test_single_domain_release.sh",
 		"scripts/upgrade_fugue_control_plane.sh",
 	}
-	if len(expectedGenesisChanges) != 52 {
-		t.Fatalf("genesis expected-change allowlist must contain exactly 52 paths, found %d", len(expectedGenesisChanges))
+	if len(expectedGenesisChanges) != 53 {
+		t.Fatalf("genesis expected-change allowlist must contain exactly 53 paths, found %d", len(expectedGenesisChanges))
 	}
 	seenGenesisChanges := make(map[string]struct{}, len(expectedGenesisChanges))
 	for _, path := range expectedGenesisChanges {
@@ -3362,9 +3379,15 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("deploy live image resolution must use the built image tag chain: got %q want %q", got, deployImageTag)
 	}
 
-	upgrade := workflowStepByName(t, deploy, "Upgrade Fugue control plane")
+	upgrade := workflowStepByName(t, deploy, "Upgrade Fugue control plane through uploaded operational evidence")
 	if strings.TrimSpace(upgrade.If) != nonGenesisCondition {
 		t.Fatalf("control-plane upgrade must be unreachable from the genesis evidence path: %q", upgrade.If)
+	}
+	if got, want := upgrade.Uses, "./.github/actions/operational-domain-guarded-deploy"; got != want {
+		t.Fatalf("control-plane upgrade must use the guarded composite action: got %q want %q", got, want)
+	}
+	if strings.TrimSpace(upgrade.Run) != "" {
+		t.Fatal("guarded deploy workflow step must not define a run body")
 	}
 	for key, want := range map[string]string{
 		"FUGUE_API_IMAGE_REPOSITORY":             "${{ needs.build.outputs.build_api == 'true' && needs.build.outputs.api_image_repository || steps.live_images.outputs.api_image_repository }}",
@@ -3388,15 +3411,90 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("public data-plane auto release must depend only on explicit policy or an edge build: got %q want %q", got, want)
 	}
 	for key, want := range map[string]string{
-		"FUGUE_RELEASE_DOMAIN_BASE_SHA":             "${{ needs.release-baseline.outputs.domain_base_sha }}",
-		"FUGUE_RELEASE_DOMAIN_TARGET_SHA":           "${{ github.sha }}",
-		"FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL":        "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence",
-		"FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL":        "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
-		"FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE": "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
+		"FUGUE_RELEASE_DOMAIN_BASE_SHA":                       "${{ needs.release-baseline.outputs.domain_base_sha }}",
+		"FUGUE_RELEASE_DOMAIN_TARGET_SHA":                     "${{ github.sha }}",
+		"FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL":                  "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence",
+		"FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL":                  "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
+		"FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE":           "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE":        "${{ runner.temp }}/fugue-release-domain-public/operational-domain-evidence.json",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS":                  "${{ needs.build.outputs.image_targets }}",
+		"FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA":             "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST":               "${{ needs.build.outputs.api_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA":      "${{ needs.release-baseline.outputs.controller_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST":        "${{ needs.build.outputs.controller_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_BASE_SHA":     "${{ needs.release-baseline.outputs.drain_agent_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_DIGEST":       "${{ needs.build.outputs.drain_agent_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_BASE_SHA": "${{ needs.release-baseline.outputs.telemetry_agent_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST":   "${{ needs.build.outputs.telemetry_agent_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA":     "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST":       "${{ needs.build.outputs.image_cache_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA":            "${{ needs.release-baseline.outputs.edge_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST":              "${{ needs.build.outputs.edge_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST":           "${{ needs.build.outputs.app_ssh_image_digest }}",
 	} {
 		if got := upgrade.Env[key]; got != want {
 			t.Fatalf("upgrade release-domain input %s drifted: got %q want %q", key, got, want)
 		}
+	}
+	if got, want := operationalAction.Runs.Using, "composite"; got != want {
+		t.Fatalf("operational deploy action runtime drifted: got %q want %q", got, want)
+	}
+	wantActionSteps := []string{
+		"Prepare operational-domain report-only evidence",
+		"Upload operational-domain report-only evidence",
+		"Apply exact authorized control-plane release",
+	}
+	gotActionSteps := make([]string, 0, len(operationalAction.Runs.Steps))
+	for _, step := range operationalAction.Runs.Steps {
+		gotActionSteps = append(gotActionSteps, step.Name)
+	}
+	if !reflect.DeepEqual(gotActionSteps, wantActionSteps) {
+		t.Fatalf("operational deploy action order drifted: got %q want %q", gotActionSteps, wantActionSteps)
+	}
+	prepare := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Prepare operational-domain report-only evidence")
+	if got, want := prepare.Env["FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE"], "prepare"; got != want {
+		t.Fatalf("operational prepare phase drifted: got %q want %q", got, want)
+	}
+	if got, want := strings.TrimSpace(prepare.Run), "./scripts/upgrade_fugue_control_plane.sh"; got != want {
+		t.Fatalf("operational prepare entrypoint drifted: got %q want %q", got, want)
+	}
+	operationalUpload := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Upload operational-domain report-only evidence")
+	if got, want := operationalUpload.ID, "operational-report-upload"; got != want {
+		t.Fatalf("operational report upload id drifted: got %q want %q", got, want)
+	}
+	if got, want := operationalUpload.If, "always()"; got != want {
+		t.Fatalf("operational report upload condition drifted: got %q want %q", got, want)
+	}
+	if operationalUpload.ContinueOnError {
+		t.Fatal("operational report upload must fail closed")
+	}
+	if got, want := operationalUpload.Uses, "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"; got != want {
+		t.Fatalf("operational report upload pin drifted: got %q want %q", got, want)
+	}
+	for key, want := range map[string]string{
+		"path":                 "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}",
+		"if-no-files-found":    "error",
+		"retention-days":       "90",
+		"include-hidden-files": "false",
+		"overwrite":            "false",
+	} {
+		if got := operationalUpload.With[key]; got != want {
+			t.Fatalf("operational report upload %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	apply := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Apply exact authorized control-plane release")
+	for key, want := range map[string]string{
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE":           "apply",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID":     "${{ steps.operational-report-upload.outputs.artifact-id }}",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST": "${{ steps.operational-report-upload.outputs.artifact-digest }}",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL":    "${{ steps.operational-report-upload.outputs.artifact-url }}",
+	} {
+		if got := apply.Env[key]; got != want {
+			t.Fatalf("operational apply %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	if got, want := strings.TrimSpace(apply.Run), "./scripts/upgrade_fugue_control_plane.sh"; got != want {
+		t.Fatalf("operational apply entrypoint drifted: got %q want %q", got, want)
 	}
 
 	publicUpload := workflowStepByName(t, deploy, "Upload release-domain public evidence")

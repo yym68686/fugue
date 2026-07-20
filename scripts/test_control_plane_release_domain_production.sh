@@ -28,6 +28,7 @@ fake_tool_log() {
 
 case "$(basename "$0")" in
   fake-release-evidence)
+    fake_tool_log "evidence:$*"
     output="$(fake_flag_value --output "$@")" || exit 2
     if [[ "${1:-}" == "canonicalize-manifest" ]]; then
       input="$(fake_flag_value --input "$@")" || exit 2
@@ -63,9 +64,12 @@ case "$(basename "$0")" in
         cp "${target_manifest}" "${bundle_dir}/target-manifest.yaml" || exit 1
         cp "${repeated_manifest}" "${bundle_dir}/repeated-target-manifest.yaml" || exit 1
         cp "${argv_snapshot}" "${bundle_dir}/upgrade-argv.snapshot" || exit 1
+        printf '{"planDigest":"%s"}\n' "${FAKE_PLAN_DIGEST}" >"${bundle_dir}/release-domain-plan.json" || exit 1
         chmod 600 "${bundle_dir}"/* || exit 1
         if [[ "${FAKE_OUTCOME}" == "zero" ]]; then
           printf 'zero\t%s\n' "${FAKE_PLAN_DIGEST}"
+        elif [[ "${FAKE_OUTCOME}" == "multiple" || "${FAKE_OUTCOME}" == "unknown" ]]; then
+          exit 2
         else
           printf 'single\t%s\t%s\n' "${FAKE_DOMAIN}" "${FAKE_PLAN_DIGEST}"
         fi
@@ -565,12 +569,24 @@ setup_case() {
 
   RUNNER_TEMP="${CASE_DIR}/runner"
   FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE="${CASE_DIR}/public/evidence.json"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE="${CASE_DIR}/public/operational-domain-evidence.json"
+  mkdir "${CASE_DIR}/public"
+  chmod 700 "${CASE_DIR}/public"
+  printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  chmod 600 "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS=""
   FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${CASE_DIR}/fake-release-evidence"
   FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL="${CASE_DIR}/fake-release-dispatch"
   FUGUE_RELEASE_DOMAIN_BASE_SHA="1111111111111111111111111111111111111111"
   FUGUE_RELEASE_DOMAIN_TARGET_SHA="2222222222222222222222222222222222222222"
   GITHUB_RUN_ID="123"
   GITHUB_RUN_ATTEMPT="1"
+  GITHUB_SERVER_URL="https://github.com"
+  GITHUB_REPOSITORY="example/fugue"
   PREVIOUS_REVISION=7
   FAKE_CURRENT_REVISION=7
   FAKE_LIVE_MANIFEST="base"
@@ -662,16 +678,21 @@ run_release_status() {
 
 assert_public_parent_and_cleanup() {
   [[ -f "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] || fail_test "public evidence is missing"
-  python3 - "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" "${RUNNER_TEMP}" <<'PY'
+  [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] || fail_test "operational report is missing"
+  python3 - "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" \
+    "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" "${RUNNER_TEMP}" <<'PY'
 import os
 import stat
 import sys
-evidence, runner = sys.argv[1:]
+evidence, operational, runner = sys.argv[1:]
 parent = os.lstat(os.path.dirname(evidence))
 artifact = os.lstat(evidence)
+operational_artifact = os.lstat(operational)
 if stat.S_IMODE(parent.st_mode) != 0o700 or parent.st_uid != os.geteuid():
     raise SystemExit(1)
 if stat.S_IMODE(artifact.st_mode) != 0o600 or artifact.st_uid != os.geteuid():
+    raise SystemExit(1)
+if stat.S_IMODE(operational_artifact.st_mode) != 0o600 or operational_artifact.st_uid != os.geteuid():
     raise SystemExit(1)
 if os.listdir(runner):
     raise SystemExit(1)
@@ -770,9 +791,12 @@ case_blocked() {
   FAKE_OUTCOME="${outcome}"
   FAKE_DOMAIN=""
   [[ "$(run_release_status)" == "2" ]] || fail_test "${outcome} did not block"
-  assert_log_count 0 "preserve:"
+  assert_log_count 1 "preserve:public"
+  assert_log_count 1 "preserve:image-cache:"
+  assert_log_count 1 "preserve:maintenance"
+  assert_log_count 1 "preserve:strict-drain"
   assert_log_count 0 "helm-upgrade:"
-  assert_file_contains "${FAKE_LOG}" "dispatch:write-blocked-public-evidence:"
+  assert_file_contains "${FAKE_LOG}" "dispatch:write-public-evidence:"
   assert_public_parent_and_cleanup
 }
 
@@ -1124,6 +1148,69 @@ case_emergency_nonlocal_exit() {
   assert_public_parent_and_cleanup
 }
 
+case_operational_report_binds_build_target_before_dispatch() {
+  setup_case
+  trap cleanup_case EXIT
+  FAKE_DOMAIN="control-plane"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="controller"
+  FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA="3333333333333333333333333333333333333333"
+  FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  [[ "$(run_release_status)" == "0" ]] || fail_test "operational report target binding release failed"
+  assert_file_contains "${FAKE_LOG}" \
+    "evidence:operational-image-plan --changed-evidence"
+  assert_file_contains "${FAKE_LOG}" \
+    "--target controller=3333333333333333333333333333333333333333=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  assert_log_order "evidence:operational-report" "dispatch:verify:"
+  assert_public_parent_and_cleanup
+}
+
+case_operational_prepare_stops_before_dispatch() {
+  setup_case
+  trap cleanup_case EXIT
+  rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+  [[ "$(run_release_status)" == "0" ]] || fail_test "operational prepare phase failed"
+  [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] ||
+    fail_test "operational prepare phase did not materialize its report"
+  [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+    fail_test "operational prepare phase unexpectedly published final evidence"
+  assert_log_count 0 "helm-upgrade:"
+  assert_log_count 0 "node-local:apply"
+  assert_log_count 0 "authoritative-dns:apply"
+  assert_log_count 0 "control-plane:apply"
+  assert_log_count 0 "image-cache:apply"
+  assert_log_count 0 "backup:apply"
+  assert_log_order "evidence:operational-report" "dispatch:verify:"
+  [[ -z "$(find "${RUNNER_TEMP}" -mindepth 1 -print -quit)" ]] ||
+    fail_test "operational prepare phase leaked its private workdir"
+}
+
+case_operational_apply_requires_upload_proof() {
+  setup_case
+  trap cleanup_case EXIT
+  FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
+  [[ "$(run_release_status)" == "2" ]] ||
+    fail_test "operational apply accepted missing artifact proof"
+  assert_log_count 0 "helm-upgrade:"
+  [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+    fail_test "missing artifact proof unexpectedly published evidence"
+}
+
+case_operational_apply_rejects_report_drift() {
+  setup_case
+  trap cleanup_case EXIT
+  printf '{"drift":true}\n' >"${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  chmod 600 "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+  [[ "$(run_release_status)" == "2" ]] ||
+    fail_test "operational apply accepted report drift after upload"
+  assert_log_count 0 "helm-upgrade:"
+  [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+    fail_test "report drift unexpectedly published final evidence"
+}
+
 run_case() {
   local label="$1"
   local status=0
@@ -1142,6 +1229,10 @@ run_case zero case_zero
 run_case multiple case_blocked multiple
 run_case unknown case_blocked unknown
 run_case blocked-public-failure case_blocked_public_failure
+run_case operational-prepare-before-dispatch case_operational_prepare_stops_before_dispatch
+run_case operational-apply-upload-proof case_operational_apply_requires_upload_proof
+run_case operational-apply-report-drift case_operational_apply_rejects_report_drift
+run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch
 for domain in node-local authoritative-dns control-plane image-cache backup; do
   run_case "success-${domain}" case_domain_success "${domain}"
 done

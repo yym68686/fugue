@@ -38,6 +38,67 @@ func TestOperationalReportEmitsDigestBoundNonAuthorizingEvidence(t *testing.T) {
 	if report.AuthorizationEligible {
 		t.Fatal("report-only command emitted authorization-eligible evidence")
 	}
+	if !report.ClassificationAgrees || report.ConservativeOutcome != releasedomain.OutcomeSingle ||
+		report.ConservativeDomain != releasedomain.DomainControlPlane {
+		t.Fatalf("dual classification was not reported: %#v", report)
+	}
+}
+
+func TestOperationalImagePlanBindsSelectedBuildTargets(t *testing.T) {
+	fixture := newOperationalCommandFixture(t)
+	emptyOutput := filepath.Join(t.TempDir(), "empty-image-plan.json")
+	emptyArgs := []string{
+		"--changed-evidence", fixture.changedEvidence,
+		"--trusted-base", fixture.base,
+		"--trusted-target", fixture.target,
+		"--output", emptyOutput,
+	}
+	if exit := runOperationalImagePlan(emptyArgs, ioDiscard{}, &bytes.Buffer{}); exit != 0 {
+		t.Fatalf("empty selected build plan exit=%d", exit)
+	}
+	emptyBytes, err := os.ReadFile(emptyOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyPlan, err := releasedomain.DecodeAndVerifyOperationalImageRolloutPlan(
+		bytes.NewReader(emptyBytes), fixture.base, fixture.target, readOperationalChangedDigest(t, fixture.changedEvidence),
+	)
+	if err != nil || len(emptyPlan.Targets) != 0 {
+		t.Fatalf("empty selected build plan was not preserved: plan=%#v err=%v", emptyPlan, err)
+	}
+
+	output := filepath.Join(t.TempDir(), "image-plan.json")
+	args := []string{
+		"--changed-evidence", fixture.changedEvidence,
+		"--trusted-base", fixture.base,
+		"--trusted-target", fixture.target,
+		"--target", "controller=" + strings.Repeat("c", 40) + "=sha256:" + strings.Repeat("d", 64),
+		"--output", output,
+	}
+	var stderr bytes.Buffer
+	if exit := runOperationalImagePlan(args, ioDiscard{}, &stderr); exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+	}
+	encoded, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := releasedomain.DecodeAndVerifyOperationalImageRolloutPlan(
+		bytes.NewReader(encoded), fixture.base, fixture.target, readOperationalChangedDigest(t, fixture.changedEvidence),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Targets) != 1 || plan.Targets[0].Name != "controller" ||
+		plan.Targets[0].SourceBaseCommit != strings.Repeat("c", 40) ||
+		plan.Targets[0].ArtifactDigest != "sha256:"+strings.Repeat("d", 64) {
+		t.Fatalf("unexpected image plan: %#v", plan)
+	}
+
+	duplicate := append(append([]string(nil), args...), "--target", "controller="+strings.Repeat("e", 40)+"=sha256:"+strings.Repeat("f", 64))
+	if exit := runOperationalImagePlan(duplicate, ioDiscard{}, &bytes.Buffer{}); exit == 0 {
+		t.Fatal("duplicate target unexpectedly accepted")
+	}
 }
 
 func TestOperationalReportRejectsDuplicateFlagsAndTrustedDrift(t *testing.T) {
@@ -229,6 +290,21 @@ func writeOperationalFixture(t *testing.T, filename string, data []byte) {
 	if err := os.WriteFile(filename, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readOperationalChangedDigest(t *testing.T, filename string) string {
+	t.Helper()
+	encoded, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	return document.Digest
 }
 
 type ioDiscard struct{}

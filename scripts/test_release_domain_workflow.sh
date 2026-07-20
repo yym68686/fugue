@@ -4,13 +4,16 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/deploy-control-plane.yml"
+OPERATIONAL_ACTION_FILE="${REPO_ROOT}/.github/actions/operational-domain-guarded-deploy/action.yml"
 
-ruby - "${WORKFLOW_FILE}" <<'RUBY'
+ruby - "${WORKFLOW_FILE}" "${OPERATIONAL_ACTION_FILE}" <<'RUBY'
 require "yaml"
 
 workflow_path = ARGV.fetch(0)
+operational_action_path = ARGV.fetch(1)
 source = File.read(workflow_path, encoding: "UTF-8")
 workflow = YAML.safe_load(source, aliases: false)
+operational_action = YAML.safe_load(File.read(operational_action_path, encoding: "UTF-8"), aliases: false)
 
 def fail_contract(message)
   warn "release-domain workflow contract: #{message}"
@@ -25,6 +28,12 @@ end
 def step(job, name)
   matches = Array(job["steps"]).select { |candidate| candidate["name"] == name }
   fail_contract("expected exactly one #{name.inspect} step") unless matches.length == 1
+  matches.fetch(0)
+end
+
+def action_step(action, name)
+  matches = Array(action.fetch("runs").fetch("steps")).select { |candidate| candidate["name"] == name }
+  fail_contract("expected exactly one composite action #{name.inspect} step") unless matches.length == 1
   matches.fetch(0)
 end
 
@@ -184,6 +193,7 @@ genesis_run.each_line do |line|
 end
 
 expected_genesis_changes = [
+  ".github/actions/operational-domain-guarded-deploy/action.yml",
   ".github/workflows/deploy-control-plane.yml",
   "cmd/fugue-release-domain-dispatch/classify_files.go",
   "cmd/fugue-release-domain-dispatch/main.go",
@@ -237,10 +247,10 @@ expected_genesis_changes = [
   "scripts/test_single_domain_release.sh",
   "scripts/upgrade_fugue_control_plane.sh",
 ]
-fail_contract("genesis expected-change allowlist must contain exactly 52 unique paths") unless
-  expected_genesis_changes.length == 52 && expected_genesis_changes.uniq.length == 52
+fail_contract("genesis expected-change allowlist must contain exactly 53 unique paths") unless
+  expected_genesis_changes.length == 53 && expected_genesis_changes.uniq.length == 53
 actual_genesis_changes = genesis_run.scan(/^\s*--expected-change "([^"]+)" \\\s*$/).flatten
-assert_equal(genesis_run.scan(/--expected-change/).length, 52, "genesis expected-change occurrence count")
+assert_equal(genesis_run.scan(/--expected-change/).length, 53, "genesis expected-change occurrence count")
 assert_equal(actual_genesis_changes, expected_genesis_changes, "genesis expected-change exact allowlist")
 
 genesis_reachable = {
@@ -265,7 +275,9 @@ assert_equal(
   "genesis-reachable step allowlist",
 )
 
-upgrade = step(deploy, "Upgrade Fugue control plane")
+upgrade = step(deploy, "Upgrade Fugue control plane through uploaded operational evidence")
+assert_equal(upgrade["uses"], "./.github/actions/operational-domain-guarded-deploy", "guarded deploy action")
+fail_contract("guarded deploy workflow step must not define a run body") if upgrade.key?("run")
 upgrade_env = upgrade.fetch("env")
 {
   "FUGUE_RELEASE_DOMAIN_BASE_SHA" => "${{ needs.release-baseline.outputs.domain_base_sha }}",
@@ -273,6 +285,21 @@ upgrade_env = upgrade.fetch("env")
   "FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL" => "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence",
   "FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL" => "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
   "FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE" => "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
+  "FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE" => "${{ runner.temp }}/fugue-release-domain-public/operational-domain-evidence.json",
+  "FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS" => "${{ needs.build.outputs.image_targets }}",
+  "FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
+  "FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST" => "${{ needs.build.outputs.api_image_digest }}",
+  "FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.controller_image_baseline_ref }}",
+  "FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST" => "${{ needs.build.outputs.controller_image_digest }}",
+  "FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.drain_agent_image_baseline_ref }}",
+  "FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_DIGEST" => "${{ needs.build.outputs.drain_agent_image_digest }}",
+  "FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.telemetry_agent_image_baseline_ref }}",
+  "FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST" => "${{ needs.build.outputs.telemetry_agent_image_digest }}",
+  "FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
+  "FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST" => "${{ needs.build.outputs.image_cache_image_digest }}",
+  "FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.edge_image_baseline_ref }}",
+  "FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST" => "${{ needs.build.outputs.edge_image_digest }}",
+  "FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST" => "${{ needs.build.outputs.app_ssh_image_digest }}",
 }.each do |name, expected|
   assert_equal(upgrade_env[name], expected, "upgrade #{name}")
 end
@@ -289,8 +316,58 @@ assert_equal(public_upload.fetch("with").fetch("if-no-files-found"), "error", "p
 assert_equal(public_upload.fetch("with").fetch("retention-days"), 90, "public evidence retention")
 assert_equal(public_upload.fetch("with").fetch("include-hidden-files"), false, "public evidence hidden-file policy")
 assert_equal(public_upload.fetch("with").fetch("overwrite"), false, "public evidence overwrite policy")
+assert_equal(operational_action.fetch("runs").fetch("using"), "composite", "operational action runtime")
+action_steps = operational_action.fetch("runs").fetch("steps")
+assert_equal(
+  action_steps.map { |candidate| candidate.fetch("name") },
+  [
+    "Prepare operational-domain report-only evidence",
+    "Upload operational-domain report-only evidence",
+    "Apply exact authorized control-plane release",
+  ],
+  "operational action step order",
+)
+prepare = action_step(operational_action, "Prepare operational-domain report-only evidence")
+assert_equal(prepare.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE"), "prepare", "prepare phase")
+assert_equal(prepare.fetch("run"), "./scripts/upgrade_fugue_control_plane.sh", "prepare entrypoint")
+operational_upload = action_step(operational_action, "Upload operational-domain report-only evidence")
+assert_equal(operational_upload["id"], "operational-report-upload", "operational upload id")
+assert_equal(operational_upload["if"], "always()", "operational report upload condition")
+assert_equal(operational_upload["continue-on-error"], nil, "operational report upload continue-on-error")
+assert_equal(
+  operational_upload["uses"],
+  "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  "operational report upload pin",
+)
+assert_equal(
+  operational_upload.fetch("with").fetch("path"),
+  "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}",
+  "operational report upload path",
+)
+assert_equal(operational_upload.fetch("with").fetch("if-no-files-found"), "error", "operational report missing-file policy")
+assert_equal(operational_upload.fetch("with").fetch("retention-days"), 90, "operational report retention")
+assert_equal(operational_upload.fetch("with").fetch("include-hidden-files"), false, "operational report hidden-file policy")
+assert_equal(operational_upload.fetch("with").fetch("overwrite"), false, "operational report overwrite policy")
+apply = action_step(operational_action, "Apply exact authorized control-plane release")
+assert_equal(apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE"), "apply", "apply phase")
+assert_equal(
+  apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID"),
+  "${{ steps.operational-report-upload.outputs.artifact-id }}",
+  "apply artifact id proof",
+)
+assert_equal(
+  apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST"),
+  "${{ steps.operational-report-upload.outputs.artifact-digest }}",
+  "apply artifact digest proof",
+)
+assert_equal(
+  apply.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL"),
+  "${{ steps.operational-report-upload.outputs.artifact-url }}",
+  "apply artifact URL proof",
+)
+assert_equal(apply.fetch("run"), "./scripts/upgrade_fugue_control_plane.sh", "apply entrypoint")
 deploy_uploads = Array(deploy["steps"]).select { |candidate| candidate["uses"].to_s.start_with?("actions/upload-artifact@") }
-assert_equal(deploy_uploads.length, 1, "deploy artifact upload count")
+assert_equal(deploy_uploads.length, 1, "outer deploy artifact upload count")
 
 record = jobs.fetch("record-release-baseline")
 assert_equal(
@@ -452,8 +529,13 @@ all_uploads = jobs.each_with_object([]) do |(job_name, job), uploads|
     uploads << [job_name, candidate.fetch("with").fetch("path")]
   end
 end
+all_uploads.insert(
+  1,
+  ["deploy", operational_upload.fetch("with").fetch("path")],
+)
 allowed_uploads = [
   ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
+  ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
   ["freeze-release-lane-on-failure", "${{ runner.temp }}/fugue-release-lane-freeze/lane-freeze.json"],
 ]
 assert_equal(all_uploads, allowed_uploads, "public artifact allowlist")
