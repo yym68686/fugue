@@ -134,34 +134,6 @@ coordination Lease is additionally available only to the literal
 `control-plane` and `backup` branches; `node-local`, `authoritative-dns`, and
 `image-cache` cannot acquire, drain, release, or restore it.
 
-## Dormant operational-domain evidence
-
-`fugue-release-domain-evidence operational-report` is an additive,
-side-effect-free evidence contract for shared Go source. It accepts four
-revision- and digest-bound witness channels:
-
-1. the existing changed-file evidence and package consumer graph;
-2. an exact `OperationalImageRolloutPlan` containing only the image targets
-   selected by the existing build/rollout planner, with each target bound to
-   its component source baseline commit and verified OCI artifact digest;
-3. the rendered-object channel from an independently digest-verified existing
-   release-domain plan; and
-4. the complete fixed production adapter binding set.
-
-The report records each domain set, their intersection, contradictions and an
-`authorizationEligible: false` marker. A real multi-domain rendered or rollout
-set stays `multiple`. Missing target ownership, rendered unknowns, consumer
-coverage gaps, digest drift or disagreement stays `unknown`; no caller can
-provide a domain hint. Non-production command consumers are ignored only when
-the exact rollout plan proves their image is not selected.
-
-This checkpoint does not wire the report into a workflow and does not change
-`ClassifyFiles`, `BuildPlan`, `ExecutionAuthorization`, reverse ownership,
-adapter dispatch or any production mutation decision. A later report-only
-checkpoint must bind the image-plan input to the actual build job and compare
-the operational observation with the conservative planner before any separate
-activation checkpoint may be considered.
-
 ## Production entrypoint
 
 The ordinary workflow supplies these exact production inputs to
