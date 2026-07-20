@@ -2820,7 +2820,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "cc2ef0ac991945b157a7397554dc9f78e47c1d397fed04826e130298a4d44b68")
+	assertWorkflowSourceDigest(t, data, "44e20779ee182fa3a2b9bd46b5a7188e587f18c62e17e3af8ac8daf4b2e8a870")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2830,7 +2830,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read operational-domain guarded deploy action: %v", err)
 	}
-	assertWorkflowSourceDigest(t, actionData, "0133402e03e5e03a6b33e757433b03b1191838cc1e63f6727607b6ba26c10b12")
+	assertWorkflowSourceDigest(t, actionData, "bb52d445d98b0f5e6d10a42b2bfabb4c22a30f88e28ab0bf38177c4c8c151057")
 	var operationalAction compositeReleaseAction
 	if err := yaml.Unmarshal(actionData, &operationalAction); err != nil {
 		t.Fatalf("parse operational-domain guarded deploy action: %v", err)
@@ -3411,26 +3411,28 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("public data-plane auto release must depend only on explicit policy or an edge build: got %q want %q", got, want)
 	}
 	for key, want := range map[string]string{
-		"FUGUE_RELEASE_DOMAIN_BASE_SHA":                       "${{ needs.release-baseline.outputs.domain_base_sha }}",
-		"FUGUE_RELEASE_DOMAIN_TARGET_SHA":                     "${{ github.sha }}",
-		"FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL":                  "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence",
-		"FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL":                  "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
-		"FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE":           "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
-		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE":        "${{ runner.temp }}/fugue-release-domain-public/operational-domain-evidence.json",
-		"FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS":                  "${{ needs.build.outputs.image_targets }}",
-		"FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA":             "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
-		"FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST":               "${{ needs.build.outputs.api_image_digest }}",
-		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA":      "${{ needs.release-baseline.outputs.controller_image_baseline_ref }}",
-		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST":        "${{ needs.build.outputs.controller_image_digest }}",
-		"FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_BASE_SHA":     "${{ needs.release-baseline.outputs.drain_agent_image_baseline_ref }}",
-		"FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_DIGEST":       "${{ needs.build.outputs.drain_agent_image_digest }}",
-		"FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_BASE_SHA": "${{ needs.release-baseline.outputs.telemetry_agent_image_baseline_ref }}",
-		"FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST":   "${{ needs.build.outputs.telemetry_agent_image_digest }}",
-		"FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA":     "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
-		"FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST":       "${{ needs.build.outputs.image_cache_image_digest }}",
-		"FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA":            "${{ needs.release-baseline.outputs.edge_image_baseline_ref }}",
-		"FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST":              "${{ needs.build.outputs.edge_image_digest }}",
-		"FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST":           "${{ needs.build.outputs.app_ssh_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_BASE_SHA":                        "${{ needs.release-baseline.outputs.domain_base_sha }}",
+		"FUGUE_RELEASE_DOMAIN_TARGET_SHA":                      "${{ github.sha }}",
+		"FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL":                   "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence",
+		"FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL":                   "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
+		"FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE":            "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE":         "${{ runner.temp }}/fugue-release-domain-public/operational-domain-evidence.json",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR":     "${{ runner.temp }}/fugue-release-domain-public/build-activation-evidence",
+		"FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST": "${{ needs.build.outputs.verified_image_artifacts_digest }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS":                   "${{ needs.build.outputs.image_targets }}",
+		"FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA":              "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST":                "${{ needs.build.outputs.api_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA":       "${{ needs.release-baseline.outputs.controller_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST":         "${{ needs.build.outputs.controller_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_BASE_SHA":      "${{ needs.release-baseline.outputs.drain_agent_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_DIGEST":        "${{ needs.build.outputs.drain_agent_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_BASE_SHA":  "${{ needs.release-baseline.outputs.telemetry_agent_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST":    "${{ needs.build.outputs.telemetry_agent_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA":      "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST":        "${{ needs.build.outputs.image_cache_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA":             "${{ needs.release-baseline.outputs.edge_image_baseline_ref }}",
+		"FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST":               "${{ needs.build.outputs.edge_image_digest }}",
+		"FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST":            "${{ needs.build.outputs.app_ssh_image_digest }}",
 	} {
 		if got := upgrade.Env[key]; got != want {
 			t.Fatalf("upgrade release-domain input %s drifted: got %q want %q", key, got, want)
@@ -3442,6 +3444,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	wantActionSteps := []string{
 		"Prepare operational-domain report-only evidence",
 		"Upload operational-domain report-only evidence",
+		"Upload build-vs-activation report-only evidence",
 		"Apply exact authorized control-plane release",
 	}
 	gotActionSteps := make([]string, 0, len(operationalAction.Runs.Steps))
@@ -3482,12 +3485,39 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("operational report upload %s drifted: got %q want %q", key, got, want)
 		}
 	}
+	activationUpload := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Upload build-vs-activation report-only evidence")
+	if got, want := activationUpload.ID, "image-activation-report-upload"; got != want {
+		t.Fatalf("build-activation report upload id drifted: got %q want %q", got, want)
+	}
+	if got, want := activationUpload.If, "always()"; got != want {
+		t.Fatalf("build-activation report upload condition drifted: got %q want %q", got, want)
+	}
+	if activationUpload.ContinueOnError {
+		t.Fatal("build-activation report upload must fail closed")
+	}
+	if got, want := activationUpload.Uses, "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"; got != want {
+		t.Fatalf("build-activation report upload pin drifted: got %q want %q", got, want)
+	}
+	for key, want := range map[string]string{
+		"path":                 "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}",
+		"if-no-files-found":    "error",
+		"retention-days":       "90",
+		"include-hidden-files": "false",
+		"overwrite":            "false",
+	} {
+		if got := activationUpload.With[key]; got != want {
+			t.Fatalf("build-activation report upload %s drifted: got %q want %q", key, got, want)
+		}
+	}
 	apply := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Apply exact authorized control-plane release")
 	for key, want := range map[string]string{
-		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE":           "apply",
-		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID":     "${{ steps.operational-report-upload.outputs.artifact-id }}",
-		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST": "${{ steps.operational-report-upload.outputs.artifact-digest }}",
-		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL":    "${{ steps.operational-report-upload.outputs.artifact-url }}",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE":                "apply",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID":          "${{ steps.operational-report-upload.outputs.artifact-id }}",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST":      "${{ steps.operational-report-upload.outputs.artifact-digest }}",
+		"FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL":         "${{ steps.operational-report-upload.outputs.artifact-url }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID":     "${{ steps.image-activation-report-upload.outputs.artifact-id }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST": "${{ steps.image-activation-report-upload.outputs.artifact-digest }}",
+		"FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL":    "${{ steps.image-activation-report-upload.outputs.artifact-url }}",
 	} {
 		if got := apply.Env[key]; got != want {
 			t.Fatalf("operational apply %s drifted: got %q want %q", key, got, want)
