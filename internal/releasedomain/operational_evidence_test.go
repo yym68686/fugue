@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestOperationalDomainEvidenceReportsSingleWithoutAuthorizing(t *testing.T) {
+func TestOperationalDomainEvidenceReportsCompleteSingleAsActivationEligible(t *testing.T) {
 	changed, imagePlan, plan := operationalEvidenceFixture(t,
 		[]ChangedFile{{
 			Status:           ChangeModified,
@@ -29,8 +29,8 @@ func TestOperationalDomainEvidenceReportsSingleWithoutAuthorizing(t *testing.T) 
 	if report.Observation != OutcomeSingle || report.CandidateDomain != DomainControlPlane {
 		t.Fatalf("unexpected report outcome: %#v", report)
 	}
-	if report.AuthorizationEligible {
-		t.Fatal("report-only evidence became authorization eligible")
+	if !report.AuthorizationEligible {
+		t.Fatal("complete single-domain evidence was not activation eligible")
 	}
 	if report.ConservativeOutcome != OutcomeUnknown || report.ClassificationAgrees {
 		t.Fatalf("conservative/operational comparison was not preserved: %#v", report)
@@ -55,6 +55,79 @@ func TestOperationalDomainEvidenceReportsSingleWithoutAuthorizing(t *testing.T) 
 	}
 	if !reflect.DeepEqual(decoded, report) {
 		t.Fatalf("decoded report drifted\n got=%#v\nwant=%#v", decoded, report)
+	}
+}
+
+func TestActivateOperationalPlanRebuildsBlockedPlanAsSingleDomain(t *testing.T) {
+	changed, imagePlan, conservative := operationalEvidenceFixture(t,
+		[]ChangedFile{{
+			Status: ChangeModified, Path: "internal/runtime/objects.go",
+			ConsumerDomains: []Domain{DomainControlPlane},
+		}},
+		[]string{"controller"},
+		[]Domain{DomainControlPlane},
+		nil,
+	)
+	report, err := BuildOperationalDomainEvidence(changed, imagePlan, conservative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := ActivateOperationalPlan(conservative, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated.Result != OutcomeSingle || activated.SelectedDomain != DomainControlPlane ||
+		!reflect.DeepEqual(activated.Domains, []Domain{DomainControlPlane}) ||
+		len(activated.OperationalEvidence) != 1 {
+		t.Fatalf("activated plan = %#v", activated)
+	}
+	if activated.OperationalEvidence[0].PlanDigest != conservative.PlanDigest ||
+		activated.PlanDigest == conservative.PlanDigest {
+		t.Fatalf("activation digest chain was not preserved: %#v", activated)
+	}
+	if err := VerifyPlanDigest(activated); err != nil {
+		t.Fatal(err)
+	}
+
+	conservative.Domains[0] = DomainBackup
+	report.IntersectionDomains[0] = DomainBackup
+	if activated.Domains[0] != DomainControlPlane ||
+		activated.OperationalEvidence[0].IntersectionDomains[0] != DomainControlPlane {
+		t.Fatal("activated plan retained mutable caller slices")
+	}
+}
+
+func TestActivateOperationalPlanRejectsIncompleteOrNonBlockedEvidence(t *testing.T) {
+	changed, imagePlan, conservative := operationalEvidenceFixture(t,
+		[]ChangedFile{{Status: ChangeModified, Path: "internal/controller/controller.go", ConsumerDomains: []Domain{DomainControlPlane}}},
+		[]string{"controller"},
+		[]Domain{DomainControlPlane},
+		nil,
+	)
+	report, err := BuildOperationalDomainEvidence(changed, imagePlan, conservative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := report
+	mutated.AuthorizationEligible = false
+	mutated.Digest = operationalEvidenceDigest(mutated)
+	if _, err := ActivateOperationalPlan(conservative, mutated); err == nil {
+		t.Fatal("ineligible operational evidence unexpectedly activated")
+	}
+
+	conservative.Result = OutcomeSingle
+	conservative.SelectedDomain = DomainControlPlane
+	conservative.Domains = []Domain{DomainControlPlane}
+	conservative.PlanDigest = computePlanDigest(conservative)
+	report, err = BuildOperationalDomainEvidence(changed, imagePlan, conservative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AuthorizationEligible {
+		t.Fatal("already-authorized conservative plan became operational activation eligible")
+	}
+	if _, err := ActivateOperationalPlan(conservative, report); err == nil {
+		t.Fatal("conservative single-domain plan unexpectedly reactivated")
 	}
 }
 
@@ -242,12 +315,12 @@ func TestOperationalEvidenceStrictDecodeRejectsMutationAndDuplicateFields(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	report.AuthorizationEligible = true
+	report.AuthorizationEligible = false
 	if err := VerifyOperationalDomainEvidence(report); err == nil {
 		t.Fatal("authorizationEligible mutation unexpectedly accepted")
 	}
 
-	report.AuthorizationEligible = false
+	report.AuthorizationEligible = true
 	report.ImagePlanDigest = "sha256:" + strings.Repeat("f", 64)
 	report.Digest = operationalEvidenceDigest(report)
 	mutatedImagePlan, err := MarshalOperationalDomainEvidence(report)
@@ -305,11 +378,7 @@ func operationalEvidenceFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan := Plan{
-		APIVersion: PlanAPIVersion,
-		Kind:       PlanKind,
-		Result:     OutcomeUnknown,
-		Domains:    canonicalDomains(renderedDomains),
+	plan := BuildPlan(PlanInput{
 		Digests: DigestEvidence{
 			Base:                   "fixture-base",
 			Target:                 "fixture-target",
@@ -330,9 +399,7 @@ func operationalEvidenceFixture(
 			Evidence: renderedEvidence,
 			Unknown:  canonicalEvidence(renderedUnknown),
 		},
-		Unknown: []Evidence{},
-	}
-	plan.PlanDigest = computePlanDigest(plan)
+	})
 	return changed, imagePlan, plan
 }
 

@@ -132,6 +132,67 @@ func TestBlockedOutcomesPersistDecisionAndExitTwo(t *testing.T) {
 	}
 }
 
+func TestOperationalReportActivatesAndVerifiesOneDomainBundle(t *testing.T) {
+	fixture, reportPath, reportDigest := newOperationalActivationFixture(t)
+	fixture.bundle = filepath.Join(fixture.root, "operational-authorization-bundle")
+	fixture.args = replaceFlagValue(t, fixture.args, "--bundle-dir", fixture.bundle)
+	fixture.args = append(fixture.args,
+		"--operational-report", reportPath,
+		"--operational-report-digest", reportDigest,
+	)
+	options, err := parseAuthorizeFlags(fixture.args[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildAuthorization(options); err != nil {
+		t.Fatalf("build operational authorization: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if got := run(fixture.args, &stdout, &stderr); got != 0 {
+		t.Fatalf("operational authorize exit = %d, stderr = %s", got, stderr.String())
+	}
+	assertFixedResult(t, stdout.String(), "single", string(releasedomain.DomainControlPlane))
+	var plan releasedomain.Plan
+	mustDecodeJSON(t, mustReadFile(t, filepath.Join(fixture.bundle, planFilename)), &plan)
+	if len(plan.OperationalEvidence) != 1 || !plan.OperationalEvidence[0].AuthorizationEligible {
+		t.Fatalf("persisted operational activation = %#v", plan.OperationalEvidence)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if got := run([]string{"verify", "--bundle-dir", fixture.bundle}, &stdout, &stderr); got != 0 {
+		t.Fatalf("operational verify exit = %d, stderr = %s", got, stderr.String())
+	}
+	assertFixedResult(t, stdout.String(), "single", string(releasedomain.DomainControlPlane))
+}
+
+func TestOperationalAuthorizeFailsClosedOnMissingOrDriftedReportBinding(t *testing.T) {
+	fixture, reportPath, reportDigest := newOperationalActivationFixture(t)
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing digest", args: []string{"--operational-report", reportPath}},
+		{name: "digest drift", args: []string{
+			"--operational-report", reportPath,
+			"--operational-report-digest", "sha256:" + strings.Repeat("0", 64),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append(append([]string(nil), fixture.args...), test.args...)
+			args = replaceFlagValue(t, args, "--bundle-dir", filepath.Join(fixture.root, "blocked-"+strings.ReplaceAll(test.name, " ", "-")))
+			var stdout, stderr bytes.Buffer
+			if got := run(args, &stdout, &stderr); got != 1 {
+				t.Fatalf("operational blocked exit = %d, stdout = %q, stderr = %q, report=%s", got, stdout.String(), stderr.String(), reportDigest)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("operational blocked stdout = %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestClassifyFilesIsReadOnlyHintNotAuthorization(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -627,6 +688,98 @@ func newCommandFixture(t *testing.T, domains []releasedomain.Domain, outcome rel
 		"--ignore-helm-test-hooks=false",
 	}
 	return commandFixture{root: root, bundle: bundle, args: args, baseCommit: baseCommit, targetCommit: targetCommit}
+}
+
+func newOperationalActivationFixture(t *testing.T) (commandFixture, string, string) {
+	t.Helper()
+	fixture := newCommandFixture(t, nil, releasedomain.OutcomeUnknown)
+	changedBytes := testChangedEvidence(t, fixture.baseCommit, fixture.targetCommit, []releasedomain.ChangedFile{{
+		Status:           releasedomain.ChangeModified,
+		Path:             "internal/shared/runtime.go",
+		ConsumerDomains:  []releasedomain.Domain{releasedomain.DomainControlPlane},
+		OutsideConsumers: []string{"cmd/fugue-controller"},
+	}})
+	changedPath := flagValue(t, fixture.args, "--changed-evidence")
+	overwritePrivateFile(t, changedPath, changedBytes)
+	ownership, err := releasedomain.LoadOwnership(bytes.NewReader(testOwnership(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseManifest := canonicalTestManifest(t, ownership, []releasedomain.Domain{releasedomain.DomainControlPlane}, "base-operational")
+	targetManifest := canonicalTestManifest(t, ownership, []releasedomain.Domain{releasedomain.DomainControlPlane}, "target-operational")
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--base-canonical-manifest"), baseManifest)
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--target-canonical-manifest"), targetManifest)
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--repeated-target-canonical-manifest"), targetManifest)
+	options, err := parseAuthorizeFlags(fixture.args[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := buildAuthorization(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifacts.plan.Result != releasedomain.OutcomeUnknown {
+		t.Fatalf("conservative fixture outcome = %s", artifacts.plan.Result)
+	}
+	changed, err := releasedomain.DecodeAndVerifyChangedFileEvidence(
+		bytes.NewReader(changedBytes), fixture.baseCommit, fixture.targetCommit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imagePlan, err := releasedomain.NewOperationalImageRolloutPlan(
+		fixture.baseCommit,
+		fixture.targetCommit,
+		changed.Digest(),
+		[]releasedomain.OperationalImageRolloutTarget{{
+			Name: "controller", SourceBaseCommit: strings.Repeat("3", 40),
+			ArtifactDigest: "sha256:" + strings.Repeat("4", 64),
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := releasedomain.BuildOperationalDomainEvidence(changed, imagePlan, artifacts.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.AuthorizationEligible || report.CandidateDomain != releasedomain.DomainControlPlane {
+		t.Fatalf("activation report = %#v", report)
+	}
+	activated, err := releasedomain.ActivateOperationalPlan(artifacts.plan, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := releasedomain.ClassifyRendered(baseManifest, targetManifest, ownership, releasedomain.RenderedOptions{
+		DefaultNamespace: "fugue-system",
+		Bindings: map[string]string{
+			"releaseName": "fugue", "releaseNamespace": "fugue-system",
+		},
+		IgnoreHelmTestHooks: false,
+	})
+	if !reflect.DeepEqual(activated.Rendered, forward) {
+		t.Fatalf("activated rendered evidence drifted\n plan=%#v\nfresh=%#v", activated.Rendered, forward)
+	}
+	reportBytes, err := releasedomain.MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(fixture.root, "operational-domain-evidence.json")
+	writePrivateFile(t, reportPath, reportBytes)
+	return fixture, reportPath, report.Digest
+}
+
+func replaceFlagValue(t *testing.T, args []string, name, value string) []string {
+	t.Helper()
+	result := append([]string(nil), args...)
+	for index, argument := range result {
+		if argument == name && index+1 < len(result) {
+			result[index+1] = value
+			return result
+		}
+	}
+	t.Fatalf("flag %s missing", name)
+	return nil
 }
 
 func testOwnership(t *testing.T) []byte {

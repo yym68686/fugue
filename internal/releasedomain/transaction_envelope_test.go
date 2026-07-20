@@ -372,6 +372,49 @@ func TestDecodeTransactionEnvelopeRebuildsPlanAgainstSelfDigestForgery(t *testin
 	}
 }
 
+func TestTransactionEnvelopeRebuildsOperationalActivation(t *testing.T) {
+	changed, imagePlan, conservative := operationalEvidenceFixture(t,
+		[]ChangedFile{{
+			Status: ChangeModified, Path: "internal/runtime/objects.go",
+			ConsumerDomains: []Domain{DomainControlPlane},
+		}},
+		[]string{"controller"},
+		[]Domain{DomainControlPlane},
+		nil,
+	)
+	report, err := BuildOperationalDomainEvidence(changed, imagePlan, conservative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := ActivateOperationalPlan(conservative, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := NewTransactionEnvelope(activated, activated.PlanDigest, DomainControlPlane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := DecodeAndVerifyTransactionEnvelope(
+		bytes.NewReader(encoded), activated.PlanDigest, DomainControlPlane,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization.Domain() != DomainControlPlane || authorization.PlanDigest() != activated.PlanDigest {
+		t.Fatalf("authorization = %q %q", authorization.Domain(), authorization.PlanDigest())
+	}
+
+	activated.OperationalEvidence[0].CandidateDomain = DomainBackup
+	activated.PlanDigest = computePlanDigest(activated)
+	if _, err := NewTransactionEnvelope(activated, activated.PlanDigest, DomainControlPlane); err == nil {
+		t.Fatal("mutated operational activation unexpectedly authorized")
+	}
+}
+
 func TestDecodeTransactionEnvelopeRequiresEmptyUnknownEvidence(t *testing.T) {
 	plan, _, encoded := encodedTransactionEnvelope(t, DomainNodeLocal)
 	explicitEmpty := mutateTransactionEnvelopeJSON(t, encoded, func(root map[string]any) {

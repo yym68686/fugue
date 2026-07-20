@@ -1067,8 +1067,19 @@ control_plane_release_domain_private_authorize_consumer() {
   local base_manifest="$4"
   local target_manifest="$5"
   local repeated_manifest="$6"
-  local target_revision=$((live_revision + 1))
-  local status=0
+	local target_revision=$((live_revision + 1))
+	local status=0
+	local -a operational_args=()
+
+	if [[ -n "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT:-}" ||
+	  -n "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST:-}" ]]; then
+	  [[ -n "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT:-}" &&
+	    -n "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST:-}" ]] || return 2
+	  operational_args=(
+	    --operational-report "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT}"
+	    --operational-report-digest "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST}"
+	  )
+	fi
 
   rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT}"
   if "${FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL}" authorize \
@@ -1084,9 +1095,10 @@ control_plane_release_domain_private_authorize_consumer() {
     --release-name "${release_name}" \
     --release-namespace "${release_namespace}" \
     --base-revision "${live_revision}" \
-    --target-revision "${target_revision}" \
-    --ignore-helm-test-hooks=false \
-    "${CONTROL_PLANE_RELEASE_DOMAIN_BINDING_ARGS[@]}" \
+		--target-revision "${target_revision}" \
+		--ignore-helm-test-hooks=false \
+		${operational_args[@]+"${operational_args[@]}"} \
+		"${CONTROL_PLANE_RELEASE_DOMAIN_BINDING_ARGS[@]}" \
     >"${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT}"; then
     status=0
   else
@@ -1105,6 +1117,74 @@ control_plane_release_domain_private_authorize_consumer() {
       ;;
     *) return "${status}" ;;
   esac
+}
+
+control_plane_release_domain_operational_report_digest() {
+	(( $# == 1 )) || return 2
+	python3 - "$1" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+digest = document.get("digest")
+if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+    raise SystemExit(1)
+print(digest)
+PY
+}
+
+control_plane_release_domain_try_operational_activation() {
+	local conservative_bundle="${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}"
+	local activated_bundle="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization-bundle-operational"
+	local report_digest=""
+	local result=""
+	local outcome=""
+	local selected=""
+	local plan_digest=""
+
+	[[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" &&
+	  -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked" ]] || return 2
+	[[ -d "${conservative_bundle}" && ! -e "${activated_bundle}" ]] || return 2
+	report_digest="$(control_plane_release_domain_operational_report_digest \
+	  "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}")" || return 2
+	control_plane_release_domain_validate_digest "${report_digest}" || return 2
+
+	CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT="${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST="${report_digest}"
+	CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${activated_bundle}"
+	if ! control_plane_release_domain_private_authorize_consumer \
+	  "${PREVIOUS_REVISION}" "${FUGUE_RELEASE_NAME}" "${FUGUE_NAMESPACE}" \
+	  "${conservative_bundle}/base-manifest.yaml" \
+	  "${conservative_bundle}/target-manifest.yaml" \
+	  "${conservative_bundle}/repeated-target-manifest.yaml"; then
+	  CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${conservative_bundle}"
+	  unset CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT
+	  unset CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST
+	  return 2
+	fi
+	unset CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT
+	unset CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST
+	result="$(control_plane_release_domain_read_exact_result \
+	  "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT}")" || return 2
+	case "${result}" in
+	  $'single\tnode-local\t'sha256:*|$'single\tauthoritative-dns\t'sha256:*|\
+	  $'single\tcontrol-plane\t'sha256:*|$'single\timage-cache\t'sha256:*|\
+	  $'single\tbackup\t'sha256:*) ;;
+	  *)
+	    CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${conservative_bundle}"
+	    return 2
+	    ;;
+	esac
+	IFS=$'\t' read -r outcome selected plan_digest <<<"${result}"
+	[[ "${outcome}" == "single" && -n "${selected}" ]] || return 2
+	control_plane_release_domain_validate_digest "${plan_digest}" || return 2
+	CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="${selected}"
+	CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST="${plan_digest}"
+	CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME="single"
+	control_plane_release_domain_verify_bundle_command || return
+	rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked"
 }
 
 control_plane_release_domain_capture_frozen_argv() {
@@ -2182,11 +2262,20 @@ control_plane_release_run_atomic_domain_release() {
     final_status=$?
   fi
 
-  if (( final_status == 0 )); then
-    if ! control_plane_release_domain_materialize_operational_report; then
-      final_status=2
-    fi
-  fi
+	if (( final_status == 0 )); then
+		if ! control_plane_release_domain_materialize_operational_report; then
+			final_status=2
+		fi
+	fi
+
+	if (( final_status == 0 )) &&
+	  [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" ]] &&
+	  [[ -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked" ]]; then
+		# Activation is best-effort within the fail-closed boundary. Any invalid,
+		# incomplete, or non-single report leaves the conservative block intact;
+		# the normal no-write evidence path below then returns status 2.
+		control_plane_release_domain_try_operational_activation || :
+	fi
 
   if (( final_status == 0 )) &&
     [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "prepare" ]] &&
@@ -2222,12 +2311,18 @@ control_plane_release_run_atomic_domain_release() {
     fi
   fi
 
-  if (( final_status == 0 )) && [[ "${prepare_complete}" != "true" ]]; then
-    if [[ -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked" ]]; then
-      if control_plane_release_domain_publish_bundle_evidence; then
-        final_status=2
-      else
-        final_status=2
+	if (( final_status == 0 )) && [[ "${prepare_complete}" != "true" ]]; then
+		if [[ -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked" ]]; then
+			if [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "prepare" ]]; then
+				# Prepare is read-only. Returning success after the report is
+				# materialized lets the pinned upload finish and apply rederive the
+				# evidence. Final public evidence belongs to apply, so prepare must
+				# not leave a stale publication at the shared path.
+				final_status=0
+			elif control_plane_release_domain_publish_bundle_evidence; then
+				final_status=2
+			else
+				final_status=2
       fi
     else
       authorize_result="$(control_plane_release_domain_read_exact_result \

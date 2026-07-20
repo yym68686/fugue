@@ -134,7 +134,7 @@ coordination Lease is additionally available only to the literal
 `control-plane` and `backup` branches; `node-local`, `authoritative-dns`, and
 `image-cache` cannot acquire, drain, release, or restore it.
 
-## Dormant operational-domain evidence
+## Operational-domain evidence and activation
 
 `fugue-release-domain-evidence operational-report` is an additive,
 side-effect-free evidence contract for shared Go source. It accepts four
@@ -149,7 +149,10 @@ revision- and digest-bound witness channels:
 4. the complete fixed production adapter binding set.
 
 The report records each domain set, their intersection, contradictions and an
-`authorizationEligible: false` marker. A real multi-domain rendered or rollout
+`authorizationEligible` marker. The marker is true only when every witness is
+complete, their intersection contains exactly one fixed adapter domain, and
+the conservative result is blocked as `multiple` or `unknown`. A real
+multi-domain rendered or rollout
 set stays `multiple`. Missing target ownership, rendered unknowns, consumer
 coverage gaps, digest drift or disagreement stays `unknown`; no caller can
 provide a domain hint. Non-production command consumers are ignored only when
@@ -172,12 +175,22 @@ artifact ID, digest and URL. The apply phase rederives the report from fresh
 exact inputs and byte-matches it with the already uploaded local report before
 adapter dispatch. Missing upload proof, report drift, malformed target
 bindings, render evidence, plan digest or report output freezes the lane.
-`ClassifyFiles`, `BuildPlan`,
-`ExecutionAuthorization`, reverse ownership and adapter dispatch remain the
-sole conservative authorization path; the operational report retains
-`authorizationEligible: false` and cannot select or invoke an adapter. A later
-activation checkpoint is required before an operational single-domain result
-may affect authorization.
+`ClassifyFiles` remains the conservative first pass. When it blocks, apply may
+consume the byte-matched uploaded report through `ActivateOperationalPlan`.
+That constructor verifies the predecessor plan digest, changed-evidence
+digest, conservative outcome, and the complete single-domain witness
+intersection, then embeds the report in a new digest-bound plan. The ordinary
+transaction envelope, rollback ownership verifier, execution binding and fixed
+adapter dispatcher must reconstruct that activated plan before any mutation.
+The original conservative evidence is retained inside the activated plan and
+report; it is not rewritten or hidden.
+
+Prepare remains read-only. A conservative block returns success only long
+enough for the pinned artifact upload and apply rederivation to run. If apply
+cannot construct and reverify one activated authorization bundle, the original
+blocked bundle is published as no-write evidence and the lane freezes with
+status 2. Zero, multiple, unknown, incomplete, drifted or contradictory
+operational evidence never invokes an adapter.
 
 ## Production entrypoint
 

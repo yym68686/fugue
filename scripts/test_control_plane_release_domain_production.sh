@@ -33,7 +33,10 @@ case "$(basename "$0")" in
     if [[ "${1:-}" == "canonicalize-manifest" ]]; then
       input="$(fake_flag_value --input "$@")" || exit 2
       cp "${input}" "${output}" || exit 1
-    else
+	elif [[ "${1:-}" == "operational-report" &&
+	  "${FAKE_OPERATIONAL_REPORT_ELIGIBLE:-false}" == "true" ]]; then
+	  printf '{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}\n' >"${output}" || exit 1
+	else
       printf '{}\n' >"${output}" || exit 1
     fi
     chmod 600 "${output}" || exit 1
@@ -66,7 +69,11 @@ case "$(basename "$0")" in
         cp "${argv_snapshot}" "${bundle_dir}/upgrade-argv.snapshot" || exit 1
         printf '{"planDigest":"%s"}\n' "${FAKE_PLAN_DIGEST}" >"${bundle_dir}/release-domain-plan.json" || exit 1
         chmod 600 "${bundle_dir}"/* || exit 1
-        if [[ "${FAKE_OUTCOME}" == "zero" ]]; then
+		operational_report=""
+		if operational_report="$(fake_flag_value --operational-report "$@" 2>/dev/null)"; then
+		  [[ "${FAKE_OPERATIONAL_REPORT_ELIGIBLE:-false}" == "true" ]] || exit 2
+		  printf 'single\t%s\t%s\n' "${FAKE_DOMAIN}" "${FAKE_PLAN_DIGEST}"
+		elif [[ "${FAKE_OUTCOME}" == "zero" ]]; then
           printf 'zero\t%s\n' "${FAKE_PLAN_DIGEST}"
         elif [[ "${FAKE_OUTCOME}" == "multiple" || "${FAKE_OUTCOME}" == "unknown" ]]; then
           exit 2
@@ -601,6 +608,7 @@ setup_case() {
   FAKE_PUBLIC_FAIL="false"
   FAKE_TAMPER_CLEANUP="false"
   FAKE_TAMPER_SEALED_ARGV="false"
+	FAKE_OPERATIONAL_REPORT_ELIGIBLE="false"
   FAKE_SIGNAL_PRETRANSACTION="false"
   FAKE_SIGNAL_DURING_APPLY="false"
   FAKE_SIGNAL_DURING_ROLLBACK="false"
@@ -615,7 +623,7 @@ setup_case() {
   FAKE_TAMPER_ARGV_INPUT_AT=0
   FAKE_REPOSITORY_VERIFY_COUNT=0
   export FAKE_OUTCOME FAKE_DOMAIN FAKE_PLAN_DIGEST FAKE_VERIFY_FAIL_AT FAKE_PUBLIC_FAIL
-  export FAKE_TAMPER_CLEANUP
+	export FAKE_TAMPER_CLEANUP FAKE_OPERATIONAL_REPORT_ELIGIBLE
 
   FUGUE_RELEASE_NAME="fugue"
   FUGUE_RELEASE_FULLNAME="fugue"
@@ -1211,6 +1219,38 @@ case_operational_apply_rejects_report_drift() {
     fail_test "report drift unexpectedly published final evidence"
 }
 
+case_operational_apply_activates_complete_single_domain() {
+	setup_case
+	trap cleanup_case EXIT
+	FAKE_OUTCOME="unknown"
+	FAKE_DOMAIN="control-plane"
+	FAKE_OPERATIONAL_REPORT_ELIGIBLE="true"
+	export FAKE_OUTCOME FAKE_DOMAIN FAKE_OPERATIONAL_REPORT_ELIGIBLE
+	rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+	[[ "$(run_release_status)" == "0" ]] ||
+	  fail_test "blocked prepare did not reach the durable upload boundary"
+	[[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] ||
+	  fail_test "blocked prepare did not materialize operational evidence"
+	[[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+	  fail_test "blocked prepare published stale final evidence"
+
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+	[[ "$(run_release_status)" == "0" ]] ||
+	  fail_test "complete operational single-domain report did not activate"
+	assert_log_count 3 "dispatch:authorize:"
+	assert_log_count 1 "helm-upgrade:control-plane"
+	assert_log_order "evidence:operational-report" "helm-upgrade:control-plane"
+	assert_file_contains "${FAKE_LOG}" "--operational-report ${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	assert_public_parent_and_cleanup
+}
+
 run_case() {
   local label="$1"
   local status=0
@@ -1232,6 +1272,7 @@ run_case blocked-public-failure case_blocked_public_failure
 run_case operational-prepare-before-dispatch case_operational_prepare_stops_before_dispatch
 run_case operational-apply-upload-proof case_operational_apply_requires_upload_proof
 run_case operational-apply-report-drift case_operational_apply_rejects_report_drift
+run_case operational-apply-activation case_operational_apply_activates_complete_single_domain
 run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch
 for domain in node-local authoritative-dns control-plane image-cache backup; do
   run_case "success-${domain}" case_domain_success "${domain}"

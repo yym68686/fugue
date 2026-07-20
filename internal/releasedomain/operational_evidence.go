@@ -56,9 +56,9 @@ type OperationalAdapterBinding struct {
 	Adapter string `json:"adapter"`
 }
 
-// OperationalDomainEvidence is a report-only conjunction of four independent
-// witness channels. AuthorizationEligible is permanently false; no production
-// authorization constructor accepts this type.
+// OperationalDomainEvidence is a conjunction of four independent witness
+// channels. AuthorizationEligible is true only for a complete single-domain
+// intersection that may be consumed by ActivateOperationalPlan.
 type OperationalDomainEvidence struct {
 	APIVersion            string                          `json:"apiVersion"`
 	Kind                  string                          `json:"kind"`
@@ -289,6 +289,7 @@ func BuildOperationalDomainEvidence(changed ChangedFileEvidence, imagePlan Opera
 		}
 	}
 	report.ClassificationAgrees = operationalClassificationAgrees(report)
+	report.AuthorizationEligible = operationalAuthorizationEligible(report)
 	report.Digest = operationalEvidenceDigest(report)
 	return report, nil
 }
@@ -302,8 +303,8 @@ func MarshalOperationalDomainEvidence(report OperationalDomainEvidence) ([]byte,
 }
 
 // DecodeAndVerifyOperationalDomainEvidence strictly decodes a report and
-// binds it to an independently supplied digest. This still creates no
-// ExecutionAuthorization.
+// binds it to an independently supplied digest. The report alone is never an
+// ExecutionAuthorization; activation still requires its conservative plan.
 func DecodeAndVerifyOperationalDomainEvidence(reader io.Reader, expectedDigest string) (OperationalDomainEvidence, error) {
 	data, err := readOperationalEvidence(reader, "operational domain evidence")
 	if err != nil {
@@ -328,13 +329,10 @@ func DecodeAndVerifyOperationalDomainEvidence(reader io.Reader, expectedDigest s
 }
 
 // VerifyOperationalDomainEvidence enforces canonical report structure and the
-// permanent non-authorization boundary.
+// exact activation eligibility predicate.
 func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 	if report.APIVersion != OperationalEvidenceAPIVersion || report.Kind != OperationalEvidenceKind || report.Policy != OperationalEvidencePolicy {
 		return fmt.Errorf("operational domain evidence identity is unsupported")
-	}
-	if report.AuthorizationEligible {
-		return fmt.Errorf("operational domain evidence must never be authorization eligible")
 	}
 	if err := validateTrustedGitCommit(report.BaseCommit, "operational evidence base commit"); err != nil {
 		return err
@@ -417,10 +415,75 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 	if report.ClassificationAgrees != operationalClassificationAgrees(report) {
 		return fmt.Errorf("operational evidence classification comparison mismatch")
 	}
+	if report.AuthorizationEligible != operationalAuthorizationEligible(report) {
+		return fmt.Errorf("operational evidence authorization eligibility mismatch")
+	}
 	if report.Digest != operationalEvidenceDigest(report) {
 		return fmt.Errorf("operational domain evidence digest mismatch")
 	}
 	return nil
+}
+
+// ActivateOperationalPlan returns a canonically reproducible single-domain
+// plan only when a conservative multiple/unknown result is paired with a
+// complete four-witness operational report. The predecessor plan remains
+// embedded verbatim through its evidence fields and report PlanDigest.
+func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
+	if err := VerifyPlanDigest(conservative); err != nil {
+		return Plan{}, fmt.Errorf("operational activation conservative plan: %w", err)
+	}
+	if len(conservative.OperationalEvidence) != 0 {
+		return Plan{}, fmt.Errorf("operational activation requires a conservative predecessor")
+	}
+	if err := VerifyOperationalDomainEvidence(report); err != nil {
+		return Plan{}, fmt.Errorf("operational activation report: %w", err)
+	}
+	if !report.AuthorizationEligible || report.PlanDigest != conservative.PlanDigest ||
+		report.ChangedFilesDigest != conservative.Digests.ChangedFiles {
+		return Plan{}, fmt.Errorf("operational activation evidence binding mismatch")
+	}
+	if report.ConservativeOutcome != conservative.Result ||
+		!equalDomains(report.ConservativeDomains, conservative.Domains) ||
+		report.ConservativeDomain != conservative.SelectedDomain {
+		return Plan{}, fmt.Errorf("operational activation conservative classification mismatch")
+	}
+	if conservative.Result != OutcomeMultiple && conservative.Result != OutcomeUnknown {
+		return Plan{}, fmt.Errorf("operational activation requires a blocked conservative outcome")
+	}
+	if conservative.Files.AllNonRuntime || len(report.IntersectionDomains) != 1 ||
+		report.CandidateDomain != report.IntersectionDomains[0] {
+		return Plan{}, fmt.Errorf("operational activation single-domain evidence mismatch")
+	}
+	rebuiltConservative := BuildPlan(PlanInput{
+		Files: conservative.Files, Rendered: conservative.Rendered, Digests: conservative.Digests,
+	})
+	if !reflect.DeepEqual(rebuiltConservative, conservative) {
+		return Plan{}, fmt.Errorf("operational activation conservative plan is not canonically reproducible")
+	}
+
+	clonedPlan := rebuiltConservative
+	encodedReport, err := MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		return Plan{}, fmt.Errorf("operational activation marshal report: %w", err)
+	}
+	clonedReport, err := DecodeAndVerifyOperationalDomainEvidence(bytes.NewReader(encodedReport), report.Digest)
+	if err != nil {
+		return Plan{}, fmt.Errorf("operational activation clone report: %w", err)
+	}
+
+	clonedPlan.Result = OutcomeSingle
+	clonedPlan.SelectedDomain = clonedReport.CandidateDomain
+	clonedPlan.Domains = []Domain{clonedReport.CandidateDomain}
+	clonedPlan.OperationalEvidence = []OperationalDomainEvidence{clonedReport}
+	clonedPlan.PlanDigest = computePlanDigest(clonedPlan)
+	return clonedPlan, nil
+}
+
+func operationalAuthorizationEligible(report OperationalDomainEvidence) bool {
+	return len(report.Issues) == 0 && report.Observation == OutcomeSingle &&
+		len(report.IntersectionDomains) == 1 &&
+		report.CandidateDomain == report.IntersectionDomains[0] &&
+		(report.ConservativeOutcome == OutcomeMultiple || report.ConservativeOutcome == OutcomeUnknown)
 }
 
 func verifyOperationalConservativeClassification(report OperationalDomainEvidence) error {

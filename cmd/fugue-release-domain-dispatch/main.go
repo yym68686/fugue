@@ -43,6 +43,7 @@ const (
 	maxDecisionBytes        = 64 << 10
 	maxBindingBytes         = 64 << 10
 	maxRollbackEvidence     = 64 << 10
+	maxOperationalReport    = 8 << 20
 )
 
 type bindingFlags map[string]string
@@ -115,21 +116,23 @@ func (value *explicitFalseFlag) Set(raw string) error {
 func (value *explicitFalseFlag) IsBoolFlag() bool { return true }
 
 type authorizeOptions struct {
-	ownershipPath        string
-	changedEvidencePath  string
-	trustedBaseCommit    string
-	trustedTargetCommit  string
-	baseManifestPath     string
-	targetManifestPath   string
-	repeatedManifestPath string
-	argvSnapshotPath     string
-	bundleDir            string
-	releaseName          string
-	releaseNamespace     string
-	baseRevision         string
-	targetRevision       string
-	bindings             bindingFlags
-	ignoreHooks          explicitFalseFlag
+	ownershipPath           string
+	changedEvidencePath     string
+	trustedBaseCommit       string
+	trustedTargetCommit     string
+	baseManifestPath        string
+	targetManifestPath      string
+	repeatedManifestPath    string
+	argvSnapshotPath        string
+	bundleDir               string
+	releaseName             string
+	releaseNamespace        string
+	baseRevision            string
+	targetRevision          string
+	bindings                bindingFlags
+	ignoreHooks             explicitFalseFlag
+	operationalReportPath   string
+	operationalReportDigest string
 }
 
 type artifactDigests struct {
@@ -287,6 +290,7 @@ func parseAuthorizeFlags(args []string) (authorizeOptions, error) {
 		"argv-snapshot": false, "bundle-dir": false, "release-name": false,
 		"release-namespace": false, "base-revision": false, "target-revision": false,
 		"binding": true, "ignore-helm-test-hooks": false,
+		"operational-report": false, "operational-report-digest": false,
 	}); err != nil {
 		return authorizeOptions{}, err
 	}
@@ -307,6 +311,8 @@ func parseAuthorizeFlags(args []string) (authorizeOptions, error) {
 	flags.StringVar(&options.targetRevision, "target-revision", "", "opaque target Helm revision binding")
 	flags.Var(&options.bindings, "binding", "resolved ownership binding key=value (repeatable)")
 	flags.Var(&options.ignoreHooks, "ignore-helm-test-hooks", "must be explicitly false; manifests must contain no hooks")
+	flags.StringVar(&options.operationalReportPath, "operational-report", "", "uploaded and byte-matched operational-domain report")
+	flags.StringVar(&options.operationalReportDigest, "operational-report-digest", "", "expected embedded operational-domain report digest")
 	if err := flags.Parse(args); err != nil {
 		return authorizeOptions{}, err
 	}
@@ -346,6 +352,17 @@ func parseAuthorizeFlags(args []string) (authorizeOptions, error) {
 	}
 	if options.bindings == nil {
 		options.bindings = bindingFlags{}
+	}
+	if (options.operationalReportPath == "") != (options.operationalReportDigest == "") {
+		return authorizeOptions{}, fmt.Errorf("--operational-report and --operational-report-digest must be supplied together")
+	}
+	if options.operationalReportPath != "" {
+		if err := validateRequiredString("--operational-report", options.operationalReportPath); err != nil {
+			return authorizeOptions{}, err
+		}
+		if err := validateCanonicalDigest(options.operationalReportDigest); err != nil {
+			return authorizeOptions{}, fmt.Errorf("--operational-report-digest: %w", err)
+		}
 	}
 	for name, value := range map[string]string{
 		"releaseName":      options.releaseName,
@@ -460,6 +477,25 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 	})
 	if err != nil {
 		return authorizationArtifacts{}, fmt.Errorf("build release-domain plan: %w", err)
+	}
+	if options.operationalReportPath != "" {
+		reportJSON, err := readSecureSource(options.operationalReportPath, maxOperationalReport, false)
+		if err != nil {
+			return authorizationArtifacts{}, fmt.Errorf("read operational-domain report: %w", err)
+		}
+		report, err := releasedomain.DecodeAndVerifyOperationalDomainEvidence(
+			bytes.NewReader(reportJSON), options.operationalReportDigest,
+		)
+		if err != nil {
+			return authorizationArtifacts{}, fmt.Errorf("verify operational-domain report: %w", err)
+		}
+		if report.BaseCommit != options.trustedBaseCommit || report.TargetCommit != options.trustedTargetCommit {
+			return authorizationArtifacts{}, fmt.Errorf("operational-domain report revision binding mismatch")
+		}
+		plan, err = releasedomain.ActivateOperationalPlan(plan, report)
+		if err != nil {
+			return authorizationArtifacts{}, fmt.Errorf("activate operational-domain plan: %w", err)
+		}
 	}
 	planJSON, err := marshalPrivateJSON(plan)
 	if err != nil {
@@ -735,6 +771,15 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 	})
 	if err != nil {
 		return dispatchDecision{}, fmt.Errorf("rebuild release-domain plan: %w", err)
+	}
+	if len(plan.OperationalEvidence) > 1 {
+		return dispatchDecision{}, fmt.Errorf("persisted plan contains multiple operational activation reports")
+	}
+	if len(plan.OperationalEvidence) == 1 {
+		rebuilt, err = releasedomain.ActivateOperationalPlan(rebuilt, plan.OperationalEvidence[0])
+		if err != nil {
+			return dispatchDecision{}, fmt.Errorf("rebuild operational-domain activation: %w", err)
+		}
 	}
 	if rebuilt.PlanDigest != plan.PlanDigest {
 		return dispatchDecision{}, fmt.Errorf("rebuilt release-domain plan differs from persisted plan")

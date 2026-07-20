@@ -178,6 +178,10 @@ func validateStrictTransactionEnvelopeJSON(data []byte) error {
 }
 
 func rebuildExecutableTransactionPlan(plan Plan, expectedPlanDigest string, expectedDomain Domain) (Plan, error) {
+	operational := len(plan.OperationalEvidence) == 1
+	if len(plan.OperationalEvidence) > 1 {
+		return Plan{}, fmt.Errorf("transaction plan contains multiple operational activation reports")
+	}
 	if err := validateCanonicalPlanDigest(plan.PlanDigest, "nested plan digest"); err != nil {
 		return Plan{}, err
 	}
@@ -196,15 +200,22 @@ func rebuildExecutableTransactionPlan(plan Plan, expectedPlanDigest string, expe
 	if plan.SelectedDomain != expectedDomain {
 		return Plan{}, fmt.Errorf("nested selected domain mismatch")
 	}
-	if !isExactTransactionDomain(plan.Domains, expectedDomain) ||
-		!isExactTransactionDomain(plan.Files.Domains, expectedDomain) ||
+	if !isExactTransactionDomain(plan.Domains, expectedDomain) {
+		return Plan{}, fmt.Errorf("transaction plan must select exactly the expected domain")
+	}
+	if operational {
+		report := plan.OperationalEvidence[0]
+		if !report.AuthorizationEligible || report.CandidateDomain != expectedDomain {
+			return Plan{}, fmt.Errorf("transaction operational activation does not authorize the expected domain")
+		}
+	} else if !isExactTransactionDomain(plan.Files.Domains, expectedDomain) ||
 		!isExactTransactionDomain(plan.Rendered.Domains, expectedDomain) {
 		return Plan{}, fmt.Errorf("transaction plan domain evidence must contain exactly the expected domain")
 	}
 	if plan.Files.AllNonRuntime {
 		return Plan{}, fmt.Errorf("single-domain transaction cannot be marked all-non-runtime")
 	}
-	if len(plan.Unknown) != 0 || len(plan.Files.Unknown) != 0 || len(plan.Rendered.Unknown) != 0 {
+	if !operational && (len(plan.Unknown) != 0 || len(plan.Files.Unknown) != 0 || len(plan.Rendered.Unknown) != 0) {
 		return Plan{}, fmt.Errorf("single-domain transaction contains unknown evidence")
 	}
 
@@ -213,6 +224,13 @@ func rebuildExecutableTransactionPlan(plan Plan, expectedPlanDigest string, expe
 		Rendered: plan.Rendered,
 		Digests:  plan.Digests,
 	})
+	if operational {
+		var err error
+		rebuilt, err = ActivateOperationalPlan(rebuilt, plan.OperationalEvidence[0])
+		if err != nil {
+			return Plan{}, fmt.Errorf("reconstruct operational activation: %w", err)
+		}
+	}
 	if rebuilt.Result != OutcomeSingle || rebuilt.SelectedDomain != expectedDomain || rebuilt.PlanDigest != expectedPlanDigest {
 		return Plan{}, fmt.Errorf("reconstructed transaction plan does not authorize the expected domain")
 	}
