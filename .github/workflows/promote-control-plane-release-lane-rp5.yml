@@ -94,7 +94,8 @@ jobs:
               "https://api.github.com/${path}"
           }
           policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
-          [[ "${policy_commit}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${policy_commit}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1
           for policy_path in "${workflow_path}" "${test_path}"; do
             [[ "$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}" ]] || exit 1
           done
@@ -407,7 +408,8 @@ jobs:
           readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
           readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
           policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
-          [[ "${policy_commit}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${policy_commit}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1
           for policy_path in "${workflow_path}" "${test_path}"; do
             [[ "$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}" ]] || exit 1
           done

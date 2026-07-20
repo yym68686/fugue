@@ -20,7 +20,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "63ad76296a83211127ad01d64ce39ba708af36c402d0e811fe815e378f2be1ef")
+	assertWorkflowSourceDigest(t, data, "2a59067621f8d933b7c5a12638acb4f87103af556d3ee73561244dfb9abad7ea")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -149,7 +149,8 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	for _, required := range []string{
 		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
 		`"${GITHUB_REF}" == 'refs/heads/main'`,
-		`"${policy_commit}" == "${GITHUB_SHA}"`,
+		`"${policy_commit}" =~ ^[0-9a-f]{40}$`,
+		`git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}"`,
 		`M\t.github/workflows/promote-control-plane-release-lane-rp5.yml`,
 		`M\tinternal/platformsafety/release_lane_promotion_workflow_test.go`,
 		`github_api_get()`,
@@ -179,6 +180,16 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	}
 	if strings.Contains(authorize.Run, "gh api") {
 		t.Fatal("self-hosted lane qualification must not depend on the absent gh CLI")
+	}
+	promoteIdentity := promote.Steps[1]
+	for _, required := range []string{
+		`"${policy_commit}" =~ ^[0-9a-f]{40}$`,
+		`git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}"`,
+		`"$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}"`,
+	} {
+		if !strings.Contains(promoteIdentity.Run, required) {
+			t.Fatalf("hosted lane promotion policy identity must contain %q", required)
+		}
 	}
 
 	qualifyRuntime := qualify.Steps[2]
@@ -265,6 +276,53 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("lane promotion contains out-of-scope capability %q", forbidden)
 		}
+	}
+}
+
+func TestRP5ReleaseLanePromotionPolicyIdentityUsesRealForwardMainHistory(t *testing.T) {
+	t.Parallel()
+
+	steps := []struct {
+		name string
+		step releaseWorkflowStep
+	}{
+		{name: "self-hosted qualification", step: rp5PromotionWorkflowStep(t, "qualify-control-plane-lane", "Verify exact read-only lane qualification authorization")},
+		{name: "hosted promotion", step: rp5PromotionWorkflowStep(t, "promote-deploy-lane", "Verify one-shot promotion policy identity")},
+	}
+	for _, step := range steps {
+		step := step
+		t.Run(step.name, func(t *testing.T) {
+			t.Parallel()
+			identity := rp5PromotionPolicyIdentitySnippet(t, step.step.Run)
+			for _, test := range []struct {
+				name     string
+				scenario string
+				wantPass bool
+			}{
+				{name: "unchanged policy on forward main", scenario: "forward", wantPass: true},
+				{name: "one policy file changed later", scenario: "drift", wantPass: false},
+				{name: "policy files split across commits", scenario: "split", wantPass: false},
+				{name: "policy commit is not ancestor of execution SHA", scenario: "non-ancestor", wantPass: false},
+			} {
+				test := test
+				t.Run(test.name, func(t *testing.T) {
+					t.Parallel()
+					repository, executionSHA := prepareRP5PolicyIdentityRepository(t, test.scenario)
+					command := exec.Command("bash", "-c", "set -euo pipefail\n"+
+						"readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'\n"+
+						"readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'\n"+identity)
+					command.Dir = repository
+					command.Env = append(os.Environ(), "GITHUB_SHA="+executionSHA)
+					output, err := command.CombinedOutput()
+					if test.wantPass && err != nil {
+						t.Fatalf("forward-main identity rejected valid history: %v output=%s", err, output)
+					}
+					if !test.wantPass && err == nil {
+						t.Fatalf("forward-main identity accepted %s: output=%s", test.scenario, output)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -543,6 +601,91 @@ func rp5PromotionWorkflowStep(t *testing.T, jobName, stepName string) releaseWor
 		t.Fatalf("step %q is absent from job %q", stepName, jobName)
 	}
 	return match
+}
+
+func rp5PromotionPolicyIdentitySnippet(t *testing.T, script string) string {
+	t.Helper()
+	const startMarker = `policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1`
+	start := strings.Index(script, startMarker)
+	if start < 0 {
+		t.Fatal("RP5 policy identity start marker is absent")
+	}
+	const endMarker = "\ndone"
+	endOffset := strings.Index(script[start:], endMarker)
+	if endOffset < 0 {
+		t.Fatal("RP5 policy identity end marker is absent")
+	}
+	end := start + endOffset + len(endMarker)
+	return script[start:end] + "\n"
+}
+
+func prepareRP5PolicyIdentityRepository(t *testing.T, scenario string) (string, string) {
+	t.Helper()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatalf("create synthetic repository: %v", err)
+	}
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v output=%s", args, err, output)
+		}
+		return string(output)
+	}
+	write := func(path, value string) {
+		t.Helper()
+		fullPath := filepath.Join(repository, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+			t.Fatalf("create parent for %s: %v", path, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(value), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	commit := func(message string) {
+		t.Helper()
+		runGit("add", ".")
+		runGit("-c", "user.name=Fugue Test", "-c", "user.email=fugue-test@example.invalid", "commit", "--quiet", "-m", message)
+	}
+
+	const workflowPath = ".github/workflows/promote-control-plane-release-lane-rp5.yml"
+	const testPath = "internal/platformsafety/release_lane_promotion_workflow_test.go"
+	runGit("init", "--quiet", "--initial-branch=main")
+	write(workflowPath, "policy v1\n")
+	write(testPath, "test v1\n")
+	write("README.md", "base\n")
+	commit("base")
+	baseSHA := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+
+	switch scenario {
+	case "forward", "drift", "non-ancestor":
+		write(workflowPath, "policy v2\n")
+		write(testPath, "test v2\n")
+		commit("policy")
+	case "split":
+		write(workflowPath, "policy v2\n")
+		commit("workflow policy")
+		write(testPath, "test v2\n")
+		commit("test policy")
+	default:
+		t.Fatalf("unknown RP5 policy identity scenario %q", scenario)
+	}
+
+	switch scenario {
+	case "forward":
+		write("README.md", "forward main\n")
+		commit("forward main")
+	case "drift":
+		write(workflowPath, "policy v3\n")
+		commit("policy drift")
+	}
+	executionSHA := strings.TrimSpace(runGit("rev-parse", "HEAD"))
+	if scenario == "non-ancestor" {
+		executionSHA = baseSHA
+	}
+	return repository, executionSHA
 }
 
 func writeRP5PromotionExecutable(t *testing.T, path, contents string) {
