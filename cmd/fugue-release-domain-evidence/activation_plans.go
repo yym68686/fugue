@@ -108,7 +108,7 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		artifacts,
 	)
 	if err != nil {
-		fmt.Fprintln(stderr, activationPlanBuildError)
+		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
 	activationPlan, activationEvidence, err := releasedomain.BuildImageActivationReportFromManifests(releasedomain.ImageActivationPlanInput{
@@ -116,22 +116,22 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		BaseManifest: baseManifest, TargetManifest: targetManifest,
 	})
 	if err != nil {
-		fmt.Fprintln(stderr, activationPlanBuildError)
+		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
 	buildBytes, err := releasedomain.MarshalBuildArtifactPlan(buildPlan)
 	if err != nil {
-		fmt.Fprintln(stderr, activationPlanBuildError)
+		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
 	activationBytes, err := releasedomain.MarshalImageActivationPlan(activationPlan)
 	if err != nil {
-		fmt.Fprintln(stderr, activationPlanBuildError)
+		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
 	evidenceBytes, err := releasedomain.MarshalImageActivationEvidence(activationEvidence)
 	if err != nil {
-		fmt.Fprintln(stderr, activationPlanBuildError)
+		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
 	if err := writeActivationPlanDirectory(options.outputDirectory, buildBytes, activationBytes, evidenceBytes); err != nil {
@@ -139,6 +139,52 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func writeActivationPlanBuildError(stderr io.Writer, err error) {
+	fmt.Fprintf(stderr, "%s: %s\n", activationPlanBuildError, activationPlanBuildErrorCode(err))
+}
+
+func activationPlanBuildErrorCode(err error) string {
+	if err == nil || strings.TrimSpace(err.Error()) == "" {
+		return "unspecified-internal-invariant"
+	}
+	message := err.Error()
+	known := []struct {
+		fragment string
+		code     string
+	}{
+		{"verify build artifact plan:", "build-artifact-plan-invalid"},
+		{"verify release plan:", "release-plan-invalid"},
+		{"build artifact and release plan binding mismatch", "plan-binding-mismatch"},
+		{"rendered manifest or ownership digest mismatch", "rendered-input-digest-mismatch"},
+		{"verify classification context:", "classification-context-invalid"},
+		{"load ownership:", "ownership-invalid"},
+		{"validate ownership bindings:", "ownership-bindings-invalid"},
+		{"rendered manifests contain incomplete object evidence", "rendered-object-evidence-incomplete"},
+		{"rendered manifests contain duplicate object identities", "rendered-object-identity-duplicated"},
+		{"workload pod spec is missing", "workload-pod-spec-missing"},
+		{"workload containers are missing", "workload-containers-missing"},
+		{"workload containers are invalid", "workload-containers-invalid"},
+		{"workload initContainers are invalid", "workload-init-containers-invalid"},
+		{"workload container is invalid", "workload-container-invalid"},
+		{"workload container identity is invalid", "workload-container-identity-invalid"},
+		{"workload container name is duplicated", "workload-container-name-duplicated"},
+		{"workload kind changed", "workload-kind-changed"},
+		{"base ownership match failed:", "base-ownership-match-failed"},
+		{"target ownership match failed:", "target-ownership-match-failed"},
+		{"image activation ownership rules overlap", "activation-ownership-overlap"},
+		{"marshal rendered workload:", "rendered-workload-marshal-failed"},
+		{"image activation", "image-activation-contract-invalid"},
+		{"activation gap", "activation-gap-contract-invalid"},
+		{"build artifact", "build-artifact-contract-invalid"},
+	}
+	for _, item := range known {
+		if strings.Contains(message, item.fragment) {
+			return item.code
+		}
+	}
+	return "internal-invariant-unclassified"
 }
 
 func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error) {

@@ -193,6 +193,28 @@ func TestParseImageActivationPlanFlagsRejectsDuplicateOrRelativeOutput(t *testin
 	}
 }
 
+func TestWriteActivationPlanBuildErrorIncludesOnlyFixedReasonCode(t *testing.T) {
+	var stderr bytes.Buffer
+	writeActivationPlanBuildError(&stderr, nil)
+	if got := stderr.String(); got != activationPlanBuildError+": unspecified-internal-invariant\n" {
+		t.Fatalf("nil build error output = %q", got)
+	}
+
+	stderr.Reset()
+	privateIdentity := "apps/v1 Deployment private-namespace/private-name"
+	writeActivationPlanBuildError(&stderr, &activationPlanTestError{message: "workload containers are missing for " + privateIdentity})
+	if got := stderr.String(); got != activationPlanBuildError+": workload-containers-missing\n" {
+		t.Fatalf("classified build error output = %q", got)
+	}
+	if strings.Contains(stderr.String(), privateIdentity) {
+		t.Fatalf("classified build error leaked manifest identity: %q", stderr.String())
+	}
+}
+
+type activationPlanTestError struct{ message string }
+
+func (err *activationPlanTestError) Error() string { return err.message }
+
 func activationTestDeployment(image string) string {
 	return "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fugue-api\n  namespace: fugue-system\nspec:\n  selector:\n    matchLabels:\n      app: fugue-api\n  template:\n    metadata:\n      labels:\n        app: fugue-api\n    spec:\n      containers:\n        - name: api\n          image: " + image + "\n"
 }
