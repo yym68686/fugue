@@ -53,6 +53,68 @@ func TestBuildAndActivationPlansKeepUnactivatedArtifactsDormant(t *testing.T) {
 	}
 }
 
+func TestBuildArtifactPlanPublishedImageRefIsOptionalAndSealed(t *testing.T) {
+	artifactDigest := md0Digest("b")
+	legacy, err := NewBuildArtifactPlan(md0BaseCommit, md0TargetCommit, md0Digest("a"), []BuildArtifact{{
+		Name: "api", SourceBaseCommit: md0BaseCommit,
+		ArtifactDigest: artifactDigest, ProvenanceDigest: md0Digest("c"),
+	}})
+	if err != nil {
+		t.Fatalf("new legacy build artifact plan: %v", err)
+	}
+	const legacyDigest = "sha256:2020db02d62b2164eb31761657c56fd79c8757ead8b7681a7059bf29b6abddea"
+	if legacy.Digest != legacyDigest {
+		t.Fatalf("optional field changed the legacy digest: got %q want %q", legacy.Digest, legacyDigest)
+	}
+	legacyBytes, err := MarshalBuildArtifactPlan(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy build artifact plan: %v", err)
+	}
+	if bytes.Contains(legacyBytes, []byte("publishedImageRef")) {
+		t.Fatalf("empty optional field changed legacy JSON: %s", legacyBytes)
+	}
+	decodedLegacy, err := DecodeAndVerifyBuildArtifactPlan(bytes.NewReader(legacyBytes), legacy.Digest)
+	if err != nil || !reflect.DeepEqual(decodedLegacy, legacy) {
+		t.Fatalf("legacy build artifact round trip failed: decoded=%#v err=%v", decodedLegacy, err)
+	}
+
+	publishedRef := "ghcr.io/yym68686/fugue-api@" + artifactDigest
+	sealed, err := NewBuildArtifactPlan(md0BaseCommit, md0TargetCommit, md0Digest("a"), []BuildArtifact{{
+		Name: "api", SourceBaseCommit: md0BaseCommit,
+		ArtifactDigest: artifactDigest, ProvenanceDigest: md0Digest("c"), PublishedImageRef: publishedRef,
+	}})
+	if err != nil {
+		t.Fatalf("new sealed build artifact plan: %v", err)
+	}
+	if sealed.Digest == legacy.Digest {
+		t.Fatal("published image reference was not bound into the plan digest")
+	}
+	sealedBytes, err := MarshalBuildArtifactPlan(sealed)
+	if err != nil || !bytes.Contains(sealedBytes, []byte(`"publishedImageRef": "`+publishedRef+`"`)) {
+		t.Fatalf("published image reference was not serialized: bytes=%s err=%v", sealedBytes, err)
+	}
+	decodedSealed, err := DecodeAndVerifyBuildArtifactPlan(bytes.NewReader(sealedBytes), sealed.Digest)
+	if err != nil || !reflect.DeepEqual(decodedSealed, sealed) {
+		t.Fatalf("sealed build artifact round trip failed: decoded=%#v err=%v", decodedSealed, err)
+	}
+
+	for name, reference := range map[string]string{
+		"mutable tag":       "ghcr.io/yym68686/fugue-api:latest",
+		"mismatched digest": "ghcr.io/yym68686/fugue-api@" + md0Digest("d"),
+		"whitespace":        " ghcr.io/yym68686/fugue-api@" + artifactDigest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			mutated := sealed
+			mutated.Artifacts = append([]BuildArtifact(nil), sealed.Artifacts...)
+			mutated.Artifacts[0].PublishedImageRef = reference
+			mutated.Digest = buildArtifactPlanDigest(mutated)
+			if err := VerifyBuildArtifactPlan(mutated); err == nil {
+				t.Fatal("invalid published image reference must fail closed")
+			}
+		})
+	}
+}
+
 func TestImageActivationPlanBindsWorkloadDomainAdapterAndRenderedEvidence(t *testing.T) {
 	build, err := NewBuildArtifactPlan(md0BaseCommit, md0TargetCommit, md0Digest("1"), nil)
 	if err != nil {

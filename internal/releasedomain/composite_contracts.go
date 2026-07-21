@@ -40,10 +40,11 @@ type BuildArtifactPlan struct {
 }
 
 type BuildArtifact struct {
-	Name             string `json:"name"`
-	SourceBaseCommit string `json:"sourceBaseCommit"`
-	ArtifactDigest   string `json:"artifactDigest"`
-	ProvenanceDigest string `json:"provenanceDigest"`
+	Name              string `json:"name"`
+	SourceBaseCommit  string `json:"sourceBaseCommit"`
+	ArtifactDigest    string `json:"artifactDigest"`
+	ProvenanceDigest  string `json:"provenanceDigest"`
+	PublishedImageRef string `json:"publishedImageRef,omitempty"`
 }
 
 // ImageActivationPlan contains only the image changes that a later adapter
@@ -123,6 +124,12 @@ func VerifyBuildArtifactPlan(plan BuildArtifactPlan) error {
 		}
 		if err := validateCanonicalSHA256Digest(artifact.ArtifactDigest, "build artifact digest"); err != nil {
 			return err
+		}
+		if artifact.PublishedImageRef != "" {
+			digest, immutable := imageArtifactDigest(artifact.PublishedImageRef)
+			if !validContractText(artifact.PublishedImageRef, 1024) || !immutable || digest != artifact.ArtifactDigest {
+				return fmt.Errorf("build artifact published image reference must be immutable and match its artifact digest")
+			}
 		}
 		if err := validateCanonicalSHA256Digest(artifact.ProvenanceDigest, "build artifact provenance digest"); err != nil {
 			return err
