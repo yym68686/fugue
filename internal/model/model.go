@@ -5,8 +5,6 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	"fugue/internal/compositecoordinator"
 )
 
 const (
@@ -3234,7 +3232,6 @@ type State struct {
 	AppReleases                []AppRelease                `json:"app_releases,omitempty"`
 	ReleaseAttempts            []ReleaseAttempt            `json:"release_attempts,omitempty"`
 	ReleaseSteps               []ReleaseStep               `json:"release_steps,omitempty"`
-	CompositeTransactions       []compositecoordinator.Record `json:"composite_release_transactions,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`

@@ -1631,21 +1631,6 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_release_steps_attempt_started ON fugue_release_steps (release_attempt_id, started_at ASC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_release_steps_operation ON fugue_release_steps (operation_id) WHERE operation_id <> ''`,
-	`CREATE TABLE IF NOT EXISTS fugue_composite_release_transactions (
-		id TEXT PRIMARY KEY,
-		plan_digest TEXT NOT NULL UNIQUE,
-		image_activation_plan_digest TEXT NOT NULL,
-		generation TEXT NOT NULL,
-		fencing_epoch TEXT NOT NULL,
-		state TEXT NOT NULL CHECK (state IN ('prepared', 'applying', 'observing', 'committed', 'reverting', 'reverted', 'frozen')),
-		current_step INTEGER NOT NULL,
-		rollback_start_step INTEGER NOT NULL DEFAULT -1,
-		record_revision BIGINT NOT NULL CHECK (record_revision > 0),
-		record_json JSONB NOT NULL,
-		created_at TIMESTAMPTZ NOT NULL,
-		updated_at TIMESTAMPTZ NOT NULL
-	)`,
-	`CREATE INDEX IF NOT EXISTS idx_fugue_composite_release_transactions_state_updated ON fugue_composite_release_transactions (state, updated_at ASC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_operation_evidence (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
