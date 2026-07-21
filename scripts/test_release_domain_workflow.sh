@@ -302,6 +302,7 @@ upgrade_env = upgrade.fetch("env")
   "FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.edge_image_baseline_ref }}",
   "FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST" => "${{ needs.build.outputs.edge_image_digest }}",
   "FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST" => "${{ needs.build.outputs.app_ssh_image_digest }}",
+  "FUGUE_APP_SSH_IMAGE_REPOSITORY" => "${{ needs.build.outputs.app_ssh_image_repository }}",
 }.each do |name, expected|
   assert_equal(upgrade_env[name], expected, "upgrade #{name}")
 end

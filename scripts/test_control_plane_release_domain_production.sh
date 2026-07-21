@@ -1202,6 +1202,7 @@ case_operational_report_binds_build_target_before_dispatch() {
   FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="controller"
   FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA="3333333333333333333333333333333333333333"
   FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  FUGUE_CONTROLLER_IMAGE_REPOSITORY="ghcr.io/acme/fugue-controller"
   [[ "$(run_release_status)" == "0" ]] || fail_test "operational report target binding release failed"
   assert_file_contains "${FAKE_LOG}" \
     "evidence:operational-image-plan --changed-evidence"
@@ -1210,7 +1211,7 @@ case_operational_report_binds_build_target_before_dispatch() {
   assert_file_contains "${FAKE_LOG}" \
     "evidence:image-activation-plans --changed-evidence"
   assert_file_contains "${FAKE_LOG}" \
-    "--artifact controller=3333333333333333333333333333333333333333=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "--artifact controller=3333333333333333333333333333333333333333=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=ghcr.io/acme/fugue-controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   assert_file_contains "${FAKE_LOG}" \
     "--provenance-digest sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   assert_log_order "evidence:operational-report" "dispatch:verify:"

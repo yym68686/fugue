@@ -27,8 +27,8 @@ func (values *buildArtifactFlags) String() string { return "" }
 
 func (values *buildArtifactFlags) Set(value string) error {
 	parts := strings.Split(value, "=")
-	if len(parts) != 3 {
-		return fmt.Errorf("artifact must be name=source-base-commit=artifact-digest")
+	if len(parts) != 4 {
+		return fmt.Errorf("artifact must be name=source-base-commit=artifact-digest=published-image-ref")
 	}
 	for _, part := range parts {
 		if strings.TrimSpace(part) != part || part == "" {
@@ -36,7 +36,7 @@ func (values *buildArtifactFlags) Set(value string) error {
 		}
 	}
 	*values = append(*values, releasedomain.BuildArtifact{
-		Name: parts[0], SourceBaseCommit: parts[1], ArtifactDigest: parts[2],
+		Name: parts[0], SourceBaseCommit: parts[1], ArtifactDigest: parts[2], PublishedImageRef: parts[3],
 	})
 	return nil
 }
@@ -243,7 +243,7 @@ func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error)
 	flags.StringVar(&options.trustedTarget, "trusted-target", "", "trusted exact target commit")
 	flags.StringVar(&options.provenanceDigest, "provenance-digest", "", "verified build provenance digest")
 	flags.StringVar(&options.outputDirectory, "output-dir", "", "new private report output directory")
-	flags.Var(&options.artifacts, "artifact", "built name=source-base-commit=artifact-digest (repeatable)")
+	flags.Var(&options.artifacts, "artifact", "built name=source-base-commit=artifact-digest=published-image-ref (repeatable)")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return activationPlanOptions{}, fmt.Errorf("invalid flags")
 	}

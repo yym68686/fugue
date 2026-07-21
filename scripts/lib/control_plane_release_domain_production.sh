@@ -1287,6 +1287,8 @@ control_plane_release_domain_materialize_operational_report() {
   local target=""
   local source_base=""
   local artifact_digest=""
+  local published_image_repository=""
+  local published_image_ref=""
   local activation_output=""
   local -a targets=()
   local -a target_args=()
@@ -1324,41 +1326,53 @@ control_plane_release_domain_materialize_operational_report() {
   fi
   for target in "${targets[@]-}"; do
     [[ -n "${target}" ]] || continue
+    published_image_repository=""
     case "${target}" in
       api)
         source_base="${FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA:-}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_API_IMAGE_REPOSITORY:-}"
         ;;
       controller)
         source_base="${FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA:-}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY:-}"
         ;;
       drain_agent)
         source_base="${FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_BASE_SHA:-}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_DRAIN_AGENT_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY:-}"
         ;;
       telemetry_agent)
         source_base="${FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_BASE_SHA:-}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY:-}"
         ;;
       image_cache)
         source_base="${FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA:-}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY:-}"
         ;;
       edge)
         source_base="${FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_BASE_SHA:-}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_EDGE_IMAGE_REPOSITORY:-}"
         ;;
       app_ssh)
         source_base="${FUGUE_RELEASE_DOMAIN_BASE_SHA}"
         artifact_digest="${FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST:-}"
+        published_image_repository="${FUGUE_APP_SSH_IMAGE_REPOSITORY:-}"
         ;;
       *) return 2 ;;
     esac
     control_plane_release_domain_validate_sha "${source_base}" || return 2
     control_plane_release_domain_validate_digest "${artifact_digest}" || return 2
+    [[ -n "${published_image_repository}" &&
+      "${published_image_repository}" != *"@"* &&
+      "${published_image_repository}" != *[[:space:]]* ]] || return 2
+    published_image_ref="${published_image_repository}@${artifact_digest}"
     target_args+=(--target "${target}=${source_base}=${artifact_digest}")
-    activation_artifact_args+=(--artifact "${target}=${source_base}=${artifact_digest}")
+    activation_artifact_args+=(--artifact "${target}=${source_base}=${artifact_digest}=${published_image_ref}")
   done
 
   image_plan_command=("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-image-plan \

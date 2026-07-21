@@ -115,8 +115,8 @@ objectRules:
 		"--trusted-base", activationTestBase,
 		"--trusted-target", activationTestTarget,
 		"--provenance-digest", activationTestDigest("f"),
-		"--artifact", "api=" + activationTestBase + "=" + targetDigest,
-		"--artifact", "edge=" + activationTestBase + "=" + activationTestDigest("e"),
+		"--artifact", "api=" + activationTestBase + "=" + targetDigest + "=registry.test/api@" + targetDigest,
+		"--artifact", "edge=" + activationTestBase + "=" + activationTestDigest("e") + "=registry.test/edge@" + activationTestDigest("e"),
 		"--output-dir", output,
 	}, ioDiscard{}, &stderr)
 	if exit != 0 {
@@ -144,6 +144,10 @@ objectRules:
 	build, err := releasedomain.DecodeAndVerifyBuildArtifactPlan(bytes.NewReader(buildBytes), buildIdentity.Digest)
 	if err != nil || len(build.Artifacts) != 2 {
 		t.Fatalf("build plan = %#v err=%v", build, err)
+	}
+	if build.Artifacts[0].PublishedImageRef != "registry.test/api@"+targetDigest ||
+		build.Artifacts[1].PublishedImageRef != "registry.test/edge@"+activationTestDigest("e") {
+		t.Fatalf("build plan did not seal published image refs: %#v", build.Artifacts)
 	}
 	activationBytes, err := os.ReadFile(filepath.Join(output, "image-activation-plan.json"))
 	if err != nil {
@@ -191,6 +195,21 @@ objectRules:
 		decomposition.ImageActivationPlanDigest != activation.Digest ||
 		decomposition.ImageActivationEvidenceDigest != evidence.Digest {
 		t.Fatalf("composite decomposition = %#v err=%v", decomposition, err)
+	}
+}
+
+func TestBuildArtifactFlagsRequireExactPublishedImageRef(t *testing.T) {
+	var values buildArtifactFlags
+	legacy := "api=" + activationTestBase + "=" + activationTestDigest("a")
+	if err := values.Set(legacy); err == nil {
+		t.Fatal("legacy producer input without a published image ref was accepted")
+	}
+	sealed := legacy + "=registry.test/api@" + activationTestDigest("a")
+	if err := values.Set(sealed); err != nil {
+		t.Fatalf("sealed producer input was rejected: %v", err)
+	}
+	if len(values) != 1 || values[0].PublishedImageRef != "registry.test/api@"+activationTestDigest("a") {
+		t.Fatalf("published image ref was not parsed exactly: %#v", values)
 	}
 }
 

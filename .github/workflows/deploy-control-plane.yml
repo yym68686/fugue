@@ -750,6 +750,7 @@ jobs:
           FUGUE_DRAIN_AGENT_IMAGE_TAG: ${{ needs.build.outputs.build_drain_agent == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.drain_agent_image_tag }}
           FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_telemetry_agent == 'true' && needs.build.outputs.telemetry_agent_image_repository || steps.live_images.outputs.telemetry_agent_image_repository }}
           FUGUE_TELEMETRY_AGENT_IMAGE_TAG: ${{ needs.build.outputs.build_telemetry_agent == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.telemetry_agent_image_tag }}
+          FUGUE_APP_SSH_IMAGE_REPOSITORY: ${{ needs.build.outputs.app_ssh_image_repository }}
           FUGUE_OBSERVABILITY_ENABLED: ${{ vars.FUGUE_OBSERVABILITY_ENABLED || 'true' }}
           FUGUE_OBSERVABILITY_RETENTION: ${{ vars.FUGUE_OBSERVABILITY_RETENTION || '24h' }}
           FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME: ${{ vars.FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME || '' }}
