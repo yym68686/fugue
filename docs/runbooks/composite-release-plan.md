@@ -1,8 +1,10 @@
 # Composite release contracts
 
-MD0 adds three dormant, side-effect-free contracts under
-`internal/releasedomain`. No production workflow reads them and they do not
-authorize or execute a release.
+MD0 adds three dormant, side-effect-free contracts. Build and activation
+evidence remain under `internal/releasedomain`. The strict composite contract
+and shared domain vocabulary live under `internal/releasecontract`, with
+source-compatible aliases in `internal/releasedomain`. No production workflow
+reads the strict composite plan and it does not authorize or execute a release.
 
 ## Build and activation are different facts
 
@@ -44,6 +46,13 @@ MD0 intentionally does not add:
 Existing single-domain plans remain the only executable release path. Later
 checkpoints must independently bind these contracts to exact production
 evidence before enabling any composite mutation.
+
+The neutral contract package is intentionally independent of the Planner,
+store, controller, and runtime packages. A dormant durable coordinator can
+therefore validate and persist the exact `CompositeReleasePlan` without making
+the Planner package a production-binary dependency. The aliases preserve the
+existing evidence producer API and exact JSON/digest behavior; this package
+boundary does not change authorization.
 
 ## MD1 report-only production evidence
 

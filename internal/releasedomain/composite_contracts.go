@@ -6,14 +6,15 @@ import (
 	"io"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"fugue/internal/releasecontract"
 )
 
 const (
-	MultiDomainContractAPIVersion = "release-domain.fugue.dev/v2"
+	MultiDomainContractAPIVersion = releasecontract.MultiDomainContractAPIVersion
 
 	BuildArtifactPlanKind   = "BuildArtifactPlan"
 	BuildArtifactPlanPolicy = "artifact-build-plan-v1"
@@ -21,8 +22,8 @@ const (
 	ImageActivationPlanKind   = "ImageActivationPlan"
 	ImageActivationPlanPolicy = "live-relative-image-activation-v1"
 
-	CompositeReleasePlanKind   = "CompositeReleasePlan"
-	CompositeReleasePlanPolicy = "evidence-derived-composite-saga-v1"
+	CompositeReleasePlanKind   = releasecontract.CompositeReleasePlanKind
+	CompositeReleasePlanPolicy = releasecontract.CompositeReleasePlanPolicy
 )
 
 // BuildArtifactPlan records verified build outputs without implying that any
@@ -81,48 +82,10 @@ type ActivationWorkload struct {
 	Container  string `json:"container"`
 }
 
-// CompositeReleasePlan is a dormant, evidence-only contract. It does not
-// authorize or execute a mutation. A future TransactionEnvelope v2 consumer
-// must independently bind ImageActivationPlanDigest before the first write.
-type CompositeReleasePlan struct {
-	APIVersion                string                 `json:"apiVersion"`
-	Kind                      string                 `json:"kind"`
-	Policy                    string                 `json:"policy"`
-	BaseCommit                string                 `json:"baseCommit"`
-	TargetCommit              string                 `json:"targetCommit"`
-	ImageActivationPlanDigest string                 `json:"imageActivationPlanDigest"`
-	Generation                string                 `json:"generation"`
-	FencingEpoch              string                 `json:"fencingEpoch"`
-	BaseVersions              []DomainVersion        `json:"baseVersions"`
-	TargetVersions            []DomainVersion        `json:"targetVersions"`
-	Steps                     []CompositeReleaseStep `json:"steps"`
-	Digest                    string                 `json:"digest"`
-}
-
-type DomainVersion struct {
-	Domain  Domain `json:"domain"`
-	Version string `json:"version"`
-}
-
-type CompositeReleaseStep struct {
-	ID                    string                     `json:"id"`
-	Domain                Domain                     `json:"domain"`
-	Adapter               string                     `json:"adapter"`
-	DependsOn             []string                   `json:"dependsOn"`
-	ActivationIDs         []string                   `json:"activationIds"`
-	BaseVersion           string                     `json:"baseVersion"`
-	TargetVersion         string                     `json:"targetVersion"`
-	ForwardRenderedDigest string                     `json:"forwardRenderedDigest"`
-	ReverseRenderedDigest string                     `json:"reverseRenderedDigest"`
-	Observation           CompositeObservationPolicy `json:"observation"`
-	RollbackBudgetSeconds string                     `json:"rollbackBudgetSeconds"`
-}
-
-type CompositeObservationPolicy struct {
-	HealthEvidenceDigest string `json:"healthEvidenceDigest"`
-	MinimumSamples       string `json:"minimumSamples"`
-	WindowSeconds        string `json:"windowSeconds"`
-}
+type CompositeReleasePlan = releasecontract.CompositeReleasePlan
+type DomainVersion = releasecontract.DomainVersion
+type CompositeReleaseStep = releasecontract.CompositeReleaseStep
+type CompositeObservationPolicy = releasecontract.CompositeObservationPolicy
 
 func NewBuildArtifactPlan(baseCommit, targetCommit, changedFilesDigest string, artifacts []BuildArtifact) (BuildArtifactPlan, error) {
 	plan := BuildArtifactPlan{
@@ -277,145 +240,19 @@ func DecodeAndVerifyImageActivationPlan(reader io.Reader, expectedDigest string)
 }
 
 func NewCompositeReleasePlan(plan CompositeReleasePlan) (CompositeReleasePlan, error) {
-	plan.APIVersion = MultiDomainContractAPIVersion
-	plan.Kind = CompositeReleasePlanKind
-	plan.Policy = CompositeReleasePlanPolicy
-	plan.BaseVersions = canonicalDomainVersions(plan.BaseVersions)
-	plan.TargetVersions = canonicalDomainVersions(plan.TargetVersions)
-	plan.Steps = cloneCompositeSteps(plan.Steps)
-	for index := range plan.Steps {
-		dependencies := canonicalContractStrings(plan.Steps[index].DependsOn)
-		activations := canonicalContractStrings(plan.Steps[index].ActivationIDs)
-		if len(dependencies) != len(plan.Steps[index].DependsOn) || len(activations) != len(plan.Steps[index].ActivationIDs) {
-			return CompositeReleasePlan{}, fmt.Errorf("composite step dependencies or activations are duplicated")
-		}
-		plan.Steps[index].DependsOn = dependencies
-		plan.Steps[index].ActivationIDs = activations
-	}
-	plan.Digest = compositeReleasePlanDigest(plan)
-	if err := VerifyCompositeReleasePlan(plan); err != nil {
-		return CompositeReleasePlan{}, err
-	}
-	return plan, nil
+	return releasecontract.NewCompositeReleasePlan(plan)
 }
 
 func VerifyCompositeReleasePlan(plan CompositeReleasePlan) error {
-	if plan.APIVersion != MultiDomainContractAPIVersion || plan.Kind != CompositeReleasePlanKind || plan.Policy != CompositeReleasePlanPolicy {
-		return fmt.Errorf("composite release plan identity is unsupported")
-	}
-	if err := validateRevisionPair(plan.BaseCommit, plan.TargetCommit, "composite release plan"); err != nil {
-		return err
-	}
-	if err := validateCanonicalSHA256Digest(plan.ImageActivationPlanDigest, "composite image activation plan digest"); err != nil {
-		return err
-	}
-	if !validPositiveDecimal(plan.Generation) || !validPositiveDecimal(plan.FencingEpoch) {
-		return fmt.Errorf("composite generation and fencing epoch must be positive")
-	}
-	baseDomains, err := verifyDomainVersionVector(plan.BaseVersions, "base")
-	if err != nil {
-		return err
-	}
-	targetDomains, err := verifyDomainVersionVector(plan.TargetVersions, "target")
-	if err != nil {
-		return err
-	}
-	if len(baseDomains) < 2 || !equalDomains(baseDomains, targetDomains) {
-		return fmt.Errorf("composite version vectors must contain the same two or more domains")
-	}
-	if len(plan.Steps) < 2 {
-		return fmt.Errorf("composite release plan requires at least two ordered steps")
-	}
-	knownIDs := map[string]struct{}{}
-	activationIDs := map[string]struct{}{}
-	stepDomains := map[Domain]struct{}{}
-	vectorDomains := map[Domain]struct{}{}
-	baseVersionByDomain := map[Domain]string{}
-	targetVersionByDomain := map[Domain]string{}
-	for index, domain := range baseDomains {
-		vectorDomains[domain] = struct{}{}
-		baseVersionByDomain[domain] = plan.BaseVersions[index].Version
-		targetVersionByDomain[domain] = plan.TargetVersions[index].Version
-	}
-	for _, step := range plan.Steps {
-		if !validContractIdentifier(step.ID) {
-			return fmt.Errorf("composite step identity is invalid")
-		}
-		if _, duplicate := knownIDs[step.ID]; duplicate {
-			return fmt.Errorf("composite step identity is duplicated")
-		}
-		if _, ok := vectorDomains[step.Domain]; !ok {
-			return fmt.Errorf("composite step domain is absent from the version vector")
-		}
-		if expected, ok := fixedAdapterForDomain(step.Domain); !ok || step.Adapter != expected {
-			return fmt.Errorf("composite step adapter does not match its fixed domain")
-		}
-		if !reflect.DeepEqual(step.DependsOn, canonicalContractStrings(step.DependsOn)) ||
-			!reflect.DeepEqual(step.ActivationIDs, canonicalContractStrings(step.ActivationIDs)) {
-			return fmt.Errorf("composite step dependencies or activations are not canonical")
-		}
-		for _, dependency := range step.DependsOn {
-			if _, ok := knownIDs[dependency]; !ok {
-				return fmt.Errorf("composite step dependency must reference an earlier step")
-			}
-		}
-		for _, activationID := range step.ActivationIDs {
-			if !validContractIdentifier(activationID) {
-				return fmt.Errorf("composite activation identity is invalid")
-			}
-			if _, duplicate := activationIDs[activationID]; duplicate {
-				return fmt.Errorf("composite activation identity is assigned more than once")
-			}
-			activationIDs[activationID] = struct{}{}
-		}
-		for label, digest := range map[string]string{
-			"base version":     step.BaseVersion,
-			"target version":   step.TargetVersion,
-			"forward rendered": step.ForwardRenderedDigest,
-			"reverse rendered": step.ReverseRenderedDigest,
-			"health evidence":  step.Observation.HealthEvidenceDigest,
-		} {
-			if err := validateCanonicalSHA256Digest(digest, "composite step "+label+" digest"); err != nil {
-				return err
-			}
-		}
-		if step.BaseVersion != baseVersionByDomain[step.Domain] || step.TargetVersion != targetVersionByDomain[step.Domain] {
-			return fmt.Errorf("composite step versions do not match the domain-version vectors")
-		}
-		if !validPositiveDecimal(step.Observation.MinimumSamples) || !validPositiveDecimal(step.Observation.WindowSeconds) ||
-			!validPositiveDecimal(step.RollbackBudgetSeconds) {
-			return fmt.Errorf("composite observation and rollback budgets must be positive")
-		}
-		knownIDs[step.ID] = struct{}{}
-		stepDomains[step.Domain] = struct{}{}
-	}
-	if len(stepDomains) < 2 {
-		return fmt.Errorf("composite steps must cover at least two domains")
-	}
-	for domain := range vectorDomains {
-		if _, ok := stepDomains[domain]; !ok {
-			return fmt.Errorf("composite version-vector domain has no step")
-		}
-	}
-	return verifyContractDigest(plan.Digest, compositeReleasePlanDigest(plan), "composite release plan")
+	return releasecontract.VerifyCompositeReleasePlan(plan)
 }
 
 func MarshalCompositeReleasePlan(plan CompositeReleasePlan) ([]byte, error) {
-	if err := VerifyCompositeReleasePlan(plan); err != nil {
-		return nil, err
-	}
-	return marshalOperationalJSON(plan)
+	return releasecontract.MarshalCompositeReleasePlan(plan)
 }
 
 func DecodeAndVerifyCompositeReleasePlan(reader io.Reader, expectedDigest string) (CompositeReleasePlan, error) {
-	var plan CompositeReleasePlan
-	if err := decodeStrictContract(reader, expectedDigest, reflect.TypeOf(plan), &plan, "composite release plan"); err != nil {
-		return CompositeReleasePlan{}, err
-	}
-	if err := VerifyCompositeReleasePlan(plan); err != nil {
-		return CompositeReleasePlan{}, err
-	}
-	return plan, nil
+	return releasecontract.DecodeAndVerifyCompositeReleasePlan(reader, expectedDigest)
 }
 
 func canonicalBuildArtifacts(values []BuildArtifact) []BuildArtifact {
@@ -436,45 +273,8 @@ func canonicalImageActivations(values []ImageActivation) []ImageActivation {
 	return result
 }
 
-func canonicalDomainVersions(values []DomainVersion) []DomainVersion {
-	result := append([]DomainVersion(nil), values...)
-	sort.Slice(result, func(left, right int) bool { return domainRank[result[left].Domain] < domainRank[result[right].Domain] })
-	if result == nil {
-		return []DomainVersion{}
-	}
-	return result
-}
-
-func verifyDomainVersionVector(values []DomainVersion, label string) ([]Domain, error) {
-	if !reflect.DeepEqual(values, canonicalDomainVersions(values)) {
-		return nil, fmt.Errorf("composite %s version vector is not canonical", label)
-	}
-	domains := make([]Domain, 0, len(values))
-	for index, value := range values {
-		if _, err := ParseDomain(string(value.Domain)); err != nil {
-			return nil, fmt.Errorf("composite %s version domain: %w", label, err)
-		}
-		if index > 0 && values[index-1].Domain == value.Domain {
-			return nil, fmt.Errorf("composite %s version domain is duplicated", label)
-		}
-		if err := validateCanonicalSHA256Digest(value.Version, "composite "+label+" version digest"); err != nil {
-			return nil, err
-		}
-		domains = append(domains, value.Domain)
-	}
-	return domains, nil
-}
-
 func cloneCompositeSteps(values []CompositeReleaseStep) []CompositeReleaseStep {
-	result := append([]CompositeReleaseStep(nil), values...)
-	for index := range result {
-		result[index].DependsOn = append([]string(nil), result[index].DependsOn...)
-		result[index].ActivationIDs = append([]string(nil), result[index].ActivationIDs...)
-	}
-	if result == nil {
-		return []CompositeReleaseStep{}
-	}
-	return result
+	return releasecontract.CloneCompositeSteps(values)
 }
 
 func canonicalContractStrings(values []string) []string {
@@ -493,12 +293,7 @@ func canonicalContractStrings(values []string) []string {
 }
 
 func fixedAdapterForDomain(domain Domain) (string, bool) {
-	for _, binding := range fixedOperationalBindings() {
-		if binding.Domain == domain {
-			return binding.Adapter, true
-		}
-	}
-	return "", false
+	return releasecontract.AdapterForDomain(domain)
 }
 
 func validateActivationWorkload(workload ActivationWorkload) error {
@@ -593,19 +388,6 @@ func validContractText(value string, maximum int) bool {
 	return strings.IndexFunc(value, unicode.IsSpace) == -1
 }
 
-func validPositiveDecimal(value string) bool {
-	if len(value) == 0 || len(value) > 20 || value[0] < '1' || value[0] > '9' {
-		return false
-	}
-	for _, digit := range value[1:] {
-		if digit < '0' || digit > '9' {
-			return false
-		}
-	}
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	return err == nil && parsed > 0
-}
-
 func buildArtifactPlanDigest(plan BuildArtifactPlan) string {
 	plan.Digest = ""
 	encoded, err := json.Marshal(plan)
@@ -625,10 +407,5 @@ func imageActivationPlanDigest(plan ImageActivationPlan) string {
 }
 
 func compositeReleasePlanDigest(plan CompositeReleasePlan) string {
-	plan.Digest = ""
-	encoded, err := json.Marshal(plan)
-	if err != nil {
-		panic(fmt.Sprintf("marshal composite release plan: %v", err))
-	}
-	return digestOperationalBytes(encoded)
+	return releasecontract.DigestCompositeReleasePlan(plan)
 }

@@ -11,47 +11,43 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"fugue/internal/releasecontract"
 )
 
 // Domain is a release-time mutation boundary, not a runtime RBAC role.
-type Domain string
+type Domain = releasecontract.Domain
 
 const (
-	DomainNodeLocal        Domain = "node-local"
-	DomainAuthoritativeDNS Domain = "authoritative-dns"
-	DomainControlPlane     Domain = "control-plane"
-	DomainImageCache       Domain = "image-cache"
-	DomainBackup           Domain = "backup"
+	DomainNodeLocal        = releasecontract.DomainNodeLocal
+	DomainAuthoritativeDNS = releasecontract.DomainAuthoritativeDNS
+	DomainControlPlane     = releasecontract.DomainControlPlane
+	DomainImageCache       = releasecontract.DomainImageCache
+	DomainBackup           = releasecontract.DomainBackup
 )
 
-var orderedDomains = []Domain{
-	DomainNodeLocal,
-	DomainAuthoritativeDNS,
-	DomainControlPlane,
-	DomainImageCache,
-	DomainBackup,
-}
+var orderedDomains = releasecontract.KnownDomains()
 
-var domainRank = map[Domain]int{
-	DomainNodeLocal:        0,
-	DomainAuthoritativeDNS: 1,
-	DomainControlPlane:     2,
-	DomainImageCache:       3,
-	DomainBackup:           4,
-}
+var domainRank = func() map[Domain]int {
+	ranks := make(map[Domain]int, len(orderedDomains))
+	for _, domain := range orderedDomains {
+		rank, ok := releasecontract.DomainRank(domain)
+		if !ok {
+			panic("release contract domain rank is incomplete")
+		}
+		ranks[domain] = rank
+	}
+	return ranks
+}()
 
 // KnownDomains returns the canonical domain order used in plans and digests.
 func KnownDomains() []Domain {
-	return append([]Domain(nil), orderedDomains...)
+	return releasecontract.KnownDomains()
 }
 
 // ParseDomain validates a domain name.
 func ParseDomain(value string) (Domain, error) {
-	domain := Domain(value)
-	if _, ok := domainRank[domain]; !ok {
-		return "", fmt.Errorf("unknown release domain %q", value)
-	}
-	return domain, nil
+	return releasecontract.ParseDomain(value)
 }
 
 func canonicalDomains(values []Domain) []Domain {
