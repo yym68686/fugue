@@ -148,3 +148,21 @@ a production write possible.
 This checkpoint does not connect the authorization to the store, state
 transitions, an API, worker, workflow, adapter, canary, or rollback execution.
 Existing single-domain transaction authorization remains unchanged.
+
+## MD5 controlled no-op recovery drill
+
+MD5 adds one deterministic in-memory canary for an exact prepared two-domain
+record and its opaque MD4 no-op authorization. The first ordered domain
+completes a no-op observation; the second begins its no-op observation and
+then receives a controlled failure. Fugue's coordinator state machine performs
+the recovery itself, reversing the current second step and then the completed
+first step. The final state must be `reverted`.
+
+Every apply, observation, induced-failure, and reverse event is digest-bound to
+the exact record, plan, authorization, action, and step. The result is sealed,
+requires `productionWrite=false`, and can be reverified against both the
+initial prepared record and final reverted record.
+
+The drill calls no adapter and writes no store, API, workflow, Kubernetes
+object, node configuration, DNS state, or network rule. Production activation
+and a real mutation/recovery canary remain separate later checkpoints.
