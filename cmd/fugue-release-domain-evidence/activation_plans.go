@@ -119,6 +119,11 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
+	decompositionEvidence, err := releasedomain.BuildCompositeDecompositionEvidence(activationPlan, activationEvidence)
+	if err != nil {
+		writeActivationPlanBuildError(stderr, err)
+		return 1
+	}
 	buildBytes, err := releasedomain.MarshalBuildArtifactPlan(buildPlan)
 	if err != nil {
 		writeActivationPlanBuildError(stderr, err)
@@ -134,7 +139,12 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
-	if err := writeActivationPlanDirectory(options.outputDirectory, buildBytes, activationBytes, evidenceBytes); err != nil {
+	decompositionBytes, err := releasedomain.MarshalCompositeDecompositionEvidence(decompositionEvidence)
+	if err != nil {
+		writeActivationPlanBuildError(stderr, err)
+		return 1
+	}
+	if err := writeActivationPlanDirectory(options.outputDirectory, buildBytes, activationBytes, evidenceBytes, decompositionBytes); err != nil {
 		fmt.Fprintln(stderr, activationPlanOutputError)
 		return 1
 	}
@@ -154,6 +164,7 @@ func activationPlanBuildErrorCode(err error) string {
 		fragment string
 		code     string
 	}{
+		{"image activation plan and evidence binding mismatch", "composite-decomposition-binding-mismatch"},
 		{"verify build artifact plan:", "build-artifact-plan-invalid"},
 		{"verify release plan:", "release-plan-invalid"},
 		{"build artifact and release plan binding mismatch", "plan-binding-mismatch"},
@@ -178,6 +189,7 @@ func activationPlanBuildErrorCode(err error) string {
 		{"image activation", "image-activation-contract-invalid"},
 		{"activation gap", "activation-gap-contract-invalid"},
 		{"build artifact", "build-artifact-contract-invalid"},
+		{"composite decomposition", "composite-decomposition-contract-invalid"},
 	}
 	for _, item := range known {
 		if strings.Contains(message, item.fragment) {
@@ -257,7 +269,7 @@ func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error)
 	return options, nil
 }
 
-func writeActivationPlanDirectory(output string, buildPlan, activationPlan, activationEvidence []byte) (resultErr error) {
+func writeActivationPlanDirectory(output string, buildPlan, activationPlan, activationEvidence, decompositionEvidence []byte) (resultErr error) {
 	parentPath := filepath.Dir(output)
 	parentInfo, err := os.Lstat(parentPath)
 	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o077 != 0 {
@@ -287,6 +299,9 @@ func writeActivationPlanDirectory(output string, buildPlan, activationPlan, acti
 		return err
 	}
 	if err := writePrivateAtomicFile(filepath.Join(temporary, "image-activation-evidence.json"), activationEvidence); err != nil {
+		return err
+	}
+	if err := writePrivateAtomicFile(filepath.Join(temporary, "composite-decomposition-evidence.json"), decompositionEvidence); err != nil {
 		return err
 	}
 	directory, err := os.Open(temporary)

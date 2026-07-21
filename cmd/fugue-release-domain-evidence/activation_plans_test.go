@@ -18,7 +18,7 @@ const (
 	activationTestTarget = "2222222222222222222222222222222222222222"
 )
 
-func TestRunImageActivationPlansWritesStrictThreeFileReport(t *testing.T) {
+func TestRunImageActivationPlansWritesStrictFourFileReport(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -126,8 +126,9 @@ objectRules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 3 || entries[0].Name() != "build-artifact-plan.json" ||
-		entries[1].Name() != "image-activation-evidence.json" || entries[2].Name() != "image-activation-plan.json" {
+	if len(entries) != 4 || entries[0].Name() != "build-artifact-plan.json" ||
+		entries[1].Name() != "composite-decomposition-evidence.json" ||
+		entries[2].Name() != "image-activation-evidence.json" || entries[3].Name() != "image-activation-plan.json" {
 		t.Fatalf("report inventory = %#v", entries)
 	}
 	buildBytes, err := os.ReadFile(filepath.Join(output, "build-artifact-plan.json"))
@@ -174,6 +175,23 @@ objectRules:
 		evidence.ResolvedImageActivationPlanDigest != activation.Digest {
 		t.Fatalf("activation evidence = %#v err=%v", evidence, err)
 	}
+	decompositionBytes, err := os.ReadFile(filepath.Join(output, "composite-decomposition-evidence.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decompositionIdentity struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(decompositionBytes, &decompositionIdentity); err != nil {
+		t.Fatal(err)
+	}
+	decomposition, err := releasedomain.DecodeAndVerifyCompositeDecompositionEvidence(bytes.NewReader(decompositionBytes), decompositionIdentity.Digest)
+	if err != nil || decomposition.Complete || len(decomposition.Steps) != 1 ||
+		decomposition.Steps[0].Domain != releasedomain.DomainControlPlane ||
+		decomposition.ImageActivationPlanDigest != activation.Digest ||
+		decomposition.ImageActivationEvidenceDigest != evidence.Digest {
+		t.Fatalf("composite decomposition = %#v err=%v", decomposition, err)
+	}
 }
 
 func TestParseImageActivationPlanFlagsRejectsDuplicateOrRelativeOutput(t *testing.T) {
@@ -214,6 +232,12 @@ func TestWriteActivationPlanBuildErrorIncludesOnlyFixedReasonCode(t *testing.T) 
 	writeActivationPlanBuildError(&stderr, &activationPlanTestError{message: "build artifact and release plan binding mismatch"})
 	if got := stderr.String(); got != activationPlanBuildError+": plan-binding-mismatch\n" {
 		t.Fatalf("plan binding build error output = %q", got)
+	}
+
+	stderr.Reset()
+	writeActivationPlanBuildError(&stderr, &activationPlanTestError{message: "image activation plan and evidence binding mismatch"})
+	if got := stderr.String(); got != activationPlanBuildError+": composite-decomposition-binding-mismatch\n" {
+		t.Fatalf("decomposition binding build error output = %q", got)
 	}
 }
 

@@ -55,9 +55,9 @@ digests to fixed object ownership and adapters. A shared image is assigned per
 rendered workload, not by a static image-to-domain shortcut; extra build
 outputs remain build-only.
 
-Three canonical files are uploaded as a separate artifact: the build plan, the
+Three canonical activation files are uploaded as a separate artifact: the build plan, the
 resolved activation plan, and `ImageActivationEvidence`. Apply receives the
-pinned artifact identity, rederives all three files from the same sealed
+pinned artifact identity and rederives them from the same sealed
 inputs, and requires byte equality. Missing ownership and other unresolved
 rendered image changes remain explicit gaps with `complete=false`; they are
 never relabeled as built-only or admitted to the resolved plan. Malformed or
@@ -81,3 +81,19 @@ is false while an activation remains unresolved or fewer than two domains are
 present. The contract cannot authorize a transaction and has no producer,
 workflow artifact, envelope, adapter dispatch, coordinator, or runtime
 consumer in this checkpoint.
+
+## MD2 report-only decomposition producer
+
+MD2 derives `CompositeDecompositionEvidence` from the exact verified
+`ImageActivationPlan` and `ImageActivationEvidence`. Resolved activations are
+grouped by their actual fixed domain and adapter, ordered by the canonical
+domain order, and sealed as a strictly serial dependency chain. Each step
+contains deterministic aggregate forward and reverse rendered-evidence
+digests. Every unresolved activation gap ID is preserved, so incomplete input
+remains incomplete instead of being promoted into a composite plan.
+
+The decomposition is the fourth file in the build-activation evidence
+artifact. Prepare uploads it; apply independently rederives the complete
+four-file directory and requires exact inventory, permissions, and byte
+equality. It remains report-only and is not passed to authorization, adapter
+dispatch, a transaction envelope, runtime state, or rollback logic.

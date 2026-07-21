@@ -94,6 +94,7 @@ import sys
 
 expected_names = [
     "build-artifact-plan.json",
+    "composite-decomposition-evidence.json",
     "image-activation-evidence.json",
     "image-activation-plan.json",
 ]

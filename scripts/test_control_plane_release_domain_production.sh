@@ -34,6 +34,7 @@ case "$(basename "$0")" in
       mkdir "${output_dir}" || exit 1
       chmod 700 "${output_dir}" || exit 1
       printf '{}\n' >"${output_dir}/build-artifact-plan.json" || exit 1
+      printf '{}\n' >"${output_dir}/composite-decomposition-evidence.json" || exit 1
       printf '{}\n' >"${output_dir}/image-activation-evidence.json" || exit 1
       printf '{}\n' >"${output_dir}/image-activation-plan.json" || exit 1
       chmod 600 "${output_dir}"/*.json || exit 1
@@ -595,6 +596,7 @@ setup_case() {
   mkdir "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
   chmod 700 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/build-artifact-plan.json"
+  printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/composite-decomposition-evidence.json"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json"
   chmod 600 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"/*.json
@@ -730,6 +732,7 @@ if stat.S_IMODE(activation_directory.st_mode) != 0o700 or activation_directory.s
     raise SystemExit(1)
 if sorted(os.listdir(activation)) != [
     "build-artifact-plan.json",
+    "composite-decomposition-evidence.json",
     "image-activation-evidence.json",
     "image-activation-plan.json",
 ]:
@@ -1230,6 +1233,7 @@ case_operational_prepare_stops_before_dispatch() {
   [[ -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" ]] ||
     fail_test "operational prepare phase did not materialize its report"
   [[ -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/build-artifact-plan.json" &&
+    -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/composite-decomposition-evidence.json" &&
     -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json" &&
     -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json" ]] ||
     fail_test "operational prepare phase did not materialize build-activation evidence"
