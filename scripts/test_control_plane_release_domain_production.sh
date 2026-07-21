@@ -37,7 +37,8 @@ case "$(basename "$0")" in
       printf '{}\n' >"${output_dir}/composite-decomposition-evidence.json" || exit 1
       printf '{}\n' >"${output_dir}/image-activation-evidence.json" || exit 1
       printf '{}\n' >"${output_dir}/image-activation-plan.json" || exit 1
-      chmod 600 "${output_dir}"/*.json || exit 1
+      printf '%s\n' 'immutable-target-manifest' >"${output_dir}/immutable-target-manifest.yaml" || exit 1
+      chmod 600 "${output_dir}"/* || exit 1
       exit 0
     fi
     output="$(fake_flag_value --output "$@")" || exit 2
@@ -599,7 +600,8 @@ setup_case() {
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/composite-decomposition-evidence.json"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json"
-  chmod 600 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"/*.json
+  printf '%s\n' 'immutable-target-manifest' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/immutable-target-manifest.yaml"
+  chmod 600 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"/*
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -735,6 +737,7 @@ if sorted(os.listdir(activation)) != [
     "composite-decomposition-evidence.json",
     "image-activation-evidence.json",
     "image-activation-plan.json",
+    "immutable-target-manifest.yaml",
 ]:
     raise SystemExit(1)
 for name in os.listdir(activation):
@@ -1236,7 +1239,8 @@ case_operational_prepare_stops_before_dispatch() {
   [[ -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/build-artifact-plan.json" &&
     -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/composite-decomposition-evidence.json" &&
     -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json" &&
-    -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json" ]] ||
+    -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json" &&
+    -f "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/immutable-target-manifest.yaml" ]] ||
     fail_test "operational prepare phase did not materialize build-activation evidence"
   [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
     fail_test "operational prepare phase unexpectedly published final evidence"
