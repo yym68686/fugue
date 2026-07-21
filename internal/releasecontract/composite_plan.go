@@ -243,12 +243,21 @@ func DecodeAndVerifyCompositeReleasePlan(reader io.Reader, expectedDigest string
 func CloneCompositeSteps(values []CompositeReleaseStep) []CompositeReleaseStep {
 	result := append([]CompositeReleaseStep(nil), values...)
 	for index := range result {
-		result[index].DependsOn = append([]string(nil), result[index].DependsOn...)
-		result[index].ActivationIDs = append([]string(nil), result[index].ActivationIDs...)
+		result[index].DependsOn = cloneStringsPreservingNil(result[index].DependsOn)
+		result[index].ActivationIDs = cloneStringsPreservingNil(result[index].ActivationIDs)
 	}
 	if result == nil {
 		return []CompositeReleaseStep{}
 	}
+	return result
+}
+
+func cloneStringsPreservingNil(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	result := make([]string, len(values))
+	copy(result, values)
 	return result
 }
 

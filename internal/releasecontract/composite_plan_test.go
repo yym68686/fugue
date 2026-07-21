@@ -61,6 +61,39 @@ func TestDomainVocabularyAndAdaptersAreComplete(t *testing.T) {
 	}
 }
 
+func TestCloneCompositeStepsPreservesCanonicalShapeDigestAndOwnership(t *testing.T) {
+	plan, err := NewCompositeReleasePlan(compositePlanFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloned := plan
+	cloned.Steps = CloneCompositeSteps(plan.Steps)
+	if cloned.Steps[0].DependsOn == nil || cloned.Steps[0].ActivationIDs == nil ||
+		cloned.Steps[1].DependsOn == nil || cloned.Steps[1].ActivationIDs == nil {
+		t.Fatalf("canonical non-nil slices became nil: %#v", cloned.Steps)
+	}
+	if !reflect.DeepEqual(cloned, plan) || DigestCompositeReleasePlan(cloned) != plan.Digest {
+		t.Fatalf("clone changed canonical plan bytes or digest: %#v", cloned)
+	}
+	if err := VerifyCompositeReleasePlan(cloned); err != nil {
+		t.Fatalf("cloned canonical plan no longer verifies: %v", err)
+	}
+
+	cloned.Steps[0].ActivationIDs[0] = "mutated"
+	cloned.Steps[1].DependsOn[0] = "mutated"
+	if plan.Steps[0].ActivationIDs[0] != "activate-dns" || plan.Steps[1].DependsOn[0] != "authoritative-dns" {
+		t.Fatal("clone retained caller-owned nested slice memory")
+	}
+
+	nilNested := CloneCompositeSteps([]CompositeReleaseStep{{}})
+	if nilNested[0].DependsOn != nil || nilNested[0].ActivationIDs != nil {
+		t.Fatalf("nil nested slices changed shape: %#v", nilNested)
+	}
+	if clonedNil := CloneCompositeSteps(nil); clonedNil == nil || len(clonedNil) != 0 {
+		t.Fatalf("existing top-level nil behavior changed: %#v", clonedNil)
+	}
+}
+
 func compositePlanFixture() CompositeReleasePlan {
 	dnsAdapter, _ := AdapterForDomain(DomainAuthoritativeDNS)
 	controlAdapter, _ := AdapterForDomain(DomainControlPlane)
