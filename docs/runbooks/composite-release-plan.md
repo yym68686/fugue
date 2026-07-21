@@ -106,3 +106,27 @@ artifact. Prepare uploads it; apply independently rederives the complete
 four-file directory and requires exact inventory, permissions, and byte
 equality. It remains report-only and is not passed to authorization, adapter
 dispatch, a transaction envelope, runtime state, or rollback logic.
+
+## MD3 dormant durable coordinator
+
+MD3 adds an unwired durable journal for a future Fugue-owned composite saga.
+The journal imports only the neutral `internal/releasecontract` package and
+does not reconnect `internal/releasedomain` or the Planner to runtime binaries.
+Each record embeds and re-verifies the complete `CompositeReleasePlan` before
+it can be stored, so the ordered steps, fixed adapters, forward/reverse
+rendered evidence, observation policy, rollback budget, generation, and
+fencing epoch are durable before a future first write.
+
+The state machine permits only one serial step at a time:
+`prepared -> applying -> observing`; a successful observation either starts
+the next step or commits the whole record. Failure changes direction at the
+current step, and recovery can only advance through the current and completed
+steps in reverse order. Missing reverse proof can only freeze the record.
+Every update requires the exact plan digest, fencing epoch, and record
+revision, with the same CAS enforced by both the file-backed store and
+PostgreSQL.
+
+This checkpoint does not add a coordinator worker, scheduler, API, workflow,
+transaction-envelope authorization, adapter call, production mutation, or
+rollback execution. The journal and additive table remain dormant until later
+authorization and activation checkpoints.
