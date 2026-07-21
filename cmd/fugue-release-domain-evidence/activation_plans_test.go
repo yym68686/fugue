@@ -82,7 +82,7 @@ objectRules:
 			DefaultNamespace: "fugue-system", Bindings: context.BindingMap(),
 		}),
 		Digests: releasedomain.DigestEvidence{
-			Base: activationTestBase, Target: activationTestTarget, Live: activationTestBase,
+			Base: activationTestDigest("1"), Target: activationTestDigest("2"), Live: activationTestDigest("1"),
 			BaseManifest: activationTestBytesDigest(base), TargetManifest: activationTestBytesDigest(target),
 			RepeatedTargetManifest: activationTestBytesDigest(target), Ownership: activationTestBytesDigest(ownership),
 			ChangedFiles: document.Digest, ClassificationContext: context,
@@ -208,6 +208,12 @@ func TestWriteActivationPlanBuildErrorIncludesOnlyFixedReasonCode(t *testing.T) 
 	}
 	if strings.Contains(stderr.String(), privateIdentity) {
 		t.Fatalf("classified build error leaked manifest identity: %q", stderr.String())
+	}
+
+	stderr.Reset()
+	writeActivationPlanBuildError(&stderr, &activationPlanTestError{message: "build artifact and release plan binding mismatch"})
+	if got := stderr.String(); got != activationPlanBuildError+": plan-binding-mismatch\n" {
+		t.Fatalf("plan binding build error output = %q", got)
 	}
 }
 

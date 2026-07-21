@@ -52,9 +52,11 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 	if err := VerifyPlanDigest(input.ReleasePlan); err != nil {
 		return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("verify release plan: %w", err)
 	}
-	if input.BuildPlan.BaseCommit != input.ReleasePlan.Digests.Base ||
-		input.BuildPlan.TargetCommit != input.ReleasePlan.Digests.Target ||
-		input.BuildPlan.ChangedFilesDigest != input.ReleasePlan.Digests.ChangedFiles {
+	// BuildArtifactPlan revision bounds are exact Git commits from the verified
+	// changed-file evidence. Plan.Digests.Base/Target are opaque SSoT digests
+	// and intentionally have a different namespace. The common changed-file
+	// digest is the revision-to-rendered-plan binding at this report-only layer.
+	if input.BuildPlan.ChangedFilesDigest != input.ReleasePlan.Digests.ChangedFiles {
 		return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("build artifact and release plan binding mismatch")
 	}
 	if digestBytesSHA256(input.BaseManifest) != input.ReleasePlan.Digests.BaseManifest ||

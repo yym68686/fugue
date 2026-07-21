@@ -231,7 +231,7 @@ func md1ActivationFixture(t *testing.T, baseRaw, targetRaw string, rules []md1Ow
 		Files:    FileClassification{Domains: []Domain{}, Evidence: []Evidence{}},
 		Rendered: rendered,
 		Digests: DigestEvidence{
-			Base: md0BaseCommit, Target: md0TargetCommit, Live: md0BaseCommit,
+			Base: md0Digest("1"), Target: md0Digest("2"), Live: md0Digest("1"),
 			BaseManifest: digestBytesSHA256(base), TargetManifest: digestBytesSHA256(target),
 			RepeatedTargetManifest: digestBytesSHA256(target), Ownership: digestBytesSHA256(ownership),
 			ChangedFiles: changedDigest, ClassificationContext: context,
