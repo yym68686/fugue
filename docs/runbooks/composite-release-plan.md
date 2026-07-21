@@ -66,3 +66,18 @@ unrepresentable evidence still fails production closed.
 This report is not an authorization input. It is not passed to plan activation,
 transaction envelopes, adapters, Helm dispatch, rollback, or runtime baseline
 advancement. Multi-domain decomposition remains a later checkpoint.
+
+## MD2A dormant decomposition evidence
+
+`CompositeDecompositionEvidence` is an additive, unused report contract for
+the case where production evidence is not yet sufficient to construct a
+strict `CompositeReleasePlan`. It binds the exact activation plan and
+activation-evidence digests, groups resolved activation IDs by their actual
+domain and fixed adapter, seals aggregate forward/reverse rendered evidence,
+and represents the groups as a canonical serial dependency chain.
+
+The report keeps unresolved activation IDs explicit. `complete` is derived and
+is false while an activation remains unresolved or fewer than two domains are
+present. The contract cannot authorize a transaction and has no producer,
+workflow artifact, envelope, adapter dispatch, coordinator, or runtime
+consumer in this checkpoint.
