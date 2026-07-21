@@ -111,14 +111,6 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
-	immutableTargetManifest, err := releasedomain.MaterializeTargetPublishedImageRefs(
-		targetManifest, ownership, plan.Digests.ClassificationContext.DefaultNamespace,
-		options.trustedTarget, buildPlan,
-	)
-	if err != nil {
-		writeActivationPlanBuildError(stderr, err)
-		return 1
-	}
 	activationPlan, activationEvidence, err := releasedomain.BuildImageActivationReportFromManifests(releasedomain.ImageActivationPlanInput{
 		BuildPlan: buildPlan, ReleasePlan: plan, Ownership: ownership,
 		BaseManifest: baseManifest, TargetManifest: targetManifest,
@@ -152,10 +144,7 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
-	if err := writeActivationPlanDirectory(
-		options.outputDirectory, buildBytes, activationBytes, evidenceBytes,
-		decompositionBytes, immutableTargetManifest,
-	); err != nil {
+	if err := writeActivationPlanDirectory(options.outputDirectory, buildBytes, activationBytes, evidenceBytes, decompositionBytes); err != nil {
 		fmt.Fprintln(stderr, activationPlanOutputError)
 		return 1
 	}
@@ -182,9 +171,6 @@ func activationPlanBuildErrorCode(err error) string {
 		{"rendered manifest or ownership digest mismatch", "rendered-input-digest-mismatch"},
 		{"verify classification context:", "classification-context-invalid"},
 		{"load ownership:", "ownership-invalid"},
-		{"immutable target manifest", "immutable-target-manifest-invalid"},
-		{"target-commit workload image", "immutable-target-image-unresolved"},
-		{"published image repository is ambiguous", "immutable-target-image-ambiguous"},
 		{"validate ownership bindings:", "ownership-bindings-invalid"},
 		{"rendered manifests contain incomplete object evidence", "rendered-object-evidence-incomplete"},
 		{"rendered manifests contain duplicate object identities", "rendered-object-identity-duplicated"},
@@ -283,10 +269,7 @@ func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error)
 	return options, nil
 }
 
-func writeActivationPlanDirectory(
-	output string,
-	buildPlan, activationPlan, activationEvidence, decompositionEvidence, immutableTargetManifest []byte,
-) (resultErr error) {
+func writeActivationPlanDirectory(output string, buildPlan, activationPlan, activationEvidence, decompositionEvidence []byte) (resultErr error) {
 	parentPath := filepath.Dir(output)
 	parentInfo, err := os.Lstat(parentPath)
 	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o077 != 0 {
@@ -319,9 +302,6 @@ func writeActivationPlanDirectory(
 		return err
 	}
 	if err := writePrivateAtomicFile(filepath.Join(temporary, "composite-decomposition-evidence.json"), decompositionEvidence); err != nil {
-		return err
-	}
-	if err := writePrivateAtomicFile(filepath.Join(temporary, "immutable-target-manifest.yaml"), immutableTargetManifest); err != nil {
 		return err
 	}
 	directory, err := os.Open(temporary)
