@@ -130,3 +130,21 @@ This checkpoint does not add a coordinator worker, scheduler, API, workflow,
 transaction-envelope authorization, adapter call, production mutation, or
 rollback execution. The journal and additive table remain dormant until later
 authorization and activation checkpoints.
+
+## MD4 enforced no-op authorization
+
+MD4 adds the strict v2 `CompositeReleaseTransactionEnvelope` boundary. The
+envelope embeds the complete verified plan and independently binds its digest,
+image-activation digest, generation, fencing epoch, exact coordinator record
+ID and digest, and expected record revision. Its only valid mode is `noop`.
+
+The coordinator derives every trusted binding from one exact valid `prepared`
+record, strictly decodes the envelope, and returns an opaque authorization
+whose seal can be reverified only against that same record. The authorization
+does not expose the embedded plan, a domain step, adapter, transition, or an
+execution method. It therefore proves authorization agreement without making
+a production write possible.
+
+This checkpoint does not connect the authorization to the store, state
+transitions, an API, worker, workflow, adapter, canary, or rollback execution.
+Existing single-domain transaction authorization remains unchanged.
