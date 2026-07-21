@@ -33,6 +33,17 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func isolateParallelTestHTTPClient(t *testing.T, service *Service, server *httptest.Server) {
+	t.Helper()
+
+	client := server.Client()
+	if client.Transport == nil || client.Transport == http.DefaultTransport {
+		t.Fatal("httptest server did not provide an isolated HTTP transport")
+	}
+	client.Timeout = service.HTTPClient.Timeout
+	service.HTTPClient = client
+}
+
 type shortReadReader struct {
 	data []byte
 	err  error
@@ -1681,6 +1692,7 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 		CaddyListenAddr:      "127.0.0.1:18080",
 		CaddyProxyListenAddr: ":7833",
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 
 	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
 		t.Fatalf("apply caddy config: %v", err)
@@ -1844,6 +1856,7 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 		CaddyTLSMode:         caddyTLSModePublicOnDemand,
 		CaddyProxyListenAddr: ":7833",
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(_ context.Context, addr, host string) error {
 		warmups = append(warmups, addr+"|"+host)
 		return nil
@@ -1920,6 +1933,7 @@ func TestApplyCaddyConfigSkipsDisabledCustomDomainTLSWork(t *testing.T) {
 		CaddyDataDir:          t.TempDir(),
 		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(context.Context, string, string) error {
 		warmups++
 		return nil
@@ -1968,6 +1982,7 @@ func TestApplyCaddyConfigDoesNotRepeatSharedTLSSyncForUnchangedBundle(t *testing
 		CaddyDataDir:          t.TempDir(),
 		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(context.Context, string, string) error { return nil }
 
 	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
@@ -2051,6 +2066,7 @@ func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 		CaddyDataDir:          dataDir,
 		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(_ context.Context, addr, host string) error {
 		warmups = append(warmups, addr+"|"+host)
 		return nil
@@ -2143,6 +2159,7 @@ func TestApplyCaddyConfigBackfillsSharedCertificateForReadyCustomDomain(t *testi
 		CaddyDataDir:          dataDir,
 		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(_ context.Context, addr, host string) error {
 		warmups = append(warmups, addr+"|"+host)
 		return nil
@@ -2218,6 +2235,7 @@ func TestApplyCaddyConfigDoesNotDowngradeReadyCustomDomainOnWarmupFailure(t *tes
 		CaddyTLSMode:         caddyTLSModePublicOnDemand,
 		CaddyProxyListenAddr: ":7833",
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(context.Context, string, string) error {
 		return errors.New("warmup failed")
 	}
@@ -2285,6 +2303,7 @@ func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 		CaddyDataDir:          dataDir,
 		CaddySharedTLSEnabled: true,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(_ context.Context, addr, host string) error {
 		warmups = append(warmups, addr+"|"+host)
 		return nil
@@ -2390,6 +2409,7 @@ func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
 		CacheWarmupMaxDepth:   2,
 		AssetCacheMaxBytes:    1024 * 1024,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.cacheWarmupClientFactory = func(_, _ string) *http.Client {
 		return &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -2557,6 +2577,7 @@ func TestApplyCaddyConfigReappliesWhenStaticTLSFilesChange(t *testing.T) {
 		CaddyStaticTLSCertFile: certFile,
 		CaddyStaticTLSKeyFile:  keyFile,
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.caddyWarmup = func(_ context.Context, _, _ string) error {
 		warmups++
 		return nil
@@ -2611,6 +2632,7 @@ func TestSyncFailureReappliesCachedCaddyConfig(t *testing.T) {
 		CaddyListenAddr:      "127.0.0.1:18080",
 		CaddyProxyListenAddr: ":7833",
 	}, log.New(ioDiscard{}, "", 0))
+	isolateParallelTestHTTPClient(t, service, admin)
 	service.recordSyncSuccess(bundle, `"routegen_cached_reapply"`, time.Now().UTC(), false)
 	service.recordCaddyApply(bundle.Version, 0, "", errors.New("apply caddy config: connect: connection refused"))
 
