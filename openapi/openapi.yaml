@@ -1030,6 +1030,30 @@ paths:
                 $ref: "#/components/schemas/PlatformFailureDrillResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/composite-release-transactions:
+    post:
+      operationId: prepareCompositeReleaseTransaction
+      summary: Prepare Composite Release Transaction
+      description: Persist one exact strict plan as an inert prepared coordinator record. This endpoint cannot authorize or execute the transaction.
+      tags: [Admin]
+      x-fugue-handler: handlePrepareCompositeReleaseTransaction
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompositeReleaseTransactionPrepareRequest"
+      responses:
+        '201':
+          description: Prepared durable transaction record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompositeReleaseTransactionPrepareResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/invariants:
     get:
       operationId: listInvariantDefinitions
@@ -23852,6 +23876,122 @@ components:
       properties:
         report:
           $ref: "#/components/schemas/PlatformFailureDrillReport"
+    CompositeReleaseTransactionPrepareRequest:
+      type: object
+      additionalProperties: false
+      required: [planDigest, plan]
+      properties:
+        planDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        plan:
+          $ref: "#/components/schemas/CompositeReleasePlan"
+    CompositeReleaseTransactionPrepareResponse:
+      type: object
+      additionalProperties: false
+      required: [record]
+      properties:
+        record:
+          $ref: "#/components/schemas/CompositeCoordinatorRecord"
+    CompositeReleasePlan:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, policy, baseCommit, targetCommit, imageActivationPlanDigest, generation, fencingEpoch, baseVersions, targetVersions, steps, digest]
+      properties:
+        apiVersion: {type: string, enum: [release-domain.fugue.dev/v2]}
+        kind: {type: string, enum: [CompositeReleasePlan]}
+        policy: {type: string, enum: [evidence-derived-composite-saga-v1]}
+        baseCommit: {type: string}
+        targetCommit: {type: string}
+        imageActivationPlanDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        generation: {type: string, pattern: '^[1-9][0-9]*$'}
+        fencingEpoch: {type: string, pattern: '^[1-9][0-9]*$'}
+        baseVersions:
+          type: array
+          minItems: 2
+          items: {$ref: "#/components/schemas/CompositeDomainVersion"}
+        targetVersions:
+          type: array
+          minItems: 2
+          items: {$ref: "#/components/schemas/CompositeDomainVersion"}
+        steps:
+          type: array
+          minItems: 2
+          items: {$ref: "#/components/schemas/CompositeReleaseStep"}
+        digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+    CompositeDomainVersion:
+      type: object
+      additionalProperties: false
+      required: [domain, version]
+      properties:
+        domain: {type: string}
+        version: {type: string}
+    CompositeReleaseStep:
+      type: object
+      additionalProperties: false
+      required: [id, domain, adapter, dependsOn, activationIds, baseVersion, targetVersion, forwardRenderedDigest, reverseRenderedDigest, observation, rollbackBudgetSeconds]
+      properties:
+        id: {type: string}
+        domain: {type: string}
+        adapter: {type: string}
+        dependsOn:
+          type: array
+          items: {type: string}
+        activationIds:
+          type: array
+          minItems: 1
+          items: {type: string}
+        baseVersion: {type: string}
+        targetVersion: {type: string}
+        forwardRenderedDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        reverseRenderedDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        observation: {$ref: "#/components/schemas/CompositeObservationPolicy"}
+        rollbackBudgetSeconds: {type: string, pattern: '^[1-9][0-9]*$'}
+    CompositeObservationPolicy:
+      type: object
+      additionalProperties: false
+      required: [healthEvidenceDigest, minimumSamples, windowSeconds]
+      properties:
+        healthEvidenceDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        minimumSamples: {type: string, pattern: '^[1-9][0-9]*$'}
+        windowSeconds: {type: string, pattern: '^[1-9][0-9]*$'}
+    CompositeCoordinatorRecord:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, policy, id, plan, state, currentStep, rollbackStartStep, steps, revision, failureReason, freezeReason, createdAt, updatedAt, digest]
+      properties:
+        apiVersion: {type: string, enum: [release-domain.fugue.dev/v2]}
+        kind: {type: string, enum: [CompositeCoordinatorRecord]}
+        policy: {type: string, enum: [durable-serial-saga-v1]}
+        id: {type: string}
+        plan: {$ref: "#/components/schemas/CompositeReleasePlan"}
+        state: {type: string, enum: [prepared]}
+        currentStep: {type: integer, enum: [0]}
+        rollbackStartStep: {type: integer, enum: [-1]}
+        steps:
+          type: array
+          minItems: 2
+          items: {$ref: "#/components/schemas/CompositeStepProgress"}
+        revision: {type: integer, format: int64, enum: [1]}
+        failureReason: {type: string, enum: ['']}
+        freezeReason: {type: string, enum: ['']}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+    CompositeStepProgress:
+      type: object
+      additionalProperties: false
+      required: [id, state, startedAt, applyEvidenceDigest, observationStartedAt, observationEvidenceDigest, completedAt, reverseEvidenceDigest, revertedAt]
+      properties:
+        id: {type: string}
+        state: {type: string, enum: [pending]}
+        startedAt: {type: string, format: date-time, nullable: true}
+        applyEvidenceDigest: {type: string, enum: ['']}
+        observationStartedAt: {type: string, format: date-time, nullable: true}
+        observationEvidenceDigest: {type: string, enum: ['']}
+        completedAt: {type: string, format: date-time, nullable: true}
+        reverseEvidenceDigest: {type: string, enum: ['']}
+        revertedAt: {type: string, format: date-time, nullable: true}
     GateBlastRadiusPolicy:
       type: object
       additionalProperties: false
