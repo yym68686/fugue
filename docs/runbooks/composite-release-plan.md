@@ -184,3 +184,19 @@ values all fail closed. The materializer is dormant: it does not allocate a
 generation, create a durable record, authorize an envelope, call an adapter,
 advance the coordinator, or write production state. Those activation
 boundaries remain later checkpoints.
+
+## MD6p7 durable enforced no-op worker
+
+MD6p7 adds a dormant worker that accepts only one exact prepared durable record
+and its opaque MD4 no-op authorization. It uses the existing store CAS boundary
+to advance the coordinator serially through no-op apply and observation. A
+controlled observation failure makes the same worker persist `reverting` and
+reverse the current and completed steps in strict reverse order. Every event is
+bound to the exact record, plan, authorization, action, and step, and the sealed
+result requires `productionWrite=false`.
+
+The worker receives no adapter and is not connected to a scheduler, API,
+workflow, or release lane. It cannot materialize a plan, allocate a generation,
+change a workload, or advance a runtime baseline. A real two-domain canary,
+adapter mutation, automatic health failure detection, freeze/watchdog behavior,
+and composite activation remain separate checkpoints.
