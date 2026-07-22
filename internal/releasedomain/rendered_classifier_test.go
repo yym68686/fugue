@@ -484,6 +484,7 @@ func renderCurrentProductionProfile(t *testing.T) []byte {
 		"--set-string", "dns.groups[0].answerIPs[0]=203.0.113.11",
 		"--set-string", "dns.groups[0].nodeSelector.fugue\\.io/role\\.dns=true",
 		"--set", "ingress.enabled=true",
+		"--set", "observability.agent.enabled=true",
 		"--set", "controlPlanePostgres.enabled=true",
 		"--set-string", "controlPlanePostgres.password=release-domain-test-password",
 		"--set", "controlPlanePostgres.backup.enabled=true",
