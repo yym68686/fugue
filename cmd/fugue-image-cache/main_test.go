@@ -1165,6 +1165,53 @@ func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *t
 	}
 }
 
+func TestImageCachePruneDoesNotExpandDigestTargetToUntargetedAlias(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("live-layer"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"live"}`))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	manifestDigest := manifestBodyDigest([]byte(manifest))
+	for _, target := range []string{"current", manifestDigest} {
+		if err := cache.persistManifest("fugue-apps/demo", target, "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+			t.Fatalf("persist manifest target %s: %v", target, err)
+		}
+	}
+
+	result := postImageCachePrune(t, cache, fmt.Sprintf(`{"dry_run":false,"allow_delete":true,"targets":[{"repo":"fugue-apps/demo","target":%q,"digest":%q}],"max_delete_bytes":"1Gi"}`, manifestDigest, manifestDigest))
+
+	if !result.Deleted || result.SelectedCount != 1 {
+		t.Fatalf("expected only the explicit digest target to be deleted, got %+v", result)
+	}
+	if len(result.SelectedManifests) != 1 || result.SelectedManifests[0].Target != manifestDigest {
+		t.Fatalf("unexpected selected manifests: %+v", result.SelectedManifests)
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("manifest records: %v", err)
+	}
+	if len(records) != 1 || records[0].Target != "current" {
+		t.Fatalf("expected untargeted current alias to remain, got %+v", records)
+	}
+	for _, digest := range []string{configDigest, layerDigest} {
+		if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); err != nil {
+			t.Fatalf("expected blob %s to remain while current alias exists: %v", digest, err)
+		}
+	}
+}
+
 func TestImageCachePruneKeepsBlobsWhenDigestManifestStillServed(t *testing.T) {
 	t.Parallel()
 

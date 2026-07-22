@@ -733,21 +733,9 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	targeted := len(targets) > 0
 	selected := []imageCacheManifestRecord{}
 	if targeted {
-		selectedDigestByRepo := map[string]map[string]struct{}{}
 		for _, candidate := range candidates {
-			if !manifestMatchesAnyPruneTarget(candidate, targets) {
-				continue
-			}
-			if selectedDigestByRepo[candidate.Repo] == nil {
-				selectedDigestByRepo[candidate.Repo] = map[string]struct{}{}
-			}
-			selectedDigestByRepo[candidate.Repo][candidate.Digest] = struct{}{}
-		}
-		for _, candidate := range candidates {
-			if digests := selectedDigestByRepo[candidate.Repo]; digests != nil {
-				if _, ok := digests[candidate.Digest]; ok {
-					selected = append(selected, candidate)
-				}
+			if manifestMatchesAnyPruneTarget(candidate, targets) {
+				selected = append(selected, candidate)
 			}
 		}
 	}
@@ -948,11 +936,7 @@ func manifestMatchesPruneTarget(record imageCacheManifestRecord, req imageCacheP
 	switch {
 	case target != "" && record.Target == target:
 		return true
-	case target != "" && record.Digest == normalizeImageCacheDigest(target):
-		return true
 	case digest != "" && record.Target == digest:
-		return true
-	case digest != "" && record.Digest == digest:
 		return true
 	default:
 		return false

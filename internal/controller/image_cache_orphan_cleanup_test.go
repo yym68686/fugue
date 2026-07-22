@@ -279,6 +279,88 @@ func TestControllerImageCacheProtectsDigestWorkloadRef(t *testing.T) {
 	}
 }
 
+func TestControllerImageCachePrunePlanProtectsAliasesSharingLiveDigest(t *testing.T) {
+	t.Parallel()
+
+	stateStore, _ := newImageCacheControllerTestStore(t)
+	digest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
+	created := time.Now().UTC().Add(-48 * time.Hour)
+	now := time.Now().UTC()
+	node := model.ImageCacheNodeInventory{
+		NodeID:          "machine-1",
+		ClusterNodeName: "worker-1",
+		RuntimeID:       "runtime-1",
+		CacheEndpoint:   "http://worker-1:5000",
+		ManifestCount:   2,
+		ObservedAt:      now,
+		Status:          "reported",
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(node, []model.ImageCacheManifest{
+		{
+			ImageRef:          "registry.fugue.internal:5000/fugue-apps/demo:current",
+			Repo:              "fugue-apps/demo",
+			Target:            "current",
+			Digest:            digest,
+			TotalBlobBytes:    500,
+			ReferencedBlobs:   []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			LastSeenAt:        now,
+			CreatedAtObserved: &created,
+			Present:           true,
+		},
+		{
+			Repo:              "fugue-apps/demo",
+			Target:            digest,
+			Digest:            digest,
+			TotalBlobBytes:    500,
+			ReferencedBlobs:   []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			LastSeenAt:        now,
+			CreatedAtObserved: &created,
+			Present:           true,
+		},
+	}); err != nil {
+		t.Fatalf("upsert image cache inventory: %v", err)
+	}
+	liveRef := "registry.fugue.internal:5000/fugue-apps/demo:current"
+	protected := controllerImageCacheProtectedSet{
+		liveRefs:          map[string]struct{}{},
+		workloadRefsByRef: map[string][]string{},
+	}
+	liveKeys := controllerImageReferenceKeys(liveRef, "")
+	addControllerImageKeys(protected.liveRefs, liveKeys...)
+	addControllerImageDetails(protected.workloadRefsByRef, liveKeys, liveRef)
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	plan, err := svc.computeControllerImageCachePrunePlan(context.Background(), node, protected, model.ImageCachePruneModeObserve)
+	if err != nil {
+		t.Fatalf("compute plan: %v", err)
+	}
+	if plan.CandidateManifestCount != 0 || plan.ProtectedManifestCount != 2 {
+		t.Fatalf("expected both digest aliases protected, got %+v", plan)
+	}
+	if plan.ProtectionSummary["current_workload"] != 1 || plan.ProtectionSummary["shared_digest_protected_alias"] != 1 {
+		t.Fatalf("unexpected protection summary: %+v", plan.ProtectionSummary)
+	}
+	var digestAlias *model.ImageCachePruneCandidate
+	for idx := range plan.ProtectedManifests {
+		if plan.ProtectedManifests[idx].Target == digest {
+			digestAlias = &plan.ProtectedManifests[idx]
+			break
+		}
+	}
+	if digestAlias == nil || digestAlias.SkipReason != "shared_digest_protected_alias" || len(digestAlias.MatchedWorkloadRefs) != 1 {
+		t.Fatalf("expected digest alias to inherit live workload protection, got %+v", digestAlias)
+	}
+	if targets := controllerImageCachePruneTargets(plan.Candidates, 10); len(targets) != 0 {
+		t.Fatalf("protected digest group produced prune targets: %+v", targets)
+	}
+}
+
 func TestControllerImageCacheDoesNotProtectSameRepoHistoryWithCurrentTag(t *testing.T) {
 	t.Parallel()
 
