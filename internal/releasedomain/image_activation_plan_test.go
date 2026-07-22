@@ -107,6 +107,47 @@ func TestBuildImageActivationReportKeepsOwnershipGapExplicit(t *testing.T) {
 	}
 }
 
+func TestBuildImageActivationReportAcceptsOnlyDeterministicImmutableTarget(t *testing.T) {
+	targetDigest := md0Digest("d")
+	input := md1ActivationFixture(
+		t,
+		md1Deployment("fugue-api", "api", "registry.test/api@"+md0Digest("a")),
+		md1Deployment("fugue-api", "api", "registry.test/api:"+md0TargetCommit),
+		[]md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}},
+		[]BuildArtifact{{
+			Name: "api", SourceBaseCommit: md0BaseCommit,
+			ArtifactDigest: targetDigest, ProvenanceDigest: md0Digest("f"),
+			PublishedImageRef: "registry.test/api@" + targetDigest,
+		}},
+	)
+	context := input.ReleasePlan.Digests.ClassificationContext
+	immutableTarget, err := MaterializeTargetPublishedImageRefs(
+		input.TargetManifest, input.Ownership, context.DefaultNamespace,
+		input.BuildPlan.TargetCommit, input.BuildPlan,
+	)
+	if err != nil {
+		t.Fatalf("materialize immutable target: %v", err)
+	}
+	input.ImmutableTargetManifest = immutableTarget
+
+	activation, evidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatalf("derive report from deterministic immutable target: %v", err)
+	}
+	if len(activation.Activations) != 1 || !evidence.Complete || len(evidence.Unresolved) != 0 ||
+		activation.Activations[0].TargetImageRef != "registry.test/api@"+targetDigest {
+		t.Fatalf("immutable target resolution drifted: plan=%#v evidence=%#v", activation, evidence)
+	}
+
+	tampered := append([]byte(nil), immutableTarget...)
+	tampered[len(tampered)-2] ^= 1
+	input.ImmutableTargetManifest = tampered
+	if _, _, err := BuildImageActivationReportFromManifests(input); err == nil ||
+		!strings.Contains(err.Error(), "immutable target manifest binding mismatch") {
+		t.Fatalf("tampered immutable target was not rejected: %v", err)
+	}
+}
+
 func TestBuildImageActivationPlanFailsClosedOnIncompleteEvidence(t *testing.T) {
 	targetDigest := md0Digest("d")
 	valid := md1ActivationFixture(

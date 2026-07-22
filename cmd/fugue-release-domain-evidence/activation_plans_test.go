@@ -18,7 +18,7 @@ const (
 	activationTestTarget = "2222222222222222222222222222222222222222"
 )
 
-func TestRunImageActivationPlansWritesStrictFiveFileReportWithoutChangingResolverInput(t *testing.T) {
+func TestRunImageActivationPlansFeedsBoundImmutableTargetToReportOnlyResolver(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -161,8 +161,13 @@ objectRules:
 		t.Fatal(err)
 	}
 	activation, err := releasedomain.DecodeAndVerifyImageActivationPlan(bytes.NewReader(activationBytes), activationIdentity.Digest)
-	if err != nil || len(activation.Activations) != 0 {
+	if err != nil || len(activation.Activations) != 1 {
 		t.Fatalf("activation plan = %#v err=%v", activation, err)
+	}
+	resolved := activation.Activations[0]
+	if resolved.ArtifactName != "api" || resolved.Domain != releasedomain.DomainControlPlane ||
+		resolved.TargetImageRef != "registry.test/api@"+targetDigest {
+		t.Fatalf("immutable target was not resolved exactly: %#v", resolved)
 	}
 	evidenceBytes, err := os.ReadFile(filepath.Join(output, "image-activation-evidence.json"))
 	if err != nil {
@@ -175,9 +180,8 @@ objectRules:
 		t.Fatal(err)
 	}
 	evidence, err := releasedomain.DecodeAndVerifyImageActivationEvidence(bytes.NewReader(evidenceBytes), evidenceIdentity.Digest)
-	if err != nil || evidence.Complete || len(evidence.Unresolved) != 1 ||
-		evidence.Unresolved[0].Reason != "target-image-not-immutable" ||
-		len(evidence.BuiltOnlyArtifacts) != 2 ||
+	if err != nil || !evidence.Complete || len(evidence.Unresolved) != 0 ||
+		len(evidence.BuiltOnlyArtifacts) != 1 || evidence.BuiltOnlyArtifacts[0] != "edge" ||
 		evidence.ResolvedImageActivationPlanDigest != activation.Digest {
 		t.Fatalf("activation evidence = %#v err=%v", evidence, err)
 	}
@@ -192,7 +196,10 @@ objectRules:
 		t.Fatal(err)
 	}
 	decomposition, err := releasedomain.DecodeAndVerifyCompositeDecompositionEvidence(bytes.NewReader(decompositionBytes), decompositionIdentity.Digest)
-	if err != nil || decomposition.Complete || len(decomposition.Steps) != 0 ||
+	if err != nil || decomposition.Complete || len(decomposition.Steps) != 1 ||
+		decomposition.Steps[0].Domain != releasedomain.DomainControlPlane ||
+		len(decomposition.UnresolvedActivationIDs) != 0 || len(decomposition.Issues) != 1 ||
+		decomposition.Issues[0] != releasedomain.CompositeDecompositionIssueTooFewDomains ||
 		decomposition.ImageActivationPlanDigest != activation.Digest ||
 		decomposition.ImageActivationEvidenceDigest != evidence.Digest {
 		t.Fatalf("composite decomposition = %#v err=%v", decomposition, err)

@@ -1,6 +1,7 @@
 package releasedomain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,11 +14,12 @@ import (
 // deriving actual image activations from a conservative build plan and the
 // exact live-relative rendered workload diff.
 type ImageActivationPlanInput struct {
-	BuildPlan      BuildArtifactPlan
-	ReleasePlan    Plan
-	Ownership      []byte
-	BaseManifest   []byte
-	TargetManifest []byte
+	BuildPlan               BuildArtifactPlan
+	ReleasePlan             Plan
+	Ownership               []byte
+	BaseManifest            []byte
+	TargetManifest          []byte
+	ImmutableTargetManifest []byte
 }
 
 type renderedContainer struct {
@@ -75,9 +77,26 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 	if err := spec.ValidateBindings(context.BindingMap()); err != nil {
 		return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("validate ownership bindings: %w", err)
 	}
+	activationTargetManifest := input.TargetManifest
+	if len(input.ImmutableTargetManifest) != 0 {
+		expected, err := MaterializeTargetPublishedImageRefs(
+			input.TargetManifest,
+			input.Ownership,
+			context.DefaultNamespace,
+			input.BuildPlan.TargetCommit,
+			input.BuildPlan,
+		)
+		if err != nil {
+			return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("materialize immutable target manifest: %w", err)
+		}
+		if !bytes.Equal(expected, input.ImmutableTargetManifest) {
+			return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("immutable target manifest binding mismatch")
+		}
+		activationTargetManifest = input.ImmutableTargetManifest
+	}
 
 	baseObjects, baseUnknown := decodeManifest(input.BaseManifest, spec, context.DefaultNamespace, "base")
-	targetObjects, targetUnknown := decodeManifest(input.TargetManifest, spec, context.DefaultNamespace, "target")
+	targetObjects, targetUnknown := decodeManifest(activationTargetManifest, spec, context.DefaultNamespace, "target")
 	if len(baseUnknown) != 0 || len(targetUnknown) != 0 {
 		return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("rendered manifests contain incomplete object evidence")
 	}

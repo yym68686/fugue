@@ -122,6 +122,7 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 	activationPlan, activationEvidence, err := releasedomain.BuildImageActivationReportFromManifests(releasedomain.ImageActivationPlanInput{
 		BuildPlan: buildPlan, ReleasePlan: plan, Ownership: ownership,
 		BaseManifest: baseManifest, TargetManifest: targetManifest,
+		ImmutableTargetManifest: immutableTargetManifest,
 	})
 	if err != nil {
 		writeActivationPlanBuildError(stderr, err)
