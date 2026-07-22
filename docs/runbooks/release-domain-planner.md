@@ -143,35 +143,48 @@ coordination Lease is additionally available only to the literal
 ## Operational-domain evidence and activation
 
 `fugue-release-domain-evidence operational-report` is an additive,
-side-effect-free evidence contract for shared Go source. It accepts four
-revision- and digest-bound witness channels:
+side-effect-free evidence contract for shared Go source. The legacy
+`OperationalImageRolloutPlan` input remains readable for already-sealed
+reports. New production reports use the activation-aware v2 policy and accept
+four revision- and digest-bound witness channels:
 
 1. the existing changed-file evidence and package consumer graph;
-2. an exact `OperationalImageRolloutPlan` containing only the image targets
-   selected by the existing build/rollout planner, with each target bound to
-   its component source baseline commit and verified OCI artifact digest;
-3. the rendered-object channel from an independently digest-verified existing
-   release-domain plan; and
+2. the exact `BuildArtifactPlan`, `ImageActivationPlan`, and
+   `ImageActivationEvidence` produced from the live base, requested target,
+   immutable activation target, and ownership source;
+3. the rendered-object channel reclassified from the live base to that
+   immutable activation target and bound to the existing release-domain plan;
+   and
 4. the complete fixed production adapter binding set.
+
+The producer rederives the activation plan and evidence from the original
+manifests before accepting them. Every built artifact must appear exactly once
+as activated, built-only, or unresolved. Built-only artifacts remain available
+for later activation but do not contribute a production rollout domain.
+Activated image targets retain their component source baseline and verified
+OCI digest. A real activation in more than one production domain remains
+multi-domain and cannot use this single-domain authorization path.
 
 The report records each domain set, their intersection, contradictions and an
 `authorizationEligible` marker. The marker is true only when every witness is
 complete, their intersection contains exactly one fixed adapter domain, and
 the conservative result is blocked as `multiple` or `unknown`. A real
-multi-domain rendered or rollout
-set stays `multiple`. Missing target ownership, rendered unknowns, consumer
+multi-domain rendered or activation
+set stays `multiple`. Missing target ownership, unresolved activation,
+rendered unknowns, consumer
 coverage gaps, digest drift or disagreement stays `unknown`; no caller can
 provide a domain hint. Non-production command consumers are ignored only when
-the exact rollout plan proves their image is not selected.
+the exact activation partition proves their artifact is not activated.
 
 The formal workflow now runs this contract in report-only mode before adapter
-dispatch. The image targets come only from the existing build job outputs; each
-selected target is bound to its live component source baseline and the verified
-OCI digest produced by that same build job. The ordinary conservative planner
-still renders and persists its verified bundle for `multiple` and `unknown`, but
-does so with every production surface in preserve mode. The operational report
-records the conservative outcome/domains beside the operational
-consumer/build/render/adapter intersection and a digest-bound
+dispatch. Build job outputs are audit inputs, not implied rollout targets. The
+formal path derives the live-relative activation set and an immutable target
+that changes only those activations; images built but not activated keep their
+live refs. The ordinary conservative planner still renders and persists its
+verified bundle for `multiple` and `unknown`, but does so with every production
+surface in preserve mode. The operational report embeds the exact activation
+witness and records the conservative outcome/domains beside the operational
+consumer/activation/render/adapter intersection and a digest-bound
 `classificationAgrees` result.
 
 The report is uploaded as a separate formal artifact before any production

@@ -1420,7 +1420,13 @@ PY
 
   "${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-report \
     --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
-    --image-plan "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN}" \
+    --build-artifact-plan "${activation_output}/build-artifact-plan.json" \
+    --image-activation-plan "${activation_output}/image-activation-plan.json" \
+    --image-activation-evidence "${activation_output}/image-activation-evidence.json" \
+    --ownership "${CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE}" \
+    --base-manifest "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/base-manifest.yaml" \
+    --target-manifest "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/target-manifest.yaml" \
+    --immutable-target-manifest "${activation_output}/immutable-target-manifest.yaml" \
     --plan "${plan_file}" \
     --plan-digest "${plan_digest}" \
     --trusted-base "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" \

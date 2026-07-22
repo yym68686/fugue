@@ -1218,6 +1218,16 @@ case_operational_report_binds_build_target_before_dispatch() {
     "--artifact controller=3333333333333333333333333333333333333333=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=ghcr.io/acme/fugue-controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   assert_file_contains "${FAKE_LOG}" \
     "--provenance-digest sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	assert_file_contains "${FAKE_LOG}" \
+	  "evidence:operational-report --changed-evidence"
+	assert_file_contains "${FAKE_LOG}" \
+	  "--build-artifact-plan"
+	assert_file_contains "${FAKE_LOG}" \
+	  "--image-activation-plan"
+	assert_file_contains "${FAKE_LOG}" \
+	  "--image-activation-evidence"
+	assert_file_contains "${FAKE_LOG}" \
+	  "--immutable-target-manifest"
   assert_log_order "evidence:operational-report" "dispatch:verify:"
   assert_public_parent_and_cleanup
 }

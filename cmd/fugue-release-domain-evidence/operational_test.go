@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,6 +42,131 @@ func TestOperationalReportEmitsDigestBoundNonAuthorizingEvidence(t *testing.T) {
 	if !report.ClassificationAgrees || report.ConservativeOutcome != releasedomain.OutcomeSingle ||
 		report.ConservativeDomain != releasedomain.DomainControlPlane {
 		t.Fatalf("dual classification was not reported: %#v", report)
+	}
+}
+
+func TestOperationalReportConsumesRederivedActivationArtifacts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownership := []byte(`apiVersion: release-domain.fugue.dev/v1
+kind: ReleaseDomainOwnership
+domains: [node-local, authoritative-dns, control-plane, image-cache, backup]
+requiredBindings: [releaseNamespace]
+fileRules: []
+valueRules: []
+objectRules:
+  - id: api
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: fugue-api
+`)
+	spec, err := releasedomain.LoadOwnership(bytes.NewReader(ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := releasedomain.CanonicalizeRenderedManifest([]byte(activationTestDeployment("registry.test/api@"+activationTestDigest("a"))), spec, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := releasedomain.CanonicalizeRenderedManifest([]byte(activationTestDeployment("registry.test/api:"+activationTestTarget)), spec, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := newEvidenceDocument(evidenceResult{
+		baseCommit: activationTestBase, targetCommit: activationTestTarget,
+		changes: []releasedomain.ChangedFile{{
+			Status: releasedomain.ChangeModified, Path: "internal/model/model.go",
+			ConsumerDomains: []releasedomain.Domain{releasedomain.DomainAuthoritativeDNS, releasedomain.DomainControlPlane},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed = append(changed, '\n')
+	context, err := releasedomain.NewClassificationContextEvidence("fugue-system", map[string]string{"releaseNamespace": "fugue-system"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conservative := releasedomain.BuildPlan(releasedomain.PlanInput{
+		Files: releasedomain.FileClassification{Domains: []releasedomain.Domain{}, Evidence: []releasedomain.Evidence{}},
+		Rendered: releasedomain.ClassifyRendered(base, target, spec, releasedomain.RenderedOptions{
+			DefaultNamespace: "fugue-system", Bindings: context.BindingMap(),
+		}),
+		Digests: releasedomain.DigestEvidence{
+			Base: activationTestDigest("1"), Target: activationTestDigest("2"), Live: activationTestDigest("1"),
+			BaseManifest: activationTestBytesDigest(base), TargetManifest: activationTestBytesDigest(target),
+			RepeatedTargetManifest: activationTestBytesDigest(target), Ownership: activationTestBytesDigest(ownership),
+			ChangedFiles: document.Digest, ClassificationContext: context,
+		},
+	})
+	planBytes, err := json.Marshal(conservative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planBytes = append(planBytes, '\n')
+	for name, data := range map[string][]byte{
+		"changed.json": changed, "ownership.yaml": ownership, "plan.json": planBytes,
+		"base.yaml": base, "target.yaml": target,
+	} {
+		writeOperationalFixture(t, filepath.Join(root, name), data)
+	}
+	activationDir := filepath.Join(root, "activation")
+	targetDigest := activationTestDigest("c")
+	if exit := runImageActivationPlans([]string{
+		"--changed-evidence", filepath.Join(root, "changed.json"), "--ownership", filepath.Join(root, "ownership.yaml"),
+		"--plan", filepath.Join(root, "plan.json"), "--plan-digest", conservative.PlanDigest,
+		"--base-manifest", filepath.Join(root, "base.yaml"), "--target-manifest", filepath.Join(root, "target.yaml"),
+		"--trusted-base", activationTestBase, "--trusted-target", activationTestTarget,
+		"--provenance-digest", activationTestDigest("f"),
+		"--artifact", "api=" + activationTestBase + "=" + targetDigest + "=registry.test/api@" + targetDigest,
+		"--artifact", "edge=" + activationTestBase + "=" + activationTestDigest("e") + "=registry.test/edge@" + activationTestDigest("e"),
+		"--output-dir", activationDir,
+	}, ioDiscard{}, &bytes.Buffer{}); exit != 0 {
+		t.Fatalf("activation plans exit=%d", exit)
+	}
+	reportPath := filepath.Join(root, "operational.json")
+	var stderr bytes.Buffer
+	exit := runOperationalReport([]string{
+		"--changed-evidence", filepath.Join(root, "changed.json"),
+		"--build-artifact-plan", filepath.Join(activationDir, "build-artifact-plan.json"),
+		"--image-activation-plan", filepath.Join(activationDir, "image-activation-plan.json"),
+		"--image-activation-evidence", filepath.Join(activationDir, "image-activation-evidence.json"),
+		"--ownership", filepath.Join(root, "ownership.yaml"),
+		"--base-manifest", filepath.Join(root, "base.yaml"), "--target-manifest", filepath.Join(root, "target.yaml"),
+		"--immutable-target-manifest", filepath.Join(activationDir, "immutable-target-manifest.yaml"),
+		"--plan", filepath.Join(root, "plan.json"), "--plan-digest", conservative.PlanDigest,
+		"--trusted-base", activationTestBase, "--trusted-target", activationTestTarget,
+		"--output", reportPath,
+	}, ioDiscard{}, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+	}
+	encoded, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(encoded, &identity); err != nil {
+		t.Fatal(err)
+	}
+	report, err := releasedomain.DecodeAndVerifyOperationalDomainEvidence(bytes.NewReader(encoded), identity.Digest)
+	if err != nil || !report.AuthorizationEligible || report.CandidateDomain != releasedomain.DomainControlPlane ||
+		len(report.ImageTargets) != 1 || report.ImageTargets[0].Name != "api" ||
+		len(report.ActivationWitness) != 1 ||
+		!reflect.DeepEqual(report.ActivationWitness[0].Evidence.BuiltOnlyArtifacts, []string{"edge"}) {
+		t.Fatalf("activation operational report = %#v err=%v", report, err)
 	}
 }
 

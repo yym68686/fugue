@@ -58,6 +58,100 @@ func TestOperationalDomainEvidenceReportsCompleteSingleAsActivationEligible(t *t
 	}
 }
 
+func TestActivationOperationalEvidenceUsesOnlyLiveRelativeActivations(t *testing.T) {
+	changed, input, activationPlan, activationEvidence, activationRendered := operationalActivationV2Fixture(t, false, false)
+	report, err := BuildOperationalDomainEvidenceFromActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, activationRendered,
+		input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Policy != OperationalActivationEvidencePolicy || !report.AuthorizationEligible ||
+		report.Observation != OutcomeSingle || report.CandidateDomain != DomainControlPlane ||
+		!equalDomains(report.IntersectionDomains, []Domain{DomainControlPlane}) {
+		t.Fatalf("activation report = %#v", report)
+	}
+	if len(report.ImageTargets) != 1 || report.ImageTargets[0].Name != "api" ||
+		len(report.ActivationWitness) != 1 ||
+		!reflect.DeepEqual(report.ActivationWitness[0].Evidence.BuiltOnlyArtifacts, []string{"edge"}) {
+		t.Fatalf("built-only artifact entered activation domains: %#v", report)
+	}
+	encoded, err := MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeAndVerifyOperationalDomainEvidence(bytes.NewReader(encoded), report.Digest)
+	if err != nil || !reflect.DeepEqual(decoded, report) {
+		t.Fatalf("activation report round trip\n got=%#v\nwant=%#v\nerr=%v", decoded, report, err)
+	}
+
+	mutated := report
+	mutated.ActivationWitness = append([]OperationalActivationWitness(nil), report.ActivationWitness...)
+	mutated.ActivationWitness[0].Evidence.BuiltOnlyArtifacts = []string{"api"}
+	mutated.ActivationWitness[0].Evidence.Digest = imageActivationEvidenceDigest(mutated.ActivationWitness[0].Evidence)
+	mutated.Digest = operationalEvidenceDigest(mutated)
+	if err := VerifyOperationalDomainEvidence(mutated); err == nil {
+		t.Fatal("mutated build/activation partition unexpectedly verified")
+	}
+
+	incomplete := report
+	incomplete.ActivationWitness = append([]OperationalActivationWitness(nil), report.ActivationWitness...)
+	incompleteEvidence := incomplete.ActivationWitness[0].Evidence
+	incompleteEvidence.BuiltOnlyArtifacts = []string{}
+	gap := md0bOwnershipGap()
+	gap.ID = "edge-ownership"
+	gap.Workload.Name = "fugue-edge"
+	gap.Workload.Container = "edge"
+	gap.LiveImageRef = "registry.example/edge:live"
+	gap.TargetImageRef = "registry.example/edge@" + md0Digest("b")
+	gap.ArtifactDigest = md0Digest("b")
+	gap.MatchingBuildArtifacts = []string{"edge"}
+	incompleteEvidence.Unresolved = []ImageActivationGap{gap}
+	incompleteEvidence.Complete = false
+	incompleteEvidence.Digest = imageActivationEvidenceDigest(incompleteEvidence)
+	incomplete.ActivationWitness[0].Evidence = incompleteEvidence
+	incomplete.Digest = operationalEvidenceDigest(incomplete)
+	if err := VerifyOperationalDomainEvidence(incomplete); err == nil {
+		t.Fatal("incomplete activation witness was accepted after digest recomputation")
+	}
+}
+
+func TestActivationOperationalEvidenceKeepsIncompleteAndRealMultipleFailClosed(t *testing.T) {
+	t.Run("unresolved", func(t *testing.T) {
+		changed, input, activationPlan, activationEvidence, activationRendered := operationalActivationV2Fixture(t, false, true)
+		report, err := BuildOperationalDomainEvidenceFromActivation(
+			changed, input.BuildPlan, activationPlan, activationEvidence, activationRendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.AuthorizationEligible || report.Observation != OutcomeUnknown ||
+			!containsOperationalIssue(report.Issues, "image activation evidence is incomplete") {
+			t.Fatalf("unresolved activation did not fail closed: %#v", report)
+		}
+	})
+
+	t.Run("multiple", func(t *testing.T) {
+		changed, input, activationPlan, activationEvidence, activationRendered := operationalActivationV2Fixture(t, true, false)
+		report, err := BuildOperationalDomainEvidenceFromActivation(
+			changed, input.BuildPlan, activationPlan, activationEvidence, activationRendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.AuthorizationEligible || report.Observation != OutcomeMultiple ||
+			!equalDomains(report.IntersectionDomains, []Domain{DomainAuthoritativeDNS, DomainControlPlane}) {
+			t.Fatalf("real multi-domain activation was narrowed: %#v", report)
+		}
+	})
+}
+
 func TestActivateOperationalPlanRebuildsBlockedPlanAsSingleDomain(t *testing.T) {
 	changed, imagePlan, conservative := operationalEvidenceFixture(t,
 		[]ChangedFile{{
@@ -413,6 +507,65 @@ func operationalRolloutTargets(names []string) []OperationalImageRolloutTarget {
 		})
 	}
 	return targets
+}
+
+func operationalActivationV2Fixture(t *testing.T, includeEdge, unresolved bool) (
+	ChangedFileEvidence,
+	ImageActivationPlanInput,
+	ImageActivationPlan,
+	ImageActivationEvidence,
+	RenderedClassification,
+) {
+	t.Helper()
+	apiDigest := md0Digest("a")
+	requestedAPIDigest := apiDigest
+	if unresolved {
+		requestedAPIDigest = md0Digest("9")
+	}
+	base := md1Deployment("fugue-api", "api", "registry.example/api:live")
+	target := md1Deployment("fugue-api", "api", "registry.example/api@"+requestedAPIDigest)
+	rules := []md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}}
+	artifacts := []BuildArtifact{{
+		Name: "api", SourceBaseCommit: md0BaseCommit, ArtifactDigest: apiDigest,
+		ProvenanceDigest: md0Digest("1"), PublishedImageRef: "registry.example/api@" + apiDigest,
+	}}
+	domains := []Domain{DomainControlPlane}
+	if includeEdge {
+		edgeDigest := md0Digest("b")
+		base += "---\n" + md1Deployment("fugue-edge", "edge", "registry.example/edge:live")
+		target += "---\n" + md1Deployment("fugue-edge", "edge", "registry.example/edge@"+edgeDigest)
+		rules = append(rules, md1OwnershipRule{name: "fugue-edge", domain: DomainAuthoritativeDNS})
+		artifacts = append(artifacts, BuildArtifact{
+			Name: "edge", SourceBaseCommit: md0BaseCommit, ArtifactDigest: edgeDigest,
+			ProvenanceDigest: md0Digest("1"), PublishedImageRef: "registry.example/edge@" + edgeDigest,
+		})
+		domains = []Domain{DomainAuthoritativeDNS, DomainControlPlane}
+	} else {
+		artifacts = append(artifacts, BuildArtifact{
+			Name: "edge", SourceBaseCommit: md0BaseCommit, ArtifactDigest: md0Digest("b"),
+			ProvenanceDigest: md0Digest("1"), PublishedImageRef: "registry.example/edge@" + md0Digest("b"),
+		})
+	}
+	input := md1ActivationFixture(t, base, target, rules, artifacts)
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{
+			Status: ChangeModified, Path: "internal/model/model.go", ConsumerDomains: domains,
+		}},
+	}
+	return changed, input, activationPlan, activationEvidence, rendered
 }
 
 func containsOperationalIssue(issues []string, fragment string) bool {
