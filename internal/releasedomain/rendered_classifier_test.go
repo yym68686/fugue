@@ -419,6 +419,7 @@ func currentChartRenderedOptions() RenderedOptions {
 			"dnsName":                        "fugue-fugue-dns",
 			"apiName":                        "fugue-fugue-api",
 			"controllerName":                 "fugue-fugue-controller",
+			"telemetryAgentName":             "fugue-fugue-telemetry-agent",
 			"serviceName":                    "fugue-fugue",
 			"ingressName":                    "fugue-fugue",
 			"imageCacheName":                 "fugue-fugue-image-cache",

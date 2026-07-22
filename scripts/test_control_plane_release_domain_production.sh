@@ -922,6 +922,7 @@ case_domain_success() {
   assert_file_contains "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}.trace" '"phase":"transaction","state":"succeeded"'
   assert_file_contains "${FAKE_LOG}" "controlPlanePostgresName=custom-control-plane-postgres"
   assert_file_contains "${FAKE_LOG}" "controlPlanePostgresSecretName=custom-control-plane-postgres-app"
+  assert_file_contains "${FAKE_LOG}" "telemetryAgentName=fugue-telemetry-agent"
   assert_public_parent_and_cleanup
 }
 

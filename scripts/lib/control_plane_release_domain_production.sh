@@ -782,6 +782,7 @@ control_plane_release_domain_build_binding_args() {
     --binding "dnsName=${FUGUE_RELEASE_FULLNAME}-dns"
     --binding "apiName=${FUGUE_API_DEPLOYMENT_NAME}"
     --binding "controllerName=${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"
+    --binding "telemetryAgentName=${FUGUE_RELEASE_FULLNAME}-telemetry-agent"
     --binding "serviceName=${FUGUE_RELEASE_FULLNAME}"
     --binding "ingressName=${FUGUE_RELEASE_FULLNAME}"
     --binding "imageCacheName=${FUGUE_RELEASE_FULLNAME}-image-cache"

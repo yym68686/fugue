@@ -37,6 +37,7 @@ func baseCLIArgs(changed, base, target, repeated string) []string {
 		"dnsName=fugue-dns",
 		"apiName=fugue-api",
 		"controllerName=fugue-controller",
+		"telemetryAgentName=fugue-telemetry-agent",
 		"serviceName=fugue",
 		"ingressName=fugue",
 		"imageCacheName=fugue-image-cache",
