@@ -11956,12 +11956,13 @@ PY
   [[ "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" == "true" ]] || fail "revision drift cleared the pre-Helm recovery fence"
 )
 
-early_evidence_tmp="$(mktemp -d)"
+early_evidence_root="${TMPDIR:-/tmp}"
+early_evidence_tmp="$(mktemp -d "${early_evidence_root%/}/fugue-release-early-evidence.XXXXXX")"
 early_evidence_status=0
 if env -i \
   HOME="${HOME}" \
   PATH="${PATH}" \
-  TMPDIR="${TMPDIR:-/tmp}" \
+  TMPDIR="${early_evidence_root}" \
   FUGUE_RELEASE_ATTRIBUTION_DIR="${early_evidence_tmp}/evidence" \
   bash "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" >"${early_evidence_tmp}/output" 2>&1; then
   fail "missing required configuration must fail after installing the release evidence EXIT trap"
