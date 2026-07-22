@@ -77,20 +77,23 @@ type PathOwner struct {
 
 // ObjectRule is an exact GVK/scope/name allowlist entry with required labels.
 // NamePrefix is permitted only with NameSuffixLabel, preserving a deterministic
-// relation between the normalized name and component label.
+// relation between the normalized name and component label. NameSuffixTerminal
+// may additionally bind the extracted suffix to one exact hyphen-delimited
+// terminal role such as "front" or "worker-a".
 type ObjectRule struct {
-	ID              string            `yaml:"id" json:"id"`
-	Domain          Domain            `yaml:"domain" json:"domain"`
-	APIGroup        string            `yaml:"apiGroup" json:"apiGroup"`
-	Version         string            `yaml:"version" json:"version"`
-	Kind            string            `yaml:"kind" json:"kind"`
-	Scope           Scope             `yaml:"scope" json:"scope"`
-	Namespace       string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
-	Name            string            `yaml:"name,omitempty" json:"name,omitempty"`
-	NamePrefix      string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
-	RequiredLabels  map[string]string `yaml:"requiredLabels,omitempty" json:"requiredLabels,omitempty"`
-	NameSuffixLabel *NameSuffixLabel  `yaml:"nameSuffixLabel,omitempty" json:"nameSuffixLabel,omitempty"`
-	PathOverrides   []PathOwner       `yaml:"pathOverrides,omitempty" json:"pathOverrides,omitempty"`
+	ID                 string            `yaml:"id" json:"id"`
+	Domain             Domain            `yaml:"domain" json:"domain"`
+	APIGroup           string            `yaml:"apiGroup" json:"apiGroup"`
+	Version            string            `yaml:"version" json:"version"`
+	Kind               string            `yaml:"kind" json:"kind"`
+	Scope              Scope             `yaml:"scope" json:"scope"`
+	Namespace          string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
+	Name               string            `yaml:"name,omitempty" json:"name,omitempty"`
+	NamePrefix         string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
+	NameSuffixTerminal string            `yaml:"nameSuffixTerminal,omitempty" json:"nameSuffixTerminal,omitempty"`
+	RequiredLabels     map[string]string `yaml:"requiredLabels,omitempty" json:"requiredLabels,omitempty"`
+	NameSuffixLabel    *NameSuffixLabel  `yaml:"nameSuffixLabel,omitempty" json:"nameSuffixLabel,omitempty"`
+	PathOverrides      []PathOwner       `yaml:"pathOverrides,omitempty" json:"pathOverrides,omitempty"`
 }
 
 // LoadOwnership parses and validates exactly one strict YAML document.
@@ -236,6 +239,14 @@ func (spec *OwnershipSpec) Validate() error {
 			}
 			if strings.Contains(rule.NameSuffixLabel.ValuePrefix, "${") {
 				return fmt.Errorf("object rule %q nameSuffixLabel valuePrefix must be literal", rule.ID)
+			}
+		}
+		if rule.NameSuffixTerminal != "" {
+			if rule.NamePrefix == "" {
+				return fmt.Errorf("object rule %q nameSuffixTerminal requires namePrefix", rule.ID)
+			}
+			if !validNameSuffixTerminal(rule.NameSuffixTerminal) {
+				return fmt.Errorf("object rule %q has invalid nameSuffixTerminal %q", rule.ID, rule.NameSuffixTerminal)
 			}
 		}
 		for field, value := range map[string]string{
@@ -421,6 +432,11 @@ func (rule ObjectRule) matches(object manifestObject, defaultNamespace string, b
 		}
 		nameSuffix = strings.TrimPrefix(object.Identity.Name, prefix)
 	}
+	if rule.NameSuffixTerminal != "" &&
+		nameSuffix != rule.NameSuffixTerminal &&
+		!strings.HasSuffix(nameSuffix, "-"+rule.NameSuffixTerminal) {
+		return false, nil
+	}
 
 	for key, expectedTemplate := range rule.RequiredLabels {
 		expected, err := expandBindings(expectedTemplate, bindings)
@@ -438,6 +454,21 @@ func (rule ObjectRule) matches(object manifestObject, defaultNamespace string, b
 		}
 	}
 	return true, nil
+}
+
+func validNameSuffixTerminal(value string) bool {
+	if value == "" || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (rule ObjectRule) domainForPointer(pointer string) Domain {

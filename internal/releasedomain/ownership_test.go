@@ -65,6 +65,9 @@ func TestEveryObjectRuleHasOneSyntheticMatch(t *testing.T) {
 			if nameTemplate == "" {
 				nameTemplate = targetRule.NamePrefix
 				nameSuffix = "group-a"
+				if targetRule.NameSuffixTerminal != "" {
+					nameSuffix += "-" + targetRule.NameSuffixTerminal
+				}
 			}
 			name, err := expandBindings(nameTemplate, bindings)
 			if err != nil {
@@ -107,6 +110,96 @@ func TestEveryObjectRuleHasOneSyntheticMatch(t *testing.T) {
 			}
 			if len(matches) != 1 || matches[0] != targetRule.ID {
 				t.Fatalf("synthetic object matched %v, want only %s", matches, targetRule.ID)
+			}
+		})
+	}
+}
+
+func TestDynamicObjectNameSuffixTerminalIsExactAndHyphenDelimited(t *testing.T) {
+	rule := ObjectRule{
+		ID:                 "worker-a",
+		Domain:             DomainAuthoritativeDNS,
+		APIGroup:           "apps",
+		Version:            "v1",
+		Kind:               "DaemonSet",
+		Scope:              ScopeNamespaced,
+		Namespace:          "fugue-system",
+		NamePrefix:         "fugue-edge-",
+		NameSuffixTerminal: "worker-a",
+		RequiredLabels: map[string]string{
+			"fugue.io/rollout-mode": "node-local-blue-green-worker",
+		},
+		NameSuffixLabel: &NameSuffixLabel{
+			Key:         "app.kubernetes.io/component",
+			ValuePrefix: "edge-",
+		},
+	}
+	labelsFor := func(suffix string) map[string]string {
+		return map[string]string{
+			"app.kubernetes.io/component": "edge-" + suffix,
+			"fugue.io/rollout-mode":       "node-local-blue-green-worker",
+		}
+	}
+	for _, suffix := range []string{"worker-a", "country-de-worker-a", "dynamic-worker-a"} {
+		object := manifestObject{
+			Identity: ObjectIdentity{APIGroup: "apps", Version: "v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-edge-" + suffix},
+			Labels:   labelsFor(suffix),
+		}
+		matched, err := rule.matches(object, "fugue-system", nil)
+		if err != nil || !matched {
+			t.Fatalf("suffix %q matched=%t err=%v", suffix, matched, err)
+		}
+	}
+	for _, suffix := range []string{"front", "worker-b", "country-de-worker-a-extra", "country-de-worker-aa"} {
+		object := manifestObject{
+			Identity: ObjectIdentity{APIGroup: "apps", Version: "v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-edge-" + suffix},
+			Labels:   labelsFor(suffix),
+		}
+		matched, err := rule.matches(object, "fugue-system", nil)
+		if err != nil || matched {
+			t.Fatalf("suffix %q matched=%t err=%v", suffix, matched, err)
+		}
+	}
+}
+
+func TestNameSuffixTerminalValidationFailsClosed(t *testing.T) {
+	base := ObjectRule{
+		ID:                 "dynamic",
+		Domain:             DomainAuthoritativeDNS,
+		APIGroup:           "apps",
+		Version:            "v1",
+		Kind:               "DaemonSet",
+		Scope:              ScopeNamespaced,
+		Namespace:          "fugue-system",
+		NamePrefix:         "fugue-edge-",
+		NameSuffixTerminal: "worker-a",
+		NameSuffixLabel: &NameSuffixLabel{
+			Key:         "app.kubernetes.io/component",
+			ValuePrefix: "edge-",
+		},
+	}
+	for name, mutate := range map[string]func(*ObjectRule){
+		"exact name": func(rule *ObjectRule) {
+			rule.Name = "fugue-edge-worker-a"
+			rule.NamePrefix = ""
+			rule.NameSuffixLabel = nil
+		},
+		"uppercase":       func(rule *ObjectRule) { rule.NameSuffixTerminal = "Worker-a" },
+		"leading hyphen":  func(rule *ObjectRule) { rule.NameSuffixTerminal = "-worker-a" },
+		"trailing hyphen": func(rule *ObjectRule) { rule.NameSuffixTerminal = "worker-a-" },
+		"template":        func(rule *ObjectRule) { rule.NameSuffixTerminal = "${worker}" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rule := base
+			mutate(&rule)
+			spec := &OwnershipSpec{
+				APIVersion:  OwnershipAPIVersion,
+				Kind:        OwnershipKind,
+				Domains:     KnownDomains(),
+				ObjectRules: []ObjectRule{rule},
+			}
+			if err := spec.Validate(); err == nil {
+				t.Fatal("invalid nameSuffixTerminal was accepted")
 			}
 		})
 	}
