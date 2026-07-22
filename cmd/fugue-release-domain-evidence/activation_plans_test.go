@@ -18,7 +18,7 @@ const (
 	activationTestTarget = "2222222222222222222222222222222222222222"
 )
 
-func TestRunImageActivationPlansWritesStrictFourFileReport(t *testing.T) {
+func TestRunImageActivationPlansWritesStrictFiveFileReportWithoutChangingResolverInput(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
@@ -54,7 +54,7 @@ objectRules:
 		t.Fatal(err)
 	}
 	targetDigest := activationTestDigest("c")
-	target, err := releasedomain.CanonicalizeRenderedManifest([]byte(activationTestDeployment("registry.test/api@"+targetDigest)), spec, "fugue-system")
+	target, err := releasedomain.CanonicalizeRenderedManifest([]byte(activationTestDeployment("registry.test/api:"+activationTestTarget)), spec, "fugue-system")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,9 +126,10 @@ objectRules:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 4 || entries[0].Name() != "build-artifact-plan.json" ||
+	if len(entries) != 5 || entries[0].Name() != "build-artifact-plan.json" ||
 		entries[1].Name() != "composite-decomposition-evidence.json" ||
-		entries[2].Name() != "image-activation-evidence.json" || entries[3].Name() != "image-activation-plan.json" {
+		entries[2].Name() != "image-activation-evidence.json" || entries[3].Name() != "image-activation-plan.json" ||
+		entries[4].Name() != "immutable-target-manifest.yaml" {
 		t.Fatalf("report inventory = %#v", entries)
 	}
 	buildBytes, err := os.ReadFile(filepath.Join(output, "build-artifact-plan.json"))
@@ -160,7 +161,7 @@ objectRules:
 		t.Fatal(err)
 	}
 	activation, err := releasedomain.DecodeAndVerifyImageActivationPlan(bytes.NewReader(activationBytes), activationIdentity.Digest)
-	if err != nil || len(activation.Activations) != 1 || activation.Activations[0].ArtifactName != "api" {
+	if err != nil || len(activation.Activations) != 0 {
 		t.Fatalf("activation plan = %#v err=%v", activation, err)
 	}
 	evidenceBytes, err := os.ReadFile(filepath.Join(output, "image-activation-evidence.json"))
@@ -174,8 +175,9 @@ objectRules:
 		t.Fatal(err)
 	}
 	evidence, err := releasedomain.DecodeAndVerifyImageActivationEvidence(bytes.NewReader(evidenceBytes), evidenceIdentity.Digest)
-	if err != nil || !evidence.Complete || len(evidence.Unresolved) != 0 ||
-		len(evidence.BuiltOnlyArtifacts) != 1 || evidence.BuiltOnlyArtifacts[0] != "edge" ||
+	if err != nil || evidence.Complete || len(evidence.Unresolved) != 1 ||
+		evidence.Unresolved[0].Reason != "target-image-not-immutable" ||
+		len(evidence.BuiltOnlyArtifacts) != 2 ||
 		evidence.ResolvedImageActivationPlanDigest != activation.Digest {
 		t.Fatalf("activation evidence = %#v err=%v", evidence, err)
 	}
@@ -190,11 +192,21 @@ objectRules:
 		t.Fatal(err)
 	}
 	decomposition, err := releasedomain.DecodeAndVerifyCompositeDecompositionEvidence(bytes.NewReader(decompositionBytes), decompositionIdentity.Digest)
-	if err != nil || decomposition.Complete || len(decomposition.Steps) != 1 ||
-		decomposition.Steps[0].Domain != releasedomain.DomainControlPlane ||
+	if err != nil || decomposition.Complete || len(decomposition.Steps) != 0 ||
 		decomposition.ImageActivationPlanDigest != activation.Digest ||
 		decomposition.ImageActivationEvidenceDigest != evidence.Digest {
 		t.Fatalf("composite decomposition = %#v err=%v", decomposition, err)
+	}
+	immutableTarget, err := os.ReadFile(filepath.Join(output, "immutable-target-manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(immutableTarget, []byte("registry.test/api@"+targetDigest)) ||
+		bytes.Contains(immutableTarget, []byte("registry.test/api:"+activationTestTarget)) {
+		t.Fatalf("immutable target manifest = %s", immutableTarget)
+	}
+	if !bytes.Contains(target, []byte("registry.test/api:"+activationTestTarget)) {
+		t.Fatal("original resolver target input was unexpectedly changed")
 	}
 }
 

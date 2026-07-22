@@ -97,6 +97,7 @@ expected_names = [
     "composite-decomposition-evidence.json",
     "image-activation-evidence.json",
     "image-activation-plan.json",
+    "immutable-target-manifest.yaml",
 ]
 payloads = []
 for directory in map(os.path.abspath, sys.argv[1:]):
