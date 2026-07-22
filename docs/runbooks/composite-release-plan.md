@@ -166,3 +166,21 @@ initial prepared record and final reverted record.
 The drill calls no adapter and writes no store, API, workflow, Kubernetes
 object, node configuration, DNS state, or network rule. Production activation
 and a real mutation/recovery canary remain separate later checkpoints.
+
+## MD6p6 dormant strict-plan materializer
+
+MD6p6 adds the fail-closed bridge from one complete, verified
+`CompositeDecompositionEvidence` report to the strict
+`CompositeReleasePlan`. Domains, fixed adapters, serial dependencies,
+activation IDs, forward/reverse rendered digests, and the two domain-version
+vectors are copied or derived only from the decomposition. Callers supply the
+coordinator-controlled generation and fencing epoch plus one health/observation
+requirement for each already-derived domain; an observation cannot introduce
+another domain or adapter.
+
+Incomplete or tampered decomposition, missing/extra/duplicate observations,
+and invalid generation, fencing, digest, sample, window, or rollback budget
+values all fail closed. The materializer is dormant: it does not allocate a
+generation, create a durable record, authorize an envelope, call an adapter,
+advance the coordinator, or write production state. Those activation
+boundaries remain later checkpoints.
