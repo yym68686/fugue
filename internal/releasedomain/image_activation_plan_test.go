@@ -3,6 +3,7 @@ package releasedomain
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -104,6 +105,77 @@ func TestBuildImageActivationReportKeepsOwnershipGapExplicit(t *testing.T) {
 		len(gap.OwnershipDomains) != 0 || len(evidence.BuiltOnlyArtifacts) != 0 ||
 		evidence.ResolvedImageActivationPlanDigest != activation.Digest {
 		t.Fatalf("ownership gap evidence drifted: %#v", evidence)
+	}
+}
+
+func TestCanonicalOwnershipResolvesTelemetryAgentThroughControlPlaneAdapter(t *testing.T) {
+	ownership, err := os.ReadFile("../../deploy/release-domains/ownership-v1.yaml")
+	if err != nil {
+		t.Fatalf("read canonical ownership: %v", err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(ownership))
+	if err != nil {
+		t.Fatalf("load canonical ownership: %v", err)
+	}
+	bindings := testBindings()
+	context, err := NewClassificationContextEvidence("fugue-system", bindings, false)
+	if err != nil {
+		t.Fatalf("classification context: %v", err)
+	}
+	telemetryDigest := md0Digest("d")
+	baseRaw := md1LabeledDeployment(
+		bindings["telemetryAgentName"], "telemetry-agent", "telemetry-agent",
+		"registry.test/telemetry@"+md0Digest("c"),
+	)
+	targetRaw := md1LabeledDeployment(
+		bindings["telemetryAgentName"], "telemetry-agent", "telemetry-agent",
+		"registry.test/telemetry@"+telemetryDigest,
+	)
+	base, err := CanonicalizeRenderedManifest([]byte(baseRaw), spec, context.DefaultNamespace)
+	if err != nil {
+		t.Fatalf("canonicalize base: %v", err)
+	}
+	target, err := CanonicalizeRenderedManifest([]byte(targetRaw), spec, context.DefaultNamespace)
+	if err != nil {
+		t.Fatalf("canonicalize target: %v", err)
+	}
+	changedDigest := md0Digest("f")
+	build, err := NewBuildArtifactPlan(md0BaseCommit, md0TargetCommit, changedDigest, []BuildArtifact{{
+		Name: "telemetry_agent", SourceBaseCommit: md0BaseCommit,
+		ArtifactDigest: telemetryDigest, ProvenanceDigest: md0Digest("e"),
+	}})
+	if err != nil {
+		t.Fatalf("build artifact plan: %v", err)
+	}
+	rendered := ClassifyRendered(base, target, spec, RenderedOptions{
+		DefaultNamespace: context.DefaultNamespace,
+		Bindings:         context.BindingMap(),
+	})
+	plan := BuildPlan(PlanInput{
+		Files:    FileClassification{Domains: []Domain{}, Evidence: []Evidence{}},
+		Rendered: rendered,
+		Digests: DigestEvidence{
+			Base: md0Digest("1"), Target: md0Digest("2"), Live: md0Digest("1"),
+			BaseManifest: digestBytesSHA256(base), TargetManifest: digestBytesSHA256(target),
+			RepeatedTargetManifest: digestBytesSHA256(target), Ownership: digestBytesSHA256(ownership),
+			ChangedFiles: changedDigest, ClassificationContext: context,
+		},
+	})
+	activation, evidence, err := BuildImageActivationReportFromManifests(ImageActivationPlanInput{
+		BuildPlan: build, ReleasePlan: plan, Ownership: ownership,
+		BaseManifest: base, TargetManifest: target,
+	})
+	if err != nil {
+		t.Fatalf("derive canonical telemetry activation: %v", err)
+	}
+	if !evidence.Complete || len(evidence.Unresolved) != 0 || len(activation.Activations) != 1 {
+		t.Fatalf("canonical telemetry ownership remained incomplete: plan=%#v evidence=%#v", activation, evidence)
+	}
+	got := activation.Activations[0]
+	if got.ArtifactName != "telemetry_agent" || got.Domain != DomainControlPlane ||
+		got.Adapter != "control_plane_release_adapter_control_plane" ||
+		got.Workload.Name != bindings["telemetryAgentName"] || got.Workload.Container != "telemetry-agent" {
+		t.Fatalf("canonical telemetry activation binding drifted: %#v", got)
 	}
 }
 
@@ -299,4 +371,8 @@ func md1Ownership(rules []md1OwnershipRule) []byte {
 
 func md1Deployment(name, container, image string) string {
 	return fmt.Sprintf("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\n  namespace: fugue-system\nspec:\n  selector:\n    matchLabels:\n      app: %s\n  template:\n    metadata:\n      labels:\n        app: %s\n    spec:\n      containers:\n        - name: %s\n          image: %s\n", name, name, name, container, image)
+}
+
+func md1LabeledDeployment(name, container, component, image string) string {
+	return fmt.Sprintf("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\n  namespace: fugue-system\n  labels:\n    app.kubernetes.io/component: %s\nspec:\n  selector:\n    matchLabels:\n      app: %s\n  template:\n    metadata:\n      labels:\n        app: %s\n    spec:\n      containers:\n        - name: %s\n          image: %s\n", name, component, name, name, container, image)
 }

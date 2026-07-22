@@ -20,6 +20,7 @@ requiredBindings:
   - dnsName
   - apiName
   - controllerName
+  - telemetryAgentName
   - serviceName
   - ingressName
   - imageCacheName
@@ -1034,6 +1035,16 @@ objectRules:
     name: ${controllerName}
     requiredLabels:
       app.kubernetes.io/component: controller
+  - id: control-plane-telemetry-agent-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${telemetryAgentName}
+    requiredLabels:
+      app.kubernetes.io/component: telemetry-agent
   - id: control-plane-service
     domain: control-plane
     apiGroup: ""
