@@ -39,6 +39,10 @@ fileRules:
     prefix: scripts/test_
     nonRuntime: true
 
+  - id: control-plane-openapi-source
+    exact: openapi/openapi.yaml
+    domains: [control-plane]
+
   - id: planner-bootstrap-package
     prefix: internal/releasedomain/
     unknownReason: planner implementation is bootstrap/shared and cannot authorize itself

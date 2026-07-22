@@ -17,6 +17,12 @@ authorization, fixed adapters, durable trace, rollback, and public evidence.
 allowlist. It is not workload RBAC. A rendered object or field not positively
 matched by this file is unknown.
 
+The authoritative `openapi/openapi.yaml` source belongs to the control-plane
+domain because it generates the API route registry and served specification in
+the control-plane API image. Generated Go outputs still require their normal
+package-to-binary consumer evidence; this exact source rule does not classify
+any other YAML file or weaken unknown/multiple handling.
+
 | Domain | Rendered ownership | Production boundary |
 | --- | --- | --- |
 | `node-local` | NodeLocal PriorityClass, ServiceAccount, ConfigMap, upstream/cache/active Services, and preserved/active DaemonSets | Does not use the backup Lease and does not invoke API/controller rollout, authoritative-DNS transaction, image-cache mutation, CoreDNS repair, or generic node maintenance. |

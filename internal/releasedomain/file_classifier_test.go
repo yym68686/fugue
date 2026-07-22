@@ -127,6 +127,22 @@ func TestRuntimeGoWithoutConsumerEvidenceIsUnknown(t *testing.T) {
 	}
 }
 
+func TestAuthoritativeOpenAPISourceIsControlPlaneOwned(t *testing.T) {
+	classification := ClassifyFiles([]ChangedFile{{
+		Status: ChangeModified,
+		Path:   "openapi/openapi.yaml",
+	}}, testOwnership(t))
+	if len(classification.Unknown) != 0 {
+		t.Fatalf("unknown = %#v", classification.Unknown)
+	}
+	if !equalDomains(classification.Domains, []Domain{DomainControlPlane}) {
+		t.Fatalf("domains = %v, want [%s]", classification.Domains, DomainControlPlane)
+	}
+	if classification.AllNonRuntime {
+		t.Fatal("authoritative OpenAPI source was classified non-runtime")
+	}
+}
+
 func TestParseNameStatusZ(t *testing.T) {
 	changes, err := ParseNameStatusZ(strings.NewReader("M\x00docs/runbook.md\x00A\x00new.txt\x00"))
 	if err != nil {
