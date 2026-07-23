@@ -111,9 +111,9 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
-	immutableTargetManifest, err := releasedomain.MaterializeTargetPublishedImageRefs(
-		targetManifest, ownership, plan.Digests.ClassificationContext.DefaultNamespace,
-		options.trustedTarget, buildPlan,
+	immutableTargetManifest, err := releasedomain.MaterializeLiveRelativeTargetPublishedImageRefs(
+		baseManifest, targetManifest, ownership, plan.Digests.ClassificationContext.DefaultNamespace,
+		options.trustedTarget, buildPlan, plan,
 	)
 	if err != nil {
 		writeActivationPlanBuildError(stderr, err)

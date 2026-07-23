@@ -79,12 +79,14 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 	}
 	activationTargetManifest := input.TargetManifest
 	if len(input.ImmutableTargetManifest) != 0 {
-		expected, err := MaterializeTargetPublishedImageRefs(
+		expected, err := MaterializeLiveRelativeTargetPublishedImageRefs(
+			input.BaseManifest,
 			input.TargetManifest,
 			input.Ownership,
 			context.DefaultNamespace,
 			input.BuildPlan.TargetCommit,
 			input.BuildPlan,
+			input.ReleasePlan,
 		)
 		if err != nil {
 			return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("materialize immutable target manifest: %w", err)
