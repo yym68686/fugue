@@ -229,3 +229,19 @@ It receives no adapter, cannot inject a failure, cannot update a workload or
 runtime baseline, and rejects stale or replayed envelopes before another run.
 Real adapter apply/observe, controlled failure and reverse recovery, freeze,
 and guarded composite activation remain separate later checkpoints.
+
+## Dormant composite runtime lane reservation
+
+Before any real composite adapter is connected, Fugue persists one fixed
+`composite-runtime` lane. A reservation atomically creates one prepared record
+and advances the lane's version, generation, and fencing epoch. The plan must
+carry exactly the next generation and epoch, and callers must present the
+exact current lane version. A stale version, skipped counter, frozen lane, or
+different active record fails closed.
+
+Genesis conservatively derives its counters from verified legacy records. Any
+nonterminal legacy record makes genesis ambiguous and blocks reservation; a
+frozen record produces a frozen lane. Existing unreserved prepare/no-op APIs
+remain unchanged and cannot acquire runtime mutation authority. This
+checkpoint exposes no API, worker, scheduler, adapter, or cluster write; later
+runtime checkpoints must consume the reserved lane explicitly.

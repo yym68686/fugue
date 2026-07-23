@@ -20,6 +20,12 @@ func (s *Store) CreateCompositeReleaseTransaction(plan releasecontract.Composite
 		return s.pgCreateCompositeReleaseTransaction(record)
 	}
 	err = s.withLockedState(true, func(state *model.State) error {
+		if state.CompositeRuntimeLane != nil {
+			if _, err := compositeRuntimeLaneFromState(state, record.CreatedAt); err != nil {
+				return err
+			}
+			return ErrConflict
+		}
 		for _, existing := range state.CompositeTransactions {
 			if err := compositecoordinator.VerifyRecord(existing); err != nil {
 				return fmt.Errorf("stored composite release transaction: %w", err)

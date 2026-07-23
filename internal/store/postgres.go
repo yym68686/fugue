@@ -1646,6 +1646,23 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_composite_release_transactions_state_updated ON fugue_composite_release_transactions (state, updated_at ASC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_composite_release_lanes (
+		lane_key TEXT PRIMARY KEY CHECK (lane_key = 'composite-runtime'),
+		generation TEXT NOT NULL,
+		fencing_epoch TEXT NOT NULL,
+		lane_version BIGINT NOT NULL CHECK (lane_version >= 0),
+		active_record_id TEXT NOT NULL DEFAULT '',
+		active_initial_record_digest TEXT NOT NULL DEFAULT '',
+		active_plan_digest TEXT NOT NULL DEFAULT '',
+		last_settled_record_id TEXT NOT NULL DEFAULT '',
+		last_settled_record_digest TEXT NOT NULL DEFAULT '',
+		last_settled_plan_digest TEXT NOT NULL DEFAULT '',
+		frozen BOOLEAN NOT NULL DEFAULT FALSE,
+		freeze_reason TEXT NOT NULL DEFAULT '',
+		lane_json JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS fugue_operation_evidence (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

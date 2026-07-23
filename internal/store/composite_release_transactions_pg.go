@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,22 +12,32 @@ import (
 )
 
 func (s *Store) pgCreateCompositeReleaseTransaction(record compositecoordinator.Record) (compositecoordinator.Record, error) {
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		return compositecoordinator.Record{}, fmt.Errorf("marshal composite release transaction: %w", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO fugue_composite_release_transactions (
-  id, plan_digest, image_activation_plan_digest, generation, fencing_epoch,
-  state, current_step, rollback_start_step, record_revision, record_json,
-  created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-`, record.ID, record.Plan.Digest, record.Plan.ImageActivationPlanDigest, record.Plan.Generation,
-		record.Plan.FencingEpoch, record.State, record.CurrentStep, record.RollbackStartStep,
-		record.Revision, encoded, record.CreatedAt, record.UpdatedAt)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return compositecoordinator.Record{}, mapDBErr(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, compositeRuntimeLaneAdvisoryLock); err != nil {
+		return compositecoordinator.Record{}, mapDBErr(err)
+	}
+	if lane, err := pgReadCompositeRuntimeLane(ctx, tx, true); err == nil {
+		records, historyErr := pgReadCompositeReleaseHistory(ctx, tx)
+		if historyErr != nil {
+			return compositecoordinator.Record{}, historyErr
+		}
+		if historyErr = compositecoordinator.VerifyRuntimeLaneHistory(lane, records); historyErr != nil {
+			return compositecoordinator.Record{}, mapCompositeRuntimeLaneError(historyErr)
+		}
+		return compositecoordinator.Record{}, ErrConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return compositecoordinator.Record{}, mapDBErr(err)
+	}
+	if err := pgInsertCompositeReleaseTransactionTx(ctx, tx, record); err != nil {
+		return compositecoordinator.Record{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return compositecoordinator.Record{}, mapDBErr(err)
 	}
 	return record, nil

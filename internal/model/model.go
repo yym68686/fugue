@@ -3207,6 +3207,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type compositeTransaction = compositecoordinator.Record
+type compositeRuntimeLane = compositecoordinator.RuntimeLane
 
 type State struct {
 	Version                    string                      `json:"version"`
@@ -3239,6 +3240,7 @@ type State struct {
 	ReleaseAttempts            []ReleaseAttempt            `json:"release_attempts,omitempty"`
 	ReleaseSteps               []ReleaseStep               `json:"release_steps,omitempty"`
 	CompositeTransactions      []compositeTransaction      `json:"composite_release_transactions,omitempty"`
+	CompositeRuntimeLane       *compositeRuntimeLane       `json:"composite_runtime_lane,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
