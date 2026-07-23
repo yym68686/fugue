@@ -1,0 +1,210 @@
+name: rearm-control-plane-release-lane-rp5
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact main SHA authorized to rearm the formal deploy lane
+        required: true
+        type: string
+      expected_baseline_oid:
+        description: Exact forward-only runtime baseline ref object
+        required: true
+        type: string
+      expected_runtime_sha:
+        description: Exact runtime represented by the baseline object
+        required: true
+        type: string
+      expected_terminal_oid:
+        description: Exact frozen terminal ref object
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-control-plane-release-lane-rearm-rp5
+  cancel-in-progress: false
+
+jobs:
+  rearm-deploy-lane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout exact lane rearm policy SHA
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact rearm authorization
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${EXPECTED_BASELINE_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EXPECTED_RUNTIME_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${EXPECTED_TERMINAL_OID}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+
+          readonly workflow_path='.github/workflows/rearm-control-plane-release-lane-rp5.yml'
+          readonly test_path='internal/platformsafety/release_lane_rearm_workflow_test.go'
+          policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
+          [[ "${policy_commit}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1
+          for policy_path in "${workflow_path}" "${test_path}"; do
+            [[ "$(git log --format='%H' -n 1 -- "${policy_path}")" == "${policy_commit}" ]] || exit 1
+          done
+          policy_identity="$(git rev-list --parents -n 1 "${policy_commit}")" || exit 1
+          read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
+          [[ -z "${extra:-}" && "${policy_parent}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${policy_commit}")" || exit 1
+          actual_changes=()
+          while IFS= read -r change; do
+            actual_changes+=("${change}")
+          done <<<"${actual_changes_text}"
+          expected_changes=(
+            $'A\t.github/workflows/rearm-control-plane-release-lane-rp5.yml'
+            $'A\tinternal/platformsafety/release_lane_rearm_workflow_test.go'
+          )
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[${index}]}" == "${expected_changes[${index}]}" ]] || exit 1
+          done
+          git diff --check "${policy_parent}" "${policy_commit}" || exit 1
+          git diff --exit-code --ignore-submodules "${GITHUB_SHA}" -- || exit 1
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+
+          main_head="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-terminal-state" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${baseline_oid}" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
+          [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+
+          timeout --kill-after=5s 60s git fetch --no-tags origin 'refs/heads/fugue-control-plane-release-baseline' || exit 1
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
+          metadata_blob="$(git ls-tree --full-tree FETCH_HEAD -- fugue-runtime-baseline.json | awk '{print $3}')" || exit 1
+          [[ "${metadata_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          represented_runtime="$(git cat-file blob "${metadata_blob}" | python3 -c '
+          import json, re, sys
+          raw = sys.stdin.buffer.read()
+          value = json.loads(raw)
+          runtime = value.get("runtime_sha") if type(value) is dict else None
+          previous = value.get("previous_baseline_object_sha") if type(value) is dict else None
+          if type(runtime) is not str or re.fullmatch(r"[0-9a-f]{40}", runtime) is None:
+              raise SystemExit("runtime SHA drifted")
+          if type(previous) is not str or re.fullmatch(r"[0-9a-f]{40}", previous) is None:
+              raise SystemExit("previous baseline OID drifted")
+          expected = json.dumps(
+              {"previous_baseline_object_sha": previous, "runtime_sha": runtime, "schema_version": 1},
+              sort_keys=True, separators=(",", ":"),
+          ).encode() + b"\n"
+          if raw != expected:
+              raise SystemExit("baseline metadata is not canonical")
+          print(runtime)
+          ')" || exit 1
+          [[ "${represented_runtime}" == "${EXPECTED_RUNTIME_SHA}" ]] || exit 1
+          git merge-base --is-ancestor "${EXPECTED_RUNTIME_SHA}" "${GITHUB_SHA}" || exit 1
+
+          for run_status in queued in_progress waiting pending requested; do
+            other_runs="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id")" || exit 1
+            [[ -z "${other_runs}" ]] || exit 1
+          done
+          state_before="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" --jq '.state')" || exit 1
+          [[ "${state_before}" == 'active' ]] || exit 1
+
+      - name: Disable formal deploy lane with exact readback
+        id: rearm
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
+          EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly workflow_id='deploy-control-plane.yml'
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-rp5-lane-rearm"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+
+          main_head="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
+          terminal_oid="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/fugue-control-plane-release-terminal-state" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${baseline_oid}" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
+          [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
+          for run_status in queued in_progress waiting pending requested; do
+            other_runs="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" --jq ".workflow_runs[] | select(.id != ${GITHUB_RUN_ID}) | .id")" || exit 1
+            [[ -z "${other_runs}" ]] || exit 1
+          done
+
+          state_before="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+          [[ "${state_before}" == 'active' ]] || exit 1
+          mutation_status=0
+          set +e
+          timeout --kill-after=2s 10s gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/disable" >/dev/null
+          mutation_status=$?
+          set -e
+          state_after=''
+          settled='false'
+          for attempt in 1 2 3 4 5; do
+            state_after="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+            if [[ "${state_after}" == 'disabled_manually' ]]; then
+              settled='true'
+              break
+            fi
+            sleep 1
+          done
+          [[ "${settled}" == 'true' && "${state_after}" == 'disabled_manually' ]] || exit 1
+
+          python3 - "${evidence_dir}/rearm.json" "${state_before}" "${state_after}" "${mutation_status}" <<'PY'
+          import datetime, json, os, sys
+          output, before, after, mutation_status = sys.argv[1:]
+          payload = {
+              "schema_version": 1,
+              "workflow": "rearm-control-plane-release-lane-rp5",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "policy_sha": os.environ["GITHUB_SHA"],
+              "baseline_ref_object": os.environ["EXPECTED_BASELINE_OID"],
+              "represented_runtime_sha": os.environ["EXPECTED_RUNTIME_SHA"],
+              "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
+              "state_before": before,
+              "state_after": after,
+              "workflow_mutation_attempted": True,
+              "workflow_mutation_status": mutation_status,
+              "ref_mutation_attempted": False,
+              "runtime_mutation_attempted": False,
+              "cluster_mutation_attempted": False,
+              "production_write": False,
+              "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          }
+          with open(output, "w", encoding="utf-8", newline="\n") as handle:
+              json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+          PY
+          artifact_name="fugue-rp5-lane-rearm-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload exact lane rearm evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v6.0.0
+        with:
+          name: ${{ steps.rearm.outputs.artifact_name }}
+          path: ${{ runner.temp }}/fugue-rp5-lane-rearm/rearm.json
+          if-no-files-found: error
+          retention-days: 90
