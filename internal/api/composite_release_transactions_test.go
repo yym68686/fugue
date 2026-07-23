@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
@@ -12,6 +13,129 @@ import (
 	"fugue/internal/releasecontract"
 	"fugue/internal/store"
 )
+
+func TestRunCompositeReleaseTransactionNoopCommitsExactTwoDomainRecord(t *testing.T) {
+	stateStore, server, platformAdminKey, tenantKey := newCompositeTransactionAPITestServer(t)
+	plan := compositeTransactionAPIPlan(t)
+	prepared := prepareCompositeTransactionForAPITest(t, server, platformAdminKey, plan)
+	envelope := compositeTransactionAPIEnvelopeJSON(t, prepared)
+	path := "/v1/admin/composite-release-transactions/" + prepared.ID + "/execute-noop"
+
+	forbidden := performJSONRequest(t, server, http.MethodPost, path, tenantKey, map[string]any{
+		"envelope": json.RawMessage(envelope),
+	})
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("tenant status=%d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+	stillPrepared, err := stateStore.GetCompositeReleaseTransaction(prepared.ID)
+	if err != nil || stillPrepared.Revision != prepared.Revision || stillPrepared.Digest != prepared.Digest {
+		t.Fatalf("forbidden request changed prepared record: record=%#v err=%v", stillPrepared, err)
+	}
+
+	committed := performJSONRequest(t, server, http.MethodPost, path, platformAdminKey, map[string]any{
+		"envelope": json.RawMessage(envelope),
+	})
+	if committed.Code != http.StatusOK {
+		t.Fatalf("commit status=%d body=%s", committed.Code, committed.Body.String())
+	}
+	var response struct {
+		Record compositecoordinator.Record               `json:"record"`
+		Result compositecoordinator.DurableNoopRunResult `json:"result"`
+	}
+	if err := json.Unmarshal(committed.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode committed response: %v", err)
+	}
+	authorization, err := compositecoordinator.DecodeAndAuthorizeNoop(prepared, bytes.NewReader(envelope))
+	if err != nil {
+		t.Fatalf("rebuild no-op authorization: %v", err)
+	}
+	if err := compositecoordinator.VerifyDurableNoopRunResult(prepared, authorization, response.Record, response.Result); err != nil {
+		t.Fatalf("verify committed no-op result: %v", err)
+	}
+	if response.Record.State != compositecoordinator.StateCommitted || response.Record.CurrentStep != 2 || response.Record.Revision != 6 ||
+		response.Result.ProductionWrite || response.Result.FinalState != compositecoordinator.StateCommitted ||
+		len(response.Result.Events) != 4 {
+		t.Fatalf("unexpected committed no-op result: record=%#v result=%#v", response.Record, response.Result)
+	}
+	wantedActions := []string{"apply-noop", "observe-noop", "apply-noop", "observe-noop"}
+	wantedSteps := []string{plan.Steps[0].ID, plan.Steps[0].ID, plan.Steps[1].ID, plan.Steps[1].ID}
+	for index := range wantedActions {
+		if response.Result.Events[index].Action != wantedActions[index] || response.Result.Events[index].StepID != wantedSteps[index] {
+			t.Fatalf("event %d=%#v, want %s/%s", index, response.Result.Events[index], wantedActions[index], wantedSteps[index])
+		}
+	}
+	persisted, err := stateStore.GetCompositeReleaseTransaction(prepared.ID)
+	if err != nil || persisted.Digest != response.Record.Digest || persisted.Revision != 6 {
+		t.Fatalf("committed record was not durable: record=%#v err=%v", persisted, err)
+	}
+
+	replayed := performJSONRequest(t, server, http.MethodPost, path, platformAdminKey, map[string]any{
+		"envelope": json.RawMessage(envelope),
+	})
+	if replayed.Code != http.StatusConflict {
+		t.Fatalf("replay status=%d body=%s", replayed.Code, replayed.Body.String())
+	}
+	afterReplay, err := stateStore.GetCompositeReleaseTransaction(prepared.ID)
+	if err != nil || afterReplay.Digest != persisted.Digest || afterReplay.Revision != persisted.Revision {
+		t.Fatalf("replay changed committed record: before=%#v after=%#v err=%v", persisted, afterReplay, err)
+	}
+
+	events, err := stateStore.ListAuditEvents("", true, 20)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	foundAudit := false
+	for _, event := range events {
+		if event.Action == "composite.transaction.noop.commit" && event.TargetID == prepared.ID &&
+			event.Metadata["result_digest"] == response.Result.Digest && event.Metadata["production_write"] == "false" {
+			foundAudit = true
+		}
+	}
+	if !foundAudit {
+		t.Fatalf("committed no-op audit event missing: %#v", events)
+	}
+}
+
+func TestRunCompositeReleaseTransactionNoopFailsClosedBeforeAdvance(t *testing.T) {
+	t.Run("mismatched envelope", func(t *testing.T) {
+		stateStore, server, platformAdminKey, _ := newCompositeTransactionAPITestServer(t)
+		plan := compositeTransactionAPIPlan(t)
+		prepared := prepareCompositeTransactionForAPITest(t, server, platformAdminKey, plan)
+		envelope := compositeTransactionAPIEnvelopeJSON(t, prepared)
+		tampered := strings.Replace(string(envelope), prepared.Digest, compositeTransactionAPIDigest("f"), 1)
+
+		response := performJSONRequest(t, server, http.MethodPost,
+			"/v1/admin/composite-release-transactions/"+prepared.ID+"/execute-noop", platformAdminKey,
+			map[string]any{"envelope": json.RawMessage(tampered)},
+		)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("tampered status=%d body=%s", response.Code, response.Body.String())
+		}
+		persisted, err := stateStore.GetCompositeReleaseTransaction(prepared.ID)
+		if err != nil || persisted.State != compositecoordinator.StatePrepared || persisted.Revision != 1 || persisted.Digest != prepared.Digest {
+			t.Fatalf("tampered envelope advanced record: record=%#v err=%v", persisted, err)
+		}
+	})
+
+	t.Run("more than two domains", func(t *testing.T) {
+		stateStore, server, platformAdminKey, _ := newCompositeTransactionAPITestServer(t)
+		plan := compositeTransactionAPIThreeDomainPlan(t)
+		prepared := prepareCompositeTransactionForAPITest(t, server, platformAdminKey, plan)
+		envelope := compositeTransactionAPIEnvelopeJSON(t, prepared)
+
+		response := performJSONRequest(t, server, http.MethodPost,
+			"/v1/admin/composite-release-transactions/"+prepared.ID+"/execute-noop", platformAdminKey,
+			map[string]any{"envelope": json.RawMessage(envelope)},
+		)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("three-domain status=%d body=%s", response.Code, response.Body.String())
+		}
+		persisted, err := stateStore.GetCompositeReleaseTransaction(prepared.ID)
+		if err != nil || persisted.State != compositecoordinator.StatePrepared || persisted.Revision != 1 || persisted.Digest != prepared.Digest {
+			t.Fatalf("three-domain request advanced record: record=%#v err=%v", persisted, err)
+		}
+	})
+}
 
 func TestPrepareCompositeReleaseTransactionCreatesExactInertRecord(t *testing.T) {
 	stateStore, server, platformAdminKey, tenantKey := newCompositeTransactionAPITestServer(t)
@@ -144,6 +268,63 @@ func compositeTransactionAPIPlan(t *testing.T) releasecontract.CompositeReleaseP
 		t.Fatalf("new composite plan: %v", err)
 	}
 	return plan
+}
+
+func compositeTransactionAPIThreeDomainPlan(t *testing.T) releasecontract.CompositeReleasePlan {
+	t.Helper()
+	plan := compositeTransactionAPIPlan(t)
+	plan.BaseVersions = append(plan.BaseVersions, releasecontract.DomainVersion{
+		Domain: releasecontract.DomainBackup, Version: compositeTransactionAPIDigest("b"),
+	})
+	plan.TargetVersions = append(plan.TargetVersions, releasecontract.DomainVersion{
+		Domain: releasecontract.DomainBackup, Version: compositeTransactionAPIDigest("c"),
+	})
+	plan.Steps = append(plan.Steps, compositeTransactionAPIStep(
+		"backup", releasecontract.DomainBackup, "control_plane_release_adapter_backup",
+		[]string{"control-plane"}, "d", "e", "b", "c",
+	))
+	plan.Digest = ""
+	plan, err := releasecontract.NewCompositeReleasePlan(plan)
+	if err != nil {
+		t.Fatalf("new three-domain composite plan: %v", err)
+	}
+	return plan
+}
+
+func prepareCompositeTransactionForAPITest(
+	t *testing.T,
+	server *Server,
+	platformAdminKey string,
+	plan releasecontract.CompositeReleasePlan,
+) compositecoordinator.Record {
+	t.Helper()
+	created := performJSONRequest(t, server, http.MethodPost, "/v1/admin/composite-release-transactions", platformAdminKey, map[string]any{
+		"planDigest": plan.Digest, "plan": json.RawMessage(compositeTransactionAPIPlanJSON(t, plan)),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("prepare status=%d body=%s", created.Code, created.Body.String())
+	}
+	var response struct {
+		Record compositecoordinator.Record `json:"record"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode prepared response: %v", err)
+	}
+	return response.Record
+}
+
+func compositeTransactionAPIEnvelopeJSON(t *testing.T, record compositecoordinator.Record) []byte {
+	t.Helper()
+	binding := releasecontract.CompositeTransactionBindingForRecord(record.ID, record.Digest, record.Revision, record.Plan)
+	envelope, err := releasecontract.NewCompositeTransactionEnvelope(record.Plan, binding)
+	if err != nil {
+		t.Fatalf("new composite transaction envelope: %v", err)
+	}
+	encoded, err := releasecontract.MarshalCompositeTransactionEnvelope(envelope)
+	if err != nil {
+		t.Fatalf("marshal composite transaction envelope: %v", err)
+	}
+	return encoded
 }
 
 func compositeTransactionAPIStep(id string, domain releasecontract.Domain, adapter string, depends []string, forward, reverse, base, target string) releasecontract.CompositeReleaseStep {

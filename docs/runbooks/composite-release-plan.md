@@ -214,3 +214,18 @@ construct or accept a transaction envelope, return a no-op authorization,
 advance the worker, call an adapter, observe health, revert a step, or change a
 runtime baseline. Preparing and activating the controlled two-domain canary
 remain separate transactions.
+
+## MD6 controlled two-domain no-op execution
+
+The first MD6 execution checkpoint connects one exact `prepared` record to the
+existing durable no-op worker through a platform-admin-only API. The caller
+must provide the strict MD4 envelope bound to the record digest, revision,
+plan digest, generation, and fencing epoch. This controlled boundary accepts
+exactly two already ordered plan steps and runs only the success path.
+
+The worker persists serial no-op apply and observation transitions and returns
+sealed evidence with `productionWrite=false` and final state `committed`.
+It receives no adapter, cannot inject a failure, cannot update a workload or
+runtime baseline, and rejects stale or replayed envelopes before another run.
+Real adapter apply/observe, controlled failure and reverse recovery, freeze,
+and guarded composite activation remain separate later checkpoints.
