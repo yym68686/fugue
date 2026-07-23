@@ -339,29 +339,10 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 	if resourceSpecsEqual(&effectiveCurrent, recommended) {
 		return decision
 	}
-	if resourceSpecHasDecrease(effectiveCurrent, *recommended) {
-		if resourceSpecHasIncrease(effectiveCurrent, *recommended) ||
-			!materialResourceDecrease(
-				effectiveCurrent.CPUMilliCores,
-				recommended.CPUMilliCores,
-				rightSizingAutoApplyMinCPUDecrease,
-				rightSizingAutoApplyMinCPUDecreaseR,
-			) && !materialResourceDecrease(
-				effectiveCurrent.MemoryMebibytes,
-				recommended.MemoryMebibytes,
-				rightSizingAutoApplyMinMemDecrease,
-				rightSizingAutoApplyMinMemDecreaseR,
-			) {
-			return decision
-		}
-		decision.allowed = true
-		decision.downscale = true
-		decision.requestedByID = rightSizingAutoDownscaleRequestedByID
-		decision.resources = autoRightSizingDownscaleTarget(effectiveCurrent, *recommended)
-		return decision
-	}
-	if resourceSpecHasIncrease(effectiveCurrent, *recommended) &&
-		(materialResourceIncrease(
+	hasIncrease := resourceSpecHasIncrease(effectiveCurrent, *recommended)
+	hasDecrease := resourceSpecHasDecrease(effectiveCurrent, *recommended)
+	if hasIncrease {
+		if materialResourceIncrease(
 			effectiveCurrent.CPUMilliCores,
 			recommended.CPUMilliCores,
 			rightSizingAutoApplyMinCPUIncrease,
@@ -371,9 +352,31 @@ func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) 
 			recommended.MemoryMebibytes,
 			rightSizingAutoApplyMinMemIncrease,
 			rightSizingAutoApplyMinMemIncreaseR,
-		)) {
+		) {
+			decision.allowed = true
+			decision.resources = autoRightSizingUpscaleTarget(effectiveCurrent, *recommended)
+		}
+		return decision
+	}
+	if hasDecrease {
+		if !materialResourceDecrease(
+			effectiveCurrent.CPUMilliCores,
+			recommended.CPUMilliCores,
+			rightSizingAutoApplyMinCPUDecrease,
+			rightSizingAutoApplyMinCPUDecreaseR,
+		) && !materialResourceDecrease(
+			effectiveCurrent.MemoryMebibytes,
+			recommended.MemoryMebibytes,
+			rightSizingAutoApplyMinMemDecrease,
+			rightSizingAutoApplyMinMemDecreaseR,
+		) {
+			return decision
+		}
 		decision.allowed = true
-		decision.resources = cloneResourceSpec(recommended)
+		decision.downscale = true
+		decision.requestedByID = rightSizingAutoDownscaleRequestedByID
+		decision.resources = autoRightSizingDownscaleTarget(effectiveCurrent, *recommended)
+		return decision
 	}
 	return decision
 }
@@ -412,6 +415,15 @@ func materialResourceDecrease(current, recommended, minDecrease int64, minRatio 
 	}
 	decrease := current - recommended
 	return decrease >= minDecrease && float64(decrease)/float64(current) >= minRatio
+}
+
+func autoRightSizingUpscaleTarget(current, recommended model.ResourceSpec) *model.ResourceSpec {
+	return &model.ResourceSpec{
+		CPUMilliCores:        maxInt64(current.CPUMilliCores, recommended.CPUMilliCores),
+		MemoryMebibytes:      maxInt64(current.MemoryMebibytes, recommended.MemoryMebibytes),
+		CPULimitMilliCores:   maxInt64(current.CPULimitMilliCores, recommended.CPULimitMilliCores),
+		MemoryLimitMebibytes: maxInt64(current.MemoryLimitMebibytes, recommended.MemoryLimitMebibytes),
+	}
 }
 
 func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec) *model.ResourceSpec {

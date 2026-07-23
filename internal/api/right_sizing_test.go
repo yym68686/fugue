@@ -595,6 +595,44 @@ func TestAutoRightSizingQueuesMaterialAppIncreaseWithoutPostgres(t *testing.T) {
 	}
 }
 
+func TestAutoRightSizingMixedDirectionPrioritizesMaterialUpscale(t *testing.T) {
+	t.Parallel()
+
+	current := &model.ResourceSpec{
+		CPUMilliCores:        1030,
+		MemoryMebibytes:      2288,
+		MemoryLimitMebibytes: 4576,
+	}
+	recommended := &model.ResourceSpec{
+		CPUMilliCores:        1515,
+		MemoryMebibytes:      2256,
+		MemoryLimitMebibytes: 4512,
+	}
+
+	decision := autoRightSizingAppResourceChange(current, recommended)
+	if !decision.allowed {
+		t.Fatal("expected a material CPU increase to be allowed even when memory recommendations decrease")
+	}
+	if decision.downscale {
+		t.Fatal("expected mixed-direction recommendation to be treated as an upscale")
+	}
+	if decision.requestedByID != rightSizingAutoApplyRequestedByID {
+		t.Fatalf("expected upscale requester %q, got %q", rightSizingAutoApplyRequestedByID, decision.requestedByID)
+	}
+	if decision.resources == nil {
+		t.Fatal("expected an upscale resource target")
+	}
+	if got := decision.resources.CPUMilliCores; got != recommended.CPUMilliCores {
+		t.Fatalf("expected CPU request to increase to %dm, got %dm", recommended.CPUMilliCores, got)
+	}
+	if got := decision.resources.MemoryMebibytes; got != current.MemoryMebibytes {
+		t.Fatalf("expected memory request to remain at %dMi, got %dMi", current.MemoryMebibytes, got)
+	}
+	if got := decision.resources.MemoryLimitMebibytes; got != current.MemoryLimitMebibytes {
+		t.Fatalf("expected memory limit to remain at %dMi, got %dMi", current.MemoryLimitMebibytes, got)
+	}
+}
+
 type rightSizingUsageValue struct {
 	cpuMilli  int64
 	memoryMiB int64
