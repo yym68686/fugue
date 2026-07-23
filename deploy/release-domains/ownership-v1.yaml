@@ -1018,6 +1018,59 @@ objectRules:
     nameSuffixLabel:
       key: app.kubernetes.io/component
       valuePrefix: dns-
+  - id: authoritative-dns-public-edge-front-daemon-set
+    domain: authoritative-dns
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    namePrefix: ${serviceName}-edge-
+    nameSuffixTerminal: front
+    requiredLabels:
+      app.kubernetes.io/instance: ${releaseName}
+      fugue.io/rollout-subsystem: public-data-plane
+      fugue.io/rollout-mode: node-local-blue-green-front
+      fugue.io/downtime-class: online-required
+    nameSuffixLabel:
+      key: app.kubernetes.io/component
+      valuePrefix: edge-
+  - id: authoritative-dns-public-edge-worker-a-daemon-set
+    domain: authoritative-dns
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    namePrefix: ${serviceName}-edge-
+    nameSuffixTerminal: worker-a
+    requiredLabels:
+      app.kubernetes.io/instance: ${releaseName}
+      fugue.io/rollout-subsystem: public-data-plane
+      fugue.io/rollout-mode: node-local-blue-green-worker
+      fugue.io/downtime-class: online-required
+      fugue.io/edge-slot: a
+    nameSuffixLabel:
+      key: app.kubernetes.io/component
+      valuePrefix: edge-
+  - id: authoritative-dns-public-edge-worker-b-daemon-set
+    domain: authoritative-dns
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    namePrefix: ${serviceName}-edge-
+    nameSuffixTerminal: worker-b
+    requiredLabels:
+      app.kubernetes.io/instance: ${releaseName}
+      fugue.io/rollout-subsystem: public-data-plane
+      fugue.io/rollout-mode: node-local-blue-green-worker
+      fugue.io/downtime-class: online-required
+      fugue.io/edge-slot: b
+    nameSuffixLabel:
+      key: app.kubernetes.io/component
+      valuePrefix: edge-
 
   - id: control-plane-api-deployment
     domain: control-plane

@@ -119,6 +119,91 @@ spec:
 	}
 }
 
+func TestPublicEdgeDaemonSetsRequireExactNameLabelAndRolloutIdentity(t *testing.T) {
+	base := []byte(`apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-country-de-front
+  namespace: fugue-system
+  labels:
+    app.kubernetes.io/instance: fugue
+    app.kubernetes.io/component: edge-country-de-front
+    fugue.io/rollout-subsystem: public-data-plane
+    fugue.io/rollout-mode: node-local-blue-green-front
+    fugue.io/downtime-class: online-required
+spec:
+  template:
+    spec:
+      containers:
+        - name: edge-front
+          image: edge:v1
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-dynamic-worker-a
+  namespace: fugue-system
+  labels:
+    app.kubernetes.io/instance: fugue
+    app.kubernetes.io/component: edge-dynamic-worker-a
+    fugue.io/rollout-subsystem: public-data-plane
+    fugue.io/rollout-mode: node-local-blue-green-worker
+    fugue.io/downtime-class: online-required
+    fugue.io/edge-slot: a
+spec:
+  template:
+    spec:
+      containers:
+        - name: edge
+          image: edge:v1
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-worker-b
+  namespace: fugue-system
+  labels:
+    app.kubernetes.io/instance: fugue
+    app.kubernetes.io/component: edge-worker-b
+    fugue.io/rollout-subsystem: public-data-plane
+    fugue.io/rollout-mode: node-local-blue-green-worker
+    fugue.io/downtime-class: online-required
+    fugue.io/edge-slot: b
+spec:
+  template:
+    spec:
+      containers:
+        - name: edge
+          image: edge:v1
+`)
+	target := []byte(strings.ReplaceAll(string(base), "edge:v1", "edge:v2"))
+	got := ClassifyRendered(base, target, testOwnership(t), testRenderedOptions())
+	if len(got.Unknown) != 0 || !equalDomains(got.Domains, []Domain{DomainAuthoritativeDNS}) {
+		t.Fatalf("public edge classification = %#v", got)
+	}
+
+	invalidTargets := map[string][]byte{
+		"component suffix":  bytesReplace(target, "edge-country-de-front", "edge-other-front", 1),
+		"subsystem":         bytesReplace(target, "public-data-plane", "public-ssh-data-plane", 1),
+		"front worker mode": bytesReplace(target, "node-local-blue-green-front", "node-local-blue-green-worker", 1),
+		"worker slot":       bytesReplace(target, "fugue.io/edge-slot: a", "fugue.io/edge-slot: b", 1),
+		"terminal role":     bytesReplace(target, "edge-dynamic-worker-a", "edge-dynamic-worker-a-extra", 2),
+		"namespace":         bytesReplace(target, "namespace: fugue-system", "namespace: other", 1),
+	}
+	for name, invalidTarget := range invalidTargets {
+		t.Run(name, func(t *testing.T) {
+			classification := ClassifyRendered(base, invalidTarget, testOwnership(t), testRenderedOptions())
+			if len(classification.Unknown) == 0 {
+				t.Fatalf("invalid public edge identity was authorized: %#v", classification)
+			}
+		})
+	}
+}
+
+func bytesReplace(value []byte, old, replacement string, count int) []byte {
+	return []byte(strings.Replace(string(value), old, replacement, count))
+}
+
 func TestRequiredOwnershipLabelCannotBeRemoved(t *testing.T) {
 	base := readManifestFixture(t, "single-node-local", "base.yaml")
 	target := []byte(strings.ReplaceAll(string(readManifestFixture(t, "single-node-local", "target.yaml")), "cluster-dns", "other"))
@@ -485,6 +570,9 @@ func renderCurrentProductionProfile(t *testing.T) []byte {
 		"--set-string", "dns.groups[0].nodeSelector.fugue\\.io/role\\.dns=true",
 		"--set", "ingress.enabled=true",
 		"--set", "observability.agent.enabled=true",
+		"--set", "edge.caddy.enabled=true",
+		"--set-string", "edge.edgeGroupID=release-domain-test-edge-group",
+		"--set", "edge.blueGreen.enabled=true",
 		"--set", "controlPlanePostgres.enabled=true",
 		"--set-string", "controlPlanePostgres.password=release-domain-test-password",
 		"--set", "controlPlanePostgres.backup.enabled=true",

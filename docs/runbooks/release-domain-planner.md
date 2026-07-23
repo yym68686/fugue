@@ -351,6 +351,16 @@ advanced after a failed release.
 
 ## Operator interpretation
 
+Public edge front and worker DaemonSets are authoritative-DNS objects only
+when their names start with the exact rendered service name plus `-edge-`,
+their component label is `edge-` plus the complete remaining name suffix, and
+that suffix ends at the exact `front`, `worker-a`, or `worker-b` terminal role.
+The instance, public-data-plane subsystem, role-specific rollout mode, worker
+slot, downtime class, namespace, GVK, and scope must also match the sealed
+ownership rule. Dynamic and country cohorts therefore share deterministic
+matchers without using a manual domain hint. Any name/label/role drift or SSH
+subsystem object remains `unknown` and freezes the lane before Helm.
+
 - `zero`: verify the public artifact says the write boundary was not crossed;
   no adapter or rollback should appear in the trace.
 - `single`: verify the selected literal domain, plan digest, successful durable
