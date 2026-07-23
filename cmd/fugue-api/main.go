@@ -22,6 +22,12 @@ func main() {
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}
+	if platformStateSchemaExpandRequired(cfg.DatabaseURL) {
+		if err := runPlatformStateSchemaExpand(context.Background(), cfg.DatabaseURL); err != nil {
+			logger.Fatalf("platform-state schema expand: %v", err)
+		}
+		logger.Printf("platform-state schema expand verified")
+	}
 
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
