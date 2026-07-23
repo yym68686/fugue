@@ -572,9 +572,11 @@ func scopeConsoleActiveOperations(principal model.Principal, operations []model.
 
 func sumConsoleResourceUsage(items []*model.ResourceUsage) model.ResourceUsage {
 	var (
-		cpuMillicores         *int64
-		memoryBytes           *int64
-		ephemeralStorageBytes *int64
+		cpuMillicores                  *int64
+		memoryBytes                    *int64
+		ephemeralStorageBytes          *int64
+		persistentStorageUsedBytes     *int64
+		persistentStorageCapacityBytes *int64
 	)
 
 	add := func(current **int64, next *int64) {
@@ -597,12 +599,16 @@ func sumConsoleResourceUsage(items []*model.ResourceUsage) model.ResourceUsage {
 		add(&cpuMillicores, item.CPUMilliCores)
 		add(&memoryBytes, item.MemoryBytes)
 		add(&ephemeralStorageBytes, item.EphemeralStorageBytes)
+		add(&persistentStorageUsedBytes, item.PersistentStorageUsedBytes)
+		add(&persistentStorageCapacityBytes, item.PersistentStorageCapacityBytes)
 	}
 
 	return model.ResourceUsage{
-		CPUMilliCores:         cpuMillicores,
-		EphemeralStorageBytes: ephemeralStorageBytes,
-		MemoryBytes:           memoryBytes,
+		CPUMilliCores:                  cpuMillicores,
+		EphemeralStorageBytes:          ephemeralStorageBytes,
+		MemoryBytes:                    memoryBytes,
+		PersistentStorageUsedBytes:     persistentStorageUsedBytes,
+		PersistentStorageCapacityBytes: persistentStorageCapacityBytes,
 	}
 }
 

@@ -834,9 +834,11 @@ type ClusterNodeStorageStats struct {
 }
 
 type ResourceUsage struct {
-	CPUMilliCores         *int64 `json:"cpu_millicores,omitempty"`
-	MemoryBytes           *int64 `json:"memory_bytes,omitempty"`
-	EphemeralStorageBytes *int64 `json:"ephemeral_storage_bytes,omitempty"`
+	CPUMilliCores                  *int64 `json:"cpu_millicores,omitempty"`
+	MemoryBytes                    *int64 `json:"memory_bytes,omitempty"`
+	EphemeralStorageBytes          *int64 `json:"ephemeral_storage_bytes,omitempty"`
+	PersistentStorageUsedBytes     *int64 `json:"persistent_storage_used_bytes,omitempty"`
+	PersistentStorageCapacityBytes *int64 `json:"persistent_storage_capacity_bytes,omitempty"`
 }
 
 type ResourceUsageSample struct {

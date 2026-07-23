@@ -50,7 +50,7 @@ func formatResourceUsageSummary(usage *model.ResourceUsage) string {
 	if usage == nil {
 		return ""
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if usage.CPUMilliCores != nil {
 		parts = append(parts, fmt.Sprintf("%dm CPU", *usage.CPUMilliCores))
 	}
@@ -59,6 +59,14 @@ func formatResourceUsageSummary(usage *model.ResourceUsage) string {
 	}
 	if usage.EphemeralStorageBytes != nil {
 		parts = append(parts, fmt.Sprintf("%s eph", formatBytes(*usage.EphemeralStorageBytes)))
+	}
+	switch {
+	case usage.PersistentStorageUsedBytes != nil && usage.PersistentStorageCapacityBytes != nil:
+		parts = append(parts, fmt.Sprintf("%s / %s PVC", formatBytes(*usage.PersistentStorageUsedBytes), formatBytes(*usage.PersistentStorageCapacityBytes)))
+	case usage.PersistentStorageUsedBytes != nil:
+		parts = append(parts, fmt.Sprintf("%s PVC", formatBytes(*usage.PersistentStorageUsedBytes)))
+	case usage.PersistentStorageCapacityBytes != nil:
+		parts = append(parts, fmt.Sprintf("%s PVC capacity", formatBytes(*usage.PersistentStorageCapacityBytes)))
 	}
 	return strings.Join(parts, " / ")
 }

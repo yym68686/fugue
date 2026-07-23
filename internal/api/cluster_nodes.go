@@ -234,13 +234,27 @@ type kubeNodeSummaryRuntime struct {
 }
 
 type kubeNodeSummaryPod struct {
-	PodRef           kubeNodeSummaryPodRef `json:"podRef"`
-	CPU              kubeNodeSummaryCPU    `json:"cpu,omitempty"`
-	Memory           kubeNodeSummaryMem    `json:"memory,omitempty"`
-	EphemeralStorage kubeNodeSummaryFS     `json:"ephemeral-storage,omitempty"`
+	PodRef           kubeNodeSummaryPodRef   `json:"podRef"`
+	CPU              kubeNodeSummaryCPU      `json:"cpu,omitempty"`
+	Memory           kubeNodeSummaryMem      `json:"memory,omitempty"`
+	EphemeralStorage kubeNodeSummaryFS       `json:"ephemeral-storage,omitempty"`
+	Volumes          []kubeNodeSummaryVolume `json:"volume,omitempty"`
 }
 
 type kubeNodeSummaryPodRef struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+type kubeNodeSummaryVolume struct {
+	Name           string                    `json:"name,omitempty"`
+	PVCRef         *kubeNodeSummaryVolumeRef `json:"pvcRef,omitempty"`
+	AvailableBytes *uint64                   `json:"availableBytes,omitempty"`
+	CapacityBytes  *uint64                   `json:"capacityBytes,omitempty"`
+	UsedBytes      *uint64                   `json:"usedBytes,omitempty"`
+}
+
+type kubeNodeSummaryVolumeRef struct {
 	Name      string `json:"name,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
 }

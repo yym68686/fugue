@@ -167,6 +167,30 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 						"ephemeral-storage": map[string]any{
 							"usedBytes": 1 * 1024 * 1024 * 1024,
 						},
+						"volume": []map[string]any{
+							{
+								"name": "shared-data",
+								"pvcRef": map[string]any{
+									"name":      "demo-shared-data",
+									"namespace": namespace,
+								},
+								"usedBytes":     3 * 1024 * 1024 * 1024,
+								"capacityBytes": 10 * 1024 * 1024 * 1024,
+							},
+							{
+								"name": "extra-data",
+								"pvcRef": map[string]any{
+									"name": "demo-extra-data",
+								},
+								"usedBytes":     1 * 1024 * 1024 * 1024,
+								"capacityBytes": 2 * 1024 * 1024 * 1024,
+							},
+							{
+								"name":          "cache",
+								"usedBytes":     8 * 1024 * 1024 * 1024,
+								"capacityBytes": 10 * 1024 * 1024 * 1024,
+							},
+						},
 					},
 				},
 			})
@@ -190,6 +214,17 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 						"ephemeral-storage": map[string]any{
 							"usedBytes": 2 * 1024 * 1024 * 1024,
 						},
+						"volume": []map[string]any{
+							{
+								"name": "shared-data",
+								"pvcRef": map[string]any{
+									"name":      "demo-shared-data",
+									"namespace": namespace,
+								},
+								"usedBytes":     4 * 1024 * 1024 * 1024,
+								"capacityBytes": 10 * 1024 * 1024 * 1024,
+							},
+						},
 					},
 					{
 						"podRef": map[string]any{
@@ -204,6 +239,17 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 						},
 						"ephemeral-storage": map[string]any{
 							"usedBytes": 4 * 1024 * 1024 * 1024,
+						},
+						"volume": []map[string]any{
+							{
+								"name": "database",
+								"pvcRef": map[string]any{
+									"name":      "demo-postgres-data",
+									"namespace": namespace,
+								},
+								"availableBytes": 7 * 1024 * 1024 * 1024,
+								"capacityBytes":  20 * 1024 * 1024 * 1024,
+							},
 						},
 					},
 				},
@@ -234,11 +280,11 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 	if len(listAppsResponse.Apps) != 1 {
 		t.Fatalf("expected one app, got %#v", listAppsResponse.Apps)
 	}
-	assertResourceUsage(t, listAppsResponse.Apps[0].CurrentResourceUsage, 750, 640*1024*1024, 3*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, listAppsResponse.Apps[0].CurrentResourceUsage, 750, 640*1024*1024, 3*1024*1024*1024, 5*1024*1024*1024, 12*1024*1024*1024)
 	if len(listAppsResponse.Apps[0].BackingServices) != 1 {
 		t.Fatalf("expected one nested backing service, got %#v", listAppsResponse.Apps[0].BackingServices)
 	}
-	assertResourceUsage(t, listAppsResponse.Apps[0].BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, listAppsResponse.Apps[0].BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024, 13*1024*1024*1024, 20*1024*1024*1024)
 
 	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID, apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -248,8 +294,22 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 		App model.App `json:"app"`
 	}
 	mustDecodeJSON(t, recorder, &getAppResponse)
-	assertResourceUsage(t, getAppResponse.App.CurrentResourceUsage, 750, 640*1024*1024, 3*1024*1024*1024)
-	assertResourceUsage(t, getAppResponse.App.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, getAppResponse.App.CurrentResourceUsage, 750, 640*1024*1024, 3*1024*1024*1024, 5*1024*1024*1024, 12*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, getAppResponse.App.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024, 13*1024*1024*1024, 20*1024*1024*1024)
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/console/projects/"+project.ID, apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var consoleProjectResponse struct {
+		Apps []model.App `json:"apps"`
+	}
+	mustDecodeJSON(t, recorder, &consoleProjectResponse)
+	if len(consoleProjectResponse.Apps) != 1 || len(consoleProjectResponse.Apps[0].BackingServices) != 1 {
+		t.Fatalf("expected one console app with one backing service, got %#v", consoleProjectResponse.Apps)
+	}
+	assertResourceUsageWithPersistentStorage(t, consoleProjectResponse.Apps[0].CurrentResourceUsage, 750, 640*1024*1024, 3*1024*1024*1024, 5*1024*1024*1024, 12*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, consoleProjectResponse.Apps[0].BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024, 13*1024*1024*1024, 20*1024*1024*1024)
 
 	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/bindings", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -262,7 +322,7 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 	if len(bindingsResponse.BackingServices) != 1 {
 		t.Fatalf("expected one binding backing service, got %#v", bindingsResponse.BackingServices)
 	}
-	assertResourceUsage(t, bindingsResponse.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, bindingsResponse.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024, 13*1024*1024*1024, 20*1024*1024*1024)
 
 	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/backing-services", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -275,7 +335,19 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 	if len(listServicesResponse.BackingServices) != 1 {
 		t.Fatalf("expected one backing service, got %#v", listServicesResponse.BackingServices)
 	}
-	assertResourceUsage(t, listServicesResponse.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024)
+	assertResourceUsageWithPersistentStorage(t, listServicesResponse.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024, 13*1024*1024*1024, 20*1024*1024*1024)
+}
+
+func assertResourceUsageWithPersistentStorage(t *testing.T, usage *model.ResourceUsage, cpuMilliCores, memoryBytes, ephemeralStorageBytes, persistentStorageUsedBytes, persistentStorageCapacityBytes int64) {
+	t.Helper()
+
+	assertResourceUsage(t, usage, cpuMilliCores, memoryBytes, ephemeralStorageBytes)
+	if usage.PersistentStorageUsedBytes == nil || *usage.PersistentStorageUsedBytes != persistentStorageUsedBytes {
+		t.Fatalf("expected persistent_storage_used_bytes=%d, got %#v", persistentStorageUsedBytes, usage)
+	}
+	if usage.PersistentStorageCapacityBytes == nil || *usage.PersistentStorageCapacityBytes != persistentStorageCapacityBytes {
+		t.Fatalf("expected persistent_storage_capacity_bytes=%d, got %#v", persistentStorageCapacityBytes, usage)
+	}
 }
 
 func assertResourceUsage(t *testing.T, usage *model.ResourceUsage, cpuMilliCores, memoryBytes, ephemeralStorageBytes int64) {

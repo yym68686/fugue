@@ -26,6 +26,14 @@ type resourceUsageAccumulator struct {
 	hasMemory             bool
 	ephemeralStorageBytes int64
 	hasEphemeralStorage   bool
+	persistentVolumes     map[string]persistentVolumeUsage
+}
+
+type persistentVolumeUsage struct {
+	usedBytes        int64
+	hasUsedBytes     bool
+	capacityBytes    int64
+	hasCapacityBytes bool
 }
 
 func (s *Server) overlayCurrentResourceUsageOnApps(ctx context.Context, apps []model.App) []model.App {
@@ -206,7 +214,7 @@ func buildResourceUsageSamples(
 	for _, app := range apps {
 		id := strings.TrimSpace(app.ID)
 		usage, ok := overlay.apps[id]
-		if !ok || isEmptyResourceUsage(usage) {
+		if !ok || !hasSampledResourceUsage(usage) {
 			continue
 		}
 		samples = append(samples, resourceUsageSampleFromUsage(observedAt, model.ClusterNodeWorkloadKindApp, app.TenantID, app.ProjectID, app.ID, app.Name, "", usage))
@@ -214,7 +222,7 @@ func buildResourceUsageSamples(
 	for _, service := range services {
 		id := strings.TrimSpace(service.ID)
 		usage, ok := overlay.services[id]
-		if !ok || isEmptyResourceUsage(usage) {
+		if !ok || !hasSampledResourceUsage(usage) {
 			continue
 		}
 		samples = append(samples, resourceUsageSampleFromUsage(observedAt, model.ClusterNodeWorkloadKindBackingService, service.TenantID, service.ProjectID, service.ID, service.Name, service.Type, usage))
@@ -238,8 +246,8 @@ func resourceUsageSampleFromUsage(observedAt time.Time, targetKind, tenantID, pr
 	}
 }
 
-func isEmptyResourceUsage(usage model.ResourceUsage) bool {
-	return usage.CPUMilliCores == nil && usage.MemoryBytes == nil && usage.EphemeralStorageBytes == nil
+func hasSampledResourceUsage(usage model.ResourceUsage) bool {
+	return usage.CPUMilliCores != nil || usage.MemoryBytes != nil || usage.EphemeralStorageBytes != nil
 }
 
 func cloneInt64Pointer(value *int64) *int64 {
@@ -290,7 +298,11 @@ func applyCurrentResourceUsageToService(service model.BackingService, overlay cu
 }
 
 func currentResourceUsagePointer(usage model.ResourceUsage) *model.ResourceUsage {
-	if usage.CPUMilliCores == nil && usage.MemoryBytes == nil && usage.EphemeralStorageBytes == nil {
+	if usage.CPUMilliCores == nil &&
+		usage.MemoryBytes == nil &&
+		usage.EphemeralStorageBytes == nil &&
+		usage.PersistentStorageUsedBytes == nil &&
+		usage.PersistentStorageCapacityBytes == nil {
 		return nil
 	}
 	copied := usage
@@ -333,10 +345,11 @@ func (a *resourceUsageAccumulator) addPodUsage(pod kubeNodeSummaryPod) {
 		a.ephemeralStorageBytes += *storage
 		a.hasEphemeralStorage = true
 	}
+	a.addPersistentVolumeUsage(pod)
 }
 
 func (a *resourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
-	if a == nil || (!a.hasCPU && !a.hasMemory && !a.hasEphemeralStorage) {
+	if a == nil {
 		return model.ResourceUsage{}, false
 	}
 
@@ -350,7 +363,74 @@ func (a *resourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
 	if a.hasEphemeralStorage {
 		usage.EphemeralStorageBytes = int64Pointer(a.ephemeralStorageBytes)
 	}
+	for _, volume := range a.persistentVolumes {
+		if volume.hasUsedBytes {
+			if usage.PersistentStorageUsedBytes == nil {
+				usage.PersistentStorageUsedBytes = int64Pointer(0)
+			}
+			*usage.PersistentStorageUsedBytes += volume.usedBytes
+		}
+		if volume.hasCapacityBytes {
+			if usage.PersistentStorageCapacityBytes == nil {
+				usage.PersistentStorageCapacityBytes = int64Pointer(0)
+			}
+			*usage.PersistentStorageCapacityBytes += volume.capacityBytes
+		}
+	}
+	if usage.CPUMilliCores == nil &&
+		usage.MemoryBytes == nil &&
+		usage.EphemeralStorageBytes == nil &&
+		usage.PersistentStorageUsedBytes == nil &&
+		usage.PersistentStorageCapacityBytes == nil {
+		return model.ResourceUsage{}, false
+	}
 	return usage, true
+}
+
+func (a *resourceUsageAccumulator) addPersistentVolumeUsage(pod kubeNodeSummaryPod) {
+	if a == nil {
+		return
+	}
+	for _, volume := range pod.Volumes {
+		if volume.PVCRef == nil {
+			continue
+		}
+		claimName := strings.TrimSpace(volume.PVCRef.Name)
+		if claimName == "" {
+			continue
+		}
+		namespace := strings.TrimSpace(volume.PVCRef.Namespace)
+		if namespace == "" {
+			namespace = strings.TrimSpace(pod.PodRef.Namespace)
+		}
+		key := clusterNamespacedResourceKey(namespace, claimName)
+		if key == "" {
+			continue
+		}
+
+		usedBytes := kubeSummaryFilesystemUsage(kubeNodeSummaryFS{
+			AvailableBytes: volume.AvailableBytes,
+			CapacityBytes:  volume.CapacityBytes,
+			UsedBytes:      volume.UsedBytes,
+		})
+		capacityBytes := uint64PointerToInt64(volume.CapacityBytes)
+		if usedBytes == nil && capacityBytes == nil {
+			continue
+		}
+		if a.persistentVolumes == nil {
+			a.persistentVolumes = make(map[string]persistentVolumeUsage)
+		}
+		current := a.persistentVolumes[key]
+		if usedBytes != nil && (!current.hasUsedBytes || *usedBytes > current.usedBytes) {
+			current.usedBytes = *usedBytes
+			current.hasUsedBytes = true
+		}
+		if capacityBytes != nil && (!current.hasCapacityBytes || *capacityBytes > current.capacityBytes) {
+			current.capacityBytes = *capacityBytes
+			current.hasCapacityBytes = true
+		}
+		a.persistentVolumes[key] = current
+	}
 }
 
 func kubeSummaryCPUMilliUsage(cpu kubeNodeSummaryCPU) *int64 {

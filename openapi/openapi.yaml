@@ -12275,6 +12275,14 @@ components:
         ephemeral_storage_bytes:
           type: integer
           format: int64
+        persistent_storage_used_bytes:
+          type: integer
+          format: int64
+          description: Used bytes across distinct persistent volume claims mounted by the workload.
+        persistent_storage_capacity_bytes:
+          type: integer
+          format: int64
+          description: Capacity bytes across distinct persistent volume claims mounted by the workload.
     ResourceRightSizingPolicy:
       type: object
       additionalProperties: false
