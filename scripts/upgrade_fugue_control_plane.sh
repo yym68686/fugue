@@ -319,6 +319,7 @@ NODE_LOCAL_DNS_HELM_SET_ARGS=()
 HEADSCALE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_PRESERVED=false
+PUBLIC_DATA_PLANE_CHECKSUMS_JSON='{}'
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 MAINTENANCE_AGENT_HELM_SET_ARGS=()
 CORE_IMAGE_DIGEST_HELM_SET_ARGS=()
@@ -7964,6 +7965,53 @@ append_dns_group_image_args_from_live() {
   done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
 }
 
+public_data_plane_checksum_records_from_daemonset_snapshot() {
+  local daemonsets_json="$1"
+
+  printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import re
+import sys
+
+release_name = sys.argv[1]
+document = json.load(sys.stdin)
+items = document.get("items")
+if not isinstance(items, list):
+    raise SystemExit(1)
+
+mode_keys = {
+    "node-local-blue-green-front": "checksum/edge-blue-green-front",
+    "node-local-blue-green-worker": "checksum/edge-blue-green-worker",
+}
+records = {}
+for item in items:
+    if not isinstance(item, dict):
+        raise SystemExit(1)
+    metadata = item.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    if labels.get("fugue.io/rollout-subsystem") != "public-data-plane":
+        continue
+    mode = labels.get("fugue.io/rollout-mode")
+    key = mode_keys.get(mode)
+    if key is None:
+        continue
+    if release_name and labels.get("app.kubernetes.io/instance") != release_name:
+        continue
+    name = metadata.get("name")
+    if not isinstance(name, str) or re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name) is None:
+        raise SystemExit(1)
+    if name in records:
+        raise SystemExit(1)
+    annotations = (((item.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("annotations") or {}
+    checksum = annotations.get(key)
+    if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        raise SystemExit(1)
+    records[name] = {"key": key, "value": checksum}
+
+print(json.dumps(records, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+' "${FUGUE_RELEASE_NAME:-}"
+}
+
 preserve_public_data_plane_from_live() {
   local edge_ds="${FUGUE_RELEASE_FULLNAME}-edge"
   local edge_front_ds="${FUGUE_RELEASE_FULLNAME}-edge-front"
@@ -7987,17 +8035,25 @@ preserve_public_data_plane_from_live() {
   local blue_count=0
   local group_records="" group_name="" group_image="" group_index=""
   local configured_group_names="" live_group_names=""
+  local checksum_records='{}'
   local snapshot_spec="" snapshot_var="" snapshot_name="" snapshot_value=""
   local -a pending_args=()
 
   PUBLIC_DATA_PLANE_PRESERVED=false
   if [[ "${FUGUE_EDGE_ENABLED:-true}" != "true" && "${FUGUE_DNS_ENABLED:-false}" != "true" ]]; then
     PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+    PUBLIC_DATA_PLANE_CHECKSUMS_JSON='{}'
     PUBLIC_DATA_PLANE_PRESERVED=true
     return 0
   fi
   daemonsets_json="$(live_daemonsets_json_snapshot)" || {
     log "public data-plane preserve failed; live DaemonSet inventory is unreadable"
+    return 1
+  }
+  checksum_records="$(
+    public_data_plane_checksum_records_from_daemonset_snapshot "${daemonsets_json}"
+  )" || {
+    log "public data-plane preserve failed; live blue/green checksum inventory is invalid"
     return 1
   }
   for snapshot_spec in \
@@ -8138,6 +8194,7 @@ preserve_public_data_plane_from_live() {
     FUGUE_DNS_TCP_ADDR="${dns_tcp_addr}"
   fi
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=("${pending_args[@]}")
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON="${checksum_records}"
   PUBLIC_DATA_PLANE_PRESERVED=true
 }
 
@@ -11144,96 +11201,170 @@ live_deployment_replicas() {
 }
 
 prepare_helm_post_renderer() {
+  local public_checksums="${PUBLIC_DATA_PLANE_CHECKSUMS_JSON:-}"
+  local registry_deployment=""
   local registry_replicas=""
+  local renderer_config_b64=""
   local renderer_file=""
 
   HELM_POST_RENDERER_FILE=""
   HELM_POST_RENDERER_ARGS=()
   PRESERVE_REGISTRY_ZERO_REPLICAS="false"
-  if [[ "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED}" != "true" ]]; then
-    return 0
+  [[ -n "${public_checksums}" ]] || public_checksums='{}'
+  if [[ "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED}" == "true" ]]; then
+    if ! registry_replicas="$(live_deployment_replicas "${FUGUE_REGISTRY_DEPLOYMENT_NAME}")"; then
+      return 1
+    fi
+    registry_replicas="$(trim_field "${registry_replicas}")"
+    if [[ "${registry_replicas}" == "0" ]] && ! stateful_dependency_changed; then
+      registry_deployment="${FUGUE_REGISTRY_DEPLOYMENT_NAME}"
+    fi
   fi
-  if ! registry_replicas="$(live_deployment_replicas "${FUGUE_REGISTRY_DEPLOYMENT_NAME}")"; then
+
+  if [[ "${public_checksums}" != '{}' && "${PUBLIC_DATA_PLANE_PRESERVED:-false}" != "true" ]]; then
     return 1
   fi
-  registry_replicas="$(trim_field "${registry_replicas}")"
-  if [[ "${registry_replicas}" != "0" ]]; then
-    return 0
-  fi
-  if stateful_dependency_changed; then
+  renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" <<'PY'
+import base64
+import json
+import re
+import sys
+
+registry, raw_checksums = sys.argv[1:]
+checksums = json.loads(raw_checksums)
+if not isinstance(checksums, dict):
+    raise SystemExit(1)
+for name, record in checksums.items():
+    if not isinstance(name, str) or re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name) is None:
+        raise SystemExit(1)
+    if not isinstance(record, dict) or set(record) != {"key", "value"}:
+        raise SystemExit(1)
+    if record["key"] not in {"checksum/edge-blue-green-front", "checksum/edge-blue-green-worker"}:
+        raise SystemExit(1)
+    if not isinstance(record["value"], str) or re.fullmatch(r"[0-9a-f]{64}", record["value"]) is None:
+        raise SystemExit(1)
+payload = json.dumps(
+    {"publicDataPlaneChecksums": checksums, "registryDeployment": registry},
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+print(base64.b64encode(payload).decode("ascii"))
+PY
+)" || return 1
+  [[ -n "${renderer_config_b64}" ]] || return 1
+  if [[ -z "${registry_deployment}" && "${public_checksums}" == '{}' ]]; then
     return 0
   fi
 
   renderer_file="$(mktemp -t fugue-helm-post-renderer.XXXXXX.py)" || return 1
-  if ! cat >"${renderer_file}" <<'PY'
-#!/usr/bin/env python3
-import os
-import sys
-
-target_name = os.environ.get("FUGUE_HELM_POST_RENDERER_REGISTRY_DEPLOYMENT", "").strip()
-if not target_name:
-    sys.stdout.write(sys.stdin.read())
-    raise SystemExit(0)
-
-target = f"  name: {target_name}"
-lines = sys.stdin.read().splitlines()
-out = []
-in_doc = False
-in_spec = False
-doc_is_target = False
-doc_is_deployment = False
-spec_indent = None
-replicas_set = False
-
-def target_doc():
-    return doc_is_deployment and doc_is_target
-
-def flush_missing_replicas():
-    global in_spec, replicas_set
-    if in_spec and target_doc() and not replicas_set:
-        out.append("  replicas: 0")
-    in_spec = False
-    replicas_set = False
-
+  if ! {
+    printf '%s\n' '#!/usr/bin/env python3' \
+      'import base64' 'import json' 'import re' 'import sys' \
+      "CONFIG_B64 = \"${renderer_config_b64}\""
+    cat <<'PY'
+config = json.loads(base64.b64decode(CONFIG_B64, validate=True).decode("utf-8"))
+target_name = config["registryDeployment"]
+checksums = config["publicDataPlaneChecksums"]
+source = sys.stdin.read()
+lines = source.splitlines()
+documents = []
+document = []
 for line in lines:
-    if line == "---":
-        flush_missing_replicas()
-        in_doc = False
-        doc_is_target = False
-        doc_is_deployment = False
-        spec_indent = None
-        out.append(line)
-        continue
+    if line == "---" and document:
+        documents.append(document)
+        document = [line]
+    else:
+        document.append(line)
+if document:
+    documents.append(document)
 
-    if not in_doc and line.strip():
-        in_doc = True
-    if in_doc and line == target:
-        doc_is_target = True
-    if in_doc and line == "kind: Deployment":
-        doc_is_deployment = True
+seen_checksums = set()
+rendered = []
 
-    if target_doc():
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-        if not in_spec and line == "spec:":
-            in_spec = True
-            spec_indent = indent
-            replicas_set = False
-        elif in_spec and indent <= spec_indent and stripped and not line.startswith(" "):
-            flush_missing_replicas()
-        elif in_spec and indent == spec_indent + 2 and stripped.startswith("replicas:"):
-            out.append("  replicas: 0")
-            replicas_set = True
-            continue
+def block_end(lines, start, indent):
+    for index, line in enumerate(lines[start + 1 :], start + 1):
+        if line and len(line) - len(line.lstrip(" ")) <= indent:
+            return index
+    return len(lines)
 
-    out.append(line)
+def unique_mapping(lines, start, end, indent, key):
+    expected = f"{' ' * indent}{key}:"
+    matches = [
+        index
+        for index, line in enumerate(lines[start:end], start)
+        if line == expected
+    ]
+    if len(matches) != 1:
+        raise SystemExit(1)
+    return matches[0]
 
-flush_missing_replicas()
-sys.stdout.write("\n".join(out))
-if lines:
+for document in documents:
+    kind = next((line[6:] for line in document if line.startswith("kind: ")), "")
+    spec_index = next((index for index, line in enumerate(document) if line == "spec:"), -1)
+    metadata_index = next((index for index, line in enumerate(document) if line == "metadata:"), -1)
+    metadata_end = next(
+        (
+            index
+            for index, line in enumerate(document[metadata_index + 1 :], metadata_index + 1)
+            if line and not line.startswith(" ")
+        ),
+        len(document),
+    )
+    name_lines = [
+        line[8:]
+        for line in document[metadata_index + 1 : metadata_end]
+        if line.startswith("  name: ")
+    ] if metadata_index >= 0 else []
+    if len(name_lines) != (1 if metadata_index >= 0 else 0):
+        raise SystemExit(1)
+    name = name_lines[0] if name_lines else ""
+
+    if name in checksums:
+        if kind != "DaemonSet":
+            raise SystemExit(1)
+        record = checksums[name]
+        key = record["key"]
+        spec_end = block_end(document, spec_index, 0)
+        template_index = unique_mapping(document, spec_index + 1, spec_end, 2, "template")
+        template_end = block_end(document, template_index, 2)
+        pod_metadata_index = unique_mapping(document, template_index + 1, template_end, 4, "metadata")
+        pod_metadata_end = block_end(document, pod_metadata_index, 4)
+        annotations_index = unique_mapping(document, pod_metadata_index + 1, pod_metadata_end, 6, "annotations")
+        annotations_end = block_end(document, annotations_index, 6)
+        prefix = f"        {key}:"
+        matches = [
+            index
+            for index, line in enumerate(document[annotations_index + 1 : annotations_end], annotations_index + 1)
+            if line.startswith(prefix)
+        ]
+        if len(matches) != 1 or name in seen_checksums:
+            raise SystemExit(1)
+        document[matches[0]] = f"        {key}: {record['value']}"
+        seen_checksums.add(name)
+
+    if target_name and name == target_name and kind == "Deployment":
+        if spec_index < 0:
+            raise SystemExit(1)
+        replica_matches = [
+            index for index, line in enumerate(document[spec_index + 1 :], spec_index + 1)
+            if line.startswith("  replicas:")
+        ]
+        if len(replica_matches) > 1:
+            raise SystemExit(1)
+        if replica_matches:
+            document[replica_matches[0]] = "  replicas: 0"
+        else:
+            document.insert(spec_index + 1, "  replicas: 0")
+    rendered.extend(document)
+
+if seen_checksums != set(checksums):
+    raise SystemExit(1)
+sys.stdout.write("\n".join(rendered))
+if source.endswith("\n"):
     sys.stdout.write("\n")
 PY
-  then
+  } >"${renderer_file}"; then
     rm -f "${renderer_file}"
     return 1
   fi
@@ -11242,10 +11373,14 @@ PY
     return 1
   fi
   HELM_POST_RENDERER_FILE="${renderer_file}"
-  export FUGUE_HELM_POST_RENDERER_REGISTRY_DEPLOYMENT="${FUGUE_REGISTRY_DEPLOYMENT_NAME}"
   HELM_POST_RENDERER_ARGS=(--post-renderer "${HELM_POST_RENDERER_FILE}")
-  PRESERVE_REGISTRY_ZERO_REPLICAS="true"
-  log "preserving ${FUGUE_REGISTRY_DEPLOYMENT_NAME} at replicas=0 during this Helm upgrade"
+  if [[ -n "${registry_deployment}" ]]; then
+    PRESERVE_REGISTRY_ZERO_REPLICAS="true"
+    log "preserving ${registry_deployment} at replicas=0 during this Helm upgrade"
+  fi
+  if [[ "${public_checksums}" != '{}' ]]; then
+    log "preserving live public data-plane blue/green checksum annotations during this Helm upgrade"
+  fi
 }
 
 deployment_node_selector_pairs() {

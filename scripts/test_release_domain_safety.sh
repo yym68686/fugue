@@ -11242,6 +11242,151 @@ fi
 FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\nscripts/build_control_plane_images.sh\nscripts/compute_control_plane_image_build_plan.sh\nscripts/compute_release_changed_files_from_live.sh\nscripts/resolve_control_plane_live_images.sh\nscripts/test_release_domain_safety.sh\nscripts/test_verify_registry_image.py\nscripts/upgrade_fugue_control_plane.sh\nscripts/verify_registry_image.py'
 node_local_build_plane_preflight_override_allowed || fail "deploy tooling changes must allow existing node-local build-plane preflight degradation"
 
+(
+  front_live_checksum=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  worker_live_checksum=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FUGUE_RELEASE_NAME=fugue
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON="$(public_data_plane_checksum_records_from_daemonset_snapshot "$(printf '%s' '{
+    "items": [
+      {
+        "metadata": {
+          "name": "fugue-edge-front",
+          "labels": {
+            "app.kubernetes.io/instance": "fugue",
+            "fugue.io/rollout-subsystem": "public-data-plane",
+            "fugue.io/rollout-mode": "node-local-blue-green-front"
+          }
+        },
+        "spec": {"template": {"metadata": {"annotations": {"checksum/edge-blue-green-front": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
+      },
+      {
+        "metadata": {
+          "name": "fugue-edge-worker-a",
+          "labels": {
+            "app.kubernetes.io/instance": "fugue",
+            "fugue.io/rollout-subsystem": "public-data-plane",
+            "fugue.io/rollout-mode": "node-local-blue-green-worker"
+          }
+        },
+        "spec": {"template": {"metadata": {"annotations": {"checksum/edge-blue-green-worker": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}}
+      },
+      {
+        "metadata": {
+          "name": "other-edge-front",
+          "labels": {
+            "app.kubernetes.io/instance": "other",
+            "fugue.io/rollout-subsystem": "public-data-plane",
+            "fugue.io/rollout-mode": "node-local-blue-green-front"
+          }
+        },
+        "spec": {"template": {"metadata": {"annotations": {"checksum/edge-blue-green-front": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}}
+      }
+    ]
+  }')")"
+  expected_checksums='{"fugue-edge-front":{"key":"checksum/edge-blue-green-front","value":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"fugue-edge-worker-a":{"key":"checksum/edge-blue-green-worker","value":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
+  assert_eq "${PUBLIC_DATA_PLANE_CHECKSUMS_JSON}" "${expected_checksums}" "public preserve checksum inventory is canonical and release scoped"
+
+  if public_data_plane_checksum_records_from_daemonset_snapshot '{
+    "items": [{
+      "metadata": {
+        "name": "fugue-edge-front",
+        "labels": {
+          "app.kubernetes.io/instance": "fugue",
+          "fugue.io/rollout-subsystem": "public-data-plane",
+          "fugue.io/rollout-mode": "node-local-blue-green-front"
+        }
+      },
+      "spec": {"template": {"metadata": {"annotations": {}}}}
+    }]
+  }' >/dev/null; then
+    fail "public preserve checksum inventory must reject a labeled blue/green target without its exact checksum"
+  fi
+
+  PUBLIC_DATA_PLANE_PRESERVED=true
+  NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=true
+  FUGUE_REGISTRY_DEPLOYMENT_NAME=fugue-registry
+  live_deployment_replicas() { printf '0'; }
+  stateful_dependency_changed() { return 1; }
+  prepare_helm_post_renderer || fail "combined public checksum and registry-zero renderer must be created"
+  [[ "${PRESERVE_REGISTRY_ZERO_REPLICAS}" == "true" ]] || fail "combined renderer must preserve registry zero replicas"
+  renderer_file="${HELM_POST_RENDERER_FILE}"
+
+  # The renderer must consume only the configuration embedded before argv/file
+  # identity sealing; later shell variable drift cannot change applied bytes.
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON='{}'
+  rendered_manifest="$("${renderer_file}" <<'YAML'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-front
+spec:
+  template:
+    metadata:
+      annotations:
+        checksum/edge-blue-green-front: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-worker-a
+spec:
+  template:
+    metadata:
+      annotations:
+        checksum/edge-blue-green-worker: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-registry
+spec:
+  replicas: 1
+YAML
+)" || fail "combined renderer must accept every exact preserved target"
+  [[ "${rendered_manifest}" == *"checksum/edge-blue-green-front: ${front_live_checksum}"* ]] || fail "renderer must preserve the live front checksum"
+  [[ "${rendered_manifest}" == *"checksum/edge-blue-green-worker: ${worker_live_checksum}"* ]] || fail "renderer must preserve the live worker checksum"
+  assert_eq "$(grep -c '^  replicas: 0$' <<<"${rendered_manifest}")" "1" "combined renderer retains registry-zero behavior"
+
+  missing_output=""
+  if missing_output="$(printf '%s\n' \
+    'apiVersion: apps/v1' 'kind: DaemonSet' 'metadata:' '  name: fugue-edge-front' \
+    'spec:' '  template:' '    metadata:' '      annotations:' \
+    '        checksum/edge-blue-green-front: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' |
+    "${renderer_file}")"; then
+    fail "renderer must reject an absent expected public checksum target"
+  fi
+  [[ -z "${missing_output}" ]] || fail "failed renderer must emit no partial manifest"
+
+  decoy_output=""
+  if decoy_output="$("${renderer_file}" <<'YAML'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-front
+spec:
+  template:
+    metadata:
+      labels:
+        checksum/edge-blue-green-front: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      annotations: {}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-worker-a
+spec:
+  template:
+    metadata:
+      annotations:
+        checksum/edge-blue-green-worker: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+YAML
+)"; then
+    fail "renderer must not accept a checksum-shaped label in place of the exact pod-template annotation"
+  fi
+  [[ -z "${decoy_output}" ]] || fail "path-mismatched renderer failure must emit no partial manifest"
+  cleanup_upgrade_override_values
+)
+
 live_deployment_replicas() {
   case "$1" in
     fugue-fugue-registry) printf '0' ;;
