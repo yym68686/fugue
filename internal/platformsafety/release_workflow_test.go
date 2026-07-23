@@ -65,6 +65,9 @@ type releaseWorkflowDispatchInput struct {
 type releaseWorkflowJob struct {
 	Needs           workflowNeeds         `yaml:"needs"`
 	If              string                `yaml:"if"`
+	RunsOn          yaml.Node             `yaml:"runs-on"`
+	TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+	Environment     string                `yaml:"environment"`
 	Outputs         map[string]string     `yaml:"outputs"`
 	Permissions     map[string]string     `yaml:"permissions"`
 	ContinueOnError bool                  `yaml:"continue-on-error"`
@@ -2820,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "099f5c56872ca6630f30796395bfaa2da0e48368a5ea3787c0993893859bd80a")
+	assertWorkflowSourceDigest(t, data, "1ed163622569afd38a3bd2535e2f350656290db49c952e8ff8cac542d5aef013")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2838,31 +2841,32 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                      "36817d224982821ad3eb81a44fd42dd50bfa479915e48b339010fae5e19ae1a5",
-		"release-baseline/Resolve release-domain baseline":                               "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
-		"release-baseline/Resolve live image metadata":                                   "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
-		"release-baseline/Compute live-to-target release changed files":                  "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-gate/Prepare pinned ripgrep for release safety contracts":               "fd3284573ed17f45090180e1d168e8c0f143e088586882168e5cf60637390761",
-		"release-gate/Verify generated OpenAPI artifacts":                                "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
-		"release-gate/Verify release-domain safety contracts":                            "0a71d9858c02ceb5aa8aa188313276dc4a63db5dae5cc856323c533fd1051144",
-		"release-gate/Run Go tests":                                                      "1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3",
-		"build/Compute image metadata":                                                   "12f6dcc38d6f1597416aae34a1c2fa4efda4c6353c5fcbc0eee6c66ee3ccb5b6",
-		"build/Compute image build plan":                                                 "e545c87a2385902616eb8fa652954970e0de7e47ffe4c8fea46eb03cb71e5ea0",
-		"build/Publish verified control-plane image provenance":                          "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
-		"deploy/Record deploy job budget origin":                                         "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
-		"deploy/Build private release-domain tools":                                      "1017c0bb023803233350b68c1b434ca34c01e82d04bc0ad8a80b03f2c437ead2",
-		"deploy/Write genesis public release evidence":                                   "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
-		"deploy/Guard stateful component files":                                          "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
-		"deploy/Prepare authoritative DNS DiG runtime":                                   "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
-		"deploy/Verify local deploy prerequisites":                                       "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
-		"deploy/Explain runner and fail closed target":                                   "afab1c1aa3b6305ac3fdf982640fce8d81781c339cea714f11e2bde65a3b4475",
-		"deploy/Resolve live image metadata":                                             "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
-		"deploy/Prove explicitly authorized stale pre-Helm release recovery":             "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
-		"deploy/Remove stale release recovery proof":                                     "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
-		"record-release-baseline/Advance dedicated forward-only release baseline branch": "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
-		"freeze-release-lane-on-failure/Record release lane freeze evidence":             "fcf21e0732d091de6e115386f2d55e88de2c0e49110bb7ebf7674c7c8e76e00a",
-		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":     "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
-		"freeze-release-lane-on-failure/Require release lane freeze evidence":            "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
+		"release-input-guard/Guard exact main commit authorization":                         "36817d224982821ad3eb81a44fd42dd50bfa479915e48b339010fae5e19ae1a5",
+		"release-baseline/Resolve release-domain baseline":                                  "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
+		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
+		"release-gate/Prepare pinned ripgrep for release safety contracts":                  "fd3284573ed17f45090180e1d168e8c0f143e088586882168e5cf60637390761",
+		"release-gate/Verify generated OpenAPI artifacts":                                   "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
+		"release-gate/Verify release-domain safety contracts":                               "0a71d9858c02ceb5aa8aa188313276dc4a63db5dae5cc856323c533fd1051144",
+		"release-gate/Run Go tests":                                                         "1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3",
+		"build/Compute image metadata":                                                      "12f6dcc38d6f1597416aae34a1c2fa4efda4c6353c5fcbc0eee6c66ee3ccb5b6",
+		"build/Compute image build plan":                                                    "e545c87a2385902616eb8fa652954970e0de7e47ffe4c8fea46eb03cb71e5ea0",
+		"build/Publish verified control-plane image provenance":                             "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
+		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
+		"deploy/Build private release-domain tools":                                         "1017c0bb023803233350b68c1b434ca34c01e82d04bc0ad8a80b03f2c437ead2",
+		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
+		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
+		"deploy/Prepare authoritative DNS DiG runtime":                                      "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
+		"deploy/Verify local deploy prerequisites":                                          "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
+		"deploy/Explain runner and fail closed target":                                      "afab1c1aa3b6305ac3fdf982640fce8d81781c339cea714f11e2bde65a3b4475",
+		"deploy/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
+		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "47f3662d1f73fd307553e0249301f60b4248e9dbe952ef522428204fced61e7e",
+		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "647f2abd75678bcf08439bbb465cc0fc976c2d6c8949f82bcd3a045fbfbd7022",
+		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
+		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
 	})
 	workflowJobsNode := workflowMappingValue(t, workflowRootNode, "jobs")
 	assertWorkflowJobNodeContracts(t, workflowJobsNode, map[string]workflowJobNodeContract{
@@ -2929,6 +2933,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			StepKeys: [][]string{
 				{"name", "uses", "with"},
 				{"name", "env", "run"},
+			},
+		},
+		"rearm-release-lane-on-success": {
+			Keys: []string{"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "id", "env", "run"},
+				{"name", "uses", "with"},
 			},
 		},
 		"freeze-release-lane-on-failure": {
@@ -3659,19 +3670,100 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 
+	successRearm, ok := workflow.Jobs["rearm-release-lane-on-success"]
+	if !ok {
+		t.Fatal("control-plane workflow must define the successful release-lane rearm finalizer")
+	}
+	wantSuccessNeeds := []string{"release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline"}
+	for _, required := range wantSuccessNeeds {
+		if !containsWorkflowNeed(successRearm.Needs, required) {
+			t.Fatalf("successful lane rearm must wait for %s", required)
+		}
+	}
+	if len(successRearm.Needs) != len(wantSuccessNeeds) {
+		t.Fatalf("successful lane rearm has unexpected dependencies: %v", successRearm.Needs)
+	}
+	const successRearmCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.record-release-baseline.result == 'success' }}"
+	if successRearm.If != successRearmCondition {
+		t.Fatalf("successful lane rearm condition drifted: got %q want %q", successRearm.If, successRearmCondition)
+	}
+	var successRunner string
+	if err := successRearm.RunsOn.Decode(&successRunner); err != nil {
+		t.Fatalf("decode successful lane rearm runner: %v", err)
+	}
+	if successRunner != "ubuntu-latest" || successRearm.TimeoutMinutes != 10 || successRearm.Environment != "production" ||
+		!reflect.DeepEqual(successRearm.Permissions, map[string]string{"actions": "write", "contents": "read"}) {
+		t.Fatalf("successful lane rearm boundary drifted: runner=%q job=%+v", successRunner, successRearm)
+	}
+	successRearmStep := workflowStepByName(t, successRearm, "Disable successful release lane with exact readback")
+	if successRearmStep.ID != "rearm_lane" {
+		t.Fatalf("successful lane rearm step id drifted: %+v", successRearmStep)
+	}
+	for key, want := range map[string]string{
+		"EXPECTED_SHA":                   "${{ inputs.expected_sha }}",
+		"RELEASE_INPUT_GUARD_RESULT":     "${{ needs.release-input-guard.result }}",
+		"RELEASE_BASELINE_RESULT":        "${{ needs.release-baseline.result }}",
+		"RELEASE_GATE_RESULT":            "${{ needs.release-gate.result }}",
+		"BUILD_RESULT":                   "${{ needs.build.result }}",
+		"DEPLOY_RESULT":                  "${{ needs.deploy.result }}",
+		"RECORD_RELEASE_BASELINE_RESULT": "${{ needs.record-release-baseline.result }}",
+		"GH_TOKEN":                       "${{ github.token }}",
+		"REPOSITORY":                     "${{ github.repository }}",
+	} {
+		if got := successRearmStep.Env[key]; got != want {
+			t.Fatalf("successful lane rearm env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{
+		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
+		`"${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}"`,
+		`"${main_head}" == "${EXPECTED_SHA}"`,
+		"git/ref/heads/fugue-control-plane-release-baseline",
+		"for run_status in queued in_progress waiting pending requested",
+		"actions/workflows/${workflow_id}/runs?status=${run_status}",
+		`"${state_before}" == 'active'`,
+		"actions/workflows/${workflow_id}/disable",
+		"mutation_status=$?",
+		"for attempt in 1 2 3 4 5",
+		`"${state_after}" == 'disabled_manually'`,
+		`"${settled}" == 'true'`,
+		`"rearm_ref_mutation_attempted": False`,
+		`"rearm_runtime_mutation_attempted": False`,
+		`"rearm_cluster_mutation_attempted": False`,
+		`"rearm_production_write": False`,
+	} {
+		if !strings.Contains(successRearmStep.Run, required) {
+			t.Fatalf("successful lane rearm must contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"/enable", "/dispatches", "/cancel", "git push", "git update-ref", "updateRefs", "createRef", "deleteRef",
+		"--method POST", "--method PATCH", "--method DELETE", "helm ", "kubectl ", "k3s kubectl", "fugue app ",
+	} {
+		if strings.Contains(successRearmStep.Run, forbidden) {
+			t.Fatalf("successful lane rearm contains out-of-scope capability %q", forbidden)
+		}
+	}
+	successRearmUpload := workflowStepByName(t, successRearm, "Upload successful release lane rearm evidence")
+	if successRearmUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		successRearmUpload.With["if-no-files-found"] != "error" || successRearmUpload.With["retention-days"] != "90" ||
+		successRearmUpload.With["include-hidden-files"] != "false" || successRearmUpload.With["overwrite"] != "false" {
+		t.Fatalf("successful lane rearm upload drifted: %+v", successRearmUpload)
+	}
+
 	freeze, ok := workflow.Jobs["freeze-release-lane-on-failure"]
 	if !ok {
 		t.Fatal("control-plane workflow must define the automatic release-lane freeze finalizer")
 	}
-	for _, required := range []string{"release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline"} {
+	for _, required := range []string{"release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline", "rearm-release-lane-on-success"} {
 		if !containsWorkflowNeed(freeze.Needs, required) {
 			t.Fatalf("release-lane freeze finalizer must wait for %s", required)
 		}
 	}
-	if len(freeze.Needs) != 6 {
+	if len(freeze.Needs) != 7 {
 		t.Fatalf("release-lane freeze finalizer has unexpected dependencies: %v", freeze.Needs)
 	}
-	const freezeCondition = "${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || needs.record-release-baseline.result != 'success') }}"
+	const freezeCondition = "${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || needs.record-release-baseline.result != 'success' || needs.rearm-release-lane-on-success.result != 'success') }}"
 	if freeze.If != freezeCondition {
 		t.Fatalf("release-lane freeze condition drifted: got %q want %q", freeze.If, freezeCondition)
 	}
@@ -3688,7 +3780,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("workflow default permissions must be contents:read only: got %v want %v", got, want)
 	}
 	for jobName, job := range workflow.Jobs {
-		if jobName != "freeze-release-lane-on-failure" && job.Permissions["actions"] == "write" {
+		if jobName != "freeze-release-lane-on-failure" && jobName != "rearm-release-lane-on-success" && job.Permissions["actions"] == "write" {
 			t.Fatalf("job %s must not receive actions:write", jobName)
 		}
 	}
@@ -3701,6 +3793,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"BUILD_RESULT":                   "${{ needs.build.result }}",
 		"DEPLOY_RESULT":                  "${{ needs.deploy.result }}",
 		"RECORD_RELEASE_BASELINE_RESULT": "${{ needs.record-release-baseline.result }}",
+		"REARM_RELEASE_LANE_RESULT":      "${{ needs.rearm-release-lane-on-success.result }}",
 	} {
 		if got := freezeRecord.Env[key]; got != want {
 			t.Fatalf("release-lane freeze evidence env %s drifted: got %q want %q", key, got, want)
@@ -3742,6 +3835,150 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	requireFreezeEvidence := workflowStepByName(t, freeze, "Require release lane freeze evidence")
 	if got, want := requireFreezeEvidence.If, "${{ always() && steps.freeze_evidence_upload.outcome != 'success' }}"; got != want {
 		t.Fatalf("release-lane evidence failure condition drifted: got %q want %q", got, want)
+	}
+}
+
+func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	rearm := workflowStepByName(t, workflow.Jobs["rearm-release-lane-on-success"], "Disable successful release lane with exact readback")
+	const (
+		expectedSHA      = "1111111111111111111111111111111111111111"
+		expectedBaseline = "2222222222222222222222222222222222222222"
+		driftedOID       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	tests := []struct {
+		name         string
+		initialState string
+		mutate       string
+		putExit      string
+		mainDrift    bool
+		otherRuns    string
+		deployResult string
+		wantPass     bool
+		wantState    string
+		wantWrites   string
+	}{
+		{name: "successful response settles", initialState: "active", mutate: "true", putExit: "0", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
+		{name: "lost response settles by readback", initialState: "active", mutate: "true", putExit: "23", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
+		{name: "unsettled disable fails closed", initialState: "active", mutate: "false", putExit: "23", wantPass: false, wantState: "active", wantWrites: "PUT\n"},
+		{name: "already disabled cannot replay", initialState: "disabled_manually", mutate: "false", putExit: "0", wantPass: false, wantState: "disabled_manually"},
+		{name: "main drift blocks before disable", initialState: "active", mutate: "false", putExit: "0", mainDrift: true, wantPass: false, wantState: "active"},
+		{name: "active deploy run blocks before disable", initialState: "active", mutate: "false", putExit: "0", otherRuns: "999\n", wantPass: false, wantState: "active"},
+		{name: "failed release result blocks before disable", initialState: "active", mutate: "false", putExit: "0", deployResult: "failure", wantPass: false, wantState: "active"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tempDir := t.TempDir()
+			mockBin := filepath.Join(tempDir, "bin")
+			if err := os.Mkdir(mockBin, 0o700); err != nil {
+				t.Fatalf("create mock bin: %v", err)
+			}
+			stateFile := filepath.Join(tempDir, "state")
+			mutationLog := filepath.Join(tempDir, "mutations")
+			if err := os.WriteFile(stateFile, []byte(test.initialState+"\n"), 0o600); err != nil {
+				t.Fatalf("write initial workflow state: %v", err)
+			}
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "timeout"), "#!/usr/bin/env bash\nset -euo pipefail\nshift 2\nexec \"$@\"\n")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "sleep"), "#!/usr/bin/env bash\nexit 0\n")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "gh"), "#!/usr/bin/env bash\n"+
+				"set -euo pipefail\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/disable\"* ]]; then\n"+
+				"  printf 'PUT\\n' >>\"${MUTATION_LOG}\"\n"+
+				"  if [[ \"${MUTATE}\" == 'true' ]]; then printf 'disabled_manually\\n' >\"${STATE_FILE}\"; fi\n"+
+				"  exit \"${PUT_EXIT}\"\n"+
+				"fi\n"+
+				"if [[ \"$*\" == *\"git/ref/heads/main\"* ]]; then printf '%s\\n' \"${OBSERVED_MAIN_SHA}\"; exit 0; fi\n"+
+				"if [[ \"$*\" == *\"git/ref/heads/fugue-control-plane-release-baseline\"* ]]; then printf '%s\\n' \"${OBSERVED_BASELINE_OID}\"; exit 0; fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/runs?status=\"* ]]; then printf '%s' \"${OTHER_RUNS}\"; exit 0; fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml\"* ]]; then cat \"${STATE_FILE}\"; exit 0; fi\n"+
+				"exit 91\n")
+			observedMain := expectedSHA
+			if test.mainDrift {
+				observedMain = driftedOID
+			}
+			deployResult := test.deployResult
+			if deployResult == "" {
+				deployResult = "success"
+			}
+			command := exec.Command("bash", "-c", rearm.Run)
+			command.Env = append(os.Environ(),
+				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"STATE_FILE="+stateFile,
+				"MUTATION_LOG="+mutationLog,
+				"MUTATE="+test.mutate,
+				"PUT_EXIT="+test.putExit,
+				"EXPECTED_SHA="+expectedSHA,
+				"RELEASE_INPUT_GUARD_RESULT=success",
+				"RELEASE_BASELINE_RESULT=success",
+				"RELEASE_GATE_RESULT=success",
+				"BUILD_RESULT=success",
+				"DEPLOY_RESULT="+deployResult,
+				"RECORD_RELEASE_BASELINE_RESULT=success",
+				"OBSERVED_MAIN_SHA="+observedMain,
+				"OBSERVED_BASELINE_OID="+expectedBaseline,
+				"OTHER_RUNS="+test.otherRuns,
+				"GITHUB_EVENT_NAME=workflow_dispatch",
+				"GITHUB_REF=refs/heads/main",
+				"GITHUB_RUN_ID=555",
+				"GITHUB_RUN_ATTEMPT=1",
+				"GITHUB_SHA="+expectedSHA,
+				"GITHUB_WORKFLOW=deploy-control-plane",
+				"GITHUB_REPOSITORY=example/fugue",
+				"GITHUB_OUTPUT="+filepath.Join(tempDir, "outputs"),
+				"RUNNER_TEMP="+tempDir,
+				"REPOSITORY=example/fugue",
+				"GH_TOKEN=test",
+			)
+			output, err := command.CombinedOutput()
+			if test.wantPass && err != nil {
+				t.Fatalf("successful lane rearm settlement failed: %v output=%s", err, output)
+			}
+			if !test.wantPass && err == nil {
+				t.Fatalf("successful lane rearm settlement unexpectedly passed: output=%s", output)
+			}
+			finalState, readErr := os.ReadFile(stateFile)
+			if readErr != nil {
+				t.Fatalf("read final workflow state: %v", readErr)
+			}
+			if strings.TrimSpace(string(finalState)) != test.wantState {
+				t.Fatalf("final state = %q, want %q", finalState, test.wantState)
+			}
+			writes, readErr := os.ReadFile(mutationLog)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatalf("read mutation log: %v", readErr)
+			}
+			if string(writes) != test.wantWrites {
+				t.Fatalf("mutation calls = %q, want %q", writes, test.wantWrites)
+			}
+			if test.wantPass {
+				evidencePath := filepath.Join(tempDir, "fugue-release-lane-success-rearm", "success-rearm.json")
+				evidenceData, readErr := os.ReadFile(evidencePath)
+				if readErr != nil {
+					t.Fatalf("read successful lane rearm evidence: %v", readErr)
+				}
+				var evidence map[string]any
+				if err := json.Unmarshal(evidenceData, &evidence); err != nil {
+					t.Fatalf("decode successful lane rearm evidence: %v", err)
+				}
+				if evidence["state_before"] != "active" || evidence["state_after"] != "disabled_manually" ||
+					evidence["workflow_mutation_attempted"] != true || evidence["rearm_production_write"] != false ||
+					evidence["baseline_ref_object"] != expectedBaseline {
+					t.Fatalf("successful lane rearm evidence drifted: %+v", evidence)
+				}
+			}
+		})
 	}
 }
 

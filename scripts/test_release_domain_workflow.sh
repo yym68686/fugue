@@ -540,9 +540,54 @@ for forbidden in [
   fail_contract("baseline writer contains out-of-scope capability #{forbidden.inspect}") if advance_run.include?(forbidden)
 end
 
+success_rearm = jobs.fetch("rearm-release-lane-on-success")
+success_rearm_needs = [
+  "release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline",
+]
+assert_equal(needs(success_rearm), success_rearm_needs, "successful lane rearm dependencies")
+success_rearm_needs.each do |job_name|
+  fail_contract("successful lane rearm condition omits #{job_name}") unless success_rearm.fetch("if").include?("needs.#{job_name}.result == 'success'")
+end
+assert_equal(success_rearm["permissions"], {"actions" => "write", "contents" => "read"}, "successful lane rearm permissions")
+assert_equal(success_rearm.fetch("steps").length, 2, "successful lane rearm exact step inventory")
+success_rearm_step = step(success_rearm, "Disable successful release lane with exact readback")
+for fragment in [
+  '"${EXPECTED_SHA}" == "${GITHUB_SHA}"',
+  '"${main_head}" == "${EXPECTED_SHA}"',
+  "git/ref/heads/fugue-control-plane-release-baseline",
+  "for run_status in queued in_progress waiting pending requested",
+  "actions/workflows/${workflow_id}/runs?status=${run_status}",
+  '"${state_before}" == \'active\'',
+  "actions/workflows/${workflow_id}/disable",
+  "mutation_status=$?",
+  "for attempt in 1 2 3 4 5",
+  '"${state_after}" == \'disabled_manually\'',
+  '"${settled}" == \'true\'',
+  '"rearm_ref_mutation_attempted": False',
+  '"rearm_runtime_mutation_attempted": False',
+  '"rearm_cluster_mutation_attempted": False',
+  '"rearm_production_write": False',
+]
+  fail_contract("successful lane rearm is missing #{fragment.inspect}") unless success_rearm_step.fetch("run").include?(fragment)
+end
+for forbidden in [
+  "/enable", "/dispatches", "/cancel", "git push", "git update-ref", "updateRefs", "createRef", "deleteRef",
+  "--method POST", "--method PATCH", "--method DELETE", "helm ", "kubectl ", "k3s kubectl", "fugue app ",
+]
+  fail_contract("successful lane rearm contains out-of-scope capability #{forbidden.inspect}") if success_rearm_step.fetch("run").include?(forbidden)
+end
+success_rearm_upload = step(success_rearm, "Upload successful release lane rearm evidence")
+assert_equal(
+  success_rearm_upload.fetch("uses"),
+  "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  "successful lane rearm artifact action",
+)
+assert_equal(success_rearm_upload.fetch("with").fetch("if-no-files-found"), "error", "successful lane rearm absent artifact policy")
+
 freeze = jobs.fetch("freeze-release-lane-on-failure")
 freeze_needs = [
   "release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline",
+  "rearm-release-lane-on-success",
 ]
 assert_equal(needs(freeze), freeze_needs, "freeze finalizer dependencies")
 freeze_needs.each do |job_name|
@@ -554,6 +599,7 @@ allowed_permissions = {
   "build" => {"contents" => "read", "packages" => "write"},
   "deploy" => {"actions" => "read", "contents" => "read"},
   "record-release-baseline" => {"contents" => "write"},
+  "rearm-release-lane-on-success" => {"actions" => "write", "contents" => "read"},
   "freeze-release-lane-on-failure" => {"actions" => "write", "contents" => "read"},
 }
 jobs.each do |name, job|
@@ -578,6 +624,7 @@ allowed_uploads = [
   ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
+  ["rearm-release-lane-on-success", "${{ runner.temp }}/fugue-release-lane-success-rearm/success-rearm.json"],
   ["freeze-release-lane-on-failure", "${{ runner.temp }}/fugue-release-lane-freeze/lane-freeze.json"],
 ]
 assert_equal(all_uploads, allowed_uploads, "public artifact allowlist")

@@ -1205,6 +1205,122 @@ jobs:
           printf 'baseline carrier CAS settled by exact bounded readback (blob_status=%s tree_status=%s commit_status=%s mutation_status=%s response_exact=%s carrier=%s)\n' \
             "${blob_status}" "${tree_status}" "${commit_status}" "${mutation_status}" "${response_exact}" "${carrier_sha}" >&2 || true
 
+  rearm-release-lane-on-success:
+    needs:
+      - release-input-guard
+      - release-baseline
+      - release-gate
+      - build
+      - deploy
+      - record-release-baseline
+    if: ${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.record-release-baseline.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Disable successful release lane with exact readback
+        id: rearm_lane
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RELEASE_INPUT_GUARD_RESULT: ${{ needs.release-input-guard.result }}
+          RELEASE_BASELINE_RESULT: ${{ needs.release-baseline.result }}
+          RELEASE_GATE_RESULT: ${{ needs.release-gate.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          RECORD_RELEASE_BASELINE_RESULT: ${{ needs.record-release-baseline.result }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          readonly workflow_id='deploy-control-plane.yml'
+          readonly evidence_dir="${RUNNER_TEMP}/fugue-release-lane-success-rearm"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          for result in "${RELEASE_INPUT_GUARD_RESULT}" "${RELEASE_BASELINE_RESULT}" "${RELEASE_GATE_RESULT}" "${BUILD_RESULT}" "${DEPLOY_RESULT}" "${RECORD_RELEASE_BASELINE_RESULT}"; do
+            [[ "${result}" == 'success' ]] || exit 1
+          done
+
+          main_head="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          for run_status in queued in_progress waiting pending requested; do
+            other_runs="$(timeout --kill-after=2s 10s gh api --paginate "repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[].id' | awk -v current="${GITHUB_RUN_ID}" '$0 != current')" || exit 1
+            [[ -z "${other_runs}" ]] || exit 1
+          done
+
+          state_before="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+          [[ "${state_before}" == 'active' ]] || exit 1
+          mutation_status=0
+          set +e
+          timeout --kill-after=2s 10s gh api --method PUT "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" >/dev/null
+          mutation_status=$?
+          set -e
+          state_after=''
+          settled='false'
+          for attempt in 1 2 3 4 5; do
+            state_after="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+            if [[ "${state_after}" == 'disabled_manually' ]]; then
+              settled='true'
+              break
+            fi
+            sleep 1
+          done
+          [[ "${settled}" == 'true' && "${state_after}" == 'disabled_manually' ]] || exit 1
+
+          python3 - "${evidence_dir}/success-rearm.json" "${baseline_oid}" "${state_before}" "${state_after}" "${mutation_status}" <<'PY'
+          import datetime, json, os, sys
+          output, baseline_oid, before, after, mutation_status = sys.argv[1:]
+          payload = {
+              "schema_version": 1,
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "head_sha": os.environ["GITHUB_SHA"],
+              "baseline_ref_object": baseline_oid,
+              "state_before": before,
+              "state_after": after,
+              "release_job_results": {
+                  "release_input_guard": os.environ["RELEASE_INPUT_GUARD_RESULT"],
+                  "release_baseline": os.environ["RELEASE_BASELINE_RESULT"],
+                  "release_gate": os.environ["RELEASE_GATE_RESULT"],
+                  "build": os.environ["BUILD_RESULT"],
+                  "deploy": os.environ["DEPLOY_RESULT"],
+                  "record_release_baseline": os.environ["RECORD_RELEASE_BASELINE_RESULT"],
+              },
+              "workflow_mutation_attempted": True,
+              "workflow_mutation_status": int(mutation_status),
+              "rearm_ref_mutation_attempted": False,
+              "rearm_runtime_mutation_attempted": False,
+              "rearm_cluster_mutation_attempted": False,
+              "rearm_production_write": False,
+              "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          }
+          with open(output, "w", encoding="utf-8", newline="\n") as handle:
+              json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+          PY
+          artifact_name="fugue-control-plane-lane-success-rearm-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload successful release lane rearm evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.rearm_lane.outputs.artifact_name }}
+          path: ${{ runner.temp }}/fugue-release-lane-success-rearm/success-rearm.json
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+          overwrite: false
+
   freeze-release-lane-on-failure:
     needs:
       - release-input-guard
@@ -1213,7 +1329,8 @@ jobs:
       - build
       - deploy
       - record-release-baseline
-    if: ${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || needs.record-release-baseline.result != 'success') }}
+      - rearm-release-lane-on-success
+    if: ${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || needs.record-release-baseline.result != 'success' || needs.rearm-release-lane-on-success.result != 'success') }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -1227,6 +1344,7 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           RECORD_RELEASE_BASELINE_RESULT: ${{ needs.record-release-baseline.result }}
+          REARM_RELEASE_LANE_RESULT: ${{ needs.rearm-release-lane-on-success.result }}
         run: |
           set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/fugue-release-lane-freeze"
@@ -1246,6 +1364,7 @@ jobs:
               "build": os.environ["BUILD_RESULT"],
               "deploy": os.environ["DEPLOY_RESULT"],
               "record_release_baseline": os.environ["RECORD_RELEASE_BASELINE_RESULT"],
+              "rearm_release_lane": os.environ["REARM_RELEASE_LANE_RESULT"],
           }
           payload = {
               "schema_version": 1,
@@ -1257,7 +1376,7 @@ jobs:
               "head_sha": os.environ["GITHUB_SHA"],
               "ref": os.environ["GITHUB_REF"],
               "job_results": results,
-              "reason": "release input, prerequisite, deploy, or baseline advancement did not succeed",
+              "reason": "release input, prerequisite, deploy, baseline advancement, or successful lane rearm did not succeed",
               "requested_action": "disable workflow and cancel every other non-terminal run",
               "recorded_at": datetime.now(timezone.utc).isoformat(),
           }
