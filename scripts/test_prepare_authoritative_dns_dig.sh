@@ -20,9 +20,12 @@ assert_eq() {
 
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
-FIXTURE_DEB_SOURCE="${TEST_ROOT}/fixture.deb"
-printf 'synthetic bind9-dnsutils package fixture\n' >"${FIXTURE_DEB_SOURCE}"
-FIXTURE_SHA256="$(sha256sum "${FIXTURE_DEB_SOURCE}" | awk '{print $1}')"
+FIXTURE_DIG_DEB_SOURCE="${TEST_ROOT}/bind9-dnsutils-fixture.deb"
+FIXTURE_RUNTIME_DEB_SOURCE="${TEST_ROOT}/bind9-libs-fixture.deb"
+printf 'synthetic bind9-dnsutils package fixture\n' >"${FIXTURE_DIG_DEB_SOURCE}"
+printf 'synthetic bind9-libs package fixture\n' >"${FIXTURE_RUNTIME_DEB_SOURCE}"
+FIXTURE_DIG_SHA256="$(sha256sum "${FIXTURE_DIG_DEB_SOURCE}" | awk '{print $1}')"
+FIXTURE_RUNTIME_SHA256="$(sha256sum "${FIXTURE_RUNTIME_DEB_SOURCE}" | awk '{print $1}')"
 FAKE_BIN="${TEST_ROOT}/bin"
 mkdir -p "${FAKE_BIN}"
 
@@ -38,12 +41,22 @@ cat >"${FAKE_BIN}/apt-cache" <<'SH'
 set -euo pipefail
 [[ "$1" == "show" ]]
 [[ "${TEST_APT_CACHE_FAIL:-false}" != "true" ]] || exit 71
-cat <<EOF
-Package: ${TEST_PACKAGE_NAME}
-Version: ${TEST_APT_VERSION:-${TEST_PACKAGE_VERSION}}
-Architecture: ${TEST_APT_ARCHITECTURE:-${TEST_PACKAGE_ARCHITECTURE}}
-SHA256: ${TEST_APT_SHA256:-${TEST_PACKAGE_SHA256}}
-EOF
+requested_package="${2%%=*}"
+case "${requested_package}" in
+  "${TEST_PACKAGE_NAME}")
+    printf 'Package: %s\n' "${TEST_APT_PACKAGE_NAME:-${TEST_PACKAGE_NAME}}"
+    printf 'Version: %s\n' "${TEST_APT_VERSION:-${TEST_PACKAGE_VERSION}}"
+    printf 'Architecture: %s\n' "${TEST_APT_ARCHITECTURE:-${TEST_PACKAGE_ARCHITECTURE}}"
+    printf 'SHA256: %s\n' "${TEST_APT_SHA256:-${TEST_PACKAGE_SHA256}}"
+    ;;
+  "${TEST_RUNTIME_PACKAGE_NAME}")
+    printf 'Package: %s\n' "${TEST_RUNTIME_APT_PACKAGE_NAME:-${TEST_RUNTIME_PACKAGE_NAME}}"
+    printf 'Version: %s\n' "${TEST_RUNTIME_APT_VERSION:-${TEST_RUNTIME_PACKAGE_VERSION}}"
+    printf 'Architecture: %s\n' "${TEST_RUNTIME_APT_ARCHITECTURE:-${TEST_RUNTIME_PACKAGE_ARCHITECTURE}}"
+    printf 'SHA256: %s\n' "${TEST_RUNTIME_APT_SHA256:-${TEST_RUNTIME_PACKAGE_SHA256}}"
+    ;;
+  *) exit 79 ;;
+esac
 SH
 
 cat >"${FAKE_BIN}/apt-get" <<'SH'
@@ -51,7 +64,10 @@ cat >"${FAKE_BIN}/apt-get" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >>"${TEST_COMMAND_LOG}"
 [[ "${TEST_DOWNLOAD_FAIL:-false}" != "true" ]] || exit 72
-cp "${TEST_FIXTURE_DEB_SOURCE}" ./bind9-dnsutils_fixture_amd64.deb
+cp "${TEST_FIXTURE_DIG_DEB_SOURCE}" ./bind9-dnsutils_fixture_amd64.deb
+if [[ "${TEST_DOWNLOAD_OMIT_RUNTIME:-false}" != "true" ]]; then
+  cp "${TEST_FIXTURE_RUNTIME_DEB_SOURCE}" ./bind9-libs_fixture_amd64.deb
+fi
 SH
 
 cat >"${FAKE_BIN}/dpkg-deb" <<'SH'
@@ -59,30 +75,46 @@ cat >"${FAKE_BIN}/dpkg-deb" <<'SH'
 set -euo pipefail
 case "$1" in
   --field)
-    case "$3" in
-      Package) printf '%s\n' "${TEST_EXTRACTED_PACKAGE:-${TEST_PACKAGE_NAME}}" ;;
-      Version) printf '%s\n' "${TEST_EXTRACTED_VERSION:-${TEST_PACKAGE_VERSION}}" ;;
-      Architecture) printf '%s\n' "${TEST_EXTRACTED_ARCHITECTURE:-${TEST_PACKAGE_ARCHITECTURE}}" ;;
-      *) exit 73 ;;
-    esac
+    if [[ "$(basename "$2")" == bind9-libs_* ]]; then
+      case "$3" in
+        Package) printf '%s\n' "${TEST_RUNTIME_EXTRACTED_PACKAGE:-${TEST_RUNTIME_PACKAGE_NAME}}" ;;
+        Version) printf '%s\n' "${TEST_RUNTIME_EXTRACTED_VERSION:-${TEST_RUNTIME_PACKAGE_VERSION}}" ;;
+        Architecture) printf '%s\n' "${TEST_RUNTIME_EXTRACTED_ARCHITECTURE:-${TEST_RUNTIME_PACKAGE_ARCHITECTURE}}" ;;
+        *) exit 73 ;;
+      esac
+    else
+      case "$3" in
+        Package) printf '%s\n' "${TEST_EXTRACTED_PACKAGE:-${TEST_PACKAGE_NAME}}" ;;
+        Version) printf '%s\n' "${TEST_EXTRACTED_VERSION:-${TEST_PACKAGE_VERSION}}" ;;
+        Architecture) printf '%s\n' "${TEST_EXTRACTED_ARCHITECTURE:-${TEST_PACKAGE_ARCHITECTURE}}" ;;
+        *) exit 73 ;;
+      esac
+    fi
     ;;
   --extract)
     [[ "${TEST_EXTRACT_FAIL:-false}" != "true" ]] || exit 74
-    mkdir -p "$3/usr/bin"
-    {
-      printf '#!/usr/bin/env bash\n'
-      printf 'set -euo pipefail\n'
-      if [[ "${TEST_DIG_EXEC_FAIL:-false}" == "true" ]]; then
-        printf 'exit 75\n'
-      else
-        printf 'if [[ "$1" == "-v" ]]; then\n'
-        printf '  printf "%%s\\n" %q\n' "${TEST_DIG_VERSION_OUTPUT:-DiG 9.99.1}"
-        printf '  exit 0\n'
-        printf 'fi\n'
-        printf 'exit 76\n'
-      fi
-    } >"$3/usr/bin/dig"
-    chmod +x "$3/usr/bin/dig"
+    if [[ "$(basename "$2")" == bind9-libs_* ]]; then
+      [[ "${TEST_RUNTIME_EXTRACT_FAIL:-false}" != "true" ]] || exit 80
+      mkdir -p "$3/usr/lib/x86_64-linux-gnu"
+      printf 'synthetic libisc\n' >"$3/usr/lib/x86_64-linux-gnu/libisc-fixture.so"
+    else
+      mkdir -p "$3/usr/bin"
+      {
+        printf '#!/usr/bin/env bash\n'
+        printf 'set -euo pipefail\n'
+        printf '[[ -n "${LD_LIBRARY_PATH:-}" && -f "${LD_LIBRARY_PATH}/libisc-fixture.so" ]] || exit 78\n'
+        if [[ "${TEST_DIG_EXEC_FAIL:-false}" == "true" ]]; then
+          printf 'exit 75\n'
+        else
+          printf 'if [[ "$1" == "-v" ]]; then\n'
+          printf '  printf "%%s\\n" %q\n' "${TEST_DIG_VERSION_OUTPUT:-DiG 9.99.1}"
+          printf '  exit 0\n'
+          printf 'fi\n'
+          printf 'exit 76\n'
+        fi
+      } >"$3/usr/bin/dig"
+      chmod +x "$3/usr/bin/dig"
+    fi
     ;;
   *) exit 77 ;;
 esac
@@ -111,11 +143,16 @@ run_fixture_prepare() (
   export GITHUB_ENV="${case_dir}/github-env"
   export FUGUE_AUTHORITATIVE_DNS_DIG_OS_RELEASE_FILE="${case_dir}/os-release"
   export TEST_COMMAND_LOG="${case_dir}/commands.log"
-  export TEST_FIXTURE_DEB_SOURCE="${FIXTURE_DEB_SOURCE}"
+  export TEST_FIXTURE_DIG_DEB_SOURCE="${FIXTURE_DIG_DEB_SOURCE}"
+  export TEST_FIXTURE_RUNTIME_DEB_SOURCE="${FIXTURE_RUNTIME_DEB_SOURCE}"
   export TEST_PACKAGE_NAME="bind9-dnsutils"
   export TEST_PACKAGE_VERSION="1:9.99.1-1~test1"
   export TEST_PACKAGE_ARCHITECTURE="amd64"
-  export TEST_PACKAGE_SHA256="${TEST_PROFILE_SHA256:-${FIXTURE_SHA256}}"
+  export TEST_PACKAGE_SHA256="${TEST_PROFILE_SHA256:-${FIXTURE_DIG_SHA256}}"
+  export TEST_RUNTIME_PACKAGE_NAME="bind9-libs"
+  export TEST_RUNTIME_PACKAGE_VERSION="1:9.99.1-1~test1"
+  export TEST_RUNTIME_PACKAGE_ARCHITECTURE="amd64"
+  export TEST_RUNTIME_PACKAGE_SHA256="${TEST_RUNTIME_PROFILE_SHA256:-${FIXTURE_RUNTIME_SHA256}}"
   mkdir -p "${RUNNER_TEMP}"
   : >"${GITHUB_PATH}"
   : >"${GITHUB_ENV}"
@@ -127,6 +164,11 @@ run_fixture_prepare() (
     AUTHORITATIVE_DNS_DIG_PACKAGE_VERSION="${TEST_PACKAGE_VERSION}"
     AUTHORITATIVE_DNS_DIG_PACKAGE_ARCHITECTURE="${TEST_PACKAGE_ARCHITECTURE}"
     AUTHORITATIVE_DNS_DIG_PACKAGE_SHA256="${TEST_PACKAGE_SHA256}"
+    AUTHORITATIVE_DNS_DIG_RUNTIME_PACKAGE_NAME="${TEST_RUNTIME_PACKAGE_NAME}"
+    AUTHORITATIVE_DNS_DIG_RUNTIME_PACKAGE_VERSION="${TEST_RUNTIME_PACKAGE_VERSION}"
+    AUTHORITATIVE_DNS_DIG_RUNTIME_PACKAGE_ARCHITECTURE="${TEST_RUNTIME_PACKAGE_ARCHITECTURE}"
+    AUTHORITATIVE_DNS_DIG_RUNTIME_PACKAGE_SHA256="${TEST_RUNTIME_PACKAGE_SHA256}"
+    AUTHORITATIVE_DNS_DIG_RUNTIME_LIBRARY_DIR="usr/lib/x86_64-linux-gnu"
     AUTHORITATIVE_DNS_DIG_UPSTREAM_VERSION="9.99.1"
   }
   prepare_authoritative_dns_dig
@@ -168,22 +210,43 @@ write_os_release "${success_dir}"
 run_fixture_prepare "${success_dir}"
 prepared_bin_dir="$(cat "${success_dir}/github-path")"
 prepared_bin="$(sed -n 's/^FUGUE_AUTHORITATIVE_DNS_DIG_PREPARED_BIN=//p' "${success_dir}/github-env")"
-[[ "${prepared_bin_dir}" == "${success_dir}/runner-temp/"*"/root/usr/bin" ]] ||
+[[ "${prepared_bin_dir}" == "${success_dir}/runner-temp/"*"/bin" ]] ||
   fail "success case did not publish its isolated bin directory"
 assert_eq "${prepared_bin}" "${prepared_bin_dir}/dig" "prepared DiG environment identity"
 assert_eq "$("${prepared_bin_dir}/dig" -v)" "DiG 9.99.1" "prepared DiG version"
-grep -Fq -- 'download bind9-dnsutils=1:9.99.1-1~test1' "${success_dir}/commands.log" ||
-  fail "success case did not download the exact package version"
+grep -Fq -- 'download bind9-dnsutils=1:9.99.1-1~test1 bind9-libs=1:9.99.1-1~test1' "${success_dir}/commands.log" ||
+  fail "success case did not download the exact package closure"
+prepared_work_dir="${prepared_bin_dir%/bin}"
+raw_dig="${prepared_work_dir}/root/usr/bin/dig"
+runtime_library="${prepared_work_dir}/root/usr/lib/x86_64-linux-gnu/libisc-fixture.so"
+cp "${raw_dig}" "${success_dir}/raw-dig.backup"
+printf 'tampered\n' >>"${raw_dig}"
+if "${prepared_bin}" -v >/dev/null 2>&1; then
+  fail "prepared DiG launcher must reject a modified raw executable"
+fi
+cp "${success_dir}/raw-dig.backup" "${raw_dig}"
+chmod +x "${raw_dig}"
+printf 'tampered\n' >>"${runtime_library}"
+if "${prepared_bin}" -v >/dev/null 2>&1; then
+  fail "prepared DiG launcher must reject a modified runtime library"
+fi
 
 run_failure_case apt_cache_failure TEST_APT_CACHE_FAIL true
 run_failure_case download_failure TEST_DOWNLOAD_FAIL true
 run_failure_case runner_architecture_mismatch TEST_DPKG_ARCHITECTURE arm64
 run_failure_case hash_mismatch TEST_PROFILE_SHA256 "$(printf '0%.0s' {1..64})"
+run_failure_case runtime_hash_mismatch TEST_RUNTIME_PROFILE_SHA256 "$(printf '0%.0s' {1..64})"
+run_failure_case missing_runtime_package TEST_DOWNLOAD_OMIT_RUNTIME true
 run_failure_case advertised_version_mismatch TEST_APT_VERSION 1:9.99.2-1~test1
 run_failure_case advertised_architecture_mismatch TEST_APT_ARCHITECTURE arm64
+run_failure_case advertised_runtime_version_mismatch TEST_RUNTIME_APT_VERSION 1:9.99.2-1~test1
+run_failure_case advertised_runtime_architecture_mismatch TEST_RUNTIME_APT_ARCHITECTURE arm64
 run_failure_case extracted_version_mismatch TEST_EXTRACTED_VERSION 1:9.99.2-1~test1
 run_failure_case extracted_architecture_mismatch TEST_EXTRACTED_ARCHITECTURE arm64
+run_failure_case extracted_runtime_version_mismatch TEST_RUNTIME_EXTRACTED_VERSION 1:9.99.2-1~test1
+run_failure_case extracted_runtime_architecture_mismatch TEST_RUNTIME_EXTRACTED_ARCHITECTURE arm64
 run_failure_case extraction_failure TEST_EXTRACT_FAIL true
+run_failure_case runtime_extraction_failure TEST_RUNTIME_EXTRACT_FAIL true
 run_failure_case dig_execution_failure TEST_DIG_EXEC_FAIL true
 run_failure_case dig_version_mismatch TEST_DIG_VERSION_OUTPUT 'DiG 9.98.0'
 
