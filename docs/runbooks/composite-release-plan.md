@@ -200,3 +200,17 @@ workflow, or release lane. It cannot materialize a plan, allocate a generation,
 change a workload, or advance a runtime baseline. A real two-domain canary,
 adapter mutation, automatic health failure detection, freeze/watchdog behavior,
 and composite activation remain separate checkpoints.
+
+## MD6p8 admin-only prepare boundary
+
+MD6p8 exposes one platform-admin-only API boundary that accepts an externally
+digest-bound, strictly decoded `CompositeReleasePlan` and persists it as one
+exact `prepared` coordinator record. Unknown, duplicate, non-canonical, or
+digest-mismatched plans fail before creation; a repeated plan digest conflicts
+instead of creating another record.
+
+The response is the inert durable record at revision 1. This boundary does not
+construct or accept a transaction envelope, return a no-op authorization,
+advance the worker, call an adapter, observe health, revert a step, or change a
+runtime baseline. Preparing and activating the controlled two-domain canary
+remain separate transactions.
