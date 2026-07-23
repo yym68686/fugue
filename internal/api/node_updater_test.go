@@ -2016,6 +2016,9 @@ FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
 FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${tmpdir}/edge-node.env"
 FUGUE_DISCOVERY_K3S_SERVER="https://cp.example:6443"
+detect_public_ip() {
+  printf '%s' '203.0.113.10'
+}
 mkdir() {
   local args=()
   local arg=""
