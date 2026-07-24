@@ -22,6 +22,8 @@ const (
 	OperationalEvidenceKind             = "OperationalDomainEvidence"
 	OperationalEvidencePolicy           = "consumer-build-render-adapter-intersection-v1"
 	OperationalActivationEvidencePolicy = "consumer-activation-render-adapter-intersection-v2"
+	OperationalActivationReportPolicy   = "consumer-activation-render-adapter-intersection-v3-report-only"
+	OperationalRenderedOnlyPolicy       = "empty-build-activation-render-adapter-v1"
 
 	maxOperationalEvidenceBytes = 8 << 20
 )
@@ -61,32 +63,54 @@ type OperationalAdapterBinding struct {
 // channels. AuthorizationEligible is true only for a complete single-domain
 // intersection that may be consumed by ActivateOperationalPlan.
 type OperationalDomainEvidence struct {
-	APIVersion            string                          `json:"apiVersion"`
-	Kind                  string                          `json:"kind"`
-	Policy                string                          `json:"policy"`
-	BaseCommit            string                          `json:"baseCommit"`
-	TargetCommit          string                          `json:"targetCommit"`
-	ChangedFilesDigest    string                          `json:"changedFilesDigest"`
-	ImagePlanDigest       string                          `json:"imagePlanDigest"`
-	PlanDigest            string                          `json:"planDigest"`
-	AdapterBindingDigest  string                          `json:"adapterBindingDigest"`
-	ImageTargets          []OperationalImageRolloutTarget `json:"imageTargets"`
-	ConsumerDomains       []Domain                        `json:"consumerDomains"`
-	ImageRolloutDomains   []Domain                        `json:"imageRolloutDomains"`
-	RenderedDomains       []Domain                        `json:"renderedDomains"`
-	AdapterDomains        []Domain                        `json:"adapterDomains"`
-	IntersectionDomains   []Domain                        `json:"intersectionDomains"`
-	AdapterBindings       []OperationalAdapterBinding     `json:"adapterBindings"`
-	ConservativeOutcome   Outcome                         `json:"conservativeOutcome"`
-	ConservativeDomains   []Domain                        `json:"conservativeDomains"`
-	ConservativeDomain    Domain                          `json:"conservativeDomain,omitempty"`
-	Observation           Outcome                         `json:"observation"`
-	CandidateDomain       Domain                          `json:"candidateDomain,omitempty"`
-	ClassificationAgrees  bool                            `json:"classificationAgrees"`
-	Issues                []string                        `json:"issues"`
-	AuthorizationEligible bool                            `json:"authorizationEligible"`
-	ActivationWitness     []OperationalActivationWitness  `json:"activationWitness,omitempty"`
-	Digest                string                          `json:"digest"`
+	APIVersion               string                               `json:"apiVersion"`
+	Kind                     string                               `json:"kind"`
+	Policy                   string                               `json:"policy"`
+	BaseCommit               string                               `json:"baseCommit"`
+	TargetCommit             string                               `json:"targetCommit"`
+	ChangedFilesDigest       string                               `json:"changedFilesDigest"`
+	ImagePlanDigest          string                               `json:"imagePlanDigest"`
+	PlanDigest               string                               `json:"planDigest"`
+	AdapterBindingDigest     string                               `json:"adapterBindingDigest"`
+	ImageTargets             []OperationalImageRolloutTarget      `json:"imageTargets"`
+	ConsumerDomains          []Domain                             `json:"consumerDomains"`
+	ImageRolloutDomains      []Domain                             `json:"imageRolloutDomains"`
+	RenderedDomains          []Domain                             `json:"renderedDomains"`
+	AdapterDomains           []Domain                             `json:"adapterDomains"`
+	IntersectionDomains      []Domain                             `json:"intersectionDomains"`
+	AdapterBindings          []OperationalAdapterBinding          `json:"adapterBindings"`
+	ConservativeOutcome      Outcome                              `json:"conservativeOutcome"`
+	ConservativeDomains      []Domain                             `json:"conservativeDomains"`
+	ConservativeDomain       Domain                               `json:"conservativeDomain,omitempty"`
+	Observation              Outcome                              `json:"observation"`
+	CandidateDomain          Domain                               `json:"candidateDomain,omitempty"`
+	ClassificationAgrees     bool                                 `json:"classificationAgrees"`
+	Issues                   []string                             `json:"issues"`
+	AuthorizationEligible    bool                                 `json:"authorizationEligible"`
+	ActivationWitness        []OperationalActivationWitness       `json:"activationWitness,omitempty"`
+	RenderedOnlyObservations []RenderedOnlyOperationalObservation `json:"renderedOnlyObservations,omitempty"`
+	Digest                   string                               `json:"digest"`
+}
+
+// RenderedOnlyOperationalObservation is a non-authorizing parallel
+// classification for chart/config-only changes. It is derived from the exact
+// activation witness only when no artifact was built or activated. The active
+// v2 intersection and AuthorizationEligible predicate deliberately do not
+// consume it.
+type RenderedOnlyOperationalObservation struct {
+	Policy                     string   `json:"policy"`
+	BuildArtifactsEmpty        bool     `json:"buildArtifactsEmpty"`
+	ImageActivationsEmpty      bool     `json:"imageActivationsEmpty"`
+	BuiltOnlyArtifactsEmpty    bool     `json:"builtOnlyArtifactsEmpty"`
+	UnresolvedActivationsEmpty bool     `json:"unresolvedActivationsEmpty"`
+	ActivationEvidenceComplete bool     `json:"activationEvidenceComplete"`
+	Applicable                 bool     `json:"applicable"`
+	RenderedDomains            []Domain `json:"renderedDomains"`
+	AdapterDomains             []Domain `json:"adapterDomains"`
+	IntersectionDomains        []Domain `json:"intersectionDomains"`
+	Observation                Outcome  `json:"observation"`
+	CandidateDomain            Domain   `json:"candidateDomain,omitempty"`
+	Issues                     []string `json:"issues"`
 }
 
 // OperationalActivationWitness embeds the exact build/activation partition
@@ -327,6 +351,49 @@ func BuildOperationalDomainEvidenceFromActivation(
 	ownershipDigest string,
 	plan Plan,
 ) (OperationalDomainEvidence, error) {
+	return buildOperationalDomainEvidenceFromActivation(
+		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
+		ownershipDigest, plan, OperationalActivationEvidencePolicy,
+	)
+}
+
+// BuildOperationalDomainEvidenceFromActivationReportOnly emits the v3
+// parallel rendered-only observation while preserving the v2 authorization
+// inputs and decision. It is intentionally separate so existing callers can
+// continue producing and verifying the exact v2 contract.
+func BuildOperationalDomainEvidenceFromActivationReportOnly(
+	changed ChangedFileEvidence,
+	buildPlan BuildArtifactPlan,
+	activationPlan ImageActivationPlan,
+	activationEvidence ImageActivationEvidence,
+	activationRendered RenderedClassification,
+	baseManifestDigest string,
+	targetManifestDigest string,
+	immutableTargetManifestDigest string,
+	ownershipDigest string,
+	plan Plan,
+) (OperationalDomainEvidence, error) {
+	return buildOperationalDomainEvidenceFromActivation(
+		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
+		ownershipDigest, plan, OperationalActivationReportPolicy,
+	)
+}
+
+func buildOperationalDomainEvidenceFromActivation(
+	changed ChangedFileEvidence,
+	buildPlan BuildArtifactPlan,
+	activationPlan ImageActivationPlan,
+	activationEvidence ImageActivationEvidence,
+	activationRendered RenderedClassification,
+	baseManifestDigest string,
+	targetManifestDigest string,
+	immutableTargetManifestDigest string,
+	ownershipDigest string,
+	plan Plan,
+	policy string,
+) (OperationalDomainEvidence, error) {
 	if err := VerifyBuildArtifactPlan(buildPlan); err != nil {
 		return OperationalDomainEvidence{}, fmt.Errorf("operational activation build plan: %w", err)
 	}
@@ -427,7 +494,7 @@ func BuildOperationalDomainEvidenceFromActivation(
 	}
 	report := OperationalDomainEvidence{
 		APIVersion: OperationalEvidenceAPIVersion, Kind: OperationalEvidenceKind,
-		Policy:     OperationalActivationEvidencePolicy,
+		Policy:     policy,
 		BaseCommit: changed.BaseCommit(), TargetCommit: changed.TargetCommit(),
 		ChangedFilesDigest: changed.Digest(), ImagePlanDigest: activationPlan.Digest,
 		PlanDigest: plan.PlanDigest, AdapterBindingDigest: operationalAdapterBindingDigest(bindings),
@@ -437,6 +504,12 @@ func BuildOperationalDomainEvidenceFromActivation(
 		AdapterBindings: bindings, ConservativeOutcome: plan.Result,
 		ConservativeDomains: canonicalDomains(plan.Domains), ConservativeDomain: plan.SelectedDomain,
 		Observation: OutcomeUnknown, Issues: issues, ActivationWitness: []OperationalActivationWitness{witness},
+	}
+	if policy == OperationalActivationReportPolicy {
+		observation := buildRenderedOnlyOperationalObservation(
+			buildPlan, activationPlan, activationEvidence, activationRendered, bindings,
+		)
+		report.RenderedOnlyObservations = []RenderedOnlyOperationalObservation{observation}
 	}
 	if len(report.Issues) == 0 {
 		switch len(report.IntersectionDomains) {
@@ -496,7 +569,8 @@ func DecodeAndVerifyOperationalDomainEvidence(reader io.Reader, expectedDigest s
 // exact activation eligibility predicate.
 func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 	if report.APIVersion != OperationalEvidenceAPIVersion || report.Kind != OperationalEvidenceKind ||
-		(report.Policy != OperationalEvidencePolicy && report.Policy != OperationalActivationEvidencePolicy) {
+		(report.Policy != OperationalEvidencePolicy && report.Policy != OperationalActivationEvidencePolicy &&
+			report.Policy != OperationalActivationReportPolicy) {
 		return fmt.Errorf("operational domain evidence identity is unsupported")
 	}
 	if err := validateTrustedGitCommit(report.BaseCommit, "operational evidence base commit"); err != nil {
@@ -533,6 +607,9 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 		if len(report.ActivationWitness) != 0 {
 			return fmt.Errorf("legacy operational evidence contains an activation witness")
 		}
+		if len(report.RenderedOnlyObservations) != 0 {
+			return fmt.Errorf("legacy operational evidence contains a rendered-only observation")
+		}
 		embeddedImagePlan := OperationalImageRolloutPlan{
 			APIVersion: OperationalImagePlanAPIVersion, Kind: OperationalImagePlanKind,
 			Policy: OperationalImagePlanPolicy, BaseCommit: report.BaseCommit,
@@ -542,12 +619,31 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 		if err := VerifyOperationalImageRolloutPlan(embeddedImagePlan); err != nil {
 			return fmt.Errorf("operational evidence embedded image plan: %w", err)
 		}
-	case OperationalActivationEvidencePolicy:
+	case OperationalActivationEvidencePolicy, OperationalActivationReportPolicy:
 		if len(report.ActivationWitness) != 1 {
 			return fmt.Errorf("operational activation evidence requires one exact witness")
 		}
 		if err := verifyOperationalActivationWitness(report, report.ActivationWitness[0]); err != nil {
 			return err
+		}
+		if report.Policy == OperationalActivationEvidencePolicy {
+			if len(report.RenderedOnlyObservations) != 0 {
+				return fmt.Errorf("v2 operational activation evidence contains a rendered-only observation")
+			}
+		} else {
+			if len(report.RenderedOnlyObservations) != 1 {
+				return fmt.Errorf("v3 operational activation evidence requires one rendered-only observation")
+			}
+			expected := buildRenderedOnlyOperationalObservation(
+				report.ActivationWitness[0].BuildPlan,
+				report.ActivationWitness[0].Plan,
+				report.ActivationWitness[0].Evidence,
+				report.ActivationWitness[0].Rendered,
+				fixedOperationalBindings(),
+			)
+			if !reflect.DeepEqual(report.RenderedOnlyObservations[0], expected) {
+				return fmt.Errorf("v3 operational rendered-only observation mismatch")
+			}
 		}
 	}
 	if !reflect.DeepEqual(report.AdapterBindings, fixedOperationalBindings()) {
@@ -687,6 +783,65 @@ func hasOperationalIssue(issues []string, expected string) bool {
 	return false
 }
 
+func buildRenderedOnlyOperationalObservation(
+	buildPlan BuildArtifactPlan,
+	activationPlan ImageActivationPlan,
+	activationEvidence ImageActivationEvidence,
+	rendered RenderedClassification,
+	bindings []OperationalAdapterBinding,
+) RenderedOnlyOperationalObservation {
+	issues := make([]string, 0)
+	renderedDomains := checkedOperationalDomains(rendered.Domains, "rendered-only", &issues)
+	if len(rendered.Unknown) != 0 {
+		issues = append(issues, "rendered-only immutable rendered-object evidence is incomplete")
+	}
+	if len(classificationEvidenceErrors("rendered-only immutable rendered-object", rendered.Domains, rendered.Evidence)) != 0 {
+		issues = append(issues, "rendered-only declared domains differ from their evidence")
+	}
+	adapterDomains := operationalAdapterDomains(renderedDomains, bindings, &issues)
+	intersection := intersectOperationalDomains(renderedDomains, adapterDomains)
+
+	if len(buildPlan.Artifacts) != 0 {
+		issues = append(issues, "rendered-only build artifact plan is not empty")
+	}
+	if len(activationPlan.Activations) != 0 {
+		issues = append(issues, "rendered-only image activation plan is not empty")
+	}
+	if len(activationEvidence.BuiltOnlyArtifacts) != 0 {
+		issues = append(issues, "rendered-only built-only artifact set is not empty")
+	}
+	if !activationEvidence.Complete || len(activationEvidence.Unresolved) != 0 {
+		issues = append(issues, "rendered-only image activation evidence is incomplete")
+	}
+	issues = canonicalOperationalStrings(issues)
+
+	observation := RenderedOnlyOperationalObservation{
+		Policy:                     OperationalRenderedOnlyPolicy,
+		BuildArtifactsEmpty:        len(buildPlan.Artifacts) == 0,
+		ImageActivationsEmpty:      len(activationPlan.Activations) == 0,
+		BuiltOnlyArtifactsEmpty:    len(activationEvidence.BuiltOnlyArtifacts) == 0,
+		UnresolvedActivationsEmpty: len(activationEvidence.Unresolved) == 0,
+		ActivationEvidenceComplete: activationEvidence.Complete,
+		Applicable: len(buildPlan.Artifacts) == 0 && len(activationPlan.Activations) == 0 &&
+			len(activationEvidence.BuiltOnlyArtifacts) == 0 && len(activationEvidence.Unresolved) == 0 &&
+			activationEvidence.Complete,
+		RenderedDomains: canonicalDomains(renderedDomains), AdapterDomains: canonicalDomains(adapterDomains),
+		IntersectionDomains: canonicalDomains(intersection), Observation: OutcomeUnknown, Issues: issues,
+	}
+	if observation.Applicable && len(observation.Issues) == 0 {
+		switch len(observation.IntersectionDomains) {
+		case 0:
+			observation.Observation = OutcomeZero
+		case 1:
+			observation.Observation = OutcomeSingle
+			observation.CandidateDomain = observation.IntersectionDomains[0]
+		default:
+			observation.Observation = OutcomeMultiple
+		}
+	}
+	return observation
+}
+
 // ActivateOperationalPlan returns a canonically reproducible single-domain
 // plan only when a conservative multiple/unknown result is paired with a
 // complete four-witness operational report. The predecessor plan remains
@@ -717,7 +872,7 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 		report.CandidateDomain != report.IntersectionDomains[0] {
 		return Plan{}, fmt.Errorf("operational activation single-domain evidence mismatch")
 	}
-	if report.Policy == OperationalActivationEvidencePolicy {
+	if report.Policy == OperationalActivationEvidencePolicy || report.Policy == OperationalActivationReportPolicy {
 		witness := report.ActivationWitness[0]
 		if witness.BaseManifestDigest != conservative.Digests.BaseManifest ||
 			witness.TargetManifestDigest != conservative.Digests.TargetManifest ||

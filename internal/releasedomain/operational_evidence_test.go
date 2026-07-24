@@ -86,6 +86,37 @@ func TestActivationOperationalEvidenceUsesOnlyLiveRelativeActivations(t *testing
 	if err != nil || !reflect.DeepEqual(decoded, report) {
 		t.Fatalf("activation report round trip\n got=%#v\nwant=%#v\nerr=%v", decoded, report, err)
 	}
+	reportOnly, err := BuildOperationalDomainEvidenceFromActivationReportOnly(
+		changed, input.BuildPlan, activationPlan, activationEvidence, activationRendered,
+		input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil || !reportOnly.AuthorizationEligible || reportOnly.CandidateDomain != report.CandidateDomain ||
+		len(reportOnly.RenderedOnlyObservations) != 1 || reportOnly.RenderedOnlyObservations[0].Applicable {
+		t.Fatalf("report-only extension changed active authorization: report=%#v err=%v", reportOnly, err)
+	}
+	v2Plan, err := ActivateOperationalPlan(input.ReleasePlan, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v3Plan, err := ActivateOperationalPlan(input.ReleasePlan, reportOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2Plan.Result != v3Plan.Result || v2Plan.SelectedDomain != v3Plan.SelectedDomain ||
+		!equalDomains(v2Plan.Domains, v3Plan.Domains) {
+		t.Fatalf("v2/v3 authorization decisions differ: v2=%#v v3=%#v", v2Plan, v3Plan)
+	}
+	drifted := reportOnly
+	drifted.ActivationWitness = append([]OperationalActivationWitness(nil), reportOnly.ActivationWitness...)
+	drifted.ActivationWitness[0].TargetManifestDigest = md0Digest("9")
+	drifted.Digest = operationalEvidenceDigest(drifted)
+	if err := VerifyOperationalDomainEvidence(drifted); err != nil {
+		t.Fatalf("externally bound v3 witness should remain structurally verifiable: %v", err)
+	}
+	if _, err := ActivateOperationalPlan(input.ReleasePlan, drifted); err == nil {
+		t.Fatal("v3 target-manifest witness drift bypassed conservative-plan binding")
+	}
 
 	mutated := report
 	mutated.ActivationWitness = append([]OperationalActivationWitness(nil), report.ActivationWitness...)
@@ -115,6 +146,81 @@ func TestActivationOperationalEvidenceUsesOnlyLiveRelativeActivations(t *testing
 	incomplete.Digest = operationalEvidenceDigest(incomplete)
 	if err := VerifyOperationalDomainEvidence(incomplete); err == nil {
 		t.Fatal("incomplete activation witness was accepted after digest recomputation")
+	}
+}
+
+func TestActivationOperationalEvidenceReportsRenderedOnlyCandidateWithoutAuthorizingIt(t *testing.T) {
+	base := md1Deployment("fugue-api", "api", "registry.example/api:live")
+	target := strings.Replace(base,
+		"    metadata:\n      labels:",
+		"    metadata:\n      annotations:\n        fugue.pro/source-commit: "+md0TargetCommit+"\n      labels:",
+		1,
+	)
+	input := md1ActivationFixture(
+		t, base, target,
+		[]md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}},
+		nil,
+	)
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{Status: ChangeModified, Path: "deploy/helm/fugue/templates/deployment.yaml"}},
+	}
+	report, err := BuildOperationalDomainEvidenceFromActivationReportOnly(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Policy != OperationalActivationReportPolicy || report.AuthorizationEligible || len(report.RenderedOnlyObservations) != 1 {
+		t.Fatalf("rendered-only report = %#v", report)
+	}
+	observation := report.RenderedOnlyObservations[0]
+	if !observation.Applicable || observation.Observation != OutcomeSingle ||
+		observation.CandidateDomain != DomainControlPlane ||
+		!equalDomains(observation.IntersectionDomains, []Domain{DomainControlPlane}) || len(observation.Issues) != 0 {
+		t.Fatalf("rendered-only report = %#v", report)
+	}
+	if !containsOperationalIssue(report.Issues, "image activation domains differ from immutable rendered-object domains") {
+		t.Fatalf("active authorization inputs were unexpectedly relaxed: %#v", report)
+	}
+
+	v2, err := BuildOperationalDomainEvidenceFromActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil || v2.Policy != OperationalActivationEvidencePolicy || len(v2.RenderedOnlyObservations) != 0 {
+		t.Fatalf("v2 compatibility drifted: report=%#v err=%v", v2, err)
+	}
+
+	encoded, err := MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeAndVerifyOperationalDomainEvidence(bytes.NewReader(encoded), report.Digest)
+	if err != nil || !reflect.DeepEqual(decoded, report) {
+		t.Fatalf("rendered-only report round trip\n got=%#v\nwant=%#v\nerr=%v", decoded, report, err)
+	}
+	mutated := report
+	mutated.RenderedOnlyObservations = append([]RenderedOnlyOperationalObservation(nil), report.RenderedOnlyObservations...)
+	mutated.RenderedOnlyObservations[0].CandidateDomain = DomainBackup
+	mutated.Digest = operationalEvidenceDigest(mutated)
+	if err := VerifyOperationalDomainEvidence(mutated); err == nil {
+		t.Fatal("mutated rendered-only observation unexpectedly verified")
 	}
 }
 

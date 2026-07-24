@@ -163,6 +163,8 @@ objectRules:
 	}
 	report, err := releasedomain.DecodeAndVerifyOperationalDomainEvidence(bytes.NewReader(encoded), identity.Digest)
 	if err != nil || !report.AuthorizationEligible || report.CandidateDomain != releasedomain.DomainControlPlane ||
+		report.Policy != releasedomain.OperationalActivationReportPolicy || len(report.RenderedOnlyObservations) != 1 ||
+		report.RenderedOnlyObservations[0].Applicable ||
 		len(report.ImageTargets) != 1 || report.ImageTargets[0].Name != "api" ||
 		len(report.ActivationWitness) != 1 ||
 		!reflect.DeepEqual(report.ActivationWitness[0].Evidence.BuiltOnlyArtifacts, []string{"edge"}) {
