@@ -27,9 +27,13 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
+        fugue.pro/source-commit: {{ .Values.controller.image.tag | quote }}
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
         checksum/platform-component-identity-secret: {{ include "fugue.platformComponentIdentitySecretChecksum" . }}
         {{- with .Values.podAnnotations }}
+        {{- if hasKey . "fugue.pro/source-commit" }}
+        {{- fail "podAnnotations must not override reserved fugue.pro/source-commit annotation" }}
+        {{- end }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
