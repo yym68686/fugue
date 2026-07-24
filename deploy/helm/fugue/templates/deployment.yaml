@@ -28,14 +28,10 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        fugue.pro/source-commit: {{ .Values.api.image.tag | quote }}
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
         checksum/platform-component-identity-secret: {{ include "fugue.platformComponentIdentitySecretChecksum" . }}
         checksum/headscale-config: {{ include (print $.Template.BasePath "/headscale-config.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
-        {{- if hasKey . "fugue.pro/source-commit" }}
-        {{- fail "podAnnotations must not override reserved fugue.pro/source-commit annotation" }}
-        {{- end }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
