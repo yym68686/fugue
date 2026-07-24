@@ -8476,6 +8476,30 @@ PY
   cp -R "${source_repo}/deploy/helm/fugue" "${fingerprint_repo}/deploy/helm/fugue"
   REPO_ROOT="${fingerprint_repo}"
   image_cache_strategy_target_fingerprints_match || fail "exact image-cache strategy migration chart tree fingerprint must pass"
+  python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/deployment.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+needle = "      annotations:\n"
+if body.count(needle) != 1:
+    raise SystemExit("API pod-template annotations block drifted")
+path.write_text(body.replace(needle, needle + "        fugue.pro/source-commit: {{ .Values.api.image.tag | quote }}\n", 1))
+PY
+  if image_cache_strategy_target_fingerprints_match; then
+    fail "chart fingerprint expand must reject a partial source-commit annotation tree"
+  fi
+  python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/controller-deployment.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+needle = "      annotations:\n"
+if body.count(needle) != 1:
+    raise SystemExit("controller pod-template annotations block drifted")
+path.write_text(body.replace(needle, needle + "        fugue.pro/source-commit: {{ .Values.controller.image.tag | quote }}\n", 1))
+PY
+  image_cache_strategy_target_fingerprints_match || fail "exact future source-commit annotation chart fingerprint must pass"
   printf '\n{{/* unrelated helper mutation */}}\n' >>"${fingerprint_repo}/deploy/helm/fugue/templates/_helpers.tpl"
   if image_cache_strategy_target_fingerprints_match; then
     fail "image-cache strategy migration fingerprint must reject any shared chart runtime mutation"
