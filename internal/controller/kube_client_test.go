@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"fugue/internal/runtime"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -63,6 +65,52 @@ func TestGetPodIPReadsStatusPodIP(t *testing.T) {
 	}
 	if ip != "10.42.6.74" {
 		t.Fatalf("expected target pod IP, got %q", ip)
+	}
+}
+
+func TestPatchManagedAppStatusIncludesZeroReplicaCounts(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Fatalf("unexpected request method %s", r.Method)
+		}
+		if r.URL.Path != "/apis/fugue.pro/v1alpha1/namespaces/tenant-a/managedapps/app-demo/status" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/merge-patch+json" {
+			t.Fatalf("unexpected content type %q", got)
+		}
+
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode status patch: %v", err)
+		}
+		status, ok := body["status"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected status object, got %#v", body["status"])
+		}
+		for _, field := range []string{"readyReplicas", "desiredReplicas"} {
+			value, found := status[field]
+			if !found {
+				t.Fatalf("expected zero-valued %s to be present in merge patch: %#v", field, status)
+			}
+			if value != float64(0) {
+				t.Fatalf("expected %s=0, got %#v", field, value)
+			}
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := &kubeClient{
+		client:      server.Client(),
+		baseURL:     server.URL,
+		bearerToken: "token",
+		namespace:   "tenant-a",
+	}
+	if err := client.patchManagedAppStatus(context.Background(), "tenant-a", "app-demo", runtime.ManagedAppStatus{}); err != nil {
+		t.Fatalf("patch managed app status: %v", err)
 	}
 }
 

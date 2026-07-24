@@ -69,8 +69,8 @@ type ManagedAppSpec struct {
 type ManagedAppStatus struct {
 	Phase                   string                        `json:"phase,omitempty"`
 	Message                 string                        `json:"message,omitempty"`
-	ReadyReplicas           int                           `json:"readyReplicas,omitempty"`
-	DesiredReplicas         int                           `json:"desiredReplicas,omitempty"`
+	ReadyReplicas           int                           `json:"readyReplicas"`
+	DesiredReplicas         int                           `json:"desiredReplicas"`
 	ObservedGeneration      int64                         `json:"observedGeneration,omitempty"`
 	LastAppliedSpecHash     string                        `json:"lastAppliedSpecHash,omitempty"`
 	LastAppliedTime         string                        `json:"lastAppliedTime,omitempty"`
