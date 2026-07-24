@@ -74,13 +74,13 @@ type ManagedAppStatus struct {
 	ObservedGeneration      int64                         `json:"observedGeneration,omitempty"`
 	LastAppliedSpecHash     string                        `json:"lastAppliedSpecHash,omitempty"`
 	LastAppliedTime         string                        `json:"lastAppliedTime,omitempty"`
-	CurrentReleaseKey       string                        `json:"currentReleaseKey,omitempty"`
-	CurrentReleaseStartedAt string                        `json:"currentReleaseStartedAt,omitempty"`
-	CurrentReleaseReadyAt   string                        `json:"currentReleaseReadyAt,omitempty"`
-	PendingReleaseKey       string                        `json:"pendingReleaseKey,omitempty"`
-	PendingReleaseStartedAt string                        `json:"pendingReleaseStartedAt,omitempty"`
-	BackingServices         []ManagedBackingServiceStatus `json:"backingServices,omitempty"`
-	Conditions              []ManagedAppCondition         `json:"conditions,omitempty"`
+	CurrentReleaseKey       string                        `json:"currentReleaseKey"`
+	CurrentReleaseStartedAt string                        `json:"currentReleaseStartedAt"`
+	CurrentReleaseReadyAt   string                        `json:"currentReleaseReadyAt"`
+	PendingReleaseKey       string                        `json:"pendingReleaseKey"`
+	PendingReleaseStartedAt string                        `json:"pendingReleaseStartedAt"`
+	BackingServices         []ManagedBackingServiceStatus `json:"backingServices"`
+	Conditions              []ManagedAppCondition         `json:"conditions"`
 }
 
 type ManagedBackingServiceStatus struct {

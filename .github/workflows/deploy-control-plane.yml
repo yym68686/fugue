@@ -248,6 +248,7 @@ jobs:
           bash scripts/test_release_policy_recovery_workflow.sh
           bash scripts/test_release_domain_safety.sh
           FUGUE_REQUIRE_NODE_LOCAL_DNS_TEST_DOCKER=true bash scripts/test_node_local_dns_release.sh
+          python3 scripts/test_validate_managed_app_crd_transition.py
           python3 scripts/test_verify_stale_release_recovery.py
 
       - name: Run Go tests
@@ -554,6 +555,10 @@ jobs:
             echo "control-plane auto deploy refuses postgres/registry/headscale changes; use an independent controlled release window"
             exit 1
           fi
+
+      - name: Synchronize additive ManagedApp CRD schema
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        run: bash ./scripts/sync_managed_app_crd.sh
 
       - name: Prepare authoritative DNS DiG runtime
         if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}

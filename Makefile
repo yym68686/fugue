@@ -10,6 +10,7 @@ test:
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_control_plane_observability_assets.sh
 	bash ./scripts/test_prepare_authoritative_dns_dig.sh
+	python3 ./scripts/test_validate_managed_app_crd_transition.py
 	bash ./scripts/test_release_domain_safety.sh
 	env GOCACHE=$(GOCACHE) go test ./...
 
@@ -17,6 +18,7 @@ test-scripts:
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_control_plane_observability_assets.sh
 	bash ./scripts/test_prepare_authoritative_dns_dig.sh
+	python3 ./scripts/test_validate_managed_app_crd_transition.py
 	bash ./scripts/test_release_domain_safety.sh
 
 generate-openapi:

@@ -2823,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "1ed163622569afd38a3bd2535e2f350656290db49c952e8ff8cac542d5aef013")
+	assertWorkflowSourceDigest(t, data, "0633725a05f3939f1efd83f6f92567842b17654b87bd584218ba1b36e634f5e5")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2847,7 +2847,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
 		"release-gate/Prepare pinned ripgrep for release safety contracts":                  "fd3284573ed17f45090180e1d168e8c0f143e088586882168e5cf60637390761",
 		"release-gate/Verify generated OpenAPI artifacts":                                   "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
-		"release-gate/Verify release-domain safety contracts":                               "0a71d9858c02ceb5aa8aa188313276dc4a63db5dae5cc856323c533fd1051144",
+		"release-gate/Verify release-domain safety contracts":                               "02eddf4f80a6c46526c9f528678c78600506a75870f953d3c20527979e3307da",
 		"release-gate/Run Go tests":                                                         "1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3",
 		"build/Compute image metadata":                                                      "12f6dcc38d6f1597416aae34a1c2fa4efda4c6353c5fcbc0eee6c66ee3ccb5b6",
 		"build/Compute image build plan":                                                    "e545c87a2385902616eb8fa652954970e0de7e47ffe4c8fea46eb03cb71e5ea0",
@@ -2856,6 +2856,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Build private release-domain tools":                                         "1017c0bb023803233350b68c1b434ca34c01e82d04bc0ad8a80b03f2c437ead2",
 		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
 		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
+		"deploy/Synchronize additive ManagedApp CRD schema":                                 "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",
 		"deploy/Prepare authoritative DNS DiG runtime":                                      "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
 		"deploy/Verify local deploy prerequisites":                                          "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
 		"deploy/Explain runner and fail closed target":                                      "afab1c1aa3b6305ac3fdf982640fce8d81781c339cea714f11e2bde65a3b4475",
@@ -2918,6 +2919,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "run"},
 				{"name", "if", "env", "run"},
 				{"name", "if", "env", "run"},
+				{"name", "if", "run"},
 				{"name", "if", "run"},
 				{"name", "if", "run"},
 				{"name", "if", "env", "run"},
@@ -3350,6 +3352,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 
 	statefulGuard := workflowStepByName(t, deploy, "Guard stateful component files")
 	const nonGenesisCondition = "${{ needs.release-baseline.outputs.is_genesis != 'true' }}"
+	crdSync := workflowStepByName(t, deploy, "Synchronize additive ManagedApp CRD schema")
+	if strings.TrimSpace(crdSync.If) != nonGenesisCondition {
+		t.Fatalf("managed app CRD sync must run only for ordinary releases: %q", crdSync.If)
+	}
+	if strings.TrimSpace(crdSync.Run) != "bash ./scripts/sync_managed_app_crd.sh" {
+		t.Fatalf("managed app CRD sync must use the reviewed bounded script: %q", crdSync.Run)
+	}
 	genesisReachable := map[string]string{
 		"Checkout":                              "",
 		"Setup Go":                              "",

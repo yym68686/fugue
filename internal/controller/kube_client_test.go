@@ -99,6 +99,30 @@ func TestPatchManagedAppStatusIncludesZeroReplicaCounts(t *testing.T) {
 				t.Fatalf("expected %s=0, got %#v", field, value)
 			}
 		}
+		for _, field := range []string{
+			"currentReleaseKey",
+			"currentReleaseStartedAt",
+			"currentReleaseReadyAt",
+			"pendingReleaseKey",
+			"pendingReleaseStartedAt",
+		} {
+			value, found := status[field]
+			if !found {
+				t.Fatalf("expected empty %s to be present in merge patch: %#v", field, status)
+			}
+			if value != "" {
+				t.Fatalf("expected %s to be empty, got %#v", field, value)
+			}
+		}
+		for _, field := range []string{"backingServices", "conditions"} {
+			value, found := status[field]
+			if !found {
+				t.Fatalf("expected nil %s to be present in merge patch: %#v", field, status)
+			}
+			if value != nil {
+				t.Fatalf("expected %s to be null, got %#v", field, value)
+			}
+		}
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
