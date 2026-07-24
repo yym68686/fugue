@@ -8486,12 +8486,22 @@ bindings = (
     (Path(sys.argv[1]), "        fugue.pro/source-commit: {{ .Values.api.image.tag | quote }}\n"),
     (Path(sys.argv[2]), "        fugue.pro/source-commit: {{ .Values.controller.image.tag | quote }}\n"),
 )
+guard = (
+    '        {{- if hasKey . "fugue.pro/source-commit" }}\n'
+    '        {{- fail "podAnnotations must not override reserved fugue.pro/source-commit annotation" }}\n'
+    '        {{- end }}\n'
+)
 loaded = [(path, binding, path.read_text()) for path, binding in bindings]
 counts = tuple(body.count(binding) for _, binding, body in loaded)
 if counts not in ((0, 0), (1, 1)):
     raise SystemExit(f"source-commit annotation pair drifted: counts={counts}")
+guard_counts = tuple(body.count(guard) for _, _, body in loaded)
+if guard_counts not in ((0, 0), (1, 1)):
+    raise SystemExit(f"source-commit reserved-key guard pair drifted: counts={guard_counts}")
+if guard_counts == (1, 1) and counts != (1, 1):
+    raise SystemExit("reserved-key guards require the complete source-commit annotation pair")
 for path, binding, body in loaded:
-    path.write_text(body.replace(binding, "", 1))
+    path.write_text(body.replace(binding, "", 1).replace(guard, "", 1))
 PY
   image_cache_strategy_target_fingerprints_match || fail "normalized current chart tree fingerprint must pass"
   python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/deployment.yaml" <<'PY'
@@ -8518,6 +8528,40 @@ if body.count(needle) != 1:
 path.write_text(body.replace(needle, needle + "        fugue.pro/source-commit: {{ .Values.controller.image.tag | quote }}\n", 1))
 PY
   image_cache_strategy_target_fingerprints_match || fail "exact future source-commit annotation chart fingerprint must pass"
+  python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/deployment.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+needle = "        {{- with .Values.podAnnotations }}\n"
+guard = (
+    '        {{- if hasKey . "fugue.pro/source-commit" }}\n'
+    '        {{- fail "podAnnotations must not override reserved fugue.pro/source-commit annotation" }}\n'
+    '        {{- end }}\n'
+)
+if body.count(needle) != 1:
+    raise SystemExit("API podAnnotations block drifted")
+path.write_text(body.replace(needle, needle + guard, 1))
+PY
+  if image_cache_strategy_target_fingerprints_match; then
+    fail "chart fingerprint expand must reject a partial source-commit reserved-key guard tree"
+  fi
+  python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/controller-deployment.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+needle = "        {{- with .Values.podAnnotations }}\n"
+guard = (
+    '        {{- if hasKey . "fugue.pro/source-commit" }}\n'
+    '        {{- fail "podAnnotations must not override reserved fugue.pro/source-commit annotation" }}\n'
+    '        {{- end }}\n'
+)
+if body.count(needle) != 1:
+    raise SystemExit("controller podAnnotations block drifted")
+path.write_text(body.replace(needle, needle + guard, 1))
+PY
+  image_cache_strategy_target_fingerprints_match || fail "exact future guarded source-commit chart fingerprint must pass"
   printf '\n{{/* unrelated helper mutation */}}\n' >>"${fingerprint_repo}/deploy/helm/fugue/templates/_helpers.tpl"
   if image_cache_strategy_target_fingerprints_match; then
     fail "image-cache strategy migration fingerprint must reject any shared chart runtime mutation"

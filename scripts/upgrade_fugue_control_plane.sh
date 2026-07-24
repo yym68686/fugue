@@ -3113,6 +3113,7 @@ image_cache_strategy_target_fingerprints_match() {
   CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" \
     EXPECTED_SHA256_CURRENT="8c6f0185c00055588341f741dd5a26b1c928865fb9550ec422238b9c5a18e25b" \
     EXPECTED_SHA256_SOURCE_COMMIT="445819f02f3fceaf12fc4a84785ec761248cf25ec4fbe4150e9ff12a998aec1f" \
+    EXPECTED_SHA256_SOURCE_COMMIT_GUARDED="4c5983cecb816e507bbf5e0b3882436b49e1f9f16ef2a59039030bc8bbbfaa63" \
     python3 -c '
 import hashlib
 import os
@@ -3136,6 +3137,7 @@ for path in files:
 expected = {
     os.environ["EXPECTED_SHA256_CURRENT"],
     os.environ["EXPECTED_SHA256_SOURCE_COMMIT"],
+    os.environ["EXPECTED_SHA256_SOURCE_COMMIT_GUARDED"],
 }
 raise SystemExit(0 if digest.hexdigest() in expected else 1)
 '
