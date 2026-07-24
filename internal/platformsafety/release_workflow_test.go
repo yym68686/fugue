@@ -2823,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "0633725a05f3939f1efd83f6f92567842b17654b87bd584218ba1b36e634f5e5")
+	assertWorkflowSourceDigest(t, data, "d31b39f2b1378843cadaeb82e7e72d14f19cf00829a83694efa423d159cdef1a")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -3209,6 +3209,11 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	if deploy.ContinueOnError {
 		t.Fatal("deploy job must fail closed")
+	}
+	setupGo := workflowStepByName(t, deploy, "Setup Go")
+	if setupGo.Uses != "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16" ||
+		!reflect.DeepEqual(setupGo.With, map[string]string{"go-version-file": "go.mod", "cache": "false"}) {
+		t.Fatalf("self-hosted deploy must disable Actions Go cache restore: %+v", setupGo)
 	}
 	buildTools := workflowStepByName(t, deploy, "Build private release-domain tools")
 	for _, required := range []string{

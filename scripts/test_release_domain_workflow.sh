@@ -144,6 +144,7 @@ assert_equal(deploy["permissions"], {"actions" => "read", "contents" => "read"},
 assert_equal(deploy["continue-on-error"], nil, "deploy continue-on-error")
 setup_go = step(deploy, "Setup Go")
 assert_equal(setup_go["uses"], "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16", "deploy setup-go pin")
+assert_equal(setup_go["with"], {"go-version-file" => "go.mod", "cache" => false}, "deploy setup-go persistent-runner cache policy")
 build_tools = step(deploy, "Build private release-domain tools")
 for fragment in [
   '${RUNNER_TEMP}/fugue-release-tools',
