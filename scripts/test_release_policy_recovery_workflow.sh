@@ -85,6 +85,7 @@ expected_safety_commands = [
   expected,
   "bash scripts/test_release_domain_safety.sh",
   "FUGUE_REQUIRE_NODE_LOCAL_DNS_TEST_DOCKER=true bash scripts/test_node_local_dns_release.sh",
+  "python3 scripts/test_validate_managed_app_crd_transition.py",
   "python3 scripts/test_verify_stale_release_recovery.py",
 ]
 expected_ripgrep_setup = <<~'BASH'
