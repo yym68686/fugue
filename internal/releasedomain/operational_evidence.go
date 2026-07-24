@@ -18,12 +18,14 @@ const (
 	OperationalImagePlanKind       = "OperationalImageRolloutPlan"
 	OperationalImagePlanPolicy     = "exact-image-rollout-targets-v1"
 
-	OperationalEvidenceAPIVersion       = "release-domain.fugue.dev/v1"
-	OperationalEvidenceKind             = "OperationalDomainEvidence"
-	OperationalEvidencePolicy           = "consumer-build-render-adapter-intersection-v1"
-	OperationalActivationEvidencePolicy = "consumer-activation-render-adapter-intersection-v2"
-	OperationalActivationReportPolicy   = "consumer-activation-render-adapter-intersection-v3-report-only"
-	OperationalRenderedOnlyPolicy       = "empty-build-activation-render-adapter-v1"
+	OperationalEvidenceAPIVersion           = "release-domain.fugue.dev/v1"
+	OperationalEvidenceKind                 = "OperationalDomainEvidence"
+	OperationalEvidencePolicy               = "consumer-build-render-adapter-intersection-v1"
+	OperationalActivationEvidencePolicy     = "consumer-activation-render-adapter-intersection-v2"
+	OperationalActivationReportPolicy       = "consumer-activation-render-adapter-intersection-v3-report-only"
+	OperationalRenderedOnlyActivationPolicy = "consumer-activation-render-adapter-intersection-v4-rendered-only"
+	OperationalRenderedOnlyPolicy           = "empty-build-activation-render-adapter-v1"
+	operationalRenderedOnlyMismatchIssue    = "image activation domains differ from immutable rendered-object domains"
 
 	maxOperationalEvidenceBytes = 8 << 20
 )
@@ -92,11 +94,10 @@ type OperationalDomainEvidence struct {
 	Digest                   string                               `json:"digest"`
 }
 
-// RenderedOnlyOperationalObservation is a non-authorizing parallel
-// classification for chart/config-only changes. It is derived from the exact
-// activation witness only when no artifact was built or activated. The active
-// v2 intersection and AuthorizationEligible predicate deliberately do not
-// consume it.
+// RenderedOnlyOperationalObservation is a parallel classification for
+// chart/config-only changes. It is derived from the exact activation witness
+// only when no artifact was built or activated. The v3 policy is report-only;
+// only the explicit v4 policy may consume a complete single-domain result.
 type RenderedOnlyOperationalObservation struct {
 	Policy                     string   `json:"policy"`
 	BuildArtifactsEmpty        bool     `json:"buildArtifactsEmpty"`
@@ -381,6 +382,29 @@ func BuildOperationalDomainEvidenceFromActivationReportOnly(
 	)
 }
 
+// BuildOperationalDomainEvidenceFromRenderedOnlyActivation emits the v4
+// evidence policy. It preserves the existing live-relative activation path
+// and additionally permits a complete rendered-only observation to authorize
+// exactly one operational domain.
+func BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+	changed ChangedFileEvidence,
+	buildPlan BuildArtifactPlan,
+	activationPlan ImageActivationPlan,
+	activationEvidence ImageActivationEvidence,
+	activationRendered RenderedClassification,
+	baseManifestDigest string,
+	targetManifestDigest string,
+	immutableTargetManifestDigest string,
+	ownershipDigest string,
+	plan Plan,
+) (OperationalDomainEvidence, error) {
+	return buildOperationalDomainEvidenceFromActivation(
+		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
+		ownershipDigest, plan, OperationalRenderedOnlyActivationPolicy,
+	)
+}
+
 func buildOperationalDomainEvidenceFromActivation(
 	changed ChangedFileEvidence,
 	buildPlan BuildArtifactPlan,
@@ -476,7 +500,7 @@ func buildOperationalDomainEvidenceFromActivation(
 		issues = append(issues, "changed-package consumers do not cover every activated production domain")
 	}
 	if !equalDomains(activationDomains, renderedDomains) {
-		issues = append(issues, "image activation domains differ from immutable rendered-object domains")
+		issues = append(issues, operationalRenderedOnlyMismatchIssue)
 	}
 	if !equalDomains(adapterDomains, activationDomains) {
 		issues = append(issues, "fixed adapter domains differ from image activation domains")
@@ -505,7 +529,7 @@ func buildOperationalDomainEvidenceFromActivation(
 		ConservativeDomains: canonicalDomains(plan.Domains), ConservativeDomain: plan.SelectedDomain,
 		Observation: OutcomeUnknown, Issues: issues, ActivationWitness: []OperationalActivationWitness{witness},
 	}
-	if policy == OperationalActivationReportPolicy {
+	if policy == OperationalActivationReportPolicy || policy == OperationalRenderedOnlyActivationPolicy {
 		observation := buildRenderedOnlyOperationalObservation(
 			buildPlan, activationPlan, activationEvidence, activationRendered, bindings,
 		)
@@ -570,7 +594,8 @@ func DecodeAndVerifyOperationalDomainEvidence(reader io.Reader, expectedDigest s
 func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 	if report.APIVersion != OperationalEvidenceAPIVersion || report.Kind != OperationalEvidenceKind ||
 		(report.Policy != OperationalEvidencePolicy && report.Policy != OperationalActivationEvidencePolicy &&
-			report.Policy != OperationalActivationReportPolicy) {
+			report.Policy != OperationalActivationReportPolicy &&
+			report.Policy != OperationalRenderedOnlyActivationPolicy) {
 		return fmt.Errorf("operational domain evidence identity is unsupported")
 	}
 	if err := validateTrustedGitCommit(report.BaseCommit, "operational evidence base commit"); err != nil {
@@ -619,7 +644,7 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 		if err := VerifyOperationalImageRolloutPlan(embeddedImagePlan); err != nil {
 			return fmt.Errorf("operational evidence embedded image plan: %w", err)
 		}
-	case OperationalActivationEvidencePolicy, OperationalActivationReportPolicy:
+	case OperationalActivationEvidencePolicy, OperationalActivationReportPolicy, OperationalRenderedOnlyActivationPolicy:
 		if len(report.ActivationWitness) != 1 {
 			return fmt.Errorf("operational activation evidence requires one exact witness")
 		}
@@ -760,7 +785,7 @@ func verifyOperationalActivationWitness(report OperationalDomainEvidence, witnes
 		return fmt.Errorf("operational activation witness rendered disagreement is not recorded")
 	}
 	if !equalDomains(activationDomains, witness.Rendered.Domains) &&
-		!hasOperationalIssue(report.Issues, "image activation domains differ from immutable rendered-object domains") {
+		!hasOperationalIssue(report.Issues, operationalRenderedOnlyMismatchIssue) {
 		return fmt.Errorf("operational activation witness rendered-domain mismatch is not recorded")
 	}
 	if !equalDomains(adapterDomains, activationDomains) &&
@@ -856,7 +881,8 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 	if err := VerifyOperationalDomainEvidence(report); err != nil {
 		return Plan{}, fmt.Errorf("operational activation report: %w", err)
 	}
-	if !report.AuthorizationEligible || report.PlanDigest != conservative.PlanDigest ||
+	authorizedDomain, domainEligible := operationalAuthorizationCandidate(report)
+	if !report.AuthorizationEligible || !domainEligible || report.PlanDigest != conservative.PlanDigest ||
 		report.ChangedFilesDigest != conservative.Digests.ChangedFiles {
 		return Plan{}, fmt.Errorf("operational activation evidence binding mismatch")
 	}
@@ -868,11 +894,11 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 	if conservative.Result != OutcomeMultiple && conservative.Result != OutcomeUnknown {
 		return Plan{}, fmt.Errorf("operational activation requires a blocked conservative outcome")
 	}
-	if conservative.Files.AllNonRuntime || len(report.IntersectionDomains) != 1 ||
-		report.CandidateDomain != report.IntersectionDomains[0] {
+	if conservative.Files.AllNonRuntime {
 		return Plan{}, fmt.Errorf("operational activation single-domain evidence mismatch")
 	}
-	if report.Policy == OperationalActivationEvidencePolicy || report.Policy == OperationalActivationReportPolicy {
+	if report.Policy == OperationalActivationEvidencePolicy || report.Policy == OperationalActivationReportPolicy ||
+		report.Policy == OperationalRenderedOnlyActivationPolicy {
 		witness := report.ActivationWitness[0]
 		if witness.BaseManifestDigest != conservative.Digests.BaseManifest ||
 			witness.TargetManifestDigest != conservative.Digests.TargetManifest ||
@@ -900,18 +926,41 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 	}
 
 	clonedPlan.Result = OutcomeSingle
-	clonedPlan.SelectedDomain = clonedReport.CandidateDomain
-	clonedPlan.Domains = []Domain{clonedReport.CandidateDomain}
+	clonedDomain, ok := operationalAuthorizationCandidate(clonedReport)
+	if !ok || clonedDomain != authorizedDomain {
+		return Plan{}, fmt.Errorf("operational activation cloned authorization domain mismatch")
+	}
+	clonedPlan.SelectedDomain = clonedDomain
+	clonedPlan.Domains = []Domain{clonedDomain}
 	clonedPlan.OperationalEvidence = []OperationalDomainEvidence{clonedReport}
 	clonedPlan.PlanDigest = computePlanDigest(clonedPlan)
 	return clonedPlan, nil
 }
 
 func operationalAuthorizationEligible(report OperationalDomainEvidence) bool {
-	return len(report.Issues) == 0 && report.Observation == OutcomeSingle &&
-		len(report.IntersectionDomains) == 1 &&
-		report.CandidateDomain == report.IntersectionDomains[0] &&
-		(report.ConservativeOutcome == OutcomeMultiple || report.ConservativeOutcome == OutcomeUnknown)
+	_, candidate := operationalAuthorizationCandidate(report)
+	return candidate && (report.ConservativeOutcome == OutcomeMultiple || report.ConservativeOutcome == OutcomeUnknown)
+}
+
+func operationalAuthorizationCandidate(report OperationalDomainEvidence) (Domain, bool) {
+	if len(report.Issues) == 0 && report.Observation == OutcomeSingle &&
+		len(report.IntersectionDomains) == 1 && report.CandidateDomain == report.IntersectionDomains[0] {
+		return report.CandidateDomain, true
+	}
+	if report.Policy != OperationalRenderedOnlyActivationPolicy || len(report.RenderedOnlyObservations) != 1 ||
+		!reflect.DeepEqual(report.Issues, []string{operationalRenderedOnlyMismatchIssue}) ||
+		len(report.ImageTargets) != 0 || len(report.ConsumerDomains) != 0 ||
+		len(report.ImageRolloutDomains) != 0 || len(report.AdapterDomains) != 0 ||
+		len(report.IntersectionDomains) != 0 || report.Observation != OutcomeUnknown || report.CandidateDomain != "" {
+		return "", false
+	}
+	observation := report.RenderedOnlyObservations[0]
+	if !observation.Applicable || len(observation.Issues) != 0 ||
+		observation.Observation != OutcomeSingle || len(observation.IntersectionDomains) != 1 ||
+		observation.CandidateDomain != observation.IntersectionDomains[0] {
+		return "", false
+	}
+	return observation.CandidateDomain, true
 }
 
 func verifyOperationalConservativeClassification(report OperationalDomainEvidence) error {

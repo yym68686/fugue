@@ -308,7 +308,7 @@ func buildActivationOperationalReport(
 	activationRendered := releasedomain.ClassifyRendered(baseManifest, immutableTarget, spec, releasedomain.RenderedOptions{
 		DefaultNamespace: context.DefaultNamespace, Bindings: context.BindingMap(), IgnoreHelmTestHooks: false,
 	})
-	report, err := releasedomain.BuildOperationalDomainEvidenceFromActivationReportOnly(
+	report, err := releasedomain.BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		digestOperationalInput(baseManifest), digestOperationalInput(targetManifest),
 		digestOperationalInput(immutableTarget), digestOperationalInput(ownership), plan,

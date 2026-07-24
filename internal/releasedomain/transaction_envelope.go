@@ -205,7 +205,8 @@ func rebuildExecutableTransactionPlan(plan Plan, expectedPlanDigest string, expe
 	}
 	if operational {
 		report := plan.OperationalEvidence[0]
-		if !report.AuthorizationEligible || report.CandidateDomain != expectedDomain {
+		authorizedDomain, eligible := operationalAuthorizationCandidate(report)
+		if !report.AuthorizationEligible || !eligible || authorizedDomain != expectedDomain {
 			return Plan{}, fmt.Errorf("transaction operational activation does not authorize the expected domain")
 		}
 	} else if !isExactTransactionDomain(plan.Files.Domains, expectedDomain) ||

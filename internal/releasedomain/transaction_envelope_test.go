@@ -415,6 +415,44 @@ func TestTransactionEnvelopeRebuildsOperationalActivation(t *testing.T) {
 	}
 }
 
+func TestTransactionEnvelopeRebuildsRenderedOnlyOperationalActivation(t *testing.T) {
+	changed, input, activationPlan, activationEvidence, rendered := renderedOnlyOperationalActivationFixture(t)
+	report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := ActivateOperationalPlan(input.ReleasePlan, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := NewTransactionEnvelope(activated, activated.PlanDigest, DomainControlPlane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := DecodeAndVerifyTransactionEnvelope(
+		bytes.NewReader(encoded), activated.PlanDigest, DomainControlPlane,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization.Domain() != DomainControlPlane || authorization.PlanDigest() != activated.PlanDigest {
+		t.Fatalf("rendered-only transaction authorization = %q %q", authorization.Domain(), authorization.PlanDigest())
+	}
+	if _, err := DecodeAndVerifyTransactionEnvelope(
+		bytes.NewReader(encoded), activated.PlanDigest, DomainBackup,
+	); err == nil {
+		t.Fatal("rendered-only transaction authorized a different trusted domain")
+	}
+}
+
 func TestDecodeTransactionEnvelopeRequiresEmptyUnknownEvidence(t *testing.T) {
 	plan, _, encoded := encodedTransactionEnvelope(t, DomainNodeLocal)
 	explicitEmpty := mutateTransactionEnvelopeJSON(t, encoded, func(root map[string]any) {

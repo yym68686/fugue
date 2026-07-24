@@ -224,6 +224,182 @@ func TestActivationOperationalEvidenceReportsRenderedOnlyCandidateWithoutAuthori
 	}
 }
 
+func TestActivationOperationalEvidenceAuthorizesRenderedOnlyCandidateOnlyWithV4(t *testing.T) {
+	changed, input, activationPlan, activationEvidence, rendered := renderedOnlyOperationalActivationFixture(t)
+	report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Policy != OperationalRenderedOnlyActivationPolicy || !report.AuthorizationEligible ||
+		report.Observation != OutcomeUnknown || report.CandidateDomain != "" ||
+		!reflect.DeepEqual(report.Issues, []string{operationalRenderedOnlyMismatchIssue}) {
+		t.Fatalf("rendered-only activation report = %#v", report)
+	}
+	observation := report.RenderedOnlyObservations[0]
+	if !observation.Applicable || observation.Observation != OutcomeSingle ||
+		observation.CandidateDomain != DomainControlPlane ||
+		!equalDomains(observation.IntersectionDomains, []Domain{DomainControlPlane}) || len(observation.Issues) != 0 {
+		t.Fatalf("rendered-only activation observation = %#v", observation)
+	}
+	authorizedDomain, eligible := operationalAuthorizationCandidate(report)
+	if !eligible || authorizedDomain != DomainControlPlane {
+		t.Fatalf("rendered-only authorization candidate = %q %t", authorizedDomain, eligible)
+	}
+	activated, err := ActivateOperationalPlan(input.ReleasePlan, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated.Result != OutcomeSingle || activated.SelectedDomain != DomainControlPlane ||
+		!equalDomains(activated.Domains, []Domain{DomainControlPlane}) || len(activated.OperationalEvidence) != 1 {
+		t.Fatalf("rendered-only activated plan = %#v", activated)
+	}
+	if err := VerifyPlanDigest(activated); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeAndVerifyOperationalDomainEvidence(bytes.NewReader(encoded), report.Digest)
+	if err != nil || !reflect.DeepEqual(decoded, report) {
+		t.Fatalf("rendered-only activation round trip\n got=%#v\nwant=%#v\nerr=%v", decoded, report, err)
+	}
+
+	mutated := report
+	mutated.Issues = canonicalOperationalStrings(append(mutated.Issues, "unexpected parallel issue"))
+	mutated.AuthorizationEligible = operationalAuthorizationEligible(mutated)
+	mutated.Digest = operationalEvidenceDigest(mutated)
+	if err := VerifyOperationalDomainEvidence(mutated); err != nil {
+		t.Fatalf("ineligible issue control did not verify: %v", err)
+	}
+	if mutated.AuthorizationEligible {
+		t.Fatal("rendered-only activation ignored an additional issue")
+	}
+	if _, err := ActivateOperationalPlan(input.ReleasePlan, mutated); err == nil {
+		t.Fatal("rendered-only activation accepted an additional issue")
+	}
+}
+
+func TestRenderedOnlyV4KeepsZeroMultipleAndIncompleteEvidenceFailClosed(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		changed, input, activationPlan, activationEvidence, _ := renderedOnlyOperationalActivationFixture(t)
+		rendered := RenderedClassification{Domains: []Domain{}, Evidence: []Evidence{}}
+		report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+			changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.AuthorizationEligible || report.RenderedOnlyObservations[0].Observation != OutcomeZero {
+			t.Fatalf("zero rendered-only evidence authorized: %#v", report)
+		}
+	})
+
+	t.Run("multiple", func(t *testing.T) {
+		base := md1Deployment("fugue-api", "api", "registry.example/api:live") + "---\n" +
+			md1Deployment("fugue-edge", "edge", "registry.example/edge:live")
+		target := strings.ReplaceAll(base,
+			"    metadata:\n      labels:",
+			"    metadata:\n      annotations:\n        fugue.pro/source-commit: "+md0TargetCommit+"\n      labels:",
+		)
+		input := md1ActivationFixture(t, base, target, []md1OwnershipRule{
+			{name: "fugue-api", domain: DomainControlPlane},
+			{name: "fugue-edge", domain: DomainAuthoritativeDNS},
+		}, nil)
+		activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+			DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+			Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+		})
+		changed := ChangedFileEvidence{
+			baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+			changes: []ChangedFile{{Status: ChangeModified, Path: "deploy/helm/fugue/templates/deployment.yaml"}},
+		}
+		report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+			changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.AuthorizationEligible || report.RenderedOnlyObservations[0].Observation != OutcomeMultiple ||
+			!equalDomains(report.RenderedOnlyObservations[0].IntersectionDomains,
+				[]Domain{DomainAuthoritativeDNS, DomainControlPlane}) {
+			t.Fatalf("multiple rendered-only evidence narrowed: %#v", report)
+		}
+	})
+
+	t.Run("incomplete", func(t *testing.T) {
+		changed, input, activationPlan, activationEvidence, rendered := renderedOnlyOperationalActivationFixture(t)
+		rendered.Unknown = []Evidence{{Source: "rendered-object", Subject: "fixture gap"}}
+		report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+			changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.AuthorizationEligible || report.RenderedOnlyObservations[0].Observation != OutcomeUnknown ||
+			!containsOperationalIssue(report.RenderedOnlyObservations[0].Issues,
+				"rendered-only immutable rendered-object evidence is incomplete") {
+			t.Fatalf("incomplete rendered-only evidence authorized: %#v", report)
+		}
+	})
+}
+
+func renderedOnlyOperationalActivationFixture(t *testing.T) (
+	ChangedFileEvidence,
+	ImageActivationPlanInput,
+	ImageActivationPlan,
+	ImageActivationEvidence,
+	RenderedClassification,
+) {
+	t.Helper()
+	base := md1Deployment("fugue-api", "api", "registry.example/api:live")
+	target := strings.Replace(base,
+		"    metadata:\n      labels:",
+		"    metadata:\n      annotations:\n        fugue.pro/source-commit: "+md0TargetCommit+"\n      labels:",
+		1,
+	)
+	input := md1ActivationFixture(
+		t, base, target,
+		[]md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}},
+		nil,
+	)
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{Status: ChangeModified, Path: "deploy/helm/fugue/templates/deployment.yaml"}},
+	}
+	return changed, input, activationPlan, activationEvidence, rendered
+}
+
 func TestActivationOperationalEvidenceKeepsIncompleteAndRealMultipleFailClosed(t *testing.T) {
 	t.Run("unresolved", func(t *testing.T) {
 		changed, input, activationPlan, activationEvidence, activationRendered := operationalActivationV2Fixture(t, false, true)
