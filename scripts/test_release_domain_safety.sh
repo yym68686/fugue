@@ -8475,7 +8475,25 @@ PY
   mkdir -p "${fingerprint_repo}/deploy/helm"
   cp -R "${source_repo}/deploy/helm/fugue" "${fingerprint_repo}/deploy/helm/fugue"
   REPO_ROOT="${fingerprint_repo}"
-  image_cache_strategy_target_fingerprints_match || fail "exact image-cache strategy migration chart tree fingerprint must pass"
+  image_cache_strategy_target_fingerprints_match || fail "source chart must match one exact accepted chart tree fingerprint"
+  python3 - \
+    "${fingerprint_repo}/deploy/helm/fugue/templates/deployment.yaml" \
+    "${fingerprint_repo}/deploy/helm/fugue/templates/controller-deployment.yaml" <<'PY'
+from pathlib import Path
+import sys
+
+bindings = (
+    (Path(sys.argv[1]), "        fugue.pro/source-commit: {{ .Values.api.image.tag | quote }}\n"),
+    (Path(sys.argv[2]), "        fugue.pro/source-commit: {{ .Values.controller.image.tag | quote }}\n"),
+)
+loaded = [(path, binding, path.read_text()) for path, binding in bindings]
+counts = tuple(body.count(binding) for _, binding, body in loaded)
+if counts not in ((0, 0), (1, 1)):
+    raise SystemExit(f"source-commit annotation pair drifted: counts={counts}")
+for path, binding, body in loaded:
+    path.write_text(body.replace(binding, "", 1))
+PY
+  image_cache_strategy_target_fingerprints_match || fail "normalized current chart tree fingerprint must pass"
   python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/deployment.yaml" <<'PY'
 from pathlib import Path
 import sys
