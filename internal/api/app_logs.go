@@ -64,6 +64,7 @@ type kubePodInfo struct {
 		Name              string            `json:"name"`
 		CreationTimestamp time.Time         `json:"creationTimestamp"`
 		Labels            map[string]string `json:"labels,omitempty"`
+		Annotations       map[string]string `json:"annotations,omitempty"`
 		OwnerReferences   []struct {
 			Kind string `json:"kind,omitempty"`
 			Name string `json:"name,omitempty"`

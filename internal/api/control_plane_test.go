@@ -269,3 +269,45 @@ func TestGetControlPlaneStatusRequiresPlatformAdmin(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusForbidden, recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestControlPlaneSourceCommitAnnotationOverridesDigestImage(t *testing.T) {
+	t.Parallel()
+	const commit = "890e4a161418366cd6f77dae2949249e339cc8cf"
+	var deployment kubeDeployment
+	deployment.Metadata.Name = "fugue-api"
+	replicas := int32(2)
+	deployment.Spec.Replicas = &replicas
+	deployment.Spec.Template.Metadata.Annotations = map[string]string{controlPlaneSourceCommitAnnotation: commit}
+	deployment.Spec.Template.Spec.Containers = []kubeContainer{{Name: controlPlaneComponentAPI, Image: "ghcr.io/fugue/api@sha256:deadbeef"}}
+	deployment.Status.ReadyReplicas = 2
+	deployment.Status.UpdatedReplicas = 2
+	deployment.Status.AvailableReplicas = 2
+	component := buildControlPlaneComponent(controlPlaneComponentAPI, &deployment, nil)
+	if component.ImageTag != commit {
+		t.Fatalf("expected source annotation to override digest image, got %q", component.ImageTag)
+	}
+
+	var pod kubePodInfo
+	if err := json.Unmarshal([]byte(`{"metadata":{"name":"fugue-api-0","annotations":{"fugue.pro/source-commit":"890e4a161418366cd6f77dae2949249e339cc8cf"}},"spec":{"containers":[{"name":"api","image":"ghcr.io/fugue/api@sha256:deadbeef"}]}}`), &pod); err != nil {
+		t.Fatal(err)
+	}
+	converted := controlPlanePodFromKube(controlPlaneComponentAPI, pod)
+	if converted.ImageTag != commit {
+		t.Fatalf("expected observed source annotation to override digest image, got %q", converted.ImageTag)
+	}
+}
+
+func TestControlPlaneSourceCommitAnnotationFailsClosedWhenMalformed(t *testing.T) {
+	t.Parallel()
+	var deployment kubeDeployment
+	deployment.Metadata.Name = "fugue-api"
+	deployment.Spec.Template.Metadata.Annotations = map[string]string{controlPlaneSourceCommitAnnotation: "attacker"}
+	deployment.Spec.Template.Spec.Containers = []kubeContainer{{Name: controlPlaneComponentAPI, Image: "ghcr.io/fugue/api:latest"}}
+	component := buildControlPlaneComponent(controlPlaneComponentAPI, &deployment, nil)
+	if component.ImageTag != "" {
+		t.Fatalf("malformed source annotation must not fall back to image tag, got %q", component.ImageTag)
+	}
+	if source, present := readControlPlaneSourceCommit(deployment.Spec.Template.Metadata.Annotations); !present || source != "" {
+		t.Fatalf("expected malformed annotation to be present but empty, got %q/%t", source, present)
+	}
+}

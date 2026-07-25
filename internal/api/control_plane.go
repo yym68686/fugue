@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	controlPlaneComponentAPI        = "api"
-	controlPlaneComponentController = "controller"
-	controlPlaneComponentHeadscale  = "headscale"
-	controlPlaneComponentImageCache = "image-cache"
+	controlPlaneComponentAPI           = "api"
+	controlPlaneComponentController    = "controller"
+	controlPlaneComponentHeadscale     = "headscale"
+	controlPlaneComponentImageCache    = "image-cache"
+	controlPlaneSourceCommitAnnotation = "fugue.pro/source-commit"
 
 	controlPlaneStatusReady    = "ready"
 	controlPlaneStatusRolling  = "rolling"
@@ -44,6 +45,9 @@ type kubeDeployment struct {
 	Spec struct {
 		Replicas *int32 `json:"replicas,omitempty"`
 		Template struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations,omitempty"`
+			} `json:"metadata,omitempty"`
 			Spec struct {
 				Containers   []kubeContainer        `json:"containers"`
 				NodeSelector map[string]string      `json:"nodeSelector,omitempty"`
@@ -538,6 +542,9 @@ func buildControlPlaneComponent(component string, deployment *kubeDeployment, po
 
 	image := readControlPlaneImage(deployment, component)
 	imageRepository, imageTag := splitImageReference(image)
+	if sourceCommit, present := readControlPlaneSourceCommit(deployment.Spec.Template.Metadata.Annotations); present {
+		imageTag = sourceCommit
+	}
 	controlPlaneComponent := model.ControlPlaneComponent{
 		Component:         component,
 		DeploymentName:    strings.TrimSpace(deployment.Metadata.Name),
@@ -682,6 +689,9 @@ func readControlPlaneStatus(components []model.ControlPlaneComponent, commonVers
 func controlPlanePodFromKube(component string, pod kubePodInfo) model.ControlPlanePod {
 	image := readControlPlanePodImage(component, pod)
 	imageRepository, imageTag := splitImageReference(image)
+	if sourceCommit, present := readControlPlaneSourceCommit(pod.Metadata.Annotations); present {
+		imageTag = sourceCommit
+	}
 	startTime := pod.Status.StartTime
 	return model.ControlPlanePod{
 		Name:            strings.TrimSpace(pod.Metadata.Name),
@@ -693,6 +703,35 @@ func controlPlanePodFromKube(component string, pod kubePodInfo) model.ControlPla
 		ImageTag:        imageTag,
 		StartTime:       startTime,
 	}
+}
+
+// readControlPlaneSourceCommit gives the reserved, Helm-generated annotation
+// precedence over an image tag. A present but malformed value is deliberately
+// represented as present/empty so callers fail closed instead of falling back
+// to an opaque digest or caller-controlled image reference.
+func readControlPlaneSourceCommit(annotations map[string]string) (string, bool) {
+	value, present := annotations[controlPlaneSourceCommitAnnotation]
+	if !present {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if !exactLowerGitCommit(value) {
+		return "", true
+	}
+	return value, true
+}
+
+func exactLowerGitCommit(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 40 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func readControlPlanePodImage(component string, pod kubePodInfo) string {
