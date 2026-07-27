@@ -290,7 +290,11 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	if err := s.prepareManagedPostgresInPlaceStorageExpansionForDesiredObjects(ctx, client, namespace, childObjects); err != nil {
-		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+		// A storage preflight failure has not changed the application
+		// Deployment. Keep the last fully ready release serving while the
+		// managed database resize is repaired; initial deployments and
+		// unhealthy workloads still fail closed below.
+		return patchManagedAppStorageExpansionErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	applyCtx := managedAppCloudNativePGApplyContext(ctx, app, stabilizedPostgresStorage)
 	if err := client.applyObjects(applyCtx, childObjects); err != nil {
@@ -929,6 +933,42 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 	status.PendingReleaseKey = strings.TrimSpace(managed.Status.PendingReleaseKey)
 	status.PendingReleaseStartedAt = strings.TrimSpace(managed.Status.PendingReleaseStartedAt)
 	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), managed.Status.BackingServices...)
+	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+		return fmt.Errorf("%w (also failed to patch managed app status: %v)", cause, err)
+	}
+	return cause
+}
+
+func patchManagedAppStorageExpansionErrorStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	cause error,
+) error {
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseError
+	status.Message = strings.TrimSpace(cause.Error())
+	status.CurrentReleaseKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
+	status.CurrentReleaseStartedAt = strings.TrimSpace(managed.Status.CurrentReleaseStartedAt)
+	status.CurrentReleaseReadyAt = strings.TrimSpace(managed.Status.CurrentReleaseReadyAt)
+	status.PendingReleaseKey = strings.TrimSpace(managed.Status.PendingReleaseKey)
+	status.PendingReleaseStartedAt = strings.TrimSpace(managed.Status.PendingReleaseStartedAt)
+	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), managed.Status.BackingServices...)
+
+	// The preflight runs before any child object is applied. If the existing
+	// Deployment is still fully ready, preserving its observed replica count
+	// lets the edge continue serving the last known-good release while the
+	// failed resize remains visible in the app error message.
+	if client != nil && app.Spec.Replicas > 0 {
+		deployment, found, readErr := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
+		if readErr == nil && found && managedDeploymentStatusReady(deployment, app.Spec.Replicas) {
+			status.ReadyReplicas = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
+			status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
+		}
+	}
+
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("%w (also failed to patch managed app status: %v)", cause, err)
 	}

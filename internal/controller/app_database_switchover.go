@@ -1033,6 +1033,41 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 		pvcsByName[pvcName] = pvc
 	}
 
+	plans := make([]managedPostgresPVCExpansionPlan, 0, len(pvcNames))
+	for _, pvcName := range pvcNames {
+		pvc := pvcsByName[pvcName]
+		if resizeErr := managedPostgresPVCResizeError(pvc); resizeErr != "" {
+			return fmt.Errorf("postgres PVC %s/%s reports resize error: %s", namespace, pvcName, resizeErr)
+		}
+		requestedSize := strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
+		if requestedSize == "" {
+			requestedSize = managedPostgresPVCStorageSize(pvc)
+		}
+		requestedQuantity, requestedErr := resource.ParseQuantity(requestedSize)
+		capacitySize := strings.TrimSpace(pvc.Status.Capacity["storage"])
+		capacityQuantity, capacityErr := resource.ParseQuantity(capacitySize)
+		requestConverged := requestedErr == nil && requestedQuantity.Cmp(targetQuantity) >= 0
+		capacityConverged := capacityErr == nil && capacityQuantity.Cmp(targetQuantity) >= 0
+		if requestConverged && capacityConverged {
+			continue
+		}
+		plans = append(plans, managedPostgresPVCExpansionPlan{
+			Name:               strings.TrimSpace(pvcName),
+			PVC:                pvc,
+			RequestConverged:   requestConverged,
+			CapacitySize:       capacitySize,
+			CapacityQuantity:   capacityQuantity,
+			CapacityParseError: capacityErr,
+		})
+	}
+	// A previously adopted PVC may use a non-expandable or legacy storage
+	// class. Once its requested and actual capacities already satisfy the
+	// target, there is no storage operation to prepare or storage class to
+	// validate.
+	if len(pvcNames) > 0 && len(plans) == 0 {
+		return nil
+	}
+
 	storageClassName := strings.TrimSpace(target.StorageClassName)
 	if storageClassName == "" && len(pvcNames) > 0 {
 		storageClassName = strings.TrimSpace(pvcsByName[pvcNames[0]].Spec.StorageClassName)
@@ -1072,33 +1107,6 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequiremen
 		return fmt.Errorf("storage class %s does not allow postgres in-place volume expansion", storageClassName)
 	}
 
-	plans := make([]managedPostgresPVCExpansionPlan, 0, len(pvcNames))
-	for _, pvcName := range pvcNames {
-		pvc := pvcsByName[pvcName]
-		if resizeErr := managedPostgresPVCResizeError(pvc); resizeErr != "" {
-			return fmt.Errorf("postgres PVC %s/%s reports resize error: %s", namespace, pvcName, resizeErr)
-		}
-		requestedSize := strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
-		if requestedSize == "" {
-			requestedSize = managedPostgresPVCStorageSize(pvc)
-		}
-		requestedQuantity, requestedErr := resource.ParseQuantity(requestedSize)
-		capacitySize := strings.TrimSpace(pvc.Status.Capacity["storage"])
-		capacityQuantity, capacityErr := resource.ParseQuantity(capacitySize)
-		requestConverged := requestedErr == nil && requestedQuantity.Cmp(targetQuantity) >= 0
-		capacityConverged := capacityErr == nil && capacityQuantity.Cmp(targetQuantity) >= 0
-		if requestConverged && capacityConverged {
-			continue
-		}
-		plans = append(plans, managedPostgresPVCExpansionPlan{
-			Name:               strings.TrimSpace(pvcName),
-			PVC:                pvc,
-			RequestConverged:   requestConverged,
-			CapacitySize:       capacitySize,
-			CapacityQuantity:   capacityQuantity,
-			CapacityParseError: capacityErr,
-		})
-	}
 	if strings.EqualFold(strings.TrimSpace(storageClass.Provisioner), openEBSLocalLVMProvisioner) {
 		if err := s.validateManagedPostgresLocalPVExpansionCapacity(ctx, client, namespace, storageClass, targetQuantity, plans); err != nil {
 			return err
