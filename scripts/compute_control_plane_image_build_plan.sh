@@ -66,6 +66,19 @@ image_baseline_ref() {
   esac
 }
 
+image_helm_drift() {
+  case "$1" in
+    api) printf '%s' "${FUGUE_API_IMAGE_HELM_DRIFT:-false}" ;;
+    controller) printf '%s' "${FUGUE_CONTROLLER_IMAGE_HELM_DRIFT:-false}" ;;
+    drain_agent) printf '%s' "${FUGUE_DRAIN_AGENT_IMAGE_HELM_DRIFT:-false}" ;;
+    telemetry_agent) printf '%s' "${FUGUE_TELEMETRY_AGENT_IMAGE_HELM_DRIFT:-false}" ;;
+    image_cache) printf '%s' "${FUGUE_IMAGE_CACHE_IMAGE_HELM_DRIFT:-false}" ;;
+    edge) printf '%s' "${FUGUE_EDGE_IMAGE_HELM_DRIFT:-false}" ;;
+    app_ssh) printf '%s' "${FUGUE_APP_SSH_IMAGE_HELM_DRIFT:-false}" ;;
+    *) return 1 ;;
+  esac
+}
+
 grep_membership() {
   local mode="$1"
   local pattern="$2"
@@ -108,7 +121,9 @@ image_reason_matches_component_baseline() {
   local marker="${tmp_dir}/component-baseline-${image}"
   local changed="${tmp_dir}/component-changed-files-${image}"
 
-  [[ "${reason}" == "unknown-change-set" ]] && return 0
+  case "${reason}" in
+    unknown-change-set|helm-live-image-drift) return 0 ;;
+  esac
   [[ -e "${marker}" ]] || return 0
   grep_membership exact "${reason}" "${changed}" "${image} component baseline"
 }
@@ -389,6 +404,25 @@ if [[ -n "${target_ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${target_ref}^
 elif [[ -n "${target_ref}" ]]; then
   printf 'release target is not a local commit; using fail-safe union image plan: %s\n' "${target_ref}" >&2
 fi
+
+for image in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
+  helm_drift="$(trim_field "$(image_helm_drift "${image}")")"
+  case "${helm_drift}" in
+    false) ;;
+    true)
+      if [[ ! -e "${tmp_dir}/component-baseline-${image}" ]]; then
+        printf 'Helm/live image drift requires a trusted component baseline for %s\n' "${image}" >&2
+        exit 1
+      fi
+      mark_image "${image}" "helm-live-image-drift"
+      ;;
+    *)
+      printf 'Helm/live image drift flag must be true or false for %s: %s\n' \
+        "${image}" "${helm_drift}" >&2
+      exit 1
+      ;;
+  esac
+done
 
 INVALID_CHANGED_PATHS=false
 while IFS= read -r raw_file; do

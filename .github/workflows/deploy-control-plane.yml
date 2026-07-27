@@ -56,11 +56,17 @@ jobs:
       source: ${{ steps.release_changes.outputs.source }}
       target_ref: ${{ steps.release_changes.outputs.target_ref }}
       api_image_baseline_ref: ${{ steps.live_images.outputs.api_image_baseline_ref }}
+      api_image_helm_drift: ${{ steps.live_images.outputs.api_image_helm_drift }}
       controller_image_baseline_ref: ${{ steps.live_images.outputs.controller_image_baseline_ref }}
+      controller_image_helm_drift: ${{ steps.live_images.outputs.controller_image_helm_drift }}
       drain_agent_image_baseline_ref: ${{ steps.live_images.outputs.drain_agent_image_baseline_ref }}
+      drain_agent_image_helm_drift: ${{ steps.live_images.outputs.drain_agent_image_helm_drift }}
       telemetry_agent_image_baseline_ref: ${{ steps.live_images.outputs.telemetry_agent_image_baseline_ref }}
+      telemetry_agent_image_helm_drift: ${{ steps.live_images.outputs.telemetry_agent_image_helm_drift }}
       image_cache_image_baseline_ref: ${{ steps.live_images.outputs.image_cache_image_baseline_ref }}
+      image_cache_image_helm_drift: ${{ steps.live_images.outputs.image_cache_image_helm_drift }}
       edge_image_baseline_ref: ${{ steps.live_images.outputs.edge_image_baseline_ref }}
+      edge_image_helm_drift: ${{ steps.live_images.outputs.edge_image_helm_drift }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -165,6 +171,7 @@ jobs:
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
           FUGUE_IMAGE_TAG: ${{ github.sha }}
+          FUGUE_RESOLVE_HELM_IMAGE_BASELINES: "true"
         run: ./scripts/resolve_control_plane_live_images.sh
 
       - name: Compute live-to-target release changed files
@@ -321,11 +328,17 @@ jobs:
           FUGUE_RELEASE_CHANGED_FILES_SET: "true"
           FUGUE_RELEASE_TARGET_REF: ${{ needs.release-baseline.outputs.target_ref }}
           FUGUE_API_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.api_image_baseline_ref }}
+          FUGUE_API_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.api_image_helm_drift }}
           FUGUE_CONTROLLER_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.controller_image_baseline_ref }}
+          FUGUE_CONTROLLER_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.controller_image_helm_drift }}
           FUGUE_DRAIN_AGENT_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.drain_agent_image_baseline_ref }}
+          FUGUE_DRAIN_AGENT_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.drain_agent_image_helm_drift }}
           FUGUE_TELEMETRY_AGENT_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.telemetry_agent_image_baseline_ref }}
+          FUGUE_TELEMETRY_AGENT_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.telemetry_agent_image_helm_drift }}
           FUGUE_IMAGE_CACHE_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}
+          FUGUE_IMAGE_CACHE_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.image_cache_image_helm_drift }}
           FUGUE_EDGE_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.edge_image_baseline_ref }}
+          FUGUE_EDGE_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.edge_image_helm_drift }}
         run: ./scripts/compute_control_plane_image_build_plan.sh
 
       - name: Setup Docker Buildx

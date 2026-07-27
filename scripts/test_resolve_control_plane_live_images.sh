@@ -138,6 +138,7 @@ run_resolver() {
     FUGUE_NAMESPACE=fugue-system \
     FUGUE_RELEASE_FULLNAME=fugue-fugue \
     FUGUE_IMAGE_TAG="${RESOLVER_FALLBACK_TAG-fallback-target}" \
+    FUGUE_RESOLVE_HELM_IMAGE_BASELINES="${FUGUE_RESOLVE_HELM_IMAGE_BASELINES:-false}" \
     GITHUB_SHA= \
     FAKE_KUBE_OBJECTS_FILE="${objects_file}" \
     FAKE_KUBECTL_CALLS_FILE="${output_file}.kubectl-calls" \
@@ -191,6 +192,46 @@ assert_eq "$(output_value "${TAG_OUTPUT}" public_cohort_image_count)" "1" "SSH f
 assert_eq "$(multiline_output_value "${TAG_OUTPUT}" public_cohort_image_template_refs)" "fugue-fugue-edge-front|registry.example:5000/team/front:front-live@${DIGEST_A}" "tag+digest cohort ref"
 assert_eq "$(multiline_output_value "${TAG_OUTPUT}" public_cohort_image_source_tags)" "fugue-fugue-edge-front|front-live" "tag+digest cohort source tag"
 assert_eq "$(multiline_output_value "${TAG_OUTPUT}" release_baseline_tags)" $'api-live\ncontroller-live' "legacy release baselines"
+
+TAG_HELM_BASELINE_VALUES="${TMP_ROOT}/tag-helm-baseline-values.json"
+cat >"${TAG_HELM_BASELINE_VALUES}" <<JSON
+{
+  "api":{"image":{"repository":"registry.example:5000/team/api","tag":"api-live","digest":""}},
+  "controller":{"image":{"repository":"ghcr.io/acme/controller","tag":"controller-helm","digest":""}},
+  "runtime":{"strictDrain":{"agent":{"image":{"repository":"ghcr.io/acme/drain","tag":"drain-live","digest":""}}}},
+  "observability":{"agent":{"image":{"repository":"ghcr.io/acme/telemetry","tag":"telemetry-live","digest":""}}},
+  "imageCache":{"image":{"repository":"ghcr.io/acme/cache","tag":"cache-live","digest":""}},
+  "edge":{"image":{"repository":"ghcr.io/acme/edge","tag":"edge-live","digest":""}}
+}
+JSON
+TAG_HELM_BASELINE_OUTPUT="${TMP_ROOT}/tag-helm-baseline-output"
+FUGUE_RESOLVE_HELM_IMAGE_BASELINES=true run_resolver \
+  "${TAG_OBJECTS}" \
+  "${TAG_HELM_BASELINE_VALUES}" \
+  "${TAG_HELM_BASELINE_OUTPUT}" \
+  "${TMP_ROOT}/tag-helm-baseline-stdout" \
+  "${TMP_ROOT}/tag-helm-baseline-stderr" \
+  "${TMP_ROOT}/tag-helm-baseline-calls"
+assert_eq "$(wc -l <"${TMP_ROOT}/tag-helm-baseline-calls" | tr -d ' ')" "1" "Helm baseline mode uses one values snapshot"
+assert_eq "$(output_value "${TAG_HELM_BASELINE_OUTPUT}" api_image_baseline_ref)" "api-live" "matching API Helm baseline"
+assert_eq "$(output_value "${TAG_HELM_BASELINE_OUTPUT}" api_image_helm_drift)" "false" "matching API Helm drift"
+assert_eq "$(output_value "${TAG_HELM_BASELINE_OUTPUT}" controller_image_tag)" "controller-live" "drift recovery preserves the observed live tag"
+assert_eq "$(output_value "${TAG_HELM_BASELINE_OUTPUT}" controller_image_baseline_ref)" "controller-helm" "drift recovery trusts the Helm revision source tag"
+assert_eq "$(output_value "${TAG_HELM_BASELINE_OUTPUT}" controller_image_helm_drift)" "true" "controller Helm/live drift"
+assert_eq "$(multiline_output_value "${TAG_HELM_BASELINE_OUTPUT}" release_baseline_tags)" $'api-live\ncontroller-helm' "release baselines follow the Helm revision"
+grep -Fq 'controller image drift: live=ghcr.io/acme/controller:controller-live helm=ghcr.io/acme/controller:controller-helm' \
+  "${TMP_ROOT}/tag-helm-baseline-stderr" || fail "controller Helm/live drift must be observable"
+
+if FUGUE_RESOLVE_HELM_IMAGE_BASELINES=invalid run_resolver \
+  "${TAG_OBJECTS}" \
+  "${TAG_HELM_BASELINE_VALUES}" \
+  "${TMP_ROOT}/invalid-helm-baseline-output" \
+  "${TMP_ROOT}/invalid-helm-baseline-stdout" \
+  "${TMP_ROOT}/invalid-helm-baseline-stderr" \
+  "${TMP_ROOT}/invalid-helm-baseline-calls"; then
+  fail "invalid Helm baseline mode must fail closed"
+fi
+assert_eq "$(wc -c <"${TMP_ROOT}/invalid-helm-baseline-output" | tr -d ' ')" "0" "invalid Helm baseline mode emits no outputs"
 
 EXPLICIT_EMPTY_DIGEST_OBJECTS="${TMP_ROOT}/explicit-empty-digest-objects.json"
 python3 -c '

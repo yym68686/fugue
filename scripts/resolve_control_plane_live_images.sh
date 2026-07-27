@@ -501,6 +501,35 @@ helm_source_tag_for_digest_ref() {
   printf '%s' "${source_tag}"
 }
 
+resolve_helm_image_baseline() {
+  local selector="$1"
+  local source_name="${2:-}"
+  local record repository source_tag digest
+
+  record="$(helm_effective_image_record "${selector}" "${source_name}")" || return 1
+  IFS=$'\t' read -r repository source_tag digest <<<"${record}"
+  release_image_ref_valid_repository "${repository}" || {
+    printf 'Helm image repository is invalid for %s\n' "${source_name:-${selector}}" >&2
+    return 1
+  }
+  release_image_ref_valid_tag "${source_tag}" || {
+    printf 'Helm image source tag is missing or invalid for %s\n' "${source_name:-${selector}}" >&2
+    return 1
+  }
+  if [[ -n "${digest}" && ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    printf 'Helm image digest is invalid for %s\n' "${source_name:-${selector}}" >&2
+    return 1
+  fi
+
+  if [[ -n "${digest}" ]]; then
+    release_image_ref_parse "${repository}@${digest}" "${source_tag}" || return 1
+  else
+    release_image_ref_parse "${repository}:${source_tag}" || return 1
+  fi
+  HELM_BASELINE_IMAGE_SOURCE_TAG="${RELEASE_IMAGE_REF_SOURCE_TAG}"
+  HELM_BASELINE_IMAGE_TEMPLATE_REF="${RELEASE_IMAGE_REF_EXACT_TEMPLATE_REF}"
+}
+
 resolve_image_ref() {
   local image_ref="$1"
   local fallback_repository="$2"
@@ -644,12 +673,26 @@ output_image_ref() {
   local source_name="${7:-}"
   local observed_source_tag="${8:-}"
   local baseline_ref=""
+  local helm_drift="false"
 
   resolve_image_ref "${image_ref}" "${fallback_repository}" "${fallback_tag}" "${helm_selector}" "${source_name}" "${observed_source_tag}" || return 1
   if [[ "${RESOLVED_IMAGE_IS_LIVE}" == "true" ]]; then
     baseline_ref="${RESOLVED_IMAGE_SOURCE_TAG}"
+    if [[ "${FUGUE_RESOLVE_HELM_IMAGE_BASELINES}" == "true" ]]; then
+      # Load once in the parent shell. The record helper runs in command
+      # substitution, so letting it initialize the snapshot would repeat the
+      # Helm read for every component.
+      load_helm_values_snapshot || return 1
+      resolve_helm_image_baseline "${helm_selector}" "${source_name}" || return 1
+      baseline_ref="${HELM_BASELINE_IMAGE_SOURCE_TAG}"
+      if [[ "${RESOLVED_IMAGE_TEMPLATE_REF}" != "${HELM_BASELINE_IMAGE_TEMPLATE_REF}" ]]; then
+        helm_drift="true"
+        printf '%s image drift: live=%s helm=%s\n' \
+          "${prefix}" "${RESOLVED_IMAGE_TEMPLATE_REF}" "${HELM_BASELINE_IMAGE_TEMPLATE_REF}" >&2
+      fi
+    fi
     if [[ "${include_release_baseline}" == "true" ]]; then
-      RELEASE_BASELINE_TAGS="${RELEASE_BASELINE_TAGS}${RELEASE_BASELINE_TAGS:+$'\n'}${RESOLVED_IMAGE_SOURCE_TAG}"
+      RELEASE_BASELINE_TAGS="${RELEASE_BASELINE_TAGS}${RELEASE_BASELINE_TAGS:+$'\n'}${baseline_ref}"
     fi
   fi
   emit_output "${prefix}_image_repository" "${RESOLVED_IMAGE_REPOSITORY}"
@@ -658,12 +701,21 @@ output_image_ref() {
   emit_output "${prefix}_image_template_ref" "${RESOLVED_IMAGE_TEMPLATE_REF}"
   emit_output "${prefix}_image_digest" "${RESOLVED_IMAGE_DIGEST}"
   emit_output "${prefix}_image_source_tag" "${RESOLVED_IMAGE_SOURCE_TAG}"
+  emit_output "${prefix}_image_helm_drift" "${helm_drift}"
   printf '%s resolved image: %s\n' "${prefix}" "${RESOLVED_IMAGE_TEMPLATE_REF}"
 }
 
 FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
 FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
 FUGUE_RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-fugue-fugue}"
+FUGUE_RESOLVE_HELM_IMAGE_BASELINES="${FUGUE_RESOLVE_HELM_IMAGE_BASELINES:-false}"
+case "${FUGUE_RESOLVE_HELM_IMAGE_BASELINES}" in
+  true|false) ;;
+  *)
+    printf 'FUGUE_RESOLVE_HELM_IMAGE_BASELINES must be true or false\n' >&2
+    exit 1
+    ;;
+esac
 KUBECTL_CMD="$(detect_kubectl)"
 RELEASE_BASELINE_TAGS=""
 
