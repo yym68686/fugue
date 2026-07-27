@@ -377,7 +377,6 @@ func (s *Server) refreshClusterNodeInventoryAsync() {
 			var zero []clusterNodeSnapshot
 			return zero, err
 		}
-		s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, value)
 		if err := s.syncBootstrapControlPlaneMachinesFromSnapshots(value); err != nil {
 			var zero []clusterNodeSnapshot
 			return zero, err
@@ -392,6 +391,11 @@ func (s *Server) refreshClusterNodeInventoryAsync() {
 			var zero []clusterNodeSnapshot
 			return zero, err
 		}
+		// Publish only after every store and node-policy reconciliation has
+		// completed. Callers use the cache as the completed-refresh signal;
+		// publishing the fetched snapshot earlier lets teardown race the
+		// remaining durable store writes.
+		s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, value)
 		return value, nil
 	})
 
@@ -462,7 +466,6 @@ func (s *Server) reconcileLegacyBuildTierLabelsFromSnapshots(snapshots []cluster
 	if err != nil {
 		return snapshots, true, err
 	}
-	s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, refreshed)
 	return refreshed, true, nil
 }
 
@@ -542,7 +545,6 @@ func (s *Server) reconcileSharedPoolPolicyDriftFromSnapshots(snapshots []cluster
 	if err != nil {
 		return snapshots, true, err
 	}
-	s.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, refreshed)
 	return refreshed, true, nil
 }
 
