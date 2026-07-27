@@ -82,6 +82,7 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	planRequest := performJSONRequest(t, server, http.MethodPost, "/v1/admin/image-cache/prune-plan", adminSecret, map[string]any{
 		"cluster_node_name": "worker-1",
 		"mode":              "dry-run",
+		"max_delete_bytes":  100,
 	})
 	if planRequest.Code != http.StatusCreated {
 		t.Fatalf("create prune plan status=%d body=%s", planRequest.Code, planRequest.Body.String())
@@ -96,6 +97,12 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	}
 	if planResponse.Task.Type != model.NodeUpdateTaskTypePruneImageCache || planResponse.Task.Payload["allow_delete"] != "false" || planResponse.Task.Payload["dry_run"] != "true" {
 		t.Fatalf("unexpected prune task: %+v", planResponse.Task)
+	}
+	if got, want := planResponse.Task.Payload["min_manifest_age"], planResponse.Plan.MinManifestAge; got != want || got != defaultImageCacheOrphanGracePeriod.String() {
+		t.Fatalf("prune task min_manifest_age = %q, want plan value %q", got, want)
+	}
+	if planResponse.Plan.MaxDeleteBytes != 100 || planResponse.Plan.PlannedDeleteBytes != 100 || !planResponse.Plan.BudgetExhausted || planResponse.Task.Payload["max_delete_bytes"] != "100" {
+		t.Fatalf("prune task byte-budget override was not applied consistently: plan=%+v task=%+v", planResponse.Plan, planResponse.Task)
 	}
 }
 

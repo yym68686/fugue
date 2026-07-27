@@ -213,6 +213,7 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 	}
 	if req.MaxDeleteBytes > 0 {
 		plan.MaxDeleteBytes = req.MaxDeleteBytes
+		applyImageCachePrunePlanBudget(&plan)
 	}
 	plan.Mode = mode
 	plan.Status = model.ImageCachePrunePlanStatusPlanned
@@ -247,6 +248,7 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		"allow_delete":               fmt.Sprintf("%t", allowDelete),
 		"targets_json":               string(targetsRaw),
 		"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
+		"min_manifest_age":           strings.TrimSpace(plan.MinManifestAge),
 		"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
 		"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
 		"candidate_manifest_count":   fmt.Sprintf("%d", plan.CandidateManifestCount),
@@ -544,14 +546,26 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		}
 		return plan.Candidates[i].PlannedDeleteBytes > plan.Candidates[j].PlannedDeleteBytes
 	})
-	if plan.PlannedDeleteBytes > plan.MaxDeleteBytes {
-		plan.BudgetExhausted = true
-		plan.PlannedDeleteBytes = plan.MaxDeleteBytes
-	}
+	applyImageCachePrunePlanBudget(&plan)
 	sort.SliceStable(plan.ProtectedManifests, func(i, j int) bool {
 		return plan.ProtectedManifests[i].PlannedDeleteBytes > plan.ProtectedManifests[j].PlannedDeleteBytes
 	})
 	return plan, nil
+}
+
+func applyImageCachePrunePlanBudget(plan *model.ImageCachePrunePlan) {
+	if plan == nil {
+		return
+	}
+	total := plan.CandidateBlobBytes
+	for _, candidate := range plan.Candidates {
+		total += candidate.PlannedDeleteBytes
+	}
+	plan.PlannedDeleteBytes = total
+	plan.BudgetExhausted = plan.MaxDeleteBytes > 0 && total > plan.MaxDeleteBytes
+	if plan.BudgetExhausted {
+		plan.PlannedDeleteBytes = plan.MaxDeleteBytes
+	}
 }
 
 type imageCacheProtectedSet struct {
