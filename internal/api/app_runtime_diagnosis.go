@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -248,6 +249,11 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			appStorageSameNodeOnlineMountUnsupportedSummary(app),
 		)
 		diagnosis.Hint = "Use a Recreate rollout for this storage class, or move the app storage to RWX / a same-node concurrent RWO storage class before claiming zero downtime."
+	case diagnosis.ReadyPods > 0 && httpProbe.attempted && !httpProbe.responsive && httpProbe.transportReached:
+		diagnosis.Category = "http-probe-inconclusive"
+		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready; the app accepted TCP but did not return an HTTP response", diagnosis.ReadyPods, diagnosis.LivePods)
+		diagnosis.Hint = "Verify that the declared service port speaks HTTP and that /healthz or / is a valid route, then inspect the runtime logs for protocol or handler errors."
+		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "the peer reset or closed an established TCP connection before returning an HTTP response")
 	case diagnosis.ReadyPods > 0 && httpProbe.attempted && !httpProbe.responsive && appRestrictedIngress(app):
 		diagnosis.Category = "http-probe-inconclusive"
 		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready; the internal HTTP probe was inconclusive under restricted ingress", diagnosis.ReadyPods, diagnosis.LivePods)
@@ -347,11 +353,12 @@ func appRestrictedIngress(app model.App) bool {
 }
 
 type appHTTPProbeDiagnosis struct {
-	attempted  bool
-	responsive bool
-	timedOut   bool
-	unhealthy  bool
-	evidence   []string
+	attempted        bool
+	responsive       bool
+	transportReached bool
+	timedOut         bool
+	unhealthy        bool
+	evidence         []string
 }
 
 func (s *Server) diagnoseAppHTTPAvailability(ctx context.Context, app model.App) appHTTPProbeDiagnosis {
@@ -392,6 +399,9 @@ func (s *Server) diagnoseAppHTTPAvailability(ctx context.Context, app model.App)
 		if err != nil {
 			if appDiagnosisHTTPProbeTimedOut(err) {
 				diagnosis.timedOut = true
+			}
+			if appDiagnosisHTTPProbeReachedPeer(err) {
+				diagnosis.transportReached = true
 			}
 			diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s failed after %s: %v", requestPath, elapsed, err))
 			continue
@@ -446,6 +456,26 @@ func appDiagnosisHTTPProbeTimedOut(err error) bool {
 	}
 	normalized := strings.ToLower(err.Error())
 	return strings.Contains(normalized, "timeout") || strings.Contains(normalized, "deadline exceeded")
+}
+
+func appDiagnosisHTTPProbeReachedPeer(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	normalized := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection reset by peer",
+		"malformed http response",
+		"server gave http response to https client",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) appendAppStrictDrainEvidence(ctx context.Context, client *clusterNodeClient, logClient appLogsClient, app model.App, namespace string, pods []kubePodInfo, events []coreEventOrZero, diagnosis *appDiagnosis) {
