@@ -87,13 +87,19 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if strings.Contains(sharedRules, `"secrets"`) {
 		t.Fatalf("shared platform role must not grant Kubernetes Secret API access:\n%s", sharedRole)
 	}
-	if strings.Contains(sharedRules, `resources: ["pods/resize"]`) ||
-		strings.Contains(controlPlaneRules, `resources: ["pods/resize"]`) {
-		t.Fatalf("platform roles must not grant the unused pod resize subresource:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+	if strings.Contains(sharedRules, `resources: ["pods/resize"]`) {
+		t.Fatalf("shared platform role must not grant the pod resize subresource:\n%s", sharedRole)
+	}
+	resizeRule := "  - apiGroups: [\"\"]\n" +
+		"    resources: [\"pods/resize\"]\n" +
+		"    verbs: [\"patch\"]\n"
+	if !strings.Contains(controlPlaneRules, strings.TrimSpace(resizeRule)) {
+		t.Fatalf("dedicated control-plane role must grant only patch on pods/resize:\n%s", role)
 	}
 	wantSharedRules := strings.Replace(controlPlaneRules, `"secrets", `, "", 1)
+	wantSharedRules = strings.Replace(wantSharedRules, resizeRule, "", 1)
 	if sharedRules != wantSharedRules {
-		t.Fatalf("shared and control-plane roles must differ only by Secret API access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+		t.Fatalf("shared and control-plane roles must differ only by Secret API access and pod resize patch access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
 	}
 	binding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane")
 	if binding == "" {

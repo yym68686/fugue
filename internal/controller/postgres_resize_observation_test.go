@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -74,4 +75,92 @@ func TestGetPodResizeStateReadsTheOrdinaryPodResource(t *testing.T) {
 	if !found || pod.Metadata.Name != "database-1" {
 		t.Fatalf("unexpected pod response found=%t pod=%+v", found, pod)
 	}
+}
+
+func TestPatchPodContainerResourcesUsesResizeSubresource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/namespaces/tenant-a/pods/database-1/resize" {
+			t.Fatalf("unexpected Kubernetes request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != kubeStrategicMergePatchContentType {
+			t.Fatalf("unexpected content type %q", got)
+		}
+		var patch kubeResizePodPatch
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			t.Fatalf("decode resize patch: %v", err)
+		}
+		if patch.Metadata.ResourceVersion != "42" {
+			t.Fatalf("expected resourceVersion guard, got %+v", patch.Metadata)
+		}
+		if len(patch.Spec.Containers) != 1 || patch.Spec.Containers[0].Name != managedPostgresMainContainerName {
+			t.Fatalf("unexpected resize containers: %+v", patch.Spec.Containers)
+		}
+		resources := patch.Spec.Containers[0].Resources
+		if resources.Requests["cpu"] != "150m" || resources.Limits["memory"] != "1Gi" {
+			t.Fatalf("unexpected resize resources: %+v", resources)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"namespace":"tenant-a","name":"database-1","resourceVersion":"43","generation":8},"spec":{"containers":[{"name":"postgres","resources":{"requests":{"cpu":"150m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}}}]}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &kubeClient{
+		client:      server.Client(),
+		baseURL:     server.URL,
+		bearerToken: "test",
+		namespace:   "tenant-a",
+	}
+	pod, err := client.patchPodContainerResources(
+		context.Background(),
+		"tenant-a",
+		"database-1",
+		"42",
+		managedPostgresMainContainerName,
+		kubeResourceRequirements{
+			Requests: map[string]string{"cpu": "150m", "memory": "512Mi"},
+			Limits:   map[string]string{"cpu": "500m", "memory": "1Gi"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("patch pod resources: %v", err)
+	}
+	if pod.Metadata.ResourceVersion != "43" || pod.Metadata.Generation != 8 {
+		t.Fatalf("unexpected resized pod response: %+v", pod.Metadata)
+	}
+}
+
+func TestPatchPodContainerResourcesFailsClosed(t *testing.T) {
+	t.Run("invalid resource is rejected before transport", func(t *testing.T) {
+		client := &kubeClient{}
+		_, err := client.patchPodContainerResources(
+			context.Background(),
+			"tenant-a",
+			"database-1",
+			"42",
+			managedPostgresMainContainerName,
+			kubeResourceRequirements{Requests: map[string]string{"ephemeral-storage": "1Gi"}},
+		)
+		if err == nil {
+			t.Fatal("expected unsupported resource to fail closed")
+		}
+	})
+
+	t.Run("stale observation reports conflict", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "conflict", http.StatusConflict)
+		}))
+		t.Cleanup(server.Close)
+		client := &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "test", namespace: "tenant-a"}
+		_, err := client.patchPodContainerResources(
+			context.Background(),
+			"tenant-a",
+			"database-1",
+			"42",
+			managedPostgresMainContainerName,
+			kubeResourceRequirements{Requests: map[string]string{"cpu": "150m"}},
+		)
+		if !errors.Is(err, errKubeConflict) {
+			t.Fatalf("expected Kubernetes conflict, got %v", err)
+		}
+	})
 }
