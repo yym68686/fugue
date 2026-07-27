@@ -959,8 +959,9 @@ func patchManagedAppStorageExpansionErrorStatus(
 
 	// The preflight runs before any child object is applied. If the existing
 	// Deployment is still fully ready, preserving its observed replica count
-	// lets the edge continue serving the last known-good release while the
-	// failed resize remains visible in the app error message.
+	// is the availability contract with the API proxy: the phase and message
+	// retain the storage error for operators, while a nonzero ready count keeps
+	// the last known-good release serving until the resize is repaired.
 	if client != nil && app.Spec.Replicas > 0 {
 		deployment, found, readErr := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 		if readErr == nil && found && managedDeploymentStatusReady(deployment, app.Spec.Replicas) {
