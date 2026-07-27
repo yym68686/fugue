@@ -172,6 +172,48 @@ func TestImageCacheInventoryUnreferencedBlobsUseBlobListTotals(t *testing.T) {
 	}
 }
 
+func TestImageCacheInventoryCorrectsUnderreportedFilesystemPressure(t *testing.T) {
+	t.Parallel()
+
+	_, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Image Cache Pressure Accounting Tenant")
+	report := performJSONRequest(t, server, http.MethodPost, "/v1/node-updater/image-cache/inventory", updaterToken, map[string]any{
+		"endpoint":     "http://worker-1:5000",
+		"cluster_node": "worker-1",
+		"disk": map[string]any{
+			"total_bytes":  1_000,
+			"free_bytes":   100,
+			"used_percent": 70,
+		},
+	})
+	if report.Code != http.StatusOK {
+		t.Fatalf("report inventory status=%d body=%s", report.Code, report.Body.String())
+	}
+
+	inventory := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/inventory?cluster_node_name=worker-1", adminSecret, nil)
+	if inventory.Code != http.StatusOK {
+		t.Fatalf("admin inventory status=%d body=%s", inventory.Code, inventory.Body.String())
+	}
+	var inventoryResponse struct {
+		Nodes []model.ImageCacheNodeInventory `json:"nodes"`
+	}
+	mustDecodeJSON(t, inventory, &inventoryResponse)
+	if len(inventoryResponse.Nodes) != 1 || inventoryResponse.Nodes[0].FilesystemUsedPercent != 90 {
+		t.Fatalf("expected corrected 90%% filesystem usage, got %+v", inventoryResponse.Nodes)
+	}
+
+	plan := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/prune-plan?cluster_node_name=worker-1", adminSecret, nil)
+	if plan.Code != http.StatusOK {
+		t.Fatalf("get prune plan status=%d body=%s", plan.Code, plan.Body.String())
+	}
+	var planResponse struct {
+		Plan model.ImageCachePrunePlan `json:"plan"`
+	}
+	mustDecodeJSON(t, plan, &planResponse)
+	if !planResponse.Plan.NodePressure {
+		t.Fatalf("expected corrected capacity evidence to set node pressure: %+v", planResponse.Plan)
+	}
+}
+
 func TestImageCacheInventoryAndLocalPVAdminListsReturnEmptyArrays(t *testing.T) {
 	t.Parallel()
 

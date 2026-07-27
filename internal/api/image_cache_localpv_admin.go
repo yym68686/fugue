@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/imagecachekeys"
+	"fugue/internal/imagecacheusage"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -365,6 +366,11 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 	if node.FilesystemUsedPercent == 0 {
 		node.FilesystemUsedPercent = req.Disk.UsedPercent
 	}
+	node.FilesystemUsedPercent = imagecacheusage.ConservativeUsedPercent(
+		node.FilesystemUsedPercent,
+		node.FilesystemTotalBytes,
+		node.FilesystemFreeBytes,
+	)
 	node.CacheBytes = firstNonZeroInt64(node.CacheBytes, req.Disk.CacheBytes)
 	node.PinCount = firstNonZeroInt(node.PinCount, len(req.Pins))
 	if len(req.UnreferencedBlobs) > 0 {
@@ -1154,7 +1160,12 @@ func imageCacheNodeUpdateTaskObsolete(task model.NodeUpdateTask, imageByID map[s
 }
 
 func imageCacheNodePressure(node model.ImageCacheNodeInventory) bool {
-	if node.FilesystemUsedPercent >= 85 {
+	usedPercent := imagecacheusage.ConservativeUsedPercent(
+		node.FilesystemUsedPercent,
+		node.FilesystemTotalBytes,
+		node.FilesystemFreeBytes,
+	)
+	if usedPercent >= 85 {
 		return true
 	}
 	return strings.Contains(strings.ToLower(strings.TrimSpace(node.Status)), "pressure")

@@ -161,6 +161,20 @@ func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testin
 	}
 }
 
+func TestControllerImageCacheNodePressureUsesAvailableCapacity(t *testing.T) {
+	t.Parallel()
+
+	node := model.ImageCacheNodeInventory{
+		FilesystemTotalBytes:  1_000,
+		FilesystemFreeBytes:   100,
+		FilesystemUsedPercent: 70,
+		Status:                "reported",
+	}
+	if !controllerImageCacheNodePressure(node) {
+		t.Fatal("expected 90% unavailable capacity to be treated as node pressure")
+	}
+}
+
 func TestScheduleOrphanImageCachePrunePrioritizesPressureAndDoesNotLetPendingStallGlobal(t *testing.T) {
 	t.Parallel()
 

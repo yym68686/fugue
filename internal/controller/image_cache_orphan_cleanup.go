@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fugue/internal/imagecachekeys"
+	"fugue/internal/imagecacheusage"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -1082,7 +1083,12 @@ func controllerKeySetContainsAny(set map[string]struct{}, keys ...string) bool {
 }
 
 func controllerImageCacheNodePressure(node model.ImageCacheNodeInventory) bool {
-	if node.FilesystemUsedPercent >= 85 {
+	usedPercent := imagecacheusage.ConservativeUsedPercent(
+		node.FilesystemUsedPercent,
+		node.FilesystemTotalBytes,
+		node.FilesystemFreeBytes,
+	)
+	if usedPercent >= 85 {
 		return true
 	}
 	return strings.Contains(strings.ToLower(strings.TrimSpace(node.Status)), "pressure")
