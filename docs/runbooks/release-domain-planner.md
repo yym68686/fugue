@@ -69,6 +69,16 @@ array order, labels, annotations, Secrets, and numeric values, and removes only
 The real upgrade also runs with `--no-hooks`; hooks are therefore neither
 retained in the canonical evidence nor executed as an unowned side channel.
 
+The build preflight also compares each observed workload image with the image
+recorded by the current Helm revision. A tag or repository changed outside
+Helm is not accepted as a new release baseline. The planner keeps the Helm
+source tag as the trusted component baseline, records the drift explicitly,
+and forces that component through the normal verified image build. The later
+activation evidence must therefore bind a new OCI digest before the existing
+single-domain Helm transaction can converge the workload and release record.
+An invalid or non-commit Helm baseline still fails closed; the recovery path
+does not authorize an out-of-band image directly.
+
 ## Planner outcomes
 
 | Result | Production behavior |

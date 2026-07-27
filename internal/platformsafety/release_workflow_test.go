@@ -2823,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "d31b39f2b1378843cadaeb82e7e72d14f19cf00829a83694efa423d159cdef1a")
+	assertWorkflowSourceDigest(t, data, "1dd712917a9d1ffac838dddf39a3f69a27d96091fca35a73c29c5105b78768a1")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -3127,6 +3127,21 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := baselineLiveImages.Env["FUGUE_IMAGE_TAG"], "${{ github.sha }}"; got != want {
 		t.Fatalf("release baseline image target must be the dispatched commit: got %q want %q", got, want)
 	}
+	if got, want := baselineLiveImages.Env["FUGUE_RESOLVE_HELM_IMAGE_BASELINES"], "true"; got != want {
+		t.Fatalf("release baseline must compare live images with the Helm revision: got %q want %q", got, want)
+	}
+	for component, want := range map[string]string{
+		"api":             "${{ steps.live_images.outputs.api_image_helm_drift }}",
+		"controller":      "${{ steps.live_images.outputs.controller_image_helm_drift }}",
+		"drain_agent":     "${{ steps.live_images.outputs.drain_agent_image_helm_drift }}",
+		"telemetry_agent": "${{ steps.live_images.outputs.telemetry_agent_image_helm_drift }}",
+		"image_cache":     "${{ steps.live_images.outputs.image_cache_image_helm_drift }}",
+		"edge":            "${{ steps.live_images.outputs.edge_image_helm_drift }}",
+	} {
+		if got := baseline.Outputs[component+"_image_helm_drift"]; got != want {
+			t.Fatalf("release baseline Helm drift output %s drifted: got %q want %q", component, got, want)
+		}
+	}
 	baselineChanges := workflowStepByName(t, baseline, "Compute live-to-target release changed files")
 	if baselineChanges.ID != "release_changes" {
 		t.Fatalf("release baseline changed-files step id drifted: %q", baselineChanges.ID)
@@ -3181,6 +3196,19 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	if got, want := buildPlan.Env["FUGUE_RELEASE_TARGET_REF"], "${{ needs.release-baseline.outputs.target_ref }}"; got != want {
 		t.Fatalf("image build plan must use the baseline target ref: got %q want %q", got, want)
+	}
+	for component, want := range map[string]string{
+		"API":             "${{ needs.release-baseline.outputs.api_image_helm_drift }}",
+		"CONTROLLER":      "${{ needs.release-baseline.outputs.controller_image_helm_drift }}",
+		"DRAIN_AGENT":     "${{ needs.release-baseline.outputs.drain_agent_image_helm_drift }}",
+		"TELEMETRY_AGENT": "${{ needs.release-baseline.outputs.telemetry_agent_image_helm_drift }}",
+		"IMAGE_CACHE":     "${{ needs.release-baseline.outputs.image_cache_image_helm_drift }}",
+		"EDGE":            "${{ needs.release-baseline.outputs.edge_image_helm_drift }}",
+	} {
+		key := "FUGUE_" + component + "_IMAGE_HELM_DRIFT"
+		if got := buildPlan.Env[key]; got != want {
+			t.Fatalf("image build plan Helm drift input %s drifted: got %q want %q", key, got, want)
+		}
 	}
 	buildProvenance := workflowStepByName(t, build, "Publish verified control-plane image provenance")
 	if buildProvenance.ID != "build_images" {

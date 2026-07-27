@@ -6972,6 +6972,43 @@ GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "stale held edge diff cannot enter an unrelated build plan"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "false" "stale held edge build flag"
 
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_CURRENT_CORE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_HELM_DRIFT=true \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "Helm/live drift forces one component rebuild"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "Helm/live controller drift build flag"
+grep -Fq 'will build controller image (helm-live-image-drift)' "${COMPONENT_PLAN_LOG}" ||
+  fail "Helm/live drift build reason must be observable"
+
+: >"${COMPONENT_PLAN_OUTPUT}"
+if GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_CURRENT_CORE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_HELM_DRIFT=unknown \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}" 2>&1; then
+  fail "invalid Helm/live drift flag must fail closed"
+fi
+assert_eq "$(wc -c <"${COMPONENT_PLAN_OUTPUT}" | tr -d ' ')" "0" "invalid Helm/live drift flag emits no build outputs"
+
+if GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_CURRENT_CORE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_HELM_DRIFT=true \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}" 2>&1; then
+  fail "Helm/live drift without a trusted component baseline must fail closed"
+fi
+
 COMPONENT_PLAN_FIXTURE_BASE="${COMPONENT_PLAN_TARGET}"
 mkdir -p \
   "${COMPONENT_PLAN_REPO}/internal/controller/testdata" \
