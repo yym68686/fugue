@@ -6096,6 +6096,7 @@ paths:
         - $ref: "#/components/parameters/ObservabilityRequestLimitQueryParam"
         - $ref: "#/components/parameters/TraceIdQueryParam"
         - $ref: "#/components/parameters/RequestIdQueryParam"
+        - $ref: "#/components/parameters/ObservabilityRequestPathQueryParam"
         - $ref: "#/components/parameters/StatusClassQueryParam"
         - $ref: "#/components/parameters/StatusCodeQueryParam"
         - $ref: "#/components/parameters/SlowRequestsQueryParam"
@@ -6124,6 +6125,7 @@ paths:
         - $ref: "#/components/parameters/ObservabilityRequestLimitQueryParam"
         - $ref: "#/components/parameters/TraceIdQueryParam"
         - $ref: "#/components/parameters/RequestIdQueryParam"
+        - $ref: "#/components/parameters/ObservabilityRequestPathQueryParam"
         - $ref: "#/components/parameters/StatusClassQueryParam"
         - $ref: "#/components/parameters/StatusCodeQueryParam"
         - $ref: "#/components/parameters/SlowRequestsQueryParam"
@@ -10325,6 +10327,15 @@ components:
       required: false
       schema:
         type: string
+    ObservabilityRequestPathQueryParam:
+      in: query
+      name: path
+      required: false
+      description: Exact redacted HTTP request path. Query strings and fragments are not accepted or returned.
+      schema:
+        type: string
+        maxLength: 2048
+        pattern: '^/[^?#\x00-\x1F\x7F]*$'
     StatusClassQueryParam:
       in: query
       name: status_class
@@ -22666,6 +22677,9 @@ components:
           type: string
         route:
           type: string
+        path:
+          type: string
+          description: Redacted HTTP request path without query string or fragment when the producer supplied one.
         method:
           type: string
         status_code:

@@ -52,6 +52,9 @@ type PipelineSnapshot struct {
 	KubernetesLogLines      uint64 `json:"kubernetes_log_lines"`
 	KubernetesLogErrors     uint64 `json:"kubernetes_log_errors"`
 	KubernetesLogPods       int64  `json:"kubernetes_log_pods"`
+	KubernetesPriorityLines       uint64 `json:"kubernetes_priority_log_lines"`
+	KubernetesPriorityTruncations uint64 `json:"kubernetes_priority_log_truncations"`
+	KubernetesPriorityTargets     int64  `json:"kubernetes_priority_log_targets"`
 	PrometheusScrapes       uint64 `json:"prometheus_scrapes"`
 	PrometheusScrapeErrors  uint64 `json:"prometheus_scrape_errors"`
 	OTLPRequests            uint64 `json:"otlp_requests"`
@@ -115,25 +118,28 @@ type Pipeline struct {
 	meterMu            sync.Mutex
 	tenantMeters       map[string]telemetryTenantMeter
 
-	queueDepth             atomic.Int64
-	queuedBytes            atomic.Int64
-	received               atomic.Uint64
-	exported               atomic.Uint64
-	dropped                atomic.Uint64
-	redacted               atomic.Uint64
-	quotaDropped           atomic.Uint64
-	batches                atomic.Uint64
-	exportErrors           atomic.Uint64
-	runtimeLogLines        atomic.Uint64
-	runtimeLogErrors       atomic.Uint64
-	kubernetesLogLines     atomic.Uint64
-	kubernetesLogErrors    atomic.Uint64
-	kubernetesLogPods      atomic.Int64
-	prometheusScrapes      atomic.Uint64
-	prometheusScrapeErrors atomic.Uint64
-	otlpRequests           atomic.Uint64
-	otlpBytes              atomic.Uint64
-	lastError              atomic.Value
+	queueDepth              atomic.Int64
+	queuedBytes             atomic.Int64
+	received                atomic.Uint64
+	exported                atomic.Uint64
+	dropped                 atomic.Uint64
+	redacted                atomic.Uint64
+	quotaDropped            atomic.Uint64
+	batches                 atomic.Uint64
+	exportErrors            atomic.Uint64
+	runtimeLogLines         atomic.Uint64
+	runtimeLogErrors        atomic.Uint64
+	kubernetesLogLines      atomic.Uint64
+	kubernetesLogErrors     atomic.Uint64
+	kubernetesLogPods       atomic.Int64
+	kubernetesPriorityLines       atomic.Uint64
+	kubernetesPriorityTruncations atomic.Uint64
+	kubernetesPriorityTargets     atomic.Int64
+	prometheusScrapes       atomic.Uint64
+	prometheusScrapeErrors  atomic.Uint64
+	otlpRequests            atomic.Uint64
+	otlpBytes               atomic.Uint64
+	lastError               atomic.Value
 }
 
 func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
@@ -237,6 +243,9 @@ func (p *Pipeline) Snapshot() PipelineSnapshot {
 		KubernetesLogLines:      p.kubernetesLogLines.Load(),
 		KubernetesLogErrors:     p.kubernetesLogErrors.Load(),
 		KubernetesLogPods:       p.kubernetesLogPods.Load(),
+		KubernetesPriorityLines:       p.kubernetesPriorityLines.Load(),
+		KubernetesPriorityTruncations: p.kubernetesPriorityTruncations.Load(),
+		KubernetesPriorityTargets:     p.kubernetesPriorityTargets.Load(),
 		PrometheusScrapes:       p.prometheusScrapes.Load(),
 		PrometheusScrapeErrors:  p.prometheusScrapeErrors.Load(),
 		OTLPRequests:            p.otlpRequests.Load(),
@@ -410,6 +419,15 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods Last Kubernetes pod count considered by the log collector.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_pods gauge")
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_pods %d\n", snap.KubernetesLogPods)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_lines_total Priority structured data-plane log lines ingested by the dedicated collector.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_priority_log_lines_total counter")
+	writeMetric("fugue_telemetry_pipeline_kubernetes_priority_log_lines_total", snap.KubernetesPriorityLines)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total Priority data-plane reads that filled their bounded Kubernetes tail window.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total counter")
+	writeMetric("fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total", snap.KubernetesPriorityTruncations)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_priority_log_targets Last priority data-plane target count considered by the dedicated collector.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_priority_log_targets gauge")
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_priority_log_targets %d\n", snap.KubernetesPriorityTargets)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_otlp_requests_total OTLP HTTP requests received by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_otlp_requests_total counter")
 	writeMetric("fugue_telemetry_pipeline_otlp_requests_total", snap.OTLPRequests)

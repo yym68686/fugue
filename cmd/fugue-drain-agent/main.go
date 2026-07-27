@@ -793,7 +793,21 @@ func tcpStateName(state byte) string {
 
 func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	s.metrics.mu.Lock()
-	snap := *s.metrics
+	snap := struct {
+		Active          int
+		PreStopRequests int64
+		EarlyExitTotal  int64
+		TimeoutTotal    int64
+		ObserverErrors  int64
+		LastWait        time.Duration
+	}{
+		Active:          s.metrics.Active,
+		PreStopRequests: s.metrics.PreStopRequests,
+		EarlyExitTotal:  s.metrics.EarlyExitTotal,
+		TimeoutTotal:    s.metrics.TimeoutTotal,
+		ObserverErrors:  s.metrics.ObserverErrors,
+		LastWait:        s.metrics.LastWait,
+	}
 	s.metrics.mu.Unlock()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintln(w, "# HELP fugue_app_drain_active_connections Active TCP connections observed by fugue-drain-agent.")

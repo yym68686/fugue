@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -226,8 +227,8 @@ func TestHandleListProjectImageUsageCachesRegistryFanout(t *testing.T) {
 		t.Fatalf("expected second status %d, got %d body=%s", http.StatusOK, second.Code, second.Body.String())
 	}
 
-	if fakeRegistry.inspectCalls != 2 {
-		t.Fatalf("expected cached project image usage to inspect two images once, got %d calls", fakeRegistry.inspectCalls)
+	if got := fakeRegistry.inspectCalls.Load(); got != 2 {
+		t.Fatalf("expected cached project image usage to inspect two images once, got %d calls", got)
 	}
 }
 
@@ -397,11 +398,11 @@ func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCRequestFails(t *test
 type fakeAppImageRegistry struct {
 	deleted      []string
 	images       map[string]appImageRegistryInspectResult
-	inspectCalls int
+	inspectCalls atomic.Int64
 }
 
 func (f *fakeAppImageRegistry) InspectImage(_ context.Context, imageRef string) (appImageRegistryInspectResult, error) {
-	f.inspectCalls++
+	f.inspectCalls.Add(1)
 	if result, ok := f.images[imageRef]; ok {
 		return cloneAppImageRegistryInspectResult(result), nil
 	}

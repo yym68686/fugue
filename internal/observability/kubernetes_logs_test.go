@@ -202,6 +202,78 @@ func TestKubernetesLogCollectorRetainsPriorityRequestFactsWhenCapped(t *testing.
 	}
 }
 
+func TestKubernetesLogCollectorPriorityPassOnlyIngestsStructuredDataPlaneFacts(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:          true,
+		QueueSize:        8,
+		MemoryLimitBytes: 8192,
+		MaxPayloadBytes:  2048,
+	}, nil)
+	pipeline.ctx = context.Background()
+	collector := newKubernetesLogCollectorWithClient(pipeline, nil)
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "fugue-system", Name: "edge-worker-a"}}
+	lines := strings.Join([]string{
+		"2026-06-06T01:02:00Z noisy edge request text",
+		`2026-06-06T01:02:01Z {"event_type":"request_fact","trace_id":"trace_webhook","request_id":"req_webhook","path_template":"/v1","summary_json":"{\"path\":\"/v1/webhook/provider\"}"}`,
+		"2026-06-06T01:02:02Z another noisy edge request text",
+		`2026-06-06T01:02:03Z {"event_type":"request_fact","trace_id":"trace_status","request_id":"req_status","path_template":"/v1","summary_json":"{\"path\":\"/v1/billing/topup/status?...\"}"}`,
+	}, "\n") + "\n"
+
+	result := collector.ingestLogStreamMode(context.Background(), strings.NewReader(lines), pod, "edge", 10, true)
+	if result.scanned != 4 || result.ingested != 2 {
+		t.Fatalf("expected four scanned lines and two priority facts, got %+v", result)
+	}
+	first := <-pipeline.queue
+	second := <-pipeline.queue
+	if first.Attributes["trace_id"] != "trace_webhook" || second.Attributes["trace_id"] != "trace_status" {
+		t.Fatalf("unexpected priority facts: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestKubernetesLogPriorityTargetUsesExplicitDataPlaneMetadata(t *testing.T) {
+	if kubernetesPublicDataPlaneSelector != "fugue.io/rollout-subsystem=public-data-plane" {
+		t.Fatalf("unexpected priority Kubernetes label selector %q", kubernetesPublicDataPlaneSelector)
+	}
+	priority := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{kubernetesLabelRolloutSubsystem: kubernetesPublicDataPlane}}}
+	if !kubernetesLogPriorityTarget(kubernetesLogTarget{pod: priority, container: "edge"}) {
+		t.Fatal("expected public data-plane pod to use the priority collector")
+	}
+	normal := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{kubernetesLabelComponent: "runtime"}}}
+	if kubernetesLogPriorityTarget(kubernetesLogTarget{pod: normal, container: "app"}) {
+		t.Fatal("ordinary runtime pod must remain on the standard collector only")
+	}
+	if kubernetesLogPriorityTarget(kubernetesLogTarget{pod: priority, container: "caddy"}) {
+		t.Fatal("non-producing data-plane sidecars must not consume the priority line budget")
+	}
+}
+
+func TestKubernetesLogPriorityFairShareIsIndependentFromClusterPodCount(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		KubernetesLogTailLines:        2000,
+		KubernetesLogMaxLinesPerCycle: 20000,
+	}, nil)
+	collector := newKubernetesLogCollectorWithClient(pipeline, nil)
+	if got := collector.kubernetesLogLinesPerContainer(600); got != 34 {
+		t.Fatalf("expected cluster-wide fair share of 34 lines, got %d", got)
+	}
+	if got := collector.kubernetesLogLinesPerContainer(6); got != 2000 {
+		t.Fatalf("expected six priority targets to retain the full 2000-line tail, got %d", got)
+	}
+	pipeline.kubernetesPriorityLines.Store(12)
+	pipeline.kubernetesPriorityTruncations.Store(1)
+	pipeline.kubernetesPriorityTargets.Store(6)
+	metrics := pipeline.PrometheusMetrics()
+	for _, want := range []string{
+		"fugue_telemetry_pipeline_kubernetes_priority_log_lines_total 12",
+		"fugue_telemetry_pipeline_kubernetes_priority_log_truncations_total 1",
+		"fugue_telemetry_pipeline_kubernetes_priority_log_targets 6",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("expected priority collector metric %q, got:\n%s", want, metrics)
+		}
+	}
+}
+
 func TestBenignKubernetesLogReadErrorsAreIgnored(t *testing.T) {
 	for _, message := range []string{
 		`pods "old-pod" not found`,

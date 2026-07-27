@@ -120,6 +120,11 @@ GET /v1/apps/{id}/observability/traces/{trace_id}
 GET /v1/apps/{id}/observability/diagnosis
 ```
 
+Request queries and streams accept an exact `path` filter. The returned
+request summary keeps the deployment route prefix in `route` and exposes the
+redacted request path separately in `path`; query strings and fragments are
+never accepted or returned through that field.
+
 These endpoints enforce app authorization, parse bounded query windows, and
 return source availability metadata. The logs endpoint can query a
 Loki-compatible backend, and the requests/traces endpoints can query
@@ -153,6 +158,17 @@ The first pipeline implementation is a guarded local pipeline:
   summaries to `request_facts`, span events to `request_spans`, and explicit
   platform/app events to `app_events`. Plain stdout/stderr is not copied into
   ClickHouse.
+- Kubernetes log collection has a separate bounded, concurrent priority pass
+  for pods explicitly labeled as the `public-data-plane` rollout subsystem.
+  That pass reads only structured request facts and edge diagnostic events on
+  every configured poll interval, so a slow cluster-wide log sweep cannot
+  create blind intervals for edge requests. The ordinary fair-share collector
+  continues to collect general logs independently.
+- The priority pass exposes its target count, ingested line count, and bounded
+  tail-window truncation count in telemetry-agent metrics. A non-zero
+  truncation count means the requested priority tail filled and the interval
+  must be treated as potentially incomplete rather than silently assumed
+  complete.
 
 When observability is disabled, ingestion endpoints return accepted responses
 but do not export data. This keeps app-side telemetry exporters from turning

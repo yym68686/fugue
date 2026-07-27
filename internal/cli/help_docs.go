@@ -190,10 +190,11 @@ List Fugue Observability request summaries for one app.
 
 This command reads request facts from the platform observability API. It is for operator diagnostics and should not be used as the source of truth for app-owned, user-visible product request history.
 
-Use --follow when you need a live diagnostic request summary stream. Use --fields to print a compact operator-focused column set, including nested summary fields such as summary.stage.
+Use --path for an exact redacted HTTP path without a query string. Use --follow when you need a live diagnostic request summary stream. Use --fields to print a compact operator-focused column set, including nested summary fields such as summary.stage.
 `),
 		Example: strings.TrimSpace(`
 fugue app requests my-app --since 10m
+fugue app requests my-app --path /v1/webhook/provider --since 30m
 fugue app requests my-app --slow --errors --json
 fugue app requests my-app --follow --fields timestamp,status,duration,summary.stage
 `),
