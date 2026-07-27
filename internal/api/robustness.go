@@ -1299,7 +1299,6 @@ func robustnessLocalPVInventoryChecks(
 
 func robustnessLocalPVInventoryHasStorage(inventory model.LocalPVInventory) bool {
 	return inventory.PVSizeBytes > 0 ||
-		inventory.ImageSizeBytes > 0 ||
 		strings.TrimSpace(inventory.LoopDevice) != "" ||
 		inventory.LVCount > 0 ||
 		inventory.ActiveLVCount > 0 ||

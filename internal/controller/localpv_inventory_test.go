@@ -60,15 +60,23 @@ func TestControllerLocalPVInventoryHasStorageDoesNotInventVolumeGroup(t *testing
 	t.Parallel()
 
 	if controllerLocalPVInventoryHasStorage(model.LocalPVInventory{
-		VGName:        "fugue-vg",
-		UnsafeReasons: []string{"lvm_tools_unavailable_or_vg_missing"},
+		VGName:         "fugue-vg",
+		ImagePath:      "/var/lib/fugue/lvm-localpv/fugue-vg.img",
+		ImageSizeBytes: 32 << 30,
+		UnsafeReasons:  []string{"loop_device_missing", "lvm_tools_unavailable_or_vg_missing"},
 	}) {
-		t.Fatal("a configured volume-group name without observed storage must not emit capacity metrics")
+		t.Fatal("an unattached backing file without observed storage must not emit capacity metrics")
 	}
 	if !controllerLocalPVInventoryHasStorage(model.LocalPVInventory{
 		VGName:      "fugue-vg",
 		PVSizeBytes: 96 << 30,
 	}) {
 		t.Fatal("an observed LocalPV physical-volume size must emit capacity metrics")
+	}
+	if !controllerLocalPVInventoryHasStorage(model.LocalPVInventory{
+		VGName:     "fugue-vg",
+		LoopDevice: "/dev/loop0",
+	}) {
+		t.Fatal("an attached LocalPV backing device with unavailable volume-group capacity must emit fail-closed capacity metrics")
 	}
 }

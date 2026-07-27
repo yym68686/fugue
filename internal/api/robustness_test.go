@@ -436,8 +436,10 @@ func TestRobustnessLocalPVChecksDoNotInventCapacityForNodeWithoutLocalPV(t *test
 	checks := robustnessLocalPVInventoryChecks(now, model.LocalPVInventory{
 		ClusterNodeName: "edge-without-localpv",
 		VGName:          "fugue-vg",
+		ImagePath:       "/var/lib/fugue/lvm-localpv/fugue-vg.img",
+		ImageSizeBytes:  32 << 30,
 		ObservedAt:      now,
-		UnsafeReasons:   []string{"image_path_missing", "lvm_tools_unavailable_or_vg_missing"},
+		UnsafeReasons:   []string{"loop_device_missing", "lvm_tools_unavailable_or_vg_missing"},
 	}, true, "edge-without-localpv", "updater-edge")
 	if len(checks) != 1 ||
 		checks[0].Name != "localpv_inventory_freshness" ||
