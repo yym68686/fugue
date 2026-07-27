@@ -61,6 +61,10 @@ const (
 	clusterJoinTokenLabelManaged        = "fugue.pro/cluster-join-bootstrap"
 	clusterJoinTokenLabelNodeKey        = "fugue.pro/node-key-id"
 	clusterJoinTokenLabelRuntime        = "fugue.pro/runtime-id"
+	clusterJoinTokenLabelNodeUpdater    = "fugue.pro/node-updater-id"
+	clusterJoinTokenLabelNodeName       = "fugue.pro/cluster-node-name"
+	clusterJoinTokenLabelPurpose        = "fugue.pro/bootstrap-purpose"
+	clusterJoinTokenPurposeNodeRejoin   = "node-rejoin"
 	clusterJoinTokenLabelValue          = "true"
 	clusterJoinTokenAuthGroup           = "system:bootstrappers:k3s:default-node-token"
 )
@@ -169,10 +173,12 @@ type kubeSecretList struct {
 
 type kubeSecret struct {
 	Metadata struct {
-		Name        string            `json:"name"`
-		Labels      map[string]string `json:"labels"`
-		Annotations map[string]string `json:"annotations"`
+		Name              string            `json:"name"`
+		CreationTimestamp string            `json:"creationTimestamp"`
+		Labels            map[string]string `json:"labels"`
+		Annotations       map[string]string `json:"annotations"`
 	} `json:"metadata"`
+	Data map[string]string `json:"data"`
 }
 
 type clusterNodePod struct {
@@ -1172,13 +1178,32 @@ func (c *clusterNodeClient) deleteNode(ctx context.Context, nodeName string) err
 }
 
 func (c *clusterNodeClient) createBootstrapToken(ctx context.Context, nodeKeyID, runtimeID, caHash string, ttl time.Duration) (string, string, error) {
+	token, tokenID, _, err := c.createBootstrapTokenWithLabels(
+		ctx,
+		nodeKeyID,
+		runtimeID,
+		caHash,
+		ttl,
+		nil,
+		"fugue join bootstrap token",
+	)
+	return token, tokenID, err
+}
+
+func (c *clusterNodeClient) createBootstrapTokenWithLabels(
+	ctx context.Context,
+	nodeKeyID, runtimeID, caHash string,
+	ttl time.Duration,
+	extraLabels map[string]string,
+	description string,
+) (string, string, time.Time, error) {
 	tokenID, err := randomHex(3)
 	if err != nil {
-		return "", "", fmt.Errorf("generate bootstrap token id: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("generate bootstrap token id: %w", err)
 	}
 	tokenSecret, err := randomHex(8)
 	if err != nil {
-		return "", "", fmt.Errorf("generate bootstrap token secret: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("generate bootstrap token secret: %w", err)
 	}
 	tokenID = strings.ToLower(strings.TrimSpace(tokenID))
 	tokenSecret = strings.ToLower(strings.TrimSpace(tokenSecret))
@@ -1190,6 +1215,17 @@ func (c *clusterNodeClient) createBootstrapToken(ctx context.Context, nodeKeyID,
 	if runtimeID = strings.TrimSpace(runtimeID); runtimeID != "" {
 		secretLabels[clusterJoinTokenLabelRuntime] = runtimeID
 	}
+	for key, value := range extraLabels {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			secretLabels[key] = value
+		}
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	if description = strings.TrimSpace(description); description == "" {
+		description = "fugue join bootstrap token"
+	}
 	payload := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
@@ -1200,23 +1236,23 @@ func (c *clusterNodeClient) createBootstrapToken(ctx context.Context, nodeKeyID,
 		},
 		"type": "bootstrap.kubernetes.io/token",
 		"stringData": map[string]string{
-			"description":                    "fugue join bootstrap token",
+			"description":                    description,
 			"token-id":                       tokenID,
 			"token-secret":                   tokenSecret,
-			"expiration":                     time.Now().UTC().Add(ttl).Format(time.RFC3339),
+			"expiration":                     expiresAt.Format(time.RFC3339),
 			"usage-bootstrap-authentication": "true",
 			"usage-bootstrap-signing":        "true",
 			"auth-extra-groups":              clusterJoinTokenAuthGroup,
 		},
 	}
 	if err := c.doJSONWithBody(ctx, http.MethodPost, "/api/v1/namespaces/"+clusterJoinTokenNamespace+"/secrets", payload, nil); err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	token := tokenID + "." + tokenSecret
 	if normalizedHash := normalizeClusterJoinCAHash(caHash); normalizedHash != "" {
 		token = "K10" + normalizedHash + "::" + token
 	}
-	return token, tokenID, nil
+	return token, tokenID, expiresAt, nil
 }
 
 func (c *clusterNodeClient) deleteBootstrapToken(ctx context.Context, tokenID string) error {

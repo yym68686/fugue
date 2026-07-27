@@ -223,7 +223,19 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 	removedNodes := make([]string, 0, len(staleSnapshots))
 	removedRuntimeIDs := make([]string, 0, len(staleSnapshots))
 	for _, snapshot := range staleSnapshots {
-		if err := client.deleteNode(r.Context(), snapshot.node.Name); err != nil && !isKubernetesNodeNotFound(err) {
+		if _, err := s.deleteClusterNodeWithAudit(
+			r.Context(),
+			client,
+			principal,
+			snapshot.node.Name,
+			key.TenantID,
+			"join_cleanup_stale_machine_fingerprint",
+			map[string]string{
+				"node_key_id":       key.ID,
+				"current_node_name": currentNodeName,
+				"runtime_id":        snapshot.runtimeID,
+			},
+		); err != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
@@ -376,7 +388,7 @@ type revokeNodeKeyCleanupResult struct {
 	Warnings                 []string `json:"warnings,omitempty"`
 }
 
-func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) revokeNodeKeyCleanupResult {
+func (s *Server) cleanupRevokedNodeKey(ctx context.Context, principal model.Principal, key model.NodeKey) revokeNodeKeyCleanupResult {
 	result := revokeNodeKeyCleanupResult{}
 	runtimes, err := s.store.ListRuntimesByNodeKey(key.ID, key.TenantID, false)
 	if err != nil {
@@ -435,7 +447,18 @@ func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) r
 			case clientErr != nil:
 				result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": kubernetes client unavailable")
 			default:
-				if err := client.deleteNode(ctx, nodeName); err != nil && !isKubernetesNodeNotFound(err) {
+				if _, err := s.deleteClusterNodeWithAudit(
+					ctx,
+					client,
+					principal,
+					nodeName,
+					key.TenantID,
+					"node_key_revoked_managed_runtime",
+					map[string]string{
+						"node_key_id": key.ID,
+						"runtime_id":  runtimeObj.ID,
+					},
+				); err != nil {
 					result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": "+err.Error())
 				} else {
 					result.DeletedClusterNodes = append(result.DeletedClusterNodes, nodeName)
@@ -472,7 +495,18 @@ func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) r
 		case clientErr != nil:
 			result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": kubernetes client unavailable")
 		default:
-			if err := client.deleteNode(ctx, nodeName); err != nil && !isKubernetesNodeNotFound(err) {
+			if _, err := s.deleteClusterNodeWithAudit(
+				ctx,
+				client,
+				principal,
+				nodeName,
+				key.TenantID,
+				"node_key_revoked_platform_machine",
+				map[string]string{
+					"node_key_id": key.ID,
+					"machine_id":  machine.ID,
+				},
+			); err != nil {
 				result.Warnings = append(result.Warnings, "delete cluster node "+nodeName+": "+err.Error())
 			} else {
 				result.DeletedClusterNodes = append(result.DeletedClusterNodes, nodeName)
@@ -2675,7 +2709,7 @@ install_fugue_node_updater() {
   log_step "Installing Fugue node updater..."
   mkdir -p /etc/fugue /var/lib/fugue-node-updater
   local updater_version="v6"
-  local updater_capabilities="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
+  local updater_capabilities="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
   updater_tmp="$(mktemp)"
   curl -fsSL --retry 3 --retry-delay 2 "${FUGUE_API_BASE}/install/node-updater.sh" -o "${updater_tmp}"
   cp "${updater_tmp}" /usr/local/bin/fugue-node-updater

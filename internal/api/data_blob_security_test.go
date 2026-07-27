@@ -319,7 +319,19 @@ func setupDataBlobSecurityServer(t *testing.T) (*store.Store, *Server, string, s
 	if err != nil {
 		t.Fatalf("create other key: %v", err)
 	}
-	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{TenantID: ownerTenant.ID, Name: "Blob Workspace"})
+	managedBackend, err := stateStore.CreateDataBackend(model.DataBackend{
+		TenantID: ownerTenant.ID,
+		Name:     "Blob Managed Backend",
+		Provider: model.DataBackendProviderFugueManaged,
+	})
+	if err != nil {
+		t.Fatalf("create managed backend: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{
+		TenantID:         ownerTenant.ID,
+		Name:             "Blob Workspace",
+		StorageBackendID: managedBackend.ID,
+	})
 	if err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}

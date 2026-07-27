@@ -21,6 +21,7 @@ const (
 	NodeDeepHealthCheckRemoteDialer           = "remotedialer_control_plane_endpoint"
 	NodeDeepHealthCheckNodeLeaseFreshness     = "node_lease_freshness"
 	NodeDeepHealthCheckPodSandboxCreation     = "pod_sandbox_creation"
+	NodeDeepHealthCheckClusterMembership      = "k3s_cluster_membership"
 	NodeDeepHealthCheckCNIBridge              = "cni_bridge"
 	NodeDeepHealthCheckKubeProxyRules         = "kube_proxy_rules"
 	NodeDeepHealthCheckDiskInodePressure      = "disk_inode_pressure"

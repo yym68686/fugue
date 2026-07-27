@@ -20245,10 +20245,47 @@ components:
           $ref: "#/components/schemas/ClusterNodePolicyStatus"
         edge_credential:
           $ref: "#/components/schemas/NodeUpdaterEdgeCredential"
+        cluster_rejoin:
+          $ref: "#/components/schemas/NodeUpdaterClusterRejoin"
         warnings:
           type: array
           items:
             type: string
+    NodeUpdaterClusterRejoin:
+      type: object
+      additionalProperties: false
+      required: [status, reason, observed_at]
+      properties:
+        status:
+          type: string
+          enum: [not_required, credential_ready, suppressed, unavailable]
+        reason:
+          type: string
+        node_name:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        credential:
+          $ref: "#/components/schemas/NodeUpdaterClusterRejoinCredential"
+    NodeUpdaterClusterRejoinCredential:
+      type: object
+      additionalProperties: false
+      required: [class, token, token_id, generation, expires_at]
+      properties:
+        class:
+          type: string
+          enum: [short_lived_kubernetes_bootstrap_token]
+        token:
+          type: string
+          description: Short-lived Kubernetes bootstrap token bound to the authenticated node updater.
+        token_id:
+          type: string
+        generation:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
     NodeUpdaterEdgeCredential:
       type: object
       additionalProperties: false

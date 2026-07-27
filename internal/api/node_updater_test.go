@@ -859,6 +859,10 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/discovery/bundle`,
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
+		`rejoin-k3s-node`,
+		`reconcile_cluster_rejoin_credential`,
+		`short_lived_kubernetes_bootstrap_token`,
+		`k3s_cluster_membership`,
 		`prepull-app-images`,
 		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="` + model.NodeUpdaterCurrentVersion + `"`,
 		`export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES`,
@@ -2402,6 +2406,7 @@ func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 		`/v1/discovery/bundle`,
 		`FUGUE_DISCOVERY_GENERATION`,
 		`refresh-join-config`,
+		`rejoin-k3s-node`,
 		`updater_capabilities="$(/usr/local/bin/fugue-node-updater capabilities`,
 	} {
 		if !strings.Contains(script, want) {

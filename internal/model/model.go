@@ -119,7 +119,14 @@ const (
 	NodeUpdaterStatusActive  = "active"
 	NodeUpdaterStatusRevoked = "revoked"
 
-	NodeUpdaterCurrentVersion = "v27"
+	NodeUpdaterCurrentVersion = "v28"
+
+	NodeUpdaterCapabilityRejoinK3SNode = "rejoin-k3s-node"
+
+	NodeUpdaterClusterRejoinStatusNotRequired     = "not_required"
+	NodeUpdaterClusterRejoinStatusCredentialReady = "credential_ready"
+	NodeUpdaterClusterRejoinStatusSuppressed      = "suppressed"
+	NodeUpdaterClusterRejoinStatusUnavailable     = "unavailable"
 
 	NodeUpdateTaskTypeRefreshJoinConfig           = "refresh-join-config"
 	NodeUpdateTaskTypeUpgradeK3SAgent             = "upgrade-k3s-agent"
@@ -746,7 +753,24 @@ type NodeUpdaterDesiredState struct {
 	DiscoveryBundle       DiscoveryBundle            `json:"discovery_bundle"`
 	NodePolicy            *ClusterNodePolicyStatus   `json:"node_policy,omitempty"`
 	EdgeCredential        *NodeUpdaterEdgeCredential `json:"edge_credential,omitempty"`
+	ClusterRejoin         *NodeUpdaterClusterRejoin  `json:"cluster_rejoin,omitempty"`
 	Warnings              []string                   `json:"warnings,omitempty"`
+}
+
+type NodeUpdaterClusterRejoin struct {
+	Status     string                              `json:"status"`
+	Reason     string                              `json:"reason"`
+	NodeName   string                              `json:"node_name,omitempty"`
+	ObservedAt time.Time                           `json:"observed_at"`
+	Credential *NodeUpdaterClusterRejoinCredential `json:"credential,omitempty"`
+}
+
+type NodeUpdaterClusterRejoinCredential struct {
+	Class      string    `json:"class"`
+	Token      string    `json:"token"`
+	TokenID    string    `json:"token_id"`
+	Generation string    `json:"generation"`
+	ExpiresAt  time.Time `json:"expires_at"`
 }
 
 type NodeUpdaterEdgeCredential struct {

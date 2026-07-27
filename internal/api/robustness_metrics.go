@@ -43,6 +43,8 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 		observability.WriteMetricHeader(w, "fugue_node_deep_health_pass", "Whether the latest node deep health report passed.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_node_quarantine_active", "Whether a node is currently quarantined by deep health.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_node_managed_iptables_stale_rule_count", "Suspicious stale Fugue managed iptables rules reported by node deep health.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_node_cluster_membership_present", "Whether the node updater can confirm its Kubernetes Node identity is present.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_node_cluster_rejoin_credential_ready", "Whether the control plane issued a bounded automatic cluster rejoin credential.", "gauge")
 		for _, result := range nodeHealth {
 			labels := map[string]string{
 				"node_updater_id": result.NodeUpdaterID,
@@ -53,17 +55,28 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 			observability.WriteMetricSample(w, "fugue_node_deep_health_pass", labels, boolMetric(result.OverallStatus == model.NodeDeepHealthStatusPass))
 			observability.WriteMetricSample(w, "fugue_node_quarantine_active", labels, boolMetric(nodeQuarantineActive(result, now)))
 			staleRules := 0.0
+			clusterMembershipPresent := 0.0
+			clusterRejoinCredentialReady := 0.0
+			clusterMembershipObserved := false
 			for _, check := range result.Checks {
-				if check.Name != model.NodeDeepHealthCheckManagedIptablesStale {
-					continue
-				}
-				if value := strings.TrimSpace(check.Evidence["suspect_rules"]); value != "" {
-					if parsed, err := strconv.ParseFloat(value, 64); err == nil {
-						staleRules = parsed
+				switch check.Name {
+				case model.NodeDeepHealthCheckManagedIptablesStale:
+					if value := strings.TrimSpace(check.Evidence["suspect_rules"]); value != "" {
+						if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+							staleRules = parsed
+						}
 					}
+				case model.NodeDeepHealthCheckClusterMembership:
+					clusterMembershipObserved = true
+					clusterMembershipPresent = boolMetric(check.Status == model.NodeDeepHealthStatusPass)
+					clusterRejoinCredentialReady = boolMetric(strings.TrimSpace(check.Evidence["server_status"]) == model.NodeUpdaterClusterRejoinStatusCredentialReady)
 				}
 			}
 			observability.WriteMetricSample(w, "fugue_node_managed_iptables_stale_rule_count", labels, staleRules)
+			if clusterMembershipObserved {
+				observability.WriteMetricSample(w, "fugue_node_cluster_membership_present", labels, clusterMembershipPresent)
+				observability.WriteMetricSample(w, "fugue_node_cluster_rejoin_credential_ready", labels, clusterRejoinCredentialReady)
+			}
 		}
 	}
 

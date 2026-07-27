@@ -151,6 +151,7 @@ func (s *Server) handleGetNodeUpdaterDesiredState(w http.ResponseWriter, r *http
 		s.writeStoreError(w, err)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": state})
 }
 
@@ -186,6 +187,8 @@ func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, p
 	}
 	nodePolicy = nodeUpdaterPolicyWithEdgeCredentialLabels(nodePolicy, edgeCredential)
 	warnings = append(warnings, edgeWarnings...)
+	clusterRejoin, rejoinWarnings := s.nodeUpdaterClusterRejoin(ctx, principal, updater)
+	warnings = append(warnings, rejoinWarnings...)
 	return model.NodeUpdaterDesiredState{
 		GeneratedAt:           time.Now().UTC(),
 		NodeUpdaterGeneration: nodeUpdaterScriptVersion,
@@ -193,6 +196,7 @@ func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, p
 		DiscoveryBundle:       discovery,
 		NodePolicy:            nodePolicy,
 		EdgeCredential:        edgeCredential,
+		ClusterRejoin:         clusterRejoin,
 		Warnings:              warnings,
 	}, nil
 }
@@ -1120,7 +1124,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -1128,6 +1132,7 @@ FUGUE_NODE_UPDATER_STATE_DIR="${FUGUE_NODE_UPDATER_STATE_DIR:-${FUGUE_NODE_UPDAT
 FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE="${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/discovery-bundle.json}"
 FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE="${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/discovery.env}"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/desired-state.json}"
+FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE="${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/cluster-rejoin.env}"
 FUGUE_NODE_UPDATER_STATE_ENV_FILE="${FUGUE_NODE_UPDATER_STATE_ENV_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/state.env}"
 FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH="${FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH:-/var/lib/fugue/node-guardian/autonomy.wal}"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/rancher/k3s/config.yaml}"
@@ -1218,6 +1223,7 @@ write_secret_file_if_changed() {
   if [ -f "${target_path}" ] && cmp -s "${source_path}" "${target_path}"; then
     rm -f "${source_path}"
     chmod 0600 "${target_path}" 2>/dev/null || true
+    rm -f "${target_path}.sha256"
     return 1
   fi
   target_dir="$(dirname "${target_path}")"
@@ -1225,6 +1231,7 @@ write_secret_file_if_changed() {
   staged_path="$(mktemp "${target_dir}/.fugue-write.XXXXXX")"
   install -m 0600 "${source_path}" "${staged_path}"
   mv -f "${staged_path}" "${target_path}"
+  rm -f "${target_path}.sha256"
   rm -f "${source_path}"
   return 0
 }
@@ -1232,7 +1239,9 @@ write_secret_file_if_changed() {
 preserve_rollback_file() {
   local path="$1"
   if [ -r "${path}" ]; then
-    cp -p "${path}" "${path}.rollback" 2>/dev/null || true
+    if cp -p "${path}" "${path}.rollback" 2>/dev/null; then
+      chmod 0600 "${path}.rollback" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -1541,6 +1550,7 @@ render_node_updater_state_env() {
     printf 'FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE=%s\n' "$(json_quote_env "${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE}")"
     printf 'FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE=%s\n' "$(json_quote_env "${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE}")"
     printf 'FUGUE_NODE_UPDATER_DESIRED_STATE_FILE=%s\n' "$(json_quote_env "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}")"
+    printf 'FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE=%s\n' "$(json_quote_env "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}")"
     printf 'FUGUE_NODE_UPDATER_STATE_ENV_FILE=%s\n' "$(json_quote_env "${FUGUE_NODE_UPDATER_STATE_ENV_FILE}")"
   } >"${tmp}"
   write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_STATE_ENV_FILE}" || true
@@ -1557,7 +1567,7 @@ fetch_node_policy_desired_state() {
     rm -f "${tmp}"
     return 1
   fi
-  write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" || true
+  write_secret_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" || true
   return 0
 }
 
@@ -1570,7 +1580,7 @@ yaml_update_scalar() {
   tmp="$(mktemp)"
   if [ ! -r "${file}" ]; then
     printf '%s: "%s"\n' "${key}" "${value}" >"${tmp}"
-    write_file_if_changed "${tmp}" "${file}"
+    write_secret_file_if_changed "${tmp}" "${file}"
     return $?
   fi
   preserve_rollback_file "${file}"
@@ -1588,7 +1598,61 @@ yaml_update_scalar() {
       }
     }
   ' "${file}" >"${tmp}"
-  write_file_if_changed "${tmp}" "${file}"
+  write_secret_file_if_changed "${tmp}" "${file}"
+  changed=$?
+  return "${changed}"
+}
+
+yaml_update_scalar_from_file() {
+  local file="$1"
+  local key="$2"
+  local value_file="$3"
+  local tmp=""
+  local changed=1
+  if [ ! -r "${value_file}" ]; then
+    return 1
+  fi
+  tmp="$(mktemp)"
+  if [ ! -r "${file}" ]; then
+    awk -v key="${key}" '
+      BEGIN {
+        if ((getline value < ARGV[1]) <= 0) {
+          exit 2
+        }
+        print key ": \"" value "\""
+        exit
+      }
+    ' "${value_file}" >"${tmp}" || {
+      rm -f "${tmp}"
+      return 1
+    }
+    write_secret_file_if_changed "${tmp}" "${file}"
+    return $?
+  fi
+  preserve_rollback_file "${file}"
+  awk -v key="${key}" -v value_file="${value_file}" '
+    BEGIN {
+      if ((getline value < value_file) <= 0) {
+        exit 2
+      }
+      done = 0
+    }
+    $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+      print key ": \"" value "\""
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print key ": \"" value "\""
+      }
+    }
+  ' "${file}" >"${tmp}" || {
+    rm -f "${tmp}"
+    return 1
+  }
+  write_secret_file_if_changed "${tmp}" "${file}"
   changed=$?
   return "${changed}"
 }
@@ -1609,7 +1673,7 @@ yaml_delete_scalar() {
     $0 ~ "^[[:space:]]*" key ":[[:space:]]*" { next }
     { print }
   ' "${file}" >"${tmp}"
-  write_file_if_changed "${tmp}" "${file}"
+  write_secret_file_if_changed "${tmp}" "${file}"
 }
 
 yaml_append_list_block() {
@@ -1646,7 +1710,7 @@ yaml_update_node_policy_blocks() {
   fi
   yaml_append_list_block "${tmp}" node-label "${labels_file}"
   yaml_append_list_block "${tmp}" node-taint "${taints_file}"
-  write_file_if_changed "${tmp}" "${file}"
+  write_secret_file_if_changed "${tmp}" "${file}"
 }
 
 desired_node_policy_label() {
@@ -1886,6 +1950,117 @@ reconcile_k3s_config() {
     changed=0
   fi
   return "${changed}"
+}
+
+render_cluster_rejoin_credential() {
+  local token_file="$1"
+  local metadata_file="$2"
+  local expected_node_name=""
+  expected_node_name="$(node_deep_health_cluster_node_name)"
+  python3 - "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" "${token_file}" "${metadata_file}" "${expected_node_name}" <<'PY_CLUSTER_REJOIN'
+import datetime
+import json
+import os
+import re
+import sys
+
+state_path, token_path, metadata_path, expected_node_name = sys.argv[1:5]
+with open(state_path, "r", encoding="utf-8") as fh:
+    desired = (json.load(fh).get("desired_state") or {})
+
+rejoin = desired.get("cluster_rejoin") or {}
+if str(rejoin.get("status") or "").strip() != "credential_ready":
+    raise SystemExit(3)
+if str(rejoin.get("reason") or "").strip() != "kubernetes_node_not_found":
+    raise SystemExit("refusing cluster rejoin credential with unexpected reason")
+
+node_name = str(rejoin.get("node_name") or "").strip()
+if not node_name or node_name != expected_node_name.strip():
+    raise SystemExit("refusing cluster rejoin credential for a different node identity")
+
+credential = rejoin.get("credential") or {}
+credential_class = str(credential.get("class") or "").strip()
+token = str(credential.get("token") or "").strip()
+token_id = str(credential.get("token_id") or "").strip()
+generation = str(credential.get("generation") or "").strip()
+expires_at_raw = str(credential.get("expires_at") or "").strip()
+
+if credential_class != "short_lived_kubernetes_bootstrap_token":
+    raise SystemExit("refusing non-bootstrap cluster rejoin credential")
+token_pattern = r"(?:(?:K10[0-9a-f]{64})::)?([0-9a-z]{6})\.([0-9a-z]{16})"
+match = re.fullmatch(token_pattern, token)
+if not match or match.group(1) != token_id:
+    raise SystemExit("refusing malformed cluster rejoin bootstrap token")
+if generation != "bootstrap-token/" + token_id:
+    raise SystemExit("refusing cluster rejoin credential with mismatched generation")
+try:
+    expires_at = datetime.datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+except ValueError as exc:
+    raise SystemExit("refusing cluster rejoin credential with invalid expiry") from exc
+now = datetime.datetime.now(datetime.timezone.utc)
+if expires_at.tzinfo is None:
+    expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+if expires_at <= now + datetime.timedelta(seconds=30):
+    raise SystemExit("refusing expired or near-expiry cluster rejoin credential")
+
+with open(token_path, "w", encoding="utf-8") as fh:
+    fh.write(token + "\n")
+os.chmod(token_path, 0o600)
+
+metadata = {
+    "FUGUE_K3S_REJOIN_CREDENTIAL_CLASS": credential_class,
+    "FUGUE_K3S_REJOIN_TOKEN_ID": token_id,
+    "FUGUE_K3S_REJOIN_GENERATION": generation,
+    "FUGUE_K3S_REJOIN_EXPIRES_AT": expires_at_raw,
+    "FUGUE_K3S_REJOIN_NODE_NAME": node_name,
+}
+with open(metadata_path, "w", encoding="utf-8") as fh:
+    for key in sorted(metadata):
+        fh.write(f"{key}={metadata[key]}\n")
+os.chmod(metadata_path, 0o600)
+PY_CLUSTER_REJOIN
+}
+
+reconcile_cluster_rejoin_credential() {
+  local token_tmp=""
+  local metadata_tmp=""
+  local changed=1
+  if [ ! -r "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  token_tmp="$(mktemp)"
+  metadata_tmp="$(mktemp)"
+  chmod 0600 "${token_tmp}" "${metadata_tmp}" 2>/dev/null || true
+  if ! render_cluster_rejoin_credential "${token_tmp}" "${metadata_tmp}"; then
+    rm -f "${token_tmp}" "${metadata_tmp}"
+    return 1
+  fi
+  if yaml_update_scalar_from_file "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" token "${token_tmp}"; then
+    changed=0
+  fi
+  write_secret_file_if_changed "${metadata_tmp}" "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}" || true
+  rm -f "${token_tmp}" "${metadata_tmp}"
+  if [ "${changed}" -eq 0 ]; then
+    record_node_guardian_wal \
+      "cluster_rejoin_credential_applied" \
+      "server_authorized_short_lived_credential" \
+      "node:$(node_deep_health_cluster_node_name)" \
+      "applied a short-lived Kubernetes bootstrap credential; k3s-agent restart required"
+  fi
+  return "${changed}"
+}
+
+current_rejoin_metadata_value() {
+  local key="$1"
+  if [ ! -r "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}" ]; then
+    return 1
+  fi
+  awk -F= -v key="${key}" '
+    $1 == key {
+      print substr($0, index($0, "=") + 1)
+      exit
+    }
+  ' "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}"
 }
 
 reconcile_registry_mirror() {
@@ -2628,6 +2803,10 @@ reconcile_node_state() {
     log "updated k3s join configuration"
     k3s_runtime_config_changed=1
   fi
+  if reconcile_cluster_rejoin_credential; then
+    log "installed server-authorized short-lived Kubernetes rejoin credential"
+    k3s_runtime_config_changed=1
+  fi
   if reconcile_cni_bridge_mtu; then
     log "reconciled CNI bridge MTU"
   fi
@@ -2763,6 +2942,9 @@ current_config_hash() {
     printf 'edge_env_generation=%s\n' "$(current_edge_env_generation)"
     printf 'dns_env_generation=%s\n' "$(current_dns_env_generation)"
     printf 'discovery_generation=%s\n' "${FUGUE_DISCOVERY_GENERATION:-}"
+    printf 'cluster_rejoin_credential_class=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_CREDENTIAL_CLASS || true)"
+    printf 'cluster_rejoin_generation=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_GENERATION || true)"
+    printf 'cluster_rejoin_expires_at=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_EXPIRES_AT || true)"
     printf 'timesyncd_dropin_hash=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN}")"
     printf 'timesyncd_poll_min=%s\n' "${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC}"
     printf 'timesyncd_poll_max=%s\n' "${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC}"
@@ -2897,6 +3079,11 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_LAST_ERROR="$(last_error)" \
   FUGUE_HEARTBEAT_CLUSTER_NODE_NAME="$(node_deep_health_cluster_node_name)" \
   FUGUE_HEARTBEAT_EDGE_ROLE="$(node_deep_health_edge_role)" \
+  FUGUE_HEARTBEAT_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" \
+  FUGUE_HEARTBEAT_REJOIN_CREDENTIAL_CLASS="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_CREDENTIAL_CLASS || true)" \
+  FUGUE_HEARTBEAT_REJOIN_TOKEN_ID="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_TOKEN_ID || true)" \
+  FUGUE_HEARTBEAT_REJOIN_GENERATION="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_GENERATION || true)" \
+  FUGUE_HEARTBEAT_REJOIN_EXPIRES_AT="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_EXPIRES_AT || true)" \
   python3 - <<'PY_NODE_DEEP_HEALTH'
 import datetime
 import json
@@ -2998,6 +3185,75 @@ else:
 
 node_name = os.environ.get("FUGUE_HEARTBEAT_CLUSTER_NODE_NAME", "").strip() or os.uname().nodename
 kubectl_base = kubectl_base_command()
+cluster_rejoin = {}
+desired_state_file = os.environ.get("FUGUE_HEARTBEAT_DESIRED_STATE_FILE", "").strip()
+if desired_state_file:
+    try:
+        with open(desired_state_file, "r", encoding="utf-8") as fh:
+            cluster_rejoin = ((json.load(fh).get("desired_state") or {}).get("cluster_rejoin") or {})
+    except Exception:
+        cluster_rejoin = {}
+
+rejoin_status = str(cluster_rejoin.get("status") or "").strip()
+rejoin_reason = str(cluster_rejoin.get("reason") or "").strip()
+rejoin_credential = cluster_rejoin.get("credential") or {}
+rejoin_evidence = {
+    "server_status": rejoin_status,
+    "server_reason": rejoin_reason,
+    "credential_class": str(rejoin_credential.get("class") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_CREDENTIAL_CLASS", "")).strip(),
+    "credential_token_id": str(rejoin_credential.get("token_id") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_TOKEN_ID", "")).strip(),
+    "credential_generation": str(rejoin_credential.get("generation") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_GENERATION", "")).strip(),
+    "credential_expires_at": str(rejoin_credential.get("expires_at") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_EXPIRES_AT", "")).strip(),
+    "node_name": node_name,
+}
+local_node_present = False
+local_node_observed = ""
+if kubectl_base:
+    ok_node, node_out = run(kubectl_base + ["get", "node", node_name, "-o", "name"], 5)
+    local_node_present = ok_node is True
+    local_node_observed = node_out
+if local_node_present or (rejoin_status == "not_required" and rejoin_reason == "node_present"):
+    checks.append(check(
+        "k3s_cluster_membership",
+        "kubernetes",
+        "pass",
+        local_node_observed or "control plane reports Kubernetes Node present",
+        "Kubernetes Node identity present",
+        False,
+        evidence=rejoin_evidence,
+    ))
+elif rejoin_status == "credential_ready" and rejoin_reason == "kubernetes_node_not_found":
+    checks.append(check(
+        "k3s_cluster_membership",
+        "kubernetes",
+        "fail",
+        "Kubernetes Node absent; bounded rejoin credential issued",
+        "Kubernetes Node identity present",
+        True,
+        evidence=rejoin_evidence,
+        repair_action="server_authorized_short_lived_credential_rejoin",
+    ))
+elif rejoin_status in {"suppressed", "unavailable"}:
+    checks.append(check(
+        "k3s_cluster_membership",
+        "kubernetes",
+        "warning",
+        "automatic rejoin %s: %s" % (rejoin_status, rejoin_reason),
+        "Kubernetes Node identity present or a safe bounded rejoin plan",
+        False,
+        evidence=rejoin_evidence,
+    ))
+else:
+    checks.append(check(
+        "k3s_cluster_membership",
+        "kubernetes",
+        "warning",
+        local_node_observed or "cluster rejoin observation unavailable",
+        "Kubernetes Node identity observable",
+        False,
+        evidence=rejoin_evidence,
+    ))
+
 if kubectl_base:
     ok_lease, lease_out = run(kubectl_base + ["-n", "kube-node-lease", "get", "lease", node_name, "-o", "jsonpath={.spec.renewTime}"], 5)
     if ok_lease and lease_out.strip():

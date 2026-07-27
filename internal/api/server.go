@@ -846,7 +846,7 @@ func (s *Server) handleRevokeNodeKey(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	cleanup := s.cleanupRevokedNodeKey(r.Context(), key)
+	cleanup := s.cleanupRevokedNodeKey(r.Context(), principal, key)
 	s.appendAudit(principal, "node_key.revoke", "node_key", key.ID, key.TenantID, map[string]string{"label": key.Label})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node_key": key,
