@@ -15,11 +15,33 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/registry"
 )
+
+func TestFilesystemUsageFromStatfsCountsReservedBlocksAsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	stats := syscall.Statfs_t{
+		Blocks: 1_000,
+		Bfree:  400,
+		Bavail: 100,
+		Bsize:  4_096,
+	}
+	total, used, free, err := filesystemUsageFromStatfs(stats)
+	if err != nil {
+		t.Fatalf("filesystem usage from statfs: %v", err)
+	}
+	if total != 4_096_000 || free != 409_600 || used != 3_686_400 {
+		t.Fatalf("filesystem usage total=%d used=%d free=%d, want total=4096000 used=3686400 free=409600", total, used, free)
+	}
+	if total != used+free {
+		t.Fatalf("filesystem usage is inconsistent: total=%d used=%d free=%d", total, used, free)
+	}
+}
 
 func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	t.Parallel()

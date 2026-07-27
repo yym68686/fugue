@@ -25,6 +25,8 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/imagecacheusage"
+
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/registry"
 )
@@ -1312,10 +1314,10 @@ func filesystemUsage(path string) (totalBytes, usedBytes, freeBytes int64, err e
 	for {
 		var stats syscall.Statfs_t
 		if err := syscall.Statfs(statPath, &stats); err == nil {
-			blockSize := int64(stats.Bsize)
-			total := int64(stats.Blocks) * blockSize
-			used := int64(stats.Blocks-stats.Bfree) * blockSize
-			free := int64(stats.Bavail) * blockSize
+			total, used, free, err := filesystemUsageFromStatfs(stats)
+			if err != nil {
+				return 0, 0, 0, fmt.Errorf("read image-cache filesystem usage %s: %w", statPath, err)
+			}
 			return total, used, free, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return 0, 0, 0, fmt.Errorf("stat image-cache filesystem %s: %w", statPath, err)
@@ -1326,6 +1328,26 @@ func filesystemUsage(path string) (totalBytes, usedBytes, freeBytes int64, err e
 		}
 		statPath = parent
 	}
+}
+
+func filesystemUsageFromStatfs(stats syscall.Statfs_t) (totalBytes, usedBytes, freeBytes int64, err error) {
+	blockSize := int64(stats.Bsize)
+	blocks := uint64(stats.Blocks)
+	availableBlocks := uint64(stats.Bavail)
+	if blockSize <= 0 || availableBlocks > blocks {
+		return 0, 0, 0, fmt.Errorf("invalid statfs values blocks=%d available=%d block_size=%d", blocks, availableBlocks, blockSize)
+	}
+	const maxInt64 = uint64(1<<63 - 1)
+	if blocks > maxInt64/uint64(blockSize) {
+		return 0, 0, 0, fmt.Errorf("statfs byte capacity overflows int64 blocks=%d block_size=%d", blocks, blockSize)
+	}
+	totalBytes = int64(blocks * uint64(blockSize))
+	freeBytes = int64(availableBlocks * uint64(blockSize))
+	usedBytes, ok := imagecacheusage.UsedBytesFromAvailable(totalBytes, freeBytes)
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("invalid statfs byte values total=%d available=%d", totalBytes, freeBytes)
+	}
+	return totalBytes, usedBytes, freeBytes, nil
 }
 
 func directorySize(root string) (int64, error) {
