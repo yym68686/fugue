@@ -568,7 +568,7 @@ image_cache_restore_ondelete_after_helm_rollback() {
     fake_signal_current_shell TERM
   fi
 }
-image_cache_prepare_offline_safe_rollout() { fake_log "FORBIDDEN:image-cache-offline-patch"; return 1; }
+image_cache_prepare_offline_safe_rollout() { fake_log "image-cache:prepare"; }
 
 setup_case() {
   local raw_case_dir=""
@@ -864,10 +864,12 @@ case_blocked_public_failure() {
 
 case_domain_success() {
   local domain="$1"
+  local split="${2:-false}"
   local release_status=""
   setup_case
   trap cleanup_case EXIT
   FAKE_DOMAIN="${domain}"
+  FAKE_SPLIT="${split}"
   release_status="$(run_release_status)"
   if [[ "${release_status}" != "0" ]]; then
     printf '%s\n' '--- fake operations ---' >&2
@@ -904,6 +906,7 @@ case_domain_success() {
       assert_log_order "rollback-image:preflight" "helm-upgrade:control-plane"
       ;;
     image-cache)
+      assert_log_count 1 "image-cache:prepare"
       assert_log_count 1 "image-cache:rollout"
       assert_log_count 0 "lease:acquire"
       assert_log_count 0 "dns:apply"
@@ -930,13 +933,9 @@ case_prepare_failure_evidence() {
   local mode="$1"
   setup_case
   trap cleanup_case EXIT
-  if [[ "${mode}" == "preflight" ]]; then
-    FAKE_DOMAIN="control-plane"
-    FAKE_PREFLIGHT_EXIT="true"
-  else
-    FAKE_DOMAIN="image-cache"
-    FAKE_SPLIT="true"
-  fi
+  [[ "${mode}" == "preflight" ]] || fail_test "unknown Prepare failure mode ${mode}"
+  FAKE_DOMAIN="control-plane"
+  FAKE_PREFLIGHT_EXIT="true"
   [[ "$(run_release_status)" == "1" ]] || fail_test "${mode} failure status is wrong"
   assert_log_count 0 "helm-upgrade:"
   assert_log_count 0 "FORBIDDEN:image-cache-offline-patch"
@@ -1380,7 +1379,7 @@ for domain in node-local authoritative-dns control-plane image-cache backup; do
   run_case "success-${domain}" case_domain_success "${domain}"
 done
 run_case preflight-failure case_prepare_failure_evidence preflight
-run_case split-image-cache case_prepare_failure_evidence split
+run_case split-image-cache-success case_domain_success image-cache true
 run_case gate-reverify case_reverify_failure gate
 run_case repository-reverify case_reverify_failure repository
 run_case argv-reverify case_reverify_failure argv

@@ -9198,9 +9198,7 @@ image_cache_prepare_offline_safe_rollout() {
   local daemonset_name="$1"
   local target_revision=""
   local initial_plan_json=""
-  local final_plan_json=""
   local strategy=""
-  local resource_version=""
   local current_revision=""
 
   if ! node_local_dns_split_release_enabled; then
@@ -9216,33 +9214,16 @@ image_cache_prepare_offline_safe_rollout() {
   image_cache_probe_active_plan "${initial_plan_json}" || return 1
   [[ "$(image_cache_plan_field "${initial_plan_json}" transaction)" == "false" ]] || return 1
   strategy="$(image_cache_plan_field "${initial_plan_json}" strategy)" || return 1
-
-  case "${strategy}" in
-    RollingUpdate)
-      resource_version="$(image_cache_plan_field "${initial_plan_json}" resource_version)" || return 1
-      image_cache_patch_clean_ondelete "${daemonset_name}" "${resource_version}" || return 1
-      image_cache_wait_strategy_observed "${daemonset_name}" OnDelete || return 1
-      final_plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
-      image_cache_bind_plan_to_target "${daemonset_name}" "${final_plan_json}" "${target_revision}" || return 1
-      node_local_dns_verify_preserved_nodes_isolated || return 1
-      image_cache_probe_active_plan "${final_plan_json}" || return 1
-      [[ "$(image_cache_plan_field "${final_plan_json}" transaction)" == "false" ]] || return 1
-      [[ "$(image_cache_plan_field "${final_plan_json}" strategy)" == "OnDelete" ]] || return 1
-      image_cache_validate_unchanged_pod_identities "${initial_plan_json}" "${final_plan_json}" || return 1
-      ;;
-    OnDelete)
-      final_plan_json="${initial_plan_json}"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  if [[ "${strategy}" != "OnDelete" ]]; then
+    log "image-cache split-cohort Prepare requires an already observed clean OnDelete strategy; found ${strategy:-unknown}"
+    return 1
+  fi
 
   current_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
   [[ "${current_revision}" == "${target_revision}" ]] || return 1
   IMAGE_CACHE_PRE_HELM_TARGET_REVISION="${target_revision}"
-  IMAGE_CACHE_PRE_HELM_PLAN_JSON="${final_plan_json}"
-  log "image-cache offline-node guard passed without Pod replacement: target_revision=${target_revision} active_updated=$(image_cache_plan_field "${final_plan_json}" updated_active_count) strategy=OnDelete replacements=0"
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON="${initial_plan_json}"
+  log "image-cache split-cohort Prepare pinned a read-only pre-Helm snapshot: target_revision=${target_revision} active_updated=$(image_cache_plan_field "${initial_plan_json}" updated_active_count) strategy=OnDelete replacements=0"
 }
 
 image_cache_rollout_status() {

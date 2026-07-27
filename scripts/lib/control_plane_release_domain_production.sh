@@ -2081,11 +2081,9 @@ control_plane_release_adapter_image_cache_prepare() {
   [[ "${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN}" == "image-cache" &&
     "${CONTROL_PLANE_RELEASE_DOMAIN_LEASE_ACQUIRED:-false}" != "true" ]] || return 2
   control_plane_release_domain_prepare_common || return
-  # A preserved offline NodeLocal cohort makes any image-cache Pod-template
-  # rollout a cross-domain operation. Block before Apply; never patch the
-  # DaemonSet strategy from this adapter.
-  ! node_local_dns_split_release_enabled || return 1
-  require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-image-cache"
+  require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-image-cache" || return
+  control_plane_release_domain_with_private_tmp \
+    image_cache_prepare_offline_safe_rollout "${FUGUE_RELEASE_FULLNAME}-image-cache"
 }
 control_plane_release_adapter_image_cache_apply() { control_plane_release_domain_apply_image_cache; }
 control_plane_release_adapter_image_cache_verify() { control_plane_release_domain_verify_selected_target; }

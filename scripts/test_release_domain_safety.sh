@@ -4025,8 +4025,13 @@ image_prepare = body(
     "control_plane_release_adapter_image_cache_prepare",
     "control_plane_release_adapter_image_cache_apply",
 )
-if image_prepare.index("node_local_dns_split_release_enabled") > image_prepare.index("require_daemonset_present"):
-    raise SystemExit("split image-cache release must fail closed before Apply admission")
+image_prepare_order = [
+    image_prepare.index("control_plane_release_domain_prepare_common"),
+    image_prepare.index("require_daemonset_present"),
+    image_prepare.index("image_cache_prepare_offline_safe_rollout"),
+]
+if image_prepare_order != sorted(image_prepare_order):
+    raise SystemExit("image-cache Prepare must complete common gates before its read-only cohort snapshot")
 image_apply = body(
     production,
     "control_plane_release_domain_apply_image_cache",
@@ -4044,8 +4049,11 @@ image_guard_end = source.index("\nimage_cache_rollout_status() {", image_guard_s
 image_guard = source[image_guard_start:image_guard_end]
 if "delete --raw" in image_guard or "delete pod" in image_guard.lower():
     raise SystemExit("offline image-cache guard must never delete a Pod")
-if "image_cache_prepare_offline_safe_rollout" in production:
-    raise SystemExit("single-domain image-cache activation must not patch a preserved NodeLocal cohort")
+for forbidden in ("image_cache_patch_clean_ondelete", "image_cache_wait_strategy_observed"):
+    if forbidden in image_guard:
+        raise SystemExit(f"image-cache Prepare must remain read-only: {forbidden}")
+if "image_cache_prepare_offline_safe_rollout" not in production:
+    raise SystemExit("single-domain image-cache activation must pin the pre-Helm cohort")
 
 prepare_domains_start = source.index("\nprepare_release_domains() {")
 prepare_domains_end = source.index("\npublic_data_plane_front_daemonsets_ready()", prepare_domains_start)
@@ -8256,12 +8264,11 @@ print(json.dumps(payload, separators=(",", ":")))
   : >"${wait_marker}"
   IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
   IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
-  image_cache_prepare_offline_safe_rollout fugue-fugue-image-cache
-  assert_eq "$(<"${patch_marker}")" $'fugue-fugue-image-cache\trv-20' "image-cache guard switches only the strategy"
-  assert_eq "$(<"${wait_marker}")" "waited" "image-cache guard waits for the observed OnDelete generation"
-  assert_eq "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" "rev-new" "image-cache guard pins the pre-Helm revision"
-  assert_eq "$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" strategy)" "OnDelete" "image-cache guard stores the clean OnDelete plan"
-  image_cache_validate_unchanged_pod_identities "${IC_PLAN_INITIAL}" "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" || fail "image-cache guard must preserve every Pod UID and restart count"
+  if image_cache_prepare_offline_safe_rollout fugue-fugue-image-cache; then
+    fail "image-cache Prepare must reject RollingUpdate instead of mutating it"
+  fi
+  [[ ! -s "${patch_marker}" && ! -s "${wait_marker}" ]] || fail "image-cache Prepare must be read-only"
+  assert_eq "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" "" "rejected image-cache Prepare must not pin a revision"
 
   IC_PLAN_INITIAL="${IC_PLAN_FINAL}"
   : >"${patch_marker}"
@@ -8270,6 +8277,9 @@ print(json.dumps(payload, separators=(",", ":")))
   IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
   image_cache_prepare_offline_safe_rollout fugue-fugue-image-cache
   [[ ! -s "${patch_marker}" && ! -s "${wait_marker}" ]] || fail "clean OnDelete image-cache guard must be read-only"
+  assert_eq "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" "rev-new" "image-cache guard pins the pre-Helm revision"
+  assert_eq "$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" strategy)" "OnDelete" "image-cache guard stores the clean OnDelete plan"
+  image_cache_validate_unchanged_pod_identities "${IC_PLAN_INITIAL}" "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" || fail "image-cache guard must preserve every Pod UID and restart count"
 )
 
 if grep -Fq 'delete --raw "/api/v1/namespaces/${FUGUE_NAMESPACE}/pods/' "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
