@@ -369,6 +369,8 @@ NODE_LOCAL_DNS_BUDGET_TARGET_NODES=""
 NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=0
 IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
 IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
+IMAGE_CACHE_POST_HELM_TARGET_REVISION=""
+IMAGE_CACHE_ROLLOUT_JOURNAL_FILE=""
 IMAGE_CACHE_ONDELETE_STRATEGY_MIGRATION="false"
 CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
 CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=""
@@ -8598,12 +8600,13 @@ image_cache_rollout_plan_json() (
     "${inventory_dir}/preserved-nodes.txt" \
     "${daemonset_name}" \
     "${target_revision}" <<'PY'
+import hashlib
 import json
 import sys
 from pathlib import Path
 
 def reject(reason):
-    raise SystemExit("image-cache offline rollout rejected: " + reason)
+    raise SystemExit("image-cache rollout rejected: " + reason)
 
 try:
     daemonset = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -8616,8 +8619,8 @@ except (OSError, UnicodeError, json.JSONDecodeError):
 
 expected_daemonset = sys.argv[6]
 preserved = [item.strip() for item in preserved_raw.splitlines() if item.strip()]
-if not preserved or len(preserved) != len(set(preserved)):
-    reject("preserved node cohort is empty or duplicated")
+if len(preserved) != len(set(preserved)):
+    reject("preserved node cohort is duplicated")
 preserved_set = set(preserved)
 target_revision = sys.argv[7].strip()
 if not target_revision:
@@ -8644,6 +8647,11 @@ if template_spec.get("nodeSelector") not in (None, {}) or template_spec.get("aff
 containers = template_spec.get("containers") or []
 if len(containers) != 1 or containers[0].get("name") != "image-cache" or not containers[0].get("image"):
     reject("DaemonSet image-cache container is invalid")
+template_without_image = json.loads(json.dumps(template))
+template_without_image["spec"]["containers"][0]["image"] = "__FUGUE_IMAGE_CACHE_IMAGE__"
+template_without_image_sha256 = hashlib.sha256(json.dumps(
+    template_without_image, sort_keys=True, separators=(",", ":"),
+).encode()).hexdigest()
 ports = containers[0].get("ports") or []
 registry_ports = [
     item for item in ports
@@ -8853,6 +8861,7 @@ print(json.dumps({
     "transaction": False,
     "target_revision": target_revision,
     "target_image": str(containers[0].get("image") or ""),
+    "template_without_image_sha256": template_without_image_sha256,
     "registry_port": registry_port,
     "active_nodes": active,
     "preserved_nodes": sorted(preserved_set),
@@ -8914,6 +8923,377 @@ for node in before:
     if before[node]["uid"] != after[node]["uid"] or before[node].get("restart_count") != after[node].get("restart_count"):
         raise SystemExit(1)
 '
+}
+
+image_cache_validate_plan_transition() {
+  local before_plan_json="$1"
+  local after_plan_json="$2"
+  local mode="$3"
+  local selected_node="${4:-}"
+  local target_revision="${5:-}"
+  local journal_nodes="${6:-}"
+
+  BEFORE_PLAN_JSON="${before_plan_json}" \
+    AFTER_PLAN_JSON="${after_plan_json}" \
+    IMAGE_CACHE_TRANSITION_MODE="${mode}" \
+    IMAGE_CACHE_SELECTED_NODE="${selected_node}" \
+    IMAGE_CACHE_TARGET_REVISION="${target_revision}" \
+    IMAGE_CACHE_JOURNAL_NODES="${journal_nodes}" \
+    python3 - <<'PY'
+import json
+import os
+import re
+
+def reject(reason):
+    raise SystemExit("image-cache transition rejected: " + reason)
+
+try:
+    before_plan = json.loads(os.environ["BEFORE_PLAN_JSON"])
+    after_plan = json.loads(os.environ["AFTER_PLAN_JSON"])
+except (KeyError, json.JSONDecodeError):
+    reject("plan JSON is invalid")
+
+mode = os.environ.get("IMAGE_CACHE_TRANSITION_MODE", "")
+selected = os.environ.get("IMAGE_CACHE_SELECTED_NODE", "")
+target = os.environ.get("IMAGE_CACHE_TARGET_REVISION", "")
+journal = [item.strip() for item in os.environ.get("IMAGE_CACHE_JOURNAL_NODES", "").splitlines() if item.strip()]
+if len(journal) != len(set(journal)):
+    reject("rollout journal contains duplicate nodes")
+journal_set = set(journal)
+
+for label, plan in (("before", before_plan), ("after", after_plan)):
+    if not isinstance(plan, dict):
+        reject(label + " plan is not an object")
+    if plan.get("strategy") != "OnDelete" or plan.get("transaction") is not False:
+        reject(label + " plan is not a clean OnDelete snapshot")
+    active = plan.get("active_nodes")
+    preserved = plan.get("preserved_nodes")
+    pods = plan.get("pods")
+    template_without_image_sha256 = plan.get("template_without_image_sha256")
+    target_image = plan.get("target_image")
+    if (
+        not isinstance(active, list)
+        or not active
+        or len(active) != len(set(active))
+        or not isinstance(preserved, list)
+        or len(preserved) != len(set(preserved))
+        or set(active).intersection(preserved)
+        or not isinstance(pods, list)
+        or not isinstance(template_without_image_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", template_without_image_sha256) is None
+        or not isinstance(target_image, str)
+        or not target_image
+    ):
+        reject(label + " cohort is invalid")
+
+if (
+    before_plan.get("daemonset_uid") != after_plan.get("daemonset_uid")
+    or before_plan.get("active_nodes") != after_plan.get("active_nodes")
+    or before_plan.get("preserved_nodes") != after_plan.get("preserved_nodes")
+):
+    reject("DaemonSet or node cohort changed")
+if before_plan["template_without_image_sha256"] != after_plan["template_without_image_sha256"]:
+    reject("DaemonSet Pod template changed outside the image field")
+
+active = set(before_plan["active_nodes"])
+preserved = set(before_plan["preserved_nodes"])
+if not journal_set.issubset(active):
+    reject("rollout journal contains a non-active node")
+
+def index_pods(plan, label):
+    indexed = {}
+    for pod in plan["pods"]:
+        if not isinstance(pod, dict):
+            reject(label + " plan contains a non-object Pod")
+        node = pod.get("node")
+        if not isinstance(node, str) or not node or node in indexed:
+            reject(label + " plan contains an empty or duplicate Pod node")
+        indexed[node] = pod
+    if set(indexed) != active.union(preserved):
+        reject(label + " Pod nodes do not match the pinned cohort")
+    return indexed
+
+before = index_pods(before_plan, "before")
+after = index_pods(after_plan, "after")
+identity_fields = ("name", "uid", "revision", "image", "restart_count", "deleting")
+
+def same_identity(node):
+    return all(before[node].get(field) == after[node].get(field) for field in identity_fields)
+
+def healthy_target(node, revision):
+    pod = after[node]
+    return (
+        pod.get("revision") == revision
+        and pod.get("phase") == "Running"
+        and pod.get("ready") is True
+        and pod.get("deleting") is False
+        and pod.get("container_status_valid") is True
+        and pod.get("restart_count") == 0
+        and isinstance(pod.get("pod_ip"), str)
+        and bool(pod.get("pod_ip"))
+    )
+
+for node in preserved:
+    if not same_identity(node):
+        reject("preserved Pod identity changed on " + node)
+
+if mode == "unchanged":
+    if any(not same_identity(node) for node in active):
+        reject("an active Pod identity changed outside a controlled replacement")
+elif mode == "single-forward":
+    if not target or selected not in active or selected in journal_set:
+        reject("single replacement selection is invalid")
+    if before_plan["target_image"] != after_plan["target_image"]:
+        reject("DaemonSet image changed during a controlled replacement")
+    for node in active - {selected}:
+        if not same_identity(node):
+            reject("an unselected active Pod changed on " + node)
+    if before[selected].get("uid") == after[selected].get("uid"):
+        reject("selected Pod UID did not change on " + selected)
+    if not healthy_target(selected, target):
+        reject("selected replacement is not healthy at the target revision on " + selected)
+elif mode == "final-forward":
+    if not target:
+        reject("forward target revision is empty")
+    expected = {node for node in active if before[node].get("revision") != target}
+    if journal_set != expected:
+        reject("rollout journal does not exactly cover the required active nodes")
+    for node in active:
+        if not healthy_target(node, target):
+            reject("active Pod is not healthy at the final target revision on " + node)
+        if node in journal_set:
+            if before[node].get("uid") == after[node].get("uid"):
+                reject("journaled active Pod was not replaced on " + node)
+        elif not same_identity(node):
+            reject("already-targeted active Pod changed on " + node)
+elif mode == "final-rollback":
+    if not target:
+        reject("rollback target revision is empty")
+    if before_plan["target_image"] != after_plan["target_image"]:
+        reject("DaemonSet image was not restored during rollback")
+    for node in active:
+        if node not in journal_set:
+            if not same_identity(node):
+                reject("unjournaled active Pod changed during rollback on " + node)
+            continue
+        if before[node].get("uid") == after[node].get("uid"):
+            if not same_identity(node):
+                reject("original journaled Pod drifted during rollback on " + node)
+        elif not healthy_target(node, target):
+            reject("replacement Pod was not restored to the rollback revision on " + node)
+else:
+    reject("transition mode is invalid")
+PY
+}
+
+image_cache_initialize_rollout_journal() {
+  local parent="${CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR:-${TMPDIR:-}}"
+  local journal_file=""
+
+  [[ -n "${parent}" && "${parent}" == /* ]] || return 1
+  journal_file="${parent%/}/image-cache-rollout.journal"
+  python3 - "${parent}" "${journal_file}" <<'PY' || return 1
+import os
+import stat
+import sys
+
+parent, path = sys.argv[1:]
+metadata = os.lstat(parent)
+if (
+    not stat.S_ISDIR(metadata.st_mode)
+    or stat.S_ISLNK(metadata.st_mode)
+    or stat.S_IMODE(metadata.st_mode) != 0o700
+    or metadata.st_uid != os.geteuid()
+):
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags, 0o600)
+try:
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_uid != os.geteuid()
+        or opened.st_nlink != 1
+    ):
+        raise SystemExit(1)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+  IMAGE_CACHE_ROLLOUT_JOURNAL_FILE="${journal_file}"
+}
+
+image_cache_rollout_journal_append() {
+  local node_name="$1"
+  local plan_json="$2"
+  local journal_file="${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE:-}"
+
+  [[ -n "${journal_file}" && -n "${node_name}" ]] || return 1
+  PLAN_JSON="${plan_json}" python3 - "${journal_file}" "${node_name}" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path, node = sys.argv[1:]
+plan = json.loads(os.environ["PLAN_JSON"])
+if node not in plan.get("active_nodes", []):
+    raise SystemExit(1)
+matches = [pod for pod in plan.get("pods", []) if pod.get("node") == node]
+if len(matches) != 1:
+    raise SystemExit(1)
+pod = matches[0]
+record = {"node": node, "original_revision": pod.get("revision"), "original_uid": pod.get("uid")}
+if not all(isinstance(record[key], str) and record[key] for key in record):
+    raise SystemExit(1)
+
+flags = os.O_RDWR | os.O_APPEND
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags)
+try:
+    before = os.lstat(path)
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_uid != os.geteuid()
+        or opened.st_nlink != 1
+        or opened.st_size > 65536
+    ):
+        raise SystemExit(1)
+    with os.fdopen(fd, "r+b", closefd=False) as handle:
+        raw = handle.read()
+        existing = []
+        for line in raw.splitlines(keepends=True):
+            if not line.endswith(b"\n"):
+                raise SystemExit(1)
+            value = json.loads(line)
+            if set(value) != {"node", "original_revision", "original_uid"}:
+                raise SystemExit(1)
+            canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            if line != canonical:
+                raise SystemExit(1)
+            existing.append(value)
+        if len({item["node"] for item in existing}) != len(existing) or any(item["node"] == node for item in existing):
+            raise SystemExit(1)
+        handle.seek(0, os.SEEK_END)
+        handle.write((json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        handle.flush()
+        os.fsync(handle.fileno())
+finally:
+    os.close(fd)
+PY
+}
+
+image_cache_rollout_journal_records() {
+  local journal_file="${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE:-}"
+
+  [[ -n "${journal_file}" ]] || return 1
+  python3 - "${journal_file}" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags)
+try:
+    at_path = os.lstat(path)
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(at_path.st_mode)
+        or (at_path.st_dev, at_path.st_ino) != (opened.st_dev, opened.st_ino)
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_uid != os.geteuid()
+        or opened.st_nlink != 1
+        or opened.st_size > 65536
+    ):
+        raise SystemExit(1)
+    raw = os.read(fd, 65537)
+finally:
+    os.close(fd)
+records = []
+for line in raw.splitlines(keepends=True):
+    if not line.endswith(b"\n"):
+        raise SystemExit(1)
+    value = json.loads(line)
+    if set(value) != {"node", "original_revision", "original_uid"}:
+        raise SystemExit(1)
+    canonical = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    if line != canonical or not all(isinstance(value[key], str) and value[key] for key in value):
+        raise SystemExit(1)
+    records.append(value)
+if len({item["node"] for item in records}) != len(records):
+    raise SystemExit(1)
+for item in records:
+    print(item["node"] + "\t" + item["original_uid"] + "\t" + item["original_revision"])
+PY
+}
+
+image_cache_rollout_journal_nodes() {
+  image_cache_rollout_journal_records | awk -F $'\t' 'NF {print $1}'
+}
+
+image_cache_plan_pod_delete_record() {
+  local plan_json="$1"
+  local node_name="$2"
+
+  PLAN_JSON="${plan_json}" python3 - "${node_name}" <<'PY'
+import json
+import os
+import sys
+
+node = sys.argv[1]
+plan = json.loads(os.environ["PLAN_JSON"])
+if node not in plan.get("active_nodes", []):
+    raise SystemExit(1)
+matches = [pod for pod in plan.get("pods", []) if pod.get("node") == node]
+if len(matches) != 1:
+    raise SystemExit(1)
+pod = matches[0]
+name, uid = pod.get("name"), pod.get("uid")
+if not isinstance(name, str) or not name or not isinstance(uid, str) or not uid:
+    raise SystemExit(1)
+print(name + "\t" + uid)
+PY
+}
+
+image_cache_delete_pod_by_uid_no_wait() {
+  local pod_name="$1"
+  local pod_uid="$2"
+  local delete_uri=""
+
+  [[ "${pod_name}" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ && "${pod_uid}" =~ ^[A-Za-z0-9_-]+$ ]] || {
+    log "refusing image-cache Pod deletion without a valid name and UID precondition"
+    return 1
+  }
+  delete_uri="/api/v1/namespaces/${FUGUE_NAMESPACE}/pods/${pod_name}"
+  python3 -c '
+import json
+import sys
+print(json.dumps({
+    "apiVersion": "v1",
+    "kind": "DeleteOptions",
+    "preconditions": {"uid": sys.argv[1]},
+}, separators=(",", ":")))
+' "${pod_uid}" | release_bounded_kubectl 30 \
+    "image-cache UID-preconditioned Pod delete ${pod_name}" \
+    delete --raw="${delete_uri}" -f - >/dev/null
 }
 
 image_cache_probe_endpoint() {
@@ -9181,17 +9561,25 @@ image_cache_freeze_ondelete_after_helm_rollback() {
 image_cache_wait_for_rollout_plan() {
   local daemonset_name="$1"
   local target_revision="$2"
-  local deadline=$((SECONDS + $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")))
+  local deadline="${3:-}"
   local plan_json=""
 
+  if [[ -z "${deadline}" ]]; then
+    deadline=$((SECONDS + $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")))
+  elif ! [[ "${deadline}" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
   while (( SECONDS < deadline )); do
     if plan_json="$(image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}" 2>/dev/null)"; then
       printf '%s\n' "${plan_json}"
       return 0
     fi
+    require_release_forward_budget 2 "image-cache rollout-plan poll delay" || return 1
     sleep 2
   done
-  image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}" >/dev/null
+  log_stderr "timed out waiting for an exact healthy image-cache rollout plan at revision ${target_revision}"
+  image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}" >/dev/null || true
+  return 1
 }
 
 image_cache_prepare_offline_safe_rollout() {
@@ -9201,54 +9589,238 @@ image_cache_prepare_offline_safe_rollout() {
   local strategy=""
   local current_revision=""
 
-  if ! node_local_dns_split_release_enabled; then
-    return 0
-  fi
   target_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || {
     log "image-cache DaemonSet has no exact current ControllerRevision"
     return 1
   }
   initial_plan_json="$(image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}")" || return 1
   image_cache_bind_plan_to_target "${daemonset_name}" "${initial_plan_json}" "${target_revision}" || return 1
-  node_local_dns_verify_preserved_nodes_isolated || return 1
+  if node_local_dns_split_release_enabled; then
+    node_local_dns_verify_preserved_nodes_isolated || return 1
+  fi
   image_cache_probe_active_plan "${initial_plan_json}" || return 1
   [[ "$(image_cache_plan_field "${initial_plan_json}" transaction)" == "false" ]] || return 1
   strategy="$(image_cache_plan_field "${initial_plan_json}" strategy)" || return 1
   if [[ "${strategy}" != "OnDelete" ]]; then
-    log "image-cache split-cohort Prepare requires an already observed clean OnDelete strategy; found ${strategy:-unknown}"
+    log "image-cache Prepare requires an already observed clean OnDelete strategy; found ${strategy:-unknown}"
     return 1
   fi
 
   current_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
   [[ "${current_revision}" == "${target_revision}" ]] || return 1
+  image_cache_initialize_rollout_journal || return 1
   IMAGE_CACHE_PRE_HELM_TARGET_REVISION="${target_revision}"
   IMAGE_CACHE_PRE_HELM_PLAN_JSON="${initial_plan_json}"
-  log "image-cache split-cohort Prepare pinned a read-only pre-Helm snapshot: target_revision=${target_revision} active_updated=$(image_cache_plan_field "${initial_plan_json}" updated_active_count) strategy=OnDelete replacements=0"
+  IMAGE_CACHE_POST_HELM_TARGET_REVISION=""
+  log "image-cache Prepare pinned a read-only pre-Helm snapshot: target_revision=${target_revision} active_nodes=$(image_cache_plan_field "${initial_plan_json}" active_nodes | awk 'NF {count++} END {print count+0}') preserved_nodes=$(image_cache_plan_field "${initial_plan_json}" preserved_nodes | awk 'NF {count++} END {print count+0}') strategy=OnDelete replacements=0"
 }
 
 image_cache_rollout_status() {
   local daemonset_name="$1"
   local target_revision=""
   local plan_json=""
+  local current_plan_json=""
+  local fresh_plan_json=""
+  local next_plan_json=""
+  local old_active_nodes=""
+  local node_name=""
+  local pod_name=""
+  local pod_uid=""
+  local delete_record=""
+  local journal_before=""
+  local journal_nodes=""
+  local remaining_old_active_nodes=""
 
-  if ! node_local_dns_split_release_enabled; then
-    rollout_daemonset_status "${daemonset_name}"
-    return
-  fi
   [[ -n "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" && -n "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" ]] || return 1
+  [[ -n "${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE:-}" ]] || return 1
   target_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
-  if [[ "${target_revision}" != "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" ]]; then
-    log "image-cache DaemonSet template changed during Helm upgrade while an offline node was preserved: pre_helm=${IMAGE_CACHE_PRE_HELM_TARGET_REVISION} post_helm=${target_revision}"
-    return 1
-  fi
+  IMAGE_CACHE_POST_HELM_TARGET_REVISION="${target_revision}"
   plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
   image_cache_bind_plan_to_target "${daemonset_name}" "${plan_json}" "${target_revision}" || return 1
-  node_local_dns_verify_preserved_nodes_isolated || return 1
+  if node_local_dns_split_release_enabled; then
+    node_local_dns_verify_preserved_nodes_isolated || return 1
+  fi
   image_cache_probe_active_plan "${plan_json}" || return 1
   [[ "$(image_cache_plan_field "${plan_json}" transaction)" == "false" ]] || return 1
   [[ "$(image_cache_plan_field "${plan_json}" strategy)" == "OnDelete" ]] || return 1
-  image_cache_validate_unchanged_pod_identities "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${plan_json}" || return 1
-  log "image-cache post-Helm verification passed without additional Pod replacement: target_revision=${target_revision} active_updated=$(image_cache_plan_field "${plan_json}" updated_active_count)"
+  image_cache_validate_plan_transition \
+    "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${plan_json}" unchanged || return 1
+
+  if [[ "${target_revision}" == "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" ]]; then
+    journal_nodes="$(image_cache_rollout_journal_nodes)" || return 1
+    [[ -z "${journal_nodes}" ]] || return 1
+    log "image-cache post-Helm verification passed without a template change or Pod replacement: target_revision=${target_revision}"
+    return 0
+  fi
+
+  current_plan_json="${plan_json}"
+  old_active_nodes="$(image_cache_plan_field "${current_plan_json}" old_active_nodes)" || return 1
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    fresh_plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
+    image_cache_bind_plan_to_target "${daemonset_name}" "${fresh_plan_json}" "${target_revision}" || return 1
+    if node_local_dns_split_release_enabled; then
+      node_local_dns_verify_preserved_nodes_isolated || return 1
+    fi
+    image_cache_validate_plan_transition "${current_plan_json}" "${fresh_plan_json}" unchanged || return 1
+    image_cache_probe_active_plan "${fresh_plan_json}" || return 1
+    current_plan_json="${fresh_plan_json}"
+
+    delete_record="$(image_cache_plan_pod_delete_record "${current_plan_json}" "${node_name}")" || return 1
+    IFS=$'\t' read -r pod_name pod_uid <<<"${delete_record}"
+    [[ -n "${pod_name}" && -n "${pod_uid}" ]] || return 1
+    require_release_forward_budget 30 "image-cache UID-preconditioned Pod replacement on ${node_name}" || return 1
+    journal_before="$(image_cache_rollout_journal_nodes)" || return 1
+    image_cache_rollout_journal_append "${node_name}" "${current_plan_json}" || return 1
+    log "replacing image-cache Pod on pinned active node ${node_name}: pod=${pod_name} uid=${pod_uid} target_revision=${target_revision}"
+    image_cache_delete_pod_by_uid_no_wait "${pod_name}" "${pod_uid}" || return 1
+
+    next_plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
+    image_cache_bind_plan_to_target "${daemonset_name}" "${next_plan_json}" "${target_revision}" || return 1
+    if node_local_dns_split_release_enabled; then
+      node_local_dns_verify_preserved_nodes_isolated || return 1
+    fi
+    image_cache_validate_plan_transition \
+      "${current_plan_json}" "${next_plan_json}" single-forward \
+      "${node_name}" "${target_revision}" "${journal_before}" || return 1
+    image_cache_probe_active_plan "${next_plan_json}" || return 1
+    current_plan_json="${next_plan_json}"
+  done <<<"${old_active_nodes}"
+
+  journal_nodes="$(image_cache_rollout_journal_nodes)" || return 1
+  image_cache_validate_plan_transition \
+    "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${current_plan_json}" final-forward \
+    "" "${target_revision}" "${journal_nodes}" || return 1
+  remaining_old_active_nodes="$(image_cache_plan_field "${current_plan_json}" old_active_nodes)" || return 1
+  [[ -z "${remaining_old_active_nodes}" ]] || return 1
+  log "image-cache active-node rollout completed: target_revision=${target_revision} replacements=$(awk 'NF {count++} END {print count+0}' <<<"${journal_nodes}") preserved_nodes=$(image_cache_plan_field "${current_plan_json}" preserved_nodes | awk 'NF {count++} END {print count+0}')"
+}
+
+image_cache_live_pod_state_json() (
+  local daemonset_name="$1"
+  local daemonset_uid="$2"
+  local node_name="$3"
+  local inventory_dir=""
+
+  umask 077
+  inventory_dir="$(mktemp -d)" || return 1
+  trap 'rm -rf -- "${inventory_dir}"' EXIT
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" \
+    -o json >"${inventory_dir}/pods.json" || return 1
+  python3 - "${inventory_dir}/pods.json" "${daemonset_name}" "${daemonset_uid}" "${node_name}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+pods = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+daemonset_name, daemonset_uid, node_name = sys.argv[2:]
+matches = []
+for pod in pods.get("items") or []:
+    metadata = pod.get("metadata") or {}
+    owners = [owner for owner in metadata.get("ownerReferences") or [] if owner.get("controller") is True]
+    if len(owners) != 1:
+        continue
+    owner = owners[0]
+    if (
+        owner.get("apiVersion") != "apps/v1"
+        or owner.get("kind") != "DaemonSet"
+        or owner.get("name") != daemonset_name
+        or str(owner.get("uid") or "") != daemonset_uid
+        or str((pod.get("spec") or {}).get("nodeName") or "") != node_name
+    ):
+        continue
+    matches.append(pod)
+if len(matches) > 1:
+    raise SystemExit("multiple owned image-cache Pods exist on rollback node " + node_name)
+if not matches:
+    print(json.dumps({"present": False}, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+pod = matches[0]
+metadata = pod.get("metadata") or {}
+status = pod.get("status") or {}
+container_statuses = status.get("containerStatuses") or []
+container_status_valid = len(container_statuses) == 1 and container_statuses[0].get("name") == "image-cache"
+restart_count = container_statuses[0].get("restartCount") if container_status_valid else None
+if isinstance(restart_count, bool) or (restart_count is not None and (not isinstance(restart_count, int) or restart_count < 0)):
+    raise SystemExit("invalid image-cache rollback restart count")
+ready = any(item.get("type") == "Ready" and item.get("status") == "True" for item in status.get("conditions") or [])
+print(json.dumps({
+    "container_status_valid": container_status_valid,
+    "deleting": bool(metadata.get("deletionTimestamp")),
+    "name": str(metadata.get("name") or ""),
+    "phase": str(status.get("phase") or ""),
+    "pod_ip": str(status.get("podIP") or ""),
+    "present": True,
+    "ready": ready,
+    "restart_count": restart_count,
+    "revision": str((metadata.get("labels") or {}).get("controller-revision-hash") or ""),
+    "uid": str(metadata.get("uid") or ""),
+}, sort_keys=True, separators=(",", ":")))
+PY
+)
+
+image_cache_restore_journaled_node() {
+  local daemonset_name="$1"
+  local daemonset_uid="$2"
+  local node_name="$3"
+  local original_uid="$4"
+  local target_revision="$5"
+  local deadline="$6"
+  local current_revision=""
+  local state_json=""
+  local present=""
+  local pod_name=""
+  local pod_uid=""
+  local pod_revision=""
+  local ready=""
+  local deleting=""
+  local phase=""
+  local restart_count=""
+  local container_status_valid=""
+  local pod_ip=""
+  local last_deleted_uid=""
+  local registry_port=""
+
+  [[ "${deadline}" =~ ^[0-9]+$ ]] || return 1
+  registry_port="$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" registry_port)" || return 1
+  while (( SECONDS < deadline )); do
+    current_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
+    [[ "${current_revision}" == "${target_revision}" ]] || return 1
+    state_json="$(image_cache_live_pod_state_json \
+      "${daemonset_name}" "${daemonset_uid}" "${node_name}")" || return 1
+    present="$(image_cache_plan_field "${state_json}" present)" || return 1
+    if [[ "${present}" == "true" ]]; then
+      pod_name="$(image_cache_plan_field "${state_json}" name)" || return 1
+      pod_uid="$(image_cache_plan_field "${state_json}" uid)" || return 1
+      pod_revision="$(image_cache_plan_field "${state_json}" revision)" || return 1
+      ready="$(image_cache_plan_field "${state_json}" ready)" || return 1
+      deleting="$(image_cache_plan_field "${state_json}" deleting)" || return 1
+      phase="$(image_cache_plan_field "${state_json}" phase)" || return 1
+      restart_count="$(image_cache_plan_field "${state_json}" restart_count)" || return 1
+      container_status_valid="$(image_cache_plan_field "${state_json}" container_status_valid)" || return 1
+      pod_ip="$(image_cache_plan_field "${state_json}" pod_ip)" || return 1
+      if [[ "${pod_uid}" == "${original_uid}" ]]; then
+        if [[ "${ready}" == "true" && "${deleting}" == "false" && "${phase}" == "Running" &&
+          "${container_status_valid}" == "true" && -n "${pod_ip}" ]]; then
+          return 0
+        fi
+      elif [[ "${pod_revision}" == "${target_revision}" && "${ready}" == "true" &&
+        "${deleting}" == "false" && "${phase}" == "Running" &&
+        "${container_status_valid}" == "true" && "${restart_count}" == "0" && -n "${pod_ip}" ]]; then
+        image_cache_probe_endpoint "${pod_ip}" "${registry_port}" || return 1
+        return 0
+      elif [[ "${deleting}" == "false" && "${pod_uid}" != "${last_deleted_uid}" ]]; then
+        log "replacing changed image-cache Pod during rollback on ${node_name}: pod=${pod_name} uid=${pod_uid} rollback_revision=${target_revision}"
+        image_cache_delete_pod_by_uid_no_wait "${pod_name}" "${pod_uid}" || return 1
+        last_deleted_uid="${pod_uid}"
+      fi
+    fi
+    require_release_forward_budget 2 "image-cache rollback Pod poll delay on ${node_name}" || return 1
+    sleep 2
+  done
+  log "timed out restoring image-cache Pod on ${node_name} to revision ${target_revision}"
+  return 1
 }
 
 image_cache_restore_ondelete_after_helm_rollback() {
@@ -9256,10 +9828,16 @@ image_cache_restore_ondelete_after_helm_rollback() {
   local target_revision="${IMAGE_CACHE_PRE_HELM_TARGET_REVISION:-}"
   local daemonset_uid=""
   local plan_json=""
+  local journal_records=""
+  local journal_nodes=""
+  local node_name=""
+  local original_uid=""
+  local original_revision=""
+  local restore_deadline=""
 
-  node_local_dns_split_release_enabled || return 0
   [[ "${FUGUE_IMAGE_CACHE_ENABLED:-false}" == "true" ]] || return 0
   [[ -n "${target_revision}" && -n "${IMAGE_CACHE_PRE_HELM_PLAN_JSON:-}" ]] || return 0
+  [[ -n "${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE:-}" ]] || return 1
 
   daemonset_uid="$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" daemonset_uid)" || return 1
   image_cache_freeze_ondelete_after_helm_rollback "${daemonset_name}" "${daemonset_uid}" "${target_revision}" || return 1
@@ -9267,14 +9845,30 @@ image_cache_restore_ondelete_after_helm_rollback() {
   # rollback-restored RollingUpdate controller running while an offline node
   # has consumed its disruption budget.
   image_cache_wait_strategy_observed "${daemonset_name}" OnDelete || return 1
-  plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
+  restore_deadline=$((SECONDS + $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")))
+  journal_records="$(image_cache_rollout_journal_records)" || return 1
+  while IFS=$'\t' read -r node_name original_uid original_revision; do
+    [[ -n "${node_name}" ]] || continue
+    [[ -n "${original_uid}" && -n "${original_revision}" ]] || return 1
+    image_cache_restore_journaled_node \
+      "${daemonset_name}" "${daemonset_uid}" "${node_name}" \
+      "${original_uid}" "${target_revision}" "${restore_deadline}" || return 1
+  done <<<"${journal_records}"
+
+  plan_json="$(image_cache_wait_for_rollout_plan \
+    "${daemonset_name}" "${target_revision}" "${restore_deadline}")" || return 1
   image_cache_bind_plan_to_target "${daemonset_name}" "${plan_json}" "${target_revision}" || return 1
-  node_local_dns_verify_preserved_nodes_isolated || return 1
+  if node_local_dns_split_release_enabled; then
+    node_local_dns_verify_preserved_nodes_isolated || return 1
+  fi
   image_cache_probe_active_plan "${plan_json}" || return 1
   [[ "$(image_cache_plan_field "${plan_json}" transaction)" == "false" ]] || return 1
   [[ "$(image_cache_plan_field "${plan_json}" strategy)" == "OnDelete" ]] || return 1
-  image_cache_validate_unchanged_pod_identities "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${plan_json}" || return 1
-  log "image-cache OnDelete guard restored after Helm rollback without changing the Pod cohort"
+  journal_nodes="$(image_cache_rollout_journal_nodes)" || return 1
+  image_cache_validate_plan_transition \
+    "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${plan_json}" final-rollback \
+    "" "${target_revision}" "${journal_nodes}" || return 1
+  log "image-cache OnDelete rollback restored the pinned active cohort: rollback_revision=${target_revision} touched_nodes=$(awk 'NF {count++} END {print count+0}' <<<"${journal_nodes}")"
 }
 
 daemonset_names_by_component_prefix() {
@@ -17449,7 +18043,7 @@ prepare_release_domains() {
   esac
 
   if node_local_dns_split_release_enabled && [[ "${build_mode}" == "allow" ]]; then
-    fail "node-local build-plane release cannot be forced while a preserved offline node exists; restore or remove that node before changing the image-cache Pod template"
+    fail "node-local build-plane release cannot be forced while a preserved offline node exists; use the source-attributed image-cache transaction instead"
   fi
 
   if stateful_dependency_changed && [[ "${stateful_mode}" != "allow" ]]; then
@@ -17480,8 +18074,11 @@ prepare_release_domains() {
         fail "node-local build-plane manifests changed; ship image-cache through an isolated worker/front release before changing its rendered pod spec"
       fi
     fi
-    if node_local_dns_split_release_enabled; then
-      log "preserved offline node is present; deferring all image-cache image/resource rollout and freezing the live Pod template"
+    if node_local_dns_split_release_enabled && node_local_build_plane_image_rollout_allowed; then
+      log "preserved offline node is present; allowing only the source-attributed image-cache image while preserving live resources for the pinned active-node transaction"
+      preserve_node_local_build_plane_from_live false true true || fail "failed to strictly preserve live image-cache resources for the active-node transaction"
+    elif node_local_dns_split_release_enabled; then
+      log "preserved offline node is present without an attributable image rollout; freezing the live image-cache Pod template"
       preserve_node_local_build_plane_from_live true true true || fail "failed to strictly preserve the live image-cache image and resources"
     elif node_local_build_plane_image_rollout_allowed; then
       log "node-local build-plane image-cache source changed since the live tag; allowing image-cache image rollout to ${FUGUE_IMAGE_CACHE_IMAGE_TAG} while preserving live non-image settings"
