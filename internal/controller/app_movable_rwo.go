@@ -146,7 +146,16 @@ func (s *Service) buildMovableRWOCopyPlan(ctx context.Context, op model.Operatio
 		nextStorage := *targetStorage
 		nextStorage.ClaimName = targetClaim
 		desiredApp.Spec.PersistentStorage = &nextStorage
+		targetStorage = &nextStorage
 		changed = true
+	}
+	renderedTargetClaim := runtimepkg.PersistentStoragePVCName(desiredApp, *targetStorage)
+	if strings.TrimSpace(targetClaim) != strings.TrimSpace(renderedTargetClaim) {
+		return nil, desiredApp, changed, fmt.Errorf(
+			"refusing movable RWO copy because planned target claim %q differs from rendered workload claim %q",
+			targetClaim,
+			renderedTargetClaim,
+		)
 	}
 
 	if strings.TrimSpace(sourceClaim) == "" || strings.TrimSpace(targetClaim) == "" {
@@ -198,16 +207,7 @@ func currentPersistentStorageClaimName(app model.App, storage model.AppPersisten
 }
 
 func desiredPersistentStorageClaimName(app model.App, storage model.AppPersistentStorageSpec) string {
-	if model.AppPersistentStorageSpecUsesSharedProjectRWX(&storage) {
-		return runtimepkg.ProjectSharedWorkspacePVCName(app)
-	}
-	if claimName := model.SlugifyOptional(strings.TrimSpace(storage.ClaimName)); claimName != "" {
-		if len(claimName) > 63 {
-			return claimName[:63]
-		}
-		return claimName
-	}
-	return runtimepkg.WorkspacePVCName(app)
+	return runtimepkg.PersistentStoragePVCName(app, storage)
 }
 
 func movableRWONeedsFreshClaim(op model.Operation, currentApp model.App, desiredApp model.App) bool {
@@ -240,14 +240,14 @@ func movableRWOTargetClaimName(app model.App, operationID string) string {
 		base = "app-workspace"
 	}
 	suffix := "mv-" + shortMovableRWOSuffix(operationID)
-	maxBase := 63 - len(suffix) - 1
+	maxBase := runtimepkg.PersistentStorageClaimNameMaxLength - len(suffix) - 1
 	if maxBase < 1 {
-		return suffix
+		return runtimepkg.NormalizePersistentStorageClaimName(suffix)
 	}
 	if len(base) > maxBase {
 		base = base[:maxBase]
 	}
-	return base + "-" + suffix
+	return runtimepkg.NormalizePersistentStorageClaimName(base + "-" + suffix)
 }
 
 func shortMovableRWOSuffix(value string) string {

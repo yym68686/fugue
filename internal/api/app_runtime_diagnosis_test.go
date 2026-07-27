@@ -543,6 +543,63 @@ func TestGetAppDiagnosisDetectsReadyPodHTTPTimeout(t *testing.T) {
 	}
 }
 
+func TestGetAppDiagnosisTreatsRestrictedIngressProbeFailureAsInconclusive(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		NetworkPolicy: &model.AppNetworkPolicySpec{
+			Ingress: &model.AppNetworkPolicyDirectionSpec{
+				Mode: model.AppNetworkPolicyModeRestricted,
+			},
+		},
+	})
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	readyPod := fakePod("demo-ready", "Running", time.Date(2026, 4, 16, 0, 1, 0, 0, time.UTC), containerName)
+	readyPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Image: "ghcr.io/example/demo:latest",
+		Ready: true,
+		State: kubeRuntimeState{Running: &struct{}{}},
+	}}
+	fake.setPods(selector, []kubePodInfo{readyPod})
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+	server.appRequestHTTPClient = &http.Client{
+		Transport: diagnosticRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, context.DeadlineExceeded
+		}),
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Category != "http-probe-inconclusive" {
+		t.Fatalf("expected restricted-ingress probe to be inconclusive, got %+v", response.Diagnosis)
+	}
+	if !strings.Contains(response.Diagnosis.Summary, "restricted ingress") {
+		t.Fatalf("expected restricted ingress summary, got %q", response.Diagnosis.Summary)
+	}
+	if !strings.Contains(strings.Join(response.Diagnosis.Evidence, "\n"), "allowed application peers") {
+		t.Fatalf("expected policy-aware evidence, got %+v", response.Diagnosis.Evidence)
+	}
+}
+
 func TestGetAppDiagnosisKeepsHealthzTimeoutWhenRootResponds(t *testing.T) {
 	t.Parallel()
 

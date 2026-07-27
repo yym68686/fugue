@@ -2195,15 +2195,6 @@ func managedPostgresClusterLooksStateful(cluster kubeCloudNativePGCluster) bool 
 		strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID]) != ""
 }
 
-func persistentVolumeClaimLooksLikeManagedPostgresData(pvc kubePersistentVolumeClaim) bool {
-	labels := pvc.Metadata.Labels
-	if strings.TrimSpace(labels["cnpg.io/cluster"]) != "" {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(labels[runtime.FugueLabelBackingServiceType]), model.BackingServiceTypePostgres) ||
-		strings.TrimSpace(labels[runtime.FugueLabelBackingServiceID]) != ""
-}
-
 func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeClient, namespace string, app model.App, desiredObjects []map[string]any) error {
 	if strings.TrimSpace(app.ID) == "" {
 		return nil
@@ -2296,25 +2287,10 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 		}
 	}
 
-	pvcs, err := s.listOwnedPersistentVolumeClaimNames(ctx, client, namespace, app.ID)
-	if err != nil {
-		return err
-	}
-	for _, name := range pvcs {
-		if _, ok := desiredByKind["PersistentVolumeClaim"][name]; ok {
-			continue
-		}
-		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, name)
-		if err != nil {
-			return err
-		}
-		if found && persistentVolumeClaimLooksLikeManagedPostgresData(pvc) {
-			return fmt.Errorf("refusing to prune managed postgres pvc %s/%s outside an explicit database restore or reset operation", namespace, name)
-		}
-		if err := client.deletePersistentVolumeClaim(ctx, namespace, name); err != nil {
-			return err
-		}
-	}
+	// Never prune PVCs during ordinary reconciliation. A non-desired PVC can be
+	// the only surviving copy after a storage migration, renderer drift, or a
+	// failed rollout. The explicit app-deletion lifecycle remains responsible
+	// for destructive volume cleanup.
 
 	secrets, err := s.listOwnedSecretNames(ctx, client, namespace, app.ID)
 	if err != nil {

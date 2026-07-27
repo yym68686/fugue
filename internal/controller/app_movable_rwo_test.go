@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -124,6 +126,104 @@ func TestDesiredPersistentStorageClaimNameUsesWorkspacePVCWhenClaimNameEmpty(t *
 	}
 	if got, want := desiredPersistentStorageClaimName(app, model.AppPersistentStorageSpec{}), runtimepkg.WorkspacePVCName(app); got != want {
 		t.Fatalf("expected empty claim name to use workspace PVC %q, got %q", want, got)
+	}
+}
+
+func TestDesiredPersistentStorageClaimNameMatchesRuntimeForLongExplicitClaim(t *testing.T) {
+	app := model.App{ID: "app_" + strings.Repeat("a", 28)}
+	storage := model.AppPersistentStorageSpec{
+		Mode:      model.AppPersistentStorageModeMovableRWO,
+		ClaimName: "app-" + strings.Repeat("workspace-", 8) + "claim",
+	}
+
+	got := desiredPersistentStorageClaimName(app, storage)
+	want := runtimepkg.PersistentStoragePVCName(app, storage)
+	if got != want {
+		t.Fatalf("planned claim %q does not match rendered claim %q", got, want)
+	}
+	if len(got) != runtimepkg.PersistentStorageClaimNameMaxLength {
+		t.Fatalf("expected canonical claim length %d, got %d (%q)", runtimepkg.PersistentStorageClaimNameMaxLength, len(got), got)
+	}
+}
+
+func TestMovableRWOTargetClaimNamePreservesSuffixWithinRuntimeLimit(t *testing.T) {
+	app := model.App{ID: "app_" + strings.Repeat("b", 32)}
+	operationID := "op_aaaaaaaa1234567890ab"
+
+	claimName := movableRWOTargetClaimName(app, operationID)
+	if len(claimName) > runtimepkg.PersistentStorageClaimNameMaxLength {
+		t.Fatalf("target claim exceeds runtime limit: len=%d claim=%q", len(claimName), claimName)
+	}
+	if !strings.HasSuffix(claimName, "-mv-1234567890ab") {
+		t.Fatalf("target claim lost operation suffix: %q", claimName)
+	}
+	storage := model.AppPersistentStorageSpec{
+		Mode:      model.AppPersistentStorageModeMovableRWO,
+		ClaimName: claimName,
+	}
+	if rendered := runtimepkg.PersistentStoragePVCName(app, storage); rendered != claimName {
+		t.Fatalf("copy target %q does not match rendered claim %q", claimName, rendered)
+	}
+}
+
+func TestBuildMovableRWOCopyPlanGeneratedClaimMatchesRenderedWorkload(t *testing.T) {
+	t.Parallel()
+
+	kubeServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(kubeServer.Close)
+	svc := &Service{
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+	current := model.App{
+		ID:       "app_" + strings.Repeat("c", 32),
+		TenantID: "tenant_demo",
+		Spec: model.AppSpec{
+			RuntimeID: "runtime_source",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+			},
+		},
+	}
+	desired := current
+	desired.Spec.RuntimeID = "runtime_target"
+	desired.Spec.PersistentStorage = &model.AppPersistentStorageSpec{
+		Mode:             model.AppPersistentStorageModeMovableRWO,
+		StorageClassName: model.AppStorageClassFugueLocalRWO,
+	}
+	op := model.Operation{
+		ID:              "op_aaaaaaaa1234567890ab",
+		Type:            model.OperationTypeMigrate,
+		SourceRuntimeID: current.Spec.RuntimeID,
+		TargetRuntimeID: desired.Spec.RuntimeID,
+	}
+
+	plan, prepared, changed, err := svc.buildMovableRWOCopyPlan(context.Background(), op, current, desired)
+	if err != nil {
+		t.Fatalf("build movable RWO copy plan: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected migration to generate a fresh target claim")
+	}
+	if plan == nil {
+		t.Fatal("expected movable RWO copy plan")
+	}
+	want := runtimepkg.PersistentStoragePVCName(prepared, *prepared.Spec.PersistentStorage)
+	if plan.targetClaimName != want {
+		t.Fatalf("copy target %q does not match rendered workload claim %q", plan.targetClaimName, want)
+	}
+	if len(plan.targetClaimName) > runtimepkg.PersistentStorageClaimNameMaxLength {
+		t.Fatalf("generated claim exceeds runtime limit: %q", plan.targetClaimName)
+	}
+	if !strings.HasSuffix(plan.targetClaimName, "-mv-1234567890ab") {
+		t.Fatalf("generated claim lost operation suffix: %q", plan.targetClaimName)
 	}
 }
 

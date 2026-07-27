@@ -51,10 +51,14 @@ const (
 	CloudNativePGReloadLabel          = "cnpg.io/reload"
 	KubernetesNetworkPolicyAPIVersion = "networking.k8s.io/v1"
 	KubernetesRBACAPIVersion          = "rbac.authorization.k8s.io/v1"
-	VolSyncAPIVersion                 = "volsync.backube/v1alpha1"
-	VolSyncReplicationSourceKind      = "ReplicationSource"
-	VolSyncReplicationDestinationKind = "ReplicationDestination"
-	appDrainAgentEventRecorderSuffix  = "drain-events"
+	// PersistentStorageClaimNameMaxLength preserves the historical runtime
+	// resource-name limit. Controllers must use the same limit before copying
+	// data so the rendered workload cannot reference a different PVC.
+	PersistentStorageClaimNameMaxLength = 50
+	VolSyncAPIVersion                   = "volsync.backube/v1alpha1"
+	VolSyncReplicationSourceKind        = "ReplicationSource"
+	VolSyncReplicationDestinationKind   = "ReplicationDestination"
+	appDrainAgentEventRecorderSuffix    = "drain-events"
 )
 
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
@@ -616,7 +620,7 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 		volumes = append(volumes, map[string]any{
 			"name": workspaceVolumeName,
 			"persistentVolumeClaim": map[string]any{
-				"claimName": persistentStoragePVCName(app, *storageSpec),
+				"claimName": PersistentStoragePVCName(app, *storageSpec),
 			},
 		})
 		if !model.AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(storageSpec) {
@@ -1645,7 +1649,7 @@ func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSp
 	if direction == nil {
 		return nil
 	}
-	rules := make([]map[string]any, 0, len(direction.AllowApps))
+	rules := make([]map[string]any, 0, len(direction.AllowApps)+2)
 	for _, peer := range direction.AllowApps {
 		rule := map[string]any{
 			"from": []map[string]any{
@@ -1657,10 +1661,37 @@ func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSp
 		}
 		rules = append(rules, rule)
 	}
+	if rule := buildNetworkPolicyControlPlaneAPIIngressRule(appSpec); rule != nil {
+		rules = append(rules, rule)
+	}
 	if sshPort := model.AppSSHTargetPort(appSpec); sshPort > 0 {
 		rules = append(rules, buildNetworkPolicySSHFrontIngressRule(sshPort))
 	}
 	return rules
+}
+
+func buildNetworkPolicyControlPlaneAPIIngressRule(appSpec model.AppSpec) map[string]any {
+	ports := buildNetworkPolicyPorts(appSpec.Ports)
+	if len(ports) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"from": []map[string]any{
+			{
+				// The authenticated app request and diagnosis endpoints run in the
+				// Fugue API pod, outside tenant namespaces. User apps cannot set
+				// these platform-owned workload labels.
+				"namespaceSelector": map[string]any{},
+				"podSelector": map[string]any{
+					"matchLabels": map[string]string{
+						"app.kubernetes.io/component": "api",
+						"app.kubernetes.io/name":      "fugue",
+					},
+				},
+			},
+		},
+		"ports": ports,
+	}
 }
 
 func buildNetworkPolicySSHFrontIngressRule(port int) map[string]any {
@@ -2584,7 +2615,7 @@ func normalizeRuntimeAppPersistentStorageSpec(app model.App) *model.AppPersisten
 	}
 	spec.StorageClassName = strings.TrimSpace(spec.StorageClassName)
 	if claimName := strings.TrimSpace(spec.ClaimName); claimName != "" {
-		spec.ClaimName = sanitizeName(claimName)
+		spec.ClaimName = NormalizePersistentStorageClaimName(claimName)
 	}
 	sharedSubPath, err := model.NormalizeAppPersistentStorageSharedSubPath(spec.SharedSubPath)
 	if err != nil {
@@ -2654,14 +2685,25 @@ func persistentStorageMountSubPath(spec model.AppPersistentStorageSpec, mount mo
 	return path.Join(spec.SharedSubPath, subPath)
 }
 
-func persistentStoragePVCName(app model.App, spec model.AppPersistentStorageSpec) string {
+// PersistentStoragePVCName returns the exact PVC name rendered for an app.
+// Storage migration planning must call this instead of applying an independent
+// Kubernetes name limit.
+func PersistentStoragePVCName(app model.App, spec model.AppPersistentStorageSpec) string {
 	if model.AppPersistentStorageSpecUsesSharedProjectRWX(&spec) {
 		return ProjectSharedWorkspacePVCName(app)
 	}
 	if strings.TrimSpace(spec.ClaimName) != "" {
-		return sanitizeName(spec.ClaimName)
+		return NormalizePersistentStorageClaimName(spec.ClaimName)
 	}
 	return WorkspacePVCName(app)
+}
+
+func NormalizePersistentStorageClaimName(name string) string {
+	name = model.Slugify(name)
+	if len(name) > PersistentStorageClaimNameMaxLength {
+		return name[:PersistentStorageClaimNameMaxLength]
+	}
+	return name
 }
 
 func AppHasReplicableVolume(app model.App) bool {
@@ -2867,7 +2909,7 @@ func buildAppPersistentStorageInitContainer(spec model.AppPersistentStorageSpec)
 }
 
 func buildAppPersistentStoragePVCObject(namespace string, app model.App, labels map[string]string, spec model.AppPersistentStorageSpec) map[string]any {
-	return buildPersistentStoragePVCObject(namespace, persistentStoragePVCName(app, spec), labels, []string{"ReadWriteOnce"}, spec.StorageSize, spec.StorageClassName)
+	return buildPersistentStoragePVCObject(namespace, PersistentStoragePVCName(app, spec), labels, []string{"ReadWriteOnce"}, spec.StorageSize, spec.StorageClassName)
 }
 
 func buildProjectSharedPersistentStoragePVCObject(namespace string, app model.App, spec model.AppPersistentStorageSpec) map[string]any {

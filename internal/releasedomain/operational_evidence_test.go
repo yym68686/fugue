@@ -149,6 +149,97 @@ func TestActivationOperationalEvidenceUsesOnlyLiveRelativeActivations(t *testing
 	}
 }
 
+func TestResolveOperationalPlanAllowsExactBuiltOnlyZeroWithoutExecutionAuthorization(t *testing.T) {
+	base := md1Deployment("fugue-image-cache", "image-cache", "registry.example/image-cache:live")
+	input := md1ActivationFixture(
+		t,
+		base,
+		base,
+		[]md1OwnershipRule{{name: "fugue-image-cache", domain: DomainImageCache}},
+		[]BuildArtifact{{
+			Name: "image_cache", SourceBaseCommit: md0BaseCommit,
+			ArtifactDigest: md0Digest("a"), ProvenanceDigest: md0Digest("b"),
+			PublishedImageRef: "registry.example/image-cache@" + md0Digest("a"),
+		}},
+	)
+	conservative := BuildPlan(PlanInput{
+		Files: FileClassification{
+			Domains:  []Domain{},
+			Evidence: []Evidence{},
+			Unknown: []Evidence{{
+				Source: "file", Subject: "cmd/fugue-image-cache/main.go",
+				Reason: "fixture source classification is intentionally conservative",
+			}},
+		},
+		Rendered: input.ReleasePlan.Rendered,
+		Digests:  input.ReleasePlan.Digests,
+	})
+	if conservative.Result != OutcomeUnknown {
+		t.Fatalf("conservative result = %s, want unknown", conservative.Result)
+	}
+	input.ReleasePlan = conservative
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activationPlan.Activations) != 0 || !activationEvidence.Complete ||
+		!reflect.DeepEqual(activationEvidence.BuiltOnlyArtifacts, []string{"image_cache"}) {
+		t.Fatalf("built-only activation partition = plan=%#v evidence=%#v", activationPlan, activationEvidence)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: conservative.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         conservative.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{
+			Status: ChangeModified, Path: "cmd/fugue-image-cache/main.go",
+			ConsumerDomains: []Domain{DomainImageCache},
+		}},
+	}
+	report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		conservative.Digests.BaseManifest, conservative.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), conservative.Digests.Ownership, conservative,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Observation != OutcomeZero || report.AuthorizationEligible || !operationalZeroResolutionEligible(report) {
+		t.Fatalf("built-only zero report = %#v", report)
+	}
+
+	resolved, err := ResolveOperationalPlan(conservative, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Result != OutcomeZero || resolved.SelectedDomain != "" || len(resolved.Domains) != 0 ||
+		len(resolved.OperationalEvidence) != 1 {
+		t.Fatalf("resolved built-only plan = %#v", resolved)
+	}
+	if err := VerifyPlanDigest(resolved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ActivateOperationalPlan(conservative, report); err == nil {
+		t.Fatal("zero-write report created a single-domain execution authorization")
+	}
+
+	drifted := report
+	drifted.ActivationWitness = append([]OperationalActivationWitness(nil), report.ActivationWitness...)
+	drifted.ActivationWitness[0].TargetManifestDigest = md0Digest("9")
+	drifted.Digest = operationalEvidenceDigest(drifted)
+	if err := VerifyOperationalDomainEvidence(drifted); err != nil {
+		t.Fatalf("externally bound digest drift should remain structurally verifiable: %v", err)
+	}
+	if _, err := ResolveOperationalPlan(conservative, drifted); err == nil {
+		t.Fatal("built-only zero resolution ignored target-manifest drift")
+	}
+}
+
 func TestActivationOperationalEvidenceReportsRenderedOnlyCandidateWithoutAuthorizingIt(t *testing.T) {
 	base := md1Deployment("fugue-api", "api", "registry.example/api:live")
 	target := strings.Replace(base,

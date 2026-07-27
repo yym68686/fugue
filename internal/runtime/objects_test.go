@@ -2082,6 +2082,46 @@ func TestBuildAppObjectsUsesPersistentStorageClaimName(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsCanonicalizesLongPersistentStorageClaimNameOnce(t *testing.T) {
+	rawClaimName := "app-" + strings.Repeat("long-workspace-", 5) + "migration"
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:      model.AppPersistentStorageModeMovableRWO,
+				ClaimName: rawClaimName,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
+				},
+			},
+		},
+	}
+
+	want := NormalizePersistentStorageClaimName(rawClaimName)
+	if len(want) != PersistentStorageClaimNameMaxLength {
+		t.Fatalf("expected canonical claim length %d, got %d (%q)", PersistentStorageClaimNameMaxLength, len(want), want)
+	}
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	volumes := podSpec["volumes"].([]map[string]any)
+	claim := volumes[0]["persistentVolumeClaim"].(map[string]any)
+	if got := claim["claimName"]; got != want {
+		t.Fatalf("expected deployment to reference canonical claim %q, got %#v", want, got)
+	}
+	pvc := firstObjectByKind(t, objects, "PersistentVolumeClaim")
+	metadata := pvc["metadata"].(map[string]any)
+	if got := metadata["name"]; got != want {
+		t.Fatalf("expected PVC object name %q, got %#v", want, got)
+	}
+}
+
 func TestBuildManagedAppChildObjectsIncludesSharedProjectRWXPersistentStorage(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",
@@ -2852,6 +2892,19 @@ func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
 	ingressPorts := ingress[0]["ports"].([]map[string]any)
 	if got := ingressPorts[0]["port"]; got != 7777 {
 		t.Fatalf("expected session ingress port 7777, got %#v", got)
+	}
+
+	apiIngress := networkPolicyIngressRuleByPodSelector(t, ingress, map[string]string{
+		"app.kubernetes.io/component": "api",
+		"app.kubernetes.io/name":      "fugue",
+	})
+	apiFrom := apiIngress["from"].([]map[string]any)
+	if _, ok := apiFrom[0]["namespaceSelector"].(map[string]any); !ok {
+		t.Fatalf("expected Fugue API ingress to use a cross-namespace selector, got %#v", apiFrom[0])
+	}
+	apiPorts := apiIngress["ports"].([]map[string]any)
+	if len(apiPorts) != 1 || apiPorts[0]["port"] != 7777 {
+		t.Fatalf("expected Fugue API ingress on app service port 7777, got %#v", apiPorts)
 	}
 }
 

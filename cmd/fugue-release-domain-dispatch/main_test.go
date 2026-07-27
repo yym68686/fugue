@@ -167,6 +167,37 @@ func TestOperationalReportActivatesAndVerifiesOneDomainBundle(t *testing.T) {
 	assertFixedResult(t, stdout.String(), "single", string(releasedomain.DomainControlPlane))
 }
 
+func TestOperationalBuiltOnlyReportResolvesAndVerifiesZeroBundle(t *testing.T) {
+	fixture, reportPath, reportDigest := newOperationalBuiltOnlyZeroFixture(t)
+	fixture.args = append(fixture.args,
+		"--operational-report", reportPath,
+		"--operational-report-digest", reportDigest,
+	)
+
+	var stdout, stderr bytes.Buffer
+	if got := run(fixture.args, &stdout, &stderr); got != 0 {
+		t.Fatalf("operational zero authorize exit = %d, stderr = %s", got, stderr.String())
+	}
+	assertFixedResult(t, stdout.String(), "zero", "")
+	for _, name := range []string{envelopeFilename, executionBindingFilename, rollbackEvidenceFilename} {
+		if _, err := os.Lstat(filepath.Join(fixture.bundle, name)); !os.IsNotExist(err) {
+			t.Fatalf("operational zero bundle unexpectedly contains %s", name)
+		}
+	}
+	var plan releasedomain.Plan
+	mustDecodeJSON(t, mustReadFile(t, filepath.Join(fixture.bundle, planFilename)), &plan)
+	if plan.Result != releasedomain.OutcomeZero || len(plan.OperationalEvidence) != 1 {
+		t.Fatalf("persisted operational zero plan = %#v", plan)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if got := run([]string{"verify", "--bundle-dir", fixture.bundle}, &stdout, &stderr); got != 0 {
+		t.Fatalf("operational zero verify exit = %d, stderr = %s", got, stderr.String())
+	}
+	assertFixedResult(t, stdout.String(), "zero", "")
+}
+
 func TestOperationalAuthorizeFailsClosedOnMissingOrDriftedReportBinding(t *testing.T) {
 	fixture, reportPath, reportDigest := newOperationalActivationFixture(t)
 	for _, test := range []struct {
@@ -765,6 +796,87 @@ func newOperationalActivationFixture(t *testing.T) (commandFixture, string, stri
 		t.Fatal(err)
 	}
 	reportPath := filepath.Join(fixture.root, "operational-domain-evidence.json")
+	writePrivateFile(t, reportPath, reportBytes)
+	return fixture, reportPath, report.Digest
+}
+
+func newOperationalBuiltOnlyZeroFixture(t *testing.T) (commandFixture, string, string) {
+	t.Helper()
+	fixture := newCommandFixture(t, nil, releasedomain.OutcomeUnknown)
+	changedBytes := testChangedEvidence(t, fixture.baseCommit, fixture.targetCommit, []releasedomain.ChangedFile{{
+		Status:          releasedomain.ChangeModified,
+		Path:            "cmd/fugue-image-cache/main.go",
+		ConsumerDomains: []releasedomain.Domain{releasedomain.DomainImageCache},
+	}})
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--changed-evidence"), changedBytes)
+	options, err := parseAuthorizeFlags(fixture.args[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := buildAuthorization(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifacts.plan.Result != releasedomain.OutcomeUnknown {
+		t.Fatalf("conservative fixture outcome = %s", artifacts.plan.Result)
+	}
+	changed, err := releasedomain.DecodeAndVerifyChangedFileEvidence(
+		bytes.NewReader(changedBytes), fixture.baseCommit, fixture.targetCommit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest := "sha256:" + strings.Repeat("4", 64)
+	buildPlan, err := releasedomain.NewBuildArtifactPlan(
+		fixture.baseCommit,
+		fixture.targetCommit,
+		changed.Digest(),
+		[]releasedomain.BuildArtifact{{
+			Name: "image_cache", SourceBaseCommit: strings.Repeat("3", 40),
+			ArtifactDigest: artifactDigest, ProvenanceDigest: "sha256:" + strings.Repeat("5", 64),
+			PublishedImageRef: "registry.example/image-cache@" + artifactDigest,
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownershipBytes := mustReadFile(t, flagValue(t, fixture.args, "--ownership"))
+	baseManifest := mustReadFile(t, flagValue(t, fixture.args, "--base-canonical-manifest"))
+	targetManifest := mustReadFile(t, flagValue(t, fixture.args, "--target-canonical-manifest"))
+	activationPlan, activationEvidence, err := releasedomain.BuildImageActivationReportFromManifests(
+		releasedomain.ImageActivationPlanInput{
+			BuildPlan: buildPlan, ReleasePlan: artifacts.plan, Ownership: ownershipBytes,
+			BaseManifest: baseManifest, TargetManifest: targetManifest,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownership, err := releasedomain.LoadOwnership(bytes.NewReader(ownershipBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := releasedomain.ClassifyRendered(baseManifest, targetManifest, ownership, releasedomain.RenderedOptions{
+		DefaultNamespace: artifacts.plan.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         artifacts.plan.Digests.ClassificationContext.BindingMap(),
+	})
+	report, err := releasedomain.BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+		changed, buildPlan, activationPlan, activationEvidence, rendered,
+		artifacts.plan.Digests.BaseManifest, artifacts.plan.Digests.TargetManifest,
+		digestBytes(targetManifest), artifacts.plan.Digests.Ownership, artifacts.plan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := releasedomain.ResolveOperationalPlan(artifacts.plan, report)
+	if err != nil || resolved.Result != releasedomain.OutcomeZero {
+		t.Fatalf("built-only report did not resolve to zero: plan=%#v err=%v", resolved, err)
+	}
+	reportBytes, err := releasedomain.MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(fixture.root, "operational-built-only-zero.json")
 	writePrivateFile(t, reportPath, reportBytes)
 	return fixture, reportPath, report.Digest
 }

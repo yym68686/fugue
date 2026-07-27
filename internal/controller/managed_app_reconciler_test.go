@@ -489,7 +489,7 @@ func TestManagedPostgresMissingClusterShouldBlockOnlyWhenServiceHasRuntimeHistor
 	}
 }
 
-func TestManagedPostgresStatefulObjectDetectors(t *testing.T) {
+func TestManagedPostgresStatefulClusterDetector(t *testing.T) {
 	t.Parallel()
 
 	cluster := kubeCloudNativePGCluster{}
@@ -499,13 +499,69 @@ func TestManagedPostgresStatefulObjectDetectors(t *testing.T) {
 	if !managedPostgresClusterLooksStateful(cluster) {
 		t.Fatal("expected backing-service labeled CNPG cluster to look stateful")
 	}
+}
 
-	pvc := kubePersistentVolumeClaim{}
-	pvc.Metadata.Labels = map[string]string{
-		"cnpg.io/cluster": "demo-postgres",
+func TestPruneManagedAppStaleObjectsDoesNotInspectOrDeletePVCs(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo"}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	listedPVCs := false
+	var deleted []string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/persistentvolumeclaims"):
+			listedPVCs = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"items":[{"metadata":{"name":"app-demo-workspace-old"}}]}`)),
+				Header:     header,
+			}, nil
+		case req.Method == http.MethodGet:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"items":[]}`)),
+				Header:     header,
+			}, nil
+		case req.Method == http.MethodDelete:
+			deleted = append(deleted, req.URL.Path)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     header,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "fugue-system",
 	}
-	if !persistentVolumeClaimLooksLikeManagedPostgresData(pvc) {
-		t.Fatal("expected CNPG PVC to look like managed postgres data")
+	svc := &Service{}
+	desiredObjects := []map[string]any{
+		{
+			"kind": "PersistentVolumeClaim",
+			"metadata": map[string]any{
+				"name": "app-demo-workspace-current",
+			},
+		},
+	}
+
+	if err := svc.pruneManagedAppStaleObjects(context.Background(), client, namespace, app, desiredObjects); err != nil {
+		t.Fatalf("prune stale managed app objects: %v", err)
+	}
+	if listedPVCs {
+		t.Fatal("ordinary stale-object pruning must not inventory PVCs for deletion")
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("expected stale PVC to be retained, got delete requests %#v", deleted)
 	}
 }
 

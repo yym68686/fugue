@@ -63,7 +63,7 @@ type OperationalAdapterBinding struct {
 
 // OperationalDomainEvidence is a conjunction of four independent witness
 // channels. AuthorizationEligible is true only for a complete single-domain
-// intersection that may be consumed by ActivateOperationalPlan.
+// intersection that may be consumed by ResolveOperationalPlan.
 type OperationalDomainEvidence struct {
 	APIVersion               string                               `json:"apiVersion"`
 	Kind                     string                               `json:"kind"`
@@ -338,7 +338,7 @@ func BuildOperationalDomainEvidence(changed ChangedFileEvidence, imagePlan Opera
 
 // BuildOperationalDomainEvidenceFromActivation replaces the build-target
 // witness with a live-relative activation witness. It remains side-effect
-// free: the returned report can authorize only after ActivateOperationalPlan
+// free: the returned report can authorize only after ResolveOperationalPlan
 // rebinds it to the exact conservative predecessor.
 func BuildOperationalDomainEvidenceFromActivation(
 	changed ChangedFileEvidence,
@@ -565,7 +565,7 @@ func MarshalOperationalDomainEvidence(report OperationalDomainEvidence) ([]byte,
 
 // DecodeAndVerifyOperationalDomainEvidence strictly decodes a report and
 // binds it to an independently supplied digest. The report alone is never an
-// ExecutionAuthorization; activation still requires its conservative plan.
+// ExecutionAuthorization; resolution still requires its conservative plan.
 func DecodeAndVerifyOperationalDomainEvidence(reader io.Reader, expectedDigest string) (OperationalDomainEvidence, error) {
 	data, err := readOperationalEvidence(reader, "operational domain evidence")
 	if err != nil {
@@ -867,11 +867,11 @@ func buildRenderedOnlyOperationalObservation(
 	return observation
 }
 
-// ActivateOperationalPlan returns a canonically reproducible single-domain
-// plan only when a conservative multiple/unknown result is paired with a
-// complete four-witness operational report. The predecessor plan remains
-// embedded verbatim through its evidence fields and report PlanDigest.
-func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
+// ResolveOperationalPlan returns a canonically reproducible operational plan
+// when a conservative multiple/unknown result is paired with complete live-
+// relative evidence. It can resolve either one executable domain or a proven
+// zero-write result whose built artifacts are all absent from the target.
+func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
 	if err := VerifyPlanDigest(conservative); err != nil {
 		return Plan{}, fmt.Errorf("operational activation conservative plan: %w", err)
 	}
@@ -882,9 +882,12 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 		return Plan{}, fmt.Errorf("operational activation report: %w", err)
 	}
 	authorizedDomain, domainEligible := operationalAuthorizationCandidate(report)
-	if !report.AuthorizationEligible || !domainEligible || report.PlanDigest != conservative.PlanDigest ||
-		report.ChangedFilesDigest != conservative.Digests.ChangedFiles {
+	zeroEligible := operationalZeroResolutionEligible(report)
+	if report.PlanDigest != conservative.PlanDigest || report.ChangedFilesDigest != conservative.Digests.ChangedFiles {
 		return Plan{}, fmt.Errorf("operational activation evidence binding mismatch")
+	}
+	if (!report.AuthorizationEligible || !domainEligible) && !zeroEligible {
+		return Plan{}, fmt.Errorf("operational activation evidence does not resolve to a safe outcome")
 	}
 	if report.ConservativeOutcome != conservative.Result ||
 		!equalDomains(report.ConservativeDomains, conservative.Domains) ||
@@ -925,16 +928,58 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 		return Plan{}, fmt.Errorf("operational activation clone report: %w", err)
 	}
 
-	clonedPlan.Result = OutcomeSingle
-	clonedDomain, ok := operationalAuthorizationCandidate(clonedReport)
-	if !ok || clonedDomain != authorizedDomain {
-		return Plan{}, fmt.Errorf("operational activation cloned authorization domain mismatch")
-	}
-	clonedPlan.SelectedDomain = clonedDomain
-	clonedPlan.Domains = []Domain{clonedDomain}
 	clonedPlan.OperationalEvidence = []OperationalDomainEvidence{clonedReport}
+	if zeroEligible {
+		if !operationalZeroResolutionEligible(clonedReport) {
+			return Plan{}, fmt.Errorf("operational activation cloned zero-write evidence mismatch")
+		}
+		clonedPlan.Result = OutcomeZero
+		clonedPlan.SelectedDomain = ""
+		clonedPlan.Domains = []Domain{}
+	} else {
+		clonedPlan.Result = OutcomeSingle
+		clonedDomain, ok := operationalAuthorizationCandidate(clonedReport)
+		if !ok || clonedDomain != authorizedDomain {
+			return Plan{}, fmt.Errorf("operational activation cloned authorization domain mismatch")
+		}
+		clonedPlan.SelectedDomain = clonedDomain
+		clonedPlan.Domains = []Domain{clonedDomain}
+	}
 	clonedPlan.PlanDigest = computePlanDigest(clonedPlan)
 	return clonedPlan, nil
+}
+
+// ActivateOperationalPlan preserves the single-domain execution API. A
+// proven zero-write result is intentionally consumable only by the dispatcher,
+// which never creates an execution authorization for zero outcomes.
+func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
+	resolved, err := ResolveOperationalPlan(conservative, report)
+	if err != nil {
+		return Plan{}, err
+	}
+	if resolved.Result != OutcomeSingle {
+		return Plan{}, fmt.Errorf("operational activation requires a single-domain result")
+	}
+	return resolved, nil
+}
+
+func operationalZeroResolutionEligible(report OperationalDomainEvidence) bool {
+	if report.Policy != OperationalRenderedOnlyActivationPolicy || report.AuthorizationEligible ||
+		len(report.Issues) != 0 || report.Observation != OutcomeZero || report.CandidateDomain != "" ||
+		len(report.ImageTargets) != 0 || len(report.ImageRolloutDomains) != 0 ||
+		len(report.RenderedDomains) != 0 || len(report.AdapterDomains) != 0 ||
+		len(report.IntersectionDomains) != 0 || len(report.ActivationWitness) != 1 ||
+		len(report.RenderedOnlyObservations) != 1 {
+		return false
+	}
+	witness := report.ActivationWitness[0]
+	return len(witness.BuildPlan.Artifacts) > 0 && len(witness.Plan.Activations) == 0 &&
+		witness.Evidence.Complete && len(witness.Evidence.Unresolved) == 0 &&
+		len(witness.Evidence.BuiltOnlyArtifacts) == len(witness.BuildPlan.Artifacts) &&
+		len(witness.Rendered.Domains) == 0 && len(witness.Rendered.Evidence) == 0 &&
+		len(witness.Rendered.Unknown) == 0 &&
+		witness.BaseManifestDigest == witness.TargetManifestDigest &&
+		witness.BaseManifestDigest == witness.ImmutableTargetManifestDigest
 }
 
 func operationalAuthorizationEligible(report OperationalDomainEvidence) bool {

@@ -248,6 +248,11 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			appStorageSameNodeOnlineMountUnsupportedSummary(app),
 		)
 		diagnosis.Hint = "Use a Recreate rollout for this storage class, or move the app storage to RWX / a same-node concurrent RWO storage class before claiming zero downtime."
+	case diagnosis.ReadyPods > 0 && httpProbe.attempted && !httpProbe.responsive && appRestrictedIngress(app):
+		diagnosis.Category = "http-probe-inconclusive"
+		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready; the internal HTTP probe was inconclusive under restricted ingress", diagnosis.ReadyPods, diagnosis.LivePods)
+		diagnosis.Hint = fmt.Sprintf("Reconcile the NetworkPolicy for %s so the Fugue API diagnostic peer is allowed, then retry the request from Fugue or another explicitly allowed app.", strings.TrimSpace(app.Name))
+		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "restricted ingress can reject a control-plane HTTP probe even while allowed application peers remain connected")
 	case diagnosis.ReadyPods > 0 && httpProbe.attempted && httpProbe.timedOut:
 		diagnosis.Category = "http-timeout"
 		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe timed out", diagnosis.ReadyPods, diagnosis.LivePods)
@@ -333,6 +338,12 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		diagnosis.Summary = "no single runtime root cause was identified"
 	}
 	return diagnosis, nil
+}
+
+func appRestrictedIngress(app model.App) bool {
+	policy := app.Spec.NetworkPolicy
+	return policy != nil && policy.Ingress != nil &&
+		model.NormalizeAppNetworkPolicyMode(policy.Ingress.Mode) == model.AppNetworkPolicyModeRestricted
 }
 
 type appHTTPProbeDiagnosis struct {

@@ -492,9 +492,9 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 		if report.BaseCommit != options.trustedBaseCommit || report.TargetCommit != options.trustedTargetCommit {
 			return authorizationArtifacts{}, fmt.Errorf("operational-domain report revision binding mismatch")
 		}
-		plan, err = releasedomain.ActivateOperationalPlan(plan, report)
+		plan, err = releasedomain.ResolveOperationalPlan(plan, report)
 		if err != nil {
-			return authorizationArtifacts{}, fmt.Errorf("activate operational-domain plan: %w", err)
+			return authorizationArtifacts{}, fmt.Errorf("resolve operational-domain plan: %w", err)
 		}
 	}
 	planJSON, err := marshalPrivateJSON(plan)
@@ -776,9 +776,9 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 		return dispatchDecision{}, fmt.Errorf("persisted plan contains multiple operational activation reports")
 	}
 	if len(plan.OperationalEvidence) == 1 {
-		rebuilt, err = releasedomain.ActivateOperationalPlan(rebuilt, plan.OperationalEvidence[0])
+		rebuilt, err = releasedomain.ResolveOperationalPlan(rebuilt, plan.OperationalEvidence[0])
 		if err != nil {
-			return dispatchDecision{}, fmt.Errorf("rebuild operational-domain activation: %w", err)
+			return dispatchDecision{}, fmt.Errorf("rebuild operational-domain resolution: %w", err)
 		}
 	}
 	if rebuilt.PlanDigest != plan.PlanDigest {

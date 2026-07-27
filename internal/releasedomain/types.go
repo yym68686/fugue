@@ -318,7 +318,7 @@ type Plan struct {
 	Rendered       RenderedClassification `json:"rendered"`
 	Unknown        []Evidence             `json:"unknown,omitempty"`
 	// OperationalEvidence is absent on conservative plans and contains exactly
-	// one verified report on a plan activated by the operational-domain policy.
+	// one verified report on a plan resolved by the operational-domain policy.
 	// A slice keeps the additive field omittable while the strict JSON decoder
 	// can still reject null, duplicate, or structurally invalid evidence.
 	OperationalEvidence []OperationalDomainEvidence `json:"operationalEvidence,omitempty"`
