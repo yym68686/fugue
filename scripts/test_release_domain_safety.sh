@@ -4062,17 +4062,6 @@ build_allow_guard = prepare_domains.index('node_local_dns_split_release_enabled 
 build_preservation = prepare_domains.index('if [[ "${build_mode}" != "allow" ]]')
 if build_allow_guard > build_preservation:
     raise SystemExit("split rollout must reject a forced build-plane release before preservation logic")
-split_image_rollout = prepare_domains.index(
-    'node_local_dns_split_release_enabled && node_local_build_plane_image_rollout_allowed'
-)
-split_resource_preserve = prepare_domains.index(
-    'preserve_node_local_build_plane_from_live false true true', split_image_rollout
-)
-split_full_freeze = prepare_domains.index(
-    'preserve_node_local_build_plane_from_live true true true', split_resource_preserve
-)
-if not build_preservation < split_image_rollout < split_resource_preserve < split_full_freeze:
-    raise SystemExit("split image-cache rollout must preserve resources and retain a full-freeze fallback")
 
 transaction_start = source.index("\nrun_dns_manifest_transaction_after_helm() {")
 transaction_end = source.index("\nrestore_dns_manifest_transaction_after_helm_rollback()", transaction_start)
@@ -7986,45 +7975,6 @@ PY
   assert_eq "$(image_cache_plan_field "${image_cache_plan}" updated_active_count)" "1" "image-cache exact plan updated active count"
   assert_eq "$(image_cache_plan_field "${image_cache_plan}" preserved_nodes)" "dmit" "image-cache exact plan preserved node"
   assert_eq "$(image_cache_plan_field "${image_cache_plan}" daemonset_uid)" "ds-uid" "image-cache exact plan DaemonSet UID"
-  [[ "$(image_cache_plan_field "${image_cache_plan}" template_without_image_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
-    fail "image-cache exact plan must bind a canonical non-image Pod template digest"
-
-  split_ds="${IMAGE_CACHE_TEST_DS}"
-  split_pods="${IMAGE_CACHE_TEST_PODS}"
-  split_nodes="${IMAGE_CACHE_TEST_NODES}"
-  NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES=""
-  IMAGE_CACHE_TEST_DS="$(DS_JSON="${split_ds}" python3 -c '
-import json, os
-value = json.loads(os.environ["DS_JSON"])
-value["status"].update({
-    "desiredNumberScheduled": 1,
-    "currentNumberScheduled": 1,
-    "numberReady": 1,
-    "numberAvailable": 1,
-    "numberUnavailable": 0,
-    "updatedNumberScheduled": 1,
-})
-print(json.dumps(value, separators=(",", ":")))
-')"
-  IMAGE_CACHE_TEST_PODS="$(PODS_JSON="${split_pods}" python3 -c '
-import json, os
-value = json.loads(os.environ["PODS_JSON"])
-value["items"] = [item for item in value["items"] if item["spec"]["nodeName"] != "dmit"]
-print(json.dumps(value, separators=(",", ":")))
-')"
-  IMAGE_CACHE_TEST_NODES="$(NODES_JSON="${split_nodes}" python3 -c '
-import json, os
-value = json.loads(os.environ["NODES_JSON"])
-value["items"] = [item for item in value["items"] if item["metadata"]["name"] != "dmit"]
-print(json.dumps(value, separators=(",", ":")))
-')"
-  no_preserved_plan="$(image_cache_rollout_plan_json fugue-fugue-image-cache rev-new)"
-  assert_eq "$(image_cache_plan_field "${no_preserved_plan}" active_nodes)" "node-a" "image-cache exact plan accepts an all-active cohort"
-  assert_eq "$(image_cache_plan_field "${no_preserved_plan}" preserved_nodes)" "" "image-cache exact plan allows no preserved nodes"
-  NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES=dmit
-  IMAGE_CACHE_TEST_DS="${split_ds}"
-  IMAGE_CACHE_TEST_PODS="${split_pods}"
-  IMAGE_CACHE_TEST_NODES="${split_nodes}"
 
   valid_ds="${IMAGE_CACHE_TEST_DS}"
   IMAGE_CACHE_TEST_DS="${valid_ds/\"annotations\":{},/}"
@@ -8293,13 +8243,10 @@ print(json.dumps(payload, separators=(",", ":")))
 (
   strategy_guard_dir="$(mktemp -d)"
   trap 'rm -rf "${strategy_guard_dir}"' EXIT
-  mkdir "${strategy_guard_dir}/runtime"
-  chmod 700 "${strategy_guard_dir}/runtime"
-  CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR="${strategy_guard_dir}/runtime"
   patch_marker="${strategy_guard_dir}/patch"
   wait_marker="${strategy_guard_dir}/wait"
-  IC_PLAN_INITIAL='{"daemonset_uid":"ds-uid","preserved_nodes":["dmit"],"resource_version":"rv-20","strategy":"RollingUpdate","transaction":false,"target_revision":"rev-new","registry_port":5000,"old_active_nodes":["node-a"],"updated_active_count":0,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"name":"cache-dmit","node":"dmit","revision":"rev-old","uid":"uid-dmit","restart_count":null},{"name":"cache-a","node":"node-a","revision":"rev-old","uid":"uid-old-a","restart_count":0}]}'
-  IC_PLAN_FINAL='{"daemonset_uid":"ds-uid","preserved_nodes":["dmit"],"resource_version":"rv-21","strategy":"OnDelete","transaction":false,"target_revision":"rev-new","registry_port":5000,"old_active_nodes":["node-a"],"updated_active_count":0,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"name":"cache-dmit","node":"dmit","revision":"rev-old","uid":"uid-dmit","restart_count":null},{"name":"cache-a","node":"node-a","revision":"rev-old","uid":"uid-old-a","restart_count":0}]}'
+  IC_PLAN_INITIAL='{"resource_version":"rv-20","strategy":"RollingUpdate","transaction":false,"target_revision":"rev-new","registry_port":5000,"old_active_nodes":["node-a"],"updated_active_count":0,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":null},{"node":"node-a","uid":"uid-old-a","restart_count":0}]}'
+  IC_PLAN_FINAL='{"resource_version":"rv-21","strategy":"OnDelete","transaction":false,"target_revision":"rev-new","registry_port":5000,"old_active_nodes":["node-a"],"updated_active_count":0,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":null},{"node":"node-a","uid":"uid-old-a","restart_count":0}]}'
   node_local_dns_split_release_enabled() { return 0; }
   node_local_dns_verify_preserved_nodes_isolated() { return 0; }
   image_cache_current_controller_revision() { printf 'rev-new\n'; }
@@ -8333,145 +8280,34 @@ print(json.dumps(payload, separators=(",", ":")))
   assert_eq "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" "rev-new" "image-cache guard pins the pre-Helm revision"
   assert_eq "$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" strategy)" "OnDelete" "image-cache guard stores the clean OnDelete plan"
   image_cache_validate_unchanged_pod_identities "${IC_PLAN_INITIAL}" "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" || fail "image-cache guard must preserve every Pod UID and restart count"
-  [[ -f "${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE}" && ! -s "${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE}" ]] ||
-    fail "image-cache Prepare must create an empty private rollout journal"
 )
 
-python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
-from pathlib import Path
-import sys
-
-source = Path(sys.argv[1]).read_text()
-start = source.index("\nimage_cache_delete_pod_by_uid_no_wait() {")
-end = source.index("\nimage_cache_probe_endpoint() {", start)
-delete = source[start:end]
-for required in (
-    '"preconditions": {"uid": sys.argv[1]}',
-    'release_bounded_kubectl 30',
-    'delete --raw="${delete_uri}" -f -',
-):
-    if required not in delete:
-        raise SystemExit("image-cache delete lacks an exact Pod UID precondition")
-for forbidden in (' delete pod ', '--force', '--grace-period=0'):
-    if forbidden in delete:
-        raise SystemExit("image-cache delete contains an unsafe fallback")
-PY
+if grep -Fq 'delete --raw "/api/v1/namespaces/${FUGUE_NAMESPACE}/pods/' "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
+  fail "offline image-cache guard must not delete Pods"
+fi
 
 (
-  FUGUE_NAMESPACE=fugue-system
-  image_delete_dir="$(mktemp -d)"
-  trap 'rm -rf "${image_delete_dir}"' EXIT
-  release_bounded_kubectl() {
-    printf '%s\n' "$*" >"${image_delete_dir}/args"
-    cat >"${image_delete_dir}/body"
-  }
-  image_cache_delete_pod_by_uid_no_wait cache-node-a 12345678-abcd
-  assert_eq "$(<"${image_delete_dir}/args")" \
-    '30 image-cache UID-preconditioned Pod delete cache-node-a delete --raw=/api/v1/namespaces/fugue-system/pods/cache-node-a -f -' \
-    "image-cache Pod delete uses the bounded raw API path"
-  python3 - "${image_delete_dir}/body" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    body = json.load(handle)
-assert body == {
-    "apiVersion": "v1",
-    "kind": "DeleteOptions",
-    "preconditions": {"uid": "12345678-abcd"},
-}
-PY
-)
-
-(
-  rollout_dir="$(mktemp -d)"
-  trap 'rm -rf "${rollout_dir}"' EXIT
-  mkdir "${rollout_dir}/runtime"
-  chmod 700 "${rollout_dir}/runtime"
-  CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR="${rollout_dir}/runtime"
-  FUGUE_NAMESPACE=fugue-system
   node_local_dns_split_release_enabled() { return 0; }
   node_local_dns_verify_preserved_nodes_isolated() { return 0; }
   image_cache_bind_plan_to_target() { return 0; }
   image_cache_probe_active_plan() { return 0; }
-  IC_PRE='{"active_nodes":["node-a","node-b"],"active_pods":[{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-a"},{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-b","node":"node-b","phase":"Running","pod_ip":"10.0.0.2","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-old-b"}],"daemonset_uid":"ds-uid","old_active_nodes":["node-a"],"pods":[{"container_status_valid":true,"deleting":true,"image":"cache:legacy","name":"cache-dmit","node":"dmit","phase":"Running","pod_ip":"","ready":false,"restart_count":0,"revision":"rev-legacy","uid":"uid-dmit"},{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-a"},{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-b","node":"node-b","phase":"Running","pod_ip":"10.0.0.2","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-old-b"}],"preserved_nodes":["dmit"],"registry_port":5000,"resource_version":"rv-pre","strategy":"OnDelete","target_revision":"rev-old","transaction":false,"updated_active_count":1}'
-  IC_POST_INITIAL='{"active_nodes":["node-a","node-b"],"active_pods":[{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-a"},{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-b","node":"node-b","phase":"Running","pod_ip":"10.0.0.2","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-old-b"}],"daemonset_uid":"ds-uid","old_active_nodes":["node-b"],"pods":[{"container_status_valid":true,"deleting":true,"image":"cache:legacy","name":"cache-dmit","node":"dmit","phase":"Running","pod_ip":"","ready":false,"restart_count":0,"revision":"rev-legacy","uid":"uid-dmit"},{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-a"},{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-b","node":"node-b","phase":"Running","pod_ip":"10.0.0.2","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-old-b"}],"preserved_nodes":["dmit"],"registry_port":5000,"resource_version":"rv-post","strategy":"OnDelete","target_revision":"rev-new","transaction":false,"updated_active_count":1}'
-  IC_POST_FINAL='{"active_nodes":["node-a","node-b"],"active_pods":[{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-a"},{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-b-new","node":"node-b","phase":"Running","pod_ip":"10.0.0.22","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-new-b"}],"daemonset_uid":"ds-uid","old_active_nodes":[],"pods":[{"container_status_valid":true,"deleting":true,"image":"cache:legacy","name":"cache-dmit","node":"dmit","phase":"Running","pod_ip":"","ready":false,"restart_count":0,"revision":"rev-legacy","uid":"uid-dmit"},{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-a"},{"container_status_valid":true,"deleting":false,"image":"cache:new","name":"cache-b-new","node":"node-b","phase":"Running","pod_ip":"10.0.0.22","ready":true,"restart_count":0,"revision":"rev-new","uid":"uid-new-b"}],"preserved_nodes":["dmit"],"registry_port":5000,"resource_version":"rv-final","strategy":"OnDelete","target_revision":"rev-new","transaction":false,"updated_active_count":2}'
-  image_cache_test_add_template_proof() {
-    PLAN_JSON="$1" TARGET_IMAGE="$2" python3 -c '
-import json, os
-value = json.loads(os.environ["PLAN_JSON"])
-value["target_image"] = os.environ["TARGET_IMAGE"]
-value["template_without_image_sha256"] = "a" * 64
-print(json.dumps(value, separators=(",", ":")))
-'
-  }
-  IC_PRE="$(image_cache_test_add_template_proof "${IC_PRE}" cache:old)"
-  IC_POST_INITIAL="$(image_cache_test_add_template_proof "${IC_POST_INITIAL}" cache:new)"
-  IC_POST_FINAL="$(image_cache_test_add_template_proof "${IC_POST_FINAL}" cache:new)"
-
-  image_cache_validate_plan_transition "${IC_PRE}" "${IC_POST_INITIAL}" unchanged ||
-    fail "Helm must be allowed to change only the image-cache template"
-  image_cache_validate_plan_transition "${IC_POST_INITIAL}" "${IC_POST_FINAL}" single-forward node-b rev-new "" ||
-    fail "one selected active-node replacement must pass"
-  image_cache_validate_plan_transition "${IC_PRE}" "${IC_POST_FINAL}" final-forward "" rev-new node-b ||
-    fail "final forward cohort must match the exact journal"
-  drifted_active="$(PLAN_JSON="${IC_POST_INITIAL}" python3 -c '
-import json, os
-value = json.loads(os.environ["PLAN_JSON"])
-next(item for item in value["pods"] if item["node"] == "node-a")["uid"] = "uid-unexpected-a"
-print(json.dumps(value, separators=(",", ":")))
-')"
-  if image_cache_validate_plan_transition "${IC_PRE}" "${drifted_active}" unchanged 2>/dev/null; then
-    fail "image-cache transaction must reject an unselected active Pod identity change"
-  fi
-  drifted_preserved="${IC_POST_FINAL/uid-dmit/uid-unexpected-dmit}"
-  if image_cache_validate_plan_transition "${IC_PRE}" "${drifted_preserved}" final-forward "" rev-new node-b 2>/dev/null; then
-    fail "image-cache transaction must reject a preserved Pod identity change"
-  fi
-  drifted_template="${IC_POST_INITIAL/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
-  if image_cache_validate_plan_transition "${IC_PRE}" "${drifted_template}" unchanged 2>/dev/null; then
-    fail "image-cache transaction must reject any non-image Pod template change"
-  fi
-
-  image_cache_initialize_rollout_journal || fail "image-cache rollout journal initialization"
-  printf '0\n' >"${rollout_dir}/wait-count"
-  image_cache_wait_for_rollout_plan() {
-    local count
-    count="$(<"${rollout_dir}/wait-count")"
-    count=$((count + 1))
-    printf '%s\n' "${count}" >"${rollout_dir}/wait-count"
-    case "${count}" in
-      1|2) printf '%s\n' "${IC_POST_INITIAL}" ;;
-      3) printf '%s\n' "${IC_POST_FINAL}" ;;
-      *) return 1 ;;
-    esac
-  }
-  image_cache_current_controller_revision() { printf 'rev-new\n'; }
-  image_cache_delete_pod_by_uid_no_wait() { printf '%s\t%s\n' "$1" "$2" >>"${rollout_dir}/deletes"; }
-  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-old
-  IMAGE_CACHE_PRE_HELM_PLAN_JSON="${IC_PRE}"
-  IMAGE_CACHE_POST_HELM_TARGET_REVISION=""
-  image_cache_rollout_status fugue-fugue-image-cache || fail "image-cache must replace only stale active nodes"
-  assert_eq "$(<"${rollout_dir}/deletes")" $'cache-b\tuid-old-b' "image-cache UID-preconditioned active-node replacement"
-  assert_eq "$(image_cache_rollout_journal_nodes)" "node-b" "image-cache journal records the touched active node"
-  assert_eq "${IMAGE_CACHE_POST_HELM_TARGET_REVISION}" "rev-new" "image-cache pins the post-Helm target revision"
-
-  rm -f "${IMAGE_CACHE_ROLLOUT_JOURNAL_FILE}"
-  image_cache_wait_for_rollout_plan() { printf '%s\n' "${IC_POST_FINAL}"; }
   IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-new
-  IMAGE_CACHE_PRE_HELM_PLAN_JSON="${IC_POST_FINAL}"
-  if image_cache_rollout_status fugue-fugue-image-cache 2>/dev/null; then
-    fail "an unreadable image-cache journal must not be accepted as an empty no-change transaction"
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"strategy":"OnDelete","transaction":false,"updated_active_count":1,"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0},{"node":"node-b","uid":"uid-old-b","restart_count":0}]}'
+  IMAGE_CACHE_POST_HELM_PLAN='{"strategy":"OnDelete","transaction":false,"updated_active_count":1,"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0},{"node":"node-b","uid":"uid-old-b","restart_count":0}]}'
+  image_cache_wait_for_rollout_plan() { printf '%s\n' "${IMAGE_CACHE_POST_HELM_PLAN}"; }
+  image_cache_current_controller_revision() { printf '%s\n' "${IMAGE_CACHE_TEST_CURRENT_REVISION}"; }
+  IMAGE_CACHE_TEST_CURRENT_REVISION=rev-drift
+  if image_cache_rollout_status fugue-fugue-image-cache; then
+    fail "image-cache post-Helm verification must reject target revision drift"
   fi
-)
-
-(
-  FUGUE_ROLLOUT_TIMEOUT=1s
-  duration_to_seconds() { printf '0\n'; }
-  image_cache_rollout_plan_json() { printf '{}\n'; }
-  if image_cache_wait_for_rollout_plan fugue-fugue-image-cache rev-boundary; then
-    fail "image-cache rollout polling must not report success after its deadline"
+  IMAGE_CACHE_TEST_CURRENT_REVISION=rev-new
+  changed_identity_plan="${IMAGE_CACHE_POST_HELM_PLAN/uid-old-b/uid-unexpected-b}"
+  IMAGE_CACHE_POST_HELM_PLAN="${changed_identity_plan}"
+  if image_cache_rollout_status fugue-fugue-image-cache; then
+    fail "image-cache post-Helm verification must reject an extra Pod identity change"
   fi
+  IMAGE_CACHE_POST_HELM_PLAN="${IMAGE_CACHE_PRE_HELM_PLAN_JSON}"
+  image_cache_rollout_status fugue-fugue-image-cache || fail "image-cache post-Helm verification must accept an unchanged Pod cohort"
 )
 
 (
@@ -8912,83 +8748,44 @@ PY
 )
 
 (
-  rollback_dir="$(mktemp -d)"
-  trap 'rm -rf "${rollback_dir}"' EXIT
-  mkdir "${rollback_dir}/runtime"
-  chmod 700 "${rollback_dir}/runtime"
-  CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR="${rollback_dir}/runtime"
   FUGUE_RELEASE_FULLNAME=fugue-fugue
-  FUGUE_RELEASE_NAME=fugue
   FUGUE_NAMESPACE=fugue-system
   FUGUE_IMAGE_CACHE_ENABLED=true
-  FUGUE_ROLLOUT_TIMEOUT=600s
-  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-old
-  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"active_nodes":["node-a"],"active_pods":[{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-old-a"}],"daemonset_uid":"ds-uid","old_active_nodes":[],"pods":[{"container_status_valid":true,"deleting":true,"image":"cache:legacy","name":"cache-dmit","node":"dmit","phase":"Running","pod_ip":"","ready":false,"restart_count":0,"revision":"rev-legacy","uid":"uid-dmit"},{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-a","node":"node-a","phase":"Running","pod_ip":"10.0.0.1","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-old-a"}],"preserved_nodes":["dmit"],"registry_port":5000,"resource_version":"rv-before","strategy":"OnDelete","target_revision":"rev-old","transaction":false,"updated_active_count":1}'
-  IMAGE_CACHE_ROLLBACK_FINAL='{"active_nodes":["node-a"],"active_pods":[{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-a-restored","node":"node-a","phase":"Running","pod_ip":"10.0.0.11","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-restored-a"}],"daemonset_uid":"ds-uid","old_active_nodes":[],"pods":[{"container_status_valid":true,"deleting":true,"image":"cache:legacy","name":"cache-dmit","node":"dmit","phase":"Running","pod_ip":"","ready":false,"restart_count":0,"revision":"rev-legacy","uid":"uid-dmit"},{"container_status_valid":true,"deleting":false,"image":"cache:old","name":"cache-a-restored","node":"node-a","phase":"Running","pod_ip":"10.0.0.11","ready":true,"restart_count":0,"revision":"rev-old","uid":"uid-restored-a"}],"preserved_nodes":["dmit"],"registry_port":5000,"resource_version":"rv-guarded","strategy":"OnDelete","target_revision":"rev-old","transaction":false,"updated_active_count":1}'
-  IMAGE_CACHE_PRE_HELM_PLAN_JSON="$(PLAN_JSON="${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" python3 -c '
-import json, os
-value = json.loads(os.environ["PLAN_JSON"])
-value.update(target_image="cache:old", template_without_image_sha256="a" * 64)
-print(json.dumps(value, separators=(",", ":")))
-')"
-  IMAGE_CACHE_ROLLBACK_FINAL="$(PLAN_JSON="${IMAGE_CACHE_ROLLBACK_FINAL}" python3 -c '
-import json, os
-value = json.loads(os.environ["PLAN_JSON"])
-value.update(target_image="cache:old", template_without_image_sha256="a" * 64)
-print(json.dumps(value, separators=(",", ":")))
-')"
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-new
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"daemonset_uid":"ds-uid","strategy":"OnDelete","transaction":false,"resource_version":"rv-before","registry_port":5000,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0}]}'
   rollback_patch_marker="$(mktemp)"
+  trap 'rm -f "${rollback_patch_marker}"' EXIT
   node_local_dns_split_release_enabled() { return 0; }
   node_local_dns_verify_preserved_nodes_isolated() { return 0; }
   image_cache_bind_plan_to_target() { return 0; }
   image_cache_probe_active_plan() { return 0; }
   image_cache_wait_strategy_observed() { return 0; }
-  image_cache_rollback_freeze_snapshot_json() { printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-rollback","target_revision":"rev-old"}'; }
+  image_cache_rollback_freeze_snapshot_json() { printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-rollback","target_revision":"rev-new"}'; }
   image_cache_wait_for_rollout_plan() {
-    printf '%s\n' "${3:-}" >"${rollback_dir}/wait-deadline"
-    printf '%s\n' "${IMAGE_CACHE_ROLLBACK_FINAL}"
+    printf '%s\n' '{"strategy":"OnDelete","transaction":false,"resource_version":"rv-guarded","registry_port":5000,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0}]}'
   }
   image_cache_patch_clean_ondelete() { printf '%s\t%s\n' "$1" "$2" >"${rollback_patch_marker}"; }
-  image_cache_restore_journaled_node() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >"${rollback_dir}/restored"; }
-  image_cache_initialize_rollout_journal || fail "rollback journal initialization"
-  image_cache_rollout_journal_append node-a "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" || fail "rollback journal append"
   image_cache_restore_ondelete_after_helm_rollback || fail "Helm rollback must restore the image-cache OnDelete guard"
   assert_eq "$(<"${rollback_patch_marker}")" $'fugue-fugue-image-cache\trv-rollback' "Helm rollback image-cache OnDelete CAS patch"
-  IFS=$'\t' read -r restored_ds restored_uid restored_node restored_pod_uid restored_revision restored_deadline <"${rollback_dir}/restored"
-  assert_eq "${restored_ds}" "fugue-fugue-image-cache" "rollback restores the selected DaemonSet"
-  assert_eq "${restored_uid}" "ds-uid" "rollback binds the selected DaemonSet UID"
-  assert_eq "${restored_node}" "node-a" "rollback restores only the journaled active node"
-  assert_eq "${restored_pod_uid}" "uid-old-a" "rollback binds the original Pod UID"
-  assert_eq "${restored_revision}" "rev-old" "rollback targets the pre-Helm revision"
-  [[ "${restored_deadline}" =~ ^[0-9]+$ ]] || fail "rollback must pass one absolute image-cache restore deadline"
-  assert_eq "$(<"${rollback_dir}/wait-deadline")" "${restored_deadline}" "all image-cache rollback waits share one deadline"
-  rm -f "${rollback_patch_marker}"
 )
 
 (
-  rollback_failure_dir="$(mktemp -d)"
-  trap 'rm -rf "${rollback_failure_dir}"' EXIT
-  mkdir "${rollback_failure_dir}/runtime"
-  chmod 700 "${rollback_failure_dir}/runtime"
-  CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR="${rollback_failure_dir}/runtime"
   FUGUE_RELEASE_FULLNAME=fugue-fugue
   FUGUE_NAMESPACE=fugue-system
   FUGUE_IMAGE_CACHE_ENABLED=true
-  FUGUE_ROLLOUT_TIMEOUT=600s
   IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-new
-  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"active_nodes":["node-a"],"active_pods":[],"daemonset_uid":"ds-uid","pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-old-a","restart_count":0}],"preserved_nodes":["dmit"],"registry_port":5000,"strategy":"OnDelete","transaction":false}'
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"daemonset_uid":"ds-uid","strategy":"OnDelete","transaction":false,"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-old-a","restart_count":0}]}'
   rollback_patch_marker="$(mktemp)"
+  trap 'rm -f "${rollback_patch_marker}"' EXIT
   node_local_dns_split_release_enabled() { return 0; }
   image_cache_rollback_freeze_snapshot_json() { printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-rollback","target_revision":"rev-new"}'; }
   image_cache_patch_clean_ondelete() { printf '%s\t%s\n' "$1" "$2" >"${rollback_patch_marker}"; }
   image_cache_wait_strategy_observed() { return 0; }
   image_cache_wait_for_rollout_plan() { return 1; }
-  image_cache_initialize_rollout_journal || fail "rollback failure journal initialization"
   if image_cache_restore_ondelete_after_helm_rollback; then
     fail "rollback must still fail when strict post-freeze health validation cannot complete"
   fi
   assert_eq "$(<"${rollback_patch_marker}")" $'fugue-fugue-image-cache\trv-rollback' "rollback freezes RollingUpdate before strict health validation"
-  rm -f "${rollback_patch_marker}"
 )
 
 (
