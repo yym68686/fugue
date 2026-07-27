@@ -863,13 +863,19 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 						return writeJSON(c.stdout, map[string]any{
 							"registry_configured": usage.RegistryConfigured,
 							"reclaim_requires_gc": usage.ReclaimRequiresGC,
+							"image_store_mode":    usage.ImageStoreMode,
+							"measurement_status":  usage.MeasurementStatus,
+							"measurement_note":    usage.MeasurementNote,
 							"project":             summary,
 						})
 					}
 					projectName := firstNonEmptyTrimmed(projectNames[summary.ProjectID], project.Name, summary.ProjectID)
 					if err := writeKeyValues(c.stdout,
 						kvPair{Key: "project", Value: formatDisplayName(projectName, summary.ProjectID, c.showIDs())},
+						kvPair{Key: "image_store_mode", Value: firstNonEmpty(usage.ImageStoreMode, "unknown")},
+						kvPair{Key: "measurement_status", Value: firstNonEmpty(summary.MeasurementStatus, usage.MeasurementStatus)},
 						kvPair{Key: "version_count", Value: fmt.Sprintf("%d", summary.VersionCount)},
+						kvPair{Key: "total_size", Value: formatBytes(summary.TotalSizeBytes)},
 						kvPair{Key: "reclaimable", Value: formatBytes(summary.ReclaimableSizeBytes)},
 					); err != nil {
 						return err
@@ -890,6 +896,8 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "registry_configured", Value: fmt.Sprintf("%t", usage.RegistryConfigured)},
 				kvPair{Key: "reclaim_requires_gc", Value: fmt.Sprintf("%t", usage.ReclaimRequiresGC)},
+				kvPair{Key: "image_store_mode", Value: firstNonEmpty(usage.ImageStoreMode, "unknown")},
+				kvPair{Key: "measurement_status", Value: usage.MeasurementStatus},
 			); err != nil {
 				return err
 			}

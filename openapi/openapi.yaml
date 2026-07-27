@@ -18222,6 +18222,13 @@ components:
         size_bytes:
           type: integer
           format: int64
+        size_measurement_status:
+          type: string
+          description: >-
+            Whether size_bytes is complete, partial, or unavailable. Distributed
+            image-cache evidence may be partial when a manifest graph does not
+            include complete referenced-blob bytes.
+          enum: [complete, partial, unavailable]
         reclaimable_size_bytes:
           type: integer
           format: int64
@@ -18819,6 +18826,13 @@ components:
           type: boolean
         reclaim_note:
           type: string
+        measurement_status:
+          type: string
+          description: Image-size measurement status for this app inventory.
+          enum: [complete, partial, unavailable]
+        measurement_note:
+          type: string
+          description: Human-readable explanation of the image-size evidence source.
         summary:
           $ref: "#/components/schemas/AppImageSummary"
         versions:
@@ -18896,6 +18910,10 @@ components:
         reclaimable_size_bytes:
           type: integer
           format: int64
+        measurement_status:
+          type: string
+          description: Image-size measurement status for this app summary.
+          enum: [complete, partial, unavailable]
     ProjectImageUsageSummary:
       type: object
       additionalProperties: false
@@ -18939,6 +18957,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ProjectImageUsageAppSummary"
+        measurement_status:
+          type: string
+          description: Image-size measurement status for this project summary.
+          enum: [complete, partial, unavailable]
     ProjectImageUsageResponse:
       type: object
       additionalProperties: false
@@ -18950,6 +18972,20 @@ components:
           type: boolean
         reclaim_note:
           type: string
+        image_store_mode:
+          type: string
+          description: Storage backend used for image evidence, such as registry or distributed.
+          enum: [registry, distributed]
+        measurement_status:
+          type: string
+          description: Overall image-size measurement status.
+          enum: [complete, partial, unavailable]
+        measurement_note:
+          type: string
+          description: Human-readable explanation of the image-size evidence source.
+        observed_at:
+          type: string
+          format: date-time
         projects:
           type: array
           items:

@@ -169,6 +169,7 @@ type projectImageUsageAppSummary struct {
 	CurrentSizeBytes     int64  `json:"current_size_bytes"`
 	StaleSizeBytes       int64  `json:"stale_size_bytes"`
 	ReclaimableSizeBytes int64  `json:"reclaimable_size_bytes"`
+	MeasurementStatus    string `json:"measurement_status,omitempty"`
 }
 
 type projectImageUsageSummary struct {
@@ -181,12 +182,17 @@ type projectImageUsageSummary struct {
 	StaleSizeBytes       int64                         `json:"stale_size_bytes"`
 	ReclaimableSizeBytes int64                         `json:"reclaimable_size_bytes"`
 	Apps                 []projectImageUsageAppSummary `json:"apps"`
+	MeasurementStatus    string                        `json:"measurement_status,omitempty"`
 }
 
 type projectImageUsageResponse struct {
 	RegistryConfigured bool                       `json:"registry_configured"`
 	ReclaimRequiresGC  bool                       `json:"reclaim_requires_gc"`
 	ReclaimNote        string                     `json:"reclaim_note,omitempty"`
+	ImageStoreMode     string                     `json:"image_store_mode,omitempty"`
+	MeasurementStatus  string                     `json:"measurement_status,omitempty"`
+	MeasurementNote    string                     `json:"measurement_note,omitempty"`
+	ObservedAt         *time.Time                 `json:"observed_at,omitempty"`
 	Projects           []projectImageUsageSummary `json:"projects"`
 }
 

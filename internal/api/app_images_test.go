@@ -166,6 +166,9 @@ func TestHandleGetAppImagesUsesRuntimeImageLocationEvidence(t *testing.T) {
 	if currentVersion.SizeBytes != 123 {
 		t.Fatalf("expected image location size evidence, got %#v", currentVersion)
 	}
+	if response.MeasurementStatus != projectImageUsageMeasurementPartial {
+		t.Fatalf("expected mixed registry and location evidence to be marked partial, got %#v", response)
+	}
 }
 
 func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
@@ -229,6 +232,406 @@ func TestHandleListProjectImageUsageCachesRegistryFanout(t *testing.T) {
 
 	if got := fakeRegistry.inspectCalls.Load(); got != 2 {
 		t.Fatalf("expected cached project image usage to inspect two images once, got %d calls", got)
+	}
+}
+
+func TestHandleListProjectImageUsageUsesDistributedCacheInventory(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, project, app, _, oldImageRef, newImageRef, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	newDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{
+		{
+			Repo:              "fugue-apps/example-demo-web",
+			Target:            "git-111111111111",
+			Digest:            oldDigest,
+			ManifestSizeBytes: 10,
+			TotalBlobBytes:    160,
+			LastSeenAt:        now,
+			Present:           true,
+		},
+		{
+			Repo:              "fugue-apps/example-demo-web",
+			Target:            "git-222222222222",
+			Digest:            newDigest,
+			ManifestSizeBytes: 12,
+			TotalBlobBytes:    180,
+			LastSeenAt:        now,
+			Present:           true,
+		},
+	}); err != nil {
+		t.Fatalf("upsert distributed image cache inventory: %v", err)
+	}
+	// The same digest is present on a second node. It must not be counted twice
+	// in one app/project summary.
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-b",
+		ClusterNodeName: "worker-b",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{{
+		Repo:              "fugue-apps/example-demo-web",
+		Target:            "git-222222222222",
+		Digest:            newDigest,
+		ManifestSizeBytes: 12,
+		TotalBlobBytes:    180,
+		LastSeenAt:        now,
+		Present:           true,
+	}}); err != nil {
+		t.Fatalf("upsert duplicate distributed image cache inventory: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert distributed image location: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/projects/image-usage", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response projectImageUsageResponse
+	mustDecodeJSON(t, recorder, &response)
+	if response.ImageStoreMode != projectImageUsageModeDistributed {
+		t.Fatalf("expected distributed image store mode, got %#v", response)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementComplete {
+		t.Fatalf("expected complete distributed measurement, got %#v", response)
+	}
+	if len(response.Projects) != 1 || response.Projects[0].ProjectID != project.ID {
+		t.Fatalf("expected project summary for %q, got %#v", project.ID, response.Projects)
+	}
+	if got := response.Projects[0].TotalSizeBytes; got != 362 {
+		t.Fatalf("expected distributed logical image bytes 362, got %d (old=%s new=%s)", got, oldImageRef, newImageRef)
+	}
+	if response.Projects[0].MeasurementStatus != projectImageUsageMeasurementComplete {
+		t.Fatalf("expected complete project measurement, got %#v", response.Projects[0])
+	}
+}
+
+func TestHandleGetAppImagesUsesDistributedCacheInventory(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, newImageRef, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{{
+		Repo:              "fugue-apps/example-demo-web",
+		Target:            "git-222222222222",
+		Digest:            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ManifestSizeBytes: 12,
+		TotalBlobBytes:    180,
+		LastSeenAt:        now,
+		Present:           true,
+	}}); err != nil {
+		t.Fatalf("upsert distributed image cache inventory: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert distributed image location: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 || response.Versions[0].ImageRef != newImageRef {
+		t.Fatalf("expected only current distributed version with cache evidence, got %#v", response.Versions)
+	}
+	if response.Versions[0].SizeBytes != 192 || response.Versions[0].SizeMeasurementStatus != projectImageUsageMeasurementComplete {
+		t.Fatalf("expected measured distributed version size 192, got %#v", response.Versions[0])
+	}
+	if response.Versions[0].RedeploySupported || response.Versions[0].DeleteSupported {
+		t.Fatalf("expected distributed read inventory to expose no unsupported image actions, got %#v", response.Versions[0])
+	}
+	if response.Summary.TotalSizeBytes != 192 {
+		t.Fatalf("expected app distributed total 192, got %#v", response.Summary)
+	}
+	if response.Summary.ReclaimableSizeBytes != 0 || response.ReclaimNote == "" {
+		t.Fatalf("expected distributed reclaimability to remain explicitly unsupported, got %#v", response)
+	}
+}
+
+func TestHandleGetAppImagesUsesKnownDigestEvidenceAcrossCacheNodes(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, newImageRef, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		CanonicalDigest: digest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert distributed image metadata: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert distributed image location: %v", err)
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{{
+		Repo:              "fugue-apps/example-demo-web",
+		Target:            "git-222222222222",
+		Digest:            digest,
+		ManifestSizeBytes: 12,
+		LastSeenAt:        now,
+		Present:           true,
+	}}); err != nil {
+		t.Fatalf("upsert partial cache inventory: %v", err)
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-b",
+		ClusterNodeName: "worker-b",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{{
+		Repo:              "fugue-apps/example-demo-web",
+		Target:            "git-222222222222",
+		Digest:            digest,
+		ManifestSizeBytes: 12,
+		TotalBlobBytes:    180,
+		LastSeenAt:        now,
+		Present:           true,
+	}}); err != nil {
+		t.Fatalf("upsert complete cache inventory: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 || response.Versions[0].Digest != digest {
+		t.Fatalf("expected known digest version, got %#v", response.Versions)
+	}
+	if response.Versions[0].SizeBytes != 192 || response.MeasurementStatus != projectImageUsageMeasurementComplete {
+		t.Fatalf("expected complete same-digest evidence from either cache node, got %#v", response)
+	}
+}
+
+func TestHandleGetAppImagesDoesNotCountModelMetadataWithoutFreshPhysicalEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, newImageRef, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:          app.TenantID,
+		AppID:             app.ID,
+		ImageRef:          newImageRef,
+		CanonicalDigest:   digest,
+		ManifestSizeBytes: 12,
+		BlobBytes:         180,
+		LifecycleState:    model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert distributed image metadata: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 || !response.Versions[0].Current {
+		t.Fatalf("expected current generation to remain visible, got %#v", response.Versions)
+	}
+	version := response.Versions[0]
+	if version.SizeBytes != 0 || version.SizeMeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected stale model-only bytes to remain unavailable, got %#v", version)
+	}
+	if version.Status != appImageStatusMissing || response.Summary.TotalSizeBytes != 0 || response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected no physical cache claim from model metadata alone, got %#v", response)
+	}
+}
+
+func TestHandleGetAppImagesRejectsConflictingCompleteSizesForSameDigest(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, _, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	for index, blobBytes := range []int64{180, 280} {
+		if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+			NodeID:          "node-" + string(rune('a'+index)),
+			ClusterNodeName: "worker-" + string(rune('a'+index)),
+			ObservedAt:      now,
+		}, []model.ImageCacheManifest{{
+			Repo:              "fugue-apps/example-demo-web",
+			Target:            "git-222222222222",
+			Digest:            digest,
+			ManifestSizeBytes: 12,
+			TotalBlobBytes:    blobBytes,
+			LastSeenAt:        now,
+			Present:           true,
+		}}); err != nil {
+			t.Fatalf("upsert conflicting same-digest cache inventory %d: %v", index, err)
+		}
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 {
+		t.Fatalf("expected current version to remain visible, got %#v", response.Versions)
+	}
+	version := response.Versions[0]
+	if version.SizeBytes != 0 || version.SizeMeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected inconsistent complete reports to remain unavailable, got %#v", version)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected unavailable app measurement, got %#v", response)
+	}
+}
+
+func TestHandleGetAppImagesRejectsConflictingUnpinnedTagSizes(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, _, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	for index, manifest := range []model.ImageCacheManifest{
+		{
+			Repo:              "fugue-apps/example-demo-web",
+			Target:            "git-222222222222",
+			Digest:            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ManifestSizeBytes: 10,
+			TotalBlobBytes:    100,
+			LastSeenAt:        now,
+			Present:           true,
+		},
+		{
+			Repo:              "fugue-apps/example-demo-web",
+			Target:            "git-222222222222",
+			Digest:            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ManifestSizeBytes: 20,
+			TotalBlobBytes:    200,
+			LastSeenAt:        now,
+			Present:           true,
+		},
+	} {
+		if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+			NodeID:          "node-" + string(rune('a'+index)),
+			ClusterNodeName: "worker-" + string(rune('a'+index)),
+			ObservedAt:      now,
+		}, []model.ImageCacheManifest{manifest}); err != nil {
+			t.Fatalf("upsert conflicting cache inventory %d: %v", index, err)
+		}
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 {
+		t.Fatalf("expected current version to remain visible, got %#v", response.Versions)
+	}
+	version := response.Versions[0]
+	if version.SizeBytes != 0 || version.Digest != "" || version.SizeMeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected conflicting unpinned cache evidence to remain unavailable, got %#v", version)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected unavailable app measurement, got %#v", response)
+	}
+}
+
+func TestHandleGetAppImagesIgnoresStaleDistributedLocationEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, oldImageRef, _, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	staleSeen := time.Now().UTC().Add(-defaultImageCacheInventoryTTL - time.Minute)
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        oldImageRef,
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &staleSeen,
+	}); err != nil {
+		t.Fatalf("upsert stale image location: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 || !response.Versions[0].Current {
+		t.Fatalf("expected only the current generation when historical location evidence is stale, got %#v", response.Versions)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected current generation without fresh size evidence to be unavailable, got %#v", response)
+	}
+}
+
+func TestHandleListProjectImageUsageDoesNotSerializeNullProjectsWhenDistributedEvidenceMissing(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, _, _, _, _, _, _, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/projects/image-usage", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var raw map[string]any
+	mustDecodeJSON(t, recorder, &raw)
+	projects, ok := raw["projects"].([]any)
+	if !ok {
+		t.Fatalf("expected projects array, got %#v", raw["projects"])
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected current app to remain visible with unavailable size evidence, got %#v", projects)
+	}
+	if raw["measurement_status"] != projectImageUsageMeasurementUnavailable {
+		t.Fatalf("expected unavailable measurement status, got %#v", raw["measurement_status"])
 	}
 }
 

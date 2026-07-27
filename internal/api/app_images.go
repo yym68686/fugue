@@ -19,11 +19,16 @@ import (
 )
 
 const (
-	appImageStatusAvailable          = "available"
-	appImageStatusMissing            = "missing"
-	defaultProjectImageUsageCacheTTL = 5 * time.Minute
-	projectImageUsageAppBuildLimit   = 8
-	projectImageUsageSoftWait        = 50 * time.Millisecond
+	appImageStatusAvailable                 = "available"
+	appImageStatusMissing                   = "missing"
+	projectImageUsageModeRegistry           = "registry"
+	projectImageUsageModeDistributed        = "distributed"
+	projectImageUsageMeasurementComplete    = "complete"
+	projectImageUsageMeasurementPartial     = "partial"
+	projectImageUsageMeasurementUnavailable = "unavailable"
+	defaultProjectImageUsageCacheTTL        = 5 * time.Minute
+	projectImageUsageAppBuildLimit          = 8
+	projectImageUsageSoftWait               = 50 * time.Millisecond
 )
 
 type appImageSummary struct {
@@ -37,17 +42,18 @@ type appImageSummary struct {
 }
 
 type appImageVersion struct {
-	ImageRef             string           `json:"image_ref"`
-	RuntimeImageRef      string           `json:"runtime_image_ref,omitempty"`
-	Digest               string           `json:"digest,omitempty"`
-	Status               string           `json:"status"`
-	Current              bool             `json:"current"`
-	SizeBytes            int64            `json:"size_bytes,omitempty"`
-	ReclaimableSizeBytes int64            `json:"reclaimable_size_bytes,omitempty"`
-	DeleteSupported      bool             `json:"delete_supported"`
-	RedeploySupported    bool             `json:"redeploy_supported"`
-	LastDeployedAt       *time.Time       `json:"last_deployed_at,omitempty"`
-	Source               *model.AppSource `json:"source,omitempty"`
+	ImageRef              string           `json:"image_ref"`
+	RuntimeImageRef       string           `json:"runtime_image_ref,omitempty"`
+	Digest                string           `json:"digest,omitempty"`
+	Status                string           `json:"status"`
+	Current               bool             `json:"current"`
+	SizeBytes             int64            `json:"size_bytes,omitempty"`
+	SizeMeasurementStatus string           `json:"size_measurement_status,omitempty"`
+	ReclaimableSizeBytes  int64            `json:"reclaimable_size_bytes,omitempty"`
+	DeleteSupported       bool             `json:"delete_supported"`
+	RedeploySupported     bool             `json:"redeploy_supported"`
+	LastDeployedAt        *time.Time       `json:"last_deployed_at,omitempty"`
+	Source                *model.AppSource `json:"source,omitempty"`
 }
 
 type appImageInventoryResponse struct {
@@ -55,6 +61,8 @@ type appImageInventoryResponse struct {
 	RegistryConfigured bool              `json:"registry_configured"`
 	ReclaimRequiresGC  bool              `json:"reclaim_requires_gc"`
 	ReclaimNote        string            `json:"reclaim_note,omitempty"`
+	MeasurementStatus  string            `json:"measurement_status,omitempty"`
+	MeasurementNote    string            `json:"measurement_note,omitempty"`
 	Summary            appImageSummary   `json:"summary"`
 	Versions           []appImageVersion `json:"versions"`
 }
@@ -88,6 +96,7 @@ type projectImageUsageAppSummary struct {
 	CurrentSizeBytes     int64  `json:"current_size_bytes"`
 	StaleSizeBytes       int64  `json:"stale_size_bytes"`
 	ReclaimableSizeBytes int64  `json:"reclaimable_size_bytes"`
+	MeasurementStatus    string `json:"measurement_status,omitempty"`
 }
 
 type projectImageUsageSummary struct {
@@ -100,12 +109,17 @@ type projectImageUsageSummary struct {
 	StaleSizeBytes       int64                         `json:"stale_size_bytes"`
 	ReclaimableSizeBytes int64                         `json:"reclaimable_size_bytes"`
 	Apps                 []projectImageUsageAppSummary `json:"apps"`
+	MeasurementStatus    string                        `json:"measurement_status,omitempty"`
 }
 
 type projectImageUsageResponse struct {
 	RegistryConfigured bool                       `json:"registry_configured"`
 	ReclaimRequiresGC  bool                       `json:"reclaim_requires_gc"`
 	ReclaimNote        string                     `json:"reclaim_note,omitempty"`
+	ImageStoreMode     string                     `json:"image_store_mode,omitempty"`
+	MeasurementStatus  string                     `json:"measurement_status,omitempty"`
+	MeasurementNote    string                     `json:"measurement_note,omitempty"`
+	ObservedAt         *time.Time                 `json:"observed_at,omitempty"`
 	Projects           []projectImageUsageSummary `json:"projects"`
 }
 
@@ -204,6 +218,10 @@ func (s *Server) cachedProjectImageUsageResponse(
 	go s.logProjectImageUsageRefreshResult(resultCh)
 	return projectImageUsageResponse{
 		RegistryConfigured: s.appImageInventoryConfigured(),
+		ImageStoreMode:     projectImageUsageStoreMode(s),
+		MeasurementStatus:  projectImageUsageMeasurementUnavailable,
+		MeasurementNote:    "image usage refresh is still in progress",
+		Projects:           []projectImageUsageSummary{},
 	}, nil
 }
 
@@ -500,17 +518,20 @@ func (s *Server) buildProjectImageUsageResponse(
 ) (projectImageUsageResponse, error) {
 	response := projectImageUsageResponse{
 		RegistryConfigured: s.appImageInventoryConfigured(),
+		ImageStoreMode:     projectImageUsageStoreMode(s),
+		MeasurementStatus:  projectImageUsageMeasurementComplete,
+		Projects:           []projectImageUsageSummary{},
+	}
+	if strings.EqualFold(strings.TrimSpace(s.imageStoreMode), "distributed") {
+		return s.buildDistributedProjectImageUsageResponse(ctx, apps, opsByAppID)
 	}
 	if !response.RegistryConfigured {
+		response.MeasurementStatus = projectImageUsageMeasurementUnavailable
+		response.MeasurementNote = "managed image registry inventory is not configured"
 		return response, nil
 	}
 
-	type appInventoryResult struct {
-		App       model.App
-		Inventory builtAppImageInventory
-	}
-
-	inventoryResults := make([]appInventoryResult, len(apps))
+	inventoryResults := make([]projectImageUsageInventoryResult, len(apps))
 	inventoryGroup, inventoryCtx := errgroup.WithContext(ctx)
 	inventoryGroup.SetLimit(projectImageUsageAppBuildLimit)
 	for index, app := range apps {
@@ -520,7 +541,7 @@ func (s *Server) buildProjectImageUsageResponse(
 			if err != nil {
 				return err
 			}
-			inventoryResults[index] = appInventoryResult{
+			inventoryResults[index] = projectImageUsageInventoryResult{
 				App:       app,
 				Inventory: inventory,
 			}
@@ -530,72 +551,7 @@ func (s *Server) buildProjectImageUsageResponse(
 	if err := inventoryGroup.Wait(); err != nil {
 		return projectImageUsageResponse{}, err
 	}
-
-	projectSummaries := make(map[string]*projectImageUsageAccumulator)
-	for _, result := range inventoryResults {
-		app := result.App
-		inventory := result.Inventory
-		if inventory.Response.Summary.VersionCount == 0 {
-			continue
-		}
-
-		projectID := normalizedProjectIDForImageInventory(app.ProjectID)
-		accumulator := projectSummaries[projectID]
-		if accumulator == nil {
-			accumulator = &projectImageUsageAccumulator{
-				Summary: projectImageUsageSummary{
-					ProjectID: projectID,
-				},
-				TotalBlobSizes:       make(map[string]int64),
-				CurrentBlobSizes:     make(map[string]int64),
-				StaleBlobSizes:       make(map[string]int64),
-				ReclaimableBlobSizes: make(map[string]int64),
-			}
-			projectSummaries[projectID] = accumulator
-		}
-
-		accumulator.Summary.VersionCount += inventory.Response.Summary.VersionCount
-		accumulator.Summary.CurrentVersionCount += inventory.Response.Summary.CurrentVersionCount
-		accumulator.Summary.StaleVersionCount += inventory.Response.Summary.StaleVersionCount
-		accumulator.Summary.Apps = append(accumulator.Summary.Apps, projectImageUsageAppSummary{
-			AppID:                app.ID,
-			AppName:              app.Name,
-			VersionCount:         inventory.Response.Summary.VersionCount,
-			CurrentVersionCount:  inventory.Response.Summary.CurrentVersionCount,
-			StaleVersionCount:    inventory.Response.Summary.StaleVersionCount,
-			TotalSizeBytes:       inventory.Response.Summary.TotalSizeBytes,
-			CurrentSizeBytes:     inventory.Response.Summary.CurrentSizeBytes,
-			StaleSizeBytes:       inventory.Response.Summary.StaleSizeBytes,
-			ReclaimableSizeBytes: inventory.Response.Summary.ReclaimableSizeBytes,
-		})
-		unionAppImageBlobSizes(accumulator.TotalBlobSizes, inventory.TotalBlobSizes)
-		unionAppImageBlobSizes(accumulator.CurrentBlobSizes, inventory.CurrentBlobSizes)
-		unionAppImageBlobSizes(accumulator.StaleBlobSizes, inventory.StaleBlobSizes)
-		unionAppImageBlobSizes(accumulator.ReclaimableBlobSizes, inventory.ReclaimableBlobSizes)
-	}
-
-	projectIDs := make([]string, 0, len(projectSummaries))
-	for projectID := range projectSummaries {
-		projectIDs = append(projectIDs, projectID)
-	}
-	sort.Strings(projectIDs)
-
-	response.Projects = make([]projectImageUsageSummary, 0, len(projectIDs))
-	for _, projectID := range projectIDs {
-		accumulator := projectSummaries[projectID]
-		sort.Slice(accumulator.Summary.Apps, func(i, j int) bool {
-			if accumulator.Summary.Apps[i].AppName == accumulator.Summary.Apps[j].AppName {
-				return accumulator.Summary.Apps[i].AppID < accumulator.Summary.Apps[j].AppID
-			}
-			return accumulator.Summary.Apps[i].AppName < accumulator.Summary.Apps[j].AppName
-		})
-		accumulator.Summary.TotalSizeBytes = sumAppImageBlobSizes(accumulator.TotalBlobSizes)
-		accumulator.Summary.CurrentSizeBytes = sumAppImageBlobSizes(accumulator.CurrentBlobSizes)
-		accumulator.Summary.StaleSizeBytes = sumAppImageBlobSizes(accumulator.StaleBlobSizes)
-		accumulator.Summary.ReclaimableSizeBytes = sumAppImageBlobSizes(accumulator.ReclaimableBlobSizes)
-		response.Projects = append(response.Projects, accumulator.Summary)
-	}
-	return response, nil
+	return aggregateProjectImageUsageInventories(response, inventoryResults), nil
 }
 
 func (s *Server) buildAppImageInventory(
@@ -607,6 +563,7 @@ func (s *Server) buildAppImageInventory(
 		Response: appImageInventoryResponse{
 			AppID:              app.ID,
 			RegistryConfigured: s.appImageInventoryConfigured(),
+			MeasurementStatus:  projectImageUsageMeasurementComplete,
 			Versions:           []appImageVersion{},
 		},
 		VersionByImageRef:    make(map[string]builtAppImageVersion),
@@ -616,6 +573,15 @@ func (s *Server) buildAppImageInventory(
 		ReclaimableBlobSizes: make(map[string]int64),
 	}
 	if !inventory.Response.RegistryConfigured {
+		if strings.EqualFold(strings.TrimSpace(s.imageStoreMode), "distributed") {
+			evidence, err := s.loadDistributedImageUsageEvidence(ctx, []model.App{app})
+			if err != nil {
+				return builtAppImageInventory{}, err
+			}
+			return s.buildDistributedAppImageInventory(app, ops, evidence), nil
+		}
+		inventory.Response.MeasurementStatus = projectImageUsageMeasurementUnavailable
+		inventory.Response.MeasurementNote = "managed image registry inventory is not configured"
 		return inventory, nil
 	}
 
@@ -715,26 +681,31 @@ func (s *Server) buildAppImageInventory(
 			}
 		}
 		version := appImageVersion{
-			ImageRef:             candidate.ImageRef,
-			RuntimeImageRef:      candidate.RuntimeImageRef,
-			Digest:               inspectResult.Digest,
-			Status:               appImageStatusMissing,
-			Current:              candidate.Current,
-			DeleteSupported:      false,
-			RedeploySupported:    false,
-			LastDeployedAt:       cloneTimePointer(candidate.LastDeployedAt),
-			ReclaimableSizeBytes: reclaimableSizeBytes,
-			Source:               sanitizeAppSourceForAPI(&candidate.Source),
+			ImageRef:              candidate.ImageRef,
+			RuntimeImageRef:       candidate.RuntimeImageRef,
+			Digest:                inspectResult.Digest,
+			Status:                appImageStatusMissing,
+			Current:               candidate.Current,
+			SizeMeasurementStatus: projectImageUsageMeasurementUnavailable,
+			DeleteSupported:       false,
+			RedeploySupported:     false,
+			LastDeployedAt:        cloneTimePointer(candidate.LastDeployedAt),
+			ReclaimableSizeBytes:  reclaimableSizeBytes,
+			Source:                sanitizeAppSourceForAPI(&candidate.Source),
 		}
 		if inspectResult.Exists {
 			version.Status = appImageStatusAvailable
 			version.SizeBytes = inspectResult.SizeBytes
+			version.SizeMeasurementStatus = projectImageUsageMeasurementComplete
 			version.DeleteSupported = !candidate.Current
 			version.RedeploySupported = true
 		} else if locationEvidence, ok := locationEvidenceByImageRef[candidate.ImageRef]; ok {
 			version.Status = appImageStatusAvailable
 			version.Digest = strings.TrimSpace(locationEvidence.Digest)
 			version.SizeBytes = locationEvidence.SizeBytes
+			if locationEvidence.SizeBytes > 0 {
+				version.SizeMeasurementStatus = projectImageUsageMeasurementPartial
+			}
 			version.RedeploySupported = true
 		}
 		inventory.Response.Versions = append(inventory.Response.Versions, version)
@@ -760,6 +731,7 @@ func (s *Server) buildAppImageInventory(
 		StaleSizeBytes:       sumAppImageBlobSizes(inventory.StaleBlobSizes),
 		ReclaimableSizeBytes: sumAppImageBlobSizes(inventory.ReclaimableBlobSizes),
 	}
+	inventory.Response.MeasurementStatus = summarizeAppImageVersionMeasurementStatus(inventory.Response.Versions)
 	return inventory, nil
 }
 
@@ -1008,7 +980,7 @@ func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string 
 }
 
 func (s *Server) appImageInventoryConfigured() bool {
-	if s == nil || strings.TrimSpace(s.imageStoreMode) == "distributed" {
+	if s == nil || strings.EqualFold(strings.TrimSpace(s.imageStoreMode), "distributed") {
 		return false
 	}
 	return strings.TrimSpace(s.registryPushBase) != "" && s.appImageRegistry != nil
