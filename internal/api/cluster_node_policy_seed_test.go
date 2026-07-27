@@ -335,6 +335,65 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 	t.Fatalf("expected background warmers to backfill legacy machine policy and remove build-tier label, got policy=%#v legacy_label=%q", machine.Policy, legacyLabel)
 }
 
+func TestStartBackgroundWarmersPublishesInventoryAfterPolicyReconciliation(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	patchStarted := make(chan struct{})
+	allowPatch := make(chan struct{})
+	var patchStartedOnce sync.Once
+	var allowPatchOnce sync.Once
+	releasePatch := func() { allowPatchOnce.Do(func() { close(allowPatch) }) }
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, map[string]string{
+		legacyBuildTierLabelKey: "large",
+	}, func() {
+		patchStartedOnce.Do(func() { close(patchStarted) })
+		<-allowPatch
+	})
+	defer kubeServer.Close()
+	defer releasePatch()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.StartBackgroundWarmers(ctx)
+
+	select {
+	case <-patchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected background policy reconciliation to reach the node patch")
+	}
+	if _, ok := server.clusterNodeInventoryCache.get(clusterNodeInventoryCacheKey); ok {
+		t.Fatal("cluster inventory became visible before policy reconciliation completed")
+	}
+
+	releasePatch()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if snapshots, ok := server.clusterNodeInventoryCache.get(clusterNodeInventoryCacheKey); ok &&
+			len(snapshots) == 1 &&
+			snapshots[0].node.Name == "gcp1" &&
+			strings.TrimSpace(firstNodeLabel(snapshots[0].labels, legacyBuildTierLabelKey)) == "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("expected reconciled cluster inventory to become visible")
+}
+
 func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRole(t *testing.T) {
 	t.Parallel()
 
@@ -1328,8 +1387,15 @@ func rewriteBootstrapControlPlaneMachine(storePath string, mutate func(machine *
 	return os.WriteFile(storePath, next, 0o600)
 }
 
-func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[string]string) *httptest.Server {
+func newBootstrapControlPlaneKubeServerWithLabels(
+	t *testing.T,
+	extraLabels map[string]string,
+	beforePatch ...func(),
+) *httptest.Server {
 	t.Helper()
+	if len(beforePatch) > 1 {
+		t.Fatal("expected at most one before-patch hook")
+	}
 
 	var (
 		mu     = sync.Mutex{}
@@ -1380,6 +1446,9 @@ func newBootstrapControlPlaneKubeServerWithLabels(t *testing.T, extraLabels map[
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/pods":
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/nodes/gcp1":
+			if len(beforePatch) == 1 && beforePatch[0] != nil {
+				beforePatch[0]()
+			}
 			var payload struct {
 				Metadata struct {
 					Labels map[string]*string `json:"labels"`
