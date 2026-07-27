@@ -71,8 +71,6 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	for _, want := range []string{
 		`resources: ["namespaces", "services", "secrets", "pods", "endpoints", "persistentvolumeclaims", "persistentvolumes"]`,
 		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
-		`resources: ["pods/resize"]`,
-		`verbs: ["get", "update", "patch"]`,
 	} {
 		if !strings.Contains(role, want) {
 			t.Fatalf("dedicated control-plane role missing %q:\n%s", want, role)
@@ -89,17 +87,13 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if strings.Contains(sharedRules, `"secrets"`) {
 		t.Fatalf("shared platform role must not grant Kubernetes Secret API access:\n%s", sharedRole)
 	}
-	if strings.Contains(sharedRules, `resources: ["pods/resize"]`) {
-		t.Fatalf("shared platform role must not grant control-plane-only pod resize access:\n%s", sharedRole)
+	if strings.Contains(sharedRules, `resources: ["pods/resize"]`) ||
+		strings.Contains(controlPlaneRules, `resources: ["pods/resize"]`) {
+		t.Fatalf("platform roles must not grant the unused pod resize subresource:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
 	}
 	wantSharedRules := strings.Replace(controlPlaneRules, `"secrets", `, "", 1)
-	wantSharedRules = strings.Replace(wantSharedRules, `  - apiGroups: [""]
-    resources: ["pods/resize"]
-    verbs: ["get", "update", "patch"]
-`, "", 1)
-	wantSharedRules = strings.TrimSpace(wantSharedRules)
 	if sharedRules != wantSharedRules {
-		t.Fatalf("shared and control-plane roles must differ only by Secret API and pod resize access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+		t.Fatalf("shared and control-plane roles must differ only by Secret API access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
 	}
 	binding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane")
 	if binding == "" {

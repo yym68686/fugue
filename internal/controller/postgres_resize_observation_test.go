@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -45,5 +48,30 @@ func TestObserveManagedPostgresResizeRejectsMissingContainerStatus(t *testing.T)
 	pod.Spec.Containers = []kubeResizeContainerSpec{{Name: managedPostgresMainContainerName}}
 	if _, err := observeManagedPostgresResize(pod, managedPostgresMainContainerName); err == nil {
 		t.Fatal("expected missing container status to fail closed")
+	}
+}
+
+func TestGetPodResizeStateReadsTheOrdinaryPodResource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/namespaces/tenant-a/pods/database-1" {
+			t.Fatalf("unexpected Kubernetes request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"namespace":"tenant-a","name":"database-1"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &kubeClient{
+		client:      server.Client(),
+		baseURL:     server.URL,
+		bearerToken: "test",
+		namespace:   "tenant-a",
+	}
+	pod, found, err := client.getPodResizeState(context.Background(), "tenant-a", "database-1")
+	if err != nil {
+		t.Fatalf("read pod resize state: %v", err)
+	}
+	if !found || pod.Metadata.Name != "database-1" {
+		t.Fatalf("unexpected pod response found=%t pod=%+v", found, pod)
 	}
 }

@@ -1102,16 +1102,6 @@ objectRules:
     name: ${telemetryAgentName}
     requiredLabels:
       app.kubernetes.io/component: telemetry-agent
-  - id: control-plane-cluster-role
-    domain: control-plane
-    apiGroup: rbac.authorization.k8s.io
-    version: v1
-    kind: ClusterRole
-    scope: Cluster
-    name: ${serviceName}-control-plane
-    requiredLabels:
-      app.kubernetes.io/instance: ${releaseName}
-      app.kubernetes.io/part-of: fugue-control-plane
   - id: control-plane-service
     domain: control-plane
     apiGroup: ""
