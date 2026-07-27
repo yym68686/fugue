@@ -90,6 +90,14 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 					},
 				},
 			})
+		case "/api/v1/persistentvolumes":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					persistentVolumeFixture(namespace, "demo-shared-data", "local.csi.openebs.io"),
+					persistentVolumeFixture(namespace, "demo-extra-data", "local.csi.openebs.io"),
+					persistentVolumeFixture(namespace, "demo-postgres-data", "local.csi.openebs.io"),
+				},
+			})
 		case "/api/v1/pods":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]any{
@@ -336,6 +344,24 @@ func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t 
 		t.Fatalf("expected one backing service, got %#v", listServicesResponse.BackingServices)
 	}
 	assertResourceUsageWithPersistentStorage(t, listServicesResponse.BackingServices[0].CurrentResourceUsage, 200, 128*1024*1024, 4*1024*1024*1024, 13*1024*1024*1024, 20*1024*1024*1024)
+}
+
+func persistentVolumeFixture(namespace, claimName, provisioner string) map[string]any {
+	return map[string]any{
+		"metadata": map[string]any{
+			"name": "pv-" + claimName,
+			"annotations": map[string]string{
+				persistentVolumeProvisionerAnnotation: provisioner,
+			},
+		},
+		"spec": map[string]any{
+			"claimRef": map[string]string{
+				"namespace": namespace,
+				"name":      claimName,
+			},
+		},
+		"status": map[string]string{"phase": "Bound"},
+	}
 }
 
 func assertResourceUsageWithPersistentStorage(t *testing.T, usage *model.ResourceUsage, cpuMilliCores, memoryBytes, ephemeralStorageBytes, persistentStorageUsedBytes, persistentStorageCapacityBytes int64) {

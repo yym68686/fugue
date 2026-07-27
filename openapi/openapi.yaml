@@ -12308,11 +12308,17 @@ components:
         persistent_storage_used_bytes:
           type: integer
           format: int64
-          description: Used bytes across distinct persistent volume claims mounted by the workload.
+          description: >-
+            Allocated bytes across distinct persistent volume claims mounted by the workload.
+            Directory-backed local-path claims are measured from their own host directories rather
+            than from the shared node filesystem. Omitted when an accurate measurement is unavailable.
         persistent_storage_capacity_bytes:
           type: integer
           format: int64
-          description: Capacity bytes across distinct persistent volume claims mounted by the workload.
+          description: >-
+            Enforced capacity bytes across distinct persistent volume claims mounted by the workload.
+            Omitted for storage backends such as rancher.io/local-path that do not enforce a per-claim
+            capacity limit, and when an accurate capacity is unavailable.
     ResourceRightSizingPolicy:
       type: object
       additionalProperties: false

@@ -90,10 +90,36 @@ func (s *Server) currentResourceUsageOverlay(ctx context.Context, apps []model.A
 		}
 		return overlay
 	}
-	return buildCurrentResourceUsageOverlay(snapshots, apps, services)
+	policies, err := s.loadPersistentVolumeUsagePolicies(ctx, snapshots)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("current persistent volume usage overlay error: %v", err)
+		}
+		// Fail closed: kubelet reports filesystem-wide usage for directory-backed
+		// local-path volumes, so an unclassified value must never reach clients.
+		policies = persistentVolumeUsagePolicies{
+			strict:  true,
+			byClaim: map[string]persistentVolumeUsagePolicy{},
+		}
+	}
+	return buildCurrentResourceUsageOverlayWithPolicies(snapshots, apps, services, policies)
 }
 
 func buildCurrentResourceUsageOverlay(snapshots []clusterNodeSnapshot, apps []model.App, services []model.BackingService) currentResourceUsageOverlay {
+	return buildCurrentResourceUsageOverlayWithPolicies(
+		snapshots,
+		apps,
+		services,
+		persistentVolumeUsagePolicies{},
+	)
+}
+
+func buildCurrentResourceUsageOverlayWithPolicies(
+	snapshots []clusterNodeSnapshot,
+	apps []model.App,
+	services []model.BackingService,
+	policies persistentVolumeUsagePolicies,
+) currentResourceUsageOverlay {
 	overlay := currentResourceUsageOverlay{
 		apps:     map[string]model.ResourceUsage{},
 		services: map[string]model.ResourceUsage{},
@@ -103,6 +129,7 @@ func buildCurrentResourceUsageOverlay(snapshots []clusterNodeSnapshot, apps []mo
 	}
 
 	resolver := newClusterWorkloadResolver(apps, services)
+	claimOwners := persistentVolumeClaimOwners(snapshots, resolver)
 	accumulators := map[string]*resourceUsageAccumulator{}
 
 	for _, snapshot := range snapshots {
@@ -120,7 +147,7 @@ func buildCurrentResourceUsageOverlay(snapshots []clusterNodeSnapshot, apps []mo
 			if !ok {
 				continue
 			}
-			key := strings.TrimSpace(workload.Kind) + "\x00" + strings.TrimSpace(workload.ID)
+			key := clusterWorkloadUsageKey(workload)
 			if key == "\x00" {
 				continue
 			}
@@ -135,7 +162,7 @@ func buildCurrentResourceUsageOverlay(snapshots []clusterNodeSnapshot, apps []mo
 				accumulator = &resourceUsageAccumulator{}
 				accumulators[key] = accumulator
 			}
-			accumulator.addPodUsage(usage)
+			accumulator.addPodUsage(usage, key, claimOwners, policies)
 		}
 	}
 
@@ -198,7 +225,17 @@ func (s *Server) recordCurrentResourceUsageSamples(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	overlay := buildCurrentResourceUsageOverlay(snapshots, apps, services)
+	policies, err := s.loadPersistentVolumeUsagePolicies(ctx, snapshots)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("resource usage sampling persistent volume overlay error: %v", err)
+		}
+		policies = persistentVolumeUsagePolicies{
+			strict:  true,
+			byClaim: map[string]persistentVolumeUsagePolicy{},
+		}
+	}
+	overlay := buildCurrentResourceUsageOverlayWithPolicies(snapshots, apps, services, policies)
 	now := time.Now().UTC()
 	samples := buildResourceUsageSamples(now, apps, services, overlay)
 	return s.store.RecordResourceUsageSamples(samples, now.Add(-resourceUsageSampleRetention))
@@ -332,7 +369,12 @@ func kubeNodeSummaryPodUsageIndex(summary *kubeNodeSummary) map[string]kubeNodeS
 	return index
 }
 
-func (a *resourceUsageAccumulator) addPodUsage(pod kubeNodeSummaryPod) {
+func (a *resourceUsageAccumulator) addPodUsage(
+	pod kubeNodeSummaryPod,
+	workloadKey string,
+	claimOwners map[string]string,
+	policies persistentVolumeUsagePolicies,
+) {
 	if cpu := kubeSummaryCPUMilliUsage(pod.CPU); cpu != nil {
 		a.cpuMilliCores += *cpu
 		a.hasCPU = true
@@ -345,7 +387,7 @@ func (a *resourceUsageAccumulator) addPodUsage(pod kubeNodeSummaryPod) {
 		a.ephemeralStorageBytes += *storage
 		a.hasEphemeralStorage = true
 	}
-	a.addPersistentVolumeUsage(pod)
+	a.addPersistentVolumeUsage(pod, workloadKey, claimOwners, policies)
 }
 
 func (a *resourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
@@ -387,7 +429,12 @@ func (a *resourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
 	return usage, true
 }
 
-func (a *resourceUsageAccumulator) addPersistentVolumeUsage(pod kubeNodeSummaryPod) {
+func (a *resourceUsageAccumulator) addPersistentVolumeUsage(
+	pod kubeNodeSummaryPod,
+	workloadKey string,
+	claimOwners map[string]string,
+	policies persistentVolumeUsagePolicies,
+) {
 	if a == nil {
 		return
 	}
@@ -395,25 +442,15 @@ func (a *resourceUsageAccumulator) addPersistentVolumeUsage(pod kubeNodeSummaryP
 		if volume.PVCRef == nil {
 			continue
 		}
-		claimName := strings.TrimSpace(volume.PVCRef.Name)
-		if claimName == "" {
-			continue
-		}
-		namespace := strings.TrimSpace(volume.PVCRef.Namespace)
-		if namespace == "" {
-			namespace = strings.TrimSpace(pod.PodRef.Namespace)
-		}
-		key := clusterNamespacedResourceKey(namespace, claimName)
+		key := persistentVolumeClaimKey(pod, volume)
 		if key == "" {
 			continue
 		}
+		if owner, ok := claimOwners[key]; ok && owner != workloadKey {
+			continue
+		}
 
-		usedBytes := kubeSummaryFilesystemUsage(kubeNodeSummaryFS{
-			AvailableBytes: volume.AvailableBytes,
-			CapacityBytes:  volume.CapacityBytes,
-			UsedBytes:      volume.UsedBytes,
-		})
-		capacityBytes := uint64PointerToInt64(volume.CapacityBytes)
+		usedBytes, capacityBytes := persistentVolumeUsageValues(key, volume, policies)
 		if usedBytes == nil && capacityBytes == nil {
 			continue
 		}
@@ -430,6 +467,106 @@ func (a *resourceUsageAccumulator) addPersistentVolumeUsage(pod kubeNodeSummaryP
 			current.hasCapacityBytes = true
 		}
 		a.persistentVolumes[key] = current
+	}
+}
+
+func persistentVolumeUsageValues(
+	claimKey string,
+	volume kubeNodeSummaryVolume,
+	policies persistentVolumeUsagePolicies,
+) (*int64, *int64) {
+	if claimKey == "" {
+		return nil, nil
+	}
+	policy, ok := policies.byClaim[claimKey]
+	if !ok {
+		if policies.strict {
+			return nil, nil
+		}
+	} else if !policy.useKubelet {
+		return cloneInt64Pointer(policy.usedBytes), nil
+	}
+	return kubeSummaryFilesystemUsage(kubeNodeSummaryFS{
+		AvailableBytes: volume.AvailableBytes,
+		CapacityBytes:  volume.CapacityBytes,
+		UsedBytes:      volume.UsedBytes,
+	}), uint64PointerToInt64(volume.CapacityBytes)
+}
+
+func persistentVolumeClaimOwners(
+	snapshots []clusterNodeSnapshot,
+	resolver clusterWorkloadResolver,
+) map[string]string {
+	owners := make(map[string]string)
+	for _, snapshot := range snapshots {
+		if len(snapshot.pods) == 0 || snapshot.summary == nil || len(snapshot.summary.Pods) == 0 {
+			continue
+		}
+		usageByPod := kubeNodeSummaryPodUsageIndex(snapshot.summary)
+		for _, pod := range snapshot.pods {
+			workload, ok := resolver.resolvePod(pod)
+			if !ok {
+				continue
+			}
+			workloadKey := clusterWorkloadUsageKey(workload)
+			if workloadKey == "\x00" {
+				continue
+			}
+			usage, ok := usageByPod[clusterNamespacedResourceKey(pod.Metadata.Namespace, pod.Metadata.Name)]
+			if !ok {
+				continue
+			}
+			for _, volume := range usage.Volumes {
+				claimKey := persistentVolumeClaimKey(usage, volume)
+				if claimKey == "" {
+					continue
+				}
+				if current, exists := owners[claimKey]; !exists || persistentVolumeOwnerLess(workloadKey, current) {
+					owners[claimKey] = workloadKey
+				}
+			}
+		}
+	}
+	return owners
+}
+
+func clusterWorkloadUsageKey(workload model.ClusterNodeWorkload) string {
+	return strings.TrimSpace(workload.Kind) + "\x00" + strings.TrimSpace(workload.ID)
+}
+
+func persistentVolumeClaimKey(pod kubeNodeSummaryPod, volume kubeNodeSummaryVolume) string {
+	if volume.PVCRef == nil {
+		return ""
+	}
+	claimName := strings.TrimSpace(volume.PVCRef.Name)
+	if claimName == "" {
+		return ""
+	}
+	namespace := strings.TrimSpace(volume.PVCRef.Namespace)
+	if namespace == "" {
+		namespace = strings.TrimSpace(pod.PodRef.Namespace)
+	}
+	return clusterNamespacedResourceKey(namespace, claimName)
+}
+
+func persistentVolumeOwnerLess(candidate, current string) bool {
+	candidateRank := persistentVolumeOwnerRank(candidate)
+	currentRank := persistentVolumeOwnerRank(current)
+	if candidateRank != currentRank {
+		return candidateRank < currentRank
+	}
+	return candidate < current
+}
+
+func persistentVolumeOwnerRank(workloadKey string) int {
+	kind, _, _ := strings.Cut(workloadKey, "\x00")
+	switch kind {
+	case model.ClusterNodeWorkloadKindBackingService:
+		return 0
+	case model.ClusterNodeWorkloadKindApp:
+		return 1
+	default:
+		return 2
 	}
 }
 

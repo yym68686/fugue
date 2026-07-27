@@ -91,6 +91,7 @@ type Server struct {
 	projectImageUsageCache           expiringResponseCache[projectImageUsageResponse]
 	readinessKubernetesAPICache      expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache        expiringResponseCache[[]clusterNodeSnapshot]
+	persistentVolumeUsageCache       expiringResponseCache[persistentVolumeUsagePolicies]
 	edgeLiveServingCache             expiringResponseCache[map[string]edgeLiveServingState]
 	appProxyAppCache                 expiringResponseCache[model.App]
 	appProxyServiceHostCache         expiringResponseCache[string]
@@ -222,6 +223,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		projectImageUsageCache:           newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
 		readinessKubernetesAPICache:      newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:        newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
+		persistentVolumeUsageCache:       newExpiringResponseCache[persistentVolumeUsagePolicies](persistentVolumeUsageCacheTTL),
 		edgeLiveServingCache:             newExpiringResponseCache[map[string]edgeLiveServingState](5 * time.Second),
 		appProxyAppCache:                 newExpiringResponseCache[model.App](defaultAppProxyLookupCacheTTL),
 		appProxyServiceHostCache:         newExpiringResponseCache[string](defaultAppProxyLookupCacheTTL),
