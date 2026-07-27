@@ -115,6 +115,60 @@ func TestEveryObjectRuleHasOneSyntheticMatch(t *testing.T) {
 	}
 }
 
+func TestCanonicalOwnershipClassifiesIsolatedControlPlaneRBACRemoval(t *testing.T) {
+	spec := testOwnership(t)
+	bindings := testBindings()
+	bindings["serviceName"] = "fugue-fugue"
+
+	roleManifest := func(name string, isolated, legacyResizeRule bool) []byte {
+		partOf := ""
+		if isolated {
+			partOf = "    app.kubernetes.io/part-of: fugue-control-plane\n"
+		}
+		resizeRule := ""
+		if legacyResizeRule {
+			resizeRule = `  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["get", "update", "patch"]
+`
+		}
+		return []byte(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ` + name + `
+  labels:
+    app.kubernetes.io/name: fugue
+    app.kubernetes.io/instance: fugue
+` + partOf + `rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+` + resizeRule)
+	}
+
+	classified := ClassifyRendered(
+		roleManifest("fugue-fugue-control-plane", true, true),
+		roleManifest("fugue-fugue-control-plane", true, false),
+		spec,
+		RenderedOptions{DefaultNamespace: "fugue-system", Bindings: bindings},
+	)
+	if len(classified.Unknown) != 0 ||
+		len(classified.Domains) != 1 || classified.Domains[0] != DomainControlPlane ||
+		len(classified.Evidence) != 1 || classified.Evidence[0].RuleID != "control-plane-cluster-role" {
+		t.Fatalf("isolated control-plane role classification = %#v", classified)
+	}
+
+	shared := ClassifyRendered(
+		roleManifest("fugue-fugue", false, true),
+		roleManifest("fugue-fugue", false, false),
+		spec,
+		RenderedOptions{DefaultNamespace: "fugue-system", Bindings: bindings},
+	)
+	if len(shared.Domains) != 0 || len(shared.Evidence) != 0 || len(shared.Unknown) != 1 {
+		t.Fatalf("shared role must remain fail-closed, got %#v", shared)
+	}
+}
+
 func TestDynamicObjectNameSuffixTerminalIsExactAndHyphenDelimited(t *testing.T) {
 	rule := ObjectRule{
 		ID:                 "worker-a",
