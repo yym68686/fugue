@@ -27,7 +27,7 @@ any other YAML file or weaken unknown/multiple handling.
 | --- | --- | --- |
 | `node-local` | NodeLocal PriorityClass, ServiceAccount, ConfigMap, upstream/cache/active Services, and preserved/active DaemonSets | Does not use the backup Lease and does not invoke API/controller rollout, authoritative-DNS transaction, image-cache mutation, CoreDNS repair, or generic node maintenance. |
 | `authoritative-dns` | Main and normalized group DNS DaemonSets | Owns only the bounded authoritative-DNS transaction; the shared edge image does not grant edge proxy, Caddy, or Ingress ownership. |
-| `control-plane` | API/controller Deployments and PDBs, API Service, optional Ingress, generated CNPG Secret, and CNPG Cluster fields outside `/spec/backup` | May acquire the existing backup coordination Lease before its adapter writes. |
+| `control-plane` | API/controller Deployments and PDBs, telemetry-agent Deployment, isolated control-plane ClusterRole, API Service, optional Ingress, generated CNPG Secret, and CNPG Cluster fields outside `/spec/backup` | May acquire the existing backup coordination Lease before its adapter writes. |
 | `image-cache` | Image-cache DaemonSet | Does not own builder labels, registry, image-store defaults, NodeLocal, or generic node maintenance. |
 | `backup` | ScheduledBackup, restore-drill CronJob, and CNPG Cluster `/spec/backup` | May acquire the existing backup coordination Lease; it does not roll API/controller or delete historical Backup objects. |
 
