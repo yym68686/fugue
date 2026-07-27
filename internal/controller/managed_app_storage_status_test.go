@@ -43,6 +43,20 @@ func TestPatchManagedAppStorageExpansionErrorStatusPreservesReadyDeployment(t *t
 			wantReady: 1,
 		},
 		{
+			name: "over-reported deployment readiness is bounded",
+			deploymentJSON: `{
+				"metadata":{"name":"app-demo","generation":4},
+				"status":{
+					"observedGeneration":4,
+					"replicas":1,
+					"updatedReplicas":1,
+					"readyReplicas":2,
+					"availableReplicas":2
+				}
+			}`,
+			wantReady: 1,
+		},
+		{
 			name: "unready deployment",
 			deploymentJSON: `{
 				"metadata":{"name":"app-demo","generation":4},

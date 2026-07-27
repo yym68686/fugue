@@ -965,7 +965,9 @@ func patchManagedAppStorageExpansionErrorStatus(
 	if client != nil && app.Spec.Replicas > 0 {
 		deployment, found, readErr := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 		if readErr == nil && found && managedDeploymentStatusReady(deployment, app.Spec.Replicas) {
-			status.ReadyReplicas = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
+			// Bound the routing signal to the desired replica count even if a
+			// malformed or transient Deployment status over-reports readiness.
+			status.ReadyReplicas = app.Spec.Replicas
 			status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
 		}
 	}
