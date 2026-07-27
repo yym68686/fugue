@@ -62,6 +62,9 @@ func (s *Server) nodeUpdaterClusterRejoin(
 	if !nodeUpdaterHasCapability(updater, model.NodeUpdaterCapabilityRejoinK3SNode) {
 		return suppress("capability_missing", "cluster rejoin suppressed: node updater does not advertise "+model.NodeUpdaterCapabilityRejoinK3SNode)
 	}
+	if !nodeUpdaterHasCapability(updater, model.NodeUpdaterCapabilitySafeK3SNodeRejoin) {
+		return suppress("safe_rejoin_capability_missing", "cluster rejoin suppressed: node updater does not advertise "+model.NodeUpdaterCapabilitySafeK3SNodeRejoin)
+	}
 	if !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) {
 		return suppress("node_updater_inactive", "cluster rejoin suppressed: node updater is not active")
 	}

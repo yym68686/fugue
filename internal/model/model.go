@@ -119,9 +119,10 @@ const (
 	NodeUpdaterStatusActive  = "active"
 	NodeUpdaterStatusRevoked = "revoked"
 
-	NodeUpdaterCurrentVersion = "v28"
+	NodeUpdaterCurrentVersion = "v29"
 
-	NodeUpdaterCapabilityRejoinK3SNode = "rejoin-k3s-node"
+	NodeUpdaterCapabilityRejoinK3SNode     = "rejoin-k3s-node"
+	NodeUpdaterCapabilitySafeK3SNodeRejoin = "safe-k3s-node-rejoin"
 
 	NodeUpdaterClusterRejoinStatusNotRequired     = "not_required"
 	NodeUpdaterClusterRejoinStatusCredentialReady = "credential_ready"

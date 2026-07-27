@@ -1124,7 +1124,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -1137,6 +1137,7 @@ FUGUE_NODE_UPDATER_STATE_ENV_FILE="${FUGUE_NODE_UPDATER_STATE_ENV_FILE:-${FUGUE_
 FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH="${FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH:-/var/lib/fugue/node-guardian/autonomy.wal}"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/rancher/k3s/config.yaml}"
 FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE="${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE:-/etc/rancher/k3s/registries.yaml}"
+FUGUE_NODE_UPDATER_K3S_CLIENT_KUBELET_CERT_FILE="${FUGUE_NODE_UPDATER_K3S_CLIENT_KUBELET_CERT_FILE:-/var/lib/rancher/k3s/agent/client-kubelet.crt}"
 FUGUE_NODE_UPDATER_EDGE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_ENV_FILE:-/etc/fugue/fugue-edge.env}"
 FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE:-/etc/fugue/edge-node.env}"
 FUGUE_NODE_UPDATER_DNS_ENV_FILE="${FUGUE_NODE_UPDATER_DNS_ENV_FILE:-/etc/fugue/fugue-dns.env}"
@@ -1993,8 +1994,21 @@ if not match or match.group(1) != token_id:
     raise SystemExit("refusing malformed cluster rejoin bootstrap token")
 if generation != "bootstrap-token/" + token_id:
     raise SystemExit("refusing cluster rejoin credential with mismatched generation")
+expiry_match = re.fullmatch(
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})",
+    expires_at_raw,
+)
+if not expiry_match:
+    raise SystemExit("refusing cluster rejoin credential with invalid expiry")
+expiry_base, expiry_fraction, expiry_zone = expiry_match.groups()
+# Python 3.9 rejects RFC3339Nano values with more than six fractional
+# digits. Datetime itself has microsecond precision, so truncate only the
+# excess precision after validating the complete RFC3339 shape.
+expiry_fraction = (expiry_fraction or "")[:7]
+if expiry_zone == "Z":
+    expiry_zone = "+00:00"
 try:
-    expires_at = datetime.datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+    expires_at = datetime.datetime.fromisoformat(expiry_base + expiry_fraction + expiry_zone)
 except ValueError as exc:
     raise SystemExit("refusing cluster rejoin credential with invalid expiry") from exc
 now = datetime.datetime.now(datetime.timezone.utc)
@@ -2021,11 +2035,84 @@ os.chmod(metadata_path, 0o600)
 PY_CLUSTER_REJOIN
 }
 
+quarantine_stale_k3s_client_identity_for_rejoin() {
+  local metadata_file="$1"
+  local token_id=""
+  local expected_node_name=""
+  local client_cert="${FUGUE_NODE_UPDATER_K3S_CLIENT_KUBELET_CERT_FILE}"
+  local subject_cn=""
+  local quarantine_file=""
+  local candidate=""
+  token_id="$(awk -F= '$1 == "FUGUE_K3S_REJOIN_TOKEN_ID" { print substr($0, index($0, "=") + 1); exit }' "${metadata_file}")"
+  expected_node_name="$(awk -F= '$1 == "FUGUE_K3S_REJOIN_NODE_NAME" { print substr($0, index($0, "=") + 1); exit }' "${metadata_file}")"
+  printf 'FUGUE_K3S_REJOIN_AUTH_FALLBACK_MODE=bootstrap_without_stale_client_certificate\n' >>"${metadata_file}"
+
+  if [ ! -e "${client_cert}" ]; then
+    for candidate in "${client_cert}.fugue-rejoin-${token_id}"*; do
+      if [ -f "${candidate}" ]; then
+        printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=quarantined\n' >>"${metadata_file}"
+        printf 'FUGUE_K3S_REJOIN_QUARANTINE_FILE=%s\n' "$(basename "${candidate}")" >>"${metadata_file}"
+        return 2
+      fi
+    done
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=client_certificate_absent\n' >>"${metadata_file}"
+    return 2
+  fi
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=inspection_unavailable\n' >>"${metadata_file}"
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_ERROR=openssl_unavailable\n' >>"${metadata_file}"
+    record_node_guardian_wal \
+      "cluster_rejoin_stale_identity_quarantine_refused" \
+      "client_certificate_inspection_unavailable" \
+      "node:${expected_node_name}" \
+      "refused to quarantine the stale k3s client identity because openssl is unavailable"
+    return 1
+  fi
+  subject_cn="$(openssl x509 -in "${client_cert}" -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/^subject=.*CN=\([^,]*\).*$/\1/p')"
+  if [ "${subject_cn}" != "system:node:${expected_node_name}" ]; then
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=identity_mismatch_refused\n' >>"${metadata_file}"
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_ERROR=certificate_subject_mismatch\n' >>"${metadata_file}"
+    record_node_guardian_wal \
+      "cluster_rejoin_stale_identity_quarantine_refused" \
+      "client_certificate_subject_mismatch" \
+      "node:${expected_node_name}" \
+      "refused to quarantine a k3s client certificate whose subject does not match the authorized node identity"
+    return 1
+  fi
+
+  quarantine_file="${client_cert}.fugue-rejoin-${token_id}"
+  if [ -e "${quarantine_file}" ]; then
+    quarantine_file="${quarantine_file}.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  fi
+  if ! mv -- "${client_cert}" "${quarantine_file}"; then
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=quarantine_failed\n' >>"${metadata_file}"
+    printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_ERROR=certificate_move_failed\n' >>"${metadata_file}"
+    record_node_guardian_wal \
+      "cluster_rejoin_stale_identity_quarantine_failed" \
+      "client_certificate_move_failed" \
+      "node:${expected_node_name}" \
+      "failed to quarantine the stale k3s client certificate"
+    return 1
+  fi
+  chmod 0600 "${quarantine_file}" 2>/dev/null || true
+  printf 'FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=quarantined\n' >>"${metadata_file}"
+  printf 'FUGUE_K3S_REJOIN_QUARANTINE_FILE=%s\n' "$(basename "${quarantine_file}")" >>"${metadata_file}"
+  record_node_guardian_wal \
+    "cluster_rejoin_stale_identity_quarantined" \
+    "k3s_post_retry_request_body_reuse_workaround" \
+    "node:${expected_node_name}" \
+    "quarantined the exact stale kubelet client certificate so k3s starts with the server-authorized bootstrap identity"
+  log "quarantined stale k3s client identity for server-authorized bootstrap rejoin"
+  return 0
+}
+
 reconcile_cluster_rejoin_credential() {
   local token_tmp=""
   local metadata_tmp=""
   local changed=1
-  if [ ! -r "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" || ! command -v python3 >/dev/null 2>&1; then
+  local quarantine_rc=2
+  if [ ! -r "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" ] || ! command -v python3 >/dev/null 2>&1; then
     return 1
   fi
   token_tmp="$(mktemp)"
@@ -2038,14 +2125,23 @@ reconcile_cluster_rejoin_credential() {
   if yaml_update_scalar_from_file "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" token "${token_tmp}"; then
     changed=0
   fi
+  if quarantine_stale_k3s_client_identity_for_rejoin "${metadata_tmp}"; then
+    changed=0
+  else
+    quarantine_rc=$?
+  fi
   write_secret_file_if_changed "${metadata_tmp}" "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}" || true
   rm -f "${token_tmp}" "${metadata_tmp}"
+  if [ "${quarantine_rc}" -eq 1 ]; then
+    record_last_error "cluster rejoin refused because the stale k3s client identity could not be safely quarantined"
+    return 1
+  fi
   if [ "${changed}" -eq 0 ]; then
     record_node_guardian_wal \
       "cluster_rejoin_credential_applied" \
       "server_authorized_short_lived_credential" \
       "node:$(node_deep_health_cluster_node_name)" \
-      "applied a short-lived Kubernetes bootstrap credential; k3s-agent restart required"
+      "prepared a short-lived Kubernetes bootstrap credential and safe client identity fallback; k3s-agent restart required"
   fi
   return "${changed}"
 }
@@ -2773,6 +2869,7 @@ reconcile_edge_node_env() {
 
 reconcile_node_state() {
   local k3s_runtime_config_changed=0
+  local cluster_rejoin_changed=0
   mkdir -p "${FUGUE_NODE_UPDATER_STATE_DIR}"
   if reconcile_time_sync; then
     log "reconciled host time synchronization"
@@ -2806,6 +2903,7 @@ reconcile_node_state() {
   if reconcile_cluster_rejoin_credential; then
     log "installed server-authorized short-lived Kubernetes rejoin credential"
     k3s_runtime_config_changed=1
+    cluster_rejoin_changed=1
   fi
   if reconcile_cni_bridge_mtu; then
     log "reconciled CNI bridge MTU"
@@ -2817,7 +2915,11 @@ reconcile_node_state() {
     log "updated edge/dns non-secret environment generation"
   fi
   if [ "${k3s_runtime_config_changed}" -eq 1 ]; then
-    restart_k3s_agent_for_config_reload
+    if [ "${cluster_rejoin_changed}" -eq 1 ]; then
+      request_k3s_agent_restart_for_cluster_rejoin
+    else
+      restart_k3s_agent_for_config_reload
+    fi
   fi
   return 0
 }
@@ -2945,6 +3047,8 @@ current_config_hash() {
     printf 'cluster_rejoin_credential_class=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_CREDENTIAL_CLASS || true)"
     printf 'cluster_rejoin_generation=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_GENERATION || true)"
     printf 'cluster_rejoin_expires_at=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_EXPIRES_AT || true)"
+    printf 'cluster_rejoin_client_identity_state=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE || true)"
+    printf 'cluster_rejoin_auth_fallback_mode=%s\n' "$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_AUTH_FALLBACK_MODE || true)"
     printf 'timesyncd_dropin_hash=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN}")"
     printf 'timesyncd_poll_min=%s\n' "${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC}"
     printf 'timesyncd_poll_max=%s\n' "${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC}"
@@ -3084,6 +3188,9 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_REJOIN_TOKEN_ID="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_TOKEN_ID || true)" \
   FUGUE_HEARTBEAT_REJOIN_GENERATION="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_GENERATION || true)" \
   FUGUE_HEARTBEAT_REJOIN_EXPIRES_AT="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_EXPIRES_AT || true)" \
+  FUGUE_HEARTBEAT_REJOIN_CLIENT_IDENTITY_STATE="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE || true)" \
+  FUGUE_HEARTBEAT_REJOIN_AUTH_FALLBACK_MODE="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_AUTH_FALLBACK_MODE || true)" \
+  FUGUE_HEARTBEAT_REJOIN_QUARANTINE_FILE="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_QUARANTINE_FILE || true)" \
   python3 - <<'PY_NODE_DEEP_HEALTH'
 import datetime
 import json
@@ -3204,6 +3311,9 @@ rejoin_evidence = {
     "credential_token_id": str(rejoin_credential.get("token_id") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_TOKEN_ID", "")).strip(),
     "credential_generation": str(rejoin_credential.get("generation") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_GENERATION", "")).strip(),
     "credential_expires_at": str(rejoin_credential.get("expires_at") or os.environ.get("FUGUE_HEARTBEAT_REJOIN_EXPIRES_AT", "")).strip(),
+    "client_identity_state": os.environ.get("FUGUE_HEARTBEAT_REJOIN_CLIENT_IDENTITY_STATE", "").strip(),
+    "auth_fallback_mode": os.environ.get("FUGUE_HEARTBEAT_REJOIN_AUTH_FALLBACK_MODE", "").strip(),
+    "quarantine_file": os.environ.get("FUGUE_HEARTBEAT_REJOIN_QUARANTINE_FILE", "").strip(),
     "node_name": node_name,
 }
 local_node_present = False
@@ -3831,6 +3941,36 @@ restart_k3s_agent_for_config_reload() {
   systemctl restart k3s-agent
   wait_for_unit_active k3s-agent 900
   log "k3s-agent is active after join/registry configuration reload"
+}
+
+request_k3s_agent_restart_for_cluster_rejoin() {
+  local node_name=""
+  node_name="$(node_deep_health_cluster_node_name)"
+  if ! systemctl list-unit-files k3s-agent.service >/dev/null 2>&1; then
+    log "k3s-agent unit is absent; cannot start server-authorized cluster rejoin"
+    record_node_guardian_wal \
+      "cluster_rejoin_restart_refused" \
+      "k3s_agent_unit_absent" \
+      "node:${node_name}" \
+      "k3s-agent unit is absent; bounded cluster rejoin was not started"
+    return 1
+  fi
+  log "requesting non-blocking k3s-agent restart for server-authorized cluster rejoin"
+  if ! systemctl --no-block restart k3s-agent; then
+    record_node_guardian_wal \
+      "cluster_rejoin_restart_failed" \
+      "systemd_restart_request_failed" \
+      "node:${node_name}" \
+      "systemd rejected the non-blocking k3s-agent restart request"
+    record_last_error "systemd rejected the non-blocking k3s-agent restart request for cluster rejoin"
+    return 1
+  fi
+  record_node_guardian_wal \
+    "cluster_rejoin_restart_requested" \
+    "non_blocking_type_notify_restart" \
+    "node:${node_name}" \
+    "queued a non-blocking k3s-agent restart; convergence is observed by deep health instead of blocking the updater timer"
+  log "queued non-blocking k3s-agent restart for cluster rejoin"
 }
 
 upgrade_k3s_agent() {

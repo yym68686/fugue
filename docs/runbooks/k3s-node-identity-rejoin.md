@@ -7,7 +7,8 @@ corresponding Kubernetes `Node` is absent.
 
 Automatic rejoin is allowed only when all of the following are true:
 
-- the authenticated node updater advertises `rejoin-k3s-node`;
+- the authenticated node updater advertises both `rejoin-k3s-node` and
+  `safe-k3s-node-rejoin`;
 - the updater is active;
 - the bound NodeKey exists and is not revoked;
 - updater, machine, runtime, NodeKey, and cluster node names match exactly;
@@ -19,6 +20,17 @@ normal cluster-join TTL. It never returns the permanent k3s server token. The
 node updater validates the credential class, node name, token ID, generation,
 and expiry before atomically updating `/etc/rancher/k3s/config.yaml`. Both the
 desired-state cache and k3s config are mode `0600`.
+
+K3s v1.35.4+k3s1 attempts to fall back from a stale kubelet client certificate
+to the bootstrap token when a Node was deleted, but its POST retry reuses the
+already-consumed CSR body. The retry therefore fails locally with matching
+`ContentLength=<CSR bytes> with Body length 0` evidence and never reaches the
+control plane. When the exact safety contract above is satisfied, updater v29
+quarantines only the matching `client-kubelet.crt` (retaining its private key
+for the new CSR), then requests a non-blocking k3s-agent restart. Older updater
+generations are suppressed before Kubernetes access so they can finish their
+normal upgrade task instead of blocking for 30 minutes in a `Type=notify`
+restart.
 
 Explicit edge drain state and node policy are not changed by cluster rejoin.
 
@@ -35,6 +47,7 @@ The `k3s_cluster_membership` check reports:
 - the control-plane observation (`node_present` or
   `kubernetes_node_not_found`);
 - credential class, token ID, generation, and expiration, but never the token;
+- stale client identity state, bootstrap fallback mode, and quarantine filename;
 - whether the safe action was ready, suppressed, or unavailable.
 
 Prometheus metrics:
@@ -65,7 +78,8 @@ the incident visible immediately instead of relying on a later manual report.
 
 1. The controller upgrades the updater to the current generation.
 2. Desired state reports `credential_ready`.
-3. The updater applies the bounded token and restarts `k3s-agent` once.
+3. The updater applies the bounded token, quarantines the exact stale kubelet
+   client certificate, and queues a non-blocking `k3s-agent` restart once.
 4. The Node and Node Lease reappear.
 5. The next desired-state read reports `not_required/node_present`.
 6. The control plane deletes all owned rejoin bootstrap Secrets.

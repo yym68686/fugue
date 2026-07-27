@@ -860,7 +860,9 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`rejoin-k3s-node`,
+		`safe-k3s-node-rejoin`,
 		`reconcile_cluster_rejoin_credential`,
+		`quarantine_stale_k3s_client_identity_for_rejoin`,
 		`short_lived_kubernetes_bootstrap_token`,
 		`k3s_cluster_membership`,
 		`prepull-app-images`,
@@ -872,6 +874,8 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
 		`restart_k3s_agent_for_config_reload`,
+		`request_k3s_agent_restart_for_cluster_rejoin`,
+		`systemctl --no-block restart k3s-agent`,
 		`restarting k3s-agent so containerd reloads updated join/registry configuration`,
 		`time-sync`,
 		`render_desired_k3s_policy_lists`,
@@ -2407,6 +2411,7 @@ func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 		`FUGUE_DISCOVERY_GENERATION`,
 		`refresh-join-config`,
 		`rejoin-k3s-node`,
+		`safe-k3s-node-rejoin`,
 		`updater_capabilities="$(/usr/local/bin/fugue-node-updater capabilities`,
 	} {
 		if !strings.Contains(script, want) {

@@ -1222,7 +1222,11 @@ func (c *clusterNodeClient) createBootstrapTokenWithLabels(
 			secretLabels[key] = value
 		}
 	}
-	expiresAt := time.Now().UTC().Add(ttl)
+	// Kubernetes bootstrap-token Secrets persist RFC3339 timestamps with second
+	// precision. Return the exact persisted instant as well so first issuance and
+	// subsequent reads expose an identical expiry on every Python version used by
+	// the node updater.
+	expiresAt := time.Now().UTC().Truncate(time.Second).Add(ttl)
 	if description = strings.TrimSpace(description); description == "" {
 		description = "fugue join bootstrap token"
 	}

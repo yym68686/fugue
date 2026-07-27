@@ -55,7 +55,7 @@ func TestNodeUpdaterClusterRejoinIssuesReusesAndRevokesBoundedCredential(t *test
 		"machine-fingerprint",
 		model.NodeUpdaterCurrentVersion,
 		"join-v1",
-		[]string{"heartbeat", model.NodeUpdaterCapabilityRejoinK3SNode},
+		[]string{"heartbeat", model.NodeUpdaterCapabilityRejoinK3SNode, model.NodeUpdaterCapabilitySafeK3SNodeRejoin},
 	)
 	if err != nil {
 		t.Fatalf("enroll node updater: %v", err)
@@ -147,6 +147,21 @@ func TestNodeUpdaterClusterRejoinIssuesReusesAndRevokesBoundedCredential(t *test
 	if postCount != 1 {
 		t.Fatalf("bootstrap Secret posts = %d, want 1", postCount)
 	}
+	if first.Credential.ExpiresAt.Nanosecond() != 0 {
+		t.Fatalf("first credential expiry has sub-second precision: %s", first.Credential.ExpiresAt.Format(time.RFC3339Nano))
+	}
+	secretData, ok := bootstrapSecret["data"].(map[string]string)
+	if !ok {
+		t.Fatalf("bootstrap Secret data has unexpected shape: %#v", bootstrapSecret["data"])
+	}
+	encodedExpiration := secretData["expiration"]
+	persistedExpiration, err := base64.StdEncoding.DecodeString(encodedExpiration)
+	if err != nil {
+		t.Fatalf("decode persisted expiration: %v", err)
+	}
+	if got, want := string(persistedExpiration), first.Credential.ExpiresAt.Format(time.RFC3339); got != want {
+		t.Fatalf("persisted expiration = %q, credential expiration = %q", got, want)
+	}
 
 	second, warnings := server.nodeUpdaterClusterRejoin(context.Background(), principal, updater)
 	if len(warnings) != 0 {
@@ -209,7 +224,7 @@ func TestNodeUpdaterClusterRejoinSuppressesBindingMismatchWithoutKubernetesMutat
 		"machine-fingerprint",
 		model.NodeUpdaterCurrentVersion,
 		"join-v1",
-		[]string{model.NodeUpdaterCapabilityRejoinK3SNode},
+		[]string{model.NodeUpdaterCapabilityRejoinK3SNode, model.NodeUpdaterCapabilitySafeK3SNodeRejoin},
 	)
 	if err != nil {
 		t.Fatalf("enroll node updater: %v", err)
@@ -241,12 +256,62 @@ func TestNodeUpdaterClusterRejoinSuppressesBindingMismatchWithoutKubernetesMutat
 	}
 }
 
+func TestNodeUpdaterClusterRejoinSuppressesLegacyUpdaterBeforeKubernetesAccess(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	_, nodeKeySecret, err := stateStore.CreateScopedNodeKey("", "platform", model.NodeKeyScopePlatformNode)
+	if err != nil {
+		t.Fatalf("create platform node key: %v", err)
+	}
+	updater, updaterToken, err := stateStore.EnrollNodeUpdater(
+		nodeKeySecret,
+		"worker-legacy-rejoin",
+		"198.51.100.12",
+		nil,
+		"worker-legacy-rejoin",
+		"machine-fingerprint",
+		"v28",
+		"join-v1",
+		[]string{model.NodeUpdaterCapabilityRejoinK3SNode},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	_, principal, err := stateStore.AuthenticateNodeUpdater(updaterToken)
+	if err != nil {
+		t.Fatalf("authenticate node updater: %v", err)
+	}
+
+	kubernetesClientCalls := 0
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{
+		ClusterJoinServer:            "https://control-plane.example:6443",
+		ClusterJoinBootstrapTokenTTL: 15 * time.Minute,
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		kubernetesClientCalls++
+		return nil, nil
+	}
+
+	plan, _ := server.nodeUpdaterClusterRejoin(context.Background(), principal, updater)
+	if plan.Status != model.NodeUpdaterClusterRejoinStatusSuppressed || plan.Reason != "safe_rejoin_capability_missing" {
+		t.Fatalf("unexpected legacy updater plan: %+v", plan)
+	}
+	if kubernetesClientCalls != 0 {
+		t.Fatalf("Kubernetes client calls = %d, want 0 for a legacy updater", kubernetesClientCalls)
+	}
+}
+
 func TestNodeUpdaterScriptAppliesRejoinCredentialOnceWithoutLeakingMetadata(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available")
+	}
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("openssl not available")
 	}
 
 	var server Server
@@ -257,14 +322,20 @@ func TestNodeUpdaterScriptAppliesRejoinCredentialOnceWithoutLeakingMetadata(t *t
 	}
 
 	token := "abcdef.0123456789abcdef"
-	expiresAt := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339)
+	expiresAt := time.Now().UTC().Truncate(time.Second).Add(10*time.Minute + 123456789*time.Nanosecond).Format(time.RFC3339Nano)
 	harness := prefix + `
 tmpdir="$(mktemp -d)"
 FUGUE_NODE_UPDATER_STATE_DIR="${tmpdir}"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
 FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE="${tmpdir}/cluster-rejoin.env"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
+FUGUE_NODE_UPDATER_K3S_CLIENT_KUBELET_CERT_FILE="${tmpdir}/client-kubelet.crt"
 FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH="${tmpdir}/autonomy.wal"
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout "${tmpdir}/client-kubelet.key" \
+  -out "${FUGUE_NODE_UPDATER_K3S_CLIENT_KUBELET_CERT_FILE}" \
+  -days 1 \
+  -subj '/O=system:nodes/CN=system:node:worker-rejoin' >/dev/null 2>&1
 cat >"${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" <<'YAML'
 server: "https://control-plane.example:6443"
 token: "aaaaaa.aaaaaaaaaaaaaaaa"
@@ -296,6 +367,21 @@ if ! reconcile_cluster_rejoin_credential; then
 fi
 grep -q '^token: "abcdef.0123456789abcdef"$' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
 grep -q '^FUGUE_K3S_REJOIN_GENERATION=bootstrap-token/abcdef$' "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}"
+grep -q '^FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=quarantined$' "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}"
+grep -q '^FUGUE_K3S_REJOIN_AUTH_FALLBACK_MODE=bootstrap_without_stale_client_certificate$' "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}"
+if [ -e "${FUGUE_NODE_UPDATER_K3S_CLIENT_KUBELET_CERT_FILE}" ]; then
+  echo "stale kubelet client certificate was not quarantined" >&2
+  exit 1
+fi
+if [ ! -e "${tmpdir}/client-kubelet.key" ]; then
+  echo "kubelet client private key was removed instead of retained for the CSR" >&2
+  exit 1
+fi
+quarantine_count="$(find "${tmpdir}" -maxdepth 1 -type f -name 'client-kubelet.crt.fugue-rejoin-abcdef*' | wc -l | tr -d ' ')"
+if [ "${quarantine_count}" != "1" ]; then
+  echo "expected one quarantined client certificate, found ${quarantine_count}" >&2
+  exit 1
+fi
 if grep -q '0123456789abcdef' "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}"; then
   echo "cluster rejoin metadata leaked the credential secret" >&2
   exit 1
@@ -315,6 +401,7 @@ if reconcile_cluster_rejoin_credential; then
   echo "identical cluster rejoin credential triggered a second config change" >&2
   exit 1
 fi
+grep -q '^FUGUE_K3S_REJOIN_CLIENT_IDENTITY_STATE=quarantined$' "${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE}"
 cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
 {
   "desired_state": {
@@ -340,6 +427,15 @@ if reconcile_cluster_rejoin_credential; then
   exit 1
 fi
 grep -q '^token: "abcdef.0123456789abcdef"$' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+rm -f "${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}"
+if reconcile_cluster_rejoin_credential 2>"${tmpdir}/missing-state.err"; then
+  echo "missing desired state was accepted" >&2
+  exit 1
+fi
+if grep -q 'missing.*]' "${tmpdir}/missing-state.err"; then
+  echo "missing desired-state guard has malformed bracket syntax" >&2
+  exit 1
+fi
 `
 	scriptPath := filepath.Join(t.TempDir(), "node-updater-rejoin-test.sh")
 	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
@@ -348,6 +444,51 @@ grep -q '^token: "abcdef.0123456789abcdef"$' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FI
 	cmd := exec.Command("bash", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node updater rejoin harness failed: %v\n%s", err, output)
+	}
+}
+
+func TestNodeUpdaterClusterRejoinRestartUsesNonBlockingSystemdRequest(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+mkdir -p "${tmpdir}/bin"
+export FUGUE_TEST_SYSTEMCTL_LOG="${tmpdir}/systemctl.log"
+export FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME="worker-rejoin"
+export FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH="${tmpdir}/autonomy.wal"
+cat >"${tmpdir}/bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${FUGUE_TEST_SYSTEMCTL_LOG}"
+case "$*" in
+  "list-unit-files k3s-agent.service"|"--no-block restart k3s-agent") exit 0 ;;
+  *) exit 91 ;;
+esac
+SYSTEMCTL
+chmod 0755 "${tmpdir}/bin/systemctl"
+PATH="${tmpdir}/bin:${PATH}"
+if ! request_k3s_agent_restart_for_cluster_rejoin; then
+  echo "non-blocking rejoin restart request failed" >&2
+  exit 1
+fi
+grep -q '^list-unit-files k3s-agent.service$' "${FUGUE_TEST_SYSTEMCTL_LOG}"
+grep -q '^--no-block restart k3s-agent$' "${FUGUE_TEST_SYSTEMCTL_LOG}"
+grep -q '"action":"cluster_rejoin_restart_requested"' "${FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH}"
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-rejoin-restart-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater restart harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater restart harness failed: %v\n%s", err, output)
 	}
 }
 
