@@ -266,20 +266,29 @@ func persistentVolumeNodeName(pv kubePersistentVolume) string {
 	if required == nil {
 		return ""
 	}
+	nodes := map[string]struct{}{}
 	for _, term := range required.NodeSelectorTerms {
 		for _, expr := range term.MatchExpressions {
-			if strings.TrimSpace(expr.Key) != kubeHostnameLabelKey {
+			switch strings.TrimSpace(expr.Key) {
+			case kubeHostnameLabelKey, "openebs.io/nodename", "node.kubernetes.io/instance":
+			default:
 				continue
 			}
-			if !strings.EqualFold(strings.TrimSpace(expr.Operator), "In") && strings.TrimSpace(expr.Operator) != "" {
+			if !strings.EqualFold(strings.TrimSpace(expr.Operator), "In") {
 				continue
 			}
 			for _, value := range expr.Values {
 				if value = strings.TrimSpace(value); value != "" {
-					return value
+					nodes[value] = struct{}{}
 				}
 			}
 		}
+	}
+	if len(nodes) != 1 {
+		return ""
+	}
+	for node := range nodes {
+		return node
 	}
 	return ""
 }

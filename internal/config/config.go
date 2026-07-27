@@ -134,6 +134,8 @@ type ControllerConfig struct {
 	ImageCacheInventoryEnabled                 bool
 	ImageCacheInventoryInterval                time.Duration
 	ImageCacheInventoryTTL                     time.Duration
+	LocalPVInventoryEnabled                    bool
+	LocalPVInventoryInterval                   time.Duration
 	ImageStoreOrphanPruneMode                  string
 	ImageStoreOrphanPruneGracePeriod           time.Duration
 	ImageStoreOrphanPruneMaxTargetsPerNode     int
@@ -471,6 +473,8 @@ func ControllerFromEnv() ControllerConfig {
 		ImageCacheInventoryEnabled:                 getenvBool("FUGUE_IMAGE_CACHE_INVENTORY_ENABLED", true),
 		ImageCacheInventoryInterval:                getenvDuration("FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL", 30*time.Minute),
 		ImageCacheInventoryTTL:                     getenvDuration("FUGUE_IMAGE_CACHE_INVENTORY_TTL", 2*time.Hour),
+		LocalPVInventoryEnabled:                    getenvBool("FUGUE_LOCALPV_INVENTORY_ENABLED", true),
+		LocalPVInventoryInterval:                   getenvDuration("FUGUE_LOCALPV_INVENTORY_INTERVAL", 15*time.Minute),
 		ImageStoreOrphanPruneMode:                  getenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "delete"),
 		ImageStoreOrphanPruneGracePeriod:           getenvDuration("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD", 24*time.Hour),
 		ImageStoreOrphanPruneMaxTargetsPerNode:     getenvInt("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE", 50),

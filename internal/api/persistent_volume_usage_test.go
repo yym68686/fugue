@@ -93,6 +93,7 @@ func TestDedicatedPersistentVolumeKeepsKubeletUsageAndCapacity(t *testing.T) {
 
 	app := model.App{ID: "app-demo", Name: "demo"}
 	usedBytes := uint64(3 * 1024 * 1024 * 1024)
+	availableBytes := uint64(16 * 1024 * 1024 * 1024)
 	capacityBytes := uint64(20 * 1024 * 1024 * 1024)
 	snapshot := resourceUsageSnapshot(
 		"node-a",
@@ -100,9 +101,10 @@ func TestDedicatedPersistentVolumeKeepsKubeletUsageAndCapacity(t *testing.T) {
 		"demo-pod",
 		map[string]string{runtime.FugueLabelAppID: app.ID},
 		kubeNodeSummaryVolume{
-			PVCRef:        &kubeNodeSummaryVolumeRef{Name: "demo-data", Namespace: "tenant"},
-			UsedBytes:     &usedBytes,
-			CapacityBytes: &capacityBytes,
+			PVCRef:         &kubeNodeSummaryVolumeRef{Name: "demo-data", Namespace: "tenant"},
+			UsedBytes:      &usedBytes,
+			AvailableBytes: &availableBytes,
+			CapacityBytes:  &capacityBytes,
 		},
 	)
 	policies := persistentVolumeUsagePolicies{
@@ -119,6 +121,13 @@ func TestDedicatedPersistentVolumeKeepsKubeletUsageAndCapacity(t *testing.T) {
 	}
 	if usage.PersistentStorageCapacityBytes == nil || *usage.PersistentStorageCapacityBytes != int64(capacityBytes) {
 		t.Fatalf("expected kubelet capacity %d, got %#v", capacityBytes, usage.PersistentStorageCapacityBytes)
+	}
+	volumes := overlay.appPersistentVolumes[app.ID]
+	if len(volumes) != 1 ||
+		volumes[0].ClaimKey != "tenant/demo-data" ||
+		volumes[0].AvailableBytes == nil ||
+		*volumes[0].AvailableBytes != int64(availableBytes) {
+		t.Fatalf("expected per-PVC kubelet available bytes %d, got %+v", availableBytes, volumes)
 	}
 }
 
@@ -153,6 +162,60 @@ func TestPersistentVolumeIsCountedOnceAcrossWorkloads(t *testing.T) {
 	}
 	if serviceUsage.PersistentStorageUsedBytes == nil || *serviceUsage.PersistentStorageUsedBytes != int64(usedBytes) {
 		t.Fatalf("expected backing service to own shared claim usage, got %#v", serviceUsage.PersistentStorageUsedBytes)
+	}
+}
+
+func TestPersistentVolumeObservationUsesConservativeDuplicatePodCapacity(t *testing.T) {
+	t.Parallel()
+
+	service := model.BackingService{ID: "service-postgres", Name: "postgres"}
+	oldUsed := uint64(20 << 30)
+	oldAvailable := uint64(6 << 30)
+	oldCapacity := uint64(28 << 30)
+	newUsed := uint64(20 << 30)
+	newAvailable := uint64(18 << 30)
+	newCapacity := uint64(40 << 30)
+	snapshots := []clusterNodeSnapshot{
+		resourceUsageSnapshot(
+			"node-a",
+			"tenant",
+			"postgres-old",
+			map[string]string{runtime.FugueLabelBackingServiceID: service.ID},
+			kubeNodeSummaryVolume{
+				PVCRef:         &kubeNodeSummaryVolumeRef{Name: "postgres-data", Namespace: "tenant"},
+				UsedBytes:      &oldUsed,
+				AvailableBytes: &oldAvailable,
+				CapacityBytes:  &oldCapacity,
+			},
+		),
+		resourceUsageSnapshot(
+			"node-b",
+			"tenant",
+			"postgres-new",
+			map[string]string{runtime.FugueLabelBackingServiceID: service.ID},
+			kubeNodeSummaryVolume{
+				PVCRef:         &kubeNodeSummaryVolumeRef{Name: "postgres-data", Namespace: "tenant"},
+				UsedBytes:      &newUsed,
+				AvailableBytes: &newAvailable,
+				CapacityBytes:  &newCapacity,
+			},
+		),
+	}
+	policies := persistentVolumeUsagePolicies{
+		strict: true,
+		byClaim: map[string]persistentVolumeUsagePolicy{
+			clusterNamespacedResourceKey("tenant", "postgres-data"): {useKubelet: true},
+		},
+	}
+
+	overlay := buildCurrentResourceUsageOverlayWithPolicies(snapshots, nil, []model.BackingService{service}, policies)
+	volumes := overlay.servicePersistentVolumes[service.ID]
+	if len(volumes) != 1 ||
+		volumes[0].CapacityBytes == nil ||
+		*volumes[0].CapacityBytes != int64(oldCapacity) ||
+		volumes[0].AvailableBytes == nil ||
+		*volumes[0].AvailableBytes != int64(oldAvailable) {
+		t.Fatalf("duplicate pod observations must retain the minimum capacity and available bytes: %+v", volumes)
 	}
 }
 

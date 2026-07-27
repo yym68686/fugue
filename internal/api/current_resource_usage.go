@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,8 +16,10 @@ const (
 )
 
 type currentResourceUsageOverlay struct {
-	apps     map[string]model.ResourceUsage
-	services map[string]model.ResourceUsage
+	apps                     map[string]model.ResourceUsage
+	services                 map[string]model.ResourceUsage
+	appPersistentVolumes     map[string][]persistentVolumeObservation
+	servicePersistentVolumes map[string][]persistentVolumeObservation
 }
 
 type resourceUsageAccumulator struct {
@@ -30,10 +33,19 @@ type resourceUsageAccumulator struct {
 }
 
 type persistentVolumeUsage struct {
-	usedBytes        int64
-	hasUsedBytes     bool
-	capacityBytes    int64
-	hasCapacityBytes bool
+	usedBytes         int64
+	hasUsedBytes      bool
+	availableBytes    int64
+	hasAvailableBytes bool
+	capacityBytes     int64
+	hasCapacityBytes  bool
+}
+
+type persistentVolumeObservation struct {
+	ClaimKey       string
+	UsedBytes      *int64
+	AvailableBytes *int64
+	CapacityBytes  *int64
 }
 
 func (s *Server) overlayCurrentResourceUsageOnApps(ctx context.Context, apps []model.App) []model.App {
@@ -76,8 +88,10 @@ func (s *Server) overlayCurrentResourceUsageOnServices(ctx context.Context, serv
 
 func (s *Server) currentResourceUsageOverlay(ctx context.Context, apps []model.App, services []model.BackingService) currentResourceUsageOverlay {
 	overlay := currentResourceUsageOverlay{
-		apps:     map[string]model.ResourceUsage{},
-		services: map[string]model.ResourceUsage{},
+		apps:                     map[string]model.ResourceUsage{},
+		services:                 map[string]model.ResourceUsage{},
+		appPersistentVolumes:     map[string][]persistentVolumeObservation{},
+		servicePersistentVolumes: map[string][]persistentVolumeObservation{},
 	}
 	if len(apps) == 0 && len(services) == 0 {
 		return overlay
@@ -121,8 +135,10 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 	policies persistentVolumeUsagePolicies,
 ) currentResourceUsageOverlay {
 	overlay := currentResourceUsageOverlay{
-		apps:     map[string]model.ResourceUsage{},
-		services: map[string]model.ResourceUsage{},
+		apps:                     map[string]model.ResourceUsage{},
+		services:                 map[string]model.ResourceUsage{},
+		appPersistentVolumes:     map[string][]persistentVolumeObservation{},
+		servicePersistentVolumes: map[string][]persistentVolumeObservation{},
 	}
 	if len(snapshots) == 0 {
 		return overlay
@@ -180,8 +196,10 @@ func buildCurrentResourceUsageOverlayWithPolicies(
 		switch parts[0] {
 		case model.ClusterNodeWorkloadKindApp:
 			overlay.apps[parts[1]] = usage
+			overlay.appPersistentVolumes[parts[1]] = accumulator.persistentVolumeObservations()
 		case model.ClusterNodeWorkloadKindBackingService:
 			overlay.services[parts[1]] = usage
+			overlay.servicePersistentVolumes[parts[1]] = accumulator.persistentVolumeObservations()
 		}
 	}
 
@@ -429,6 +447,49 @@ func (a *resourceUsageAccumulator) resourceUsage() (model.ResourceUsage, bool) {
 	return usage, true
 }
 
+func (a *resourceUsageAccumulator) persistentVolumeObservations() []persistentVolumeObservation {
+	if a == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(a.persistentVolumes))
+	for claimKey := range a.persistentVolumes {
+		keys = append(keys, claimKey)
+	}
+	sort.Strings(keys)
+	observations := make([]persistentVolumeObservation, 0, len(keys))
+	for _, claimKey := range keys {
+		volume := a.persistentVolumes[claimKey]
+		observation := persistentVolumeObservation{ClaimKey: persistentVolumeClaimDisplayKey(claimKey)}
+		if volume.hasUsedBytes {
+			observation.UsedBytes = int64Pointer(volume.usedBytes)
+		}
+		if volume.hasAvailableBytes {
+			observation.AvailableBytes = int64Pointer(volume.availableBytes)
+		}
+		if volume.hasCapacityBytes {
+			observation.CapacityBytes = int64Pointer(volume.capacityBytes)
+		}
+		observations = append(observations, observation)
+	}
+	return observations
+}
+
+func persistentVolumeClaimDisplayKey(claimKey string) string {
+	namespace, name, found := strings.Cut(claimKey, "\x00")
+	if !found {
+		return strings.TrimSpace(claimKey)
+	}
+	namespace = strings.TrimSpace(namespace)
+	name = strings.TrimSpace(name)
+	if namespace == "" {
+		return name
+	}
+	if name == "" {
+		return namespace
+	}
+	return namespace + "/" + name
+}
+
 func (a *resourceUsageAccumulator) addPersistentVolumeUsage(
 	pod kubeNodeSummaryPod,
 	workloadKey string,
@@ -450,8 +511,8 @@ func (a *resourceUsageAccumulator) addPersistentVolumeUsage(
 			continue
 		}
 
-		usedBytes, capacityBytes := persistentVolumeUsageValues(key, volume, policies)
-		if usedBytes == nil && capacityBytes == nil {
+		usedBytes, availableBytes, capacityBytes := persistentVolumeUsageValues(key, volume, policies)
+		if usedBytes == nil && availableBytes == nil && capacityBytes == nil {
 			continue
 		}
 		if a.persistentVolumes == nil {
@@ -462,7 +523,11 @@ func (a *resourceUsageAccumulator) addPersistentVolumeUsage(
 			current.usedBytes = *usedBytes
 			current.hasUsedBytes = true
 		}
-		if capacityBytes != nil && (!current.hasCapacityBytes || *capacityBytes > current.capacityBytes) {
+		if availableBytes != nil && (!current.hasAvailableBytes || *availableBytes < current.availableBytes) {
+			current.availableBytes = *availableBytes
+			current.hasAvailableBytes = true
+		}
+		if capacityBytes != nil && (!current.hasCapacityBytes || *capacityBytes < current.capacityBytes) {
 			current.capacityBytes = *capacityBytes
 			current.hasCapacityBytes = true
 		}
@@ -474,23 +539,25 @@ func persistentVolumeUsageValues(
 	claimKey string,
 	volume kubeNodeSummaryVolume,
 	policies persistentVolumeUsagePolicies,
-) (*int64, *int64) {
+) (*int64, *int64, *int64) {
 	if claimKey == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	policy, ok := policies.byClaim[claimKey]
 	if !ok {
 		if policies.strict {
-			return nil, nil
+			return nil, nil, nil
 		}
 	} else if !policy.useKubelet {
-		return cloneInt64Pointer(policy.usedBytes), nil
+		return cloneInt64Pointer(policy.usedBytes), nil, nil
 	}
 	return kubeSummaryFilesystemUsage(kubeNodeSummaryFS{
-		AvailableBytes: volume.AvailableBytes,
-		CapacityBytes:  volume.CapacityBytes,
-		UsedBytes:      volume.UsedBytes,
-	}), uint64PointerToInt64(volume.CapacityBytes)
+			AvailableBytes: volume.AvailableBytes,
+			CapacityBytes:  volume.CapacityBytes,
+			UsedBytes:      volume.UsedBytes,
+		}),
+		uint64PointerToInt64(volume.AvailableBytes),
+		uint64PointerToInt64(volume.CapacityBytes)
 }
 
 func persistentVolumeClaimOwners(

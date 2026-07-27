@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -14,6 +16,8 @@ import (
 )
 
 const managedPostgresPodSelectorTemplate = "cnpg.io/cluster=%s,app.kubernetes.io/managed-by=cloudnative-pg"
+
+const openEBSLocalLVMProvisioner = "local.csi.openebs.io"
 
 func (s *Service) executeManagedDatabaseSwitchoverOperation(
 	ctx context.Context,
@@ -340,7 +344,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		}()
 	}
 	if inPlaceStorageExpansionRequired {
-		if err := s.prepareManagedPostgresInPlaceStorageExpansion(ctx, client, namespace, clusterName, storageTarget); err != nil {
+		if err := s.prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(ctx, client, namespace, clusterName, storageTarget); err != nil {
 			return err
 		}
 	}
@@ -393,13 +397,15 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return fmt.Errorf("finalize localized managed postgres state: %w", err)
 	}
-	if targetPrimary != "" {
+	// In-place expansion must take precedence over the normal primary check:
+	// a healthy primary says nothing about PVC or filesystem resize completion.
+	if inPlaceStorageExpansionRequired {
+		if err := s.waitForManagedPostgresStorageExpansion(ctx, client, namespace, clusterName, op.ID, storageTarget); err != nil {
+			return fmt.Errorf("wait for expanded managed postgres to settle: %w", err)
+		}
+	} else if targetPrimary != "" {
 		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
 			return fmt.Errorf("wait for localized managed postgres to settle: %w", err)
-		}
-	} else if inPlaceStorageExpansionRequired {
-		if err := s.waitForManagedPostgresClusterReady(ctx, client, namespace, clusterName, op.ID); err != nil {
-			return fmt.Errorf("wait for expanded managed postgres to settle: %w", err)
 		}
 	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
@@ -492,7 +498,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		}()
 	}
 	if inPlaceStorageExpansionRequired {
-		if err := s.prepareManagedPostgresInPlaceStorageExpansion(ctx, client, namespace, clusterName, storageTarget); err != nil {
+		if err := s.prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(ctx, client, namespace, clusterName, storageTarget); err != nil {
 			return err
 		}
 	}
@@ -553,13 +559,15 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return fmt.Errorf("apply finalized managed postgres service %s state: %w", target.ServiceID, err)
 	}
-	if targetPrimary != "" {
+	// In-place expansion must take precedence over the normal primary check:
+	// a healthy primary says nothing about PVC or filesystem resize completion.
+	if inPlaceStorageExpansionRequired {
+		if err := s.waitForManagedPostgresStorageExpansion(ctx, client, namespace, clusterName, op.ID, storageTarget); err != nil {
+			return fmt.Errorf("wait for expanded managed postgres service %s to settle: %w", target.ServiceID, err)
+		}
+	} else if targetPrimary != "" {
 		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
 			return fmt.Errorf("wait for localized managed postgres service %s to settle: %w", target.ServiceID, err)
-		}
-	} else if inPlaceStorageExpansionRequired {
-		if err := s.waitForManagedPostgresClusterReady(ctx, client, namespace, clusterName, op.ID); err != nil {
-			return fmt.Errorf("wait for expanded managed postgres service %s to settle: %w", target.ServiceID, err)
 		}
 	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
@@ -963,17 +971,96 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansion(
 	namespace, clusterName string,
 	target managedPostgresStorageTarget,
 ) error {
+	return s.prepareManagedPostgresInPlaceStorageExpansionWithPVCRequirement(
+		ctx,
+		client,
+		namespace,
+		clusterName,
+		target,
+		false,
+	)
+}
+
+func (s *Service) prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	target managedPostgresStorageTarget,
+) error {
+	return s.prepareManagedPostgresInPlaceStorageExpansionWithPVCRequirement(
+		ctx,
+		client,
+		namespace,
+		clusterName,
+		target,
+		true,
+	)
+}
+
+func (s *Service) prepareManagedPostgresInPlaceStorageExpansionWithPVCRequirement(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	target managedPostgresStorageTarget,
+	requireExistingDataPVC bool,
+) error {
 	if target.isZero() || strings.TrimSpace(target.StorageSize) == "" {
 		return nil
 	}
 	targetQuantity, err := resource.ParseQuantity(strings.TrimSpace(target.StorageSize))
 	if err != nil {
-		return nil
+		return fmt.Errorf("parse postgres in-place expansion target %q: %w", target.StorageSize, err)
 	}
+	if targetQuantity.Value() <= 0 {
+		return fmt.Errorf("postgres in-place expansion target %q must be positive", target.StorageSize)
+	}
+	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA")
+	if err != nil {
+		return fmt.Errorf("list postgres PVCs for in-place expansion %s/%s: %w", namespace, clusterName, err)
+	}
+	if requireExistingDataPVC && len(pvcNames) == 0 {
+		return fmt.Errorf("no postgres data PVCs found for in-place expansion %s/%s", namespace, clusterName)
+	}
+	pvcsByName := make(map[string]kubePersistentVolumeClaim, len(pvcNames))
+	for _, pvcName := range pvcNames {
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+		if err != nil {
+			return fmt.Errorf("read postgres PVC %s/%s for in-place expansion: %w", namespace, pvcName, err)
+		}
+		if !found {
+			return fmt.Errorf("postgres PVC %s/%s disappeared during in-place expansion preflight", namespace, pvcName)
+		}
+		pvcsByName[pvcName] = pvc
+	}
+
 	storageClassName := strings.TrimSpace(target.StorageClassName)
-	if storageClassName == "" {
-		return nil
+	if storageClassName == "" && len(pvcNames) > 0 {
+		storageClassName = strings.TrimSpace(pvcsByName[pvcNames[0]].Spec.StorageClassName)
 	}
+	if storageClassName == "" {
+		// A newly created cluster may intentionally rely on Kubernetes' default
+		// StorageClass. There is no existing volume to expand or preflight yet.
+		if len(pvcNames) == 0 {
+			return nil
+		}
+		return fmt.Errorf(
+			"postgres PVC %s/%s has no storage class for in-place expansion",
+			namespace,
+			pvcNames[0],
+		)
+	}
+	for _, pvcName := range pvcNames {
+		if actualStorageClass := strings.TrimSpace(pvcsByName[pvcName].Spec.StorageClassName); actualStorageClass != storageClassName {
+			return fmt.Errorf(
+				"postgres PVC %s/%s uses storage class %q, expected %q for in-place expansion",
+				namespace,
+				pvcName,
+				actualStorageClass,
+				storageClassName,
+			)
+		}
+	}
+
 	storageClass, found, err := client.getStorageClass(ctx, storageClassName)
 	if err != nil {
 		return fmt.Errorf("read storage class %s for postgres in-place expansion: %w", storageClassName, err)
@@ -985,34 +1072,228 @@ func (s *Service) prepareManagedPostgresInPlaceStorageExpansion(
 		return fmt.Errorf("storage class %s does not allow postgres in-place volume expansion", storageClassName)
 	}
 
-	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA")
-	if err != nil {
-		return fmt.Errorf("list postgres PVCs for in-place expansion %s/%s: %w", namespace, clusterName, err)
-	}
+	plans := make([]managedPostgresPVCExpansionPlan, 0, len(pvcNames))
 	for _, pvcName := range pvcNames {
-		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
-		if err != nil {
-			return fmt.Errorf("read postgres PVC %s/%s for in-place expansion: %w", namespace, pvcName, err)
-		}
-		if !found || strings.TrimSpace(pvc.Spec.StorageClassName) != storageClassName {
-			continue
+		pvc := pvcsByName[pvcName]
+		if resizeErr := managedPostgresPVCResizeError(pvc); resizeErr != "" {
+			return fmt.Errorf("postgres PVC %s/%s reports resize error: %s", namespace, pvcName, resizeErr)
 		}
 		requestedSize := strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
 		if requestedSize == "" {
 			requestedSize = managedPostgresPVCStorageSize(pvc)
 		}
-		requestedQuantity, err := resource.ParseQuantity(requestedSize)
-		if err == nil && requestedQuantity.Cmp(targetQuantity) >= 0 {
+		requestedQuantity, requestedErr := resource.ParseQuantity(requestedSize)
+		capacitySize := strings.TrimSpace(pvc.Status.Capacity["storage"])
+		capacityQuantity, capacityErr := resource.ParseQuantity(capacitySize)
+		requestConverged := requestedErr == nil && requestedQuantity.Cmp(targetQuantity) >= 0
+		capacityConverged := capacityErr == nil && capacityQuantity.Cmp(targetQuantity) >= 0
+		if requestConverged && capacityConverged {
 			continue
 		}
-		if err := client.patchPersistentVolumeClaimStorageRequest(ctx, namespace, pvcName, strings.TrimSpace(target.StorageSize)); err != nil {
-			return fmt.Errorf("expand postgres PVC %s/%s request to %s: %w", namespace, pvcName, strings.TrimSpace(target.StorageSize), err)
+		plans = append(plans, managedPostgresPVCExpansionPlan{
+			Name:               strings.TrimSpace(pvcName),
+			PVC:                pvc,
+			RequestConverged:   requestConverged,
+			CapacitySize:       capacitySize,
+			CapacityQuantity:   capacityQuantity,
+			CapacityParseError: capacityErr,
+		})
+	}
+	if strings.EqualFold(strings.TrimSpace(storageClass.Provisioner), openEBSLocalLVMProvisioner) {
+		if err := s.validateManagedPostgresLocalPVExpansionCapacity(ctx, client, namespace, storageClass, targetQuantity, plans); err != nil {
+			return err
+		}
+	}
+	for _, plan := range plans {
+		if plan.RequestConverged {
+			continue
+		}
+		if err := client.patchPersistentVolumeClaimStorageRequest(ctx, namespace, plan.Name, strings.TrimSpace(target.StorageSize)); err != nil {
+			return fmt.Errorf("expand postgres PVC %s/%s request to %s: %w", namespace, plan.Name, strings.TrimSpace(target.StorageSize), err)
 		}
 		if s != nil && s.Logger != nil {
-			s.Logger.Printf("expanded postgres PVC %s/%s request to %s for in-place storage growth", namespace, pvcName, strings.TrimSpace(target.StorageSize))
+			s.Logger.Printf("expanded postgres PVC %s/%s request to %s for in-place storage growth", namespace, plan.Name, strings.TrimSpace(target.StorageSize))
 		}
 	}
 	return nil
+}
+
+type managedPostgresPVCExpansionPlan struct {
+	Name               string
+	PVC                kubePersistentVolumeClaim
+	RequestConverged   bool
+	CapacitySize       string
+	CapacityQuantity   resource.Quantity
+	CapacityParseError error
+}
+
+type managedPostgresLocalPVCapacityRequirement struct {
+	NodeName       string
+	VGName         string
+	ExpansionBytes int64
+	PVCNames       []string
+}
+
+func (s *Service) validateManagedPostgresLocalPVExpansionCapacity(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	storageClass kubeStorageClass,
+	targetQuantity resource.Quantity,
+	plans []managedPostgresPVCExpansionPlan,
+) error {
+	if len(plans) == 0 {
+		return nil
+	}
+	requirements := map[string]*managedPostgresLocalPVCapacityRequirement{}
+	for _, plan := range plans {
+		if plan.RequestConverged {
+			// This invocation will not submit another expansion request. The
+			// convergence wait below still verifies PVC and filesystem state.
+			continue
+		}
+		if plan.CapacityParseError != nil || strings.TrimSpace(plan.CapacitySize) == "" {
+			return fmt.Errorf(
+				"postgres PVC %s/%s has no parseable actual capacity before LocalPV expansion",
+				namespace,
+				plan.Name,
+			)
+		}
+		if targetQuantity.Cmp(plan.CapacityQuantity) <= 0 {
+			continue
+		}
+		volumeName := strings.TrimSpace(plan.PVC.Spec.VolumeName)
+		if volumeName == "" {
+			return fmt.Errorf("postgres PVC %s/%s is not bound; cannot verify LocalPV expansion capacity", namespace, plan.Name)
+		}
+		pv, found, err := client.getPersistentVolume(ctx, volumeName)
+		if err != nil {
+			return fmt.Errorf("read postgres PV %s for LocalPV expansion capacity: %w", volumeName, err)
+		}
+		if !found {
+			return fmt.Errorf("postgres PV %s was not found for LocalPV expansion capacity", volumeName)
+		}
+		nodeName := persistentVolumeNodeName(pv)
+		if nodeName == "" {
+			return fmt.Errorf("postgres PV %s has no unambiguous LocalPV node affinity", volumeName)
+		}
+		vgName := managedPostgresLocalPVVolumeGroup(storageClass, pv)
+		if vgName == "" {
+			return fmt.Errorf("postgres PV %s has no LocalPV volume group identity", volumeName)
+		}
+		expansionBytes := targetQuantity.Value() - plan.CapacityQuantity.Value()
+		if expansionBytes <= 0 {
+			continue
+		}
+		key := nodeName + "\x00" + vgName
+		requirement := requirements[key]
+		if requirement == nil {
+			requirement = &managedPostgresLocalPVCapacityRequirement{
+				NodeName: nodeName,
+				VGName:   vgName,
+			}
+			requirements[key] = requirement
+		}
+		if requirement.ExpansionBytes > math.MaxInt64-expansionBytes {
+			return fmt.Errorf("LocalPV expansion byte requirement overflow for node %s volume group %s", nodeName, vgName)
+		}
+		requirement.ExpansionBytes += expansionBytes
+		requirement.PVCNames = append(requirement.PVCNames, plan.Name)
+	}
+	if len(requirements) == 0 {
+		return nil
+	}
+	if s == nil || s.Store == nil {
+		return fmt.Errorf("cannot verify LocalPV capacity without the Fugue state store")
+	}
+	inventories, err := s.Store.ListLocalPVInventories(model.LocalPVInventoryFilter{})
+	if err != nil {
+		return fmt.Errorf("list LocalPV inventory before postgres expansion: %w", err)
+	}
+	now := time.Now().UTC()
+	for _, requirement := range requirements {
+		inventory, found := newestLocalPVInventoryForNodeAndVG(inventories, requirement.NodeName, requirement.VGName)
+		if !found {
+			return fmt.Errorf(
+				"no LocalPV inventory exists for node %s volume group %s; refusing postgres expansion for PVCs %s",
+				requirement.NodeName,
+				requirement.VGName,
+				strings.Join(requirement.PVCNames, ","),
+			)
+		}
+		if !localpvsafety.IsFresh(inventory.ObservedAt, now, localpvsafety.DefaultInventoryTTL) {
+			return fmt.Errorf(
+				"LocalPV inventory for node %s volume group %s is stale (observed_at=%s ttl=%s); refusing postgres expansion",
+				requirement.NodeName,
+				requirement.VGName,
+				inventory.ObservedAt.UTC().Format(time.RFC3339),
+				localpvsafety.DefaultInventoryTTL,
+			)
+		}
+		requiredReserve := localpvsafety.RequiredFreeBytes(inventory.PVSizeBytes)
+		if requirement.ExpansionBytes > math.MaxInt64-requiredReserve {
+			return fmt.Errorf(
+				"LocalPV expansion capacity requirement overflow on node %s volume group %s",
+				requirement.NodeName,
+				requirement.VGName,
+			)
+		}
+		requiredTotal := requirement.ExpansionBytes + requiredReserve
+		if inventory.PVSizeBytes <= 0 ||
+			inventory.PVFreeBytes < 0 ||
+			inventory.PVFreeBytes > inventory.PVSizeBytes ||
+			inventory.PVFreeBytes < requiredTotal {
+			return fmt.Errorf(
+				"insufficient LocalPV capacity on node %s volume group %s for postgres expansion: free_bytes=%d expansion_bytes=%d required_reserve_bytes=%d pv_size_bytes=%d PVCs=%s",
+				requirement.NodeName,
+				requirement.VGName,
+				inventory.PVFreeBytes,
+				requirement.ExpansionBytes,
+				requiredReserve,
+				inventory.PVSizeBytes,
+				strings.Join(requirement.PVCNames, ","),
+			)
+		}
+	}
+	return nil
+}
+
+func managedPostgresLocalPVVolumeGroup(storageClass kubeStorageClass, pv kubePersistentVolume) string {
+	for _, key := range []string{"volgroup", "vgname", "openebs.io/volgroup"} {
+		if value := strings.TrimSpace(storageClass.Parameters[key]); value != "" {
+			return value
+		}
+	}
+	if pv.Spec.CSI != nil {
+		for _, key := range []string{"openebs.io/volgroup", "volgroup", "vgname"} {
+			if value := strings.TrimSpace(pv.Spec.CSI.VolumeAttributes[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func newestLocalPVInventoryForNodeAndVG(
+	inventories []model.LocalPVInventory,
+	nodeName, vgName string,
+) (model.LocalPVInventory, bool) {
+	nodeName = strings.TrimSpace(nodeName)
+	vgName = strings.TrimSpace(vgName)
+	var newest model.LocalPVInventory
+	found := false
+	for _, inventory := range inventories {
+		nodeMatches := strings.TrimSpace(inventory.ClusterNodeName) == nodeName ||
+			strings.TrimSpace(inventory.NodeID) == nodeName
+		if !nodeMatches || strings.TrimSpace(inventory.VGName) != vgName {
+			continue
+		}
+		if !found || inventory.ObservedAt.After(newest.ObservedAt) {
+			newest = inventory
+			found = true
+		}
+	}
+	return newest, found
 }
 
 func (s *Service) resolveDatabaseLocalizeTargetNode(
@@ -1268,10 +1549,11 @@ func (s *Service) waitForManagedPostgresPrimary(
 	}
 }
 
-func (s *Service) waitForManagedPostgresClusterReady(
+func (s *Service) waitForManagedPostgresStorageExpansion(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName, operationID string,
+	target managedPostgresStorageTarget,
 ) error {
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
@@ -1296,9 +1578,21 @@ func (s *Service) waitForManagedPostgresClusterReady(
 			return fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
 		}
 		if managedBackingServiceClusterReady(cluster, found) {
-			return nil
-		}
-		if !found {
+			converged, detail, err := inspectManagedPostgresStorageExpansion(
+				waitCtx,
+				client,
+				namespace,
+				clusterName,
+				target,
+			)
+			if err != nil {
+				return err
+			}
+			if converged {
+				return nil
+			}
+			lastMessage = detail
+		} else if !found {
 			lastMessage = fmt.Sprintf("waiting for cluster %s to exist", clusterName)
 		} else {
 			lastMessage = fmt.Sprintf(
@@ -1318,6 +1612,256 @@ func (s *Service) waitForManagedPostgresClusterReady(
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) waitForManagedPostgresStorageConvergenceForDeployments(
+	ctx context.Context,
+	operationID, namespace string,
+	deployments []runtime.ManagedBackingServiceDeployment,
+) error {
+	if len(deployments) == 0 {
+		return nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes postgres storage convergence client: %w", err)
+	}
+	for _, deployment := range deployments {
+		if deployment.ResourceKind != runtime.CloudNativePGClusterKind || deployment.Suspended {
+			continue
+		}
+		target := managedPostgresStorageTarget{
+			StorageClassName: strings.TrimSpace(deployment.StorageClassName),
+			StorageSize:      strings.TrimSpace(deployment.StorageSize),
+		}
+		if target.isZero() {
+			continue
+		}
+		if err := s.waitForManagedPostgresStorageExpansion(
+			ctx,
+			client,
+			namespace,
+			strings.TrimSpace(deployment.ResourceName),
+			operationID,
+			target,
+		); err != nil {
+			return fmt.Errorf(
+				"verify managed postgres storage convergence for %s/%s: %w",
+				namespace,
+				strings.TrimSpace(deployment.ResourceName),
+				err,
+			)
+		}
+	}
+	return nil
+}
+
+func inspectManagedPostgresStorageExpansion(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	target managedPostgresStorageTarget,
+) (bool, string, error) {
+	targetSize := strings.TrimSpace(target.StorageSize)
+	targetQuantity, err := resource.ParseQuantity(targetSize)
+	if err != nil {
+		return false, "", fmt.Errorf("parse managed postgres storage expansion target %q: %w", targetSize, err)
+	}
+	if targetQuantity.Value() <= 0 {
+		return false, "", fmt.Errorf("managed postgres storage expansion target %q must be positive", targetSize)
+	}
+	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(
+		ctx,
+		namespace,
+		"cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA",
+	)
+	if err != nil {
+		return false, "", fmt.Errorf("list postgres PVCs while verifying expansion %s/%s: %w", namespace, clusterName, err)
+	}
+	if len(pvcNames) == 0 {
+		return false, fmt.Sprintf("waiting for postgres data PVCs for cluster %s", clusterName), nil
+	}
+	pods, err := client.listPodsBySelector(
+		ctx,
+		namespace,
+		fmt.Sprintf(managedPostgresPodSelectorTemplate, strings.TrimSpace(clusterName)),
+	)
+	if err != nil {
+		return false, "", fmt.Errorf("list postgres pods while verifying expansion %s/%s: %w", namespace, clusterName, err)
+	}
+	summaries := map[string]kubeNodeSummary{}
+	summaryLoaded := map[string]bool{}
+	for _, pvcName := range pvcNames {
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+		if err != nil {
+			return false, "", fmt.Errorf("read postgres PVC %s/%s while verifying expansion: %w", namespace, pvcName, err)
+		}
+		if !found {
+			return false, fmt.Sprintf("waiting for postgres PVC %s/%s to exist", namespace, pvcName), nil
+		}
+		if resizeErr := managedPostgresPVCResizeError(pvc); resizeErr != "" {
+			return false, "", fmt.Errorf("postgres PVC %s/%s reports resize error: %s", namespace, pvcName, resizeErr)
+		}
+		requestedSize := strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
+		requestedQuantity, err := resource.ParseQuantity(requestedSize)
+		if err != nil || requestedQuantity.Cmp(targetQuantity) < 0 {
+			return false, fmt.Sprintf(
+				"waiting for postgres PVC %s/%s request to reach %s (current=%s)",
+				namespace,
+				pvcName,
+				targetSize,
+				firstNonEmptyString(requestedSize, "unknown"),
+			), nil
+		}
+		if allocatedSize := strings.TrimSpace(pvc.Status.AllocatedResources["storage"]); allocatedSize != "" {
+			allocatedQuantity, err := resource.ParseQuantity(allocatedSize)
+			if err != nil || allocatedQuantity.Cmp(targetQuantity) < 0 {
+				return false, fmt.Sprintf(
+					"waiting for postgres PVC %s/%s allocated storage to reach %s (current=%s)",
+					namespace,
+					pvcName,
+					targetSize,
+					allocatedSize,
+				), nil
+			}
+		}
+		capacitySize := strings.TrimSpace(pvc.Status.Capacity["storage"])
+		capacityQuantity, err := resource.ParseQuantity(capacitySize)
+		if err != nil || capacityQuantity.Cmp(targetQuantity) < 0 {
+			return false, fmt.Sprintf(
+				"waiting for postgres PVC %s/%s status capacity to reach %s (current=%s)",
+				namespace,
+				pvcName,
+				targetSize,
+				firstNonEmptyString(capacitySize, "unknown"),
+			), nil
+		}
+		filesystemCapacity, found, err := managedPostgresPVCFilesystemCapacity(
+			ctx,
+			client,
+			namespace,
+			pvcName,
+			pods,
+			summaries,
+			summaryLoaded,
+		)
+		if err != nil {
+			return false, "", err
+		}
+		minimumFilesystemCapacity := localpvsafety.MinimumFilesystemCapacityBytes(targetQuantity.Value())
+		if !found || !localpvsafety.FilesystemCapacityConverged(filesystemCapacity, targetQuantity.Value()) {
+			current := "unknown"
+			if found {
+				current = fmt.Sprintf("%d", filesystemCapacity)
+			}
+			return false, fmt.Sprintf(
+				"waiting for postgres PVC %s/%s filesystem capacity to reach at least %d bytes for a %d-byte provisioned volume (current=%s)",
+				namespace,
+				pvcName,
+				minimumFilesystemCapacity,
+				targetQuantity.Value(),
+				current,
+			), nil
+		}
+	}
+	return true, "", nil
+}
+
+func managedPostgresPVCResizeError(pvc kubePersistentVolumeClaim) string {
+	for resourceName, status := range pvc.Status.AllocatedResourceStatuses {
+		normalized := strings.ToLower(strings.TrimSpace(status))
+		if strings.Contains(normalized, "error") || strings.Contains(normalized, "fail") {
+			return fmt.Sprintf("allocatedResourceStatuses[%s]=%s", resourceName, status)
+		}
+	}
+	for _, condition := range pvc.Status.Conditions {
+		if !strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+			continue
+		}
+		kind := strings.ToLower(strings.Join([]string{condition.Type, condition.Reason}, " "))
+		if !strings.Contains(kind, "error") && !strings.Contains(kind, "fail") {
+			continue
+		}
+		detail := strings.TrimSpace(strings.Join([]string{condition.Type, condition.Reason, condition.Message}, ": "))
+		return detail
+	}
+	return ""
+}
+
+func managedPostgresPVCFilesystemCapacity(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, pvcName string,
+	pods []kubePod,
+	summaries map[string]kubeNodeSummary,
+	summaryLoaded map[string]bool,
+) (int64, bool, error) {
+	minimumCapacity := int64(0)
+	capacityObserved := false
+	mountedPodCount := 0
+	for _, pod := range pods {
+		if !kubePodMountsPersistentVolumeClaim(pod, pvcName) {
+			continue
+		}
+		mountedPodCount++
+		nodeName := strings.TrimSpace(pod.Spec.NodeName)
+		if nodeName == "" {
+			return 0, false, nil
+		}
+		if !summaryLoaded[nodeName] {
+			summary, err := client.getNodeSummary(ctx, nodeName)
+			if err != nil {
+				return 0, false, fmt.Errorf("read kubelet stats summary for postgres node %s: %w", nodeName, err)
+			}
+			summaries[nodeName] = summary
+			summaryLoaded[nodeName] = true
+		}
+		summary := summaries[nodeName]
+		podObservationFound := false
+		for _, summaryPod := range summary.Pods {
+			if strings.TrimSpace(summaryPod.PodRef.Name) != strings.TrimSpace(pod.Metadata.Name) ||
+				strings.TrimSpace(summaryPod.PodRef.Namespace) != strings.TrimSpace(namespace) {
+				continue
+			}
+			for _, volume := range summaryPod.Volumes {
+				if volume.PVCRef == nil ||
+					strings.TrimSpace(volume.PVCRef.Name) != strings.TrimSpace(pvcName) {
+					continue
+				}
+				refNamespace := strings.TrimSpace(volume.PVCRef.Namespace)
+				if refNamespace != "" && refNamespace != strings.TrimSpace(namespace) {
+					continue
+				}
+				if volume.CapacityBytes == nil || *volume.CapacityBytes > math.MaxInt64 {
+					return 0, false, nil
+				}
+				capacity := int64(*volume.CapacityBytes)
+				if capacity <= 0 {
+					return 0, false, nil
+				}
+				if !capacityObserved || capacity < minimumCapacity {
+					minimumCapacity = capacity
+				}
+				capacityObserved = true
+				podObservationFound = true
+			}
+		}
+		if !podObservationFound {
+			return 0, false, nil
+		}
+	}
+	return minimumCapacity, mountedPodCount > 0 && capacityObserved, nil
+}
+
+func kubePodMountsPersistentVolumeClaim(pod kubePod, pvcName string) bool {
+	pvcName = strings.TrimSpace(pvcName)
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil &&
+			strings.TrimSpace(volume.PersistentVolumeClaim.ClaimName) == pvcName {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) bindManagedPostgresPendingReplicaOnNode(

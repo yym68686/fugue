@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/appimages"
 	"fugue/internal/config"
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
@@ -174,6 +175,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.ImageCacheInventoryTTL <= 0 {
 		s.Config.ImageCacheInventoryTTL = 2 * time.Hour
 	}
+	if s.Config.LocalPVInventoryInterval <= 0 {
+		s.Config.LocalPVInventoryInterval = localpvsafety.DefaultInventoryInterval
+	}
 	if s.Config.ImageStoreOrphanPruneGracePeriod <= 0 {
 		s.Config.ImageStoreOrphanPruneGracePeriod = 24 * time.Hour
 	}
@@ -315,6 +319,14 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			imageCacheMaintenanceTicker = time.NewTicker(s.Config.ImageCacheInventoryInterval)
 			defer imageCacheMaintenanceTicker.Stop()
 		}
+		var localPVInventoryTicker *time.Ticker
+		if s.Config.LocalPVInventoryEnabled && s.Config.LocalPVInventoryInterval > 0 {
+			if err := s.scheduleLocalPVInventoryReports(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("initial LocalPV inventory scheduling error: %v", err)
+			}
+			localPVInventoryTicker = time.NewTicker(s.Config.LocalPVInventoryInterval)
+			defer localPVInventoryTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -347,6 +359,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			case <-githubTickerChan(imageCacheMaintenanceTicker):
 				if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("image-cache storage maintenance error: %v", err)
+				}
+			case <-githubTickerChan(localPVInventoryTicker):
+				if err := s.scheduleLocalPVInventoryReports(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("LocalPV inventory scheduling error: %v", err)
 				}
 			case <-ticker.C:
 			}
@@ -385,6 +401,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			s.Logger.Printf("initial image-cache storage maintenance error: %v", err)
 		}
 	}
+	if s.Config.LocalPVInventoryEnabled && s.Config.LocalPVInventoryInterval > 0 {
+		if err := s.scheduleLocalPVInventoryReports(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial LocalPV inventory scheduling error: %v", err)
+		}
+	}
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
@@ -415,6 +436,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if s.Config.ImageCacheInventoryInterval > 0 {
 		imageCacheMaintenanceTicker = time.NewTicker(s.Config.ImageCacheInventoryInterval)
 		defer imageCacheMaintenanceTicker.Stop()
+	}
+	var localPVInventoryTicker *time.Ticker
+	if s.Config.LocalPVInventoryEnabled && s.Config.LocalPVInventoryInterval > 0 {
+		localPVInventoryTicker = time.NewTicker(s.Config.LocalPVInventoryInterval)
+		defer localPVInventoryTicker.Stop()
 	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
@@ -473,6 +499,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-githubTickerChan(imageCacheMaintenanceTicker):
 			if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("image-cache storage maintenance error: %v", err)
+			}
+		case <-githubTickerChan(localPVInventoryTicker):
+			if err := s.scheduleLocalPVInventoryReports(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("LocalPV inventory scheduling error: %v", err)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {
@@ -981,6 +1011,27 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 					}
 				}
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
+			}
+			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
+				backingServiceDeployments := runtime.ManagedBackingServiceDeploymentsWithPlacements(
+					app,
+					scheduling,
+					postgresPlacements,
+				)
+				if err := s.waitForManagedPostgresStorageConvergenceForDeployments(
+					ctx,
+					op.ID,
+					runtime.NamespaceForTenant(app.TenantID),
+					backingServiceDeployments,
+				); err != nil {
+					if safeRollout != nil {
+						if rollbackErr := s.abortSafeZeroDowntimeRollout(ctx, op, safeRollout, err.Error()); rollbackErr != nil {
+							return fmt.Errorf("wait for managed postgres storage convergence %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
+						}
+					}
+					return fmt.Errorf("wait for managed postgres storage convergence %s: %w", app.ID, err)
+				}
+				timer.Mark("postgres_storage_convergence")
 			}
 			if err := s.completeSafeZeroDowntimeRollout(ctx, op, safeRollout); err != nil {
 				return err

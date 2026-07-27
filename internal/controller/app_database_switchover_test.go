@@ -8,11 +8,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"fugue/internal/config"
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
@@ -261,14 +267,504 @@ func TestPrepareManagedPostgresInPlaceStorageExpansionPatchesPVCRequest(t *testi
 	}
 
 	err := svc.prepareManagedPostgresInPlaceStorageExpansion(context.Background(), client, namespace, clusterName, managedPostgresStorageTarget{
-		StorageClassName: "fugue-postgres-rwo",
-		StorageSize:      "10Gi",
+		StorageSize: "10Gi",
 	})
 	if err != nil {
 		t.Fatalf("prepare in-place expansion: %v", err)
 	}
 	if patchedStorage != "10Gi" {
 		t.Fatalf("expected pvc storage patch to 10Gi, got %q", patchedStorage)
+	}
+}
+
+func TestPrepareManagedPostgresInPlaceStorageExpansionRequiresPVCForExistingCluster(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/storage.k8s.io/v1/storageclasses/fugue-postgres-rwo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":             map[string]any{"name": "fugue-postgres-rwo"},
+				"allowVolumeExpansion": true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	svc := &Service{Logger: log.New(io.Discard, "", 0)}
+	target := managedPostgresStorageTarget{
+		StorageClassName: "fugue-postgres-rwo",
+		StorageSize:      "40Gi",
+	}
+	err := svc.prepareManagedPostgresInPlaceStorageExpansionForExistingCluster(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		target,
+	)
+	if err == nil || !strings.Contains(err.Error(), "no postgres data PVCs found") {
+		t.Fatalf("expected existing-cluster PVC preflight failure, got %v", err)
+	}
+	if err := svc.prepareManagedPostgresInPlaceStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		target,
+	); err != nil {
+		t.Fatalf("initial cluster without data PVCs must remain eligible for creation: %v", err)
+	}
+	if err := svc.prepareManagedPostgresInPlaceStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		managedPostgresStorageTarget{StorageSize: "40Gi"},
+	); err != nil {
+		t.Fatalf("initial cluster using the default storage class must remain eligible for creation: %v", err)
+	}
+}
+
+func TestPrepareManagedPostgresInPlaceStorageExpansionRejectsInsufficientLocalPVCapacityBeforePatch(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	const pvcName = "demo-postgres-1"
+	const nodeName = "worker-1"
+
+	var patchCount int
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/storage.k8s.io/v1/storageclasses/fugue-postgres-rwo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":             map[string]any{"name": "fugue-postgres-rwo"},
+				"provisioner":          openEBSLocalLVMProvisioner,
+				"parameters":           map[string]string{"volgroup": "fugue-vg"},
+				"allowVolumeExpansion": true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{"metadata": map[string]any{"name": pvcName}}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+				"spec": map[string]any{
+					"volumeName":       "pv-demo-postgres-1",
+					"storageClassName": "fugue-postgres-rwo",
+					"resources": map[string]any{
+						"requests": map[string]any{"storage": "20Gi"},
+					},
+				},
+				"status": map[string]any{
+					"capacity": map[string]any{"storage": "20Gi"},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/persistentvolumes/pv-demo-postgres-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "pv-demo-postgres-1"},
+				"spec": map[string]any{
+					"csi": map[string]any{
+						"driver":           openEBSLocalLVMProvisioner,
+						"volumeAttributes": map[string]string{"openebs.io/volgroup": "fugue-vg"},
+					},
+					"nodeAffinity": map[string]any{
+						"required": map[string]any{
+							"nodeSelectorTerms": []map[string]any{{
+								"matchExpressions": []map[string]any{{
+									"key":      "openebs.io/nodename",
+									"operator": "In",
+									"values":   []string{nodeName},
+								}},
+							}},
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			patchCount++
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": pvcName}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	stateStore, _ := newImageCacheControllerTestStore(t)
+	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+		NodeID:          nodeName,
+		ClusterNodeName: nodeName,
+		VGName:          "fugue-vg",
+		PVSizeBytes:     96 << 30,
+		PVFreeBytes:     9 << 30,
+		ObservedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert LocalPV inventory: %v", err)
+	}
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+	err := svc.prepareManagedPostgresInPlaceStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		managedPostgresStorageTarget{
+			StorageClassName: "fugue-postgres-rwo",
+			StorageSize:      "40Gi",
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "insufficient LocalPV capacity") {
+		t.Fatalf("expected LocalPV capacity rejection, got %v", err)
+	}
+	if patchCount != 0 {
+		t.Fatalf("PVC request was patched before capacity preflight: patches=%d", patchCount)
+	}
+	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+		NodeID:          nodeName,
+		ClusterNodeName: nodeName,
+		VGName:          "fugue-vg",
+		PVSizeBytes:     96 << 30,
+		PVFreeBytes:     32 << 30,
+		ObservedAt:      time.Now().UTC().Add(-2 * localpvsafety.DefaultInventoryTTL),
+	}); err != nil {
+		t.Fatalf("upsert stale LocalPV inventory: %v", err)
+	}
+	err = svc.prepareManagedPostgresInPlaceStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		managedPostgresStorageTarget{
+			StorageClassName: "fugue-postgres-rwo",
+			StorageSize:      "40Gi",
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "is stale") {
+		t.Fatalf("expected stale LocalPV inventory rejection, got %v", err)
+	}
+	if patchCount != 0 {
+		t.Fatalf("PVC request was patched with stale inventory: patches=%d", patchCount)
+	}
+	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+		NodeID:          nodeName,
+		ClusterNodeName: nodeName,
+		VGName:          "fugue-vg",
+		PVSizeBytes:     96 << 30,
+		PVFreeBytes:     32 << 30,
+		ObservedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("refresh LocalPV inventory: %v", err)
+	}
+	if err := svc.prepareManagedPostgresInPlaceStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		managedPostgresStorageTarget{
+			StorageClassName: "fugue-postgres-rwo",
+			StorageSize:      "40Gi",
+		},
+	); err != nil {
+		t.Fatalf("expected expansion preflight to pass with sufficient capacity: %v", err)
+	}
+	if patchCount != 1 {
+		t.Fatalf("expected one PVC patch after successful capacity preflight, got %d", patchCount)
+	}
+}
+
+func TestInspectManagedPostgresStorageExpansionRequiresFilesystemCapacity(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	const pvcName = "demo-postgres-1"
+	const podName = "demo-postgres-1"
+	const replacementPodName = "demo-postgres-1-replacement"
+	const nodeName = "worker-1"
+
+	filesystemCapacity := uint64(28 << 30)
+	replacementFilesystemCapacity := uint64(40 << 30)
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{"metadata": map[string]any{"name": pvcName}}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+				"spec": map[string]any{
+					"resources": map[string]any{"requests": map[string]any{"storage": "40Gi"}},
+				},
+				"status": map[string]any{
+					"capacity":           map[string]any{"storage": "40Gi"},
+					"allocatedResources": map[string]any{"storage": "40Gi"},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{"name": podName},
+						"spec": map[string]any{
+							"nodeName": nodeName,
+							"volumes": []map[string]any{{
+								"name":                  "pgdata",
+								"persistentVolumeClaim": map[string]any{"claimName": pvcName},
+							}},
+						},
+					},
+					{
+						"metadata": map[string]any{"name": replacementPodName},
+						"spec": map[string]any{
+							"nodeName": nodeName,
+							"volumes": []map[string]any{{
+								"name":                  "pgdata",
+								"persistentVolumeClaim": map[string]any{"claimName": pvcName},
+							}},
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/"+nodeName+"/proxy/stats/summary":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pods": []map[string]any{
+					{
+						"podRef": map[string]any{"name": podName, "namespace": namespace},
+						"volume": []map[string]any{{
+							"pvcRef":        map[string]any{"name": pvcName, "namespace": namespace},
+							"capacityBytes": filesystemCapacity,
+						}},
+					},
+					{
+						"podRef": map[string]any{"name": replacementPodName, "namespace": namespace},
+						"volume": []map[string]any{{
+							"pvcRef":        map[string]any{"name": pvcName, "namespace": namespace},
+							"capacityBytes": replacementFilesystemCapacity,
+						}},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	target := managedPostgresStorageTarget{
+		StorageClassName: "fugue-postgres-rwo",
+		StorageSize:      "40Gi",
+	}
+	converged, detail, err := inspectManagedPostgresStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		target,
+	)
+	if err != nil {
+		t.Fatalf("inspect expansion: %v", err)
+	}
+	if converged || !strings.Contains(detail, "filesystem capacity") {
+		t.Fatalf("expected filesystem convergence wait, converged=%t detail=%q", converged, detail)
+	}
+
+	filesystemCapacity = 40 << 30
+	converged, detail, err = inspectManagedPostgresStorageExpansion(
+		context.Background(),
+		client,
+		namespace,
+		clusterName,
+		target,
+	)
+	if err != nil {
+		t.Fatalf("inspect converged expansion: %v", err)
+	}
+	if !converged || detail != "" {
+		t.Fatalf("expected converged expansion, converged=%t detail=%q", converged, detail)
+	}
+}
+
+func TestManagedDeployStorageConvergenceRejectsPVCResizeError(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	const pvcName = "demo-postgres-1"
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/postgresql.cnpg.io/v1/namespaces/"+namespace+"/clusters/"+clusterName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": clusterName},
+				"spec":     map[string]any{"instances": 1},
+				"status": map[string]any{
+					"readyInstances": 1,
+					"currentPrimary": clusterName + "-1",
+					"targetPrimary":  clusterName + "-1",
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{"metadata": map[string]any{"name": pvcName}}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+				"spec": map[string]any{
+					"resources": map[string]any{"requests": map[string]any{"storage": "40Gi"}},
+				},
+				"status": map[string]any{
+					"capacity":                  map[string]any{"storage": "20Gi"},
+					"allocatedResources":        map[string]any{"storage": "40Gi"},
+					"allocatedResourceStatuses": map[string]any{"storage": "NodeResizeError"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: time.Second,
+			PollInterval:             time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(string) (*kubeClient, error) {
+			return client, nil
+		},
+	}
+	err := svc.waitForManagedPostgresStorageConvergenceForDeployments(
+		context.Background(),
+		"",
+		namespace,
+		[]runtimepkg.ManagedBackingServiceDeployment{{
+			ResourceName:     clusterName,
+			ResourceKind:     runtimepkg.CloudNativePGClusterKind,
+			StorageClassName: "fugue-postgres-rwo",
+			StorageSize:      "40Gi",
+		}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "NodeResizeError") {
+		t.Fatalf("managed deploy must reject a PVC resize error before operation completion, got %v", err)
+	}
+
+	err = svc.waitForManagedPostgresStorageConvergenceForDeployments(
+		context.Background(),
+		"",
+		namespace,
+		[]runtimepkg.ManagedBackingServiceDeployment{{
+			ResourceName:     clusterName,
+			ResourceKind:     runtimepkg.CloudNativePGClusterKind,
+			Suspended:        true,
+			StorageClassName: "fugue-postgres-rwo",
+			StorageSize:      "40Gi",
+		}},
+	)
+	if err != nil {
+		t.Fatalf("intentionally suspended postgres must defer mounted filesystem verification: %v", err)
+	}
+}
+
+func TestLocalPVExpansionCapacityDoesNotReserveAlreadyRequestedGrowthTwice(t *testing.T) {
+	t.Parallel()
+
+	target, err := resource.ParseQuantity("40Gi")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	err = (&Service{}).validateManagedPostgresLocalPVExpansionCapacity(
+		context.Background(),
+		nil,
+		"tenant-demo",
+		kubeStorageClass{},
+		target,
+		[]managedPostgresPVCExpansionPlan{{
+			Name:             "demo-postgres-1",
+			RequestConverged: true,
+		}},
+	)
+	if err != nil {
+		t.Fatalf("already-requested expansion must proceed to convergence checks without reserving capacity twice: %v", err)
+	}
+}
+
+func TestManagedPostgresPVCResizeErrorDetectsNodeResizeError(t *testing.T) {
+	t.Parallel()
+
+	pvc := kubePersistentVolumeClaim{}
+	pvc.Status.AllocatedResourceStatuses = map[string]string{"storage": "NodeResizeError"}
+	if got := managedPostgresPVCResizeError(pvc); !strings.Contains(got, "NodeResizeError") {
+		t.Fatalf("resize error = %q", got)
+	}
+}
+
+func TestPersistentVolumeNodeNameRejectsAmbiguousAffinity(t *testing.T) {
+	t.Parallel()
+
+	var pv kubePersistentVolume
+	if err := json.Unmarshal([]byte(`{
+		"spec": {
+			"nodeAffinity": {
+				"required": {
+					"nodeSelectorTerms": [{
+						"matchExpressions": [{
+							"key": "openebs.io/nodename",
+							"operator": "In",
+							"values": ["worker-1", "worker-2"]
+						}]
+					}]
+				}
+			}
+		}
+	}`), &pv); err != nil {
+		t.Fatalf("decode PV fixture: %v", err)
+	}
+	if got := persistentVolumeNodeName(pv); got != "" {
+		t.Fatalf("ambiguous node affinity resolved to %q", got)
 	}
 }
 

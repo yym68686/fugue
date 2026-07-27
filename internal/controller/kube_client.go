@@ -129,7 +129,15 @@ type kubePersistentVolumeClaim struct {
 		} `json:"resources,omitempty"`
 	} `json:"spec"`
 	Status struct {
-		Capacity map[string]string `json:"capacity,omitempty"`
+		Capacity                  map[string]string `json:"capacity,omitempty"`
+		AllocatedResources        map[string]string `json:"allocatedResources,omitempty"`
+		AllocatedResourceStatuses map[string]string `json:"allocatedResourceStatuses,omitempty"`
+		Conditions                []struct {
+			Type    string `json:"type,omitempty"`
+			Status  string `json:"status,omitempty"`
+			Reason  string `json:"reason,omitempty"`
+			Message string `json:"message,omitempty"`
+		} `json:"conditions,omitempty"`
 	} `json:"status,omitempty"`
 }
 
@@ -138,6 +146,10 @@ type kubePersistentVolume struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
+		CSI *struct {
+			Driver           string            `json:"driver,omitempty"`
+			VolumeAttributes map[string]string `json:"volumeAttributes,omitempty"`
+		} `json:"csi,omitempty"`
 		NodeAffinity struct {
 			Required *struct {
 				NodeSelectorTerms []struct {
@@ -156,7 +168,31 @@ type kubeStorageClass struct {
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
-	AllowVolumeExpansion *bool `json:"allowVolumeExpansion,omitempty"`
+	Provisioner          string            `json:"provisioner,omitempty"`
+	Parameters           map[string]string `json:"parameters,omitempty"`
+	AllowVolumeExpansion *bool             `json:"allowVolumeExpansion,omitempty"`
+}
+
+type kubeNodeSummary struct {
+	Pods []kubeNodeSummaryPod `json:"pods,omitempty"`
+}
+
+type kubeNodeSummaryPod struct {
+	PodRef struct {
+		Name      string `json:"name,omitempty"`
+		Namespace string `json:"namespace,omitempty"`
+	} `json:"podRef"`
+	Volumes []kubeNodeSummaryVolume `json:"volume,omitempty"`
+}
+
+type kubeNodeSummaryVolume struct {
+	PVCRef *struct {
+		Name      string `json:"name,omitempty"`
+		Namespace string `json:"namespace,omitempty"`
+	} `json:"pvcRef,omitempty"`
+	AvailableBytes *uint64 `json:"availableBytes,omitempty"`
+	CapacityBytes  *uint64 `json:"capacityBytes,omitempty"`
+	UsedBytes      *uint64 `json:"usedBytes,omitempty"`
 }
 
 type kubeJobList struct {
@@ -671,6 +707,18 @@ func (c *kubeClient) getStorageClass(ctx context.Context, name string) (kubeStor
 		return kubeStorageClass{}, false, err
 	}
 	return storageClass, true, nil
+}
+
+func (c *kubeClient) getNodeSummary(ctx context.Context, nodeName string) (kubeNodeSummary, error) {
+	var summary kubeNodeSummary
+	_, err := c.doJSON(
+		ctx,
+		http.MethodGet,
+		"/api/v1/nodes/"+url.PathEscape(strings.TrimSpace(nodeName))+"/proxy/stats/summary",
+		nil,
+		&summary,
+	)
+	return summary, err
 }
 
 func (c *kubeClient) doJSON(ctx context.Context, method, apiPath string, body any, out any) (int, error) {

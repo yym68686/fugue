@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -219,6 +220,229 @@ func TestRobustnessStatusDetectsManagedPostgresRuntimeNotReady(t *testing.T) {
 	mustDecodeJSON(t, planRecorder, &planResponse)
 	if !robustnessPlanHasCommand(planResponse.Plan, "fugue app db configure "+dbApp.ID+" --storage-size <larger-than-current> --wait") {
 		t.Fatalf("expected storage expansion command in repair plan, got %+v", planResponse.Plan.Actions)
+	}
+}
+
+func TestRobustnessDefersMountedFilesystemChecksForSuspendedPostgres(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	configureRobustnessTestPreflight(t, server)
+	raiseManagedTestCap(t, storeState, app.TenantID)
+
+	dbApp, err := storeState.CreateApp(app.TenantID, app.ProjectID, "suspended-database-app", "", model.AppSpec{
+		Image:     "ghcr.io/example/suspended-database-app:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			RuntimeID:        "runtime_managed_shared",
+			Database:         "app",
+			User:             "app",
+			Password:         "postgres-password-123",
+			ServiceName:      "suspended-database-app-postgres",
+			StorageSize:      "20Gi",
+			StorageClassName: "fugue-postgres-rwo",
+			Instances:        1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create suspended postgres app: %v", err)
+	}
+	if len(dbApp.BackingServices) != 1 {
+		t.Fatalf("expected one suspended postgres service, got %+v", dbApp.BackingServices)
+	}
+	serviceID := dbApp.BackingServices[0].ID
+	zero := 0
+	scaleDown, err := storeState.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeScale,
+		AppID:           dbApp.ID,
+		DesiredReplicas: &zero,
+	})
+	if err != nil {
+		t.Fatalf("create scale-down operation: %v", err)
+	}
+	if _, err := storeState.CompleteManagedOperation(scaleDown.ID, "", "disabled"); err != nil {
+		t.Fatalf("complete scale-down operation: %v", err)
+	}
+	suspend, err := storeState.CreateOperation(model.Operation{
+		TenantID:  app.TenantID,
+		Type:      model.OperationTypeDatabaseSuspend,
+		AppID:     dbApp.ID,
+		ServiceID: serviceID,
+	})
+	if err != nil {
+		t.Fatalf("create postgres suspension operation: %v", err)
+	}
+	if _, err := storeState.CompleteManagedOperation(suspend.ID, "", "suspended"); err != nil {
+		t.Fatalf("complete postgres suspension operation: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/robustness/status", platformAdminKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response model.RobustnessStatusResponse
+	mustDecodeJSON(t, recorder, &response)
+
+	for _, checkName := range []string{"managed_postgres_storage_floor", "managed_postgres_storage_headroom"} {
+		var matched *model.RobustnessCheck
+		for index := range response.Status.Checks {
+			check := &response.Status.Checks[index]
+			if check.Name == checkName && check.Evidence["service_id"] == serviceID {
+				matched = check
+				break
+			}
+		}
+		if matched == nil {
+			t.Fatalf("expected suspended postgres check %q", checkName)
+		}
+		if !matched.Pass || matched.Evidence["filesystem_observation_required"] != "false" {
+			t.Fatalf("suspended postgres check must explicitly defer mounted filesystem observation: %+v", matched)
+		}
+		if checkName == "managed_postgres_storage_headroom" && matched.Severity != model.RobustnessSeverityInfo {
+			t.Fatalf("deferred suspended headroom check must be informational: %+v", matched)
+		}
+	}
+	for _, incident := range response.Status.Incidents {
+		if incident.Evidence["service_id"] == serviceID &&
+			(incident.CheckName == "managed_postgres_storage_floor" ||
+				incident.CheckName == "managed_postgres_storage_headroom") {
+			t.Fatalf("intentional suspension must not create a mounted filesystem incident: %+v", incident)
+		}
+	}
+}
+
+func TestEvaluateManagedPostgresStorageHealthUsesActualCapacityAndUsage(t *testing.T) {
+	t.Parallel()
+
+	used := int64(20 << 30)
+	capacity := int64(28 << 30)
+	available := int64(6 << 30)
+	health := evaluateManagedPostgresStorageHealth("40Gi", 1, []persistentVolumeObservation{{
+		ClaimKey:       "tenant/demo-postgres-1",
+		UsedBytes:      &used,
+		CapacityBytes:  &capacity,
+		AvailableBytes: &available,
+	}})
+	if !health.CapacityObserved || health.CapacityConverged {
+		t.Fatalf("expected actual 28Gi capacity not to satisfy configured 40Gi: %+v", health)
+	}
+	if !health.UsageObserved || !health.HeadroomHealthy {
+		t.Fatalf("expected recovered 20/28Gi filesystem to retain short-term headroom: %+v", health)
+	}
+	firstCapacity := int64(44 << 30)
+	firstUsed := int64(10 << 30)
+	firstAvailable := int64(32 << 30)
+	secondCapacity := int64(32 << 30)
+	secondUsed := int64(10 << 30)
+	secondAvailable := int64(20 << 30)
+	health = evaluateManagedPostgresStorageHealth("40Gi", 2, []persistentVolumeObservation{
+		{
+			ClaimKey:       "tenant/demo-postgres-1",
+			UsedBytes:      &firstUsed,
+			CapacityBytes:  &firstCapacity,
+			AvailableBytes: &firstAvailable,
+		},
+		{
+			ClaimKey:       "tenant/demo-postgres-2",
+			UsedBytes:      &secondUsed,
+			CapacityBytes:  &secondCapacity,
+			AvailableBytes: &secondAvailable,
+		},
+	})
+	if health.CapacityConverged ||
+		health.ProvisionedBytes != 80<<30 ||
+		health.RequiredCapacityBytes != 2*localpvsafety.MinimumFilesystemCapacityBytes(40<<30) ||
+		len(health.CapacityUnhealthyClaims) != 1 ||
+		health.CapacityUnhealthyClaims[0] != "tenant/demo-postgres-2" {
+		t.Fatalf("aggregate capacity must not hide one undersized instance volume: %+v", health)
+	}
+
+	capacity = 40 << 30
+	used = 10 << 30
+	available = 1 << 30
+	health = evaluateManagedPostgresStorageHealth("40Gi", 1, []persistentVolumeObservation{{
+		ClaimKey:       "tenant/demo-postgres-1",
+		UsedBytes:      &used,
+		CapacityBytes:  &capacity,
+		AvailableBytes: &available,
+	}})
+	if !health.CapacityConverged || !health.UsageObserved || health.HeadroomHealthy {
+		t.Fatalf("actual one GiB available must fail headroom even at low reported usage: %+v", health)
+	}
+
+	capacity = 28 << 30
+	used = capacity
+	available = 0
+	health = evaluateManagedPostgresStorageHealth("20Gi", 1, []persistentVolumeObservation{{
+		ClaimKey:       "tenant/demo-postgres-1",
+		UsedBytes:      &used,
+		CapacityBytes:  &capacity,
+		AvailableBytes: &available,
+	}})
+	if !health.CapacityConverged || health.HeadroomHealthy {
+		t.Fatalf("expected a converged but full filesystem to fail headroom: %+v", health)
+	}
+
+	health = evaluateManagedPostgresStorageHealth("20Gi", 1, nil)
+	if health.CapacityObserved || health.CapacityConverged || health.HeadroomHealthy {
+		t.Fatalf("unknown actual capacity must fail closed: %+v", health)
+	}
+
+	health = evaluateManagedPostgresStorageHealth("20Gi", 1, []persistentVolumeObservation{{
+		ClaimKey:      "tenant/demo-postgres-1",
+		UsedBytes:     &used,
+		CapacityBytes: &capacity,
+	}})
+	if !health.CapacityConverged || health.UsageObserved || health.HeadroomHealthy {
+		t.Fatalf("missing per-volume available bytes must fail headroom closed: %+v", health)
+	}
+}
+
+func TestRobustnessLocalPVChecksFailOnStaleAndLowCapacityInventory(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 27, 8, 0, 0, 0, time.UTC)
+	checks := robustnessLocalPVInventoryChecks(now, model.LocalPVInventory{
+		ClusterNodeName: "worker-1",
+		VGName:          "fugue-vg",
+		PVSizeBytes:     96 << 30,
+		PVFreeBytes:     1 << 30,
+		ObservedAt:      now.Add(-25 * 24 * time.Hour),
+	}, true, "worker-1", "updater-1")
+	if len(checks) != 2 {
+		t.Fatalf("expected freshness and capacity checks, got %+v", checks)
+	}
+	if checks[0].Name != "localpv_inventory_freshness" || checks[0].Pass {
+		t.Fatalf("expected stale inventory failure, got %+v", checks[0])
+	}
+	if checks[1].Name != "localpv_capacity_headroom" || checks[1].Pass {
+		t.Fatalf("expected LocalPV headroom failure, got %+v", checks[1])
+	}
+	incidents := robustnessIncidentsFromChecks(checks, now)
+	if len(incidents) != 2 ||
+		incidents[0].CheckName == "" ||
+		incidents[1].CheckName == "" {
+		t.Fatalf("expected stale and low-capacity LocalPV incidents, got %+v", incidents)
+	}
+}
+
+func TestRobustnessLocalPVChecksDoNotInventCapacityForNodeWithoutLocalPV(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 27, 8, 0, 0, 0, time.UTC)
+	checks := robustnessLocalPVInventoryChecks(now, model.LocalPVInventory{
+		ClusterNodeName: "edge-without-localpv",
+		VGName:          "fugue-vg",
+		ObservedAt:      now,
+		UnsafeReasons:   []string{"image_path_missing", "lvm_tools_unavailable_or_vg_missing"},
+	}, true, "edge-without-localpv", "updater-edge")
+	if len(checks) != 1 ||
+		checks[0].Name != "localpv_inventory_freshness" ||
+		!checks[0].Pass {
+		t.Fatalf("an intentional no-LocalPV node should report freshness without a fabricated capacity incident: %+v", checks)
 	}
 }
 

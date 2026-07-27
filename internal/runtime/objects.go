@@ -1109,6 +1109,8 @@ type ManagedBackingServiceDeployment struct {
 	RuntimeKey       string
 	DesiredInstances int
 	Suspended        bool
+	StorageClassName string
+	StorageSize      string
 }
 
 func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
@@ -1142,6 +1144,8 @@ func ManagedBackingServiceDeploymentsWithPlacements(app model.App, scheduling Sc
 			RuntimeKey:       managedDeploymentRuntimeKey(object),
 			DesiredInstances: resource.spec.Instances,
 			Suspended:        resource.spec.Suspended,
+			StorageClassName: strings.TrimSpace(resource.spec.StorageClassName),
+			StorageSize:      strings.TrimSpace(resource.spec.StorageSize),
 		})
 	}
 	return deployments

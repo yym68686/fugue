@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/observability"
 )
@@ -563,6 +564,10 @@ func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
 	if inventories, err := s.Store.ListLocalPVInventories(model.LocalPVInventoryFilter{}); err == nil {
 		observability.WriteMetricHeader(w, "fugue_localpv_inventory_age_seconds", "Age of the latest LVM LocalPV inventory report.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_backing_file_bytes", "LVM LocalPV backing file size reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_pv_size_bytes", "Total bytes in the LocalPV volume group reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_pv_free_bytes", "Free bytes in the LocalPV volume group reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_inventory_fresh", "Whether the LocalPV inventory is within the accepted freshness window.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_capacity_headroom", "Whether the LocalPV volume group retains its minimum free-space reserve.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_active_lv_count", "Active LVM LV count reported by each node.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_bound_pv_count", "Bound Kubernetes PV count reported by each node.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_decommission_eligible", "Whether the latest LVM LocalPV inventory is eligible for explicit decommission.", "gauge")
@@ -572,14 +577,33 @@ func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
 			age := float64(0)
 			if !inventory.ObservedAt.IsZero() {
 				age = now.Sub(inventory.ObservedAt).Seconds()
+				if age < 0 {
+					age = 0
+				}
 			}
+			fresh := localpvsafety.IsFresh(inventory.ObservedAt, now, localpvsafety.DefaultInventoryTTL)
 			observability.WriteMetricSample(w, "fugue_localpv_inventory_age_seconds", labels, age)
 			observability.WriteMetricSample(w, "fugue_localpv_backing_file_bytes", labels, float64(inventory.ImageSizeBytes))
+			observability.WriteMetricSample(w, "fugue_localpv_inventory_fresh", labels, boolGauge(fresh))
+			if controllerLocalPVInventoryHasStorage(inventory) {
+				observability.WriteMetricSample(w, "fugue_localpv_pv_size_bytes", labels, float64(inventory.PVSizeBytes))
+				observability.WriteMetricSample(w, "fugue_localpv_pv_free_bytes", labels, float64(inventory.PVFreeBytes))
+				observability.WriteMetricSample(w, "fugue_localpv_capacity_headroom", labels, boolGauge(fresh && localpvsafety.HasCapacityHeadroom(inventory.PVSizeBytes, inventory.PVFreeBytes)))
+			}
 			observability.WriteMetricSample(w, "fugue_localpv_active_lv_count", labels, float64(inventory.ActiveLVCount))
 			observability.WriteMetricSample(w, "fugue_localpv_bound_pv_count", labels, float64(inventory.BoundPVCount))
-			observability.WriteMetricSample(w, "fugue_localpv_decommission_eligible", labels, boolGauge(inventory.SafeToDecommission))
+			observability.WriteMetricSample(w, "fugue_localpv_decommission_eligible", labels, boolGauge(fresh && inventory.SafeToDecommission))
 		}
 	}
+}
+
+func controllerLocalPVInventoryHasStorage(inventory model.LocalPVInventory) bool {
+	return inventory.PVSizeBytes > 0 ||
+		inventory.ImageSizeBytes > 0 ||
+		strings.TrimSpace(inventory.LoopDevice) != "" ||
+		inventory.LVCount > 0 ||
+		inventory.ActiveLVCount > 0 ||
+		inventory.BoundPVCount > 0
 }
 
 func latestImageCachePrunePlansByMetricLabels(plans []model.ImageCachePrunePlan) []model.ImageCachePrunePlan {

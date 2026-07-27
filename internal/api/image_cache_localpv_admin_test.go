@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -259,6 +260,31 @@ func TestLocalPVInventoryAPIRecomputesEligibility(t *testing.T) {
 	mustDecodeJSON(t, list, &response)
 	if len(response.Inventories) != 1 || response.Inventories[0].SafeToDecommission || response.Inventories[0].BoundPVCount != 1 {
 		t.Fatalf("expected unsafe LocalPV inventory, got %+v", response.Inventories)
+	}
+
+	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+		NodeID:          "machine-stale",
+		ClusterNodeName: "worker-stale",
+		VGName:          "fugue-vg",
+		ImagePath:       "/var/lib/fugue/lvm-localpv/fugue-vg.img",
+		LoopDevice:      "/dev/loop9",
+		LoopBackingFile: "/var/lib/fugue/lvm-localpv/fugue-vg.img",
+		ObservedAt:      time.Now().UTC().Add(-2 * localpvsafety.DefaultInventoryTTL),
+	}); err != nil {
+		t.Fatalf("upsert stale LocalPV inventory: %v", err)
+	}
+	staleList := performFormRequest(t, server, http.MethodGet, "/v1/admin/localpv/inventory?cluster_node_name=worker-stale", adminSecret, nil)
+	if staleList.Code != http.StatusOK {
+		t.Fatalf("list stale localpv status=%d body=%s", staleList.Code, staleList.Body.String())
+	}
+	var staleResponse struct {
+		Inventories []model.LocalPVInventory `json:"inventories"`
+	}
+	mustDecodeJSON(t, staleList, &staleResponse)
+	if len(staleResponse.Inventories) != 1 ||
+		staleResponse.Inventories[0].SafeToDecommission ||
+		!containsString(staleResponse.Inventories[0].UnsafeReasons, "inventory_stale") {
+		t.Fatalf("stale LocalPV inventory must not remain eligible for decommission: %+v", staleResponse.Inventories)
 	}
 }
 

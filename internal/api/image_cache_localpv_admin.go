@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/imagecachekeys"
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -284,6 +285,16 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 	}
 	if inventories == nil {
 		inventories = []model.LocalPVInventory{}
+	}
+	now := time.Now().UTC()
+	for index := range inventories {
+		safe, reasons := evaluateLocalPVDecommissionSafety(inventories[index])
+		if !localpvsafety.IsFresh(inventories[index].ObservedAt, now, localpvsafety.DefaultInventoryTTL) {
+			safe = false
+			reasons = uniqueNonEmptyStrings(append(reasons, "inventory_stale"))
+		}
+		inventories[index].SafeToDecommission = safe
+		inventories[index].UnsafeReasons = reasons
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"inventories": inventories})
 }

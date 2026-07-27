@@ -230,6 +230,23 @@ func TestControllerFromEnvDefaultsImageCacheOrphanPruneToLimitedDelete(t *testin
 	}
 }
 
+func TestControllerFromEnvLocalPVInventorySchedule(t *testing.T) {
+	t.Setenv("FUGUE_LOCALPV_INVENTORY_ENABLED", "")
+	t.Setenv("FUGUE_LOCALPV_INVENTORY_INTERVAL", "")
+
+	cfg := ControllerFromEnv()
+	if !cfg.LocalPVInventoryEnabled || cfg.LocalPVInventoryInterval != 15*time.Minute {
+		t.Fatalf("expected LocalPV inventory to default to enabled every 15m, got enabled=%t interval=%s", cfg.LocalPVInventoryEnabled, cfg.LocalPVInventoryInterval)
+	}
+
+	t.Setenv("FUGUE_LOCALPV_INVENTORY_ENABLED", "false")
+	t.Setenv("FUGUE_LOCALPV_INVENTORY_INTERVAL", "5m")
+	cfg = ControllerFromEnv()
+	if cfg.LocalPVInventoryEnabled || cfg.LocalPVInventoryInterval != 5*time.Minute {
+		t.Fatalf("expected LocalPV inventory env override, got enabled=%t interval=%s", cfg.LocalPVInventoryEnabled, cfg.LocalPVInventoryInterval)
+	}
+}
+
 func TestControllerFromEnvManagedAppRolloutTimeout(t *testing.T) {
 	t.Setenv("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", "")
 

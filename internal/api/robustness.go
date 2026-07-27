@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/store"
 
@@ -217,11 +220,16 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, backupChecks...)
-	backingServiceChecks, err := s.robustnessBackingServiceChecks()
+	backingServiceChecks, err := s.robustnessBackingServiceChecks(r.Context())
 	if err != nil {
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, backingServiceChecks...)
+	localPVChecks, err := s.robustnessLocalPVChecks(generatedAt)
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, localPVChecks...)
 	operationChecks, err := s.robustnessOperationChecks()
 	if err != nil {
 		return model.RobustnessStatus{}, err
@@ -777,11 +785,12 @@ func robustnessTimeValue(value *time.Time) string {
 	return value.UTC().Format(time.RFC3339)
 }
 
-func (s *Server) robustnessBackingServiceChecks() ([]model.RobustnessCheck, error) {
+func (s *Server) robustnessBackingServiceChecks(ctx context.Context) ([]model.RobustnessCheck, error) {
 	services, err := s.store.ListBackingServices("", true)
 	if err != nil {
 		return nil, err
 	}
+	usageOverlay := s.currentResourceUsageOverlay(ctx, nil, services)
 	checks := []model.RobustnessCheck{{
 		Name:     "managed_postgres_inventory",
 		Pass:     true,
@@ -819,25 +828,494 @@ func (s *Server) robustnessBackingServiceChecks() ([]model.RobustnessCheck, erro
 		storageSize := strings.TrimSpace(postgres.StorageSize)
 		storageGiB, storageOK := robustnessStorageGiB(storageSize)
 		storageFloorGiB := model.DefaultManagedPostgresStorageGibibytes
-		storagePass := storageOK && storageGiB >= storageFloorGiB
+		storageHealth := evaluateManagedPostgresStorageHealth(
+			storageSize,
+			postgres.Instances,
+			usageOverlay.servicePersistentVolumes[strings.TrimSpace(service.ID)],
+		)
+		storageObservationRequired := !postgres.Suspended
+		storagePass := storageOK &&
+			storageGiB >= storageFloorGiB &&
+			(!storageObservationRequired ||
+				(storageHealth.CapacityObserved && storageHealth.CapacityConverged))
+		storageExpected := fmt.Sprintf(
+			"actual managed postgres filesystem capacity is at least %d percent of max(storage_size, %dGi) after filesystem formatting overhead",
+			localpvsafety.MinimumFilesystemPercent,
+			storageFloorGiB,
+		)
+		if !storageObservationRequired {
+			storageExpected = fmt.Sprintf("configured managed postgres storage_size is at least %dGi; mounted filesystem verification resumes when the service is active", storageFloorGiB)
+		}
 		storageCheck := model.RobustnessCheck{
-			Name:       "managed_postgres_storage_floor",
-			Pass:       storagePass,
-			Severity:   model.RobustnessSeverityWarning,
-			Subject:    subject,
-			Expected:   fmt.Sprintf("managed postgres storage_size is at least %dGi", storageFloorGiB),
-			Observed:   fmt.Sprintf("storage_size=%s parsed_gib=%d", firstNonEmpty(storageSize, "unset"), storageGiB),
-			Evidence:   map[string]string{"guardian": "node-health", "service_id": strings.TrimSpace(service.ID), "owner_app_id": ownerAppID, "runtime_id": strings.TrimSpace(postgres.RuntimeID), "storage_size": storageSize, "storage_floor_gib": fmt.Sprintf("%d", storageFloorGiB)},
+			Name:     "managed_postgres_storage_floor",
+			Pass:     storagePass,
+			Severity: model.RobustnessSeverityWarning,
+			Subject:  subject,
+			Expected: storageExpected,
+			Observed: fmt.Sprintf(
+				"storage_size=%s parsed_gib=%d suspended=%t observation_required=%t actual_capacity_bytes=%s provisioned_capacity_bytes=%d required_filesystem_capacity_bytes=%d volumes=%d/%d",
+				firstNonEmpty(storageSize, "unset"),
+				storageGiB,
+				postgres.Suspended,
+				storageObservationRequired,
+				robustnessOptionalInt64(storageHealth.CapacityBytes),
+				storageHealth.ProvisionedBytes,
+				storageHealth.RequiredCapacityBytes,
+				storageHealth.VolumeCount,
+				storageHealth.ExpectedVolumeCount,
+			),
+			Evidence: map[string]string{
+				"guardian":                           "node-health",
+				"service_id":                         strings.TrimSpace(service.ID),
+				"owner_app_id":                       ownerAppID,
+				"runtime_id":                         strings.TrimSpace(postgres.RuntimeID),
+				"storage_size":                       storageSize,
+				"storage_floor_gib":                  fmt.Sprintf("%d", storageFloorGiB),
+				"suspended":                          fmt.Sprintf("%t", postgres.Suspended),
+				"filesystem_observation_required":    fmt.Sprintf("%t", storageObservationRequired),
+				"actual_capacity_bytes":              robustnessOptionalInt64(storageHealth.CapacityBytes),
+				"provisioned_capacity_bytes":         fmt.Sprintf("%d", storageHealth.ProvisionedBytes),
+				"required_filesystem_capacity_bytes": fmt.Sprintf("%d", storageHealth.RequiredCapacityBytes),
+				"required_filesystem_capacity_per_volume_bytes": fmt.Sprintf("%d", storageHealth.RequiredCapacityPerVolumeBytes),
+				"volume_count":            fmt.Sprintf("%d", storageHealth.VolumeCount),
+				"expected_volume_count":   fmt.Sprintf("%d", storageHealth.ExpectedVolumeCount),
+				"unhealthy_volume_claims": strings.Join(storageHealth.CapacityUnhealthyClaims, ","),
+			},
 			RepairHint: "expand small managed Postgres volumes through Fugue before heavy write traffic or long WAL bursts",
 		}
 		if !storageOK {
 			storageCheck.Message = "managed Postgres storage size is missing or could not be parsed"
-		} else if !storagePass {
+		} else if storageGiB < storageFloorGiB {
 			storageCheck.Message = "managed Postgres storage size is below the default safety floor"
+		} else if !storageObservationRequired {
+			storageCheck.Message = "mounted filesystem capacity verification is deferred while managed Postgres is intentionally suspended"
+		} else if storageHealth.VolumeCount != storageHealth.ExpectedVolumeCount {
+			storageCheck.Message = "managed Postgres mounted data volume count does not match the configured instance count"
+		} else if !storageHealth.CapacityObserved {
+			storageCheck.Message = "managed Postgres actual filesystem capacity is unavailable"
+		} else if !storageHealth.CapacityConverged {
+			storageCheck.Message = "managed Postgres actual filesystem capacity has not converged to the configured storage size"
 		}
 		checks = append(checks, storageCheck)
+
+		headroomPass := storageHealth.HeadroomHealthy
+		headroomSeverity := model.RobustnessSeverityDegraded
+		headroomExpected := "managed postgres filesystem usage is below 80 percent with at least 2Gi free per instance"
+		headroomMessage := ""
+		if !storageObservationRequired {
+			headroomPass = true
+			headroomSeverity = model.RobustnessSeverityInfo
+			headroomExpected = "managed postgres filesystem headroom is verified whenever the intentionally suspended service is mounted"
+			headroomMessage = "filesystem headroom verification is deferred while managed Postgres is intentionally suspended"
+		}
+		headroomCheck := model.RobustnessCheck{
+			Name:     "managed_postgres_storage_headroom",
+			Pass:     headroomPass,
+			Severity: headroomSeverity,
+			Subject:  subject,
+			Expected: headroomExpected,
+			Observed: fmt.Sprintf(
+				"suspended=%t observation_required=%t used_bytes=%s capacity_bytes=%s available_bytes=%s required_free_bytes=%d max_used_percent=%s volumes=%d/%d",
+				postgres.Suspended,
+				storageObservationRequired,
+				robustnessOptionalInt64(storageHealth.UsedBytes),
+				robustnessOptionalInt64(storageHealth.CapacityBytes),
+				robustnessOptionalInt64(storageHealth.AvailableBytes),
+				storageHealth.RequiredFreeBytes,
+				storageHealth.UsedPercent,
+				storageHealth.VolumeCount,
+				storageHealth.ExpectedVolumeCount,
+			),
+			Evidence: map[string]string{
+				"guardian":                        "node-health",
+				"service_id":                      strings.TrimSpace(service.ID),
+				"owner_app_id":                    ownerAppID,
+				"runtime_id":                      strings.TrimSpace(postgres.RuntimeID),
+				"suspended":                       fmt.Sprintf("%t", postgres.Suspended),
+				"filesystem_observation_required": fmt.Sprintf("%t", storageObservationRequired),
+				"used_bytes":                      robustnessOptionalInt64(storageHealth.UsedBytes),
+				"actual_capacity_bytes":           robustnessOptionalInt64(storageHealth.CapacityBytes),
+				"available_bytes":                 robustnessOptionalInt64(storageHealth.AvailableBytes),
+				"required_free_bytes":             fmt.Sprintf("%d", storageHealth.RequiredFreeBytes),
+				"required_free_per_volume_bytes":  fmt.Sprintf("%d", storageHealth.RequiredFreePerVolumeBytes),
+				"used_percent":                    storageHealth.UsedPercent,
+				"volume_count":                    fmt.Sprintf("%d", storageHealth.VolumeCount),
+				"expected_volume_count":           fmt.Sprintf("%d", storageHealth.ExpectedVolumeCount),
+				"unhealthy_volume_claims":         strings.Join(storageHealth.HeadroomUnhealthyClaims, ","),
+			},
+			RepairHint: "inspect database growth and retention, then expand storage before available bytes reach the WAL safety margin",
+			Message:    headroomMessage,
+		}
+		if !storageObservationRequired {
+			// The service has no mounted database filesystem by design.
+		} else if storageHealth.VolumeCount != storageHealth.ExpectedVolumeCount {
+			headroomCheck.Message = "managed Postgres mounted data volume count does not match the configured instance count"
+		} else if !storageHealth.UsageObserved {
+			headroomCheck.Message = "managed Postgres filesystem usage or capacity is unavailable"
+		} else if !storageHealth.HeadroomHealthy {
+			headroomCheck.Message = "managed Postgres filesystem has insufficient free capacity"
+		}
+		checks = append(checks, headroomCheck)
 	}
 	return checks, nil
+}
+
+const (
+	managedPostgresMinimumFreeBytes = int64(2 << 30)
+	managedPostgresMaximumUsedPct   = int64(80)
+)
+
+type managedPostgresStorageHealth struct {
+	CapacityObserved               bool
+	UsageObserved                  bool
+	CapacityConverged              bool
+	HeadroomHealthy                bool
+	VolumeCount                    int
+	ExpectedVolumeCount            int
+	ProvisionedBytes               int64
+	RequiredCapacityBytes          int64
+	RequiredCapacityPerVolumeBytes int64
+	RequiredFreeBytes              int64
+	RequiredFreePerVolumeBytes     int64
+	UsedBytes                      *int64
+	CapacityBytes                  *int64
+	AvailableBytes                 *int64
+	UsedPercent                    string
+	CapacityUnhealthyClaims        []string
+	HeadroomUnhealthyClaims        []string
+}
+
+func evaluateManagedPostgresStorageHealth(
+	configuredSize string,
+	instances int,
+	volumes []persistentVolumeObservation,
+) managedPostgresStorageHealth {
+	result := managedPostgresStorageHealth{UsedPercent: "unknown"}
+	requiredPerInstance := int64(model.DefaultManagedPostgresStorageGibibytes) << 30
+	if quantity, err := resource.ParseQuantity(strings.TrimSpace(configuredSize)); err == nil && quantity.Value() > requiredPerInstance {
+		requiredPerInstance = quantity.Value()
+	}
+	if instances < 1 {
+		instances = 1
+	}
+	result.VolumeCount = len(volumes)
+	result.ExpectedVolumeCount = instances
+	if requiredPerInstance > math.MaxInt64/int64(instances) {
+		result.ProvisionedBytes = math.MaxInt64
+	} else {
+		result.ProvisionedBytes = requiredPerInstance * int64(instances)
+	}
+	result.RequiredCapacityPerVolumeBytes = localpvsafety.MinimumFilesystemCapacityBytes(requiredPerInstance)
+	if result.RequiredCapacityPerVolumeBytes > math.MaxInt64/int64(instances) {
+		result.RequiredCapacityBytes = math.MaxInt64
+	} else {
+		result.RequiredCapacityBytes = result.RequiredCapacityPerVolumeBytes * int64(instances)
+	}
+	result.RequiredFreePerVolumeBytes = managedPostgresMinimumFreeBytes
+	result.RequiredFreeBytes = result.RequiredFreePerVolumeBytes
+	if result.RequiredFreeBytes <= math.MaxInt64/int64(instances) {
+		result.RequiredFreeBytes *= int64(instances)
+	} else {
+		result.RequiredFreeBytes = math.MaxInt64
+	}
+	if len(volumes) != instances {
+		return result
+	}
+
+	capacityTotal := int64(0)
+	usedTotal := int64(0)
+	availableTotal := int64(0)
+	capacityObserved := true
+	capacityConverged := true
+	usageObserved := true
+	headroomHealthy := true
+	maxUsedPercent := float64(0)
+	hasUsedPercent := false
+	for _, volume := range volumes {
+		claim := firstNonEmpty(strings.TrimSpace(volume.ClaimKey), "unknown")
+		capacityHealthy := true
+		headroomVolumeHealthy := true
+		if volume.CapacityBytes == nil ||
+			*volume.CapacityBytes <= 0 ||
+			capacityTotal > math.MaxInt64-*volume.CapacityBytes {
+			capacityObserved = false
+			capacityConverged = false
+			usageObserved = false
+			headroomHealthy = false
+			capacityHealthy = false
+			headroomVolumeHealthy = false
+		} else {
+			capacity := *volume.CapacityBytes
+			capacityTotal += capacity
+			if capacity < result.RequiredCapacityPerVolumeBytes {
+				capacityConverged = false
+				capacityHealthy = false
+			}
+			if volume.UsedBytes == nil ||
+				volume.AvailableBytes == nil ||
+				*volume.UsedBytes < 0 ||
+				*volume.UsedBytes > capacity ||
+				*volume.AvailableBytes < 0 ||
+				*volume.AvailableBytes > capacity ||
+				*volume.UsedBytes > capacity-*volume.AvailableBytes ||
+				usedTotal > math.MaxInt64-*volume.UsedBytes ||
+				availableTotal > math.MaxInt64-*volume.AvailableBytes {
+				usageObserved = false
+				headroomHealthy = false
+				headroomVolumeHealthy = false
+			} else {
+				used := *volume.UsedBytes
+				available := *volume.AvailableBytes
+				usedTotal += used
+				availableTotal += available
+				usedPercent := float64(used) * 100 / float64(capacity)
+				if !hasUsedPercent || usedPercent > maxUsedPercent {
+					maxUsedPercent = usedPercent
+					hasUsedPercent = true
+				}
+				if usedPercent >= float64(managedPostgresMaximumUsedPct) ||
+					available < result.RequiredFreePerVolumeBytes {
+					headroomHealthy = false
+					headroomVolumeHealthy = false
+				}
+			}
+		}
+		if !capacityHealthy {
+			result.CapacityUnhealthyClaims = append(result.CapacityUnhealthyClaims, claim)
+		}
+		if !headroomVolumeHealthy {
+			result.HeadroomUnhealthyClaims = append(result.HeadroomUnhealthyClaims, claim)
+		}
+	}
+	if capacityObserved {
+		result.CapacityObserved = true
+		result.CapacityBytes = int64Pointer(capacityTotal)
+	}
+	result.CapacityConverged = result.CapacityObserved && capacityConverged
+	if usageObserved {
+		result.UsageObserved = true
+		result.UsedBytes = int64Pointer(usedTotal)
+		result.AvailableBytes = int64Pointer(availableTotal)
+	}
+	if hasUsedPercent {
+		result.UsedPercent = fmt.Sprintf("%.2f", maxUsedPercent)
+	}
+	result.HeadroomHealthy = result.UsageObserved && headroomHealthy
+	return result
+}
+
+func robustnessOptionalInt64(value *int64) string {
+	if value == nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func (s *Server) robustnessLocalPVChecks(now time.Time) ([]model.RobustnessCheck, error) {
+	inventories, err := s.store.ListLocalPVInventories(model.LocalPVInventoryFilter{})
+	if err != nil {
+		return nil, err
+	}
+	updaters, err := s.store.ListNodeUpdaters("", true)
+	if err != nil {
+		return nil, err
+	}
+	activeCapableUpdaters := 0
+	for _, updater := range updaters {
+		if strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) &&
+			robustnessNodeUpdaterHasCapability(updater, model.NodeUpdateTaskTypeReportLocalPV) {
+			activeCapableUpdaters++
+		}
+	}
+	checks := []model.RobustnessCheck{{
+		Name:     "localpv_inventory",
+		Pass:     true,
+		Severity: model.RobustnessSeverityInfo,
+		Subject:  "localpv",
+		Expected: "LocalPV capacity inventory is reported by every capable active node updater",
+		Observed: fmt.Sprintf("inventories=%d active_capable_updaters=%d", len(inventories), activeCapableUpdaters),
+		Evidence: map[string]string{
+			"guardian":                "node-health",
+			"active_capable_updaters": fmt.Sprintf("%d", activeCapableUpdaters),
+		},
+	}}
+	seen := map[string]struct{}{}
+	for _, updater := range updaters {
+		if !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) ||
+			!robustnessNodeUpdaterHasCapability(updater, model.NodeUpdateTaskTypeReportLocalPV) {
+			continue
+		}
+		inventory, found := robustnessNewestLocalPVInventoryForUpdater(inventories, updater)
+		for _, candidate := range inventories {
+			if robustnessLocalPVInventoryMatchesUpdater(candidate, updater) {
+				seen[robustnessLocalPVInventoryKey(candidate)] = struct{}{}
+			}
+		}
+		checks = append(
+			checks,
+			robustnessLocalPVInventoryChecks(
+				now,
+				inventory,
+				found,
+				firstNonEmpty(
+					strings.TrimSpace(updater.ClusterNodeName),
+					strings.TrimSpace(updater.MachineID),
+					strings.TrimSpace(updater.ID),
+				),
+				strings.TrimSpace(updater.ID),
+			)...,
+		)
+	}
+	for _, inventory := range inventories {
+		if _, ok := seen[robustnessLocalPVInventoryKey(inventory)]; ok {
+			continue
+		}
+		checks = append(
+			checks,
+			robustnessLocalPVInventoryChecks(
+				now,
+				inventory,
+				true,
+				firstNonEmpty(
+					strings.TrimSpace(inventory.ClusterNodeName),
+					strings.TrimSpace(inventory.NodeID),
+					"unknown",
+				),
+				strings.TrimSpace(inventory.ReportedByNodeUpdaterID),
+			)...,
+		)
+	}
+	return checks, nil
+}
+
+func robustnessNodeUpdaterHasCapability(updater model.NodeUpdater, capability string) bool {
+	capability = strings.TrimSpace(capability)
+	for _, candidate := range updater.Capabilities {
+		if strings.EqualFold(strings.TrimSpace(candidate), capability) {
+			return true
+		}
+	}
+	return false
+}
+
+func robustnessNewestLocalPVInventoryForUpdater(
+	inventories []model.LocalPVInventory,
+	updater model.NodeUpdater,
+) (model.LocalPVInventory, bool) {
+	var newest model.LocalPVInventory
+	found := false
+	for _, inventory := range inventories {
+		if !robustnessLocalPVInventoryMatchesUpdater(inventory, updater) {
+			continue
+		}
+		if !found || inventory.ObservedAt.After(newest.ObservedAt) {
+			newest = inventory
+			found = true
+		}
+	}
+	return newest, found
+}
+
+func robustnessLocalPVInventoryMatchesUpdater(inventory model.LocalPVInventory, updater model.NodeUpdater) bool {
+	reporterMatches := strings.TrimSpace(inventory.ReportedByNodeUpdaterID) != "" &&
+		strings.TrimSpace(inventory.ReportedByNodeUpdaterID) == strings.TrimSpace(updater.ID)
+	nodeMatches := strings.TrimSpace(inventory.ClusterNodeName) != "" &&
+		strings.TrimSpace(inventory.ClusterNodeName) == strings.TrimSpace(updater.ClusterNodeName)
+	machineMatches := strings.TrimSpace(inventory.NodeID) != "" &&
+		strings.TrimSpace(inventory.NodeID) == strings.TrimSpace(updater.MachineID)
+	return reporterMatches || nodeMatches || machineMatches
+}
+
+func robustnessLocalPVInventoryChecks(
+	now time.Time,
+	inventory model.LocalPVInventory,
+	found bool,
+	nodeName, updaterID string,
+) []model.RobustnessCheck {
+	subject := "cluster-node:" + firstNonEmpty(strings.TrimSpace(nodeName), "unknown")
+	evidence := map[string]string{
+		"guardian":        "node-health",
+		"cluster_node":    strings.TrimSpace(nodeName),
+		"node_updater_id": strings.TrimSpace(updaterID),
+	}
+	if !found {
+		return []model.RobustnessCheck{{
+			Name:       "localpv_inventory_freshness",
+			Pass:       false,
+			Severity:   model.RobustnessSeverityWarning,
+			Subject:    subject,
+			Expected:   fmt.Sprintf("LocalPV inventory observed within %s", localpvsafety.DefaultInventoryTTL),
+			Observed:   "inventory=missing",
+			Evidence:   evidence,
+			Message:    "LocalPV inventory is missing for an active capable node updater",
+			RepairHint: "inspect the node updater and schedule a report-lvm-localpv-inventory task",
+		}}
+	}
+	age := now.Sub(inventory.ObservedAt)
+	if age < 0 {
+		age = 0
+	}
+	fresh := localpvsafety.IsFresh(inventory.ObservedAt, now, localpvsafety.DefaultInventoryTTL)
+	evidence["vg_name"] = strings.TrimSpace(inventory.VGName)
+	evidence["observed_at"] = inventory.ObservedAt.UTC().Format(time.RFC3339)
+	evidence["age_seconds"] = fmt.Sprintf("%.0f", age.Seconds())
+	evidence["pv_size_bytes"] = fmt.Sprintf("%d", inventory.PVSizeBytes)
+	evidence["pv_free_bytes"] = fmt.Sprintf("%d", inventory.PVFreeBytes)
+	freshness := model.RobustnessCheck{
+		Name:       "localpv_inventory_freshness",
+		Pass:       fresh,
+		Severity:   model.RobustnessSeverityWarning,
+		Subject:    subject,
+		Expected:   fmt.Sprintf("LocalPV inventory observed within %s", localpvsafety.DefaultInventoryTTL),
+		Observed:   fmt.Sprintf("observed_at=%s age_seconds=%.0f", inventory.ObservedAt.UTC().Format(time.RFC3339), age.Seconds()),
+		Evidence:   cloneStringMap(evidence),
+		RepairHint: "inspect the node updater and schedule a report-lvm-localpv-inventory task",
+	}
+	if !fresh {
+		freshness.Message = "LocalPV inventory is stale and must not be used for capacity decisions"
+	}
+	checks := []model.RobustnessCheck{freshness}
+	if !robustnessLocalPVInventoryHasStorage(inventory) {
+		return checks
+	}
+	requiredFree := localpvsafety.RequiredFreeBytes(inventory.PVSizeBytes)
+	headroomPass := fresh && localpvsafety.HasCapacityHeadroom(inventory.PVSizeBytes, inventory.PVFreeBytes)
+	headroom := model.RobustnessCheck{
+		Name:       "localpv_capacity_headroom",
+		Pass:       headroomPass,
+		Severity:   model.RobustnessSeverityDegraded,
+		Subject:    subject,
+		Expected:   fmt.Sprintf("fresh LocalPV inventory with at least %d free bytes", requiredFree),
+		Observed:   fmt.Sprintf("pv_size_bytes=%d pv_free_bytes=%d required_free_bytes=%d inventory_fresh=%t", inventory.PVSizeBytes, inventory.PVFreeBytes, requiredFree, fresh),
+		Evidence:   cloneStringMap(evidence),
+		RepairHint: "expand the LocalPV backing pool or move data before provisioning or expanding more local volumes",
+	}
+	headroom.Evidence["required_free_bytes"] = fmt.Sprintf("%d", requiredFree)
+	if !headroomPass {
+		headroom.Message = "LocalPV volume group capacity is stale, invalid, or below the safety reserve"
+	}
+	return append(checks, headroom)
+}
+
+func robustnessLocalPVInventoryHasStorage(inventory model.LocalPVInventory) bool {
+	return inventory.PVSizeBytes > 0 ||
+		inventory.ImageSizeBytes > 0 ||
+		strings.TrimSpace(inventory.LoopDevice) != "" ||
+		inventory.LVCount > 0 ||
+		inventory.ActiveLVCount > 0 ||
+		inventory.BoundPVCount > 0
+}
+
+func robustnessLocalPVInventoryKey(inventory model.LocalPVInventory) string {
+	if id := strings.TrimSpace(inventory.ID); id != "" {
+		return id
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(inventory.ReportedByNodeUpdaterID),
+		strings.TrimSpace(inventory.ClusterNodeName),
+		strings.TrimSpace(inventory.NodeID),
+		strings.TrimSpace(inventory.VGName),
+	}, "\x00")
 }
 
 func robustnessStorageGiB(value string) (int64, bool) {
@@ -1272,7 +1750,9 @@ func robustnessRepairPlanForIncident(incident model.RobustnessIncident, dryRun b
 			Risk:        "read-only",
 		})
 	}
-	if incident.CheckName == "managed_postgres_runtime_ready" || incident.CheckName == "managed_postgres_storage_floor" {
+	if incident.CheckName == "managed_postgres_runtime_ready" ||
+		incident.CheckName == "managed_postgres_storage_floor" ||
+		incident.CheckName == "managed_postgres_storage_headroom" {
 		ownerAppID := strings.TrimSpace(incident.Evidence["owner_app_id"])
 		serviceID := strings.TrimSpace(incident.Evidence["service_id"])
 		if ownerAppID != "" {
@@ -1308,6 +1788,19 @@ func robustnessRepairPlanForIncident(incident model.RobustnessIncident, dryRun b
 				Subject:     incident.Subject,
 				Description: "inspect the managed Postgres backing service status",
 				Command:     "fugue service show " + serviceID,
+				Automatic:   false,
+				Risk:        "read-only",
+			})
+		}
+	}
+	if incident.CheckName == "localpv_inventory_freshness" || incident.CheckName == "localpv_capacity_headroom" {
+		nodeName := strings.TrimSpace(incident.Evidence["cluster_node"])
+		if nodeName != "" {
+			actions = append(actions, model.RobustnessRepairAction{
+				Kind:        "inspect_localpv_inventory",
+				Subject:     incident.Subject,
+				Description: "inspect the latest LocalPV inventory, volume group free bytes, and freshness",
+				Command:     "fugue admin cluster node localpv show " + nodeName,
 				Automatic:   false,
 				Risk:        "read-only",
 			})
