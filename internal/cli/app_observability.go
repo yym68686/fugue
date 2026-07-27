@@ -209,6 +209,7 @@ func (c *CLI) newAppRequestsCommand() *cobra.Command {
 	addAppObservabilityWindowFlags(cmd, &opts.appObservabilityWindowOptions)
 	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum request summaries to return")
 	cmd.Flags().StringVar(&opts.TraceID, "trace", "", "Limit request summaries to one trace identifier")
+	cmd.Flags().StringVar(&opts.Path, "path", "", "Limit request summaries to one exact redacted HTTP path")
 	cmd.Flags().StringVar(&opts.StatusClass, "status-class", "", "Limit request summaries to one status class")
 	cmd.Flags().BoolVar(&opts.Slow, "slow", false, "Only show slow request summaries")
 	cmd.Flags().BoolVar(&opts.Errors, "errors", false, "Only show error request summaries")

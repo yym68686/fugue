@@ -178,6 +178,9 @@ func TestRunAppRequestsAndTracesUseObservabilityEndpoints(t *testing.T) {
 			if got := r.URL.Query().Get("errors"); got != "true" {
 				t.Fatalf("expected errors=true, got %q", got)
 			}
+			if got := r.URL.Query().Get("path"); got != "/v1/webhook/provider" {
+				t.Fatalf("expected exact request path, got %q", got)
+			}
 			writeDisabledObservabilityResponse(w, `{"requests":[]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/traces/trace_123":
 			writeDisabledObservabilityResponse(w, `{"trace_id":"trace_123","spans":[]}`)
@@ -193,6 +196,7 @@ func TestRunAppRequestsAndTracesUseObservabilityEndpoints(t *testing.T) {
 		"--base-url", server.URL,
 		"--token", "token",
 		"app", "requests", "demo",
+		"--path", "/v1/webhook/provider",
 		"--slow",
 		"--errors",
 	}, &requestsOut, &requestsErr); err != nil {

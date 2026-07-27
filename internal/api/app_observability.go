@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -1239,6 +1240,9 @@ func validateAppObservabilityRequestQuery(query url.Values) error {
 	if _, err := parseAppObservabilityRequestLimit(query.Get("limit")); err != nil {
 		return err
 	}
+	if _, err := parseAppObservabilityRequestPath(query.Get("path")); err != nil {
+		return err
+	}
 	if statusClass := strings.TrimSpace(query.Get("status_class")); statusClass != "" && !validStatusClass(statusClass) {
 		return fmt.Errorf("status_class must look like 2xx, 4xx, or 5xx")
 	}
@@ -1254,6 +1258,23 @@ func validateAppObservabilityRequestQuery(query url.Values) error {
 		}
 	}
 	return nil
+}
+
+func parseAppObservabilityRequestPath(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 2048 {
+		return "", fmt.Errorf("path must be at most 2048 bytes")
+	}
+	if !strings.HasPrefix(value, "/") {
+		return "", fmt.Errorf("path must start with /")
+	}
+	if strings.ContainsAny(value, "?#") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("path must not include a query string, fragment, or control characters")
+	}
+	return value, nil
 }
 
 func normalizeLokiQueryRangeURL(raw string) (*url.URL, error) {
@@ -1477,6 +1498,14 @@ func buildAppObservabilityRequestsQueryWithOptions(appID string, window appObser
 	if requestID := strings.TrimSpace(query.Get("request_id")); requestID != "" {
 		conditions = append(conditions, "request_id = "+quoteClickHouseString(requestID))
 	}
+	requestPath, err := parseAppObservabilityRequestPath(query.Get("path"))
+	if err != nil {
+		return "", err
+	}
+	if requestPath != "" {
+		conditions = append(conditions, "("+appObservabilityRequestPathExpression+" = "+quoteClickHouseString(requestPath)+
+			" OR startsWith("+appObservabilityRequestPathExpression+", "+quoteClickHouseString(requestPath+"?")+"))")
+	}
 	if statusClass := strings.TrimSpace(query.Get("status_class")); statusClass != "" {
 		if !validStatusClass(statusClass) {
 			return "", fmt.Errorf("status_class must look like 2xx, 4xx, or 5xx")
@@ -1515,10 +1544,12 @@ func buildAppObservabilityRequestsQueryWithOptions(appID string, window appObser
 	if options.Ascending {
 		order = "ASC"
 	}
-	return "SELECT ts, trace_id, request_id, route_id, hostname, path_template, method, status_code, status_class, duration_ms, ttfb_ms, summary_json " +
+	return "SELECT ts, trace_id, request_id, route_id, hostname, path_template, " + appObservabilityRequestPathExpression + " AS request_path, method, status_code, status_class, duration_ms, ttfb_ms, summary_json " +
 		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
 		fmt.Sprintf(" ORDER BY ts %s, request_id %s LIMIT %d FORMAT JSONEachRow", order, order, limit), nil
 }
+
+const appObservabilityRequestPathExpression = "coalesce(nullIf(JSONExtractString(summary_json, 'path'), ''), path_template)"
 
 func buildAppObservabilityTraceQuery(appID string, traceID string, window appObservabilityWindow) (string, error) {
 	traceID = strings.TrimSpace(traceID)
@@ -1708,10 +1739,24 @@ func appObservabilityRequestFromClickHouseRow(row map[string]any) map[string]any
 		"ttfb_ms":     row["ttfb_ms"],
 		"summary":     summary,
 	}
+	if requestPath := redactedAppObservabilityRequestPath(firstNonEmpty(stringField(row, "request_path"), stringField(summary, "path"))); requestPath != "" {
+		request["path"] = requestPath
+	}
 	if ttftMS, ok := appObservabilitySummaryMilliseconds(summary, "ttft_ms", "ttftMs"); ok {
 		request["ttft_ms"] = ttftMS
 	}
 	return request
+}
+
+func redactedAppObservabilityRequestPath(raw string) string {
+	value := strings.TrimSpace(raw)
+	if index := strings.IndexAny(value, "?#"); index >= 0 {
+		value = value[:index]
+	}
+	if value == "" || len(value) > 2048 || !strings.HasPrefix(value, "/") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return ""
+	}
+	return value
 }
 
 func appObservabilitySummaryMilliseconds(summary map[string]any, keys ...string) (int64, bool) {

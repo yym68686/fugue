@@ -53,6 +53,7 @@ type appObservabilityRequestsOptions struct {
 	appObservabilityWindowOptions
 	Limit       int
 	TraceID     string
+	Path        string
 	StatusClass string
 	Slow        bool
 	Errors      bool
@@ -268,6 +269,9 @@ func appendAppObservabilityRequestFilterValues(values url.Values, opts appObserv
 	appendPositiveIntQueryValue(values, "limit", opts.Limit)
 	if value := strings.TrimSpace(opts.TraceID); value != "" {
 		values.Set("trace_id", value)
+	}
+	if value := strings.TrimSpace(opts.Path); value != "" {
+		values.Set("path", value)
 	}
 	if value := strings.TrimSpace(opts.StatusClass); value != "" {
 		values.Set("status_class", value)

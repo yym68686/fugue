@@ -433,7 +433,7 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 		if r.URL.Query().Get("database") != "fugue_observability" {
 			t.Errorf("expected database query parameter, got %s", r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_123","request_id":"request_123","path_template":"/v1/items","method":"POST","status_code":503,"duration_ms":1200,"ttfb_ms":240,"summary_json":"{\"provider\":\"example\",\"ttftMs\":360}"}` + "\n"))
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_123","request_id":"request_123","path_template":"/v1","request_path":"/v1/webhook/provider?...","method":"POST","status_code":503,"duration_ms":1200,"ttfb_ms":240,"summary_json":"{\"path\":\"/v1/webhook/provider?...\",\"provider\":\"example\",\"ttftMs\":360}"}` + "\n"))
 	}))
 	t.Cleanup(clickHouse.Close)
 	server.observabilityConfig = observability.Config{
@@ -441,7 +441,7 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
 	}.Normalize()
 
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests?since=15m&trace_id=trace_123&status_class=5xx&errors=true&slow=true&limit=10", apiKey, nil)
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests?since=15m&trace_id=trace_123&path="+url.QueryEscape("/v1/webhook/provider")+"&status_class=5xx&errors=true&slow=true&limit=10", apiKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -457,6 +457,7 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 		"FROM request_facts",
 		"app_id = '" + app.ID + "'",
 		"trace_id = 'trace_123'",
+		"(" + appObservabilityRequestPathExpression + " = '/v1/webhook/provider' OR startsWith(" + appObservabilityRequestPathExpression + ", '/v1/webhook/provider?'))",
 		"status_class = '5xx'",
 		"(status_code >= 400 OR error_type != '')",
 		"duration_ms >= 1000",
@@ -471,12 +472,33 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 		t.Fatalf("expected one request, got %+v", response.Requests)
 	}
 	request := response.Requests[0]
-	if request["trace_id"] != "trace_123" || request["request_id"] != "request_123" || request["route"] != "/v1/items" || request["ttfb_ms"] != float64(240) || request["ttft_ms"] != float64(360) {
+	if request["trace_id"] != "trace_123" || request["request_id"] != "request_123" || request["route"] != "/v1" || request["path"] != "/v1/webhook/provider" || request["ttfb_ms"] != float64(240) || request["ttft_ms"] != float64(360) {
 		t.Fatalf("expected request summary fields, got %+v", request)
 	}
 	summary, ok := request["summary"].(map[string]any)
 	if !ok || summary["provider"] != "example" {
 		t.Fatalf("expected parsed request summary, got %+v", request)
+	}
+}
+
+func TestAppObservabilityRequestPathValidationRejectsQueriesAndFragments(t *testing.T) {
+	for _, raw := range []string{"relative", "/v1/callback?token=secret", "/v1/status#fragment", "/v1/status\nforged", "/v1/status\tforged", "/v1/status\x7f"} {
+		if _, err := parseAppObservabilityRequestPath(raw); err == nil {
+			t.Fatalf("expected path %q to be rejected", raw)
+		}
+	}
+	if got, err := parseAppObservabilityRequestPath(" /v1/status "); err != nil || got != "/v1/status" {
+		t.Fatalf("expected safe path, got %q err=%v", got, err)
+	}
+}
+
+func TestAppObservabilityRequestPathFallsBackToSummaryAndRedactsQueryMarker(t *testing.T) {
+	request := appObservabilityRequestFromClickHouseRow(map[string]any{
+		"path_template": "/v1",
+		"summary_json":  `{"path":"/v1/billing/topup/status?..."}`,
+	})
+	if request["route"] != "/v1" || request["path"] != "/v1/billing/topup/status" {
+		t.Fatalf("unexpected request path projection: %+v", request)
 	}
 }
 
