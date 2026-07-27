@@ -71,6 +71,8 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	for _, want := range []string{
 		`resources: ["namespaces", "services", "secrets", "pods", "endpoints", "persistentvolumeclaims", "persistentvolumes"]`,
 		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
+		`resources: ["pods/resize"]`,
+		`verbs: ["get", "update", "patch"]`,
 	} {
 		if !strings.Contains(role, want) {
 			t.Fatalf("dedicated control-plane role missing %q:\n%s", want, role)
