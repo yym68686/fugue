@@ -148,6 +148,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.FallbackPollInterval <= 0 {
 		s.Config.FallbackPollInterval = 30 * time.Second
 	}
+	if s.Config.ManagedAppReconcileFallbackInterval <= 0 {
+		s.Config.ManagedAppReconcileFallbackInterval = 5 * time.Minute
+	}
 	if s.Config.LeaderElectionRetryPeriod <= 0 {
 		s.Config.LeaderElectionRetryPeriod = 2 * time.Second
 	}
@@ -251,10 +254,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.GitHubSyncActivateWorkers = 0
 	}
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s image_tracking_interval=%s image_retention_sweep_interval=%s image_store_mode=%s image_store_scheduler_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s managed_app_reconcile_fallback_interval=%s github_sync_interval=%s image_tracking_interval=%s image_retention_sweep_interval=%s image_store_mode=%s image_store_scheduler_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
+		s.Config.ManagedAppReconcileFallbackInterval,
 		s.Config.GitHubSyncInterval,
 		s.Config.ImageTrackingInterval,
 		s.Config.ImageRetentionSweepInterval,
@@ -406,12 +410,22 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			s.Logger.Printf("initial LocalPV inventory scheduling error: %v", err)
 		}
 	}
-	staleTicker := time.NewTicker(s.Config.PollInterval)
+	staleSweepInterval := s.Config.PollInterval
+	if staleSweepInterval < time.Minute {
+		// Runtime-offline detection does not need the foreground app poll
+		// cadence, but it should still run at least twice within the
+		// configured offline window.
+		staleSweepInterval = time.Minute
+	}
+	if offlineHalf := s.Config.RuntimeOfflineAfter / 2; offlineHalf > 0 && staleSweepInterval > offlineHalf {
+		staleSweepInterval = offlineHalf
+	}
+	staleTicker := time.NewTicker(staleSweepInterval)
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
 	defer fallbackTicker.Stop()
-	managedAppTicker := time.NewTicker(s.Config.PollInterval)
-	defer managedAppTicker.Stop()
+	managedAppFallbackTicker := time.NewTicker(s.Config.ManagedAppReconcileFallbackInterval)
+	defer managedAppFallbackTicker.Stop()
 	var githubTicker *time.Ticker
 	if s.Config.GitHubSyncInterval > 0 {
 		githubTicker = time.NewTicker(s.Config.GitHubSyncInterval)
@@ -448,7 +462,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case _, ok := <-operationEvents:
+		case operationID, ok := <-operationEvents:
 			if !ok {
 				operationEvents = nil
 				continue
@@ -457,7 +471,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerPendingOperationWorkers(foregroundActivations...)
 			triggerBackgroundOps()
 			if s.Config.KubectlApply {
-				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				if err := s.reconcileManagedAppEvent(ctx, operationID); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("managed app reconcile error: %v", err)
 				}
 			}
@@ -465,15 +479,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerPendingOperationWorkers(foregroundImports...)
 			triggerPendingOperationWorkers(foregroundActivations...)
 			triggerBackgroundOps()
+		case <-managedAppFallbackTicker.C:
 			if s.Config.KubectlApply {
 				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("fallback managed app reconcile error: %v", err)
-				}
-			}
-		case <-managedAppTicker.C:
-			if s.Config.KubectlApply {
-				if err := s.reconcileManagedApps(ctx); err != nil && !errors.Is(err, context.Canceled) {
-					s.Logger.Printf("periodic managed app reconcile error: %v", err)
 				}
 			}
 		case <-githubTickerChan(githubTicker):
@@ -542,6 +551,61 @@ func (s *Service) reconcileOnce(ctx context.Context) error {
 	}
 	if s.Config.KubectlApply {
 		return s.reconcileManagedApps(ctx)
+	}
+	return nil
+}
+
+// reconcileManagedAppEvent handles the normal event-driven path. Operation
+// notifications carry the operation ID, so only the corresponding
+// ManagedApp needs to be reconciled. A periodic full scan remains as a
+// safety net for dropped notifications or out-of-band drift.
+func (s *Service) reconcileManagedAppEvent(ctx context.Context, operationID string) error {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		// Empty payloads are not actionable. The fallback scan is deliberately
+		// responsible for recovering malformed or legacy notifications.
+		return nil
+	}
+	op, err := s.Store.GetOperation(operationID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("load operation %s for targeted reconcile: %w", operationID, err)
+	}
+	appID := strings.TrimSpace(op.AppID)
+	tenantID := strings.TrimSpace(op.TenantID)
+	if appID == "" || tenantID == "" {
+		return nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes targeted reconcile client: %w", err)
+	}
+	app := model.App{ID: appID, TenantID: tenantID}
+	namespace := runtime.NamespaceForTenant(tenantID)
+	managed, found, err := client.getManagedApp(ctx, namespace, runtime.ManagedAppResourceName(app))
+	if err != nil {
+		return fmt.Errorf("read targeted managed app %s/%s: %w", namespace, runtime.ManagedAppResourceName(app), err)
+	}
+	if !found {
+		return nil
+	}
+	startedAt := time.Now()
+	client.writeStats.reset()
+	if err := s.reconcileManagedAppObject(ctx, client, managed); err != nil {
+		return err
+	}
+	if s.Logger != nil {
+		if summary := client.writeStats.summary(); summary != "" {
+			s.Logger.Printf(
+				"managed app targeted reconcile kubernetes write summary app_id=%s operation_id=%s duration_ms=%d %s",
+				appID,
+				operationID,
+				time.Since(startedAt).Milliseconds(),
+				summary,
+			)
+		}
 	}
 	return nil
 }

@@ -619,6 +619,27 @@ func TestBuildManagedAppStatusKeepsCurrentReleaseDuringRollout(t *testing.T) {
 	}
 }
 
+func TestManagedAppStatusEquivalentIgnoresRefreshTimestamp(t *testing.T) {
+	t.Parallel()
+
+	left := runtime.ManagedAppStatus{
+		Phase:             runtime.ManagedAppPhaseReady,
+		ReadyReplicas:     1,
+		DesiredReplicas:   1,
+		LastAppliedTime:   "2026-07-28T10:00:00Z",
+		CurrentReleaseKey: "release-a",
+	}
+	right := left
+	right.LastAppliedTime = "2026-07-28T10:05:00Z"
+	if !managedAppStatusEquivalent(left, right) {
+		t.Fatal("expected status refresh timestamp to be ignored")
+	}
+	right.Phase = runtime.ManagedAppPhaseError
+	if managedAppStatusEquivalent(left, right) {
+		t.Fatal("expected observed phase change to require a status patch")
+	}
+}
+
 func TestBuildManagedAppStatusPromotesPendingReleaseWhenReady(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
@@ -2111,6 +2132,65 @@ func TestReconcileManagedAppObjectSkipsApplyWhileOperationIsActive(t *testing.T)
 	}
 	if requests != 0 {
 		t.Fatalf("expected no kubernetes requests while active operation owns apply, got %d", requests)
+	}
+}
+
+func TestReconcileManagedAppEventTargetsOnlyNotifiesApp(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Targeted Event Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example/fugue-apps/demo:latest",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/fugue-apps/demo:latest"})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		AppID:         app.ID,
+		Type:          model.OperationTypeDeploy,
+		DesiredSpec:   &app.Spec,
+		DesiredSource: app.Source,
+	})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+
+	var requests []string
+	client := &kubeClient{
+		baseURL: "http://kube.test",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests = append(requests, req.Method+" "+req.URL.Path)
+			if req.Method != http.MethodGet || req.URL.Path != managedAppAPIPath(runtime.NamespaceForTenant(tenant.ID), runtime.ManagedAppResourceName(model.App{ID: app.ID})) {
+				t.Fatalf("unexpected targeted reconcile request %s %s", req.Method, req.URL.Path)
+			}
+			return notFoundJSONResponse(), nil
+		})},
+	}
+	svc := &Service{
+		Store: stateStore,
+		newKubeClient: func(string) (*kubeClient, error) {
+			return client, nil
+		},
+	}
+	if err := svc.reconcileManagedAppEvent(context.Background(), op.ID); err != nil {
+		t.Fatalf("targeted reconcile: %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one targeted ManagedApp GET and no full LIST, got %v", requests)
 	}
 }
 

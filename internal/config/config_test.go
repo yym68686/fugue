@@ -186,6 +186,15 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerFromEnvReadsManagedAppReconcileFallbackInterval(t *testing.T) {
+	t.Setenv("FUGUE_CONTROLLER_MANAGED_APP_RECONCILE_FALLBACK_INTERVAL", "7m")
+
+	cfg := ControllerFromEnv()
+	if cfg.ManagedAppReconcileFallbackInterval != 7*time.Minute {
+		t.Fatalf("expected managed app reconcile fallback interval 7m, got %s", cfg.ManagedAppReconcileFallbackInterval)
+	}
+}
+
 func TestControllerFromEnvDefaultsManagedPostgresInPlaceResizeClosed(t *testing.T) {
 	for _, key := range []string{
 		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED",

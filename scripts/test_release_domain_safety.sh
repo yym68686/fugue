@@ -289,12 +289,12 @@ payload = open(sys.argv[1], "rb").read()
 if not payload.endswith(b"\0"):
     raise SystemExit("frozen Helm argv is not NUL terminated")
 items = payload.split(b"\0")[:-1]
-if len(items) != 360:
+if len(items) != 362:
     raise SystemExit(f"frozen Helm argv count drifted: {len(items)}")
 if any(item == b"" for item in items):
     raise SystemExit("frozen non-empty fixture contains a phantom empty argv item")
 digest = hashlib.sha256(payload).hexdigest()
-if digest != "39c8461e6089eab8bf5bfa5f64585367158f6aa44ea7ae52f52d7b96b05f4a0b":
+if digest != "da9a9db1e7be813e82e267601dd53e80ede51d00be500f427b232c76cb614a88":
     raise SystemExit(f"frozen Helm argv byte stream drifted: {digest}")
 PY
   if declare -p CONTROL_PLANE_HELM_UPGRADE_ARGV >/dev/null 2>&1; then
@@ -329,7 +329,7 @@ payload = open(sys.argv[1], "rb").read()
 if not payload.endswith(b"\0"):
     raise SystemExit("empty-array Helm argv is not NUL terminated")
 items = payload.split(b"\0")[:-1]
-if len(items) != 342:
+if len(items) != 344:
     raise SystemExit(f"empty-array Helm argv count drifted: {len(items)}")
 if any(item == b"" for item in items):
     raise SystemExit("empty optional arrays emitted a phantom argv item")
@@ -362,7 +362,7 @@ import sys
 
 payload = open(sys.argv[1], "rb").read()
 items = payload.split(b"\0")[:-1]
-if len(items) != 358:
+if len(items) != 360:
     raise SystemExit(f"hostile Helm argv count drifted: {len(items)}")
 if items.count(b"") != 1:
     raise SystemExit("an intentional empty array member was not preserved exactly once")

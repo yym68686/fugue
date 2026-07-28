@@ -160,6 +160,7 @@ type ControllerConfig struct {
 	ManagedAppRolloutTimeout                   time.Duration
 	PollInterval                               time.Duration
 	FallbackPollInterval                       time.Duration
+	ManagedAppReconcileFallbackInterval        time.Duration
 	RuntimeOfflineAfter                        time.Duration
 	RenderDir                                  string
 	KubectlApply                               bool
@@ -503,6 +504,7 @@ func ControllerFromEnv() ControllerConfig {
 		ManagedAppRolloutTimeout:                   getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", DefaultManagedAppRolloutTimeout),
 		PollInterval:                               getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 15*time.Second),
 		FallbackPollInterval:                       getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
+		ManagedAppReconcileFallbackInterval:        getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_RECONCILE_FALLBACK_INTERVAL", 5*time.Minute),
 		RuntimeOfflineAfter:                        getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
 		RenderDir:                                  getenv("FUGUE_RENDER_DIR", "./data/rendered"),
 		KubectlApply:                               getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
