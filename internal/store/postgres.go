@@ -1990,6 +1990,37 @@ var postgresSchemaStatements = []string{
 		expires_at, created_at, updated_at
 	FROM fugue_platform_lkg_snapshots
 	ON CONFLICT (id) DO NOTHING`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_projects_id_tenant ON fugue_projects (id, tenant_id)`,
+	`CREATE TABLE IF NOT EXISTS fugue_automation_policies (
+		id TEXT PRIMARY KEY CHECK (btrim(id) <> ''),
+		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
+		project_id TEXT NULL,
+		name TEXT NOT NULL CHECK (btrim(name) <> ''),
+		description TEXT NOT NULL DEFAULT '',
+		kind TEXT NOT NULL CHECK (lower(kind) <> 'managed_system'),
+		owner_type TEXT NOT NULL CHECK (owner_type = 'user'),
+		scope_type TEXT NOT NULL CHECK (btrim(scope_type) <> ''),
+		scope_id TEXT NOT NULL DEFAULT '' CHECK (lower(scope_type) = 'cluster' OR btrim(scope_id) <> ''),
+		mode TEXT NOT NULL CHECK (mode IN ('disabled', 'shadow')),
+		priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
+		managed BOOLEAN NOT NULL DEFAULT FALSE CHECK (managed = FALSE),
+		source_ref TEXT NOT NULL DEFAULT '',
+		rules_json JSONB NOT NULL CHECK (
+			CASE
+				WHEN jsonb_typeof(rules_json) = 'array' THEN jsonb_array_length(rules_json) > 0
+				ELSE FALSE
+			END
+		),
+		generation BIGINT NOT NULL CHECK (generation > 0),
+		metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata_json) = 'object'),
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		FOREIGN KEY (project_id, tenant_id) REFERENCES fugue_projects(id, tenant_id) ON DELETE CASCADE
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_automation_policies_scope_name ON fugue_automation_policies (tenant_id, (COALESCE(project_id, '')), lower(btrim(name)))`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_automation_policies_tenant_updated ON fugue_automation_policies (tenant_id, updated_at DESC, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_automation_policies_project_updated ON fugue_automation_policies (project_id, updated_at DESC, id) WHERE project_id IS NOT NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_automation_policies_scope ON fugue_automation_policies (scope_type, scope_id)`,
 	`CREATE TABLE IF NOT EXISTS fugue_resource_usage_samples (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,
