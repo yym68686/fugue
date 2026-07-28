@@ -19,6 +19,21 @@ func MaterializeTargetPublishedImageRefs(
 	defaultNamespace, trustedTarget string,
 	buildPlan BuildArtifactPlan,
 ) ([]byte, error) {
+	return materializeTargetPublishedImageRefs(
+		nil,
+		targetManifest,
+		ownership,
+		defaultNamespace,
+		trustedTarget,
+		buildPlan,
+	)
+}
+
+func materializeTargetPublishedImageRefs(
+	baseManifest, targetManifest, ownership []byte,
+	defaultNamespace, trustedTarget string,
+	buildPlan BuildArtifactPlan,
+) ([]byte, error) {
 	if err := validateTrustedGitCommit(trustedTarget, "immutable target manifest target commit"); err != nil {
 		return nil, err
 	}
@@ -31,6 +46,29 @@ func MaterializeTargetPublishedImageRefs(
 	spec, err := LoadOwnership(bytes.NewReader(ownership))
 	if err != nil {
 		return nil, fmt.Errorf("load ownership: %w", err)
+	}
+	liveImages := map[string]string{}
+	if baseManifest != nil {
+		baseObjects, unknown := decodeManifest(baseManifest, spec, defaultNamespace, "immutable live")
+		if len(unknown) != 0 {
+			return nil, manifestEvidenceError(unknown)
+		}
+		baseByIdentity, duplicates := indexManifestObjects(baseObjects, "immutable live")
+		if len(duplicates) != 0 {
+			return nil, manifestEvidenceError(duplicates)
+		}
+		for identity, object := range baseByIdentity {
+			containers, workload, containerErr := workloadContainers(object)
+			if containerErr != nil {
+				return nil, containerErr
+			}
+			if !workload {
+				continue
+			}
+			for name, container := range containers {
+				liveImages[renderedContainerKey(identity, name)] = container.Image
+			}
+		}
 	}
 	objects, unknown := decodeManifest(targetManifest, spec, defaultNamespace, "immutable target")
 	if len(unknown) != 0 {
@@ -68,6 +106,14 @@ func MaterializeTargetPublishedImageRefs(
 			if strings.Contains(container.Image, "@") || !strings.HasSuffix(container.Image, targetSuffix) {
 				continue
 			}
+			if liveImage, exists := liveImages[renderedContainerKey(identityKey(objects[index].Identity), container.Name)]; exists &&
+				liveImage == container.Image {
+				// An exact live/target image match is not an activation. A
+				// same-SHA reconciliation therefore needs no newly built
+				// artifact for this container, while every changed or newly
+				// introduced target-commit image still fails closed below.
+				continue
+			}
 			repository := strings.TrimSuffix(container.Image, targetSuffix)
 			published, exists := publishedByRepository[repository]
 			if !exists {
@@ -81,14 +127,17 @@ func MaterializeTargetPublishedImageRefs(
 	return encodeMaterializedTargetObjects(objects)
 }
 
-// MaterializeLiveRelativeTargetPublishedImageRefs additionally removes one
-// Helm-only source of false activation evidence. The public-edge chart hashes
-// its image values into rollout checksum annotations even when an immutable
-// digest keeps the rendered workload image unchanged. When edge was built but
-// not activated, and the checksum is the object's only rendered drift, retain
-// the live checksum. Any authoritative-DNS source change, actual image change,
-// ambiguous ownership, or additional object drift leaves the target intact or
-// fails closed.
+// MaterializeLiveRelativeTargetPublishedImageRefs treats an exact live/target
+// container image match as a non-activation, so a reconciliation of a commit
+// that is already live does not require a duplicate build artifact. Changed
+// and newly introduced target-commit images retain the strict artifact
+// requirement. It also removes one Helm-only source of false activation
+// evidence: the public-edge chart hashes its image values into rollout
+// checksum annotations even when an immutable digest keeps the rendered
+// workload image unchanged. When edge was built but not activated, and the
+// checksum is the object's only rendered drift, retain the live checksum. Any
+// authoritative-DNS source change, actual image change, ambiguous ownership,
+// or additional object drift leaves the target intact or fails closed.
 func MaterializeLiveRelativeTargetPublishedImageRefs(
 	baseManifest, targetManifest, ownership []byte,
 	defaultNamespace, trustedTarget string,
@@ -114,8 +163,8 @@ func MaterializeLiveRelativeTargetPublishedImageRefs(
 		return nil, fmt.Errorf("live-relative target default namespace mismatch")
 	}
 
-	materialized, err := MaterializeTargetPublishedImageRefs(
-		targetManifest, ownership, defaultNamespace, trustedTarget, buildPlan,
+	materialized, err := materializeTargetPublishedImageRefs(
+		baseManifest, targetManifest, ownership, defaultNamespace, trustedTarget, buildPlan,
 	)
 	if err != nil {
 		return nil, err
@@ -290,6 +339,10 @@ func imageRepository(reference string) string {
 		return reference[:separator]
 	}
 	return reference
+}
+
+func renderedContainerKey(identity, container string) string {
+	return identity + "\x00" + container
 }
 
 func setRenderedContainerImage(object manifestObject, pointer, image string) error {

@@ -119,6 +119,63 @@ func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesOnlyBuiltOnlyPu
 	})
 }
 
+func TestMaterializeLiveRelativeTargetPublishedImageRefsAcceptsAlreadyLiveTargetImage(t *testing.T) {
+	baseCommit := strings.Repeat("1", 40)
+	targetCommit := strings.Repeat("2", 40)
+	changedDigest := "sha256:" + strings.Repeat("c", 64)
+	buildPlan, err := NewBuildArtifactPlan(baseCommit, targetCommit, changedDigest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownership := targetMaterializationOwnership()
+	alreadyLive := targetMaterializationManifest("registry.test/api:" + targetCommit)
+	releasePlan := publicEdgeTargetMaterializationPlan(
+		t,
+		alreadyLive,
+		alreadyLive,
+		ownership,
+		changedDigest,
+		DomainControlPlane,
+	)
+
+	materialized, err := MaterializeLiveRelativeTargetPublishedImageRefs(
+		alreadyLive,
+		alreadyLive,
+		ownership,
+		"fugue-system",
+		targetCommit,
+		buildPlan,
+		releasePlan,
+	)
+	if err != nil {
+		t.Fatalf("already-live target image required a duplicate build artifact: %v", err)
+	}
+	if !bytes.Contains(materialized, []byte("registry.test/api:"+targetCommit)) {
+		t.Fatalf("already-live target image was changed:\n%s", materialized)
+	}
+
+	previousLive := targetMaterializationManifest("registry.test/api:" + baseCommit)
+	changedReleasePlan := publicEdgeTargetMaterializationPlan(
+		t,
+		previousLive,
+		alreadyLive,
+		ownership,
+		changedDigest,
+		DomainControlPlane,
+	)
+	if _, err := MaterializeLiveRelativeTargetPublishedImageRefs(
+		previousLive,
+		alreadyLive,
+		ownership,
+		"fugue-system",
+		targetCommit,
+		buildPlan,
+		changedReleasePlan,
+	); err == nil || !strings.Contains(err.Error(), "target-commit workload image has no exact published artifact") {
+		t.Fatalf("changed target image without a build artifact did not fail closed: %v", err)
+	}
+}
+
 func publicEdgeTargetMaterializationPlan(
 	t *testing.T,
 	base, target, ownership []byte,
@@ -165,4 +222,8 @@ func publicEdgeTargetMaterializationOwnership() []byte {
 
 func targetMaterializationOwnership() []byte {
 	return []byte("apiVersion: release-domain.fugue.dev/v1\nkind: ReleaseDomainOwnership\ndomains:\n  - node-local\n  - authoritative-dns\n  - control-plane\n  - image-cache\n  - backup\nrequiredBindings: []\nfileRules: []\nvalueRules: []\nobjectRules:\n  - id: api\n    domain: control-plane\n    apiGroup: apps\n    version: v1\n    kind: Deployment\n    scope: Namespaced\n    namespace: fugue-system\n    name: fugue-api\n")
+}
+
+func targetMaterializationManifest(image string) []byte {
+	return []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fugue-api\n  namespace: fugue-system\nspec:\n  selector:\n    matchLabels:\n      app: fugue-api\n  template:\n    metadata:\n      labels:\n        app: fugue-api\n    spec:\n      containers:\n        - name: api\n          image: " + image + "\n")
 }
