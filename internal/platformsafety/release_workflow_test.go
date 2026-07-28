@@ -2823,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "1dd712917a9d1ffac838dddf39a3f69a27d96091fca35a73c29c5105b78768a1")
+	assertWorkflowSourceDigest(t, data, "528f283f702032a9bdc1b1ac422a979ff03050a2b940482f5771d4373f7856ca")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2864,7 +2864,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
-		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "47f3662d1f73fd307553e0249301f60b4248e9dbe952ef522428204fced61e7e",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "8f53d7d52326bc3dffe3a81d053a2543f0d98e9267b472eeba1006fc57e4c30b",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "647f2abd75678bcf08439bbb465cc0fc976c2d6c8949f82bcd3a045fbfbd7022",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
