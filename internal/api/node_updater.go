@@ -3615,8 +3615,13 @@ else:
     ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, kube_service_dns_name)
     kube_dns_evidence = pod_context_evidence(pod_ctx, {"dns_server": kube_dns_service_ip, "query": kube_service_dns_name})
     if ok is None:
-        checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", out, "pod-netns DNS query to kube-dns service IP", evidence=kube_dns_evidence))
-        checks.append(check("kubernetes_default_svc_dns", "dns", "warning", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", evidence=kube_dns_evidence))
+        # A missing resolver binary is an inability to run this optional
+        # probe, not evidence that DNS is broken. Keep the result explicit so
+        # node health does not degrade merely because a minimal host image
+        # omits nslookup and dig. The independent TCP probes below still
+        # validate service reachability.
+        optional_probe_skipped("pod_dns_to_kube_dns_service", "dns", out, "pod-netns DNS query to kube-dns service IP", kube_dns_evidence)
+        optional_probe_skipped("kubernetes_default_svc_dns", "dns", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", kube_dns_evidence)
     elif ok:
         checks.append(check("pod_dns_to_kube_dns_service", "dns", "pass", out, "pod-netns DNS query to kube-dns service IP", evidence=kube_dns_evidence))
         checks.append(check("kubernetes_default_svc_dns", "dns", "pass", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", evidence=kube_dns_evidence))
@@ -3628,7 +3633,7 @@ else:
         ok, out = pod_dns_query(pod_ctx, coredns_ip, kube_service_dns_name)
         coredns_evidence = pod_context_evidence(pod_ctx, {"dns_server": coredns_ip, "query": kube_service_dns_name})
         if ok is None:
-            checks.append(check("pod_dns_to_coredns_pod", "dns", "warning", out, "pod-netns DNS query to CoreDNS pod IP", evidence=coredns_evidence))
+            optional_probe_skipped("pod_dns_to_coredns_pod", "dns", out, "pod-netns DNS query to CoreDNS pod IP", coredns_evidence)
         elif ok:
             checks.append(check("pod_dns_to_coredns_pod", "dns", "pass", out, "pod-netns DNS query to CoreDNS pod IP", evidence=coredns_evidence))
         else:
@@ -3646,7 +3651,7 @@ else:
         })
         ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, same_service["fqdn"])
         if ok is None:
-            checks.append(check("same_namespace_service_dns", "dns", "warning", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", evidence=service_evidence))
+            optional_probe_skipped("same_namespace_service_dns", "dns", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", service_evidence)
         elif ok:
             checks.append(check("same_namespace_service_dns", "dns", "pass", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", evidence=service_evidence))
         else:
