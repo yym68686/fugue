@@ -52,6 +52,7 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 			"manifest_size_bytes":        50,
 			"total_blob_bytes":           500,
 			"referenced_blobs":           []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			"referenced_manifests":       []string{"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
 			"created_at_observed":        old,
 			"present":                    true,
 			"unique_blob_bytes_observed": 500,

@@ -338,7 +338,13 @@ type imageCacheInventoryManifestReport struct {
 	SizeBytes               int64  `json:"size_bytes"`
 	ReferencedBlobBytes     int64  `json:"referenced_blob_bytes"`
 	UniqueBlobBytesObserved int64  `json:"unique_blob_bytes_observed"`
-	ModifiedAt              string `json:"modified_at"`
+	// The node-local image-cache inventory includes the manifest-list/index
+	// graph in addition to the blob graph.  Keep accepting that field even
+	// though the control-plane inventory table currently only persists blob
+	// references; DecodeJSON is intentionally strict and would otherwise turn
+	// every inventory report into a 400 after a cache-agent rollout.
+	ReferencedManifests []string `json:"referenced_manifests"`
+	ModifiedAt          string   `json:"modified_at"`
 }
 
 type imageCacheInventoryBlobReport struct {
