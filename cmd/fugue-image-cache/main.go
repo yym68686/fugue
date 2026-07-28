@@ -1337,8 +1337,8 @@ func filesystemUsageFromStatfs(stats syscall.Statfs_t) (totalBytes, usedBytes, f
 	if blockSize <= 0 || availableBlocks > blocks {
 		return 0, 0, 0, fmt.Errorf("invalid statfs values blocks=%d available=%d block_size=%d", blocks, availableBlocks, blockSize)
 	}
-	const maxInt64 = uint64(1<<63 - 1)
-	if blocks > maxInt64/uint64(blockSize) {
+	const maxInt64Bytes = uint64(1<<63 - 1)
+	if blocks > maxInt64Bytes/uint64(blockSize) {
 		return 0, 0, 0, fmt.Errorf("statfs byte capacity overflows int64 blocks=%d block_size=%d", blocks, blockSize)
 	}
 	totalBytes = int64(blocks * uint64(blockSize))
