@@ -3111,11 +3111,11 @@ image_cache_strategy_target_fingerprints_match() {
     "75fdaa91fff878ca633d25671c3a2ae4c06753cb58e3ed9b9804176c4de145f7" || return 1
   file_sha256_matches \
     "${REPO_ROOT}/deploy/helm/fugue/values.yaml" \
-    "6620c80f69c264055942c1e5e933ccfa99b25f851056cd8447df8342f0d1de23" || return 1
+    "ef7c40d258eaa4a5a16234cd9dd2edc826932ccfa6d5d9775385e076e2eeab17" || return 1
   CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" \
-    EXPECTED_SHA256_CURRENT="2ff05e4e40b869d4969ae46edc74c307355b57bcde5aa1984fc58b6b1fffb780" \
-    EXPECTED_SHA256_SOURCE_COMMIT="1b5c43112214544603bcc92abe3b971627cc8c8f8291bbf9723ca585e38ce16f" \
-    EXPECTED_SHA256_SOURCE_COMMIT_GUARDED="2e0e4a526b02fd88af34a1761b1a5e2ed15aaba0009e5cad966aa5677987d747" \
+    EXPECTED_SHA256_CURRENT="9da1e73f07da41de2a97c6e053833c08594aac2dfe1db90bb90e18a9d9561069" \
+    EXPECTED_SHA256_SOURCE_COMMIT="44ae926b41a24d5208b0e7a22919ab852cb8a399381cf2cc62855946ccf59cac" \
+    EXPECTED_SHA256_SOURCE_COMMIT_GUARDED="e01462a513b70352932d7dae8e4ce3622d46c91be4066dda33c106a3fef201df" \
     python3 -c '
 import hashlib
 import os
