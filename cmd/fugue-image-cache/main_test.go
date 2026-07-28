@@ -920,15 +920,15 @@ func TestManagementManifestInventoryExcludesPersistedIndexThatFailedReplay(t *te
 		t.Fatalf("persist index: %v", err)
 	}
 
-	if err := cache.loadPersistedManifests(); err == nil {
-		t.Fatal("expected replay to reject an index whose child manifest is absent")
+	if err := cache.loadPersistedManifests(); err != nil {
+		t.Fatalf("stale replay metadata should be discarded without failing startup: %v", err)
 	}
 	records, err := cache.managementManifestRecords()
 	if err != nil {
 		t.Fatalf("persisted manifest records: %v", err)
 	}
-	if len(records) != 1 {
-		t.Fatalf("persisted manifest records = %d, want 1: %+v", len(records), records)
+	if len(records) != 0 {
+		t.Fatalf("stale persisted manifest records = %d, want 0: %+v", len(records), records)
 	}
 	if cache.localManifestAvailable("fugue-apps/demo", "image-index") {
 		t.Fatal("index with a missing child must not be locally servable")
@@ -939,6 +939,132 @@ func TestManagementManifestInventoryExcludesPersistedIndexThatFailedReplay(t *te
 	}
 	if len(inventory) != 0 {
 		t.Fatalf("unservable persisted index must not be reported present: %+v", inventory)
+	}
+}
+
+func TestImageCacheLoadsManifestJournalInDependencyOrder(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: manifestDir,
+	}
+	child := []byte(`{"schemaVersion":1,"name":"fugue-apps/demo","tag":"child","fsLayers":[]}`)
+	childDigest := manifestBodyDigest(child)
+	parent := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v1+json","digest":%q,"size":%d,"platform":{"os":"linux","architecture":"amd64"}}]}`, childDigest, len(child)))
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatalf("mkdir manifest dir: %v", err)
+	}
+	// Force the parent to be read first.  The loader must defer it until the
+	// child journal entry has been replayed rather than discarding valid data.
+	for name, manifest := range map[string]persistedManifest{
+		"001-parent.json": {Repo: "fugue-apps/demo", Target: "image-index", ContentType: "application/vnd.docker.distribution.manifest.list.v2+json", Body: parent},
+		"002-child.json":  {Repo: "fugue-apps/demo", Target: childDigest, ContentType: "application/vnd.docker.distribution.manifest.v1+json", Body: child},
+	} {
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(manifestDir, name), raw, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	if err := cache.loadPersistedManifests(); err != nil {
+		t.Fatalf("load persisted manifests: %v", err)
+	}
+	for _, target := range []string{"image-index", childDigest} {
+		if !cache.localManifestAvailable("fugue-apps/demo", target) {
+			t.Fatalf("manifest %s was not replayed", target)
+		}
+	}
+}
+
+func TestImageCacheStaleReplayRemovesManifestAliases(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: manifestDir,
+	}
+	const missingChildDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	index := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":%q,"size":123,"platform":{"os":"linux","architecture":"amd64"}}]}`, missingChildDigest))
+	if err := cache.persistManifest("fugue-apps/demo", "image-index", "application/vnd.docker.distribution.manifest.list.v2+json", index); err != nil {
+		t.Fatalf("persist index tag: %v", err)
+	}
+	if err := cache.persistManifest("fugue-apps/demo", manifestBodyDigest(index), "application/vnd.docker.distribution.manifest.list.v2+json", index); err != nil {
+		t.Fatalf("persist index digest: %v", err)
+	}
+
+	if err := cache.loadPersistedManifests(); err != nil {
+		t.Fatalf("stale replay should be discarded: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(manifestDir, "*.json"))
+	if err != nil {
+		t.Fatalf("glob manifest journal: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("stale manifest aliases remain: %v", files)
+	}
+}
+
+func TestImageCachePruneProtectsManifestListChildren(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: manifestDir,
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"child"}`))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("child-layer"))
+	child := []byte(testImageCacheManifest(configDigest, layerDigest))
+	childDigest := manifestBodyDigest(child)
+	parent := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":%d,"platform":{"os":"linux","architecture":"amd64"}}]}`, childDigest, len(child)))
+
+	for _, manifest := range []persistedManifest{
+		{Repo: "fugue-apps/demo", Target: childDigest, ContentType: "application/vnd.oci.image.manifest.v1+json", Body: child},
+		{Repo: "fugue-apps/demo", Target: "image-index", ContentType: "application/vnd.docker.distribution.manifest.list.v2+json", Body: parent},
+	} {
+		if err := cache.replayManifest(manifest); err != nil {
+			t.Fatalf("replay %s: %v", manifest.Target, err)
+		}
+		if err := cache.persistManifest(manifest.Repo, manifest.Target, manifest.ContentType, manifest.Body); err != nil {
+			t.Fatalf("persist %s: %v", manifest.Target, err)
+		}
+	}
+
+	result := postImageCachePrune(t, cache, fmt.Sprintf(`{"dry_run":false,"allow_delete":true,"targets":[{"repo":"fugue-apps/demo","target":%q}],"max_delete_bytes":"1Gi"}`, childDigest))
+	if result.Deleted || result.SelectedCount != 0 {
+		t.Fatalf("referenced child manifest was selected for deletion: %+v", result)
+	}
+	foundProtected := false
+	for _, entry := range result.SkippedManifests {
+		if entry.Target == childDigest && entry.SkipReason == "referenced_manifest" {
+			foundProtected = true
+			break
+		}
+	}
+	if !foundProtected {
+		t.Fatalf("expected referenced child skip detail, got %+v", result.SkippedManifests)
+	}
+	if !cache.localManifestAvailable("fugue-apps/demo", childDigest) {
+		t.Fatal("referenced child manifest was removed")
 	}
 }
 

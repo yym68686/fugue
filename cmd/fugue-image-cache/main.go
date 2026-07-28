@@ -673,6 +673,11 @@ type imageCacheManifestRecord struct {
 	SizeBytes       int64
 	ModifiedAt      time.Time
 	ReferencedBlobs []string
+	// ReferencedManifests contains child manifest digests for an OCI/Docker
+	// index or manifest list.  A child must not be removed while a surviving
+	// parent still points at it: the registry would then accept the persisted
+	// parent journal but fail to replay it after a restart.
+	ReferencedManifests []string
 }
 
 type imageCacheManifestEntry struct {
@@ -682,8 +687,10 @@ type imageCacheManifestEntry struct {
 	ContentType         string   `json:"content_type"`
 	SizeBytes           int64    `json:"size_bytes"`
 	ReferencedBlobs     []string `json:"referenced_blobs,omitempty"`
+	ReferencedManifests []string `json:"referenced_manifests,omitempty"`
 	ReferencedBlobBytes int64    `json:"referenced_blob_bytes"`
 	ModifiedAt          string   `json:"modified_at,omitempty"`
+	SkipReason          string   `json:"skip_reason,omitempty"`
 }
 
 type imageCacheBlobRecord struct {
@@ -715,14 +722,21 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	}
 	candidates := make([]imageCacheManifestRecord, 0, len(records))
 	skipped := make([]imageCacheManifestRecord, 0)
+	skipReasons := make(map[string]string)
+	appendSkipped := func(record imageCacheManifestRecord, reason string) {
+		skipped = append(skipped, record)
+		if reason != "" {
+			skipReasons[imageCacheManifestRecordKey(record)] = reason
+		}
+	}
 	now := time.Now().UTC()
 	for _, record := range records {
 		if _, ok := pinned[record.Repo+"\x00"+record.Target]; ok {
-			skipped = append(skipped, record)
+			appendSkipped(record, "local_pin")
 			continue
 		}
 		if req.minManifestAge > 0 && !record.ModifiedAt.IsZero() && now.Sub(record.ModifiedAt) < req.minManifestAge {
-			skipped = append(skipped, record)
+			appendSkipped(record, "recent_manifest")
 			continue
 		}
 		candidates = append(candidates, record)
@@ -735,6 +749,40 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	targeted := len(targets) > 0
 	selected := []imageCacheManifestRecord{}
 	if targeted {
+		// A manifest list/index is a graph, not an independent set of files.
+		// Work out which records would otherwise be deleted first, then keep any
+		// child referenced by a parent that survives.  Deleting such a child
+		// leaves a persisted parent that the registry cannot replay on restart.
+		potentialSelectedKeys := make(map[string]struct{})
+		for _, candidate := range candidates {
+			if !manifestMatchesAnyPruneTarget(candidate, targets) {
+				continue
+			}
+			potentialSelectedKeys[imageCacheManifestRecordKey(candidate)] = struct{}{}
+		}
+		survivingReferences := make(map[string]struct{})
+		for _, parent := range records {
+			if _, selectedParent := potentialSelectedKeys[imageCacheManifestRecordKey(parent)]; selectedParent {
+				continue
+			}
+			for _, childDigest := range parent.ReferencedManifests {
+				if key := imageCacheManifestReferenceKey(parent.Repo, childDigest); key != "" {
+					survivingReferences[key] = struct{}{}
+				}
+			}
+		}
+		filteredCandidates := make([]imageCacheManifestRecord, 0, len(candidates))
+		for _, candidate := range candidates {
+			if imageCacheManifestRecordReferencedBy(candidate, survivingReferences) {
+				appendSkipped(candidate, "referenced_manifest")
+				continue
+			}
+			filteredCandidates = append(filteredCandidates, candidate)
+		}
+		candidates = filteredCandidates
+		// Rebuild the digest grouping after graph-protected children have been
+		// removed.  This still removes all tag/digest aliases for a selected
+		// generation, while never invalidating a surviving parent index.
 		selectedDigestByRepo := map[string]map[string]struct{}{}
 		for _, candidate := range candidates {
 			if !manifestMatchesAnyPruneTarget(candidate, targets) {
@@ -789,7 +837,7 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		Disk:              disk,
 		Candidates:        manifestEntries(candidates, blobByDigest),
 		SelectedManifests: manifestEntries(selected, blobByDigest),
-		SkippedManifests:  manifestEntries(skipped, blobByDigest),
+		SkippedManifests:  manifestEntriesWithSkipReasons(skipped, blobByDigest, skipReasons),
 		UnreferencedBlobs: blobEntries(unreferenced),
 		DeleteBudgetBytes: budget,
 		NeededDeleteBytes: disk.NeededDeleteBytes,
@@ -1042,6 +1090,56 @@ func manifestEntries(records []imageCacheManifestRecord, blobByDigest map[string
 	return out
 }
 
+func manifestEntriesWithSkipReasons(records []imageCacheManifestRecord, blobByDigest map[string]imageCacheBlobRecord, reasons map[string]string) []imageCacheManifestEntry {
+	out := make([]imageCacheManifestEntry, 0, len(records))
+	for _, record := range records {
+		entry := manifestEntry(record, blobByDigest)
+		entry.SkipReason = strings.TrimSpace(reasons[imageCacheManifestRecordKey(record)])
+		out = append(out, entry)
+	}
+	return out
+}
+
+func imageCacheManifestRecordKey(record imageCacheManifestRecord) string {
+	return strings.Trim(strings.TrimSpace(record.Repo), "/") + "\x00" + strings.TrimSpace(record.Target)
+}
+
+func imageCacheManifestReferenceKey(repo, digest string) string {
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	digest = normalizeImageCacheDigest(digest)
+	if repo == "" || digest == "" {
+		return ""
+	}
+	return repo + "\x00" + digest
+}
+
+func imageCacheManifestRecordReferencedBy(record imageCacheManifestRecord, references map[string]struct{}) bool {
+	if len(references) == 0 {
+		return false
+	}
+	for _, key := range imageCacheManifestReferenceKeys(record) {
+		if _, ok := references[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func imageCacheManifestReferenceKeys(record imageCacheManifestRecord) []string {
+	repo := strings.Trim(strings.TrimSpace(record.Repo), "/")
+	if repo == "" {
+		return nil
+	}
+	out := []string{}
+	if target := strings.TrimSpace(record.Target); target != "" {
+		out = append(out, repo+"\x00"+target)
+	}
+	if digest := normalizeImageCacheDigest(record.Digest); digest != "" {
+		out = append(out, repo+"\x00"+digest)
+	}
+	return out
+}
+
 func manifestEntry(record imageCacheManifestRecord, blobByDigest map[string]imageCacheBlobRecord) imageCacheManifestEntry {
 	referencedBytes := int64(0)
 	if blobByDigest != nil {
@@ -1065,6 +1163,7 @@ func manifestEntry(record imageCacheManifestRecord, blobByDigest map[string]imag
 		ContentType:         record.ContentType,
 		SizeBytes:           record.SizeBytes,
 		ReferencedBlobs:     append([]string(nil), record.ReferencedBlobs...),
+		ReferencedManifests: append([]string(nil), record.ReferencedManifests...),
 		ReferencedBlobBytes: referencedBytes,
 		ModifiedAt:          modifiedAt,
 	}
@@ -1115,6 +1214,7 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 			"content_type":          entry.ContentType,
 			"size_bytes":            entry.SizeBytes,
 			"referenced_blobs":      entry.ReferencedBlobs,
+			"referenced_manifests":  entry.ReferencedManifests,
 			"referenced_blob_bytes": entry.ReferencedBlobBytes,
 			"modified_at":           entry.ModifiedAt,
 		})
@@ -1183,30 +1283,40 @@ func (c *imageCache) managementManifestRecords() ([]imageCacheManifestRecord, er
 		}
 		referenced := []string{}
 		seenReferenced := map[string]struct{}{}
+		referencedManifests := []string{}
+		seenReferencedManifests := map[string]struct{}{}
 		for _, descriptor := range manifestReferencedTargets(manifest.Body) {
-			if descriptor.kind != registryTargetBlob {
-				continue
-			}
 			digest := normalizeImageCacheDigest(descriptor.target)
 			if digest == "" {
 				continue
 			}
-			if _, ok := seenReferenced[digest]; ok {
-				continue
+			switch descriptor.kind {
+			case registryTargetBlob:
+				if _, ok := seenReferenced[digest]; ok {
+					continue
+				}
+				seenReferenced[digest] = struct{}{}
+				referenced = append(referenced, digest)
+			case registryTargetManifest:
+				if _, ok := seenReferencedManifests[digest]; ok {
+					continue
+				}
+				seenReferencedManifests[digest] = struct{}{}
+				referencedManifests = append(referencedManifests, digest)
 			}
-			seenReferenced[digest] = struct{}{}
-			referenced = append(referenced, digest)
 		}
 		sort.Strings(referenced)
+		sort.Strings(referencedManifests)
 		out = append(out, imageCacheManifestRecord{
-			Repo:            strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
-			Target:          strings.TrimSpace(manifest.Target),
-			Digest:          normalizeImageCacheDigest(manifestBodyDigest(manifest.Body)),
-			ContentType:     strings.TrimSpace(manifest.ContentType),
-			Path:            path,
-			SizeBytes:       info.Size(),
-			ModifiedAt:      info.ModTime(),
-			ReferencedBlobs: referenced,
+			Repo:                strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
+			Target:              strings.TrimSpace(manifest.Target),
+			Digest:              normalizeImageCacheDigest(manifestBodyDigest(manifest.Body)),
+			ContentType:         strings.TrimSpace(manifest.ContentType),
+			Path:                path,
+			SizeBytes:           info.Size(),
+			ModifiedAt:          info.ModTime(),
+			ReferencedBlobs:     referenced,
+			ReferencedManifests: referencedManifests,
 		})
 	}
 	return out, nil
@@ -1617,6 +1727,11 @@ func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) 
 				}
 				if err := c.replayManifest(manifest); err != nil {
 					log.Printf("replay manifest alias repo=%s target=%s failed: %v", manifestRepo, target, err)
+					// Do not journal an alias that the in-memory registry rejected.
+					// Persisting it makes a later restart replay the same broken
+					// parent/child graph and turns a transient write error into
+					// permanent catalog drift.
+					continue
 				}
 			}
 			if err := c.persistManifest(manifestRepo, target, manifestContentType, manifestBody); err != nil {
@@ -2021,6 +2136,7 @@ type persistedManifest struct {
 	Target      string `json:"target"`
 	ContentType string `json:"content_type"`
 	Body        []byte `json:"body"`
+	path        string `json:"-"`
 }
 
 func (c *imageCache) persistManifest(repo, target, contentType string, body []byte) error {
@@ -2094,6 +2210,97 @@ func (c *imageCache) deletePersistedManifest(repo, target string) error {
 	return nil
 }
 
+// deletePersistedManifestRecord removes the journal entry for a manifest and
+// its content-addressed alias.  A PUT normally persists both the requested
+// tag (or digest) and the body digest; removing only one alias would leave a
+// second stale record that fails on every subsequent restart.
+func (c *imageCache) deletePersistedManifestRecord(manifest persistedManifest) error {
+	targets := manifestPersistTargets(manifest.Target, manifest.Body)
+	if len(targets) == 0 {
+		targets = []string{strings.TrimSpace(manifest.Target)}
+	}
+	removed := map[string]struct{}{}
+	for _, target := range targets {
+		if err := c.deletePersistedManifest(manifest.Repo, target); err != nil {
+			return err
+		}
+		removed[filepath.Join(c.manifestDir, manifestStoreKey(strings.Trim(strings.TrimSpace(manifest.Repo), "/"), strings.TrimSpace(target))+".json")] = struct{}{}
+	}
+	// Normal production writes use manifestStoreKey above, but removing the
+	// source path as well makes recovery safe for journals written by older or
+	// partially migrated versions that used a different filename.
+	if sourcePath := strings.TrimSpace(manifest.path); sourcePath != "" {
+		if _, alreadyRemoved := removed[sourcePath]; !alreadyRemoved {
+			if err := os.Remove(sourcePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func persistedManifestKey(repo, target string) string {
+	return strings.Trim(strings.TrimSpace(repo), "/") + "\x00" + strings.TrimSpace(target)
+}
+
+func persistedManifestContentDigest(manifest persistedManifest) string {
+	return normalizeImageCacheDigest(manifestBodyDigest(manifest.Body))
+}
+
+// persistedManifestProvidesTarget reports whether a journal record can replay
+// the requested target.  In addition to its explicit tag/digest target, a
+// record can provide the digest of its body (the alias written by
+// manifestPersistTargets).
+func persistedManifestProvidesTarget(manifest persistedManifest, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	if strings.TrimSpace(manifest.Target) == target {
+		return true
+	}
+	digest := normalizeImageCacheDigest(target)
+	return digest != "" && digest == persistedManifestContentDigest(manifest)
+}
+
+// persistedManifestHasPendingDependency keeps the dependency-aware replay
+// order intact.  Registry PUT of an index/list returns 404 until every child
+// manifest is present; if that child is another journal record, defer the
+// parent for a later pass instead of deleting it as stale.  Alias records for
+// the same body are deliberately ignored so a genuinely broken manifest does
+// not remain pending forever.
+func persistedManifestHasPendingDependency(manifest persistedManifest, pending []persistedManifest) bool {
+	currentDigest := persistedManifestContentDigest(manifest)
+	currentKey := persistedManifestKey(manifest.Repo, manifest.Target)
+	for _, descriptor := range manifestReferencedTargets(manifest.Body) {
+		if descriptor.kind != registryTargetManifest {
+			continue
+		}
+		childTarget := normalizeImageCacheDigest(descriptor.target)
+		if childTarget == "" {
+			continue
+		}
+		for _, candidate := range pending {
+			if persistedManifestKey(candidate.Repo, candidate.Target) == currentKey {
+				continue
+			}
+			if strings.Trim(strings.TrimSpace(candidate.Repo), "/") != strings.Trim(strings.TrimSpace(manifest.Repo), "/") {
+				continue
+			}
+			if !persistedManifestProvidesTarget(candidate, childTarget) {
+				continue
+			}
+			// A tag and digest journal entry for the same body are aliases,
+			// not a child dependency of one another.
+			if currentDigest != "" && currentDigest == persistedManifestContentDigest(candidate) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
 func (c *imageCache) loadPersistedManifests() error {
 	if c == nil || c.registry == nil || strings.TrimSpace(c.manifestDir) == "" {
 		return nil
@@ -2118,6 +2325,7 @@ func (c *imageCache) loadPersistedManifests() error {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
 			return fmt.Errorf("decode %s: %w", entry.Name(), err)
 		}
+		manifest.path = filepath.Join(c.manifestDir, entry.Name())
 		if strings.TrimSpace(manifest.Repo) == "" || strings.TrimSpace(manifest.Target) == "" || len(manifest.Body) == 0 {
 			continue
 		}
@@ -2125,11 +2333,35 @@ func (c *imageCache) loadPersistedManifests() error {
 	}
 
 	loaded := 0
+	discarded := 0
 	var lastErr error
 	for len(pending) > 0 {
+		// Keep the original pending set visible while processing this pass so
+		// a parent can tell whether a missing child is expected to be replayed
+		// later in the same journal.
 		next := make([]persistedManifest, 0, len(pending))
 		for _, manifest := range pending {
 			if err := c.replayManifest(manifest); err != nil {
+				if imageCacheStaleReplayError(err) {
+					if persistedManifestHasPendingDependency(manifest, pending) {
+						lastErr = err
+						next = append(next, manifest)
+						continue
+					}
+					// A journal entry can outlive a child manifest that was
+					// removed by an older cache/prune implementation.  It is
+					// safer to discard only this unreachable metadata record
+					// and continue replaying the rest of the cache than to leave
+					// the registry in a partially reconstructed, repeatedly
+					// failing state.
+					if deleteErr := c.deletePersistedManifestRecord(manifest); deleteErr != nil {
+						lastErr = deleteErr
+						next = append(next, manifest)
+						continue
+					}
+					discarded++
+					continue
+				}
 				lastErr = err
 				next = append(next, manifest)
 				continue
@@ -2147,7 +2379,29 @@ func (c *imageCache) loadPersistedManifests() error {
 	if loaded > 0 {
 		log.Printf("loaded %d persisted image cache manifests", loaded)
 	}
+	if discarded > 0 {
+		log.Printf("discarded %d stale persisted image cache manifests whose registry graph was unavailable", discarded)
+	}
 	return nil
+}
+
+func imageCacheStaleReplayError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"status=404",
+		"manifest_unknown",
+		"name_unknown",
+		"blob_unknown",
+		"unknown manifest",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *imageCache) replayManifest(manifest persistedManifest) error {
