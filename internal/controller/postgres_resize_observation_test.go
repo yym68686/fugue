@@ -13,7 +13,7 @@ func TestObserveManagedPostgresResizeUsesActualContainerResources(t *testing.T) 
 	var pod kubeResizePod
 	if err := json.Unmarshal([]byte(`{
 		"metadata":{"namespace":"tenant-a","name":"database-1","uid":"pod-uid","resourceVersion":"42","generation":7},
-		"spec":{"nodeName":"worker-a","containers":[{"name":"postgres","resources":{"requests":{"cpu":"100m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}},"resizePolicy":[{"resourceName":"cpu","restartPolicy":"NotRequired"},{"resourceName":"memory","restartPolicy":"NotRequired"}]}]},
+		"spec":{"nodeName":"worker-a","resources":{"requests":{"cpu":"200m"}},"initContainers":[{"name":"bootstrap-controller","resources":{"requests":{"cpu":"100m","memory":"512Mi"}}}],"containers":[{"name":"postgres","resources":{"requests":{"cpu":"100m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}},"resizePolicy":[{"resourceName":"cpu","restartPolicy":"NotRequired"},{"resourceName":"memory","restartPolicy":"NotRequired"}]}]},
 		"status":{"observedGeneration":7,"phase":"Running","conditions":[{"type":"Ready","status":"True"},{"type":"PodResizePending","status":"True","reason":"Deferred","message":"waiting for node capacity"}],"containerStatuses":[{"name":"postgres","ready":true,"restartCount":0,"resources":{"requests":{"cpu":"150m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}}}]}
 	}`), &pod); err != nil {
 		t.Fatalf("decode pod: %v", err)
@@ -40,6 +40,12 @@ func TestObserveManagedPostgresResizeUsesActualContainerResources(t *testing.T) 
 	}
 	if len(got.ResizePolicy) != 2 || got.ResizePolicy[0].RestartPolicy != "NotRequired" {
 		t.Fatalf("unexpected resize policy: %+v", got.ResizePolicy)
+	}
+	if len(got.Containers) != 1 || len(got.InitContainers) != 1 || got.InitContainers[0].Name != "bootstrap-controller" {
+		t.Fatalf("expected complete Pod resource layout, got containers=%+v init=%+v", got.Containers, got.InitContainers)
+	}
+	if got.PodResources == nil || got.PodResources.Requests["cpu"] != "200m" {
+		t.Fatalf("expected Pod-level resources, got %+v", got.PodResources)
 	}
 }
 

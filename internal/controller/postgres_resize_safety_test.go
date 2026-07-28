@@ -3,7 +3,7 @@ package controller
 import "testing"
 
 func resizeObservationFixture() managedPostgresResizeObservation {
-	return managedPostgresResizeObservation{
+	observation := managedPostgresResizeObservation{
 		Namespace:       "tenant-a",
 		PodName:         "database-1",
 		PodUID:          "pod-uid",
@@ -21,6 +21,94 @@ func resizeObservationFixture() managedPostgresResizeObservation {
 			{ResourceName: "cpu", RestartPolicy: "NotRequired"},
 			{ResourceName: "memory", RestartPolicy: "NotRequired"},
 		},
+	}
+	observation.Containers = []kubeResizeContainerSpec{{
+		Name:      managedPostgresMainContainerName,
+		Resources: cloneKubeResourceRequirements(observation.DesiredResources),
+	}}
+	return observation
+}
+
+func TestAssessManagedPostgresResizeBlocksDownscaleBelowInitContainerFloor(t *testing.T) {
+	observation := resizeObservationFixture()
+	observation.DesiredResources.Requests["cpu"] = "500m"
+	observation.Containers[0].Resources.Requests["cpu"] = "500m"
+	observation.InitContainers = []kubeResizeContainerSpec{{
+		Name: "bootstrap-controller",
+		Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "500m", "memory": "512Mi",
+		}},
+	}}
+
+	assessment := assessManagedPostgresResize(observation, kubeResourceRequirements{
+		Requests: map[string]string{"cpu": "100m"},
+	}, managedPostgresResizeSafetyOptions{AllowRequestDownscale: true})
+	if assessment.State != managedPostgresResizeStateBlocked || assessment.Reason != "ineffective_request_downscale" {
+		t.Fatalf("expected ineffective downscale to be blocked, got %+v", assessment)
+	}
+}
+
+func TestAssessManagedPostgresResizeAllowsDownscaleThatReleasesEffectiveRequest(t *testing.T) {
+	observation := resizeObservationFixture()
+	observation.DesiredResources.Requests["cpu"] = "500m"
+	observation.Containers[0].Resources.Requests["cpu"] = "500m"
+	observation.InitContainers = []kubeResizeContainerSpec{{
+		Name: "bootstrap-controller",
+		Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "100m", "memory": "512Mi",
+		}},
+	}}
+
+	assessment := assessManagedPostgresResize(observation, kubeResourceRequirements{
+		Requests: map[string]string{"cpu": "150m"},
+	}, managedPostgresResizeSafetyOptions{AllowRequestDownscale: true})
+	if assessment.State != managedPostgresResizeStateReady {
+		t.Fatalf("expected effective downscale to pass, got %+v", assessment)
+	}
+}
+
+func TestManagedPostgresEffectivePodRequestsMatchesRestartableInitSemantics(t *testing.T) {
+	always := "Always"
+	observation := resizeObservationFixture()
+	observation.Containers = append(observation.Containers, kubeResizeContainerSpec{
+		Name: "metrics",
+		Resources: kubeResourceRequirements{Requests: map[string]string{
+			"cpu": "50m", "memory": "64Mi",
+		}},
+	})
+	observation.InitContainers = []kubeResizeContainerSpec{
+		{
+			Name: "sidecar-init", RestartPolicy: &always,
+			Resources: kubeResourceRequirements{Requests: map[string]string{"cpu": "25m", "memory": "32Mi"}},
+		},
+		{
+			Name:      "bootstrap",
+			Resources: kubeResourceRequirements{Requests: map[string]string{"cpu": "300m", "memory": "768Mi"}},
+		},
+	}
+
+	requests, err := managedPostgresEffectivePodRequests(observation, observation.DesiredResources)
+	if err != nil {
+		t.Fatalf("calculate effective requests: %v", err)
+	}
+	cpu := requests["cpu"]
+	if got := cpu.MilliValue(); got != 325 {
+		t.Fatalf("expected restartable init CPU accumulation of 325m, got %dm", got)
+	}
+	memory := requests["memory"]
+	if got := memory.Value(); got != 800*1024*1024 {
+		t.Fatalf("expected restartable init memory accumulation of 800Mi, got %d", got)
+	}
+}
+
+func TestAssessManagedPostgresResizeBlocksPodLevelRequestDownscale(t *testing.T) {
+	observation := resizeObservationFixture()
+	observation.PodResources = &kubeResourceRequirements{Requests: map[string]string{"cpu": "200m"}}
+	assessment := assessManagedPostgresResize(observation, kubeResourceRequirements{
+		Requests: map[string]string{"cpu": "75m"},
+	}, managedPostgresResizeSafetyOptions{AllowRequestDownscale: true})
+	if assessment.State != managedPostgresResizeStateBlocked || assessment.Reason != "pod_level_request_floor" {
+		t.Fatalf("expected Pod-level request floor to block downscale, got %+v", assessment)
 	}
 }
 

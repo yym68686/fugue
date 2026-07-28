@@ -96,6 +96,11 @@ func assessManagedPostgresResize(
 	if !options.AllowRequestDownscale && hasRequestDownscale(decreases) {
 		return blockedResizeAssessment("request_downscale_disabled", "request downscale is disabled by policy")
 	}
+	if hasRequestDownscale(decreases) {
+		if reason, message := ineffectiveManagedPostgresRequestDownscale(observation, current, merged, decreases); reason != "" {
+			return blockedResizeAssessment(reason, message)
+		}
+	}
 	if !options.AllowLimitChanges && hasLimitChange(changed) {
 		return blockedResizeAssessment("limit_resize_disabled", "limit changes are disabled by policy")
 	}
@@ -103,6 +108,162 @@ func assessManagedPostgresResize(
 	assessment.Reason = "safe_in_place_resize"
 	assessment.Message = "Pod resize passed the no-restart safety gate"
 	return assessment
+}
+
+// ineffectiveManagedPostgresRequestDownscale mirrors Kubernetes' effective Pod
+// request calculation, including restartable init containers. A container-level
+// request downscale can succeed through /resize while releasing no schedulable
+// capacity because a non-resizable init container (or Pod-level request) remains
+// the effective floor. Such a transition must fail closed instead of reporting
+// capacity that the scheduler cannot actually reuse.
+func ineffectiveManagedPostgresRequestDownscale(
+	observation managedPostgresResizeObservation,
+	current, target kubeResourceRequirements,
+	decreases []string,
+) (string, string) {
+	if observation.PodResources != nil {
+		for _, resourceName := range []string{"cpu", "memory"} {
+			if _, set := parseResizeQuantity(observation.PodResources.Requests[resourceName]); set && containsResizeResource(decreases, "requests."+resourceName) {
+				return "pod_level_request_floor", fmt.Sprintf("%s request downscale cannot prove schedulable capacity recovery while a Pod-level request is set", resourceName)
+			}
+		}
+	}
+
+	before, err := managedPostgresEffectivePodRequests(observation, current)
+	if err != nil {
+		return "effective_request_unknown", err.Error()
+	}
+	after, err := managedPostgresEffectivePodRequests(observation, target)
+	if err != nil {
+		return "effective_request_unknown", err.Error()
+	}
+	for _, resourceName := range []string{"cpu", "memory"} {
+		if !containsResizeResource(decreases, "requests."+resourceName) {
+			continue
+		}
+		beforeQuantity, beforeOK := before[resourceName]
+		afterQuantity, afterOK := after[resourceName]
+		if !beforeOK || !afterOK {
+			return "effective_request_unknown", fmt.Sprintf("cannot calculate effective Pod %s request", resourceName)
+		}
+		if afterQuantity.Cmp(beforeQuantity) >= 0 {
+			return "ineffective_request_downscale", fmt.Sprintf(
+				"%s container request downscale would not reduce the effective Pod request (%s before and %s after); another container or init-container request remains the effective floor",
+				resourceName,
+				beforeQuantity.String(),
+				afterQuantity.String(),
+			)
+		}
+	}
+	return "", ""
+}
+
+func managedPostgresEffectivePodRequests(
+	observation managedPostgresResizeObservation,
+	target kubeResourceRequirements,
+) (map[string]resource.Quantity, error) {
+	containers := cloneKubeResizeContainerSpecs(observation.Containers)
+	foundTarget := false
+	for index := range containers {
+		if strings.TrimSpace(containers[index].Name) != strings.TrimSpace(observation.ContainerName) {
+			continue
+		}
+		containers[index].Resources = cloneKubeResourceRequirements(target)
+		foundTarget = true
+		break
+	}
+	if !foundTarget {
+		return nil, fmt.Errorf("effective Pod request calculation cannot find target container %s", observation.ContainerName)
+	}
+
+	total := emptyResizeQuantities()
+	for _, container := range containers {
+		requests, err := resizeRequestQuantities(container.Resources.Requests, container.Name)
+		if err != nil {
+			return nil, err
+		}
+		addResizeQuantities(total, requests)
+	}
+
+	restartableInitTotal := emptyResizeQuantities()
+	initMaximum := emptyResizeQuantities()
+	for _, container := range observation.InitContainers {
+		requests, err := resizeRequestQuantities(container.Resources.Requests, container.Name)
+		if err != nil {
+			return nil, err
+		}
+		stage := emptyResizeQuantities()
+		if container.RestartPolicy != nil && strings.EqualFold(strings.TrimSpace(*container.RestartPolicy), "Always") {
+			addResizeQuantities(total, requests)
+			addResizeQuantities(restartableInitTotal, requests)
+			copyResizeQuantities(stage, restartableInitTotal)
+		} else {
+			copyResizeQuantities(stage, restartableInitTotal)
+			addResizeQuantities(stage, requests)
+		}
+		maxResizeQuantities(initMaximum, stage)
+	}
+	maxResizeQuantities(total, initMaximum)
+	return total, nil
+}
+
+func emptyResizeQuantities() map[string]resource.Quantity {
+	return map[string]resource.Quantity{
+		"cpu":    resource.MustParse("0"),
+		"memory": resource.MustParse("0"),
+	}
+}
+
+func resizeRequestQuantities(requests map[string]string, containerName string) (map[string]resource.Quantity, error) {
+	out := emptyResizeQuantities()
+	for _, resourceName := range []string{"cpu", "memory"} {
+		raw := strings.TrimSpace(requests[resourceName])
+		if raw == "" {
+			continue
+		}
+		quantity, err := resource.ParseQuantity(raw)
+		if err != nil || quantity.Sign() < 0 {
+			if err == nil {
+				err = fmt.Errorf("quantity must not be negative")
+			}
+			return nil, fmt.Errorf("parse %s request for container %s: %w", resourceName, strings.TrimSpace(containerName), err)
+		}
+		out[resourceName] = quantity
+	}
+	return out, nil
+}
+
+func addResizeQuantities(destination, source map[string]resource.Quantity) {
+	for _, resourceName := range []string{"cpu", "memory"} {
+		quantity := destination[resourceName]
+		quantity.Add(source[resourceName])
+		destination[resourceName] = quantity
+	}
+}
+
+func copyResizeQuantities(destination, source map[string]resource.Quantity) {
+	for _, resourceName := range []string{"cpu", "memory"} {
+		destination[resourceName] = source[resourceName].DeepCopy()
+	}
+}
+
+func maxResizeQuantities(destination, candidate map[string]resource.Quantity) {
+	for _, resourceName := range []string{"cpu", "memory"} {
+		candidateQuantity := candidate[resourceName]
+		destinationQuantity := destination[resourceName]
+		if candidateQuantity.Cmp(destinationQuantity) > 0 {
+			destination[resourceName] = candidateQuantity.DeepCopy()
+		}
+	}
+}
+
+func containsResizeResource(resources []string, target string) bool {
+	for _, resourceName := range resources {
+		if resourceName == target {
+			return true
+		}
+	}
+	return false
 }
 
 func blockedResizeAssessment(reason, message string) managedPostgresResizeAssessment {

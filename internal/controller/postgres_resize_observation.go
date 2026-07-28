@@ -30,9 +30,10 @@ type kubeResizePolicy struct {
 }
 
 type kubeResizeContainerSpec struct {
-	Name         string                   `json:"name"`
-	Resources    kubeResourceRequirements `json:"resources,omitempty"`
-	ResizePolicy []kubeResizePolicy       `json:"resizePolicy,omitempty"`
+	Name          string                   `json:"name"`
+	RestartPolicy *string                  `json:"restartPolicy,omitempty"`
+	Resources     kubeResourceRequirements `json:"resources,omitempty"`
+	ResizePolicy  []kubeResizePolicy       `json:"resizePolicy,omitempty"`
 }
 
 type kubeResizePod struct {
@@ -44,8 +45,10 @@ type kubeResizePod struct {
 		Generation      int64  `json:"generation,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
-		NodeName   string                    `json:"nodeName,omitempty"`
-		Containers []kubeResizeContainerSpec `json:"containers"`
+		NodeName       string                    `json:"nodeName,omitempty"`
+		Containers     []kubeResizeContainerSpec `json:"containers"`
+		InitContainers []kubeResizeContainerSpec `json:"initContainers,omitempty"`
+		Resources      *kubeResourceRequirements `json:"resources,omitempty"`
 	} `json:"spec"`
 	Status struct {
 		ObservedGeneration int64              `json:"observedGeneration,omitempty"`
@@ -85,6 +88,9 @@ type managedPostgresResizeObservation struct {
 	DesiredResources   kubeResourceRequirements
 	ActualResources    *kubeResourceRequirements
 	ResizePolicy       []kubeResizePolicy
+	Containers         []kubeResizeContainerSpec
+	InitContainers     []kubeResizeContainerSpec
+	PodResources       *kubeResourceRequirements
 	Conditions         []managedPostgresResizeCondition
 }
 
@@ -104,6 +110,12 @@ func observeManagedPostgresResize(pod kubeResizePod, containerName string) (mana
 		NodeName:           strings.TrimSpace(pod.Spec.NodeName),
 		Phase:              strings.TrimSpace(pod.Status.Phase),
 		ContainerName:      containerName,
+		Containers:         cloneKubeResizeContainerSpecs(pod.Spec.Containers),
+		InitContainers:     cloneKubeResizeContainerSpecs(pod.Spec.InitContainers),
+	}
+	if pod.Spec.Resources != nil {
+		resources := cloneKubeResourceRequirements(*pod.Spec.Resources)
+		out.PodResources = &resources
 	}
 	for _, condition := range pod.Status.Conditions {
 		conditionType := strings.TrimSpace(condition.Type)
@@ -153,6 +165,24 @@ func observeManagedPostgresResize(pod kubeResizePod, containerName string) (mana
 		return managedPostgresResizeObservation{}, fmt.Errorf("managed postgres pod %s does not report status for container %s", out.PodName, containerName)
 	}
 	return out, nil
+}
+
+func cloneKubeResizeContainerSpecs(containers []kubeResizeContainerSpec) []kubeResizeContainerSpec {
+	if len(containers) == 0 {
+		return nil
+	}
+	out := make([]kubeResizeContainerSpec, 0, len(containers))
+	for _, container := range containers {
+		copy := container
+		copy.Resources = cloneKubeResourceRequirements(container.Resources)
+		copy.ResizePolicy = append([]kubeResizePolicy(nil), container.ResizePolicy...)
+		if container.RestartPolicy != nil {
+			restartPolicy := *container.RestartPolicy
+			copy.RestartPolicy = &restartPolicy
+		}
+		out = append(out, copy)
+	}
+	return out
 }
 
 func (c *kubeClient) getPodResizeState(ctx context.Context, namespace, name string) (kubeResizePod, bool, error) {
