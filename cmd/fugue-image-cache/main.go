@@ -802,32 +802,10 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		}
 	}
 
-	selectedKeys := make(map[string]struct{}, len(selected))
-	for _, record := range selected {
-		selectedKeys[record.Repo+"\x00"+record.Target] = struct{}{}
-	}
-	remainingReferenced := map[string]struct{}{}
-	for _, record := range records {
-		if _, ok := selectedKeys[record.Repo+"\x00"+record.Target]; ok {
-			continue
-		}
-		for _, digest := range record.ReferencedBlobs {
-			remainingReferenced[digest] = struct{}{}
-		}
-	}
-	unreferenced := make([]imageCacheBlobRecord, 0, len(blobs))
-	for _, blob := range blobs {
-		if _, ok := remainingReferenced[blob.Digest]; ok {
-			continue
-		}
-		unreferenced = append(unreferenced, blob)
-	}
-	sort.SliceStable(unreferenced, func(i, j int) bool {
-		if unreferenced[i].ModifiedAt.Equal(unreferenced[j].ModifiedAt) {
-			return unreferenced[i].SizeBytes > unreferenced[j].SizeBytes
-		}
-		return unreferenced[i].ModifiedAt.Before(unreferenced[j].ModifiedAt)
-	})
+	// Use the selected candidates for the preliminary no-op check below.  Once
+	// the byte budget has chosen the actual delete set, this list is rebuilt so
+	// blobs belonging to selected-but-not-deleted manifests remain referenced.
+	unreferenced := unreferencedImageCacheBlobs(records, blobs, selected)
 
 	budget := limit.MaxDeleteBytesPerRun
 	if req.requestMaxBytes > 0 && (budget <= 0 || req.requestMaxBytes < budget) {
@@ -868,7 +846,25 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 			plan.deleteManifests = append(plan.deleteManifests, record)
 			planned += record.SizeBytes
 		}
+		// A selected parent can remain in place when the per-run byte budget is
+		// exhausted.  Never delete one of its children in that case, and repeat
+		// the check for nested manifest lists/indexes.
+		var protectedByManifestGraph []imageCacheManifestRecord
+		plan.deleteManifests, protectedByManifestGraph = protectImageCacheManifestDeletes(records, plan.deleteManifests)
+		for _, record := range protectedByManifestGraph {
+			appendSkipped(record, "referenced_manifest")
+		}
+		planned = 0
+		for _, record := range plan.deleteManifests {
+			planned += record.SizeBytes
+		}
+		plan.SkippedManifests = manifestEntriesWithSkipReasons(skipped, blobByDigest, skipReasons)
 	}
+	// Recompute blob reachability from the actual manifest delete set, not all
+	// selected candidates.  The distinction is essential when a selected
+	// manifest does not fit in this run's delete budget.
+	unreferenced = unreferencedImageCacheBlobs(records, blobs, plan.deleteManifests)
+	plan.UnreferencedBlobs = blobEntries(unreferenced)
 	blobBudget := budget - planned
 	if blobBudget < 0 {
 		blobBudget = 0
@@ -1123,6 +1119,95 @@ func imageCacheManifestRecordReferencedBy(record imageCacheManifestRecord, refer
 		}
 	}
 	return false
+}
+
+// protectImageCacheManifestDeletes removes child manifests from a proposed
+// delete set whenever a parent remains after budget selection.  The operation
+// is repeated until the graph reaches a fixed point so a newly protected
+// child also protects its own descendants.  This is intentionally based on
+// the actual delete set, rather than the broader selected-candidate set:
+// a byte budget can leave a selected parent in place for this run.
+func protectImageCacheManifestDeletes(records, deletes []imageCacheManifestRecord) ([]imageCacheManifestRecord, []imageCacheManifestRecord) {
+	if len(records) == 0 || len(deletes) == 0 {
+		return deletes, nil
+	}
+	deleting := make(map[string]struct{}, len(deletes))
+	for _, record := range deletes {
+		deleting[imageCacheManifestRecordKey(record)] = struct{}{}
+	}
+	protected := make(map[string]imageCacheManifestRecord)
+	for {
+		survivingReferences := make(map[string]struct{})
+		for _, parent := range records {
+			if _, ok := deleting[imageCacheManifestRecordKey(parent)]; ok {
+				continue
+			}
+			for _, childDigest := range parent.ReferencedManifests {
+				if key := imageCacheManifestReferenceKey(parent.Repo, childDigest); key != "" {
+					survivingReferences[key] = struct{}{}
+				}
+			}
+		}
+		changed := false
+		for _, record := range deletes {
+			key := imageCacheManifestRecordKey(record)
+			if _, ok := deleting[key]; !ok {
+				continue
+			}
+			if !imageCacheManifestRecordReferencedBy(record, survivingReferences) {
+				continue
+			}
+			delete(deleting, key)
+			protected[key] = record
+			changed = true
+		}
+		if !changed {
+			break
+		}
+	}
+	safe := make([]imageCacheManifestRecord, 0, len(deletes))
+	for _, record := range deletes {
+		if _, ok := deleting[imageCacheManifestRecordKey(record)]; ok {
+			safe = append(safe, record)
+		}
+	}
+	protectedRecords := make([]imageCacheManifestRecord, 0, len(protected))
+	for _, record := range deletes {
+		if _, ok := protected[imageCacheManifestRecordKey(record)]; ok {
+			protectedRecords = append(protectedRecords, record)
+		}
+	}
+	return safe, protectedRecords
+}
+
+func unreferencedImageCacheBlobs(records []imageCacheManifestRecord, blobs []imageCacheBlobRecord, deleted []imageCacheManifestRecord) []imageCacheBlobRecord {
+	deletedKeys := make(map[string]struct{}, len(deleted))
+	for _, record := range deleted {
+		deletedKeys[imageCacheManifestRecordKey(record)] = struct{}{}
+	}
+	remainingReferenced := map[string]struct{}{}
+	for _, record := range records {
+		if _, ok := deletedKeys[imageCacheManifestRecordKey(record)]; ok {
+			continue
+		}
+		for _, digest := range record.ReferencedBlobs {
+			remainingReferenced[digest] = struct{}{}
+		}
+	}
+	unreferenced := make([]imageCacheBlobRecord, 0, len(blobs))
+	for _, blob := range blobs {
+		if _, ok := remainingReferenced[blob.Digest]; ok {
+			continue
+		}
+		unreferenced = append(unreferenced, blob)
+	}
+	sort.SliceStable(unreferenced, func(i, j int) bool {
+		if unreferenced[i].ModifiedAt.Equal(unreferenced[j].ModifiedAt) {
+			return unreferenced[i].SizeBytes > unreferenced[j].SizeBytes
+		}
+		return unreferenced[i].ModifiedAt.Before(unreferenced[j].ModifiedAt)
+	})
+	return unreferenced
 }
 
 func imageCacheManifestReferenceKeys(record imageCacheManifestRecord) []string {

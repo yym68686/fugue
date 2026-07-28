@@ -1068,6 +1068,103 @@ func TestImageCachePruneProtectsManifestListChildren(t *testing.T) {
 	}
 }
 
+func TestImageCachePruneBudgetKeepsChildWhenParentSurvives(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: manifestDir,
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{}`))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("layer"))
+	child := []byte(testImageCacheManifest(configDigest, layerDigest))
+	childDigest := manifestBodyDigest(child)
+	// Make the parent too large for this run's budget and arrange for the
+	// child to be considered first.  The old planner would delete the child
+	// and then classify its blobs as unreferenced even though the parent stayed.
+	parent := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","annotations":{"padding":%q},"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":%d,"platform":{"os":"linux","architecture":"amd64"}}]}`, strings.Repeat("x", 4096), childDigest, len(child)))
+	if err := cache.persistManifest("fugue-apps/demo", childDigest, "application/vnd.oci.image.manifest.v1+json", child); err != nil {
+		t.Fatalf("persist child: %v", err)
+	}
+	if err := cache.persistManifest("fugue-apps/demo", "image-index", "application/vnd.docker.distribution.manifest.list.v2+json", parent); err != nil {
+		t.Fatalf("persist parent: %v", err)
+	}
+	childPath := filepath.Join(manifestDir, manifestStoreKey("fugue-apps/demo", childDigest)+".json")
+	parentPath := filepath.Join(manifestDir, manifestStoreKey("fugue-apps/demo", "image-index")+".json")
+	base := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(childPath, base, base); err != nil {
+		t.Fatalf("touch child journal: %v", err)
+	}
+	if err := os.Chtimes(parentPath, base.Add(time.Minute), base.Add(time.Minute)); err != nil {
+		t.Fatalf("touch parent journal: %v", err)
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("manifest records: %v", err)
+	}
+	var childSize, parentSize int64
+	for _, record := range records {
+		switch record.Target {
+		case childDigest:
+			childSize = record.SizeBytes
+		case "image-index":
+			parentSize = record.SizeBytes
+		}
+	}
+	if childSize <= 0 || parentSize <= childSize {
+		t.Fatalf("unexpected manifest sizes child=%d parent=%d", childSize, parentSize)
+	}
+	blobs, err := cache.imageCacheBlobRecords()
+	if err != nil {
+		t.Fatalf("blob records: %v", err)
+	}
+	var blobBytes int64
+	for _, blob := range blobs {
+		if blob.Digest == configDigest || blob.Digest == layerDigest {
+			blobBytes += blob.SizeBytes
+		}
+	}
+	budget := childSize + blobBytes
+	if budget >= parentSize {
+		t.Fatalf("test budget %d must be smaller than parent %d", budget, parentSize)
+	}
+
+	result := postImageCachePrune(t, cache, fmt.Sprintf(`{"dry_run":false,"allow_delete":true,"include_unreferenced_blobs":true,"targets":[{"repo":"fugue-apps/demo","target":"%s"},{"repo":"fugue-apps/demo","target":"%s"}],"max_delete_bytes":"%d"}`, childDigest, "image-index", budget))
+	if result.Deleted {
+		t.Fatalf("prune deleted data while parent graph survived: %+v", result)
+	}
+	if _, err := os.Stat(childPath); err != nil {
+		t.Fatalf("child journal was removed: %v", err)
+	}
+	if _, err := os.Stat(parentPath); err != nil {
+		t.Fatalf("parent journal was removed: %v", err)
+	}
+	for _, digest := range []string{configDigest, layerDigest} {
+		if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); err != nil {
+			t.Fatalf("child blob %s was removed: %v", digest, err)
+		}
+	}
+	foundProtected := false
+	for _, entry := range result.SkippedManifests {
+		if entry.Target == childDigest && entry.SkipReason == "referenced_manifest" {
+			foundProtected = true
+			break
+		}
+	}
+	if !foundProtected {
+		t.Fatalf("expected budget-surviving parent to protect child, got %+v", result.SkippedManifests)
+	}
+}
+
 func TestImageCacheStreamsBlobUploadToDisk(t *testing.T) {
 	t.Parallel()
 
