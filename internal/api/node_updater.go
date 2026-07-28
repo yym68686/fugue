@@ -4330,12 +4330,14 @@ replicate_app_image() {
   local body
   body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"source_cache_endpoint\":\"$(json_escape_shell "${source}")\",\"task_id\":\"$(json_escape_shell "${FUGUE_NODE_UPDATE_TASK_ID:-}")\"}"
   report_image_replica "${image_id}" "${digest}" copying ""
+  local rc=0
   if image_cache_api_json /fugue/cache/v1/replicate "${body}" >/dev/null; then
     report_image_replica "${image_id}" "${digest}" present ""
     log_task "replicated app image ${image_ref:-${digest}}"
     return 0
+  else
+    rc=$?
   fi
-  local rc=$?
   report_image_replica "${image_id}" "${digest}" failed "image-cache replication failed"
   return "${rc}"
 }
@@ -4350,12 +4352,14 @@ verify_image_cache() {
   fi
   local body
   body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\"}"
+  local rc=0
   if image_cache_api_json /fugue/cache/v1/verify "${body}" >/dev/null; then
     report_image_replica "${image_id}" "${digest}" present ""
     log_task "verified image cache for ${image_ref:-${digest}}"
     return 0
+  else
+    rc=$?
   fi
-  local rc=$?
   report_image_replica "${image_id}" "${digest}" missing "image-cache verify failed"
   return "${rc}"
 }

@@ -1982,6 +1982,70 @@ grep -q $'registry.example/app:retryable\tfailed' "${reports}"
 	}
 }
 
+func TestNodeUpdaterImageCacheFailuresPreserveExitStatus(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+log_task() { :; }
+report_image_replica() {
+  printf '%s\t%s\n' "$1" "$3" >>"${REPORTS}"
+}
+image_cache_api_json() {
+  case "$1" in
+    */replicate) return 23 ;;
+    */verify) return 24 ;;
+    *) return 25 ;;
+  esac
+}
+
+tmpdir="$(mktemp -d)"
+REPORTS="${tmpdir}/reports"
+export REPORTS
+FUGUE_NODE_UPDATE_TASK_ID="task-image-integrity"
+FUGUE_NODE_UPDATE_TASK_IMAGE_ID="image-image-integrity"
+FUGUE_NODE_UPDATE_TASK_IMAGE_REF="registry.example/app:integrity"
+FUGUE_NODE_UPDATE_TASK_DIGEST="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+if replicate_app_image; then
+  echo "replicate_app_image unexpectedly succeeded"
+  exit 1
+else
+  rc=$?
+  [ "${rc}" -eq 23 ] || { echo "replicate exit status=${rc}, want 23"; exit 1; }
+fi
+grep -q $'image-image-integrity\tfailed' "${REPORTS}"
+
+: >"${REPORTS}"
+if verify_image_cache; then
+  echo "verify_image_cache unexpectedly succeeded"
+  exit 1
+else
+  rc=$?
+  [ "${rc}" -eq 24 ] || { echo "verify exit status=${rc}, want 24"; exit 1; }
+fi
+grep -q $'image-image-integrity\tmissing' "${REPORTS}"
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-image-integrity-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater image integrity harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater image integrity harness failed: %v\n%s", err, output)
+	}
+}
+
 func ageTaskInStoreFile(t *testing.T, storePath, taskID string, updatedAt time.Time) {
 	t.Helper()
 	raw, err := os.ReadFile(storePath)
