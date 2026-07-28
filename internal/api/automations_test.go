@@ -50,6 +50,9 @@ func TestAutomationInventoryProjectsManagedPolicies(t *testing.T) {
 			len(policy.Rules) != 1 {
 			t.Fatalf("incomplete managed automation policy: %+v", policy)
 		}
+		if policy.CreatedAt.IsZero() || policy.UpdatedAt.IsZero() || policy.UpdatedAt.Before(policy.CreatedAt) {
+			t.Fatalf("managed automation policy has invalid timestamps: %+v", policy)
+		}
 		if policy.Rules[0].Safety.ActionContractID == "" ||
 			policy.Rules[0].Safety.GatePolicyID == "" ||
 			policy.Rules[0].Trigger.Source == "" ||

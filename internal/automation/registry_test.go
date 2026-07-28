@@ -32,6 +32,9 @@ func TestBuildManagedPoliciesProjectsEveryCompiledActionContract(t *testing.T) {
 		if policy.Kind != model.AutomationPolicyKindManagedSystem || policy.Generation != 1 {
 			t.Fatalf("compiled policy has invalid identity: %+v", policy)
 		}
+		if policy.CreatedAt.IsZero() || policy.UpdatedAt.IsZero() || policy.UpdatedAt.Before(policy.CreatedAt) {
+			t.Fatalf("compiled policy has invalid timestamps: %+v", policy)
+		}
 		if len(policy.Rules) != 1 {
 			t.Fatalf("compiled policy %q must contain one compatibility rule", policy.ID)
 		}
@@ -59,6 +62,30 @@ func TestBuildManagedPoliciesProjectsEveryCompiledActionContract(t *testing.T) {
 				rule.Trigger.InvariantID,
 			)
 		}
+	}
+}
+
+func TestBuildManagedPoliciesUsesIntroductionAsInitialUpdateTime(t *testing.T) {
+	gate := managedGateFixture()
+
+	policies, err := BuildManagedPolicies(
+		[]model.AutomaticActionContract{managedContractFixture()},
+		[]model.GatePolicy{gate},
+	)
+	if err != nil {
+		t.Fatalf("build managed policies: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("expected one policy, got %d", len(policies))
+	}
+	if !policies[0].CreatedAt.Equal(gate.IntroducedAt) ||
+		!policies[0].UpdatedAt.Equal(gate.IntroducedAt) {
+		t.Fatalf(
+			"expected initial timestamps %v, got created=%v updated=%v",
+			gate.IntroducedAt,
+			policies[0].CreatedAt,
+			policies[0].UpdatedAt,
+		)
 	}
 }
 

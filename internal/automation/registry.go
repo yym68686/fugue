@@ -91,6 +91,15 @@ func BuildManagedPolicies(
 		if rollbackAction == "" {
 			return nil, fmt.Errorf("automation registry: action contract %q has no rollback action", contractID)
 		}
+		createdAt := gate.IntroducedAt
+		updatedAt := gate.UpdatedAt
+		// A managed policy has no separate persistence record.  For a policy
+		// that has never been promoted, the introduction timestamp is also the
+		// last-known update timestamp; emitting Go's zero time would violate
+		// the API contract and make an otherwise stable policy look corrupt.
+		if updatedAt.IsZero() {
+			updatedAt = createdAt
+		}
 
 		policies = append(policies, model.AutomationPolicy{
 			ID:          managedPolicyPrefix + contractID,
@@ -136,8 +145,8 @@ func BuildManagedPolicies(
 				"gate_policy_scope": gateScope,
 				"runbook_ref":       strings.TrimSpace(contract.RunbookRef),
 			},
-			CreatedAt: gate.IntroducedAt,
-			UpdatedAt: gate.UpdatedAt,
+			CreatedAt: createdAt,
+			UpdatedAt: updatedAt,
 		})
 	}
 
