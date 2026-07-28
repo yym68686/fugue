@@ -11,17 +11,18 @@ import (
 )
 
 type zeroDowntimeRolloutGuardDecision struct {
-	Refused            bool
-	Reason             string
-	PolicyMode         string
-	RequirementSource  string
-	RolloutIntent      string
-	Strategy           string
-	DowntimeClass      string
-	RolloutMode        string
-	PreviousReleaseKey string
-	DesiredReleaseKey  string
-	PodTemplateChanged bool
+	Refused                  bool
+	Reason                   string
+	PolicyMode               string
+	RequirementSource        string
+	RolloutIntent            string
+	Strategy                 string
+	DowntimeClass            string
+	RolloutMode              string
+	PreviousReleaseKey       string
+	DesiredReleaseKey        string
+	PodTemplateChanged       bool
+	AuxiliaryTemplateChanged bool
 }
 
 func (s *Service) refuseNonZeroDowntimeRolloutIfNeeded(
@@ -40,30 +41,59 @@ func (s *Service) refuseNonZeroDowntimeRolloutWithScheduling(
 	currentScheduling, desiredScheduling runtime.SchedulingConstraints,
 	observedReleaseKey string,
 ) error {
-	decision := s.zeroDowntimeRolloutGuardDecisionWithScheduling(op, currentApp, desiredApp, currentScheduling, desiredScheduling, observedReleaseKey)
+	return s.refuseNonZeroDowntimeRolloutWithSchedulingAndTemplateEvidence(
+		ctx,
+		op,
+		currentApp,
+		desiredApp,
+		currentScheduling,
+		desiredScheduling,
+		observedReleaseKey,
+		false,
+	)
+}
+
+func (s *Service) refuseNonZeroDowntimeRolloutWithSchedulingAndTemplateEvidence(
+	ctx context.Context,
+	op model.Operation,
+	currentApp, desiredApp model.App,
+	currentScheduling, desiredScheduling runtime.SchedulingConstraints,
+	observedReleaseKey string,
+	auxiliaryTemplateChanged bool,
+) error {
+	decision := s.zeroDowntimeRolloutGuardDecisionWithSchedulingAndTemplateEvidence(
+		op,
+		currentApp,
+		desiredApp,
+		currentScheduling,
+		desiredScheduling,
+		observedReleaseKey,
+		auxiliaryTemplateChanged,
+	)
 	if !decision.Refused {
 		return nil
 	}
 
 	message := fmt.Sprintf("zero-downtime %s refused: %s", strings.TrimSpace(op.Type), decision.Reason)
 	attrs := map[string]any{
-		"decision":             "zero_downtime_required",
-		"operation_id":         strings.TrimSpace(op.ID),
-		"operation_type":       strings.TrimSpace(op.Type),
-		"policy_mode":          decision.PolicyMode,
-		"requirement_source":   decision.RequirementSource,
-		"rollout_intent":       decision.RolloutIntent,
-		"strategy":             decision.Strategy,
-		"downtime_class":       decision.DowntimeClass,
-		"rollout_mode":         decision.RolloutMode,
-		"reason":               decision.Reason,
-		"previous_release_key": decision.PreviousReleaseKey,
-		"desired_release_key":  decision.DesiredReleaseKey,
-		"pod_template_changed": decision.PodTemplateChanged,
-		"cluster_service":      model.AppHasClusterService(desiredApp.Spec),
-		"desired_replicas":     desiredApp.Spec.Replicas,
-		"storage_class":        zeroDowntimeAppStorageClass(desiredApp.Spec),
-		"storage_mode":         zeroDowntimeAppStorageMode(desiredApp.Spec),
+		"decision":                   "zero_downtime_required",
+		"operation_id":               strings.TrimSpace(op.ID),
+		"operation_type":             strings.TrimSpace(op.Type),
+		"policy_mode":                decision.PolicyMode,
+		"requirement_source":         decision.RequirementSource,
+		"rollout_intent":             decision.RolloutIntent,
+		"strategy":                   decision.Strategy,
+		"downtime_class":             decision.DowntimeClass,
+		"rollout_mode":               decision.RolloutMode,
+		"reason":                     decision.Reason,
+		"previous_release_key":       decision.PreviousReleaseKey,
+		"desired_release_key":        decision.DesiredReleaseKey,
+		"pod_template_changed":       decision.PodTemplateChanged,
+		"auxiliary_template_changed": decision.AuxiliaryTemplateChanged,
+		"cluster_service":            model.AppHasClusterService(desiredApp.Spec),
+		"desired_replicas":           desiredApp.Spec.Replicas,
+		"storage_class":              zeroDowntimeAppStorageClass(desiredApp.Spec),
+		"storage_mode":               zeroDowntimeAppStorageMode(desiredApp.Spec),
 	}
 	s.logOperationAppEvent("blocked", "warning", op, desiredApp, message, attrs)
 	s.logControllerAppEvent(ctx, "zero_downtime_rollout_decision", "warning", desiredApp, message, attrs)
@@ -113,7 +143,7 @@ func (s *Service) prepareManagedAppRolloutFromStatus(
 	current.Status.CurrentReplicas = managed.Status.ReadyReplicas
 	current.Status.CurrentRuntimeID = current.Spec.RuntimeID
 	current.Status.Phase = "deployed"
-	desired.Spec.RolloutIntent = rolloutIntentForManagedDesiredState(current, desired)
+	desired.Spec.RolloutIntent = managedRolloutIntentForDesiredState(current, desired, managed.Spec.Scheduling, desiredScheduling)
 	opType := strings.TrimSpace(operationType)
 	if opType == "" {
 		opType = inferredManagedReconcileOperationType(current, desired)
@@ -138,6 +168,55 @@ func managedAppSpecsEqualExceptReplicas(current, desired model.AppSpec) bool {
 	desired.Replicas = 0
 	current.RolloutIntent = ""
 	desired.RolloutIntent = ""
+	return reflect.DeepEqual(current, desired)
+}
+
+func managedRolloutIntentForDesiredState(
+	current, desired model.App,
+	currentScheduling, desiredScheduling runtime.SchedulingConstraints,
+) string {
+	if intent := strings.TrimSpace(rolloutIntentForManagedDesiredState(current, desired)); intent != "" {
+		return intent
+	}
+	if intent := strings.TrimSpace(desired.Spec.RolloutIntent); intent != "" {
+		return intent
+	}
+	// RolloutIntent is transient reconciliation safety state, not a user-facing
+	// switch. Preserve the live snapshot's validated intent when the durable
+	// desired state and scheduling are otherwise unchanged apart from replica
+	// count. Clearing it here changes drain lifecycle fields without changing
+	// the release key; reusing it for a different desired state would weaken the
+	// online-plan guard.
+	if !managedAppDesiredStateEqualExceptReplicasAndRolloutIntent(current, desired) ||
+		!managedSchedulingConstraintsEqual(currentScheduling, desiredScheduling) {
+		return ""
+	}
+	return strings.TrimSpace(current.Spec.RolloutIntent)
+}
+
+func managedAppDesiredStateEqualExceptReplicasAndRolloutIntent(current, desired model.App) bool {
+	currentSnapshot := comparableManagedAppRolloutSnapshot(current)
+	desiredSnapshot := comparableManagedAppRolloutSnapshot(desired)
+	currentSnapshot.Spec.Replicas = 0
+	desiredSnapshot.Spec.Replicas = 0
+	return reflect.DeepEqual(currentSnapshot, desiredSnapshot) &&
+		reflect.DeepEqual(model.AppOriginSource(current), model.AppOriginSource(desired)) &&
+		reflect.DeepEqual(model.AppBuildSource(current), model.AppBuildSource(desired))
+}
+
+func managedSchedulingConstraintsEqual(current, desired runtime.SchedulingConstraints) bool {
+	if len(current.NodeSelector) == 0 {
+		current.NodeSelector = nil
+	}
+	if len(desired.NodeSelector) == 0 {
+		desired.NodeSelector = nil
+	}
+	if len(current.Tolerations) == 0 {
+		current.Tolerations = nil
+	}
+	if len(desired.Tolerations) == 0 {
+		desired.Tolerations = nil
+	}
 	return reflect.DeepEqual(current, desired)
 }
 
@@ -195,7 +274,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	current.Status.CurrentRuntimeID = current.Spec.RuntimeID
 	current.Status.Phase = "deployed"
 	desired.Status = current.Status
-	desired.Spec.RolloutIntent = rolloutIntentForManagedDesiredState(current, desired)
+	desired.Spec.RolloutIntent = managedRolloutIntentForDesiredState(current, desired, managed.Spec.Scheduling, desiredScheduling)
 	opType := strings.TrimSpace(operationType)
 	if opType == "" {
 		opType = inferredManagedReconcileOperationType(current, desired)
@@ -217,9 +296,15 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	if desired.Spec.Replicas > 0 && model.AppHasClusterService(desired.Spec) && !zeroDowntimeDeploymentStrategyIsSafe(desiredDeployment) {
 		return model.App{}, fmt.Errorf("rendered serving workload is not an explicit safe RollingUpdate")
 	}
+	expectedDeployment, expectedDeploymentFound := s.expectedManagedAppDeployment(desired, desiredScheduling)
+	if desired.Spec.Replicas > 0 && !expectedDeploymentFound {
+		return model.App{}, fmt.Errorf("rendered serving workload has no deployment for live template preflight")
+	}
+	auxiliaryTemplateChanged := expectedDeploymentFound && managedDeploymentAuxiliaryTemplateChanged(deployment, expectedDeployment)
 	desiredReplicas := desired.Spec.Replicas
 	workloadChange := liveKey != desiredKey ||
 		!liveDeploymentStrategyMatchesDesired(deployment, desiredDeployment) ||
+		auxiliaryTemplateChanged ||
 		desiredReplicas != liveReplicas
 	if desiredReplicas > 0 && workloadChange {
 		if !managedDeploymentStatusReady(deployment, liveReplicas) {
@@ -242,10 +327,27 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		}
 	}
 
-	if err := s.refuseNonZeroDowntimeRolloutWithScheduling(ctx, op, current, desired, managed.Spec.Scheduling, desiredScheduling, liveKey); err != nil {
+	if err := s.refuseNonZeroDowntimeRolloutWithSchedulingAndTemplateEvidence(
+		ctx,
+		op,
+		current,
+		desired,
+		managed.Spec.Scheduling,
+		desiredScheduling,
+		liveKey,
+		auxiliaryTemplateChanged,
+	); err != nil {
 		return model.App{}, err
 	}
-	decision := s.zeroDowntimeRolloutGuardDecisionWithScheduling(op, current, desired, managed.Spec.Scheduling, desiredScheduling, liveKey)
+	decision := s.zeroDowntimeRolloutGuardDecisionWithSchedulingAndTemplateEvidence(
+		op,
+		current,
+		desired,
+		managed.Spec.Scheduling,
+		desiredScheduling,
+		liveKey,
+		auxiliaryTemplateChanged,
+	)
 	if decision.PodTemplateChanged && zeroDowntimeRequiresSameNodePin(desired.Spec) {
 		nodeName, ok := s.currentReadyAppNodeForOnlineRolloutWithClient(ctx, client, current)
 		if !ok || strings.TrimSpace(desiredScheduling.NodeSelector[kubeHostnameLabelKey]) != nodeName {
@@ -253,8 +355,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		}
 	}
 	if decision.PodTemplateChanged {
-		expectedDeployment, found := s.expectedManagedAppDeployment(desired, desiredScheduling)
-		if !found {
+		if !expectedDeploymentFound {
 			return model.App{}, fmt.Errorf("rendered serving workload has no deployment for capacity preflight")
 		}
 		if message, err := zeroDowntimeRolloutCapacityBlockMessage(ctx, client, expectedDeployment, desired.Spec.Replicas); err != nil {
@@ -277,6 +378,60 @@ func liveDeploymentStrategyMatchesDesired(live kubeDeployment, desired map[strin
 	}
 	return normalizedKubeIntOrString(live.Spec.Strategy.RollingUpdate.MaxUnavailable) == normalizedKubeIntOrString(rolling["maxUnavailable"]) &&
 		normalizedKubeIntOrString(live.Spec.Strategy.RollingUpdate.MaxSurge) == normalizedKubeIntOrString(rolling["maxSurge"])
+}
+
+type managedDeploymentAuxiliaryTemplateFingerprint struct {
+	DrainAnnotations              map[string]string
+	DrainAgent                    *kubeContainerSpec
+	ContainerLifecycles           map[string]map[string]any
+	TerminationGracePeriodSeconds *int64
+	ShareProcessNamespace         *bool
+}
+
+func managedDeploymentAuxiliaryTemplateChanged(live, desired kubeDeployment) bool {
+	return !reflect.DeepEqual(
+		managedDeploymentAuxiliaryTemplateFingerprintFor(live),
+		managedDeploymentAuxiliaryTemplateFingerprintFor(desired),
+	)
+}
+
+func managedDeploymentAuxiliaryTemplateFingerprintFor(deployment kubeDeployment) managedDeploymentAuxiliaryTemplateFingerprint {
+	fingerprint := managedDeploymentAuxiliaryTemplateFingerprint{
+		TerminationGracePeriodSeconds: deployment.Spec.Template.Spec.TerminationGracePeriodSeconds,
+		ShareProcessNamespace:         deployment.Spec.Template.Spec.ShareProcessNamespace,
+	}
+	for _, key := range []string{
+		"fugue.io/drain-mode",
+		"fugue.io/drain-timeout-seconds",
+		"fugue.io/drain-quiet-period-seconds",
+		"fugue.io/drain-agent-port",
+		"fugue.io/termination-grace-min-seconds",
+	} {
+		if value := strings.TrimSpace(deployment.Spec.Template.Metadata.Annotations[key]); value != "" {
+			if fingerprint.DrainAnnotations == nil {
+				fingerprint.DrainAnnotations = map[string]string{}
+			}
+			fingerprint.DrainAnnotations[key] = value
+		}
+	}
+	for _, container := range deployment.Spec.Template.Spec.InitContainers {
+		if strings.TrimSpace(container.Name) != "fugue-drain-agent" {
+			continue
+		}
+		copy := container
+		fingerprint.DrainAgent = &copy
+		break
+	}
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if len(container.Lifecycle) == 0 {
+			continue
+		}
+		if fingerprint.ContainerLifecycles == nil {
+			fingerprint.ContainerLifecycles = map[string]map[string]any{}
+		}
+		fingerprint.ContainerLifecycles[strings.TrimSpace(container.Name)] = container.Lifecycle
+	}
+	return fingerprint
 }
 
 func liveManagedAppHasReadyEndpoint(ctx context.Context, client *kubeClient, namespace string, app model.App) (bool, error) {
@@ -332,10 +487,29 @@ func (s *Service) zeroDowntimeRolloutGuardDecisionWithScheduling(
 	currentScheduling, desiredScheduling runtime.SchedulingConstraints,
 	observedReleaseKey string,
 ) zeroDowntimeRolloutGuardDecision {
+	return s.zeroDowntimeRolloutGuardDecisionWithSchedulingAndTemplateEvidence(
+		op,
+		currentApp,
+		desiredApp,
+		currentScheduling,
+		desiredScheduling,
+		observedReleaseKey,
+		false,
+	)
+}
+
+func (s *Service) zeroDowntimeRolloutGuardDecisionWithSchedulingAndTemplateEvidence(
+	op model.Operation,
+	currentApp, desiredApp model.App,
+	currentScheduling, desiredScheduling runtime.SchedulingConstraints,
+	observedReleaseKey string,
+	auxiliaryTemplateChanged bool,
+) zeroDowntimeRolloutGuardDecision {
 	decision := zeroDowntimeRolloutGuardDecision{
-		PolicyMode:        zeroDowntimePolicyMode(currentApp.Spec, desiredApp.Spec),
-		RequirementSource: zeroDowntimeRequirementSourceForOperation(currentApp, desiredApp),
-		RolloutIntent:     strings.TrimSpace(desiredApp.Spec.RolloutIntent),
+		PolicyMode:               zeroDowntimePolicyMode(currentApp.Spec, desiredApp.Spec),
+		RequirementSource:        zeroDowntimeRequirementSourceForOperation(currentApp, desiredApp),
+		RolloutIntent:            strings.TrimSpace(desiredApp.Spec.RolloutIntent),
+		AuxiliaryTemplateChanged: auxiliaryTemplateChanged,
 	}
 	if op.Type != model.OperationTypeDeploy && op.Type != model.OperationTypeMigrate && op.Type != model.OperationTypeScale {
 		return decision
@@ -360,8 +534,8 @@ func (s *Service) zeroDowntimeRolloutGuardDecisionWithScheduling(
 		if desiredApp.Spec.Replicas > 1 && !controllerAppSupportsConcurrentStorage(desiredApp.Spec) {
 			decision.Refused = true
 			decision.Reason = zeroDowntimeUnsupportedTopologyReason(desiredApp.Spec)
+			return decision
 		}
-		return decision
 	}
 	if desiredApp.Spec.Replicas <= 0 {
 		decision.Refused = true
@@ -408,7 +582,7 @@ func (s *Service) zeroDowntimeRolloutGuardDecisionWithScheduling(
 		return decision
 	}
 	if observed := strings.TrimSpace(observedReleaseKey); observed != "" {
-		decision.PodTemplateChanged = observed != decision.DesiredReleaseKey
+		decision.PodTemplateChanged = observed != decision.DesiredReleaseKey || auxiliaryTemplateChanged
 	} else {
 		previousTemplate := s.zeroDowntimeManagedAppPodTemplate(currentApp, currentScheduling)
 		desiredTemplate := nestedObjectValue(desiredDeployment, "spec", "template")

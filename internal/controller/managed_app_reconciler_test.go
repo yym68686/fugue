@@ -2865,18 +2865,20 @@ func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyMa
 		},
 	}
 
-	deployment := kubeDeployment{}
-	deployment.Metadata.Name = runtime.RuntimeAppResourceName(app)
+	testRenderer := runtime.Renderer{}
+	deployment, found := (&Service{Renderer: testRenderer}).expectedManagedAppDeployment(
+		testRenderer.PrepareApp(runtime.AppFromManagedApp(managed)),
+		managed.Spec.Scheduling,
+	)
+	if !found {
+		t.Fatal("expected managed app deployment")
+	}
 	deployment.Metadata.Generation = 1
 	deployment.Status.ObservedGeneration = 1
 	deployment.Status.Replicas = 1
 	deployment.Status.UpdatedReplicas = 1
 	deployment.Status.ReadyReplicas = 1
 	deployment.Status.AvailableReplicas = 1
-	testRenderer := runtime.Renderer{}
-	deployment.Metadata.Annotations = map[string]string{
-		runtime.FugueAnnotationReleaseKey: testRenderer.ManagedAppReleaseKey(testRenderer.PrepareApp(runtime.AppFromManagedApp(managed)), managed.Spec.Scheduling),
-	}
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {

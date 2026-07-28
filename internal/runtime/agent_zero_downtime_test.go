@@ -67,6 +67,58 @@ func TestAgentLiveGuardRefusesWorkspaceRWOReplacementBeforeApply(t *testing.T) {
 	}
 }
 
+func TestAgentLiveGuardRefusesReleaseKeyIgnoredDrainTemplateDrift(t *testing.T) {
+	current := agentZeroDowntimeTestApp(model.AppStorageClassFugueLocalRWO)
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+	live := agentTestLiveDeployment(t, current, Renderer{})
+	template := live["spec"].(map[string]any)["template"].(map[string]any)
+	metadata := template["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]string)
+	for _, key := range []string{
+		"fugue.io/drain-mode",
+		"fugue.io/drain-timeout-seconds",
+		"fugue.io/drain-quiet-period-seconds",
+		"fugue.io/drain-agent-port",
+		"fugue.io/termination-grace-min-seconds",
+	} {
+		delete(annotations, key)
+	}
+	templateSpec := template["spec"].(map[string]any)
+	initContainers := make([]map[string]any, 0)
+	for _, container := range agentObjectSlice(templateSpec["initContainers"]) {
+		if container["name"] != "fugue-drain-agent" {
+			initContainers = append(initContainers, container)
+		}
+	}
+	templateSpec["initContainers"] = initContainers
+	containers := agentObjectSlice(templateSpec["containers"])
+	for _, container := range containers {
+		delete(container, "lifecycle")
+	}
+	templateSpec["containers"] = containers
+	svc := agentTestLiveGuardService(t, live, true)
+
+	_, err := svc.prepareAgentTaskRollout(context.Background(), model.OperationTypeDeploy, current, current)
+	if err == nil || !strings.Contains(err.Error(), "does not support same-node online dual mount") {
+		t.Fatalf("release-key-ignored drain drift must fail closed on an external local-RWO runtime, got %v", err)
+	}
+}
+
+func TestAgentLiveGuardDoesNotMistakeJSONNumericTypesForDrainTemplateDrift(t *testing.T) {
+	current := agentZeroDowntimeTestApp(model.AppStorageClassFugueLocalRWO)
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+	live := agentTestLiveDeployment(t, current, Renderer{})
+	svc := agentTestLiveGuardService(t, live, true)
+
+	prepared, err := svc.prepareAgentTaskRollout(context.Background(), model.OperationTypeDeploy, current, current)
+	if err != nil {
+		t.Fatalf("semantically identical live and rendered drain templates must not be treated as drift: %v", err)
+	}
+	if prepared.Spec.RolloutIntent != current.Spec.RolloutIntent {
+		t.Fatalf("expected rollout intent %q to be preserved, got %q", current.Spec.RolloutIntent, prepared.Spec.RolloutIntent)
+	}
+}
+
 func TestAgentZeroDowntimeRolloutRefusesServingWorkspaceRWOReplacement(t *testing.T) {
 	current := agentZeroDowntimeTestApp(model.AppStorageClassFugueWorkspaceRWO)
 	desired := current

@@ -107,6 +107,75 @@ func TestManagedAppLiveGuardRefusesLocalRWOReplacementWithoutExactNodeProof(t *t
 	}
 }
 
+func TestManagedAppLiveGuardPreservesIntentAndRefusesIgnoredDrainTemplateDriftWithoutNodeProof(t *testing.T) {
+	storage := &model.AppPersistentStorageSpec{
+		Mode:             model.AppPersistentStorageModeMovableRWO,
+		StorageClassName: model.AppStorageClassFugueLocalRWO,
+		Mounts: []model.AppPersistentStorageMount{
+			{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+		},
+	}
+	app := managedAppLiveGuardTestApp(storage)
+	app.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1}
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(app), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected rendered deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	for _, key := range []string{
+		"fugue.io/drain-mode",
+		"fugue.io/drain-timeout-seconds",
+		"fugue.io/drain-quiet-period-seconds",
+		"fugue.io/drain-agent-port",
+		"fugue.io/termination-grace-min-seconds",
+	} {
+		delete(live.Spec.Template.Metadata.Annotations, key)
+	}
+	initContainers := make([]kubeContainerSpec, 0, len(live.Spec.Template.Spec.InitContainers))
+	for _, container := range live.Spec.Template.Spec.InitContainers {
+		if container.Name != "fugue-drain-agent" {
+			initContainers = append(initContainers, container)
+		}
+	}
+	live.Spec.Template.Spec.InitContainers = initContainers
+	for index := range live.Spec.Template.Spec.Containers {
+		live.Spec.Template.Spec.Containers[index].Lifecycle = nil
+	}
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+
+	_, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, app, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "no validated current-node placement") {
+		t.Fatalf("release-key-ignored drain drift must be treated as a pod-template change, got %v", err)
+	}
+}
+
+func TestManagedRolloutIntentPreservationRequiresUnchangedDesiredStateAndScheduling(t *testing.T) {
+	current := managedAppLiveGuardTestApp(nil)
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+	desired := current
+	desired.Spec.RolloutIntent = ""
+
+	if got := managedRolloutIntentForDesiredState(current, desired, runtime.SchedulingConstraints{}, runtime.SchedulingConstraints{}); got != current.Spec.RolloutIntent {
+		t.Fatalf("expected unchanged desired state to preserve %q, got %q", current.Spec.RolloutIntent, got)
+	}
+
+	changedSpec := desired
+	changedSpec.Spec.Ports = []int{9090}
+	if got := managedRolloutIntentForDesiredState(current, changedSpec, runtime.SchedulingConstraints{}, runtime.SchedulingConstraints{}); got != "" {
+		t.Fatalf("an unclassified desired-state change must not reuse stale rollout intent, got %q", got)
+	}
+
+	changedScheduling := runtime.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: "node-b"}}
+	if got := managedRolloutIntentForDesiredState(current, desired, runtime.SchedulingConstraints{}, changedScheduling); got != "" {
+		t.Fatalf("a scheduling change must not reuse stale rollout intent, got %q", got)
+	}
+}
+
 func TestApplyManagedAppDesiredStateDoesNotWriteBeforeLiveIdentityProof(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})

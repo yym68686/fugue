@@ -263,9 +263,11 @@ type kubePersistentVolumeRef struct {
 }
 
 type kubeContainerSpec struct {
-	Name      string                   `json:"name"`
-	Image     string                   `json:"image,omitempty"`
-	Resources kubeResourceRequirements `json:"resources,omitempty"`
+	Name          string                   `json:"name"`
+	Image         string                   `json:"image,omitempty"`
+	Resources     kubeResourceRequirements `json:"resources,omitempty"`
+	Lifecycle     map[string]any           `json:"lifecycle,omitempty"`
+	RestartPolicy *string                  `json:"restartPolicy,omitempty"`
 }
 
 type kubeResourceRequirements struct {

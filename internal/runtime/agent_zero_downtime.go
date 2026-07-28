@@ -83,6 +83,7 @@ func (s *AgentService) prepareAgentTaskRollout(ctx context.Context, operationTyp
 	}
 	desiredDeployment := agentRenderedDeployment(desired, s.Renderer)
 	desiredKey := agentDeploymentReleaseKey(desiredDeployment)
+	auxiliaryTemplateChanged := agentDeploymentAuxiliaryTemplateChanged(live, desiredDeployment)
 	if desired.Spec.Replicas > 0 && model.AppHasClusterService(desired.Spec) && !agentDeploymentStrategyIsSafe(desiredDeployment) {
 		return model.App{}, permanentAgentPreflightRefusal(fmt.Errorf("zero-downtime %s refused: rendered serving workload is not an online RollingUpdate", strings.TrimSpace(operationType)))
 	}
@@ -91,6 +92,7 @@ func (s *AgentService) prepareAgentTaskRollout(ctx context.Context, operationTyp
 	}
 	workloadChange := liveKey != desiredKey ||
 		desired.Spec.Replicas != liveReplicas ||
+		auxiliaryTemplateChanged ||
 		!agentLiveStrategyMatchesDesired(live, desiredDeployment)
 	if desired.Spec.Replicas > 0 && workloadChange {
 		if !agentLiveDeploymentReady(live, liveReplicas) {
@@ -104,7 +106,14 @@ func (s *AgentService) prepareAgentTaskRollout(ctx context.Context, operationTyp
 			return model.App{}, fmt.Errorf("zero-downtime %s refused: live service has no ready endpoint", strings.TrimSpace(operationType))
 		}
 	}
-	prepared, err := agentZeroDowntimeRolloutWithRendererAndObserved(operationType, observedCurrent, desired, s.Renderer, liveKey)
+	prepared, err := agentZeroDowntimeRolloutWithRendererAndObservedTemplate(
+		operationType,
+		observedCurrent,
+		desired,
+		s.Renderer,
+		liveKey,
+		auxiliaryTemplateChanged,
+	)
 	return prepared, permanentAgentPreflightRefusal(err)
 }
 
@@ -202,6 +211,110 @@ func agentLiveStrategyMatchesDesired(live, desired map[string]any) bool {
 	}
 	return fmt.Sprint(agentNestedValue(live, "spec", "strategy", "rollingUpdate", "maxUnavailable")) == fmt.Sprint(agentNestedValue(desired, "spec", "strategy", "rollingUpdate", "maxUnavailable")) &&
 		fmt.Sprint(agentNestedValue(live, "spec", "strategy", "rollingUpdate", "maxSurge")) == fmt.Sprint(agentNestedValue(desired, "spec", "strategy", "rollingUpdate", "maxSurge"))
+}
+
+type agentDeploymentAuxiliaryTemplateFingerprint struct {
+	DrainAnnotations              map[string]string
+	DrainAgent                    map[string]any
+	ContainerLifecycles           map[string]any
+	TerminationGracePeriodSeconds string
+	ShareProcessNamespace         string
+}
+
+func agentDeploymentAuxiliaryTemplateChanged(live, desired map[string]any) bool {
+	return !reflect.DeepEqual(
+		agentDeploymentAuxiliaryTemplateFingerprintFor(live),
+		agentDeploymentAuxiliaryTemplateFingerprintFor(desired),
+	)
+}
+
+func agentDeploymentAuxiliaryTemplateFingerprintFor(deployment map[string]any) agentDeploymentAuxiliaryTemplateFingerprint {
+	fingerprint := agentDeploymentAuxiliaryTemplateFingerprint{
+		TerminationGracePeriodSeconds: agentAuxiliaryScalar(agentNestedValue(deployment, "spec", "template", "spec", "terminationGracePeriodSeconds")),
+		ShareProcessNamespace:         agentAuxiliaryScalar(agentNestedValue(deployment, "spec", "template", "spec", "shareProcessNamespace")),
+	}
+	annotations, _ := agentNestedValue(deployment, "spec", "template", "metadata", "annotations").(map[string]any)
+	if annotations == nil {
+		if stringAnnotations, ok := agentNestedValue(deployment, "spec", "template", "metadata", "annotations").(map[string]string); ok {
+			annotations = make(map[string]any, len(stringAnnotations))
+			for key, value := range stringAnnotations {
+				annotations[key] = value
+			}
+		}
+	}
+	for _, key := range []string{
+		"fugue.io/drain-mode",
+		"fugue.io/drain-timeout-seconds",
+		"fugue.io/drain-quiet-period-seconds",
+		"fugue.io/drain-agent-port",
+		"fugue.io/termination-grace-min-seconds",
+	} {
+		if value := strings.TrimSpace(fmt.Sprint(annotations[key])); value != "" && value != "<nil>" {
+			if fingerprint.DrainAnnotations == nil {
+				fingerprint.DrainAnnotations = map[string]string{}
+			}
+			fingerprint.DrainAnnotations[key] = value
+		}
+	}
+	for _, container := range agentObjectSlice(agentNestedValue(deployment, "spec", "template", "spec", "initContainers")) {
+		if strings.TrimSpace(fmt.Sprint(container["name"])) != "fugue-drain-agent" {
+			continue
+		}
+		fingerprint.DrainAgent = map[string]any{
+			"name":          container["name"],
+			"image":         container["image"],
+			"resources":     container["resources"],
+			"restartPolicy": container["restartPolicy"],
+		}
+		break
+	}
+	for _, container := range agentObjectSlice(agentNestedValue(deployment, "spec", "template", "spec", "containers")) {
+		lifecycle, ok := container["lifecycle"]
+		if !ok || lifecycle == nil {
+			continue
+		}
+		if fingerprint.ContainerLifecycles == nil {
+			fingerprint.ContainerLifecycles = map[string]any{}
+		}
+		fingerprint.ContainerLifecycles[strings.TrimSpace(fmt.Sprint(container["name"]))] = agentCanonicalAuxiliaryValue(lifecycle)
+	}
+	return fingerprint
+}
+
+func agentCanonicalAuxiliaryValue(value any) any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return value
+	}
+	return normalized
+}
+
+func agentAuxiliaryScalar(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func agentObjectSlice(value any) []map[string]any {
+	switch objects := value.(type) {
+	case []map[string]any:
+		return objects
+	case []any:
+		out := make([]map[string]any, 0, len(objects))
+		for _, object := range objects {
+			if values, ok := object.(map[string]any); ok {
+				out = append(out, values)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func agentNestedValue(root map[string]any, path ...string) any {
@@ -323,6 +436,16 @@ func agentZeroDowntimeRolloutWithRenderer(operationType string, current, desired
 }
 
 func agentZeroDowntimeRolloutWithRendererAndObserved(operationType string, current, desired model.App, renderer Renderer, observedReleaseKey string) (model.App, error) {
+	return agentZeroDowntimeRolloutWithRendererAndObservedTemplate(operationType, current, desired, renderer, observedReleaseKey, false)
+}
+
+func agentZeroDowntimeRolloutWithRendererAndObservedTemplate(
+	operationType string,
+	current, desired model.App,
+	renderer Renderer,
+	observedReleaseKey string,
+	auxiliaryTemplateChanged bool,
+) (model.App, error) {
 	if operationType != model.OperationTypeDeploy &&
 		operationType != model.OperationTypeMigrate &&
 		operationType != model.OperationTypeScale {
@@ -349,7 +472,7 @@ func agentZeroDowntimeRolloutWithRendererAndObserved(operationType string, curre
 	// Scaling changes replica count but not the pod template. A scale-up of an
 	// unsupported single-writer volume can nevertheless create a second pod and
 	// contend for the claim, so fail closed when the requested count exceeds one.
-	if operationType == model.OperationTypeScale {
+	if operationType == model.OperationTypeScale && !auxiliaryTemplateChanged {
 		return desired, nil
 	}
 
@@ -361,13 +484,13 @@ func agentZeroDowntimeRolloutWithRendererAndObserved(operationType string, curre
 		if observed != currentKey && observed != desiredKey {
 			return model.App{}, fmt.Errorf("zero-downtime deploy refused: live deployment release identity matches neither current nor desired snapshot")
 		}
-		if observed == desiredKey {
+		if observed == desiredKey && !auxiliaryTemplateChanged {
 			if !agentDeploymentStrategyIsSafe(desiredDeployment) {
 				return model.App{}, fmt.Errorf("zero-downtime deploy refused: rendered serving workload is not an online RollingUpdate")
 			}
 			return desired, nil
 		}
-	} else if reflect.DeepEqual(agentDeploymentTemplate(currentDeployment), agentDeploymentTemplate(desiredDeployment)) {
+	} else if !auxiliaryTemplateChanged && reflect.DeepEqual(agentDeploymentTemplate(currentDeployment), agentDeploymentTemplate(desiredDeployment)) {
 		// A policy/strategy-only reconciliation does not replace a pod.
 		return desired, nil
 	}

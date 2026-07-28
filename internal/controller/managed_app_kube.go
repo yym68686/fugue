@@ -51,6 +51,7 @@ type kubeDeployment struct {
 				InitContainers                []kubeContainerSpec  `json:"initContainers,omitempty"`
 				NodeSelector                  map[string]string    `json:"nodeSelector,omitempty"`
 				TerminationGracePeriodSeconds *int64               `json:"terminationGracePeriodSeconds,omitempty"`
+				ShareProcessNamespace         *bool                `json:"shareProcessNamespace,omitempty"`
 				Tolerations                   []runtime.Toleration `json:"tolerations,omitempty"`
 			} `json:"spec,omitempty"`
 		} `json:"template,omitempty"`
