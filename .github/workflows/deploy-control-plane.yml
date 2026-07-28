@@ -1268,24 +1268,36 @@ jobs:
 
           main_head="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
           baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
+          printf 'release lane rearm checkpoint=refs main_matches=%s baseline_oid_valid=%s\n' \
+            "$([[ "${main_head}" == "${EXPECTED_SHA}" ]] && printf true || printf false)" \
+            "$([[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] && printf true || printf false)" >&2
           [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
           [[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           for run_status in queued in_progress waiting pending requested; do
             other_runs="$(timeout --kill-after=2s 10s gh api --paginate "repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[].id' | awk -v current="${GITHUB_RUN_ID}" '$0 != current')" || exit 1
+            other_run_count="$(printf '%s\n' "${other_runs}" | awk 'NF { count++ } END { print count + 0 }')"
+            printf 'release lane rearm checkpoint=concurrency status=%s other_run_count=%s\n' \
+              "${run_status}" "${other_run_count}" >&2
             [[ -z "${other_runs}" ]] || exit 1
           done
 
           state_before="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+          printf 'release lane rearm checkpoint=state_before state=%s expected=active\n' "${state_before}" >&2
           [[ "${state_before}" == 'active' ]] || exit 1
           mutation_status=0
           set +e
           timeout --kill-after=2s 10s gh api --method PUT "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" >/dev/null
           mutation_status=$?
           set -e
+          printf 'release lane rearm checkpoint=disable mutation_status=%s\n' "${mutation_status}" >&2
           state_after=''
           settled='false'
           for attempt in 1 2 3 4 5; do
-            state_after="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
+            read_status=0
+            state_after="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || read_status=$?
+            printf 'release lane rearm checkpoint=readback attempt=%s read_status=%s state=%s\n' \
+              "${attempt}" "${read_status}" "${state_after:-unknown}" >&2
+            [[ "${read_status}" == '0' ]] || exit 1
             if [[ "${state_after}" == 'disabled_manually' ]]; then
               settled='true'
               break
