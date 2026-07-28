@@ -2,12 +2,72 @@ package store
 
 import (
 	"context"
+	"database/sql/driver"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
+	"fugue/internal/model"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestPGFinalizeAssignedAgentReleaseFailureTxIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock db: %v", err)
+	}
+	defer db.Close()
+	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	now := time.Date(2026, time.July, 28, 9, 0, 0, 0, time.UTC)
+	op := model.Operation{
+		ID:                "op_agent_refused",
+		TenantID:          "tenant_123",
+		AppID:             "app_123",
+		Type:              model.OperationTypeDeploy,
+		AssignedRuntimeID: "runtime_123",
+	}
+	attemptValues := []driver.Value{
+		"rel_123", op.TenantID, "project_123", op.AppID,
+		model.ReleaseAttemptTriggerManualDeploy, model.ReleaseAttemptActorUser, "user_123",
+		op.ID, op.ID, "registry.example/demo:v2", "", "",
+		[]byte(`{}`), model.ReleaseAttemptStatusDeploying, model.OperationEvidenceConfidenceEvidenceBacked,
+		"", "", "deploying", now.Add(-time.Minute), nil, now.Add(-time.Minute), now.Add(-time.Minute),
+	}
+
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	mock.ExpectQuery("(?s)SELECT .* FROM fugue_release_attempts ra .* FOR UPDATE").
+		WithArgs(op.ID).
+		WillReturnRows(sqlmock.NewRows(strings.Split(releaseAttemptSelectColumns, ", ")).AddRow(attemptValues...))
+	mock.ExpectExec("(?s)INSERT INTO fugue_operation_evidence .* VALUES").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("(?s)DELETE FROM fugue_operation_evidence.*operation_id").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("(?s)DELETE FROM fugue_operation_evidence.*app_id").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("(?s)UPDATE fugue_release_attempts.*status").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("(?s)INSERT INTO fugue_release_steps .* VALUES").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := s.pgFinalizeAssignedAgentReleaseFailureTx(context.Background(), tx, op, now, "zero-downtime deploy refused"); err != nil {
+		t.Fatalf("finalize assigned agent release failure: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
 
 func TestPGGetAppTxHydratesBackingServicesWithinTransaction(t *testing.T) {
 	t.Parallel()

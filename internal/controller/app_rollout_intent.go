@@ -233,6 +233,12 @@ func comparableResourceOnlySpec(spec model.AppSpec) model.AppSpec {
 	normalized.RolloutIntent = ""
 	model.ApplyAppSpecDefaults(&normalized)
 	normalized.Resources = nil
+	// Right-sizing is control-plane policy, not part of the pod template. A
+	// resource recommendation can be recorded in the same desired-spec
+	// snapshot as a CPU/memory change; retaining it here would misclassify that
+	// otherwise-online resource rollout as an unclassified restart and let the
+	// durable-storage fallback choose Recreate.
+	normalized.RightSizing = nil
 	if normalized.Postgres != nil {
 		postgres := *normalized.Postgres
 		postgres.Resources = nil
@@ -275,7 +281,7 @@ func managedDeployOperationIsZeroDowntimeRestart(op model.Operation, currentApp,
 	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
 		return false
 	}
-	if !model.AppZeroDowntimeEnabled(currentApp.Spec) && !model.AppZeroDowntimeEnabled(desiredApp.Spec) {
+	if !managedAppRolloutRequiresZeroDowntime(currentApp, desiredApp) {
 		return false
 	}
 	currentSpec, _ := model.StripFugueInjectedAppEnvFromSpec(currentApp.Spec)
@@ -291,6 +297,13 @@ func managedDeployOperationIsZeroDowntimeRestart(op model.Operation, currentApp,
 		comparableZeroDowntimeRestartSpec(currentApp.Spec),
 		comparableZeroDowntimeRestartSpec(desiredApp.Spec),
 	)
+}
+
+func managedAppRolloutRequiresZeroDowntime(currentApp, desiredApp model.App) bool {
+	if model.AppZeroDowntimeEnabled(currentApp.Spec) || model.AppZeroDowntimeEnabled(desiredApp.Spec) {
+		return true
+	}
+	return managedAppHasLiveServiceToProtect(currentApp) || managedAppHasLiveServiceToProtect(desiredApp)
 }
 
 func zeroDowntimeRestartInputsDiffer(currentSpec, desiredSpec model.AppSpec) bool {

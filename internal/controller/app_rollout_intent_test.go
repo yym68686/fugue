@@ -572,3 +572,96 @@ func TestRolloutIntentForManagedOperationRejectsLifecycleAndImageDeploy(t *testi
 		t.Fatalf("expected no rollout intent for image plus lifecycle deploy, got %q", got)
 	}
 }
+
+func TestRolloutIntentForManagedOperationUsesOnlineRestartForMixedDefaultServiceUpdate(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Status:   model.AppStatus{CurrentReplicas: 1},
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Resources: &model.ResourceSpec{CPUMilliCores: 250},
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+				},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Image = "ghcr.io/example/demo:v2"
+	desired.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 500}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected mixed serving update to use the default online restart plan, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationTreatsRightSizingPolicyAsResourceOnly(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Status:   model.AppStatus{CurrentReplicas: 1},
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Resources: &model.ResourceSpec{CPUMilliCores: 250},
+			RightSizing: &model.AppRightSizingSpec{
+				Mode:        model.AppRightSizingModeAuto,
+				WindowHours: 168,
+				MinSamples:  12,
+			},
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+				},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 500}
+	desired.Spec.RightSizing = &model.AppRightSizingSpec{
+		Mode:        model.AppRightSizingModeRecommend,
+		WindowHours: 168,
+		MinSamples:  12,
+	}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineResourceUpdate {
+		t.Fatalf("right-sizing policy drift must not turn a resource rollout into Recreate, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationDoesNotRequireOnlinePlanForInitialDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+	desired := current
+	desired.Spec.Image = "ghcr.io/example/demo:v2"
+	desired.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 500}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("initial deploy has no live service that requires an online restart plan, got %q", got)
+	}
+}

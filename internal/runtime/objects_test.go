@@ -952,11 +952,14 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	}
 	metadata := deployment["metadata"].(map[string]any)
 	annotations := metadata["annotations"].(map[string]string)
-	if annotations["fugue.io/rollout-mode"] != "rolling-update" {
-		t.Fatalf("expected stateless app rollout-mode rolling-update, got %#v", annotations["fugue.io/rollout-mode"])
+	if annotations["fugue.io/rollout-mode"] != "rolling-restart" {
+		t.Fatalf("expected stateless app rollout-mode rolling-restart, got %#v", annotations["fugue.io/rollout-mode"])
 	}
 	if annotations["fugue.io/downtime-class"] != "online-required" {
 		t.Fatalf("expected stateless app downtime-class online-required, got %#v", annotations["fugue.io/downtime-class"])
+	}
+	if got := annotations[FugueAnnotationZeroDowntimeSource]; got != model.AppZeroDowntimeRequirementSourceServiceDefault {
+		t.Fatalf("expected stateless app service-default zero-downtime source, got %#v", got)
 	}
 
 	template := spec["template"].(map[string]any)
@@ -1007,7 +1010,7 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	}
 }
 
-func TestBuildAppDeploymentDoesNotAddStrictDrainForDowntimeRequiredDurableSteadyState(t *testing.T) {
+func TestBuildAppDeploymentDefaultsDurableServiceToFailClosedWithoutChangingPodTemplate(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",
 		Name:     "demo",
@@ -1032,11 +1035,22 @@ func TestBuildAppDeploymentDoesNotAddStrictDrainForDowntimeRequiredDurableSteady
 		t.Fatal("expected Deployment object")
 	}
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
-	if annotations["fugue.io/downtime-class"] != "downtime-required" {
-		t.Fatalf("expected durable steady-state app downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected durable service default to be online-required, got %#v", annotations["fugue.io/downtime-class"])
+	}
+	if got := annotations[FugueAnnotationZeroDowntimeSource]; got != model.AppZeroDowntimeRequirementSourceServiceDefault {
+		t.Fatalf("expected durable service-default zero-downtime source, got %#v", got)
 	}
 	spec := deployment["spec"].(map[string]any)
+	strategy := spec["strategy"].(map[string]any)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected durable service default to fail closed with RollingUpdate, got %#v", got)
+	}
 	template := spec["template"].(map[string]any)
+	templateAnnotations := template["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if got := templateAnnotations["fugue.io/downtime-class"]; got != "downtime-required" {
+		t.Fatalf("expected the steady-state pod template to remain unchanged until an online rollout is requested, got %#v", got)
+	}
 	podSpec := template["spec"].(map[string]any)
 	containers := podSpec["containers"].([]map[string]any)
 	if _, ok := containers[0]["lifecycle"]; ok {
@@ -1644,16 +1658,16 @@ func TestBuildAppObjectsIncludesPersistentWorkspaceSidecar(t *testing.T) {
 	}
 
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
-	if got := strategy["type"]; got != "Recreate" {
-		t.Fatalf("expected workspace deployment strategy Recreate, got %#v", got)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected workspace service to default to fail-closed RollingUpdate, got %#v", got)
 	}
 	metadata := deployment["metadata"].(map[string]any)
 	annotations := metadata["annotations"].(map[string]string)
-	if annotations["fugue.io/rollout-mode"] != "isolated-singleton" {
-		t.Fatalf("expected workspace rollout-mode isolated-singleton, got %#v", annotations["fugue.io/rollout-mode"])
+	if annotations["fugue.io/rollout-mode"] != "rolling-restart" {
+		t.Fatalf("expected workspace rollout-mode rolling-restart, got %#v", annotations["fugue.io/rollout-mode"])
 	}
-	if annotations["fugue.io/downtime-class"] != "downtime-required" {
-		t.Fatalf("expected workspace downtime-class downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected workspace downtime-class online-required, got %#v", annotations["fugue.io/downtime-class"])
 	}
 }
 
@@ -1774,17 +1788,17 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	}
 
 	strategy := deployment["spec"].(map[string]any)["strategy"].(map[string]any)
-	if got := strategy["type"]; got != "Recreate" {
-		t.Fatalf("expected persistent storage deployment strategy Recreate, got %#v", got)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected persistent storage service to default to fail-closed RollingUpdate, got %#v", got)
 	}
 	metadata := deployment["metadata"].(map[string]any)
 	annotations := metadata["annotations"].(map[string]string)
-	if annotations["fugue.io/rollout-reason"] != "single-writer-storage" {
-		t.Fatalf("expected persistent storage rollout reason single-writer-storage, got %#v", annotations["fugue.io/rollout-reason"])
+	if annotations["fugue.io/rollout-reason"] != model.AppZeroDowntimeRequirementSourceServiceDefault {
+		t.Fatalf("expected persistent storage rollout reason service-default, got %#v", annotations["fugue.io/rollout-reason"])
 	}
 }
 
-func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageRestart(t *testing.T) {
+func TestBuildAppObjectsFailsClosedForUnsupportedOnlinePersistentStorageRestart(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -1817,20 +1831,20 @@ func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageRestart(t *testing
 	deployment := firstObjectByKind(t, objects, "Deployment")
 	spec := deployment["spec"].(map[string]any)
 	strategy := spec["strategy"].(map[string]any)
-	if got := strategy["type"]; got != "Recreate" {
-		t.Fatalf("expected single-writer storage restart to use Recreate, got %#v", got)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected single-writer storage restart to fail closed with RollingUpdate, got %#v", got)
 	}
 
 	metadata := deployment["metadata"].(map[string]any)
 	annotations := metadata["annotations"].(map[string]string)
-	if annotations["fugue.io/rollout-mode"] != "isolated-singleton" {
-		t.Fatalf("expected deployment rollout mode isolated-singleton, got %#v", annotations["fugue.io/rollout-mode"])
+	if annotations["fugue.io/rollout-mode"] != "rolling-restart" {
+		t.Fatalf("expected deployment rollout mode rolling-restart, got %#v", annotations["fugue.io/rollout-mode"])
 	}
-	if annotations["fugue.io/downtime-class"] != "downtime-required" {
-		t.Fatalf("expected deployment downtime class downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected deployment downtime class online-required, got %#v", annotations["fugue.io/downtime-class"])
 	}
-	if annotations["fugue.io/rollout-reason"] != "single-writer-storage" {
-		t.Fatalf("expected deployment rollout reason single-writer-storage, got %#v", annotations["fugue.io/rollout-reason"])
+	if annotations["fugue.io/rollout-reason"] != "restart-only" {
+		t.Fatalf("expected deployment rollout reason restart-only, got %#v", annotations["fugue.io/rollout-reason"])
 	}
 
 	templateAnnotations := spec["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]string)
@@ -1842,7 +1856,7 @@ func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageRestart(t *testing
 	}
 }
 
-func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageResourceUpdate(t *testing.T) {
+func TestBuildAppObjectsFailsClosedForUnsupportedOnlinePersistentStorageResourceUpdate(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -1871,20 +1885,20 @@ func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageResourceUpdate(t *
 	deployment := firstObjectByKind(t, objects, "Deployment")
 	spec := deployment["spec"].(map[string]any)
 	strategy := spec["strategy"].(map[string]any)
-	if got := strategy["type"]; got != "Recreate" {
-		t.Fatalf("expected single-writer storage resource update to use Recreate, got %#v", got)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected single-writer storage resource update to fail closed with RollingUpdate, got %#v", got)
 	}
 
 	metadata := deployment["metadata"].(map[string]any)
 	annotations := metadata["annotations"].(map[string]string)
-	if annotations["fugue.io/rollout-mode"] != "isolated-singleton" {
-		t.Fatalf("expected deployment rollout mode isolated-singleton, got %#v", annotations["fugue.io/rollout-mode"])
+	if annotations["fugue.io/rollout-mode"] != "rolling-restart" {
+		t.Fatalf("expected deployment rollout mode rolling-restart, got %#v", annotations["fugue.io/rollout-mode"])
 	}
-	if annotations["fugue.io/downtime-class"] != "downtime-required" {
-		t.Fatalf("expected deployment downtime class downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected deployment downtime class online-required, got %#v", annotations["fugue.io/downtime-class"])
 	}
-	if annotations["fugue.io/rollout-reason"] != "single-writer-storage" {
-		t.Fatalf("expected deployment rollout reason single-writer-storage, got %#v", annotations["fugue.io/rollout-reason"])
+	if annotations["fugue.io/rollout-reason"] != "resource-only" {
+		t.Fatalf("expected deployment rollout reason resource-only, got %#v", annotations["fugue.io/rollout-reason"])
 	}
 
 	templateAnnotations := spec["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]string)
@@ -1896,7 +1910,7 @@ func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageResourceUpdate(t *
 	}
 }
 
-func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageImageUpdate(t *testing.T) {
+func TestBuildAppObjectsFailsClosedForUnsupportedOnlinePersistentStorageImageUpdate(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -1928,19 +1942,19 @@ func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageImageUpdate(t *tes
 	deployment := firstObjectByKind(t, buildAppObjects(app, SchedulingConstraints{}), "Deployment")
 	spec := deployment["spec"].(map[string]any)
 	strategy := spec["strategy"].(map[string]any)
-	if got := strategy["type"]; got != "Recreate" {
-		t.Fatalf("expected single-writer storage image update to use Recreate, got %#v", got)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected single-writer storage image update to fail closed with RollingUpdate, got %#v", got)
 	}
 
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
-	if annotations["fugue.io/rollout-mode"] != "isolated-singleton" {
-		t.Fatalf("expected deployment rollout mode isolated-singleton, got %#v", annotations["fugue.io/rollout-mode"])
+	if annotations["fugue.io/rollout-mode"] != "rolling-restart" {
+		t.Fatalf("expected deployment rollout mode rolling-restart, got %#v", annotations["fugue.io/rollout-mode"])
 	}
-	if annotations["fugue.io/downtime-class"] != "downtime-required" {
-		t.Fatalf("expected deployment downtime class downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected deployment downtime class online-required, got %#v", annotations["fugue.io/downtime-class"])
 	}
-	if annotations["fugue.io/rollout-reason"] != "single-writer-storage" {
-		t.Fatalf("expected single-writer-storage rollout reason, got %#v", annotations["fugue.io/rollout-reason"])
+	if annotations["fugue.io/rollout-reason"] != "image-only" {
+		t.Fatalf("expected image-only rollout reason, got %#v", annotations["fugue.io/rollout-reason"])
 	}
 
 	templateAnnotations := spec["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]string)
@@ -2002,7 +2016,7 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlineLocalRWOPersistentStorageImage
 	}
 }
 
-func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageLifecycleUpdate(t *testing.T) {
+func TestBuildAppObjectsFailsClosedForUnsupportedOnlinePersistentStorageLifecycleUpdate(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -2027,12 +2041,12 @@ func TestBuildAppObjectsUsesRecreateForOnlinePersistentStorageLifecycleUpdate(t 
 	deployment := firstObjectByKind(t, buildAppObjects(app, SchedulingConstraints{}), "Deployment")
 	spec := deployment["spec"].(map[string]any)
 	strategy := spec["strategy"].(map[string]any)
-	if got := strategy["type"]; got != "Recreate" {
-		t.Fatalf("expected single-writer storage lifecycle update to use Recreate, got %#v", got)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected single-writer storage lifecycle update to fail closed with RollingUpdate, got %#v", got)
 	}
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
-	if got := annotations["fugue.io/rollout-reason"]; got != "single-writer-storage" {
-		t.Fatalf("expected single-writer-storage rollout reason, got %#v", got)
+	if got := annotations["fugue.io/rollout-reason"]; got != "lifecycle-only" {
+		t.Fatalf("expected lifecycle-only rollout reason, got %#v", got)
 	}
 	podSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
 	if got := podSpec["terminationGracePeriodSeconds"]; got != int64(2100) {

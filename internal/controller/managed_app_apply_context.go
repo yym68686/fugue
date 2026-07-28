@@ -42,3 +42,15 @@ func managedAppApplySourceFromContext(ctx context.Context) managedAppApplyContex
 	}
 	return managedAppApplyContext{Source: managedAppApplySourceBackgroundReconcile}
 }
+
+func (s *Service) managedAppOperationTypeFromContext(ctx context.Context) string {
+	apply := managedAppApplySourceFromContext(ctx)
+	if apply.Source != managedAppApplySourceOperation || apply.OperationID == "" || s == nil || s.Store == nil {
+		return ""
+	}
+	op, err := s.Store.GetOperation(apply.OperationID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(op.Type)
+}

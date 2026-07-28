@@ -2082,9 +2082,9 @@ func TestRunAppContinuityShowZeroDowntime(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
-			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","ports":[8080],"replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
-			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1,"continuity":{"zero_downtime":{"enabled":true,"mode":"safe","strategy":"stable_candidate","canary":{"enabled":true,"initial_weight":1,"max_weight":100,"step_weights":[1,5,25,50,100],"min_observation_seconds":60}}}},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","ports":[8080],"replicas":1,"continuity":{"zero_downtime":{"enabled":true,"mode":"safe","strategy":"stable_candidate","canary":{"enabled":true,"initial_weight":1,"max_weight":100,"step_weights":[1,5,25,50,100],"min_observation_seconds":60}}}},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -2102,6 +2102,44 @@ func TestRunAppContinuityShowZeroDowntime(t *testing.T) {
 		t.Fatalf("run app continuity show: %v", err)
 	}
 	for _, want := range []string{"app_id=app_123", "zero_downtime_enabled=true", "zero_downtime_mode=safe", "zero_downtime_strategy=stable_candidate"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRunAppContinuityShowReportsServiceDefaultZeroDowntime(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","ports":[8080],"replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","ports":[8080],"replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "continuity", "show", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app continuity show: %v", err)
+	}
+	for _, want := range []string{
+		"zero_downtime_enabled=true",
+		"zero_downtime_configured=false",
+		"zero_downtime_effective=true",
+		"zero_downtime_source=service-default",
+		"zero_downtime_mode=service_default",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
 		}

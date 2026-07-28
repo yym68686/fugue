@@ -4574,6 +4574,194 @@ func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
 	return op, nil
 }
 
+func (s *Store) pgFailAssignedAgentOperation(id, runtimeID, message string) (model.Operation, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, false, fmt.Errorf("begin fail assigned agent operation transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
+	if err != nil {
+		return model.Operation{}, false, mapDBErr(err)
+	}
+	if op.Status != model.OperationStatusWaitingAgent || strings.TrimSpace(op.AssignedRuntimeID) != strings.TrimSpace(runtimeID) {
+		return op, false, nil
+	}
+
+	now := time.Now().UTC()
+	op.Status = model.OperationStatusFailed
+	op.UpdatedAt = now
+	op.CompletedAt = &now
+	op.ErrorMessage = strings.TrimSpace(message)
+	if op.StartedAt == nil {
+		op.StartedAt = &now
+	}
+
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, false, mapDBErr(err)
+	}
+	applyFailedOperationToAppModel(&app, &op)
+	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, false, err
+	}
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.Operation{}, false, err
+	}
+	if err := s.pgFinalizeAssignedAgentReleaseFailureTx(ctx, tx, op, now, message); err != nil {
+		return model.Operation{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Operation{}, false, fmt.Errorf("commit fail assigned agent operation transaction: %w", err)
+	}
+	return op, true, nil
+}
+
+func (s *Store) pgFinalizeAssignedAgentReleaseFailureTx(ctx context.Context, tx *sql.Tx, op model.Operation, now time.Time, message string) error {
+	attempt, found, err := pgFindReleaseAttemptForOperationTx(ctx, tx, op.ID)
+	if err != nil {
+		return err
+	}
+	attemptID := ""
+	if found {
+		attemptID = strings.TrimSpace(attempt.ID)
+	}
+
+	evidence := normalizeOperationEvidence(model.OperationEvidence{
+		TenantID:         op.TenantID,
+		AppID:            op.AppID,
+		OperationID:      op.ID,
+		ReleaseAttemptID: attemptID,
+		Type:             model.OperationEvidenceTypeOperationFailed,
+		Source:           model.OperationEvidenceSourceController,
+		Severity:         model.OperationEvidenceSeverityError,
+		Confidence:       model.OperationEvidenceConfidenceConfirmed,
+		SubjectKind:      "agent_operation_preflight",
+		SubjectName:      strings.TrimSpace(op.AssignedRuntimeID),
+		ObservedAt:       now,
+		CollectedAt:      now,
+		Summary:          "agent operation refused before apply",
+		Message:          strings.TrimSpace(message),
+		Reason:           "zero_downtime_preflight_refused",
+		FinishedAt:       &now,
+		RedactionStatus:  model.OperationEvidenceRedactionRedacted,
+		Payload: map[string]any{
+			"operation_type": op.Type,
+			"runtime_id":     strings.TrimSpace(op.AssignedRuntimeID),
+		},
+	})
+	payloadJSON, err := marshalJSON(evidence.Payload)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_operation_evidence (
+	id, tenant_id, project_id, app_id, operation_id, release_attempt_id, evidence_type, source,
+	severity, confidence, subject_kind, subject_name, subject_namespace, subject_uid,
+	observed_at, collected_at, summary, message, reason, exit_code, started_at, finished_at,
+	container_name, pod_name, deployment_name, replica_set_name, node_name, redaction_status,
+	payload_json, payload_version, created_at
+) VALUES (
+	$1, $2, $3, $4, $5, $6, $7, $8,
+	$9, $10, $11, $12, $13, $14,
+	$15, $16, $17, $18, $19, $20, $21, $22,
+	$23, $24, $25, $26, $27, $28,
+	$29, $30, $31
+)`,
+		evidence.ID, evidence.TenantID, evidence.ProjectID, evidence.AppID, evidence.OperationID, evidence.ReleaseAttemptID, evidence.Type, evidence.Source,
+		evidence.Severity, evidence.Confidence, evidence.SubjectKind, evidence.SubjectName, evidence.SubjectNamespace, evidence.SubjectUID,
+		evidence.ObservedAt, evidence.CollectedAt, evidence.Summary, evidence.Message, evidence.Reason, evidence.ExitCode, evidence.StartedAt, evidence.FinishedAt,
+		evidence.ContainerName, evidence.PodName, evidence.DeploymentName, evidence.ReplicaSetName, evidence.NodeName, evidence.RedactionStatus,
+		payloadJSON, evidence.PayloadVersion, evidence.CreatedAt,
+	); err != nil {
+		return mapDBErr(err)
+	}
+	if err := pruneOperationEvidenceTx(ctx, tx, evidence); err != nil {
+		return err
+	}
+	if !found || releaseAttemptTerminal(attempt.Status) {
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_release_attempts
+SET status = $2,
+	confidence = $3,
+	failure_operation_id = $4,
+	failure_evidence_id = $5,
+	summary = $6,
+	finished_at = $7,
+	updated_at = $7
+WHERE id = $1
+`, attempt.ID, model.ReleaseAttemptStatusFailed, evidence.Confidence, op.ID, evidence.ID, strings.TrimSpace(message), now); err != nil {
+		return mapDBErr(err)
+	}
+
+	step := normalizeReleaseStep(model.ReleaseStep{
+		TenantID:         op.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeFinalize,
+		Status:           model.ReleaseStepStatusFailed,
+		StartedAt:        now,
+		FinishedAt:       &now,
+		Summary:          strings.TrimSpace(message),
+		EvidenceID:       evidence.ID,
+		Payload: map[string]any{
+			"reason":     "zero_downtime_preflight_refused",
+			"runtime_id": strings.TrimSpace(op.AssignedRuntimeID),
+		},
+	})
+	stepPayloadJSON, err := marshalJSON(step.Payload)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_release_steps (
+	id, tenant_id, release_attempt_id, operation_id, step_type, status, started_at,
+	finished_at, summary, evidence_id, payload_json, created_at
+) VALUES (
+	$1, $2, $3, $4, $5, $6, $7,
+	$8, $9, $10, $11, $12
+)`,
+		step.ID, step.TenantID, step.ReleaseAttemptID, step.OperationID, step.Type, step.Status, step.StartedAt,
+		step.FinishedAt, step.Summary, step.EvidenceID, stepPayloadJSON, step.CreatedAt,
+	); err != nil {
+		return mapDBErr(err)
+	}
+	return nil
+}
+
+func pgFindReleaseAttemptForOperationTx(ctx context.Context, tx *sql.Tx, operationID string) (model.ReleaseAttempt, bool, error) {
+	item, err := scanReleaseAttempt(tx.QueryRowContext(ctx, `
+SELECT `+releaseAttemptSelectColumns+`
+FROM fugue_release_attempts ra
+WHERE ra.source_operation_id = $1
+   OR ra.root_operation_id = $1
+   OR ra.failure_operation_id = $1
+   OR EXISTS (
+       SELECT 1
+       FROM fugue_release_steps rs
+       WHERE rs.release_attempt_id = ra.id
+         AND rs.operation_id = $1
+   )
+ORDER BY ra.started_at DESC, ra.id DESC
+LIMIT 1
+FOR UPDATE
+`, strings.TrimSpace(operationID)))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.ReleaseAttempt{}, false, nil
+		}
+		return model.ReleaseAttempt{}, false, mapDBErr(err)
+	}
+	return item, true, nil
+}
+
 func (s *Store) pgListAssignedOperations(runtimeID string) ([]model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

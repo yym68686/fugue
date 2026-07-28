@@ -152,11 +152,13 @@ type patchAppContinuityRequest struct {
 }
 
 type appContinuityResponse struct {
-	AppFailover    *model.AppFailoverSpec       `json:"app_failover,omitempty"`
-	ZeroDowntime   *model.AppZeroDowntimePolicy `json:"zero_downtime,omitempty"`
-	Database       *model.AppPostgresSpec       `json:"database,omitempty"`
-	AlreadyCurrent bool                         `json:"already_current,omitempty"`
-	Operation      *model.Operation             `json:"operation,omitempty"`
+	AppFailover           *model.AppFailoverSpec       `json:"app_failover,omitempty"`
+	ZeroDowntime          *model.AppZeroDowntimePolicy `json:"zero_downtime,omitempty"`
+	ZeroDowntimeEffective *bool                        `json:"zero_downtime_effective,omitempty"`
+	ZeroDowntimeSource    string                       `json:"zero_downtime_source,omitempty"`
+	Database              *model.AppPostgresSpec       `json:"database,omitempty"`
+	AlreadyCurrent        bool                         `json:"already_current,omitempty"`
+	Operation             *model.Operation             `json:"operation,omitempty"`
 }
 
 type projectImageUsageAppSummary struct {

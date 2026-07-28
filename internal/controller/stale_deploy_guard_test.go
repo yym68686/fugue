@@ -291,8 +291,18 @@ func TestRightSizingDowntimeFailSafeRefusesOnlySystemRightSizing(t *testing.T) {
 		AppID:           app.ID,
 		DesiredSpec:     &app.Spec,
 	}
-	if err := svc.refuseRightSizingDowntimeIfNeeded(context.Background(), rightSizingOp, app, runtime.SchedulingConstraints{}, nil); err == nil {
-		t.Fatal("expected right-sizing fail-safe to refuse downtime-required deployment")
+	if err := svc.refuseRightSizingDowntimeIfNeeded(context.Background(), rightSizingOp, app, runtime.SchedulingConstraints{}, nil); err != nil {
+		t.Fatalf("service-default rollout should no longer be classified as downtime-required: %v", err)
+	}
+	regressedDeployment := map[string]any{
+		"metadata": map[string]any{"annotations": map[string]string{
+			"fugue.io/downtime-class": "downtime-required",
+			"fugue.io/rollout-mode":   "isolated-singleton",
+		}},
+		"spec": map[string]any{"strategy": map[string]any{"type": "Recreate"}},
+	}
+	if decision := rightSizingDeploymentDowntimeDecision(app, regressedDeployment); !decision.refused {
+		t.Fatalf("right-sizing fail-safe must still reject any regressed serving deployment that renders Recreate: %+v", decision)
 	}
 	manualOp := rightSizingOp
 	manualOp.ID = "op_manual"

@@ -18,4 +18,5 @@ const (
 
 	FugueAnnotationReleaseKey           = "fugue.pro/release-key"
 	FugueAnnotationZeroDowntimeRequired = "fugue.pro/zero-downtime-required"
+	FugueAnnotationZeroDowntimeSource   = "fugue.pro/zero-downtime-source"
 )

@@ -1798,6 +1798,21 @@ func (s *Server) handleAgentOperations(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate || op.Type == model.OperationTypeScale {
+			if _, preflightErr := runtime.PrepareAgentOperationApp(op, app); preflightErr != nil {
+				_, failed, failErr := s.store.FailAssignedAgentOperation(op.ID, principal.ActorID, preflightErr.Error())
+				if failErr != nil {
+					if s.log != nil {
+						s.log.Printf("agent operation %s preflight refusal could not be persisted: %v", op.ID, failErr)
+					}
+					continue
+				}
+				if failed && s.log != nil {
+					s.log.Printf("agent operation %s refused before dispatch: %v", op.ID, preflightErr)
+				}
+				continue
+			}
+		}
 		tasks = append(tasks, runtime.AgentTask{
 			Operation: op,
 			App:       app,
@@ -1855,6 +1870,37 @@ func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Req
 	}
 	s.appendAudit(principal, "operation.complete", "operation", op.ID, op.TenantID, map[string]string{"mode": op.ExecutionMode})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": op})
+}
+
+func (s *Server) handleAgentFailOperation(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	message := strings.TrimSpace(req.Message)
+	if message == "" {
+		message = "agent refused operation before apply"
+	}
+	op, claimed, err := s.store.FailAssignedAgentOperation(r.PathValue("id"), principal.ActorID, message)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !claimed && op.Status == model.OperationStatusWaitingAgent {
+		httpx.WriteError(w, http.StatusConflict, "operation is no longer assigned to this runtime")
+		return
+	}
+	if claimed {
+		s.appendAudit(principal, "operation.fail", "operation", op.ID, op.TenantID, map[string]string{
+			"mode":   op.ExecutionMode,
+			"reason": "agent_preflight_refused",
+		})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": op, "claimed": claimed})
 }
 
 func (s *Server) loadAuthorizedApp(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.App, bool) {

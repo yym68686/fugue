@@ -8553,6 +8553,40 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/agent/operations/{id}/fail:
+    post:
+      operationId: agentFailOperation
+      summary: Agent Fail Operation
+      tags: [Agent]
+      x-fugue-handler: handleAgentFailOperation
+      security:
+        - RuntimeBearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+              additionalProperties: false
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backups/backends:
     get:
       operationId: listBackupBackends
@@ -15500,6 +15534,7 @@ components:
     AppZeroDowntimePolicy:
       type: object
       additionalProperties: false
+      description: Advanced drain or stable/candidate rollout policy. Serving apps already receive baseline zero-downtime protection by default.
       required: [enabled]
       properties:
         enabled:
@@ -23453,6 +23488,12 @@ components:
           $ref: "#/components/schemas/AppFailoverSpec"
         zero_downtime:
           $ref: "#/components/schemas/AppZeroDowntimePolicy"
+        zero_downtime_effective:
+          type: boolean
+          description: Whether zero-downtime protection is effective, including the default protection for serving apps.
+        zero_downtime_source:
+          type: string
+          description: Effective requirement source. service-default applies to every app with a Service and positive replicas; service-policy identifies an explicitly configured advanced continuity policy.
         database:
           $ref: "#/components/schemas/AppPostgresSpec"
         already_current:

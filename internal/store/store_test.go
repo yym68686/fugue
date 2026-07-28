@@ -4,12 +4,171 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 )
+
+func TestFailAssignedAgentOperationAtomicallyFinalizesReleaseAttempt(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Agent Refusal")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example/demo:old",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	externalRuntime, _, err := s.CreateRuntime(tenant.ID, "external", model.RuntimeTypeExternalOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create external runtime: %v", err)
+	}
+	desired := app.Spec
+	desired.RuntimeID = externalRuntime.ID
+	op, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeMigrate,
+		AppID:           app.ID,
+		TargetRuntimeID: externalRuntime.ID,
+		DesiredSpec:     &desired,
+	})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	claimed, found, err := s.ClaimNextPendingOperation()
+	if err != nil || !found {
+		t.Fatalf("claim operation: found=%v err=%v", found, err)
+	}
+	if claimed.Status != model.OperationStatusWaitingAgent {
+		t.Fatalf("expected waiting-agent operation, got %+v", claimed)
+	}
+	attempt, err := s.CreateReleaseAttempt(model.ReleaseAttempt{
+		TenantID:          tenant.ID,
+		ProjectID:         project.ID,
+		AppID:             app.ID,
+		TriggerType:       model.ReleaseAttemptTriggerManualDeploy,
+		TriggerActorType:  model.ReleaseAttemptActorUser,
+		SourceOperationID: op.ID,
+		RootOperationID:   op.ID,
+		Status:            model.ReleaseAttemptStatusDeploying,
+	})
+	if err != nil {
+		t.Fatalf("create release attempt: %v", err)
+	}
+
+	failed, won, err := s.FailAssignedAgentOperation(op.ID, externalRuntime.ID, "zero-downtime migrate refused")
+	if err != nil || !won {
+		t.Fatalf("fail assigned operation: won=%v err=%v", won, err)
+	}
+	if failed.Status != model.OperationStatusFailed || failed.CompletedAt == nil {
+		t.Fatalf("expected failed terminal operation, got %+v", failed)
+	}
+	updatedAttempt, err := s.GetReleaseAttempt(attempt.ID)
+	if err != nil {
+		t.Fatalf("get release attempt: %v", err)
+	}
+	if updatedAttempt.Status != model.ReleaseAttemptStatusFailed ||
+		updatedAttempt.FailureOperationID != op.ID ||
+		updatedAttempt.FailureEvidenceID == "" ||
+		updatedAttempt.FinishedAt == nil {
+		t.Fatalf("expected release attempt failure closure, got %+v", updatedAttempt)
+	}
+	evidence, err := s.ListOperationEvidence(model.OperationEvidenceFilter{
+		TenantID:      tenant.ID,
+		PlatformAdmin: true,
+		OperationID:   op.ID,
+		Limit:         10,
+	})
+	if err != nil || len(evidence) != 1 {
+		t.Fatalf("expected one refusal evidence record, got %d err=%v", len(evidence), err)
+	}
+	if evidence[0].ID != updatedAttempt.FailureEvidenceID || evidence[0].Reason != "zero_downtime_preflight_refused" {
+		t.Fatalf("unexpected refusal evidence: %+v", evidence[0])
+	}
+	steps, err := s.ListReleaseSteps(tenant.ID, false, attempt.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("expected one release finalization step, got %d err=%v", len(steps), err)
+	}
+	if steps[0].Type != model.ReleaseStepTypeFinalize || steps[0].Status != model.ReleaseStepStatusFailed || steps[0].EvidenceID != evidence[0].ID {
+		t.Fatalf("unexpected release finalization step: %+v", steps[0])
+	}
+
+	if _, won, err := s.FailAssignedAgentOperation(op.ID, externalRuntime.ID, "retry"); err != nil || won {
+		t.Fatalf("terminal operation must reject a duplicate failure: won=%v err=%v", won, err)
+	}
+	steps, _ = s.ListReleaseSteps(tenant.ID, false, attempt.ID)
+	evidence, _ = s.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: tenant.ID, PlatformAdmin: true, OperationID: op.ID, Limit: 10})
+	if len(steps) != 1 || len(evidence) != 1 {
+		t.Fatalf("duplicate refusal must be idempotent, got steps=%d evidence=%d", len(steps), len(evidence))
+	}
+}
+
+func TestFailAssignedAgentOperationHasSingleCASWinner(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, _ := s.CreateTenant("Agent CAS")
+	project, _ := s.CreateProject(tenant.ID, "web", "")
+	app, _ := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{Image: "demo:v1", Ports: []int{8080}, Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	externalRuntime, _, _ := s.CreateRuntime(tenant.ID, "external", model.RuntimeTypeExternalOwned, "", nil)
+	desired := app.Spec
+	desired.RuntimeID = externalRuntime.ID
+	op, _ := s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeMigrate, AppID: app.ID, TargetRuntimeID: externalRuntime.ID, DesiredSpec: &desired})
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil || !found {
+		t.Fatalf("claim operation: found=%v err=%v", found, err)
+	}
+
+	const contenders = 8
+	results := make(chan bool, contenders)
+	errors := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, won, err := s.FailAssignedAgentOperation(op.ID, externalRuntime.ID, "refused")
+			results <- won
+			errors <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errors)
+	winners := 0
+	for won := range results {
+		if won {
+			winners++
+		}
+	}
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent refusal error: %v", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly one CAS winner, got %d", winners)
+	}
+}
 
 func TestManagedAndExternalOperationFlow(t *testing.T) {
 	t.Parallel()

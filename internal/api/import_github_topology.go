@@ -566,6 +566,14 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if strings.TrimSpace(specCopy.RuntimeID) == "" {
 			specCopy.RuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 		}
+		if plan.Match != nil {
+			// Topology update plans do not expose continuity as an input. Keep an
+			// existing advanced rollout policy attached to the matched app instead
+			// of silently clearing it when the imported spec replaces the app
+			// baseline. The service-default zero-downtime contract is computed from
+			// the serving spec, but an explicit safe policy must survive updates.
+			specCopy.Continuity = model.CloneAppContinuityPolicy(app.Spec.Continuity)
+		}
 		sourceCopy := plan.Source
 		desiredOriginSource := model.CloneAppSource(&sourceCopy)
 		if options.DesiredOriginSource != nil {

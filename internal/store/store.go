@@ -3902,6 +3902,154 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 	return op, err
 }
 
+// FailAssignedAgentOperation atomically rejects a task that is still waiting
+// for the specific runtime agent that requested the poll. This prevents a
+// stale agent response from failing an operation after another worker has
+// completed or been reassigned it.
+func (s *Store) FailAssignedAgentOperation(id, runtimeID, message string) (model.Operation, bool, error) {
+	id = strings.TrimSpace(id)
+	runtimeID = strings.TrimSpace(runtimeID)
+	if id == "" || runtimeID == "" {
+		return model.Operation{}, false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgFailAssignedAgentOperation(id, runtimeID, message)
+	}
+	var op model.Operation
+	claimed := false
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findOperation(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if state.Operations[index].Status != model.OperationStatusWaitingAgent ||
+			strings.TrimSpace(state.Operations[index].AssignedRuntimeID) != runtimeID {
+			op = state.Operations[index]
+			return nil
+		}
+		now := time.Now().UTC()
+		state.Operations[index].Status = model.OperationStatusFailed
+		state.Operations[index].UpdatedAt = now
+		state.Operations[index].CompletedAt = &now
+		state.Operations[index].ErrorMessage = strings.TrimSpace(message)
+		if state.Operations[index].StartedAt == nil {
+			state.Operations[index].StartedAt = &now
+		}
+		applyFailedOperationToApp(state, &state.Operations[index])
+		op = state.Operations[index]
+		finalizeAssignedAgentReleaseFailure(state, op, now, message)
+		claimed = true
+		return nil
+	})
+	return op, claimed, err
+}
+
+func finalizeAssignedAgentReleaseFailure(state *model.State, op model.Operation, now time.Time, message string) {
+	attemptIndex := releaseAttemptIndexForOperationState(state, op.ID)
+	attemptID := ""
+	if attemptIndex >= 0 {
+		attemptID = strings.TrimSpace(state.ReleaseAttempts[attemptIndex].ID)
+	}
+
+	evidence := normalizeOperationEvidence(model.OperationEvidence{
+		TenantID:         op.TenantID,
+		AppID:            op.AppID,
+		OperationID:      op.ID,
+		ReleaseAttemptID: attemptID,
+		Type:             model.OperationEvidenceTypeOperationFailed,
+		Source:           model.OperationEvidenceSourceController,
+		Severity:         model.OperationEvidenceSeverityError,
+		Confidence:       model.OperationEvidenceConfidenceConfirmed,
+		SubjectKind:      "agent_operation_preflight",
+		SubjectName:      strings.TrimSpace(op.AssignedRuntimeID),
+		ObservedAt:       now,
+		CollectedAt:      now,
+		Summary:          "agent operation refused before apply",
+		Message:          strings.TrimSpace(message),
+		Reason:           "zero_downtime_preflight_refused",
+		FinishedAt:       &now,
+		RedactionStatus:  model.OperationEvidenceRedactionRedacted,
+		Payload: map[string]any{
+			"operation_type": op.Type,
+			"runtime_id":     strings.TrimSpace(op.AssignedRuntimeID),
+		},
+	})
+	state.OperationEvidence = append(state.OperationEvidence, evidence)
+	state.OperationEvidence = retainOperationEvidence(state.OperationEvidence, evidence)
+
+	if attemptIndex < 0 || releaseAttemptTerminal(state.ReleaseAttempts[attemptIndex].Status) {
+		return
+	}
+	attempt := state.ReleaseAttempts[attemptIndex]
+	attempt.Status = model.ReleaseAttemptStatusFailed
+	attempt.Confidence = evidence.Confidence
+	attempt.FailureOperationID = op.ID
+	attempt.FailureEvidenceID = evidence.ID
+	attempt.Summary = strings.TrimSpace(message)
+	attempt.FinishedAt = &now
+	attempt.UpdatedAt = now
+	state.ReleaseAttempts[attemptIndex] = attempt
+
+	step := normalizeReleaseStep(model.ReleaseStep{
+		TenantID:         op.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeFinalize,
+		Status:           model.ReleaseStepStatusFailed,
+		StartedAt:        now,
+		FinishedAt:       &now,
+		Summary:          strings.TrimSpace(message),
+		EvidenceID:       evidence.ID,
+		Payload: map[string]any{
+			"reason":     "zero_downtime_preflight_refused",
+			"runtime_id": strings.TrimSpace(op.AssignedRuntimeID),
+		},
+	})
+	state.ReleaseSteps = append(state.ReleaseSteps, step)
+}
+
+func releaseAttemptIndexForOperationState(state *model.State, operationID string) int {
+	operationID = strings.TrimSpace(operationID)
+	if state == nil || operationID == "" {
+		return -1
+	}
+	selected := -1
+	selectAttempt := func(index int) {
+		if index < 0 || index >= len(state.ReleaseAttempts) {
+			return
+		}
+		if selected < 0 || state.ReleaseAttempts[index].StartedAt.After(state.ReleaseAttempts[selected].StartedAt) {
+			selected = index
+		}
+	}
+	for index, attempt := range state.ReleaseAttempts {
+		if strings.TrimSpace(attempt.SourceOperationID) == operationID ||
+			strings.TrimSpace(attempt.RootOperationID) == operationID ||
+			strings.TrimSpace(attempt.FailureOperationID) == operationID {
+			selectAttempt(index)
+		}
+	}
+	for _, step := range state.ReleaseSteps {
+		if strings.TrimSpace(step.OperationID) != operationID {
+			continue
+		}
+		selectAttempt(findReleaseAttempt(state, step.ReleaseAttemptID))
+	}
+	return selected
+}
+
+func releaseAttemptTerminal(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case model.ReleaseAttemptStatusCompleted,
+		model.ReleaseAttemptStatusFailed,
+		model.ReleaseAttemptStatusCancelled,
+		model.ReleaseAttemptStatusSuperseded:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Store) ListAssignedOperations(runtimeID string) ([]model.Operation, error) {
 	if s.usingDatabase() {
 		return s.pgListAssignedOperations(runtimeID)

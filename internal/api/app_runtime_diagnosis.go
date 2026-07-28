@@ -248,10 +248,10 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			fmt.Sprintf("%d/%d runtime pods are ready, but the replacement pod cannot mount storage concurrently: %s", diagnosis.ReadyPods, diagnosis.LivePods, appStorageSameNodeOnlineMountUnsupportedSummary(app)),
 			appStorageSameNodeOnlineMountUnsupportedSummary(app),
 		)
-		if model.AppZeroDowntimeEnabled(app.Spec) {
+		if model.AppZeroDowntimeRequired(app.Spec) {
 			diagnosis.Hint = "Keep the current pod serving and move the app storage to RWX / a same-node concurrent RWO storage class; Fugue will not downgrade this service to Recreate while zero downtime is enabled."
 		} else {
-			diagnosis.Hint = "Use a Recreate rollout for this storage class, or move the app storage to RWX / a same-node concurrent RWO storage class before enabling zero downtime."
+			diagnosis.Hint = "Move the app storage to RWX / a same-node concurrent RWO storage class, or stop the app first to explicitly authorize a maintenance-window rollout."
 		}
 	case diagnosis.ReadyPods > 0 && httpProbe.attempted && !httpProbe.responsive && httpProbe.transportReached:
 		diagnosis.Category = "http-probe-inconclusive"

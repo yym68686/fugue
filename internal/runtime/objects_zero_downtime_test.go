@@ -46,8 +46,11 @@ func TestZeroDowntimePolicyNeverRendersRecreateForDurableService(t *testing.T) {
 			if annotations["fugue.io/downtime-class"] != "online-required" {
 				t.Fatalf("expected online-required annotation, got %#v", annotations)
 			}
-			if annotations["fugue.io/rollout-reason"] != "zero-downtime-policy" {
+			if annotations["fugue.io/rollout-reason"] != model.AppZeroDowntimeRequirementSourceServicePolicy {
 				t.Fatalf("expected policy rollout reason, got %#v", annotations)
+			}
+			if annotations[FugueAnnotationZeroDowntimeSource] != model.AppZeroDowntimeRequirementSourceServicePolicy {
+				t.Fatalf("expected service-policy requirement source, got %#v", annotations)
 			}
 			if annotations[FugueAnnotationZeroDowntimeRequired] != "true" {
 				t.Fatalf("expected destructive repair guard annotation, got %#v", annotations)

@@ -5,9 +5,31 @@ release from a new candidate release. It is intentionally stronger than strict
 drain: old connections are preserved, and a bad candidate is not allowed to take
 over production traffic.
 
+## Baseline service contract
+
+Every app with a cluster Service and positive desired replicas is zero downtime
+by default. Normal deploys use `RollingUpdate` with `maxUnavailable=0` and
+`maxSurge=1`. If Fugue cannot validate an online plan for a running service, the
+controller refuses the operation before changing Kubernetes desired state. To
+authorize downtime, stop the app first, perform the maintenance change, and then
+start it again.
+
+`continuity.zero_downtime` is an advanced policy, not the switch for this
+baseline guarantee. `drain_only` configures an explicit policy and `safe` adds
+stable/candidate releases, canary gates, and rollback behavior. Inspect both the
+configured and effective state with:
+
+```bash
+fugue app continuity show <app>
+# zero_downtime_enabled=true
+# zero_downtime_configured=false
+# zero_downtime_effective=true
+# zero_downtime_source=service-default
+```
+
 ## Normal behavior
 
-For an app with `continuity.zero_downtime.mode=safe`, a deploy should produce:
+For an app with `continuity.zero_downtime.mode=safe`, a deploy should additionally produce:
 
 1. `candidate_create`: Fugue creates an AppRelease with role `candidate`.
 2. `candidate_ready`: the candidate runtime revision has an upstream URL and is ready.

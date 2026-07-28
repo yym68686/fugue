@@ -2208,17 +2208,18 @@ func deploymentRolloutAnnotations(app model.App, config StrictDrainConfig) map[s
 	annotations := map[string]string{
 		"fugue.io/rollout-mode":    "rolling-restart",
 		"fugue.io/downtime-class":  "online-required",
-		"fugue.io/rollout-reason":  onlineDurableRolloutReason(app.Spec.RolloutIntent),
+		"fugue.io/rollout-reason":  onlineDurableRolloutReason(app),
 		"fugue.io/rollout-surface": "tenant-app",
 	}
 	if validatedOnlineRollout || appRequiresZeroDowntimeRollout(app) {
 		annotations[FugueAnnotationZeroDowntimeRequired] = "true"
+		annotations[FugueAnnotationZeroDowntimeSource] = model.AppZeroDowntimeRequirementSource(app.Spec)
 	}
 	return mergeStringMaps(annotations, strictZeroDowntimeDrainAnnotations(app, config))
 }
 
-func onlineDurableRolloutReason(intent string) string {
-	switch strings.TrimSpace(intent) {
+func onlineDurableRolloutReason(app model.App) string {
+	switch strings.TrimSpace(app.Spec.RolloutIntent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate:
 		return "lifecycle-only"
 	case model.AppRolloutIntentOnlineImageUpdate:
@@ -2230,14 +2231,14 @@ func onlineDurableRolloutReason(intent string) string {
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return "resource-only"
 	case "":
-		return "zero-downtime-policy"
+		return model.AppZeroDowntimeRequirementSource(app.Spec)
 	default:
 		return "restart-only"
 	}
 }
 
 func appRequiresZeroDowntimeRollout(app model.App) bool {
-	return model.AppZeroDowntimeEnabled(app.Spec) &&
+	return model.AppZeroDowntimeRequired(app.Spec) &&
 		model.AppHasClusterService(app.Spec) &&
 		app.Spec.Replicas > 0
 }

@@ -1,6 +1,8 @@
 # Fugue Zero Downtime Rollout 修复记录
 
-最后更新：2026-06-12
+最后更新：2026-07-28
+
+> 当前行为说明：2026-07-28 起，所有有 cluster Service 且期望副本数大于 0 的 app 默认受 zero-downtime 保护。本文中“默认 Recreate”描述的是历史故障行为，不再是当前契约；运行中服务没有可验证的在线计划时，controller 必须在 apply 前拒绝，而不是退化为 `Recreate`。
 
 本文记录本轮围绕 `uni-api` 在 Fugue 上实现 zero downtime rollout 过程中发现的问题、线上现象、调查过程、证据和修复思路。本文不记录任何 secret、API key 或私有环境变量值。
 

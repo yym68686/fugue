@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,6 +256,17 @@ func (s *AgentService) pollAndProcess(ctx context.Context) error {
 		}
 		if err := s.processTask(ctx, task); err != nil {
 			s.logf("task %s failed locally: %v", task.Operation.ID, err)
+			if isPermanentAgentPreflightRefusal(err) {
+				if reportErr := s.reportAgentOperationFailure(ctx, task.Operation.ID, err.Error()); reportErr != nil {
+					s.logf("task %s preflight refusal report deferred: %v", task.Operation.ID, reportErr)
+				} else {
+					s.recordRuntimeAutonomyWAL("operation_preflight_refused", model.EdgeRepairSafetyL0ObserveOnly, task.Operation.ID, map[string]string{
+						"operation_id": task.Operation.ID,
+						"app_id":       task.App.ID,
+						"error":        err.Error(),
+					}, task.Operation.ID, nil)
+				}
+			}
 			s.recordRuntimeAutonomyWAL("operation_apply_failed", model.EdgeRepairSafetyL0ObserveOnly, task.Operation.ID, map[string]string{
 				"operation_id":   task.Operation.ID,
 				"operation_type": task.Operation.Type,
@@ -266,15 +278,24 @@ func (s *AgentService) pollAndProcess(ctx context.Context) error {
 	return nil
 }
 
+func (s *AgentService) reportAgentOperationFailure(ctx context.Context, operationID, message string) error {
+	payload, err := json.Marshal(map[string]any{
+		"message": strings.TrimSpace(message),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal agent operation failure: %w", err)
+	}
+	_, err = s.doJSONRequest(ctx, http.MethodPost, "/v1/agent/operations/"+url.PathEscape(strings.TrimSpace(operationID))+"/fail", s.Config.RuntimeKey, payload)
+	return err
+}
+
 func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 	if err := s.ensureCellStore(); err != nil {
 		return err
 	}
-	if err := s.CellStore.RecordDesiredTask(task); err != nil {
-		return fmt.Errorf("record cell desired task: %w", err)
-	}
 
-	app := task.App
+	currentApp := task.App
+	app := currentApp
 	switch task.Operation.Type {
 	case model.OperationTypeDeploy:
 		if task.Operation.DesiredSpec == nil {
@@ -307,6 +328,14 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 		model.SetAppSourceState(&app, originSource, buildSource)
 	default:
 		return fmt.Errorf("unsupported task type %s", task.Operation.Type)
+	}
+	preparedApp, err := s.prepareAgentTaskRollout(ctx, task.Operation.Type, currentApp, app)
+	if err != nil {
+		return err
+	}
+	app = preparedApp
+	if err := s.CellStore.RecordDesiredTask(task); err != nil {
+		return fmt.Errorf("record cell desired task: %w", err)
 	}
 
 	bundle, err := s.Renderer.RenderAppBundle(app)

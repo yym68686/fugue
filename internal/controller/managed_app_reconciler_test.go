@@ -656,7 +656,6 @@ func TestBuildManagedAppStatusPromotesPendingReleaseWhenReady(t *testing.T) {
 	deployment.Status.UpdatedReplicas = 1
 	deployment.Status.ReadyReplicas = 1
 	deployment.Status.AvailableReplicas = 1
-
 	status := buildManagedAppStatus(managed, app, deployment, true, nil, nil)
 
 	if status.CurrentReleaseKey != nextReleaseKey {
@@ -2479,7 +2478,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(
 	}
 }
 
-func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForWorkspaceRWOStorage(t *testing.T) {
+func TestStoredManagedAppDesiredWithRolloutIntentFailsClosedForWorkspaceRWOStorage(t *testing.T) {
 	t.Parallel()
 
 	managedSnapshot := model.App{
@@ -2518,16 +2517,16 @@ func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForWorks
 	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
 	spec, _ := deployment["spec"].(map[string]any)
 	strategy, _ := spec["strategy"].(map[string]any)
-	if gotStrategy := strategy["type"]; gotStrategy != "Recreate" {
-		t.Fatalf("expected workspace RWO config update to use Recreate, got %#v", gotStrategy)
+	if gotStrategy := strategy["type"]; gotStrategy != "RollingUpdate" {
+		t.Fatalf("expected workspace RWO config update to fail closed with RollingUpdate, got %#v", gotStrategy)
 	}
 	metadata, _ := deployment["metadata"].(map[string]any)
 	annotations, _ := metadata["annotations"].(map[string]string)
-	if gotClass := annotations["fugue.io/downtime-class"]; gotClass != "downtime-required" {
-		t.Fatalf("expected downtime-required class, got %q", gotClass)
+	if gotClass := annotations["fugue.io/downtime-class"]; gotClass != "online-required" {
+		t.Fatalf("expected online-required class, got %q", gotClass)
 	}
-	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != "single-writer-storage" {
-		t.Fatalf("expected single-writer-storage rollout reason, got %q", gotReason)
+	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != model.AppZeroDowntimeRequirementSourceServiceDefault {
+		t.Fatalf("expected service-default rollout reason, got %q", gotReason)
 	}
 }
 
@@ -2583,7 +2582,7 @@ func TestStoredManagedAppDesiredWithRolloutIntentKeepsOnlineConfigUpdateForLocal
 	}
 }
 
-func TestStoredManagedAppDesiredWithRolloutIntentKeepsStorageStructureChangeRecreate(t *testing.T) {
+func TestStoredManagedAppDesiredWithRolloutIntentKeepsStorageStructureChangeFailClosed(t *testing.T) {
 	t.Parallel()
 
 	managedSnapshot := model.App{
@@ -2619,8 +2618,8 @@ func TestStoredManagedAppDesiredWithRolloutIntentKeepsStorageStructureChangeRecr
 	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
 	spec, _ := deployment["spec"].(map[string]any)
 	strategy, _ := spec["strategy"].(map[string]any)
-	if gotStrategy := strategy["type"]; gotStrategy != "Recreate" {
-		t.Fatalf("expected storage structure change to use Recreate, got %#v", gotStrategy)
+	if gotStrategy := strategy["type"]; gotStrategy != "RollingUpdate" {
+		t.Fatalf("expected storage structure change to fail closed with RollingUpdate, got %#v", gotStrategy)
 	}
 }
 
@@ -2874,6 +2873,10 @@ func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyMa
 	deployment.Status.UpdatedReplicas = 1
 	deployment.Status.ReadyReplicas = 1
 	deployment.Status.AvailableReplicas = 1
+	testRenderer := runtime.Renderer{}
+	deployment.Metadata.Annotations = map[string]string{
+		runtime.FugueAnnotationReleaseKey: testRenderer.ManagedAppReleaseKey(testRenderer.PrepareApp(runtime.AppFromManagedApp(managed)), managed.Spec.Scheduling),
+	}
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
@@ -2909,6 +2912,12 @@ func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyMa
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(`{"items":[]}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/endpoints/"):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"subsets":[{"addresses":[{"ip":"10.0.0.1"}]}]}`)),
 				Header:     make(http.Header),
 			}, nil
 		default:
@@ -3207,7 +3216,11 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 			}, nil
 		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
 			if recordedManagedApp == nil {
-				t.Fatalf("managed app was requested before apply")
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+					Header:     make(http.Header),
+				}, nil
 			}
 			data, err := json.Marshal(recordedManagedApp)
 			if err != nil {
@@ -3405,7 +3418,11 @@ func TestApplyManagedAppDesiredStateOmitsDeploymentForDisabledAppWithoutImage(t 
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
 		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
 			if recordedManagedApp == nil {
-				t.Fatalf("managed app was requested before apply")
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+					Header:     make(http.Header),
+				}, nil
 			}
 			data, err := json.Marshal(recordedManagedApp)
 			if err != nil {

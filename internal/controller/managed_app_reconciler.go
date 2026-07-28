@@ -35,6 +35,33 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	}
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app = s.Renderer.PrepareApp(app)
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	name := runtime.ManagedAppResourceName(app)
+	managed, found, err := client.getManagedApp(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("read managed app %s/%s before zero-downtime preflight: %w", namespace, name, err)
+	}
+	if !found {
+		managedMap := runtime.BuildManagedAppObject(app, scheduling)
+		managed, err = runtime.ManagedAppObjectFromMap(managedMap)
+		if err != nil {
+			return fmt.Errorf("build managed app zero-downtime preflight snapshot: %w", err)
+		}
+	}
+	managed.Spec.Scheduling = cloneControllerSchedulingConstraints(managed.Spec.Scheduling)
+	preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(
+		ctx,
+		client,
+		namespace,
+		managed,
+		app,
+		s.managedAppOperationTypeFromContext(ctx),
+		scheduling,
+	)
+	if guardErr != nil {
+		return guardErr
+	}
+	app = preparedApp
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return fmt.Errorf("apply managed app state objects: %w", err)
@@ -43,9 +70,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 		return fmt.Errorf("replace managed app desired spec: %w", err)
 	}
 
-	namespace := runtime.NamespaceForTenant(app.TenantID)
-	name := runtime.ManagedAppResourceName(app)
-	managed, found, err := client.getManagedApp(ctx, namespace, name)
+	managed, found, err = client.getManagedApp(ctx, namespace, name)
 	if err != nil {
 		return fmt.Errorf("read managed app %s/%s after apply: %w", namespace, name, err)
 	}
@@ -53,7 +78,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 		return fmt.Errorf("managed app %s/%s was not found after apply", namespace, name)
 	}
 	managed.Spec.Scheduling = cloneControllerSchedulingConstraints(scheduling)
-	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, false, false)
+	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, false, false, true)
 }
 
 func (s *Service) deleteManagedAppDesiredState(ctx context.Context, app model.App) error {
@@ -204,10 +229,10 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 			}
 		}
 	}
-	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, recoverStoredBaseline, syncStoredManagedAppSnapshot)
+	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, recoverStoredBaseline, syncStoredManagedAppSnapshot, false)
 }
 
-func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, recoverStoredBaseline bool, syncStoredManagedAppSnapshot bool) error {
+func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, recoverStoredBaseline bool, syncStoredManagedAppSnapshot bool, rolloutPrepared bool) error {
 	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
 		app = normalizedApp
 	}
@@ -241,6 +266,15 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve stored managed app scheduling: %w", err))
 		}
 		desiredScheduling = s.onlineDurableRolloutScheduling(ctx, runtime.AppFromManagedApp(managed), app, desiredScheduling)
+		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", desiredScheduling)
+		if guardErr != nil {
+			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
+				return nil
+			}
+			return patchManagedAppZeroDowntimeBlockedStatus(ctx, client, namespace, managed, app, guardErr)
+		}
+		app = preparedApp
+		rolloutPrepared = true
 		desiredObjects := runtime.BuildManagedAppStateObjects(app, desiredScheduling)
 		if err := client.applyObjects(ctx, desiredObjects); err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("sync managed app desired snapshot from store: %w", err))
@@ -260,6 +294,16 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app = s.Renderer.PrepareApp(app)
+	if !rolloutPrepared {
+		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", managed.Spec.Scheduling)
+		if guardErr != nil {
+			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
+				return nil
+			}
+			return patchManagedAppZeroDowntimeBlockedStatus(ctx, client, namespace, managed, app, guardErr)
+		}
+		app = preparedApp
+	}
 	if err := validateManagedAppDeployableImage(app); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
@@ -960,6 +1004,52 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 		return fmt.Errorf("%w (also failed to patch managed app status: %v)", cause, err)
 	}
 	return cause
+}
+
+func patchManagedAppZeroDowntimeBlockedStatus(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, cause error) error {
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseError
+	status.Message = strings.TrimSpace(cause.Error())
+	// A blocked replacement must leave the last known-good serving count intact;
+	// clearing it would make the API proxy return 503 even though no workload was
+	// changed.
+	status.ReadyReplicas = managed.Status.ReadyReplicas
+	status.CurrentReleaseKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
+	status.CurrentReleaseStartedAt = strings.TrimSpace(managed.Status.CurrentReleaseStartedAt)
+	status.CurrentReleaseReadyAt = strings.TrimSpace(managed.Status.CurrentReleaseReadyAt)
+	status.PendingReleaseKey = strings.TrimSpace(managed.Status.PendingReleaseKey)
+	status.PendingReleaseStartedAt = strings.TrimSpace(managed.Status.PendingReleaseStartedAt)
+	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), managed.Status.BackingServices...)
+	status.Conditions = make([]runtime.ManagedAppCondition, 0, len(managed.Status.Conditions)+1)
+	for _, condition := range managed.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), "ZeroDowntimeBlocked") {
+			continue
+		}
+		status.Conditions = append(status.Conditions, condition)
+	}
+	status.Conditions = append(status.Conditions, runtime.ManagedAppCondition{
+		Type:    "ZeroDowntimeBlocked",
+		Status:  "True",
+		Reason:  "UnsupportedRolloutTopology",
+		Message: status.Message,
+	})
+	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+		return fmt.Errorf("%w (also failed to patch zero-downtime blocked status: %v)", cause, err)
+	}
+	return cause
+}
+
+func managedAppZeroDowntimeBlockedStatusCurrent(status runtime.ManagedAppStatus, cause error) bool {
+	if !strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseError) || cause == nil || strings.TrimSpace(status.Message) != strings.TrimSpace(cause.Error()) {
+		return false
+	}
+	for _, condition := range status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), "ZeroDowntimeBlocked") &&
+			strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+			return true
+		}
+	}
+	return false
 }
 
 func patchManagedAppStorageExpansionErrorStatus(

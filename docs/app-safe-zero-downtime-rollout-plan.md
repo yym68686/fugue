@@ -649,7 +649,8 @@ Debug bundle 必须包含：
 
 ## Backward compatibility
 
-- 未开启 zero downtime 的 app 行为不变，包括原有需要 `Recreate` 的单写存储发布。
+- 2026-07-28 后本节的原始兼容假设已被服务默认 zero-downtime 契约取代：有 cluster Service 且期望副本数大于 0 的 app 即使没有显式 continuity policy，也不得静默退化为 `Recreate`。
+- 不支持在线双挂载的单写存储变更必须 fail closed；如确需维护停机，先显式 stop app，完成变更后再 start。
 - 现有 `AppRelease` API 保持兼容。
 - 现有 traffic policy 手动 canary 继续可用。
 - 现有 zero downtime drain 继续作为 `drain_only` 模式存在，但同样受“禁止 Recreate”的服务级硬约束保护。

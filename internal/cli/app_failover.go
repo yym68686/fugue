@@ -19,6 +19,8 @@ type appFailoverResult struct {
 	BackupReadiness           string                       `json:"backup_readiness,omitempty"`
 	BackupPosture             []model.BackupPosture        `json:"backup_posture,omitempty"`
 	ZeroDowntime              *model.AppZeroDowntimePolicy `json:"zero_downtime,omitempty"`
+	ZeroDowntimeEffective     *bool                        `json:"zero_downtime_effective,omitempty"`
+	ZeroDowntimeSource        string                       `json:"zero_downtime_source,omitempty"`
 	ReleaseTraffic            *model.AppTrafficPolicy      `json:"release_traffic,omitempty"`
 	ActiveReleases            []model.AppRelease           `json:"active_releases,omitempty"`
 	RecentReleaseAttempts     []model.ReleaseAttempt       `json:"recent_release_attempts,omitempty"`
@@ -142,9 +144,11 @@ func (c *CLI) newAppContinuityShowCommand() *cobra.Command {
 			}
 			continuity := model.NormalizeAppContinuityPolicy(app.Spec.Continuity)
 			response := appContinuityResponse{
-				AppFailover:  app.Spec.Failover,
-				ZeroDowntime: nil,
-				Database:     app.Spec.Postgres,
+				AppFailover:           app.Spec.Failover,
+				ZeroDowntime:          nil,
+				ZeroDowntimeEffective: boolPtr(model.AppZeroDowntimeRequired(app.Spec)),
+				ZeroDowntimeSource:    model.AppZeroDowntimeRequirementSource(app.Spec),
+				Database:              app.Spec.Postgres,
 			}
 			if continuity != nil {
 				response.ZeroDowntime = continuity.ZeroDowntime
@@ -249,7 +253,7 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.AppRuntimeID, "app-runtime-id", "", "Target runtime ID for app failover")
 	cmd.Flags().StringVar(&opts.DBRuntimeName, "db-to", "", "Target runtime for database failover")
 	cmd.Flags().StringVar(&opts.DBRuntimeID, "db-runtime-id", "", "Target runtime ID for database failover")
-	cmd.Flags().StringVar(&opts.ZeroDowntimeMode, "zero-downtime", "", "Enable zero downtime policy: drain_only or safe")
+	cmd.Flags().StringVar(&opts.ZeroDowntimeMode, "zero-downtime", "", "Configure advanced zero downtime policy: drain_only or safe (services already default to zero downtime)")
 	cmd.Flags().BoolVar(&opts.Canary, "canary", true, "Enable safe rollout candidate canary")
 	cmd.Flags().IntVar(&opts.InitialCanaryWeight, "initial-canary-weight", opts.InitialCanaryWeight, "Initial safe rollout candidate canary weight")
 	cmd.Flags().IntVar(&opts.MinObservationSeconds, "min-observation-seconds", opts.MinObservationSeconds, "Minimum observation seconds per safe rollout canary step")
@@ -327,7 +331,7 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.App, "app", false, "Disable only app failover")
 	cmd.Flags().BoolVar(&opts.DB, "db", false, "Disable only database failover")
-	cmd.Flags().BoolVar(&opts.ZeroDowntime, "zero-downtime", false, "Disable only zero downtime rollout policy")
+	cmd.Flags().BoolVar(&opts.ZeroDowntime, "zero-downtime", false, "Disable only the advanced zero downtime policy; service rollouts remain zero downtime by default")
 	cmd.Flags().BoolVar(&opts.RebalanceNow, "rebalance-now", false, "Clear any pending managed Postgres placement hold while disabling database failover")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	return cmd
@@ -455,14 +459,26 @@ func (c *CLI) newAppFailoverRunCommand() *cobra.Command {
 }
 
 func (c *CLI) renderAppContinuityResult(appID string, result appContinuityResponse) error {
+	configured := result.ZeroDowntime != nil && result.ZeroDowntime.Enabled
+	effective := configured
+	if result.ZeroDowntimeEffective != nil {
+		effective = *result.ZeroDowntimeEffective
+	}
+	source := strings.TrimSpace(result.ZeroDowntimeSource)
+	if source == "" && configured && effective {
+		source = model.AppZeroDowntimeRequirementSourceServicePolicy
+	}
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app_id":          appID,
-			"app_failover":    result.AppFailover,
-			"zero_downtime":   result.ZeroDowntime,
-			"database":        result.Database,
-			"already_current": result.AlreadyCurrent,
-			"operation":       redactOperationPtrForOutput(result.Operation),
+			"app_id":                   appID,
+			"app_failover":             result.AppFailover,
+			"zero_downtime":            result.ZeroDowntime,
+			"zero_downtime_configured": configured,
+			"zero_downtime_effective":  effective,
+			"zero_downtime_source":     source,
+			"database":                 result.Database,
+			"already_current":          result.AlreadyCurrent,
+			"operation":                redactOperationPtrForOutput(result.Operation),
 		})
 	}
 	pairs := []kvPair{{Key: "app_id", Value: appID}}
@@ -488,9 +504,14 @@ func (c *CLI) renderAppContinuityResult(appID string, result appContinuityRespon
 	} else {
 		pairs = append(pairs, kvPair{Key: "database_failover_enabled", Value: "false"})
 	}
-	if result.ZeroDowntime != nil && result.ZeroDowntime.Enabled {
+	pairs = append(pairs,
+		kvPair{Key: "zero_downtime_enabled", Value: fmt.Sprintf("%t", effective)},
+		kvPair{Key: "zero_downtime_configured", Value: fmt.Sprintf("%t", configured)},
+		kvPair{Key: "zero_downtime_effective", Value: fmt.Sprintf("%t", effective)},
+		kvPair{Key: "zero_downtime_source", Value: source},
+	)
+	if configured {
 		pairs = append(pairs,
-			kvPair{Key: "zero_downtime_enabled", Value: "true"},
 			kvPair{Key: "zero_downtime_mode", Value: result.ZeroDowntime.Mode},
 			kvPair{Key: "zero_downtime_strategy", Value: result.ZeroDowntime.Strategy},
 		)
@@ -500,8 +521,11 @@ func (c *CLI) renderAppContinuityResult(appID string, result appContinuityRespon
 				kvPair{Key: "zero_downtime_initial_weight", Value: fmt.Sprintf("%d", result.ZeroDowntime.Canary.InitialWeight)},
 			)
 		}
-	} else {
-		pairs = append(pairs, kvPair{Key: "zero_downtime_enabled", Value: "false"})
+	} else if effective {
+		pairs = append(pairs,
+			kvPair{Key: "zero_downtime_mode", Value: "service_default"},
+			kvPair{Key: "zero_downtime_strategy", Value: "rolling_update"},
+		)
 	}
 	return writeKeyValues(c.stdout, pairs...)
 }
@@ -527,8 +551,10 @@ func buildAppFailoverResults(apps []model.App, runtimeByID map[string]*model.Run
 func buildAppFailoverResult(app model.App, runtimeByID map[string]*model.Runtime) appFailoverResult {
 	runtime := runtimeByID[appRuntimeID(app)]
 	return appFailoverResult{
-		App:        app,
-		Assessment: failoverpkg.AssessApp(app, runtime),
+		App:                   app,
+		Assessment:            failoverpkg.AssessApp(app, runtime),
+		ZeroDowntimeEffective: boolPtr(model.AppZeroDowntimeRequired(app.Spec)),
+		ZeroDowntimeSource:    model.AppZeroDowntimeRequirementSource(app.Spec),
 	}
 }
 
@@ -704,9 +730,23 @@ func writeAppFailoverStatus(w io.Writer, result appFailoverResult) error {
 		{Key: "blockers", Value: strings.Join(result.Assessment.Blockers, "; ")},
 		{Key: "warnings", Value: strings.Join(result.Assessment.Warnings, "; ")},
 	}
-	if result.ZeroDowntime != nil {
+	configured := result.ZeroDowntime != nil && result.ZeroDowntime.Enabled
+	effective := configured
+	if result.ZeroDowntimeEffective != nil {
+		effective = *result.ZeroDowntimeEffective
+	}
+	source := strings.TrimSpace(result.ZeroDowntimeSource)
+	if source == "" && configured && effective {
+		source = model.AppZeroDowntimeRequirementSourceServicePolicy
+	}
+	pairs = append(pairs,
+		kvPair{Key: "zero_downtime_enabled", Value: fmt.Sprintf("%t", effective)},
+		kvPair{Key: "zero_downtime_configured", Value: fmt.Sprintf("%t", configured)},
+		kvPair{Key: "zero_downtime_effective", Value: fmt.Sprintf("%t", effective)},
+		kvPair{Key: "zero_downtime_source", Value: source},
+	)
+	if configured {
 		pairs = append(pairs,
-			kvPair{Key: "zero_downtime_enabled", Value: fmt.Sprintf("%t", result.ZeroDowntime.Enabled)},
 			kvPair{Key: "zero_downtime_mode", Value: result.ZeroDowntime.Mode},
 			kvPair{Key: "zero_downtime_strategy", Value: result.ZeroDowntime.Strategy},
 		)
@@ -717,8 +757,11 @@ func writeAppFailoverStatus(w io.Writer, result appFailoverResult) error {
 				kvPair{Key: "zero_downtime_step_weights", Value: strings.Join(intsToStrings(result.ZeroDowntime.Canary.StepWeights), ",")},
 			)
 		}
-	} else {
-		pairs = append(pairs, kvPair{Key: "zero_downtime_enabled", Value: "false"})
+	} else if effective {
+		pairs = append(pairs,
+			kvPair{Key: "zero_downtime_mode", Value: "service_default"},
+			kvPair{Key: "zero_downtime_strategy", Value: "rolling_update"},
+		)
 	}
 	if result.ReleaseTraffic != nil {
 		pairs = append(pairs,

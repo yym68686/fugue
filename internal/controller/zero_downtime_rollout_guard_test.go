@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"fugue/internal/model"
@@ -18,7 +19,7 @@ func TestZeroDowntimeRolloutGuardAllowsValidatedLocalRWOEnvironmentRestart(t *te
 		op,
 		current,
 		desired,
-		runtime.SchedulingConstraints{},
+		runtime.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: "node-a"}},
 	)
 	if decision.Refused {
 		t.Fatalf("expected validated local RWO rollout to be allowed: %+v", decision)
@@ -39,7 +40,7 @@ func TestZeroDowntimeRolloutGuardRefusesWorkspaceRWO(t *testing.T) {
 		op,
 		current,
 		desired,
-		runtime.SchedulingConstraints{},
+		runtime.SchedulingConstraints{NodeSelector: map[string]string{kubeHostnameLabelKey: "node-a"}},
 	)
 	if !decision.Refused {
 		t.Fatalf("expected workspace RWO rollout to be refused: %+v", decision)
@@ -144,19 +145,20 @@ func TestZeroDowntimeRolloutGuardRefusesPolicyDisableThatWouldRecreate(t *testin
 		runtime.SchedulingConstraints{},
 	)
 	if !decision.Refused {
-		t.Fatalf("expected policy disable that would trigger Recreate to fail closed: %+v", decision)
+		t.Fatalf("expected policy disable on unsupported storage to fail closed: %+v", decision)
 	}
-	if decision.Strategy != "Recreate" || decision.DowntimeClass != "downtime-required" || decision.RolloutMode != "isolated-singleton" {
-		t.Fatalf("expected refusal to be based on the final rendered Recreate strategy: %+v", decision)
+	if decision.Strategy != "RollingUpdate" || decision.DowntimeClass != "online-required" || decision.RolloutMode != "rolling-restart" {
+		t.Fatalf("expected the service default to prevent rendering Recreate: %+v", decision)
 	}
-	if decision.Reason != "the rendered serving workload requires a Recreate rollout while zero downtime is enabled" {
+	if decision.Reason != "storage class fugue-workspace-rwo does not support same-node online dual mount" {
 		t.Fatalf("unexpected rendered-strategy refusal reason: %+v", decision)
 	}
 }
 
-func TestZeroDowntimeRolloutGuardDoesNotChangePolicyOffBehavior(t *testing.T) {
+func TestZeroDowntimeRolloutGuardProtectsRunningServiceWithoutExplicitPolicy(t *testing.T) {
 	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
 	current.Spec.Continuity = nil
+	current.Status.CurrentReplicas = 1
 	desired := current
 	desired.Spec.Env = map[string]string{"MODE": "new"}
 	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
@@ -167,8 +169,127 @@ func TestZeroDowntimeRolloutGuardDoesNotChangePolicyOffBehavior(t *testing.T) {
 		desired,
 		runtime.SchedulingConstraints{},
 	)
-	if decision.Refused {
-		t.Fatalf("policy-off service should retain existing rollout behavior: %+v", decision)
+	if !decision.Refused {
+		t.Fatalf("running service should fail closed without requiring an explicit policy: %+v", decision)
+	}
+	if decision.RequirementSource != model.AppZeroDowntimeRequirementSourceServiceDefault {
+		t.Fatalf("expected service-default requirement source: %+v", decision)
+	}
+}
+
+func TestZeroDowntimeRolloutGuardProtectsPreviouslyServingAppWhileReplicasAreUnobserved(t *testing.T) {
+	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
+	current.Spec.Continuity = nil
+	current.Status.CurrentReplicas = 0
+	current.Status.CurrentRuntimeID = current.Spec.RuntimeID
+	desired := current
+	desired.Spec.NetworkMode = model.AppNetworkModeBackground
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	decision := (&Service{Renderer: runtime.Renderer{}}).zeroDowntimeRolloutGuardDecision(
+		op,
+		current,
+		desired,
+		runtime.SchedulingConstraints{},
+	)
+	if !decision.Refused {
+		t.Fatalf("previously serving app must remain protected while observed replicas are zero: %+v", decision)
+	}
+	if decision.Reason != "the requested restart removes the cluster service while zero downtime is enabled" {
+		t.Fatalf("unexpected refusal reason: %+v", decision)
+	}
+}
+
+func TestZeroDowntimeRolloutGuardAllowsInitialDeployWithoutAServiceToProtect(t *testing.T) {
+	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
+	current.Spec.Continuity = nil
+	current.Status.CurrentReplicas = 0
+	current.Status.Phase = "deploying"
+	desired := current
+	desired.Spec.Env = map[string]string{"MODE": "new"}
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+
+	decision := (&Service{Renderer: runtime.Renderer{}}).zeroDowntimeRolloutGuardDecision(
+		op,
+		current,
+		desired,
+		runtime.SchedulingConstraints{},
+	)
+	if decision.Refused || decision.RequirementSource != "" {
+		t.Fatalf("initial deploy has no live service to protect: %+v", decision)
+	}
+}
+
+func TestManagedAppReconcileGuardRefusesStoredDriftBeforeApply(t *testing.T) {
+	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
+	current.Spec.Continuity = nil
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Name: "app-demo", Namespace: "fg-tenant-demo"},
+		Spec: runtime.ManagedAppSpec{
+			AppID:     current.ID,
+			TenantID:  current.TenantID,
+			ProjectID: current.ProjectID,
+			Name:      current.Name,
+			AppSpec:   current.Spec,
+		},
+		Status: runtime.ManagedAppStatus{
+			Phase:         runtime.ManagedAppPhaseReady,
+			ReadyReplicas: 1,
+		},
+	}
+	desired := current
+	desired.Spec.Env = map[string]string{"MODE": "new"}
+
+	_, err := (&Service{Renderer: runtime.Renderer{}}).prepareManagedAppReconcileRollout(
+		context.Background(), managed, desired, runtime.SchedulingConstraints{},
+	)
+	if err == nil {
+		t.Fatal("stored desired drift on unsupported serving storage must be refused before Kubernetes apply")
+	}
+}
+
+func TestManagedAppReconcileGuardAllowsInitialStoredSnapshot(t *testing.T) {
+	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
+	current.Spec.Continuity = nil
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Name: "app-demo", Namespace: "fg-tenant-demo"},
+		Spec: runtime.ManagedAppSpec{
+			AppID:     current.ID,
+			TenantID:  current.TenantID,
+			ProjectID: current.ProjectID,
+			Name:      current.Name,
+			AppSpec:   current.Spec,
+		},
+		Status: runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhasePending},
+	}
+	desired := current
+	desired.Spec.Env = map[string]string{"MODE": "new"}
+
+	if _, err := (&Service{Renderer: runtime.Renderer{}}).prepareManagedAppReconcileRollout(
+		context.Background(), managed, desired, runtime.SchedulingConstraints{},
+	); err != nil {
+		t.Fatalf("initial stored snapshot must not be blocked: %v", err)
+	}
+}
+
+func TestManagedAppReconcileGuardAllowsRecoveryFromInitialFailure(t *testing.T) {
+	current := zeroDowntimeGuardTestApp(model.AppStorageClassFugueWorkspaceRWO)
+	current.Spec.Continuity = nil
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Name: "app-demo", Namespace: "fg-tenant-demo"},
+		Spec: runtime.ManagedAppSpec{
+			AppID:     current.ID,
+			TenantID:  current.TenantID,
+			ProjectID: current.ProjectID,
+			Name:      current.Name,
+			AppSpec:   current.Spec,
+		},
+		Status: runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseError},
+	}
+	if _, err := (&Service{Renderer: runtime.Renderer{}}).prepareManagedAppReconcileRollout(
+		context.Background(), managed, current, runtime.SchedulingConstraints{},
+	); err != nil {
+		t.Fatalf("an initial failed deployment must remain repairable: %v", err)
 	}
 }
 

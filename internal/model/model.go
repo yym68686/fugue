@@ -2084,6 +2084,30 @@ func AppZeroDowntimeEnabled(spec AppSpec) bool {
 		policy.ZeroDowntime.Enabled
 }
 
+const (
+	AppZeroDowntimeRequirementSourceServiceDefault = "service-default"
+	AppZeroDowntimeRequirementSourceServicePolicy  = "service-policy"
+)
+
+// AppZeroDowntimeRequired reports the effective serving-workload contract.
+// Every app with a cluster Service and positive desired replicas is protected
+// by default. An explicit continuity policy can add canary, release-gate, and
+// rollback behavior, but it is not required for the baseline no-downtime
+// contract.
+func AppZeroDowntimeRequired(spec AppSpec) bool {
+	return spec.Replicas > 0 && AppHasClusterService(spec)
+}
+
+func AppZeroDowntimeRequirementSource(spec AppSpec) string {
+	if !AppZeroDowntimeRequired(spec) {
+		return ""
+	}
+	if AppZeroDowntimeEnabled(spec) {
+		return AppZeroDowntimeRequirementSourceServicePolicy
+	}
+	return AppZeroDowntimeRequirementSourceServiceDefault
+}
+
 type AppPostgresSpec struct {
 	Image                            string        `json:"image,omitempty"`
 	Database                         string        `json:"database,omitempty"`

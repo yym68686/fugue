@@ -73,6 +73,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/agent/image-locations", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentReportImageLocation)))
 	mux.Handle("GET /v1/agent/operations", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentOperations)))
 	mux.Handle("POST /v1/agent/operations/{id}/complete", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentCompleteOperation)))
+	mux.Handle("POST /v1/agent/operations/{id}/fail", s.auth.RequireRuntime(http.HandlerFunc(s.handleAgentFailOperation)))
 	mux.Handle("GET /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleListAPIKeys)))
 	mux.Handle("POST /v1/api-keys", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateAPIKey)))
 	mux.Handle("PATCH /v1/api-keys/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAPIKey)))

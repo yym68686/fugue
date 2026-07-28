@@ -16,20 +16,21 @@ const managedAppRolloutSnapshotMismatchLimit = 32
 var managedAppRolloutSnapshotTimeType = reflect.TypeOf(time.Time{})
 
 type managedAppRolloutDecision struct {
-	Source         string
-	OperationID    string
-	RolloutIntent  string
-	Strategy       string
-	DowntimeClass  string
-	Reason         string
-	RolloutMode    string
-	OldReleaseKey  string
-	NewReleaseKey  string
-	OldReplicaSet  string
-	NewReplicaSet  string
-	DeploymentName string
-	ManagedAppName string
-	Namespace      string
+	Source             string
+	OperationID        string
+	RolloutIntent      string
+	Strategy           string
+	DowntimeClass      string
+	ZeroDowntimeSource string
+	Reason             string
+	RolloutMode        string
+	OldReleaseKey      string
+	NewReleaseKey      string
+	OldReplicaSet      string
+	NewReplicaSet      string
+	DeploymentName     string
+	ManagedAppName     string
+	Namespace          string
 }
 
 func managedAppRolloutDecisionFromObjects(ctx context.Context, namespace string, managed runtime.ManagedAppObject, app model.App, objects []map[string]any, releaseKey string) managedAppRolloutDecision {
@@ -54,6 +55,7 @@ func managedAppRolloutDecisionFromObjects(ctx context.Context, namespace string,
 	decision.Strategy = deploymentStrategyTypeFromObject(deployment)
 	annotations := objectStringMapValue(nestedObjectValue(deployment, "metadata", "annotations"))
 	decision.DowntimeClass = strings.TrimSpace(annotations["fugue.io/downtime-class"])
+	decision.ZeroDowntimeSource = strings.TrimSpace(annotations[runtime.FugueAnnotationZeroDowntimeSource])
 	decision.Reason = strings.TrimSpace(annotations["fugue.io/rollout-reason"])
 	decision.RolloutMode = strings.TrimSpace(annotations["fugue.io/rollout-mode"])
 	if decision.NewReleaseKey == "" {
@@ -157,24 +159,25 @@ func (s *Service) recordManagedAppRolloutDecision(ctx context.Context, app model
 		return
 	}
 	attrs := map[string]any{
-		"source":           decision.Source,
-		"operation_id":     decision.OperationID,
-		"rollout_intent":   decision.RolloutIntent,
-		"strategy":         decision.Strategy,
-		"downtime_class":   decision.DowntimeClass,
-		"reason":           decision.Reason,
-		"rollout_mode":     decision.RolloutMode,
-		"old_release_key":  decision.OldReleaseKey,
-		"new_release_key":  decision.NewReleaseKey,
-		"old_replica_set":  decision.OldReplicaSet,
-		"new_replica_set":  decision.NewReplicaSet,
-		"deployment_name":  decision.DeploymentName,
-		"managed_app_name": decision.ManagedAppName,
-		"namespace":        decision.Namespace,
-		"desired_replicas": app.Spec.Replicas,
-		"public_app":       model.AppExposesPublicService(app.Spec),
-		"cluster_service":  model.AppHasClusterService(app.Spec),
-		"deployment_id":    decision.NewReleaseKey,
+		"source":               decision.Source,
+		"operation_id":         decision.OperationID,
+		"rollout_intent":       decision.RolloutIntent,
+		"strategy":             decision.Strategy,
+		"downtime_class":       decision.DowntimeClass,
+		"zero_downtime_source": decision.ZeroDowntimeSource,
+		"reason":               decision.Reason,
+		"rollout_mode":         decision.RolloutMode,
+		"old_release_key":      decision.OldReleaseKey,
+		"new_release_key":      decision.NewReleaseKey,
+		"old_replica_set":      decision.OldReplicaSet,
+		"new_replica_set":      decision.NewReplicaSet,
+		"deployment_name":      decision.DeploymentName,
+		"managed_app_name":     decision.ManagedAppName,
+		"namespace":            decision.Namespace,
+		"desired_replicas":     app.Spec.Replicas,
+		"public_app":           model.AppExposesPublicService(app.Spec),
+		"cluster_service":      model.AppHasClusterService(app.Spec),
+		"deployment_id":        decision.NewReleaseKey,
 	}
 	s.logControllerAppEvent(ctx, "managed_app_rollout_decision", "info", app, "managed app rollout decision", attrs)
 	if managedAppDecisionRequiresDowntimeWarning(app, decision) {

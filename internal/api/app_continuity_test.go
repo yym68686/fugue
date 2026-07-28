@@ -149,8 +149,10 @@ func TestPatchAppContinuityZeroDowntimeQueuesDeployWithoutDatabaseFailover(t *te
 	}
 
 	var response struct {
-		ZeroDowntime *model.AppZeroDowntimePolicy `json:"zero_downtime"`
-		Operation    struct {
+		ZeroDowntime          *model.AppZeroDowntimePolicy `json:"zero_downtime"`
+		ZeroDowntimeEffective bool                         `json:"zero_downtime_effective"`
+		ZeroDowntimeSource    string                       `json:"zero_downtime_source"`
+		Operation             struct {
 			ID string `json:"id"`
 		} `json:"operation"`
 	}
@@ -159,6 +161,9 @@ func TestPatchAppContinuityZeroDowntimeQueuesDeployWithoutDatabaseFailover(t *te
 	}
 	if response.ZeroDowntime == nil || !response.ZeroDowntime.Enabled || response.ZeroDowntime.Mode != model.AppZeroDowntimeModeSafe {
 		t.Fatalf("expected zero downtime response, got %+v", response.ZeroDowntime)
+	}
+	if !response.ZeroDowntimeEffective || response.ZeroDowntimeSource != model.AppZeroDowntimeRequirementSourceServicePolicy {
+		t.Fatalf("expected effective service-policy response, got effective=%t source=%q", response.ZeroDowntimeEffective, response.ZeroDowntimeSource)
 	}
 	op, err := s.GetOperation(response.Operation.ID)
 	if err != nil {

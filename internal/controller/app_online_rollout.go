@@ -103,6 +103,13 @@ func (s *Service) currentReadyAppNodeForOnlineRollout(ctx context.Context, app m
 		return "", false
 	}
 
+	return s.currentReadyAppNodeForOnlineRolloutWithClient(ctx, client, app)
+}
+
+func (s *Service) currentReadyAppNodeForOnlineRolloutWithClient(ctx context.Context, client *kubeClient, app model.App) (string, bool) {
+	if client == nil {
+		return "", false
+	}
 	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
 	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
 	if err != nil {

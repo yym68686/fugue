@@ -181,7 +181,9 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 			}
 			return continuity.ZeroDowntime
 		}(),
-		"database": sanitizePostgresSpecForContinuityResponse(nextDatabase),
+		"zero_downtime_effective": model.AppZeroDowntimeRequired(spec),
+		"zero_downtime_source":    model.AppZeroDowntimeRequirementSource(spec),
+		"database":                sanitizePostgresSpecForContinuityResponse(nextDatabase),
 	}
 	if !changed {
 		response["already_current"] = true

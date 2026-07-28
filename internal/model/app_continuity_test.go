@@ -76,3 +76,46 @@ func TestAppZeroDowntimeEnabledForEveryEnabledMode(t *testing.T) {
 		t.Fatal("disabled policy should not enable zero downtime")
 	}
 }
+
+func TestServingAppsRequireZeroDowntimeByDefault(t *testing.T) {
+	service := AppSpec{Ports: []int{8080}, Replicas: 1}
+	if AppZeroDowntimeEnabled(service) {
+		t.Fatal("service default must not masquerade as an explicitly configured continuity policy")
+	}
+	if !AppZeroDowntimeRequired(service) {
+		t.Fatal("serving app should require zero downtime by default")
+	}
+	if got := AppZeroDowntimeRequirementSource(service); got != AppZeroDowntimeRequirementSourceServiceDefault {
+		t.Fatalf("expected service-default requirement source, got %q", got)
+	}
+
+	stopped := service
+	stopped.Replicas = 0
+	if AppZeroDowntimeRequired(stopped) {
+		t.Fatal("stopped service has no live rollout continuity requirement")
+	}
+
+	background := AppSpec{NetworkMode: AppNetworkModeBackground, Ports: []int{8080}, Replicas: 1}
+	if AppZeroDowntimeRequired(background) {
+		t.Fatal("background workload should not receive the serving-app default")
+	}
+
+	background.Continuity = &AppContinuityPolicy{ZeroDowntime: &AppZeroDowntimePolicy{
+		Enabled: true,
+		Mode:    AppZeroDowntimeModeDrainOnly,
+	}}
+	if AppZeroDowntimeRequired(background) {
+		t.Fatal("configured policy without a serving Service must not be reported as effective")
+	}
+	if got := AppZeroDowntimeRequirementSource(background); got != "" {
+		t.Fatalf("non-serving policy should have no effective requirement source, got %q", got)
+	}
+
+	service.Continuity = background.Continuity
+	if !AppZeroDowntimeRequired(service) {
+		t.Fatal("configured policy should be effective for a serving app")
+	}
+	if got := AppZeroDowntimeRequirementSource(service); got != AppZeroDowntimeRequirementSourceServicePolicy {
+		t.Fatalf("expected service-policy requirement source, got %q", got)
+	}
+}
