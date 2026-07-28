@@ -283,7 +283,7 @@ func pgValidateOperationRuntimeReservationsTx(ctx context.Context, tx *sql.Tx, p
 		// Keep suspension available as a capacity-reducing safety operation
 		// even when the reservation record has drifted from the live cluster.
 		return nil
-	case model.OperationTypeDatabaseResume:
+	case model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize:
 		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
 			return ErrInvalidInput
 		}

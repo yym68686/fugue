@@ -75,6 +75,26 @@ func managedPostgresLifecycleRetryMatches(existing, candidate model.Operation) b
 		existingTargetRuntimeID == existingRuntimeID
 }
 
+func managedPostgresResizeRetryMatches(existing, candidate model.Operation) bool {
+	if candidate.Type != model.OperationTypeDatabaseResize ||
+		existing.Type != model.OperationTypeDatabaseResize ||
+		!isActiveOperationStatus(existing.Status) ||
+		strings.TrimSpace(existing.TenantID) != strings.TrimSpace(candidate.TenantID) ||
+		strings.TrimSpace(existing.AppID) != strings.TrimSpace(candidate.AppID) ||
+		strings.TrimSpace(existing.ServiceID) != strings.TrimSpace(candidate.ServiceID) ||
+		strings.TrimSpace(existing.SourceRuntimeID) != strings.TrimSpace(candidate.SourceRuntimeID) ||
+		strings.TrimSpace(existing.TargetRuntimeID) != strings.TrimSpace(candidate.TargetRuntimeID) {
+		return false
+	}
+	if existing.DesiredSpec == nil || existing.DesiredSpec.Postgres == nil ||
+		existing.DesiredSpec.Postgres.RuntimeResources == nil ||
+		candidate.DesiredSpec == nil || candidate.DesiredSpec.Postgres == nil ||
+		candidate.DesiredSpec.Postgres.RuntimeResources == nil {
+		return false
+	}
+	return *existing.DesiredSpec.Postgres.RuntimeResources == *candidate.DesiredSpec.Postgres.RuntimeResources
+}
+
 func cloneOperation(op model.Operation) model.Operation {
 	op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
 	op.DesiredSource = cloneAppSource(op.DesiredSource)

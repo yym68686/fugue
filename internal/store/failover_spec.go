@@ -56,6 +56,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 		model.OperationTypeDatabaseLocalize,
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,
+		model.OperationTypeDatabaseResize,
 		model.OperationTypeFailover:
 		return true
 	default:
@@ -68,7 +69,8 @@ func isManagedPostgresServiceOperation(operationType string) bool {
 	case model.OperationTypeDatabaseSwitchover,
 		model.OperationTypeDatabaseLocalize,
 		model.OperationTypeDatabaseSuspend,
-		model.OperationTypeDatabaseResume:
+		model.OperationTypeDatabaseResume,
+		model.OperationTypeDatabaseResize:
 		return true
 	default:
 		return false
@@ -79,7 +81,8 @@ func operationRequiresManagedController(operationType string) bool {
 	switch operationType {
 	case model.OperationTypeImport,
 		model.OperationTypeDatabaseSuspend,
-		model.OperationTypeDatabaseResume:
+		model.OperationTypeDatabaseResume,
+		model.OperationTypeDatabaseResize:
 		return true
 	default:
 		return false

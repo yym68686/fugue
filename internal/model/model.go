@@ -169,6 +169,7 @@ const (
 	OperationTypeDatabaseLocalize   = "database-localize"
 	OperationTypeDatabaseSuspend    = "database-suspend"
 	OperationTypeDatabaseResume     = "database-resume"
+	OperationTypeDatabaseResize     = "database-resize"
 	OperationTypeDataPrewarm        = "data-prewarm"
 	OperationTypeDelete             = "delete"
 

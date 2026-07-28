@@ -3063,7 +3063,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
-	if op.DesiredSpec != nil {
+	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3586,6 +3586,41 @@ WHERE app_id = $1
 			if activeImport {
 				return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresImportInProgressConflict
 			}
+		}
+	case model.OperationTypeDatabaseResize:
+		if _, err := s.pgValidateManagedPostgresResizeTargetTx(ctx, tx, &app, op.ServiceID); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if err := prepareManagedPostgresResizeOperation(app, &op); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		active, err := s.pgActiveOperationsForLifecycleTargetTx(ctx, tx, app.ID, op.ServiceID)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if len(active) > 0 {
+			if len(active) == 1 && managedPostgresResizeRetryMatches(active[0], op) {
+				return active[0], operationCreateOutcome{
+					ExistingOperationID:     active[0].ID,
+					ReusedExistingOperation: true,
+				}, nil
+			}
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+		activeBackup, err := s.pgHasActiveAppDatabaseBackupRunForManagedPostgresTx(ctx, tx, app, op.ServiceID)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		activeImport, err := s.pgHasActiveAppDatabaseImportJobForManagedPostgresTx(ctx, tx, app, op.ServiceID)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		activeRestore, err := s.pgHasActiveAppDatabaseRestoreRunForManagedPostgresTx(ctx, tx, app)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if activeBackup || activeImport || activeRestore {
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 	default:
 		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
@@ -4410,14 +4445,15 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if !operationCanTransitionToCompleted(op) {
 		return model.Operation{}, ErrConflict
 	}
-	lifecycleOperation := isManagedPostgresLifecycleOperationType(op.Type)
-	if desiredSpec != nil && !lifecycleOperation {
+	immutableDesiredOperation := isManagedPostgresLifecycleOperationType(op.Type) ||
+		op.Type == model.OperationTypeDatabaseResize
+	if desiredSpec != nil && !immutableDesiredOperation {
 		op.DesiredSpec = cloneAppSpec(desiredSpec)
 	}
-	if desiredSource != nil && !lifecycleOperation {
+	if desiredSource != nil && !immutableDesiredOperation {
 		op.DesiredSource = cloneAppSource(desiredSource)
 	}
-	if desiredOriginSource != nil && !lifecycleOperation {
+	if desiredOriginSource != nil && !immutableDesiredOperation {
 		op.DesiredOriginSource = cloneAppSource(desiredOriginSource)
 	}
 
@@ -4442,9 +4478,12 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	}
 	if operationAppliesDesiredSpecBackingServices(op) {
 		var err error
-		if op.Type == model.OperationTypeDatabaseSuspend || op.Type == model.OperationTypeDatabaseResume {
+		switch op.Type {
+		case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
 			err = s.pgApplyManagedPostgresLifecycleTx(ctx, tx, &app, &op)
-		} else {
+		case model.OperationTypeDatabaseResize:
+			err = s.pgApplyManagedPostgresResizeTx(ctx, tx, &app, &op)
+		default:
 			err = s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec)
 		}
 		if err != nil {
@@ -4458,14 +4497,16 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {
 		return model.Operation{}, err
 	}
-	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
-		return model.Operation{}, err
-	}
-	if err := s.pgUpdateAppImageTrackingDeployedTx(ctx, tx, op, now); err != nil {
-		return model.Operation{}, err
-	}
-	if err := s.pgSyncStableReleaseForCompletedDeployTx(ctx, tx, app, op, now); err != nil {
-		return model.Operation{}, err
+	if op.Type != model.OperationTypeDatabaseResize {
+		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+			return model.Operation{}, err
+		}
+		if err := s.pgUpdateAppImageTrackingDeployedTx(ctx, tx, op, now); err != nil {
+			return model.Operation{}, err
+		}
+		if err := s.pgSyncStableReleaseForCompletedDeployTx(ctx, tx, app, op, now); err != nil {
+			return model.Operation{}, err
+		}
 	}
 	if op.Type == model.OperationTypeDelete {
 		if err := s.pgDeleteAppDomainsByAppTx(ctx, tx, app.ID); err != nil {
@@ -6049,6 +6090,10 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
 		// The exact backing service lifecycle intent is applied transactionally
 		// before this model update. AppSpec must remain untouched.
+	case model.OperationTypeDatabaseResize:
+		// The exact runtime target is applied to the backing service in the same
+		// transaction. Do not change AppSpec, status, or timestamps.
+		return nil
 	default:
 		return ErrInvalidInput
 	}

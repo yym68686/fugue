@@ -260,7 +260,7 @@ func validateOperationRuntimeReservationsState(state *model.State, projectID str
 		// available even if a stale reservation no longer describes the live
 		// database placement.
 		return nil
-	case model.OperationTypeDatabaseResume:
+	case model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize:
 		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
 			return ErrInvalidInput
 		}

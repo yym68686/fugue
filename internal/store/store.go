@@ -2827,7 +2827,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if op.DesiredSpec != nil {
+		if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseResize {
 			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 				return err
 			}
@@ -3160,6 +3160,28 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if op.Type == model.OperationTypeDatabaseSuspend &&
 				hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) {
 				return ErrManagedPostgresImportInProgressConflict
+			}
+		case model.OperationTypeDatabaseResize:
+			if err := validateManagedPostgresResizeTargetState(state, app, op.ServiceID); err != nil {
+				return err
+			}
+			if err := prepareManagedPostgresResizeOperation(app, &op); err != nil {
+				return err
+			}
+			active := activeOperationsForLifecycleTarget(state.Operations, app.ID, op.ServiceID)
+			if len(active) > 0 {
+				if len(active) == 1 && managedPostgresResizeRetryMatches(active[0], op) {
+					op = cloneOperation(active[0])
+					outcome.ReusedExistingOperation = true
+					outcome.ExistingOperationID = op.ID
+					return nil
+				}
+				return ErrConflict
+			}
+			if hasActiveAppDatabaseBackupRunForManagedPostgres(state, app, op.ServiceID) ||
+				hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) ||
+				hasActiveAppDatabaseRestoreRunForManagedPostgres(state, app) {
+				return ErrConflict
 			}
 		default:
 			return ErrInvalidInput
@@ -3769,14 +3791,15 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 		if !operationCanTransitionToCompleted(state.Operations[index]) {
 			return ErrConflict
 		}
-		lifecycleOperation := isManagedPostgresLifecycleOperationType(state.Operations[index].Type)
-		if desiredSpec != nil && !lifecycleOperation {
+		immutableDesiredOperation := isManagedPostgresLifecycleOperationType(state.Operations[index].Type) ||
+			state.Operations[index].Type == model.OperationTypeDatabaseResize
+		if desiredSpec != nil && !immutableDesiredOperation {
 			state.Operations[index].DesiredSpec = cloneAppSpec(desiredSpec)
 		}
-		if desiredSource != nil && !lifecycleOperation {
+		if desiredSource != nil && !immutableDesiredOperation {
 			state.Operations[index].DesiredSource = cloneAppSource(desiredSource)
 		}
-		if desiredOriginSource != nil && !lifecycleOperation {
+		if desiredOriginSource != nil && !immutableDesiredOperation {
 			state.Operations[index].DesiredOriginSource = cloneAppSource(desiredOriginSource)
 		}
 		now := time.Now().UTC()
@@ -4889,6 +4912,8 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		if err := applyManagedPostgresLifecycleState(state, app, op); err != nil {
 			return err
 		}
+	case model.OperationTypeDatabaseResize:
+		return applyManagedPostgresResizeState(state, app, op)
 	default:
 		return ErrInvalidInput
 	}
@@ -4990,6 +5015,8 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "database-suspend", nil
 	case model.OperationTypeDatabaseResume:
 		return "database-resume", nil
+	case model.OperationTypeDatabaseResize:
+		return "database-resize", nil
 	default:
 		return "", ErrInvalidInput
 	}
@@ -5041,6 +5068,8 @@ func operationActionLabel(op model.Operation) string {
 		return "database suspend"
 	case model.OperationTypeDatabaseResume:
 		return "database resume"
+	case model.OperationTypeDatabaseResize:
+		return "database resize"
 	default:
 		return "operation"
 	}

@@ -48,6 +48,20 @@ FOR UPDATE SKIP LOCKED`,
 				return s.ClaimNextPendingOperation()
 			},
 		},
+		{
+			name:          "try claim resize",
+			operationType: model.OperationTypeDatabaseResize,
+			firstQuery: `(?s)SELECT id, tenant_id, type, status, execution_mode.*
+FROM fugue_operations
+WHERE id = \$1
+  AND status = \$2
+FOR UPDATE SKIP LOCKED`,
+			firstArgs:  []driver.Value{"op_lifecycle", model.OperationStatusPending},
+			fullUpdate: true,
+			claim: func(s *Store, operationID string) (model.Operation, bool, error) {
+				return s.TryClaimPendingOperation(operationID)
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
