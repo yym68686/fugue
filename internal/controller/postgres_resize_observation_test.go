@@ -12,9 +12,9 @@ import (
 func TestObserveManagedPostgresResizeUsesActualContainerResources(t *testing.T) {
 	var pod kubeResizePod
 	if err := json.Unmarshal([]byte(`{
-		"metadata":{"namespace":"tenant-a","name":"database-1","uid":"pod-uid","resourceVersion":"42","generation":7},
+		"metadata":{"namespace":"tenant-a","name":"database-1","uid":"pod-uid","resourceVersion":"42","generation":7,"labels":{"cnpg.io/cluster":"database"},"ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","name":"database","uid":"cluster-uid","controller":true}]},
 		"spec":{"nodeName":"worker-a","resources":{"requests":{"cpu":"200m"}},"initContainers":[{"name":"bootstrap-controller","resources":{"requests":{"cpu":"100m","memory":"512Mi"}}}],"containers":[{"name":"postgres","resources":{"requests":{"cpu":"100m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}},"resizePolicy":[{"resourceName":"cpu","restartPolicy":"NotRequired"},{"resourceName":"memory","restartPolicy":"NotRequired"}]}]},
-		"status":{"observedGeneration":7,"phase":"Running","conditions":[{"type":"Ready","status":"True"},{"type":"PodResizePending","status":"True","reason":"Deferred","message":"waiting for node capacity"}],"containerStatuses":[{"name":"postgres","ready":true,"restartCount":0,"resources":{"requests":{"cpu":"150m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}}}]}
+		"status":{"observedGeneration":7,"phase":"Running","conditions":[{"type":"Ready","status":"True"},{"type":"PodResizePending","status":"True","reason":"Deferred","message":"waiting for node capacity"}],"containerStatuses":[{"name":"postgres","ready":true,"restartCount":0,"state":{"running":{"startedAt":"2026-07-28T00:00:00Z"}},"resources":{"requests":{"cpu":"150m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}}}]}
 	}`), &pod); err != nil {
 		t.Fatalf("decode pod: %v", err)
 	}
@@ -28,6 +28,10 @@ func TestObserveManagedPostgresResizeUsesActualContainerResources(t *testing.T) 
 	}
 	if !got.PodReady || !got.ContainerReady || got.RestartCount != 0 {
 		t.Fatalf("unexpected readiness observation: %+v", got)
+	}
+	if got.ContainerStartedAt != "2026-07-28T00:00:00Z" || got.Labels[cloudNativePGClusterLabel] != "database" ||
+		len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != "cluster-uid" {
+		t.Fatalf("expected immutable identity evidence, got %+v", got)
 	}
 	if got.DesiredResources.Requests["cpu"] != "100m" {
 		t.Fatalf("expected desired CPU from pod spec, got %+v", got.DesiredResources)

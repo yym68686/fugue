@@ -11,6 +11,8 @@ import (
 	"fugue/internal/store"
 )
 
+const managedPostgresResizeForceDeleteConflictMessage = "app force delete is blocked while managed postgres resize is active"
+
 func isActiveAppOperationStatus(status string) bool {
 	switch strings.TrimSpace(strings.ToLower(status)) {
 	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
@@ -43,6 +45,17 @@ func activeDeleteOperationForApp(operations []model.Operation) *model.Operation 
 	return nil
 }
 
+func activeManagedPostgresResizeOperationForApp(operations []model.Operation) *model.Operation {
+	for _, operation := range operations {
+		if operation.Type != model.OperationTypeDatabaseResize || !isActiveAppOperationStatus(operation.Status) {
+			continue
+		}
+		operationCopy := operation
+		return &operationCopy
+	}
+	return nil
+}
+
 func (s *Server) handleForceDeleteApp(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -56,6 +69,15 @@ func (s *Server) handleForceDeleteApp(
 	)
 	if err != nil {
 		s.writeStoreError(w, err)
+		return
+	}
+	if resizeOperation := activeManagedPostgresResizeOperationForApp(operations); resizeOperation != nil {
+		s.appendAudit(principal, "app.force_delete_blocked", "operation", resizeOperation.ID, app.TenantID, map[string]string{
+			"app_id":         app.ID,
+			"operation_type": resizeOperation.Type,
+			"reason":         "managed_postgres_resize_active",
+		})
+		httpx.WriteError(w, http.StatusConflict, managedPostgresResizeForceDeleteConflictMessage)
 		return
 	}
 

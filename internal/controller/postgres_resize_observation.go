@@ -36,13 +36,24 @@ type kubeResizeContainerSpec struct {
 	ResizePolicy  []kubeResizePolicy       `json:"resizePolicy,omitempty"`
 }
 
+type kubeResizeOwnerReference struct {
+	APIVersion string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Name       string `json:"name,omitempty"`
+	UID        string `json:"uid,omitempty"`
+	Controller *bool  `json:"controller,omitempty"`
+}
+
 type kubeResizePod struct {
 	Metadata struct {
-		Namespace       string `json:"namespace,omitempty"`
-		Name            string `json:"name"`
-		UID             string `json:"uid,omitempty"`
-		ResourceVersion string `json:"resourceVersion,omitempty"`
-		Generation      int64  `json:"generation,omitempty"`
+		Namespace         string                     `json:"namespace,omitempty"`
+		Name              string                     `json:"name"`
+		UID               string                     `json:"uid,omitempty"`
+		ResourceVersion   string                     `json:"resourceVersion,omitempty"`
+		Generation        int64                      `json:"generation,omitempty"`
+		DeletionTimestamp string                     `json:"deletionTimestamp,omitempty"`
+		Labels            map[string]string          `json:"labels,omitempty"`
+		OwnerReferences   []kubeResizeOwnerReference `json:"ownerReferences,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		NodeName       string                    `json:"nodeName,omitempty"`
@@ -59,6 +70,11 @@ type kubeResizePod struct {
 			Ready        bool                      `json:"ready,omitempty"`
 			RestartCount int                       `json:"restartCount,omitempty"`
 			Resources    *kubeResourceRequirements `json:"resources,omitempty"`
+			State        struct {
+				Running *struct {
+					StartedAt string `json:"startedAt,omitempty"`
+				} `json:"running,omitempty"`
+			} `json:"state,omitempty"`
 		} `json:"containerStatuses,omitempty"`
 	} `json:"status"`
 }
@@ -79,12 +95,16 @@ type managedPostgresResizeObservation struct {
 	ResourceVersion    string
 	Generation         int64
 	ObservedGeneration int64
+	DeletionTimestamp  string
+	Labels             map[string]string
+	OwnerReferences    []kubeResizeOwnerReference
 	NodeName           string
 	Phase              string
 	PodReady           bool
 	ContainerName      string
 	ContainerReady     bool
 	RestartCount       int
+	ContainerStartedAt string
 	DesiredResources   kubeResourceRequirements
 	ActualResources    *kubeResourceRequirements
 	ResizePolicy       []kubeResizePolicy
@@ -107,6 +127,9 @@ func observeManagedPostgresResize(pod kubeResizePod, containerName string) (mana
 		ResourceVersion:    strings.TrimSpace(pod.Metadata.ResourceVersion),
 		Generation:         pod.Metadata.Generation,
 		ObservedGeneration: pod.Status.ObservedGeneration,
+		DeletionTimestamp:  strings.TrimSpace(pod.Metadata.DeletionTimestamp),
+		Labels:             cloneKubeResourceStringMap(pod.Metadata.Labels),
+		OwnerReferences:    append([]kubeResizeOwnerReference(nil), pod.Metadata.OwnerReferences...),
 		NodeName:           strings.TrimSpace(pod.Spec.NodeName),
 		Phase:              strings.TrimSpace(pod.Status.Phase),
 		ContainerName:      containerName,
@@ -155,6 +178,9 @@ func observeManagedPostgresResize(pod kubeResizePod, containerName string) (mana
 		foundStatus = true
 		out.ContainerReady = status.Ready
 		out.RestartCount = status.RestartCount
+		if status.State.Running != nil {
+			out.ContainerStartedAt = strings.TrimSpace(status.State.Running.StartedAt)
+		}
 		if status.Resources != nil {
 			resources := cloneKubeResourceRequirements(*status.Resources)
 			out.ActualResources = &resources

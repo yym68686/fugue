@@ -121,6 +121,7 @@ type kubeEndpoints struct {
 type kubeCloudNativePGCluster struct {
 	Metadata struct {
 		Name              string            `json:"name"`
+		UID               string            `json:"uid,omitempty"`
 		ResourceVersion   string            `json:"resourceVersion,omitempty"`
 		Generation        int64             `json:"generation,omitempty"`
 		Annotations       map[string]string `json:"annotations,omitempty"`

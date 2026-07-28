@@ -1465,6 +1465,89 @@ func TestForceDeleteFailsActiveDeployAndQueuesDelete(t *testing.T) {
 	}
 }
 
+func TestForceDeleteBlocksActiveManagedPostgresResizeWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:        100,
+				MemoryMebibytes:      256,
+				CPULimitMilliCores:   200,
+				MemoryLimitMebibytes: 384,
+			},
+		},
+	})
+	app, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("reload app: %v", err)
+	}
+	var service model.BackingService
+	for _, candidate := range app.BackingServices {
+		if candidate.OwnerAppID == app.ID && candidate.Spec.Postgres != nil {
+			service = candidate
+			break
+		}
+	}
+	if service.ID == "" || service.Spec.Postgres == nil || service.Spec.Postgres.Resources == nil {
+		t.Fatalf("expected app-owned managed postgres service, got %+v", app.BackingServices)
+	}
+	targetResources := model.CloneResourceSpec(service.Spec.Postgres.RuntimeResources)
+	if targetResources == nil {
+		targetResources = model.CloneResourceSpec(service.Spec.Postgres.Resources)
+	}
+	resizeOp, err := s.CreateOperation(model.Operation{
+		TenantID:  app.TenantID,
+		Type:      model.OperationTypeDatabaseResize,
+		AppID:     app.ID,
+		ServiceID: service.ID,
+		DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{
+			RuntimeResources: targetResources,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create resize operation: %v", err)
+	}
+	if claimed, found, err := s.TryClaimPendingOperation(resizeOp.ID); err != nil || !found || claimed.Status != model.OperationStatusRunning {
+		t.Fatalf("claim resize operation: claimed=%+v found=%t err=%v", claimed, found, err)
+	}
+
+	recorder := performJSONRequest(
+		t,
+		server,
+		http.MethodDelete,
+		"/v1/apps/"+app.ID+"?force=true",
+		apiKey,
+		nil,
+	)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), managedPostgresResizeForceDeleteConflictMessage) {
+		t.Fatalf("expected exact resize conflict, got status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	storedResize, err := s.GetOperation(resizeOp.ID)
+	if err != nil {
+		t.Fatalf("get resize operation: %v", err)
+	}
+	if storedResize.Status != model.OperationStatusRunning {
+		t.Fatalf("force delete mutated resize operation: %+v", storedResize)
+	}
+	if _, err := s.GetApp(app.ID); err != nil {
+		t.Fatalf("force delete removed app despite resize fence: %v", err)
+	}
+	operations, err := s.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	for _, operation := range operations {
+		if operation.Type == model.OperationTypeDelete {
+			t.Fatalf("force delete queued delete despite resize fence: %+v", operation)
+		}
+	}
+}
+
 func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
