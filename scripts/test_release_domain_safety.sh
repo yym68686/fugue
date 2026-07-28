@@ -977,6 +977,63 @@ exit 99
   rm -f "${forced_health_abort_log}" "${forced_health_file}"
   assert_runner_state_cleared
 
+  renewer_stop_race_tmp="$(mktemp -d)"
+  renewer_stop_race_status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" RENEWER_STOP_RACE_TMP="${renewer_stop_race_tmp}" \
+    bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=1
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=2
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=release/stop-race
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${RENEWER_STOP_RACE_TMP}/health"
+RUNNER_TEMP="${RENEWER_STOP_RACE_TMP}"
+TMPDIR="${RENEWER_STOP_RACE_TMP}"
+printf "healthy|release/stop-race|acquired\n" >"${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}"
+bounded_renewal_body() {
+  printf started >"${RENEWER_STOP_RACE_TMP}/renew-started"
+  sleep 2 &
+  renew_child_pid=$!
+  printf "%s" "${renew_child_pid}" >"${RENEWER_STOP_RACE_TMP}/renew-child-pid"
+  wait "${renew_child_pid}"
+  printf completed >"${RENEWER_STOP_RACE_TMP}/renew-completed"
+}
+renew_control_plane_backup_coordination_lease() {
+  run_with_wall_timeout 5 bounded_renewal_body
+  return 0
+}
+start_control_plane_backup_coordination_lease_renewer
+for _ in $(seq 1 50); do
+  [[ -f "${RENEWER_STOP_RACE_TMP}/renew-started" ]] && break
+  sleep 0.1
+done
+[[ -f "${RENEWER_STOP_RACE_TMP}/renew-started" ]]
+stop_control_plane_backup_coordination_lease_renewer
+[[ -f "${RENEWER_STOP_RACE_TMP}/renew-completed" ]]
+[[ "$(cat "${RENEWER_STOP_RACE_TMP}/health")" == "healthy|release/stop-race|acquired" ]]
+renew_child_pid="$(cat "${RENEWER_STOP_RACE_TMP}/renew-child-pid")"
+! kill -0 "${renew_child_pid}" >/dev/null 2>&1
+[[ -z "$(find "${RENEWER_STOP_RACE_TMP}" -maxdepth 1 -name "fugue-release-command.*" -print -quit)" ]]
+[[ -z "$(find "${RENEWER_STOP_RACE_TMP}" -type p -print -quit)" ]]
+[[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" ]]
+[[ ! -e "${RENEWER_STOP_RACE_TMP}/health.stop" ]]
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED=true
+if stop_control_plane_backup_coordination_lease_renewer; then
+  exit 1
+fi
+[[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED}" == "true" ]]
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED=false
+rm -f "${RENEWER_STOP_RACE_TMP}/health"
+'; then
+    renewer_stop_race_status=0
+  else
+    renewer_stop_race_status=$?
+  fi
+  assert_eq "${renewer_stop_race_status}" "0" \
+    "stopping the backup coordination renewer must reap an in-flight bounded command before cleanup"
+  rm -rf "${renewer_stop_race_tmp}"
+
   marker="${temp_dir}/fail-fast.reached"
   status=0
   if run_with_wall_timeout 3 fail_fast_release_function "${marker}"; then

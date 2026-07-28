@@ -2574,6 +2574,8 @@ control_plane_release_run_atomic_domain_release() {
   if control_plane_release_domain_private_recovery_required; then
     :
   elif ! control_plane_release_domain_cleanup_private_workdir; then
+    control_plane_release_domain_log \
+      "private release workdir cleanup failed after transaction completion; renewer_pid=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-none} renewer_stop_failed=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED:-false}"
     final_status=2
   fi
   control_plane_release_domain_restore_signal_boundary || final_status=2

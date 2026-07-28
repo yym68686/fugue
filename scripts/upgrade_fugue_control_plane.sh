@@ -376,6 +376,8 @@ CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
 CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=""
 CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN=""
 CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE=""
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="false"
 CONTROL_PLANE_BACKUP_COORDINATION_WAIT_DEADLINE=0
 CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
 CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
@@ -4334,6 +4336,56 @@ initialize_control_plane_backup_coordination_health() {
   chmod 600 "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" || return 1
 }
 
+prepare_control_plane_backup_coordination_renewer_stop_file() {
+  local health_file="${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}"
+  local expected_stop_file=""
+
+  [[ -n "${health_file}" ]] || return 1
+  expected_stop_file="${health_file}.stop"
+  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE:-}" &&
+    "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE}" != "${expected_stop_file}" ]]; then
+    log_stderr "backup coordination renewer stop path does not match its private health file"
+    return 1
+  fi
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE="${expected_stop_file}"
+  if [[ -L "${expected_stop_file}" ]]; then
+    log_stderr "refusing a symbolic-link backup coordination renewer stop path"
+    return 1
+  fi
+  if [[ -e "${expected_stop_file}" ]] && ! rm -f "${expected_stop_file}"; then
+    log_stderr "cannot clear the stale backup coordination renewer stop request"
+    return 1
+  fi
+}
+
+request_control_plane_backup_coordination_renewer_stop() {
+  local stop_file="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE:-}"
+  local health_file="${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}"
+  local temporary=""
+
+  [[ -n "${stop_file}" && -n "${health_file}" && "${stop_file}" == "${health_file}.stop" ]] || {
+    log_stderr "backup coordination renewer has no bound private stop path"
+    return 1
+  }
+  [[ ! -L "${stop_file}" ]] || {
+    log_stderr "refusing a symbolic-link backup coordination renewer stop request"
+    return 1
+  }
+  temporary="$(mktemp "${stop_file}.tmp.XXXXXX")" || return 1
+  if ! (
+    umask 077
+    printf 'stop\n' >"${temporary}" &&
+      chmod 600 "${temporary}"
+  ); then
+    rm -f "${temporary}"
+    return 1
+  fi
+  if ! mv -f "${temporary}" "${stop_file}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+}
+
 write_control_plane_backup_coordination_health() {
   local state="$1"
   local detail="${2:-}"
@@ -4784,21 +4836,62 @@ renew_control_plane_backup_coordination_lease() {
 
 start_control_plane_backup_coordination_lease_renewer() {
   local parent_pid="${BASHPID:-$$}"
+  local renew_seconds="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS:-}"
+  local existing_pid="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}"
+  local existing_state=""
 
   [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || return 1
-  [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" ]] || return 0
+  if [[ -n "${existing_pid}" ]]; then
+    existing_state="$(ps -o stat= -p "${existing_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if kill -0 "${existing_pid}" >/dev/null 2>&1 && [[ -n "${existing_state}" && "${existing_state}" != Z* ]]; then
+      return 0
+    fi
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="true"
+    log_stderr "refusing to replace a registered backup coordination renewer whose shutdown is unproven"
+    return 1
+  fi
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED:-false}" == "true" ]]; then
+    log_stderr "refusing to restart the backup coordination renewer after an unproven shutdown"
+    return 1
+  fi
+  [[ "${renew_seconds}" =~ ^[0-9]+$ ]] || {
+    log_stderr "backup coordination renew interval is not a nonnegative integer"
+    return 1
+  }
+  initialize_control_plane_backup_coordination_health || return 1
+  prepare_control_plane_backup_coordination_renewer_stop_file || return 1
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="false"
   CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID="${parent_pid}"
   CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL="${BASH_SUBSHELL:-0}"
 
   (
+    renewer_stop_requested="false"
     renew_sleep_pid=""
-    trap 'if [[ -n "${renew_sleep_pid:-}" ]]; then kill -TERM "${renew_sleep_pid}" >/dev/null 2>&1 || true; wait "${renew_sleep_pid}" >/dev/null 2>&1 || true; fi; exit 0' TERM INT
+    renew_deadline=0
+    renew_wait_seconds=0
+    renewer_should_stop() {
+      [[ "${renewer_stop_requested}" == "true" ||
+        -f "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE}" ]]
+    }
+    wait_for_control_plane_backup_coordination_renewal() {
+      renew_deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS))
+      while (( SECONDS < renew_deadline )); do
+        renewer_should_stop && return 1
+        renew_wait_seconds=$((renew_deadline - SECONDS))
+        (( renew_wait_seconds <= 1 )) || renew_wait_seconds=1
+        sleep "${renew_wait_seconds}" &
+        renew_sleep_pid=$!
+        wait "${renew_sleep_pid}" >/dev/null 2>&1 || true
+        renew_sleep_pid=""
+      done
+      ! renewer_should_stop
+    }
+    trap 'renewer_stop_requested="true"; if [[ -n "${renew_sleep_pid:-}" ]]; then kill -TERM "${renew_sleep_pid}" >/dev/null 2>&1 || true; wait "${renew_sleep_pid}" >/dev/null 2>&1 || true; renew_sleep_pid=""; fi' TERM INT
     while true; do
-      sleep "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS}" &
-      renew_sleep_pid=$!
-      wait "${renew_sleep_pid}" || exit 0
-      renew_sleep_pid=""
+      wait_for_control_plane_backup_coordination_renewal || exit 0
+      renewer_should_stop && exit 0
       if renew_control_plane_backup_coordination_lease; then
+        renewer_should_stop && exit 0
         if ! write_control_plane_backup_coordination_health healthy renewed; then
           log_stderr "cannot persist successful backup coordination renewal health; aborting release"
           write_control_plane_backup_coordination_health lost health-write-failure || true
@@ -4807,9 +4900,11 @@ start_control_plane_backup_coordination_lease_renewer() {
         fi
         continue
       fi
+      renewer_should_stop && exit 0
       write_control_plane_backup_coordination_health degraded first-renew-failure || true
       log_stderr "control-plane backup coordination Lease renewal failed; performing one immediate bounded retry"
       if renew_control_plane_backup_coordination_lease; then
+        renewer_should_stop && exit 0
         if ! write_control_plane_backup_coordination_health healthy immediate-retry-recovered; then
           log_stderr "cannot persist recovered backup coordination renewal health; aborting release"
           write_control_plane_backup_coordination_health lost health-write-failure || true
@@ -4818,6 +4913,7 @@ start_control_plane_backup_coordination_lease_renewer() {
         fi
         continue
       fi
+      renewer_should_stop && exit 0
       write_control_plane_backup_coordination_health lost consecutive-renew-failures || true
       log_stderr "control-plane backup coordination Lease renewal failed twice; signaling the parent release for synchronous rollback"
       kill -USR2 "${parent_pid}" >/dev/null 2>&1 || true
@@ -4829,12 +4925,79 @@ start_control_plane_backup_coordination_lease_renewer() {
 
 stop_control_plane_backup_coordination_lease_renewer() {
   local pid="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}"
+  local command_timeout="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
+  local deadline=0
+  local process_state=""
+  local renewer_status=0
+  local stop_file="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE:-}"
+
+  if [[ -z "${pid}" ]]; then
+    if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED:-false}" == "true" ]]; then
+      log_stderr "backup coordination renewer shutdown remains unproven"
+      return 1
+    fi
+    if [[ -n "${stop_file}" && -L "${stop_file}" ]]; then
+      log_stderr "refusing to clear a symbolic-link backup coordination renewer stop request"
+      return 1
+    fi
+    if [[ -n "${stop_file}" ]]; then
+      rm -f "${stop_file}" "${stop_file}".tmp.* || return 1
+    fi
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE=""
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="false"
+    CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
+    CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL=""
+    return 0
+  fi
+  [[ "${command_timeout}" =~ ^[1-9][0-9]*$ ]] || command_timeout=15
+  if ! request_control_plane_backup_coordination_renewer_stop; then
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="true"
+    log_stderr "cannot request synchronous backup coordination renewer shutdown"
+    return 1
+  fi
+
+  # A renewal owns a wall-bounded kubectl process group. Let that group finish
+  # and be reaped by its owning shell; killing only the outer renewer can orphan
+  # the group and race private release-directory cleanup.
+  deadline=$((SECONDS + 2 * command_timeout + 5))
+  while kill -0 "${pid}" >/dev/null 2>&1; do
+    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "${process_state}" == Z* ]]; then
+      break
+    fi
+    if (( SECONDS >= deadline )); then
+      CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="true"
+      log_stderr "backup coordination renewer did not stop after its bounded in-flight command"
+      return 1
+    fi
+    sleep 0.1
+  done
+  if wait "${pid}" >/dev/null 2>&1; then
+    renewer_status=0
+  else
+    renewer_status=$?
+  fi
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
   CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
   CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL=""
-  [[ -n "${pid}" ]] || return 0
-  kill -TERM "${pid}" >/dev/null 2>&1 || true
-  wait "${pid}" >/dev/null 2>&1 || true
+  if (( renewer_status != 0 )); then
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="true"
+    log_stderr "backup coordination renewer exited unsafely before synchronous shutdown completed"
+    return "${renewer_status}"
+  fi
+  if [[ -n "${stop_file}" && -L "${stop_file}" ]]; then
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="true"
+    log_stderr "refusing to clear a symbolic-link backup coordination renewer stop request"
+    return 1
+  fi
+  if [[ -n "${stop_file}" ]]; then
+    rm -f "${stop_file}" "${stop_file}".tmp.* || {
+      CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="true"
+      return 1
+    }
+  fi
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE=""
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED="false"
 }
 
 release_control_plane_backup_coordination_lease() {
@@ -4842,7 +5005,10 @@ release_control_plane_backup_coordination_lease() {
   local now=""
   local released_json=""
 
-  stop_control_plane_backup_coordination_lease_renewer
+  if ! stop_control_plane_backup_coordination_lease_renewer; then
+    log_stderr "refusing to release the shared Lease before the renewer and its command group are reaped"
+    return 1
+  fi
   [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || return 0
   lease_json="$(control_plane_backup_coordination_lease_json)" || return 1
   [[ -n "$(trim_field "${lease_json}")" ]] || return 1
@@ -10335,11 +10501,19 @@ cleanup_tmp_artifacts() {
     cleanup_control_plane_automation_tmp
     cleanup_upgrade_override_values
     if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}" ]]; then
-      rm -f \
-        "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" \
-        "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".*.tmp \
-        "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".tmp.*
-      CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
+      if [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" &&
+        "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED:-false}" != "true" ]]; then
+        rm -f \
+          "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" \
+          "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".*.tmp \
+          "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".tmp.* \
+          "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".stop \
+          "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".stop.tmp.*
+        CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
+        CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE=""
+      else
+        log_stderr "preserving backup coordination health artifacts because renewer shutdown was not proven"
+      fi
     fi
     if [[ -n "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR:-}" &&
       -d "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" ]]; then
