@@ -616,9 +616,9 @@ func TestPGActiveManagedPostgresLifecycleBlocksLaterOperation(t *testing.T) {
 	expectPGLifecycleAppHydration(mock, appID,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
-	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2\).*AND app_id = \$6`).
+	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*AND app_id = \$7`).
 		WithArgs(
-			model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume,
+			model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize,
 			model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, appID,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
@@ -668,9 +668,9 @@ func TestPGBindBackingServiceRejectsLifecycleLeaseAndSuspendedDatabase(t *testin
 				mock, now, "tenant_lifecycle", "project_lifecycle", "app_owner", "service_target", test.suspended,
 			)
 			if test.expectLeaseLookup {
-				mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2\).*AND service_id = \$6`).
+				mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*AND service_id = \$7`).
 					WithArgs(
-						model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume,
+						model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize,
 						model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, "service_target",
 					).
 					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(test.activeLifecycle))
@@ -722,9 +722,9 @@ func TestPGActiveManagedPostgresLifecycleBlocksServiceUpdateAndDelete(t *testing
 			now := time.Date(2026, time.July, 15, 6, 7, 8, 0, time.UTC)
 			mock.ExpectBegin()
 			expectPGLifecycleBackingServiceForUpdate(mock, now, "tenant_lifecycle", "project_lifecycle", "app_lifecycle", "service_target", false)
-			mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2\).*AND service_id = \$6`).
+			mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*AND service_id = \$7`).
 				WithArgs(
-					model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume,
+					model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize,
 					model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, "service_target",
 				).
 				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
@@ -766,9 +766,9 @@ func TestPGActiveManagedPostgresLifecycleBlocksUnbind(t *testing.T) {
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
 	expectPGLifecycleBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, false)
-	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2\).*AND app_id = \$6.*AND service_id = \$7`).
+	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*AND app_id = \$7.*AND service_id = \$8`).
 		WithArgs(
-			model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume,
+			model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize,
 			model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, appID, serviceID,
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))

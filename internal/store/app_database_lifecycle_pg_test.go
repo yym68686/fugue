@@ -17,10 +17,10 @@ func TestPGCreateAppDatabaseImportJobRejectsUnavailableManagedPostgresUnderAppLo
 	for _, testCase := range []struct {
 		name               string
 		persistedSuspended bool
-		activeSuspend      bool
+		activeMutation     bool
 	}{
 		{name: "persisted suspended", persistedSuspended: true},
-		{name: "active suspend", activeSuspend: true},
+		{name: "active suspend", activeMutation: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -50,15 +50,17 @@ func TestPGCreateAppDatabaseImportJobRejectsUnavailableManagedPostgresUnderAppLo
 				),
 			)
 			if !testCase.persistedSuspended {
-				mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*WHERE app_id = \$1.*type = \$2.*status IN \(\$3, \$4, \$5\)`).
+				mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
 					WithArgs(
-						"app_database_import",
 						model.OperationTypeDatabaseSuspend,
+						model.OperationTypeDatabaseResume,
+						model.OperationTypeDatabaseResize,
 						model.OperationStatusPending,
 						model.OperationStatusRunning,
 						model.OperationStatusWaitingAgent,
+						"app_database_import",
 					).
-					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(testCase.activeSuspend))
+					WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(testCase.activeMutation))
 			}
 			mock.ExpectRollback()
 
@@ -141,13 +143,15 @@ WHERE id = $1
 			nil,
 			nil,
 		))
-	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*WHERE app_id = \$1.*type = \$2.*status IN \(\$3, \$4, \$5\)`).
+	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
 		WithArgs(
-			"app_database_import",
 			model.OperationTypeDatabaseSuspend,
+			model.OperationTypeDatabaseResume,
+			model.OperationTypeDatabaseResize,
 			model.OperationStatusPending,
 			model.OperationStatusRunning,
 			model.OperationStatusWaitingAgent,
+			"app_database_import",
 		).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectExec(`(?s)UPDATE fugue_app_database_import_jobs.*SET status = \$2.*error_message = \$3.*started_at = NULL.*completed_at = \$4.*WHERE id = \$1 AND status = \$5`).

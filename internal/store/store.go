@@ -2509,7 +2509,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresLifecycleForApp(state.Operations, app.ID) {
+		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) {
 			return ErrConflict
 		}
 
@@ -2559,7 +2559,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 			return ErrNotFound
 		}
 		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresLifecycleForApp(state.Operations, app.ID) {
+		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) {
 			return ErrConflict
 		}
 
@@ -2795,9 +2795,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 }
 
 // CreateOperationWithResult creates an operation or, for an exact retry of an
-// active managed PostgreSQL suspend/resume request, returns the sole existing
-// operation. Callers that emit acceptance audit events must only do so when
-// result.Created is true.
+// active managed PostgreSQL suspend, resume, or resize request, returns the
+// sole existing operation. Callers that emit acceptance audit events must only
+// do so when result.Created is true.
 func (s *Store) CreateOperationWithResult(op model.Operation) (model.Operation, OperationCreateResult, error) {
 	created, outcome, err := s.createOperationWithPolicy(op, operationCreatePolicy{})
 	if err != nil {
@@ -2846,7 +2846,8 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			}
 		}
 
-		if !isManagedPostgresLifecycleOperationType(op.Type) && hasInFlightManagedPostgresLifecycleForApp(state.Operations, app.ID) {
+		if !isManagedPostgresExclusiveMutationOperationType(op.Type) &&
+			hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) {
 			return ErrConflict
 		}
 		if err := validateManagedPostgresActiveForOperation(app, op); err != nil {
@@ -3178,10 +3179,14 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 				}
 				return ErrConflict
 			}
-			if hasActiveAppDatabaseBackupRunForManagedPostgres(state, app, op.ServiceID) ||
-				hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) ||
-				hasActiveAppDatabaseRestoreRunForManagedPostgres(state, app) {
-				return ErrConflict
+			if hasActiveAppDatabaseBackupRunForManagedPostgres(state, app, op.ServiceID) {
+				return ErrManagedPostgresBackupInProgressConflict
+			}
+			if hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) {
+				return ErrManagedPostgresImportInProgressConflict
+			}
+			if hasActiveAppDatabaseRestoreRunForManagedPostgres(state, app) {
+				return ErrManagedPostgresRestoreInProgressConflict
 			}
 		default:
 			return ErrInvalidInput

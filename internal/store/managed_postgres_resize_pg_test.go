@@ -44,7 +44,6 @@ func TestPGCreateManagedPostgresResizePersistsNarrowIntent(t *testing.T) {
 	mock.ExpectBegin()
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0, serviceRow)
 	expectPGLifecycleAppHydration(mock, appID, serviceRow)
-	expectPGNoActiveLifecycleForResizeApp(mock, appID)
 	expectPGResizeBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, bootstrap, nil)
 	expectPGResizeTargetBinding(mock, tenantID, appID, serviceID)
 	expectPGActiveLifecycleOperationsForTarget(mock, appID, serviceID, pgLifecycleOperationRows())
@@ -274,15 +273,6 @@ func expectPGResizeTargetBinding(mock sqlmock.Sqlmock, tenantID, appID, serviceI
 	mock.ExpectQuery(`(?s)SELECT tenant_id, app_id.*FROM fugue_service_bindings.*WHERE service_id = \$1.*FOR UPDATE`).
 		WithArgs(serviceID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "app_id"}).AddRow(tenantID, appID))
-}
-
-func expectPGNoActiveLifecycleForResizeApp(mock sqlmock.Sqlmock, appID string) {
-	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2\).*AND app_id = \$6`).
-		WithArgs(
-			model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume,
-			model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent, appID,
-		).
-		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 }
 
 func expectPGNoActiveAppDatabaseRestore(mock sqlmock.Sqlmock, appID string) {

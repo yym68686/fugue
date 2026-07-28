@@ -28,14 +28,26 @@ const (
 	defaultBackupRestorePlanListLimit = 100
 	defaultBackupRestoreRunListLimit  = 100
 
-	ManagedPostgresSuspendBackupConflictCode       = "managed_postgres_suspend_in_progress"
-	ManagedPostgresSuspendBackupConflictMessage    = "managed_postgres_suspend_in_progress: wait for database suspend to finish before starting backup"
-	ManagedPostgresBackupInProgressConflictCode    = "managed_postgres_backup_in_progress"
-	ManagedPostgresBackupInProgressConflictMessage = "managed_postgres_backup_in_progress: wait for app-database backup to finish before suspending"
+	ManagedPostgresSuspendBackupConflictCode        = "managed_postgres_suspend_in_progress"
+	ManagedPostgresSuspendBackupConflictMessage     = "managed_postgres_suspend_in_progress: wait for database suspend to finish before starting backup"
+	ManagedPostgresResumeBackupConflictCode         = "managed_postgres_resume_in_progress"
+	ManagedPostgresResumeBackupConflictMessage      = "managed_postgres_resume_in_progress: wait for database resume to finish before starting backup"
+	ManagedPostgresResizeBackupConflictCode         = "managed_postgres_resize_in_progress"
+	ManagedPostgresResizeBackupConflictMessage      = "managed_postgres_resize_in_progress: wait for database resize to finish before starting backup"
+	ManagedPostgresBackupInProgressConflictCode     = "managed_postgres_backup_in_progress"
+	ManagedPostgresBackupInProgressConflictMessage  = "managed_postgres_backup_in_progress: wait for app-database backup to finish before changing database lifecycle or resources"
+	ManagedPostgresRestoreMutationConflictCode      = "managed_postgres_mutation_in_progress"
+	ManagedPostgresRestoreMutationConflictMessage   = "managed_postgres_mutation_in_progress: wait for database suspend, resume, or resize to finish before starting restore"
+	ManagedPostgresRestoreInProgressConflictCode    = "managed_postgres_restore_in_progress"
+	ManagedPostgresRestoreInProgressConflictMessage = "managed_postgres_restore_in_progress: wait for app-database restore to finish before changing database lifecycle or resources"
 )
 
 var ErrManagedPostgresSuspendBackupConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresSuspendBackupConflictMessage)
+var ErrManagedPostgresResumeBackupConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresResumeBackupConflictMessage)
+var ErrManagedPostgresResizeBackupConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresResizeBackupConflictMessage)
 var ErrManagedPostgresBackupInProgressConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresBackupInProgressConflictMessage)
+var ErrManagedPostgresRestoreMutationConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresRestoreMutationConflictMessage)
+var ErrManagedPostgresRestoreInProgressConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresRestoreInProgressConflictMessage)
 
 const pgRepairBackupPolicyScheduleSQL = `
 UPDATE fugue_backup_policies
@@ -899,6 +911,9 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 				run.Version = policy.Version
 			}
 		}
+		if err := validateManagedPostgresBackupRunIdentity(run); err != nil {
+			return err
+		}
 		if run.BackendID == "" {
 			run.Status = model.BackupRunStatusBlocked
 			run.ErrorCode = "backup_backend_missing"
@@ -909,8 +924,9 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 		if backupTargetHasActiveRun(state.BackupRuns, run.Target) {
 			return ErrConflict
 		}
-		if activeManagedPostgresSuspendForBackupRun(state, run) {
-			return ErrManagedPostgresSuspendBackupConflict
+		if operationType, active := activeManagedPostgresExclusiveMutationForBackupRun(state, run); active {
+			_, _, conflictErr := managedPostgresBackupConflictForOperationType(operationType)
+			return conflictErr
 		}
 		if run.ID == "" {
 			run.ID = model.NewID("backup_run")
@@ -976,10 +992,14 @@ func (s *Store) ClaimBackupRun(id, leaseOwner string, now time.Time, leaseTTL ti
 		if run.Status != model.BackupRunStatusPending || run.NextRetryAt != nil && run.NextRetryAt.After(now) {
 			return ErrConflict
 		}
-		if activeManagedPostgresSuspendForBackupRun(state, run) {
+		if err := validateManagedPostgresBackupRunIdentity(run); err != nil {
+			return ErrConflict
+		}
+		if operationType, active := activeManagedPostgresExclusiveMutationForBackupRun(state, run); active {
+			conflictCode, conflictMessage, conflictErr := managedPostgresBackupConflictForOperationType(operationType)
 			run.Status = model.BackupRunStatusFailed
-			run.ErrorCode = ManagedPostgresSuspendBackupConflictCode
-			run.ErrorMessage = ManagedPostgresSuspendBackupConflictMessage
+			run.ErrorCode = conflictCode
+			run.ErrorMessage = conflictMessage
 			run.LeaseOwner = ""
 			run.LockedUntil = nil
 			run.HeartbeatAt = nil
@@ -987,7 +1007,7 @@ func (s *Store) ClaimBackupRun(id, leaseOwner string, now time.Time, leaseTTL ti
 			run.UpdatedAt = now
 			state.BackupRuns[index] = model.NormalizeBackupRun(run)
 			claimed = state.BackupRuns[index]
-			claimErr = ErrManagedPostgresSuspendBackupConflict
+			claimErr = conflictErr
 			return nil
 		}
 		lockedUntil := now.Add(leaseTTL)
@@ -1573,6 +1593,9 @@ func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.Bac
 		if plan.AppID == "" {
 			plan.AppID = artifact.AppID
 		}
+		if err := reconcileBackupRestorePlanTargetScope(&plan); err != nil {
+			return err
+		}
 		if plan.CreatedAt.IsZero() {
 			plan.CreatedAt = now
 		}
@@ -1630,7 +1653,7 @@ func (s *Store) GetBackupRestorePlan(id string, tenantID string, platformAdmin b
 }
 
 func (s *Store) CreateBackupRestoreRun(run model.BackupRestoreRun) (model.BackupRestoreRun, error) {
-	run = model.NormalizeBackupRestoreRun(run)
+	run.PlanID = strings.TrimSpace(run.PlanID)
 	if run.PlanID == "" {
 		return model.BackupRestoreRun{}, ErrInvalidInput
 	}
@@ -1645,22 +1668,15 @@ func (s *Store) CreateBackupRestoreRun(run model.BackupRestoreRun) (model.Backup
 		}
 		plan := model.NormalizeBackupRestorePlan(state.BackupRestorePlans[planIndex])
 		now := time.Now().UTC()
-		if run.ID == "" {
-			run.ID = model.NewID("backup_restore_run")
+		var err error
+		run, err = prepareBackupRestoreRunForPlan(run, plan, now)
+		if err != nil {
+			return err
 		}
-		run.TenantID = firstNonEmpty(run.TenantID, plan.TenantID)
-		run.ProjectID = firstNonEmpty(run.ProjectID, plan.ProjectID)
-		run.AppID = firstNonEmpty(run.AppID, plan.AppID)
-		run.ArtifactID = firstNonEmpty(run.ArtifactID, plan.ArtifactID)
-		run.Mode = firstNonEmpty(run.Mode, plan.Mode)
-		if run.CreatedAt.IsZero() {
-			run.CreatedAt = now
+		if run.AppID != "" &&
+			hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, run.AppID) {
+			return ErrManagedPostgresRestoreMutationConflict
 		}
-		run.UpdatedAt = now
-		if len(run.Phases) == 0 {
-			run.Phases = plan.Phases
-		}
-		run = model.NormalizeBackupRestoreRun(run)
 		state.BackupRestoreRuns = append(state.BackupRestoreRuns, run)
 		plan.Status = model.BackupRestoreStatusRunning
 		plan.UpdatedAt = now
@@ -1669,6 +1685,83 @@ func (s *Store) CreateBackupRestoreRun(run model.BackupRestoreRun) (model.Backup
 		return nil
 	})
 	return created, err
+}
+
+func prepareBackupRestoreRunForPlan(run model.BackupRestoreRun, plan model.BackupRestorePlan, now time.Time) (model.BackupRestoreRun, error) {
+	plan = model.NormalizeBackupRestorePlan(plan)
+	if err := reconcileBackupRestorePlanTargetScope(&plan); err != nil {
+		return model.BackupRestoreRun{}, err
+	}
+	run.PlanID = strings.TrimSpace(run.PlanID)
+	if run.PlanID == "" || run.PlanID != strings.TrimSpace(plan.ID) {
+		return model.BackupRestoreRun{}, ErrInvalidInput
+	}
+	for _, identity := range []struct {
+		provided string
+		exact    string
+	}{
+		{provided: run.TenantID, exact: plan.TenantID},
+		{provided: run.ProjectID, exact: plan.ProjectID},
+		{provided: run.AppID, exact: plan.AppID},
+		{provided: run.ArtifactID, exact: plan.ArtifactID},
+	} {
+		provided := strings.TrimSpace(identity.provided)
+		if provided != "" && provided != strings.TrimSpace(identity.exact) {
+			return model.BackupRestoreRun{}, ErrInvalidInput
+		}
+	}
+	if run.ID == "" {
+		run.ID = model.NewID("backup_restore_run")
+	}
+	run.TenantID = plan.TenantID
+	run.ProjectID = plan.ProjectID
+	run.AppID = plan.AppID
+	run.ArtifactID = plan.ArtifactID
+	run.Mode = firstNonEmpty(run.Mode, plan.Mode)
+	if strings.TrimSpace(run.Status) == "" {
+		run.Status = model.BackupRestoreStatusPlanned
+	}
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = now
+	}
+	run.UpdatedAt = now
+	if len(run.Phases) == 0 {
+		run.Phases = plan.Phases
+	}
+	run = model.NormalizeBackupRestoreRun(run)
+	if run.Status != model.BackupRestoreStatusPlanned {
+		return model.BackupRestoreRun{}, ErrInvalidInput
+	}
+	return run, nil
+}
+
+func reconcileBackupRestorePlanTargetScope(plan *model.BackupRestorePlan) error {
+	if plan == nil {
+		return ErrInvalidInput
+	}
+	plan.TenantID = strings.TrimSpace(plan.TenantID)
+	plan.ProjectID = strings.TrimSpace(plan.ProjectID)
+	plan.AppID = strings.TrimSpace(plan.AppID)
+	target := model.NormalizeBackupTarget(plan.Target)
+	for _, identity := range []struct {
+		planValue   *string
+		targetValue *string
+	}{
+		{planValue: &plan.TenantID, targetValue: &target.TenantID},
+		{planValue: &plan.ProjectID, targetValue: &target.ProjectID},
+		{planValue: &plan.AppID, targetValue: &target.AppID},
+	} {
+		switch {
+		case *identity.planValue == "":
+			*identity.planValue = *identity.targetValue
+		case *identity.targetValue == "":
+			*identity.targetValue = *identity.planValue
+		case *identity.planValue != *identity.targetValue:
+			return ErrInvalidInput
+		}
+	}
+	plan.Target = target
+	return nil
 }
 
 func (s *Store) ListBackupRestoreRuns(tenantID string, platformAdmin bool, limit int) ([]model.BackupRestoreRun, error) {
@@ -1846,6 +1939,22 @@ func managedPostgresBackupRunAppID(run model.BackupRun) string {
 	return strings.TrimSpace(run.Target.AppID)
 }
 
+func validateManagedPostgresBackupRunIdentity(run model.BackupRun) error {
+	run = model.NormalizeBackupRun(run)
+	if run.Target.Type != model.BackupTargetAppDatabase {
+		return nil
+	}
+	appID := strings.TrimSpace(run.AppID)
+	targetAppID := strings.TrimSpace(run.Target.AppID)
+	if appID == "" && targetAppID == "" {
+		return ErrInvalidInput
+	}
+	if appID != "" && targetAppID != "" && appID != targetAppID {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
 func backupTargetMatchesManagedPostgresService(app model.App, target model.BackupTarget, serviceID string) bool {
 	target = model.NormalizeBackupTarget(target)
 	if target.Type != model.BackupTargetAppDatabase {
@@ -1874,31 +1983,59 @@ func backupTargetMatchesManagedPostgresService(app model.App, target model.Backu
 	return false
 }
 
-func activeManagedPostgresSuspendForBackupRun(state *model.State, run model.BackupRun) bool {
+func activeManagedPostgresExclusiveMutationForBackupRun(state *model.State, run model.BackupRun) (string, bool) {
 	if state == nil {
-		return false
+		return "", false
 	}
 	appID := managedPostgresBackupRunAppID(run)
 	if appID == "" {
-		return false
+		return "", false
 	}
 	appIndex := findApp(state, appID)
 	if appIndex < 0 {
-		return false
+		return "", false
 	}
 	app := state.Apps[appIndex]
 	hydrateAppBackingServices(state, &app)
-	for _, op := range state.Operations {
-		if strings.TrimSpace(op.AppID) != appID ||
-			op.Type != model.OperationTypeDatabaseSuspend ||
-			!isActiveOperationStatus(op.Status) {
-			continue
-		}
-		if backupTargetMatchesManagedPostgresService(app, run.Target, op.ServiceID) {
-			return true
+	// Preserve the established suspend conflict when malformed legacy state
+	// contains more than one active database mutation; resume and resize follow.
+	for _, operationType := range []string{
+		model.OperationTypeDatabaseSuspend,
+		model.OperationTypeDatabaseResume,
+		model.OperationTypeDatabaseResize,
+	} {
+		for _, op := range state.Operations {
+			if strings.TrimSpace(op.AppID) != appID || op.Type != operationType ||
+				!isActiveOperationStatus(op.Status) {
+				continue
+			}
+			if backupTargetMatchesManagedPostgresService(app, run.Target, op.ServiceID) {
+				return operationType, true
+			}
 		}
 	}
-	return false
+	return "", false
+}
+
+func managedPostgresBackupConflictForOperationType(operationType string) (string, string, error) {
+	switch operationType {
+	case model.OperationTypeDatabaseSuspend:
+		return ManagedPostgresSuspendBackupConflictCode,
+			ManagedPostgresSuspendBackupConflictMessage,
+			ErrManagedPostgresSuspendBackupConflict
+	case model.OperationTypeDatabaseResume:
+		return ManagedPostgresResumeBackupConflictCode,
+			ManagedPostgresResumeBackupConflictMessage,
+			ErrManagedPostgresResumeBackupConflict
+	case model.OperationTypeDatabaseResize:
+		return ManagedPostgresResizeBackupConflictCode,
+			ManagedPostgresResizeBackupConflictMessage,
+			ErrManagedPostgresResizeBackupConflict
+	default:
+		return "managed_postgres_mutation_in_progress",
+			"managed_postgres_mutation_in_progress: wait for the active database mutation to finish before starting backup",
+			ErrConflict
+	}
 }
 
 func hasActiveAppDatabaseBackupRunForManagedPostgres(state *model.State, app model.App, serviceID string) bool {
@@ -1964,38 +2101,43 @@ SELECT EXISTS (
 	return active, nil
 }
 
-func (s *Store) pgHasActiveManagedPostgresSuspendForBackupRunTx(ctx context.Context, tx *sql.Tx, run model.BackupRun) (bool, error) {
+func (s *Store) pgActiveManagedPostgresExclusiveMutationForBackupRunTx(ctx context.Context, tx *sql.Tx, run model.BackupRun) (string, bool, error) {
 	appID := managedPostgresBackupRunAppID(run)
 	if appID == "" {
-		return false, nil
+		return "", false, nil
 	}
 	targetServiceName := strings.TrimSpace(run.Target.ServiceName)
-	var active bool
+	var operationType string
 	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-	SELECT 1
-	FROM fugue_operations AS operation
-	JOIN fugue_backing_services AS service ON service.id = operation.service_id
-	WHERE operation.app_id = $1
-	  AND operation.type = $2
-	  AND operation.status IN ($3, $4, $5)
-	  AND (
-		$6 = ''
-		OR service.name = $6
-		OR COALESCE(service.spec_json->'postgres'->>'service_name', '') = $6
-	  )
-)
+SELECT operation.type
+FROM fugue_operations AS operation
+JOIN fugue_backing_services AS service ON service.id = operation.service_id
+WHERE operation.app_id = $1
+  AND operation.type IN ($2, $3, $4)
+  AND operation.status IN ($5, $6, $7)
+  AND (
+	$8 = ''
+	OR service.name = $8
+	OR COALESCE(service.spec_json->'postgres'->>'service_name', '') = $8
+  )
+ORDER BY CASE operation.type WHEN $2 THEN 0 WHEN $3 THEN 1 ELSE 2 END, operation.created_at, operation.id
+LIMIT 1
 `,
 		appID,
 		model.OperationTypeDatabaseSuspend,
+		model.OperationTypeDatabaseResume,
+		model.OperationTypeDatabaseResize,
 		model.OperationStatusPending,
 		model.OperationStatusRunning,
 		model.OperationStatusWaitingAgent,
 		targetServiceName,
-	).Scan(&active); err != nil {
-		return false, fmt.Errorf("check active managed postgres suspend: %w", err)
+	).Scan(&operationType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("check active managed postgres exclusive mutation for backup: %w", err)
 	}
-	return active, nil
+	return operationType, true, nil
 }
 
 func pgLockAppRowForBackupTx(ctx context.Context, tx *sql.Tx, appID string) error {
@@ -3460,6 +3602,9 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 		}
 		policySchedule = policy.Schedule
 	}
+	if err := validateManagedPostgresBackupRunIdentity(run); err != nil {
+		return model.BackupRun{}, err
+	}
 	if run.BackendID == "" {
 		run.Status = model.BackupRunStatusBlocked
 		run.ErrorCode = "backup_backend_missing"
@@ -3469,12 +3614,13 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 		if err := pgLockAppRowForBackupTx(ctx, tx, appID); err != nil {
 			return model.BackupRun{}, err
 		}
-		activeSuspend, err := s.pgHasActiveManagedPostgresSuspendForBackupRunTx(ctx, tx, run)
+		operationType, activeMutation, err := s.pgActiveManagedPostgresExclusiveMutationForBackupRunTx(ctx, tx, run)
 		if err != nil {
 			return model.BackupRun{}, err
 		}
-		if activeSuspend {
-			return model.BackupRun{}, ErrManagedPostgresSuspendBackupConflict
+		if activeMutation {
+			_, _, conflictErr := managedPostgresBackupConflictForOperationType(operationType)
+			return model.BackupRun{}, conflictErr
 		}
 	}
 	var active bool
@@ -3548,15 +3694,19 @@ WHERE id = $1
 		return model.BackupRun{}, err
 	}
 	candidate := model.NormalizeBackupRun(model.BackupRun{ID: id, AppID: appID, Target: target})
+	if err := validateManagedPostgresBackupRunIdentity(candidate); err != nil {
+		return model.BackupRun{}, ErrConflict
+	}
 	if managedPostgresBackupRunAppID(candidate) != "" {
 		if err := pgLockAppRowForBackupTx(ctx, tx, appID); err != nil {
 			return model.BackupRun{}, err
 		}
-		activeSuspend, err := s.pgHasActiveManagedPostgresSuspendForBackupRunTx(ctx, tx, candidate)
+		operationType, activeMutation, err := s.pgActiveManagedPostgresExclusiveMutationForBackupRunTx(ctx, tx, candidate)
 		if err != nil {
 			return model.BackupRun{}, err
 		}
-		if activeSuspend {
+		if activeMutation {
+			conflictCode, conflictMessage, conflictErr := managedPostgresBackupConflictForOperationType(operationType)
 			failed, err := scanBackupRun(tx.QueryRowContext(ctx, `
 UPDATE fugue_backup_runs
 SET status = $2,
@@ -3573,8 +3723,8 @@ WHERE id = $1
 RETURNING `+backupRunReturningColumns(),
 				id,
 				model.BackupRunStatusFailed,
-				ManagedPostgresSuspendBackupConflictCode,
-				ManagedPostgresSuspendBackupConflictMessage,
+				conflictCode,
+				conflictMessage,
 				now,
 				model.BackupRunStatusPending,
 			))
@@ -3587,7 +3737,7 @@ RETURNING `+backupRunReturningColumns(),
 			if err := tx.Commit(); err != nil {
 				return model.BackupRun{}, err
 			}
-			return failed, ErrManagedPostgresSuspendBackupConflict
+			return failed, conflictErr
 		}
 	}
 
@@ -4004,6 +4154,9 @@ func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.B
 	plan.TenantID = firstNonEmpty(plan.TenantID, artifact.TenantID)
 	plan.ProjectID = firstNonEmpty(plan.ProjectID, artifact.ProjectID)
 	plan.AppID = firstNonEmpty(plan.AppID, artifact.AppID)
+	if err := reconcileBackupRestorePlanTargetScope(&plan); err != nil {
+		return model.BackupRestorePlan{}, err
+	}
 	if plan.CreatedAt.IsZero() {
 		plan.CreatedAt = now
 	}
@@ -4077,37 +4230,62 @@ func (s *Store) pgGetBackupRestorePlan(id string, tenantID string, platformAdmin
 }
 
 func (s *Store) pgCreateBackupRestoreRun(run model.BackupRestoreRun) (model.BackupRestoreRun, error) {
-	plan, err := s.pgGetBackupRestorePlan(run.PlanID, "", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BackupRestoreRun{}, fmt.Errorf("begin backup restore run transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	plan, err := scanBackupRestorePlan(tx.QueryRowContext(ctx,
+		backupRestorePlanSelectSQL()+` WHERE id = $1 FOR UPDATE`, strings.TrimSpace(run.PlanID)))
+	if err != nil {
+		return model.BackupRestoreRun{}, mapDBErr(err)
+	}
+	now := time.Now().UTC()
+	run, err = prepareBackupRestoreRunForPlan(run, plan, now)
 	if err != nil {
 		return model.BackupRestoreRun{}, err
 	}
-	now := time.Now().UTC()
-	if run.ID == "" {
-		run.ID = model.NewID("backup_restore_run")
+	if run.AppID != "" {
+		app, err := s.pgGetAppTx(ctx, tx, run.AppID, true)
+		if err != nil {
+			return model.BackupRestoreRun{}, mapDBErr(err)
+		}
+		if isDeletedApp(app) || strings.TrimSpace(app.TenantID) != run.TenantID {
+			return model.BackupRestoreRun{}, ErrNotFound
+		}
+		activeMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, run.AppID, "")
+		if err != nil {
+			return model.BackupRestoreRun{}, err
+		}
+		if activeMutation {
+			return model.BackupRestoreRun{}, ErrManagedPostgresRestoreMutationConflict
+		}
 	}
-	run.TenantID = firstNonEmpty(run.TenantID, plan.TenantID)
-	run.ProjectID = firstNonEmpty(run.ProjectID, plan.ProjectID)
-	run.AppID = firstNonEmpty(run.AppID, plan.AppID)
-	run.ArtifactID = firstNonEmpty(run.ArtifactID, plan.ArtifactID)
-	run.Mode = firstNonEmpty(run.Mode, plan.Mode)
-	if run.CreatedAt.IsZero() {
-		run.CreatedAt = now
-	}
-	run.UpdatedAt = now
-	if len(run.Phases) == 0 {
-		run.Phases = plan.Phases
-	}
-	run = model.NormalizeBackupRestoreRun(run)
 	phasesJSON, err := marshalJSON(run.Phases)
 	if err != nil {
 		return model.BackupRestoreRun{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return scanBackupRestoreRun(s.db.QueryRowContext(ctx, `
+	created, err := scanBackupRestoreRun(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_backup_restore_runs (id, plan_id, tenant_id, project_id, app_id, artifact_id, mode, status, phases_json, error_code, error_message, requested_by_type, requested_by_id, created_at, updated_at, started_at, finished_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 RETURNING `+backupRestoreRunReturningColumns(), run.ID, run.PlanID, nullIfEmpty(run.TenantID), nullIfEmpty(run.ProjectID), nullIfEmpty(run.AppID), run.ArtifactID, run.Mode, run.Status, phasesJSON, run.ErrorCode, run.ErrorMessage, run.RequestedByType, run.RequestedByID, run.CreatedAt, run.UpdatedAt, run.StartedAt, run.FinishedAt))
+	if err != nil {
+		return model.BackupRestoreRun{}, mapDBErr(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_backup_restore_plans
+SET status = $2, updated_at = $3
+WHERE id = $1
+`, plan.ID, model.BackupRestoreStatusRunning, now); err != nil {
+		return model.BackupRestoreRun{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.BackupRestoreRun{}, fmt.Errorf("commit backup restore run transaction: %w", err)
+	}
+	return created, nil
 }
 
 func (s *Store) pgListBackupRestoreRuns(tenantID string, platformAdmin bool, limit int) ([]model.BackupRestoreRun, error) {

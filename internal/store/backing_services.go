@@ -135,7 +135,7 @@ func (s *Store) DeleteBackingService(id string) (model.BackingService, error) {
 		if isDeletedBackingService(service) {
 			return ErrNotFound
 		}
-		if hasInFlightManagedPostgresLifecycleForService(state.Operations, id) {
+		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, id) {
 			return ErrConflict
 		}
 		if hasServiceBindings(state, id) {
@@ -165,7 +165,7 @@ func (s *Store) UpdateBackingServiceSpec(id string, spec model.BackingServiceSpe
 		if isDeletedBackingService(next) {
 			return ErrNotFound
 		}
-		if hasInFlightManagedPostgresLifecycleForService(state.Operations, id) {
+		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, id) {
 			return ErrConflict
 		}
 		beforeRuntimeID := backingServiceSpecRuntimeID(next)
@@ -246,8 +246,8 @@ func (s *Store) BindBackingService(tenantID, appID, serviceID, alias string, env
 		if managedPostgresServiceIsSuspended(service) {
 			return ErrConflict
 		}
-		if hasInFlightManagedPostgresLifecycleForService(state.Operations, serviceID) ||
-			hasInFlightManagedPostgresLifecycleForApp(state.Operations, appID) {
+		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, serviceID) ||
+			hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, appID) {
 			return ErrConflict
 		}
 		if findServiceBindingByAppAndService(state, appID, serviceID) >= 0 {
@@ -299,7 +299,7 @@ func (s *Store) UnbindBackingService(bindingID string) (model.ServiceBinding, er
 			return ErrNotFound
 		}
 		binding = cloneServiceBinding(state.ServiceBindings[index])
-		if hasInFlightManagedPostgresLifecycleForService(state.Operations, binding.ServiceID) {
+		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, binding.ServiceID) {
 			return ErrConflict
 		}
 		serviceIndex := findBackingService(state, binding.ServiceID)

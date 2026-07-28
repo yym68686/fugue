@@ -283,16 +283,7 @@ func TestPGCreateBackupRunAdvancesSixHourSchedule(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_apps WHERE id = $1 FOR UPDATE`)).
 		WithArgs(policy.AppID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(policy.AppID))
-	mock.ExpectQuery(`(?s)SELECT EXISTS .*FROM fugue_operations AS operation.*operation.type = \$2`).
-		WithArgs(
-			policy.AppID,
-			model.OperationTypeDatabaseSuspend,
-			model.OperationStatusPending,
-			model.OperationStatusRunning,
-			model.OperationStatusWaitingAgent,
-			policy.Target.ServiceName,
-		).
-		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	expectPGDatabaseMutationForBackup(mock, policy.AppID, policy.Target.ServiceName, "")
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (SELECT 1 FROM fugue_backup_runs WHERE status IN ('pending', 'running') AND target_type = $1 AND COALESCE(target_tenant_id, '') = $2 AND COALESCE(target_project_id, '') = $3 AND COALESCE(target_app_id, '') = $4)`)).
 		WithArgs(policy.Target.Type, policy.Target.TenantID, policy.Target.ProjectID, policy.Target.AppID).
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
@@ -375,16 +366,7 @@ func TestPGClaimBackupRunIsAtomicAndDueAware(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_apps WHERE id = $1 FOR UPDATE`)).
 			WithArgs(run.Target.AppID).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(run.Target.AppID))
-		mock.ExpectQuery(`(?s)SELECT EXISTS .*FROM fugue_operations AS operation.*operation.type = \$2`).
-			WithArgs(
-				run.Target.AppID,
-				model.OperationTypeDatabaseSuspend,
-				model.OperationStatusPending,
-				model.OperationStatusRunning,
-				model.OperationStatusWaitingAgent,
-				run.Target.ServiceName,
-			).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		expectPGDatabaseMutationForBackup(mock, run.Target.AppID, run.Target.ServiceName, "")
 		mock.ExpectQuery(`(?s)UPDATE fugue_backup_runs.*SET status = 'running'.*WHERE id = \$1 AND status = 'pending' AND \(next_retry_at IS NULL OR next_retry_at <= \$4\).*RETURNING`).
 			WithArgs(run.ID, "worker-a", lockedUntil, now).
 			WillReturnRows(backupScheduleRunRows(run))
@@ -413,16 +395,7 @@ func TestPGClaimBackupRunIsAtomicAndDueAware(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_apps WHERE id = $1 FOR UPDATE`)).
 			WithArgs(target.AppID).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(target.AppID))
-		mock.ExpectQuery(`(?s)SELECT EXISTS .*FROM fugue_operations AS operation.*operation.type = \$2`).
-			WithArgs(
-				target.AppID,
-				model.OperationTypeDatabaseSuspend,
-				model.OperationStatusPending,
-				model.OperationStatusRunning,
-				model.OperationStatusWaitingAgent,
-				target.ServiceName,
-			).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		expectPGDatabaseMutationForBackup(mock, target.AppID, target.ServiceName, "")
 		mock.ExpectQuery(`(?s)UPDATE fugue_backup_runs.*WHERE id = \$1 AND status = 'pending' AND \(next_retry_at IS NULL OR next_retry_at <= \$4\).*RETURNING`).
 			WithArgs("backup_run_claimed", "worker-b", now.Add(leaseTTL), now).
 			WillReturnRows(sqlmock.NewRows(backupScheduleRunColumns()))
@@ -460,16 +433,7 @@ func TestPGCreateDatabaseBackupRunLocksAppAndRejectsActiveSuspend(t *testing.T) 
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_apps WHERE id = $1 FOR UPDATE`)).
 		WithArgs(run.AppID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(run.AppID))
-	mock.ExpectQuery(`(?s)SELECT EXISTS .*FROM fugue_operations AS operation.*operation.type = \$2`).
-		WithArgs(
-			run.AppID,
-			model.OperationTypeDatabaseSuspend,
-			model.OperationStatusPending,
-			model.OperationStatusRunning,
-			model.OperationStatusWaitingAgent,
-			run.Target.ServiceName,
-		).
-		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	expectPGDatabaseMutationForBackup(mock, run.AppID, run.Target.ServiceName, model.OperationTypeDatabaseSuspend)
 	mock.ExpectRollback()
 
 	if _, err := s.CreateBackupRun(run); !errors.Is(err, ErrManagedPostgresSuspendBackupConflict) {
@@ -516,16 +480,7 @@ func TestPGClaimDatabaseBackupRunPersistsTerminalFailureDuringSuspend(t *testing
 		mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_apps WHERE id = $1 FOR UPDATE`)).
 			WithArgs(pending.AppID).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(pending.AppID))
-		mock.ExpectQuery(`(?s)SELECT EXISTS .*FROM fugue_operations AS operation.*operation.type = \$2`).
-			WithArgs(
-				pending.AppID,
-				model.OperationTypeDatabaseSuspend,
-				model.OperationStatusPending,
-				model.OperationStatusRunning,
-				model.OperationStatusWaitingAgent,
-				pending.Target.ServiceName,
-			).
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		expectPGDatabaseMutationForBackup(mock, pending.AppID, pending.Target.ServiceName, model.OperationTypeDatabaseSuspend)
 	}
 
 	mock.ExpectBegin()
@@ -1154,6 +1109,25 @@ func expectGetBackupSchedulePolicy(mock sqlmock.Sqlmock, policy model.BackupPoli
 	mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_policies WHERE \(id = \$1 OR name = \$1 OR slug = \$2\)`).
 		WithArgs(policy.ID, sqlmock.AnyArg()).
 		WillReturnRows(backupSchedulePolicyRows(policy))
+}
+
+func expectPGDatabaseMutationForBackup(mock sqlmock.Sqlmock, appID, serviceName, operationType string) {
+	rows := sqlmock.NewRows([]string{"type"})
+	if operationType != "" {
+		rows.AddRow(operationType)
+	}
+	mock.ExpectQuery(`(?s)SELECT operation.type.*FROM fugue_operations AS operation.*operation.type IN \(\$2, \$3, \$4\).*operation.status IN \(\$5, \$6, \$7\).*LIMIT 1`).
+		WithArgs(
+			appID,
+			model.OperationTypeDatabaseSuspend,
+			model.OperationTypeDatabaseResume,
+			model.OperationTypeDatabaseResize,
+			model.OperationStatusPending,
+			model.OperationStatusRunning,
+			model.OperationStatusWaitingAgent,
+			serviceName,
+		).
+		WillReturnRows(rows)
 }
 
 func backupPolicyUpsertQueryPattern() string {

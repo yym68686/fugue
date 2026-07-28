@@ -246,7 +246,7 @@ func (s *Store) pgValidateAppDatabaseImportRunnableTx(ctx context.Context, tx *s
 	if appHasSuspendedManagedPostgres(app) {
 		return ErrManagedPostgresDatabaseImportConflict
 	}
-	active, err := s.pgHasActiveManagedPostgresSuspendForAppTx(ctx, tx, app.ID)
+	active, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, app.ID, "")
 	if err != nil {
 		return err
 	}
@@ -256,31 +256,10 @@ func (s *Store) pgValidateAppDatabaseImportRunnableTx(ctx context.Context, tx *s
 	return nil
 }
 
-func (s *Store) pgHasActiveManagedPostgresSuspendForAppTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
-	var active bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-	SELECT 1
-	FROM fugue_operations
-	WHERE app_id = $1
-	  AND type = $2
-	  AND status IN ($3, $4, $5)
-)
-`,
-		strings.TrimSpace(appID),
-		model.OperationTypeDatabaseSuspend,
-		model.OperationStatusPending,
-		model.OperationStatusRunning,
-		model.OperationStatusWaitingAgent,
-	).Scan(&active); err != nil {
-		return false, fmt.Errorf("check active managed postgres suspend for database import: %w", err)
-	}
-	return active, nil
-}
-
 // pgHasActiveAppDatabaseImportJobForManagedPostgresTx uses the shared app row
 // lock as its serialization fence. AppDatabaseImportJob has no service ID, so
-// any pending/running import for the app blocks suspension of its managed DB.
+// any pending/running import for the app blocks an exclusive mutation of its
+// managed database.
 func (s *Store) pgHasActiveAppDatabaseImportJobForManagedPostgresTx(
 	ctx context.Context,
 	tx *sql.Tx,

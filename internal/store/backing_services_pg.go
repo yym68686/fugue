@@ -163,11 +163,11 @@ func (s *Store) pgDeleteBackingService(id string) (model.BackingService, error) 
 	if isDeletedBackingService(service) {
 		return model.BackingService{}, ErrNotFound
 	}
-	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, "", service.ID)
+	activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, "", service.ID)
 	if err != nil {
 		return model.BackingService{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.BackingService{}, ErrConflict
 	}
 	bindingCount, err := s.pgCountBindingsForServiceTx(ctx, tx, id)
@@ -206,11 +206,11 @@ func (s *Store) pgUpdateBackingServiceSpec(id string, spec model.BackingServiceS
 	if isDeletedBackingService(service) {
 		return model.BackingService{}, ErrNotFound
 	}
-	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, "", service.ID)
+	activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, "", service.ID)
 	if err != nil {
 		return model.BackingService{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.BackingService{}, ErrConflict
 	}
 	if err := validateManagedPostgresSuspensionTransition(spec.Postgres, service.Spec.Postgres); err != nil {
@@ -298,18 +298,18 @@ func (s *Store) pgBindBackingService(tenantID, appID, serviceID, alias string, e
 	if managedPostgresServiceIsSuspended(service) {
 		return model.ServiceBinding{}, ErrConflict
 	}
-	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, "", serviceID)
+	activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, "", serviceID)
 	if err != nil {
 		return model.ServiceBinding{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.ServiceBinding{}, ErrConflict
 	}
-	activeLifecycle, err = s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, appID, "")
+	activeDatabaseMutation, err = s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, appID, "")
 	if err != nil {
 		return model.ServiceBinding{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.ServiceBinding{}, ErrConflict
 	}
 
@@ -385,11 +385,11 @@ func (s *Store) pgUnbindBackingService(bindingID string) (model.ServiceBinding, 
 	if managedPostgresServiceIsSuspended(service) {
 		return model.ServiceBinding{}, ErrConflict
 	}
-	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, binding.AppID, binding.ServiceID)
+	activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, binding.AppID, binding.ServiceID)
 	if err != nil {
 		return model.ServiceBinding{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.ServiceBinding{}, ErrConflict
 	}
 	lockedBinding, err := s.pgGetServiceBindingTx(ctx, tx, bindingID, true)
@@ -409,7 +409,7 @@ func (s *Store) pgUnbindBackingService(bindingID string) (model.ServiceBinding, 
 	return binding, nil
 }
 
-func (s *Store) pgHasInFlightManagedPostgresLifecycleTx(ctx context.Context, tx *sql.Tx, appID, serviceID string) (bool, error) {
+func (s *Store) pgHasInFlightManagedPostgresExclusiveMutationTx(ctx context.Context, tx *sql.Tx, appID, serviceID string) (bool, error) {
 	appID = strings.TrimSpace(appID)
 	serviceID = strings.TrimSpace(serviceID)
 	if appID == "" && serviceID == "" {
@@ -419,12 +419,13 @@ func (s *Store) pgHasInFlightManagedPostgresLifecycleTx(ctx context.Context, tx 
 SELECT EXISTS (
 	SELECT 1
 	FROM fugue_operations
-	WHERE type IN ($1, $2)
-	  AND status IN ($3, $4, $5)
+	WHERE type IN ($1, $2, $3)
+	  AND status IN ($4, $5, $6)
 `
 	args := []any{
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,
+		model.OperationTypeDatabaseResize,
 		model.OperationStatusPending,
 		model.OperationStatusRunning,
 		model.OperationStatusWaitingAgent,
@@ -440,7 +441,7 @@ SELECT EXISTS (
 	query += ")\n"
 	var active bool
 	if err := tx.QueryRowContext(ctx, query, args...).Scan(&active); err != nil {
-		return false, fmt.Errorf("check active managed postgres lifecycle: %w", err)
+		return false, fmt.Errorf("check active managed postgres exclusive mutation: %w", err)
 	}
 	return active, nil
 }

@@ -115,9 +115,21 @@ func cloneOperation(op model.Operation) model.Operation {
 	return op
 }
 
-func hasInFlightManagedPostgresLifecycleForApp(ops []model.Operation, appID string) bool {
+// Managed PostgreSQL lifecycle and resize operations both hold an exclusive
+// desired-state lease for the app-owned database. Keep this predicate separate
+// from isManagedPostgresLifecycleOperationType: lifecycle completion persists
+// suspension state, while resize completion persists only RuntimeResources.
+func isManagedPostgresExclusiveMutationOperationType(operationType string) bool {
+	return isManagedPostgresLifecycleOperationType(operationType) ||
+		operationType == model.OperationTypeDatabaseResize
+}
+
+func hasInFlightManagedPostgresExclusiveMutationForApp(ops []model.Operation, appID string) bool {
+	appID = strings.TrimSpace(appID)
 	for _, op := range ops {
-		if op.AppID != appID || !isManagedPostgresLifecycleOperationType(op.Type) || !isActiveOperationStatus(op.Status) {
+		if strings.TrimSpace(op.AppID) != appID ||
+			!isManagedPostgresExclusiveMutationOperationType(op.Type) ||
+			!isActiveOperationStatus(op.Status) {
 			continue
 		}
 		return true
@@ -125,9 +137,12 @@ func hasInFlightManagedPostgresLifecycleForApp(ops []model.Operation, appID stri
 	return false
 }
 
-func hasInFlightManagedPostgresLifecycleForService(ops []model.Operation, serviceID string) bool {
+func hasInFlightManagedPostgresExclusiveMutationForService(ops []model.Operation, serviceID string) bool {
+	serviceID = strings.TrimSpace(serviceID)
 	for _, op := range ops {
-		if op.ServiceID != serviceID || !isManagedPostgresLifecycleOperationType(op.Type) || !isActiveOperationStatus(op.Status) {
+		if strings.TrimSpace(op.ServiceID) != serviceID ||
+			!isManagedPostgresExclusiveMutationOperationType(op.Type) ||
+			!isActiveOperationStatus(op.Status) {
 			continue
 		}
 		return true

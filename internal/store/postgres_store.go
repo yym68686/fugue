@@ -2756,11 +2756,11 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
-	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, app.ID, "")
+	activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, app.ID, "")
 	if err != nil {
 		return model.App{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.App{}, ErrConflict
 	}
 
@@ -2812,11 +2812,11 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
-	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, app.ID, "")
+	activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, app.ID, "")
 	if err != nil {
 		return model.App{}, err
 	}
-	if activeLifecycle {
+	if activeDatabaseMutation {
 		return model.App{}, ErrConflict
 	}
 
@@ -3081,12 +3081,12 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
 	}
-	if !isManagedPostgresLifecycleOperationType(op.Type) {
-		activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, app.ID, "")
+	if !isManagedPostgresExclusiveMutationOperationType(op.Type) {
+		activeDatabaseMutation, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, app.ID, "")
 		if err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
-		if activeLifecycle {
+		if activeDatabaseMutation {
 			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 	}
@@ -3611,16 +3611,22 @@ WHERE app_id = $1
 		if err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
+		if activeBackup {
+			return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresBackupInProgressConflict
+		}
 		activeImport, err := s.pgHasActiveAppDatabaseImportJobForManagedPostgresTx(ctx, tx, app, op.ServiceID)
 		if err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if activeImport {
+			return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresImportInProgressConflict
 		}
 		activeRestore, err := s.pgHasActiveAppDatabaseRestoreRunForManagedPostgresTx(ctx, tx, app)
 		if err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
-		if activeBackup || activeImport || activeRestore {
-			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		if activeRestore {
+			return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresRestoreInProgressConflict
 		}
 	default:
 		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput

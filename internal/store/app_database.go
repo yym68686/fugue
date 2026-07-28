@@ -13,9 +13,9 @@ import (
 
 const (
 	ManagedPostgresDatabaseImportConflictCode      = "managed_postgres_unavailable_for_database_import"
-	ManagedPostgresDatabaseImportConflictMessage   = "managed_postgres_unavailable_for_database_import: resume the database or wait for suspend to finish before importing"
+	ManagedPostgresDatabaseImportConflictMessage   = "managed_postgres_unavailable_for_database_import: resume the database or wait for database suspend, resume, or resize to finish before importing"
 	ManagedPostgresImportInProgressConflictCode    = "managed_postgres_import_in_progress"
-	ManagedPostgresImportInProgressConflictMessage = "managed_postgres_import_in_progress: wait for app-database import to finish before suspending"
+	ManagedPostgresImportInProgressConflictMessage = "managed_postgres_import_in_progress: wait for app-database import to finish before changing database lifecycle or resources"
 )
 
 var ErrManagedPostgresDatabaseImportConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresDatabaseImportConflictMessage)
@@ -241,22 +241,11 @@ func validateAppDatabaseImportRunnableState(state *model.State, appID string) er
 	}
 	app := state.Apps[appIndex]
 	hydrateAppBackingServices(state, &app)
-	if appHasSuspendedManagedPostgres(app) || hasActiveManagedPostgresSuspendForApp(state.Operations, appID) {
+	if appHasSuspendedManagedPostgres(app) ||
+		hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, appID) {
 		return ErrManagedPostgresDatabaseImportConflict
 	}
 	return nil
-}
-
-func hasActiveManagedPostgresSuspendForApp(operations []model.Operation, appID string) bool {
-	appID = strings.TrimSpace(appID)
-	for _, operation := range operations {
-		if strings.TrimSpace(operation.AppID) == appID &&
-			operation.Type == model.OperationTypeDatabaseSuspend &&
-			isActiveOperationStatus(operation.Status) {
-			return true
-		}
-	}
-	return false
 }
 
 // hasActiveAppDatabaseImportJobForManagedPostgres deliberately uses app-level
