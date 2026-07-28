@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -129,11 +130,25 @@ func writeAutomationPolicy(w io.Writer, policy model.AutomationPolicy) error {
 		if _, err := fmt.Fprintf(w, "\nrule[%d]:\n", index); err != nil {
 			return err
 		}
+		requestMetric := "-"
+		requestWindow := "-"
+		requestStatusCodes := "-"
+		requestErrorClasses := "-"
+		if selector := rule.Trigger.RequestMetric; selector != nil {
+			requestMetric = firstNonEmpty(selector.Metric, "-")
+			requestWindow = firstNonEmpty(selector.Window, "-")
+			requestStatusCodes = automationStatusCodesDisplay(selector.StatusCodes)
+			requestErrorClasses = stringsJoin(selector.ErrorClasses)
+		}
 		if err := writeKeyValues(w,
 			kvPair{Key: "id", Value: firstNonEmpty(rule.ID, "-")},
 			kvPair{Key: "description", Value: firstNonEmpty(rule.Description, "-")},
 			kvPair{Key: "trigger_type", Value: firstNonEmpty(rule.Trigger.Type, "-")},
 			kvPair{Key: "trigger_source", Value: firstNonEmpty(rule.Trigger.Source, "-")},
+			kvPair{Key: "request_metric", Value: requestMetric},
+			kvPair{Key: "request_window", Value: requestWindow},
+			kvPair{Key: "request_status_codes", Value: requestStatusCodes},
+			kvPair{Key: "request_error_classes", Value: requestErrorClasses},
 			kvPair{Key: "invariant_id", Value: firstNonEmpty(rule.Trigger.InvariantID, "-")},
 			kvPair{Key: "required_evidence", Value: stringsJoin(rule.Trigger.RequiredEvidence)},
 			kvPair{Key: "minimum_samples", Value: fmt.Sprintf("%d", rule.Trigger.MinimumSamples)},
@@ -197,4 +212,15 @@ func automationActionTypes(rules []model.AutomationRule) string {
 	}
 	sort.Strings(sorted)
 	return strings.Join(sorted, ",")
+}
+
+func automationStatusCodesDisplay(values []int) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, strconv.Itoa(value))
+	}
+	return strings.Join(out, ",")
 }

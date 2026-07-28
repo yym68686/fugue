@@ -65,6 +65,42 @@ fugue tenant ls
 fugue tenant ls --output json
 `),
 	},
+	"fugue automation": {
+		Long: strings.TrimSpace(`
+Manage user-owned, typed automation policies without exposing the platform's
+internal action registry. The initial surface is app request-outcome evidence
+with a disabled or shadow-mode restart proposal.
+`),
+		Example: strings.TrimSpace(`
+fugue automation ls
+fugue automation create my-app --name "API unavailable recovery"
+fugue automation update automation_policy_123 --generation 1 --mode shadow
+`),
+	},
+	"fugue automation ls": {
+		Example: strings.TrimSpace(`
+fugue automation ls
+fugue automation ls --json
+`),
+	},
+	"fugue automation show": {
+		Example: "fugue automation show automation_policy_123",
+	},
+	"fugue automation create": {
+		Example: strings.TrimSpace(`
+fugue automation create my-app --name "API unavailable recovery"
+fugue automation create my-app --name "API unavailable recovery" --mode shadow --window 2m --status-code 503,504
+`),
+	},
+	"fugue automation update": {
+		Example: strings.TrimSpace(`
+fugue automation update automation_policy_123 --generation 1 --mode shadow
+fugue automation update automation_policy_123 --generation 2 --window 3m --status-code 502,503,504
+`),
+	},
+	"fugue automation delete": {
+		Example: "fugue automation delete automation_policy_123 --generation 2",
+	},
 	"fugue tenant ls": {
 		Long: strings.TrimSpace(`
 List the visible tenants/workspaces for the current access key.

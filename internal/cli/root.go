@@ -272,6 +272,7 @@ Environment variables:
 		c.newSSHKeyCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
+		c.newAutomationCommand(),
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
 		c.newDataCommand(),
