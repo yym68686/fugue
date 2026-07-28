@@ -233,13 +233,5 @@ func cloneAppFailoverSpec(spec *model.AppFailoverSpec) *model.AppFailoverSpec {
 }
 
 func cloneAppPostgresSpec(spec *model.AppPostgresSpec) *model.AppPostgresSpec {
-	if spec == nil {
-		return nil
-	}
-	out := *spec
-	if spec.Resources != nil {
-		resources := *spec.Resources
-		out.Resources = &resources
-	}
-	return &out
+	return model.CloneAppPostgresSpec(spec)
 }

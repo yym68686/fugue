@@ -117,13 +117,9 @@ func redactAppSpecForOutput(spec model.AppSpec) model.AppSpec {
 		out.Resources = &resources
 	}
 	if spec.Postgres != nil {
-		postgres := *spec.Postgres
+		postgres := *model.CloneAppPostgresSpec(spec.Postgres)
 		if postgres.Password != "" {
 			postgres.Password = redactedSecretValue
-		}
-		if spec.Postgres.Resources != nil {
-			resources := *spec.Postgres.Resources
-			postgres.Resources = &resources
 		}
 		out.Postgres = &postgres
 	}
@@ -153,13 +149,9 @@ func cloneBackingServicesForOutput(services []model.BackingService, redactSecret
 	for index, service := range services {
 		out[index] = service
 		if service.Spec.Postgres != nil {
-			postgres := *service.Spec.Postgres
+			postgres := *model.CloneAppPostgresSpec(service.Spec.Postgres)
 			if redactSecrets && postgres.Password != "" {
 				postgres.Password = redactedSecretValue
-			}
-			if service.Spec.Postgres.Resources != nil {
-				resources := *service.Spec.Postgres.Resources
-				postgres.Resources = &resources
 			}
 			out[index].Spec.Postgres = &postgres
 		}

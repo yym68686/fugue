@@ -1273,8 +1273,7 @@ func appOwnedPostgresSpec(app model.App) *model.AppPostgresSpec {
 		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
 			continue
 		}
-		specCopy := *service.Spec.Postgres
-		return &specCopy
+		return model.CloneAppPostgresSpec(service.Spec.Postgres)
 	}
 	return nil
 }
@@ -1311,8 +1310,7 @@ func cloneImportSpec(spec model.AppSpec) model.AppSpec {
 		out.PersistentStorage = &storage
 	}
 	if spec.Postgres != nil {
-		postgres := *spec.Postgres
-		out.Postgres = &postgres
+		out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
 	}
 	return out
 }

@@ -48,6 +48,37 @@ func ValidateManagedPostgresUser(appName string, spec AppPostgresSpec) error {
 	)
 }
 
+func CloneResourceSpec(spec *ResourceSpec) *ResourceSpec {
+	if spec == nil {
+		return nil
+	}
+	out := *spec
+	return &out
+}
+
+func CloneAppPostgresSpec(spec *AppPostgresSpec) *AppPostgresSpec {
+	if spec == nil {
+		return nil
+	}
+	out := *spec
+	out.Resources = CloneResourceSpec(spec.Resources)
+	out.RuntimeResources = CloneResourceSpec(spec.RuntimeResources)
+	return &out
+}
+
+// ManagedPostgresRuntimeResources returns the in-place runtime target when it
+// exists and otherwise falls back to the CNPG bootstrap template. The returned
+// value is detached from the input so callers cannot mutate persisted state.
+func ManagedPostgresRuntimeResources(spec AppPostgresSpec) ResourceSpec {
+	if spec.RuntimeResources != nil {
+		return *spec.RuntimeResources
+	}
+	if spec.Resources != nil {
+		return *spec.Resources
+	}
+	return DefaultManagedPostgresResources()
+}
+
 func isOfficialPostgresImage(image string) bool {
 	repository := postgresImageRepository(image)
 	return repository == "postgres" || repository == "library/postgres"

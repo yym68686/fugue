@@ -2660,14 +2660,7 @@ func cloneControllerBackingServices(services []model.BackingService) []model.Bac
 
 func cloneControllerBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
 	out := spec
-	if spec.Postgres != nil {
-		postgres := *spec.Postgres
-		if spec.Postgres.Resources != nil {
-			resources := *spec.Postgres.Resources
-			postgres.Resources = &resources
-		}
-		out.Postgres = &postgres
-	}
+	out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
 	return out
 }
 

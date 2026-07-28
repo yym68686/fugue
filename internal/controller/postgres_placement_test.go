@@ -15,6 +15,18 @@ import (
 	"fugue/internal/store"
 )
 
+func TestManagedPostgresPlacementRequestUsesRuntimeTarget(t *testing.T) {
+	t.Parallel()
+
+	request := managedPostgresPlacementRequest(model.AppPostgresSpec{
+		Resources:        &model.ResourceSpec{CPUMilliCores: 500, MemoryMebibytes: 1024},
+		RuntimeResources: &model.ResourceSpec{CPUMilliCores: 150, MemoryMebibytes: 640},
+	})
+	if request.cpuMilli != 150 || request.memoryBytes != 640*1024*1024 {
+		t.Fatalf("expected runtime target placement request, got %+v", request)
+	}
+}
+
 func TestManagedPostgresPlacementsPinsSharedPrimaryToObservedPrimaryNode(t *testing.T) {
 	t.Parallel()
 

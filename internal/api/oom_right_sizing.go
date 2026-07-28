@@ -242,8 +242,7 @@ func (s *Server) queueOOMRightSizingDeploy(app model.App, targets []oomRightSizi
 				continue
 			}
 			if spec.Postgres == nil {
-				postgres := *service.Spec.Postgres
-				spec.Postgres = &postgres
+				spec.Postgres = model.CloneAppPostgresSpec(service.Spec.Postgres)
 			}
 			current := service.Spec.Postgres.Resources
 			if current == nil {
@@ -317,12 +316,15 @@ func (s *Server) validateAutoscalingTenantEnvelope(app model.App, desired model.
 	desiredTarget := autoscalingAppResourceCommitment(app, desired)
 	currentPostgres := firstOwnedPostgresService(app)
 	if currentPostgres != nil && currentPostgres.Spec.Postgres != nil {
-		addAutoscalingResourceSpec(&currentTarget, currentPostgres.Spec.Postgres.Resources, model.DefaultManagedPostgresResources())
+		resources := model.ManagedPostgresRuntimeResources(*currentPostgres.Spec.Postgres)
+		addAutoscalingResourceSpec(&currentTarget, &resources, model.DefaultManagedPostgresResources())
 	}
 	if desired.Postgres != nil {
-		addAutoscalingResourceSpec(&desiredTarget, desired.Postgres.Resources, model.DefaultManagedPostgresResources())
+		resources := model.ManagedPostgresRuntimeResources(*desired.Postgres)
+		addAutoscalingResourceSpec(&desiredTarget, &resources, model.DefaultManagedPostgresResources())
 	} else if currentPostgres != nil && currentPostgres.Spec.Postgres != nil {
-		addAutoscalingResourceSpec(&desiredTarget, currentPostgres.Spec.Postgres.Resources, model.DefaultManagedPostgresResources())
+		resources := model.ManagedPostgresRuntimeResources(*currentPostgres.Spec.Postgres)
+		addAutoscalingResourceSpec(&desiredTarget, &resources, model.DefaultManagedPostgresResources())
 	}
 	next := model.BillingResourceSpec{
 		CPUMilliCores:   maxInt64(0, total.CPUMilliCores-currentTarget.CPUMilliCores) + desiredTarget.CPUMilliCores,

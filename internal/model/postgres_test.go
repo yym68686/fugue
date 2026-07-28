@@ -97,3 +97,32 @@ func TestNormalizeManagedPostgresImage(t *testing.T) {
 		})
 	}
 }
+
+func TestCloneAppPostgresSpecDetachesBootstrapAndRuntimeResources(t *testing.T) {
+	t.Parallel()
+
+	original := &AppPostgresSpec{
+		Resources:        &ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512},
+		RuntimeResources: &ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 768},
+	}
+	cloned := CloneAppPostgresSpec(original)
+	cloned.Resources.CPUMilliCores = 200
+	cloned.RuntimeResources.MemoryMebibytes = 1024
+
+	if original.Resources.CPUMilliCores != 100 || original.RuntimeResources.MemoryMebibytes != 768 {
+		t.Fatalf("postgres resource clone aliases original: original=%+v clone=%+v", original, cloned)
+	}
+}
+
+func TestManagedPostgresRuntimeResourcesFallsBackToBootstrap(t *testing.T) {
+	t.Parallel()
+
+	bootstrap := ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512}
+	runtimeTarget := ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 768}
+	if got := ManagedPostgresRuntimeResources(AppPostgresSpec{Resources: &bootstrap}); got != bootstrap {
+		t.Fatalf("expected bootstrap fallback, got %+v", got)
+	}
+	if got := ManagedPostgresRuntimeResources(AppPostgresSpec{Resources: &bootstrap, RuntimeResources: &runtimeTarget}); got != runtimeTarget {
+		t.Fatalf("expected runtime target, got %+v", got)
+	}
+}

@@ -128,6 +128,7 @@ func (s *Server) appResourceRecommendation(app model.App, windowHours, minSample
 		if err != nil {
 			return model.AppRightSizingRecommendation{}, err
 		}
+		currentRuntimeResources := model.ManagedPostgresRuntimeResources(*service.Spec.Postgres)
 		out.BackingServices = append(out.BackingServices, buildRightSizingRecommendation(
 			model.ClusterNodeWorkloadKindBackingService,
 			service.ID,
@@ -136,7 +137,7 @@ func (s *Server) appResourceRecommendation(app model.App, windowHours, minSample
 			model.WorkloadClassCritical,
 			windowHours,
 			minSamples,
-			service.Spec.Postgres.Resources,
+			&currentRuntimeResources,
 			samples,
 		))
 	}
@@ -175,8 +176,7 @@ func (s *Server) applyAppRightSizingRecommendation(
 			continue
 		}
 		if spec.Postgres == nil {
-			postgres := *service.Spec.Postgres
-			spec.Postgres = &postgres
+			spec.Postgres = model.CloneAppPostgresSpec(service.Spec.Postgres)
 		}
 		spec.Postgres.Resources = cloneResourceSpec(serviceRecommendation.Recommended)
 		changed = true

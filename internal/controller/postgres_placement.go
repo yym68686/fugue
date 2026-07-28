@@ -361,10 +361,7 @@ func managedSharedNodeSchedulable(node kubeNode) bool {
 }
 
 func managedPostgresPlacementRequest(spec model.AppPostgresSpec) managedSharedNodeRequests {
-	resources := model.DefaultManagedPostgresResources()
-	if spec.Resources != nil {
-		resources = *spec.Resources
-	}
+	resources := model.ManagedPostgresRuntimeResources(spec)
 	return managedSharedNodeRequests{
 		cpuMilli:    maxInt64(0, resources.CPUMilliCores),
 		memoryBytes: maxInt64(0, resources.MemoryMebibytes) * 1024 * 1024,

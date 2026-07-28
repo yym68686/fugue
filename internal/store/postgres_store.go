@@ -3064,6 +3064,9 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if op.DesiredSpec != nil {
+		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
 		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3520,12 +3523,7 @@ WHERE app_id = $1
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if op.DesiredSpec.Postgres == nil {
-			postgresCopy := *postgresSpec
-			if postgresSpec.Resources != nil {
-				resources := *postgresSpec.Resources
-				postgresCopy.Resources = &resources
-			}
-			op.DesiredSpec.Postgres = &postgresCopy
+			op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
 		}
 		op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
 		op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""

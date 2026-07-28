@@ -349,8 +349,7 @@ func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 	}
 	out.Continuity = model.CloneAppContinuityPolicy(spec.Continuity)
 	if spec.Postgres != nil {
-		postgres := *spec.Postgres
-		out.Postgres = &postgres
+		out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
 	}
 	return out
 }
@@ -405,8 +404,7 @@ func cloneManagedBackingServices(services []model.BackingService) []model.Backin
 		if service.Spec.Postgres == nil {
 			continue
 		}
-		postgres := *service.Spec.Postgres
-		out[index].Spec.Postgres = &postgres
+		out[index].Spec.Postgres = model.CloneAppPostgresSpec(service.Spec.Postgres)
 	}
 	return out
 }

@@ -216,6 +216,9 @@ func (s *Store) pgUpdateBackingServiceSpec(id string, spec model.BackingServiceS
 	if err := validateManagedPostgresSuspensionTransition(spec.Postgres, service.Spec.Postgres); err != nil {
 		return model.BackingService{}, err
 	}
+	if err := reconcileManagedPostgresRuntimeResources(spec.Postgres, service.Spec.Postgres); err != nil {
+		return model.BackingService{}, err
+	}
 	beforeRuntimeID := backingServiceSpecRuntimeID(service)
 	service.Spec = cloneBackingServiceSpec(spec)
 	service.UpdatedAt = time.Now().UTC()
@@ -593,6 +596,9 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return err
 	} else if found {
 		now := time.Now().UTC()
+		if err := reconcileManagedPostgresRuntimeResources(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
+			return err
+		}
 		if err := ensureManagedPostgresPasswordWithExisting(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
 			return err
 		}
@@ -625,6 +631,9 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return nil
 	}
 
+	if err := reconcileManagedPostgresRuntimeResources(desiredSpec.Postgres, nil); err != nil {
+		return err
+	}
 	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
 		return err
 	}
@@ -686,11 +695,7 @@ func (s *Store) pgApplyManagedPostgresLifecycleTx(ctx context.Context, tx *sql.T
 	if op.DesiredSpec.Postgres.Suspended != wantSuspended {
 		return ErrInvalidInput
 	}
-	postgres := *service.Spec.Postgres
-	if service.Spec.Postgres.Resources != nil {
-		resources := *service.Spec.Postgres.Resources
-		postgres.Resources = &resources
-	}
+	postgres := *model.CloneAppPostgresSpec(service.Spec.Postgres)
 	postgres.Suspended = wantSuspended
 	service.Spec.Postgres = &postgres
 	service.UpdatedAt = time.Now().UTC()

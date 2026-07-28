@@ -284,6 +284,13 @@ func normalizePostgresSpecResources(spec *model.AppPostgresSpec) error {
 		resources.MemoryLimitMebibytes = model.DefaultPostgresMemoryLimitMebibytes(resources.MemoryMebibytes)
 	}
 	spec.Resources = resources
+	if spec.RuntimeResources != nil {
+		runtimeResources, err := normalizeWorkloadResources(spec.RuntimeResources, *resources)
+		if err != nil {
+			return err
+		}
+		spec.RuntimeResources = runtimeResources
+	}
 	return nil
 }
 
@@ -1086,10 +1093,7 @@ func appEffectiveResources(spec model.AppSpec) model.BillingResourceSpec {
 }
 
 func postgresEffectiveResources(spec model.AppPostgresSpec) model.BillingResourceSpec {
-	compute := model.DefaultManagedPostgresResources()
-	if spec.Resources != nil {
-		compute = *spec.Resources
-	}
+	compute := model.ManagedPostgresRuntimeResources(spec)
 	if spec.Suspended {
 		compute.CPUMilliCores = 0
 		compute.MemoryMebibytes = 0

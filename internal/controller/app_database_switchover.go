@@ -637,15 +637,7 @@ func databaseLocalizeDesiredPostgresSpec(current, desired *model.AppPostgresSpec
 }
 
 func clonePostgresForDatabaseOperation(spec *model.AppPostgresSpec) *model.AppPostgresSpec {
-	if spec == nil {
-		return nil
-	}
-	out := *spec
-	if spec.Resources != nil {
-		resources := *spec.Resources
-		out.Resources = &resources
-	}
-	return &out
+	return model.CloneAppPostgresSpec(spec)
 }
 
 func managedPostgresStorageMigrationRequired(current, desired *model.AppPostgresSpec) bool {
@@ -728,11 +720,7 @@ func databaseSwitchoverPostgresSpec(
 	postgres *model.AppPostgresSpec,
 	primaryRuntimeID, failoverTargetRuntimeID string,
 ) model.AppPostgresSpec {
-	postgresCopy := *postgres
-	if postgres.Resources != nil {
-		resources := *postgres.Resources
-		postgresCopy.Resources = &resources
-	}
+	postgresCopy := *model.CloneAppPostgresSpec(postgres)
 	postgresCopy.RuntimeID = strings.TrimSpace(primaryRuntimeID)
 	postgresCopy.FailoverTargetRuntimeID = strings.TrimSpace(failoverTargetRuntimeID)
 	postgresCopy.PrimaryPlacementPendingRebalance = false
@@ -798,11 +786,7 @@ func databaseLocalizePostgresSpec(
 	targetRuntimeID, targetNodeName string,
 	singleInstance, holdPrimaryPlacement bool,
 ) model.AppPostgresSpec {
-	postgresCopy := *postgres
-	if postgres.Resources != nil {
-		resources := *postgres.Resources
-		postgresCopy.Resources = &resources
-	}
+	postgresCopy := *model.CloneAppPostgresSpec(postgres)
 	postgresCopy.RuntimeID = strings.TrimSpace(targetRuntimeID)
 	postgresCopy.FailoverTargetRuntimeID = ""
 	postgresCopy.PrimaryNodeName = strings.TrimSpace(targetNodeName)

@@ -2653,6 +2653,9 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if spec.Postgres != nil && spec.Postgres.Suspended {
 		return model.App{}, ErrInvalidInput
 	}
+	if err := reconcileManagedPostgresRuntimeResources(spec.Postgres, nil); err != nil {
+		return model.App{}, err
+	}
 	spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
 	if err := normalizeAppSpecResources(&spec); err != nil {
 		return model.App{}, err
@@ -2825,6 +2828,9 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		}
 		hydrateAppBackingServices(state, &app)
 		if op.DesiredSpec != nil {
+			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
+				return err
+			}
 			if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
 				return err
 			}
@@ -3106,12 +3112,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 				return err
 			}
 			if op.DesiredSpec.Postgres == nil {
-				postgresCopy := *postgresSpec
-				if postgresSpec.Resources != nil {
-					resources := *postgresSpec.Resources
-					postgresCopy.Resources = &resources
-				}
-				op.DesiredSpec.Postgres = &postgresCopy
+				op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
 			}
 			op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
 			op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""
@@ -4682,12 +4683,7 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 		out.RightSizing = &rightSizing
 	}
 	if in.Postgres != nil {
-		pg := *in.Postgres
-		if in.Postgres.Resources != nil {
-			resources := *in.Postgres.Resources
-			pg.Resources = &resources
-		}
-		out.Postgres = &pg
+		out.Postgres = model.CloneAppPostgresSpec(in.Postgres)
 	}
 	model.ApplyAppSpecDefaults(&out)
 	return &out

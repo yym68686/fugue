@@ -29,11 +29,7 @@ func FailoverDesiredSpec(app model.App, targetRuntimeID string) *model.AppSpec {
 		return next
 	}
 
-	postgres := *currentDatabase
-	if currentDatabase.Resources != nil {
-		resources := *currentDatabase.Resources
-		postgres.Resources = &resources
-	}
+	postgres := *model.CloneAppPostgresSpec(currentDatabase)
 	if shouldConsumeManagedPostgresFailover(*currentDatabase, targetRuntimeID) {
 		postgres.RuntimeID = targetRuntimeID
 		postgres.FailoverTargetRuntimeID = ""

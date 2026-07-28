@@ -90,15 +90,7 @@ func cloneAppGeneratedEnvSpecMap(in map[string]model.AppGeneratedEnvSpec) map[st
 }
 
 func cloneAppPostgresSpec(spec *model.AppPostgresSpec) *model.AppPostgresSpec {
-	if spec == nil {
-		return nil
-	}
-	out := *spec
-	if spec.Resources != nil {
-		resources := *spec.Resources
-		out.Resources = &resources
-	}
-	return &out
+	return model.CloneAppPostgresSpec(spec)
 }
 
 func legacyWorkspacePersistentStorageSpec(workspace *model.AppWorkspaceSpec) *model.AppPersistentStorageSpec {

@@ -309,12 +309,7 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		out.RightSizing = &rightSizing
 	}
 	if spec.Postgres != nil {
-		postgres := *spec.Postgres
-		if spec.Postgres.Resources != nil {
-			resources := *spec.Postgres.Resources
-			postgres.Resources = &resources
-		}
-		out.Postgres = &postgres
+		out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
 	}
 	model.ApplyAppSpecDefaults(&out)
 	return out
@@ -416,14 +411,7 @@ func cloneBackingService(service model.BackingService) model.BackingService {
 
 func cloneBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
 	out := spec
-	if spec.Postgres != nil {
-		postgres := *spec.Postgres
-		if spec.Postgres.Resources != nil {
-			resources := *spec.Postgres.Resources
-			postgres.Resources = &resources
-		}
-		out.Postgres = &postgres
-	}
+	out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
 	return out
 }
 

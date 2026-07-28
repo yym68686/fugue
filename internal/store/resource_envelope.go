@@ -46,10 +46,7 @@ func (s *Store) GetTenantResourceCommitment(tenantID string) (model.BillingResou
 		if service.Spec.Postgres.Suspended {
 			continue
 		}
-		resources := model.DefaultManagedPostgresResources()
-		if service.Spec.Postgres.Resources != nil {
-			resources = *service.Spec.Postgres.Resources
-		}
+		resources := model.ManagedPostgresRuntimeResources(*service.Spec.Postgres)
 		total.CPUMilliCores += resources.CPUMilliCores
 		total.MemoryMebibytes += resources.MemoryMebibytes
 	}

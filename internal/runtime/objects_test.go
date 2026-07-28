@@ -38,6 +38,10 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 					CPUMilliCores:   500,
 					MemoryMebibytes: 1024,
 				},
+				RuntimeResources: &model.ResourceSpec{
+					CPUMilliCores:   750,
+					MemoryMebibytes: 2048,
+				},
 			},
 		},
 	}
@@ -97,6 +101,9 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 	if got := clusterRequests["memory"]; got != "1024Mi" {
 		t.Fatalf("expected postgres memory request 1024Mi, got %#v", got)
+	}
+	if got := clusterRequests["cpu"]; got == "750m" {
+		t.Fatalf("runtime target must not be rendered into CNPG bootstrap resources, got %#v", clusterRequests)
 	}
 	clusterLimits := resourceStringValues(t, clusterResources["limits"])
 	if got := clusterLimits["memory"]; got != "1536Mi" {

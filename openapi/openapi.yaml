@@ -15622,6 +15622,12 @@ components:
           description: Whether the managed Postgres service is configured to hibernate with its PVCs retained. Change this state only through the backing-service suspend and resume endpoints.
         resources:
           $ref: "#/components/schemas/ResourceSpec"
+          description: Bootstrap resource template used when CNPG creates or recreates a PostgreSQL Pod. Changing this field may require a maintenance rollout.
+        runtime_resources:
+          allOf:
+            - $ref: "#/components/schemas/ResourceSpec"
+          readOnly: true
+          description: Fugue's persisted in-place runtime resource target. It is not rendered into CNPG Cluster.spec.resources and is changed only by the dedicated database resize operation.
     BackingServiceSpec:
       type: object
       additionalProperties: false

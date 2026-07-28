@@ -61,6 +61,9 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 	if tenantID == "" || projectID == "" || strings.TrimSpace(name) == "" {
 		return model.BackingService{}, ErrInvalidInput
 	}
+	if err := reconcileManagedPostgresRuntimeResources(spec.Postgres, nil); err != nil {
+		return model.BackingService{}, err
+	}
 	if spec.Postgres != nil && spec.Postgres.Suspended {
 		return model.BackingService{}, ErrInvalidInput
 	}
@@ -167,6 +170,9 @@ func (s *Store) UpdateBackingServiceSpec(id string, spec model.BackingServiceSpe
 		}
 		beforeRuntimeID := backingServiceSpecRuntimeID(next)
 		if err := validateManagedPostgresSuspensionTransition(spec.Postgres, next.Spec.Postgres); err != nil {
+			return err
+		}
+		if err := reconcileManagedPostgresRuntimeResources(spec.Postgres, next.Spec.Postgres); err != nil {
 			return err
 		}
 		next.Spec = cloneBackingServiceSpec(spec)
@@ -317,6 +323,9 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if serviceIndex := findOwnedBackingServiceByAppAndType(state, app.ID, model.BackingServiceTypePostgres); serviceIndex >= 0 {
 		now := time.Now().UTC()
 		service := cloneBackingService(state.BackingServices[serviceIndex])
+		if err := reconcileManagedPostgresRuntimeResources(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
+			return err
+		}
 		if err := ensureManagedPostgresPasswordWithExisting(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
 			return err
 		}
@@ -343,6 +352,9 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 		return nil
 	}
 
+	if err := reconcileManagedPostgresRuntimeResources(desiredSpec.Postgres, nil); err != nil {
+		return err
+	}
 	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
 		return err
 	}
@@ -391,11 +403,7 @@ func applyManagedPostgresLifecycleState(state *model.State, app *model.App, op *
 	if op.DesiredSpec.Postgres.Suspended != wantSuspended {
 		return ErrInvalidInput
 	}
-	postgres := *service.Spec.Postgres
-	if service.Spec.Postgres.Resources != nil {
-		resources := *service.Spec.Postgres.Resources
-		postgres.Resources = &resources
-	}
+	postgres := *model.CloneAppPostgresSpec(service.Spec.Postgres)
 	postgres.Suspended = wantSuspended
 	service.Spec.Postgres = &postgres
 	service.UpdatedAt = time.Now().UTC()
@@ -463,14 +471,7 @@ func cloneBackingService(service model.BackingService) model.BackingService {
 
 func cloneBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
 	out := spec
-	if spec.Postgres != nil {
-		postgres := *spec.Postgres
-		if spec.Postgres.Resources != nil {
-			resources := *spec.Postgres.Resources
-			postgres.Resources = &resources
-		}
-		out.Postgres = &postgres
-	}
+	out.Postgres = model.CloneAppPostgresSpec(spec.Postgres)
 	return out
 }
 
@@ -589,6 +590,29 @@ func validateManagedPostgresSpecForAppName(appName string, spec *model.AppPostgr
 	return nil
 }
 
+// reconcileManagedPostgresRuntimeResources makes RuntimeResources a
+// server-owned field for every ordinary app and backing-service mutation. A
+// caller may round-trip the exact current value, but cannot create or change
+// it. Omitting the read-only field preserves the persisted target. The
+// dedicated in-place resize operation updates it through a narrower store
+// transaction instead of this helper.
+func reconcileManagedPostgresRuntimeResources(desired, current *model.AppPostgresSpec) error {
+	if desired == nil {
+		return nil
+	}
+	if desired.RuntimeResources != nil {
+		if current == nil || current.RuntimeResources == nil || *desired.RuntimeResources != *current.RuntimeResources {
+			return ErrInvalidInput
+		}
+	}
+	if current == nil {
+		desired.RuntimeResources = nil
+		return nil
+	}
+	desired.RuntimeResources = model.CloneResourceSpec(current.RuntimeResources)
+	return nil
+}
+
 func normalizeBindingForPersist(binding *model.ServiceBinding, service model.BackingService) error {
 	if binding == nil {
 		return ErrInvalidInput
@@ -609,7 +633,7 @@ func normalizeBindingForPersist(binding *model.ServiceBinding, service model.Bac
 }
 
 func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPostgresSpec) model.AppPostgresSpec {
-	out := spec
+	out := *model.CloneAppPostgresSpec(&spec)
 	resourceName := postgresServiceNameForApp(appName)
 	out.Image = model.NormalizeManagedPostgresImage(out.Image)
 	if strings.TrimSpace(out.Image) == "" {
@@ -808,11 +832,7 @@ func prepareManagedPostgresLifecycleOperation(app model.App, op *model.Operation
 	if op.DesiredSpec == nil {
 		return ErrInvalidInput
 	}
-	postgresCopy := target.Postgres
-	if target.Postgres.Resources != nil {
-		resources := *target.Postgres.Resources
-		postgresCopy.Resources = &resources
-	}
+	postgresCopy := *model.CloneAppPostgresSpec(&target.Postgres)
 	postgresCopy.Suspended = suspended
 	op.DesiredSpec.Postgres = &postgresCopy
 	op.ServiceID = strings.TrimSpace(target.ServiceID)
@@ -1023,12 +1043,7 @@ func ManagedPostgresSpecForOperation(app model.App, serviceID string) *model.App
 	if err != nil || target == nil {
 		return nil
 	}
-	postgres := target.Postgres
-	if target.Postgres.Resources != nil {
-		resources := *target.Postgres.Resources
-		postgres.Resources = &resources
-	}
-	return &postgres
+	return model.CloneAppPostgresSpec(&target.Postgres)
 }
 
 func appHasBindingToServiceID(app model.App, serviceID string) bool {
