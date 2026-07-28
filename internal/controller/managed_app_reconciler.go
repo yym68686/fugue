@@ -398,8 +398,10 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	}
 
 	status := buildManagedAppStatus(managed, app, deployment, found, appPods, backingServiceStatuses, releaseKey)
-	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
-		return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
+	if !managedAppStatusEquivalent(managed.Status, status) {
+		if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+			return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
+		}
 	}
 	s.sampleManagedAppReadyEndpoints(ctx, client, namespace, app, status)
 	if err := s.Store.SyncManagedAppRuntimeStatus(app.ID, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
@@ -1210,6 +1212,15 @@ func managedAppBaseStatus(managed runtime.ManagedAppObject, app model.App) runti
 		LastAppliedSpecHash: runtime.ManagedAppSpecHash(managed.Spec),
 		LastAppliedTime:     time.Now().UTC().Format(time.RFC3339Nano),
 	}
+}
+
+func managedAppStatusEquivalent(left, right runtime.ManagedAppStatus) bool {
+	// LastAppliedTime is refreshed while constructing a status snapshot. It is
+	// bookkeeping, not an observed-state change, so it must not turn every
+	// background reconcile into a status PATCH.
+	left.LastAppliedTime = ""
+	right.LastAppliedTime = ""
+	return reflect.DeepEqual(left, right)
 }
 
 func hasDeploymentFailureCondition(conditions []runtime.ManagedAppCondition) bool {

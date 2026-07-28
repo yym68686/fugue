@@ -3113,11 +3113,11 @@ image_cache_strategy_target_fingerprints_match() {
     "75fdaa91fff878ca633d25671c3a2ae4c06753cb58e3ed9b9804176c4de145f7" || return 1
   file_sha256_matches \
     "${REPO_ROOT}/deploy/helm/fugue/values.yaml" \
-    "ef7c40d258eaa4a5a16234cd9dd2edc826932ccfa6d5d9775385e076e2eeab17" || return 1
+    "c32b81e8573e48a92415471dd928bc8b83dc89c0d8c8403e93432c16d7a9c778" || return 1
   CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" \
-    EXPECTED_SHA256_CURRENT="9da1e73f07da41de2a97c6e053833c08594aac2dfe1db90bb90e18a9d9561069" \
-    EXPECTED_SHA256_SOURCE_COMMIT="44ae926b41a24d5208b0e7a22919ab852cb8a399381cf2cc62855946ccf59cac" \
-    EXPECTED_SHA256_SOURCE_COMMIT_GUARDED="e01462a513b70352932d7dae8e4ce3622d46c91be4066dda33c106a3fef201df" \
+    EXPECTED_SHA256_CURRENT="f9dadabde9ee2e66f59721aab2eacebd28e1abea121138e05f4b11248e2792a2" \
+    EXPECTED_SHA256_SOURCE_COMMIT="c0454fe503aec2a37a06bf7127337cd739206d57d1b83661d874a5d0479740ea" \
+    EXPECTED_SHA256_SOURCE_COMMIT_GUARDED="0328a391156b8a4374e7631f128cd6a3abb555a5fdec5069de9cb63a00be0415" \
     python3 -c '
 import hashlib
 import os
@@ -10933,6 +10933,7 @@ with_frozen_control_plane_helm_upgrade_argv() {
     --set controller.replicaCount="${FUGUE_CONTROLLER_REPLICA_COUNT}"
     --set-string controller.pollInterval=15s
     --set-string controller.fallbackPollInterval=30s
+    --set-string controller.managedAppReconcileFallbackInterval=5m
     --set controller.terminationGracePeriodSeconds=30
     --set controller.podDisruptionBudget.enabled=true
     --set controller.podDisruptionBudget.minAvailable=1

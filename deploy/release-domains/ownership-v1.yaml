@@ -643,6 +643,10 @@ valueRules:
     glob: deploy/helm/fugue/values*.yaml
     pointer: /controller/fallbackPollInterval
     domain: control-plane
+  - id: values-controller-managed-app-reconcile-fallback-interval
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/managedAppReconcileFallbackInterval
+    domain: control-plane
   - id: values-controller-runtime-offline-after
     glob: deploy/helm/fugue/values*.yaml
     pointer: /controller/runtimeOfflineAfter

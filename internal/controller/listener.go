@@ -10,8 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func listenForOperationEvents(ctx context.Context, logger *log.Logger, databaseURL string) <-chan struct{} {
-	events := make(chan struct{}, 1)
+func listenForOperationEvents(ctx context.Context, logger *log.Logger, databaseURL string) <-chan string {
+	events := make(chan string, 16)
 	if databaseURL == "" {
 		close(events)
 		return events
@@ -45,11 +45,6 @@ func listenForOperationEvents(ctx context.Context, logger *log.Logger, databaseU
 				continue
 			}
 
-			select {
-			case events <- struct{}{}:
-			default:
-			}
-
 			for {
 				if ctx.Err() != nil {
 					_ = conn.Close(context.Background())
@@ -62,9 +57,14 @@ func listenForOperationEvents(ctx context.Context, logger *log.Logger, databaseU
 					break
 				}
 				if notification != nil {
+					// The payload is the operation ID. Keep the notification
+					// targeted so the controller can reconcile one app instead
+					// of scanning every ManagedApp after each operation update.
 					select {
-					case events <- struct{}{}:
+					case events <- notification.Payload:
 					default:
+						// A full fallback scan will repair any notification that
+						// was dropped while the controller was busy.
 					}
 				}
 			}

@@ -194,6 +194,8 @@ spec:
               value: {{ .Values.controller.pollInterval | quote }}
             - name: FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL
               value: {{ .Values.controller.fallbackPollInterval | quote }}
+            - name: FUGUE_CONTROLLER_MANAGED_APP_RECONCILE_FALLBACK_INTERVAL
+              value: {{ .Values.controller.managedAppReconcileFallbackInterval | quote }}
             - name: FUGUE_CONTROLLER_FOREGROUND_ACTIVATE_WORKERS
               value: {{ .Values.controller.foregroundActivateWorkers | quote }}
             - name: FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS

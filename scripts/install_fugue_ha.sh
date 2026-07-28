@@ -2381,6 +2381,7 @@ controller:
     pullPolicy: IfNotPresent
   pollInterval: "15s"
   fallbackPollInterval: "30s"
+  managedAppReconcileFallbackInterval: "5m"
   kubectlApply: true
   terminationGracePeriodSeconds: 30
   leaderElection:

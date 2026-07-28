@@ -42,6 +42,7 @@ controller:
   imageRetentionSweepTimeout: 5m
   pollInterval: 15s
   fallbackPollInterval: 30s
+  managedAppReconcileFallbackInterval: 5m
   runtimeOfflineAfter: 90s
   kubectlApply: true
   leaderElection:
