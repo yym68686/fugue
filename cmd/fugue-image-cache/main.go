@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"net"
@@ -96,6 +97,18 @@ type sourceCacheEntry struct {
 type manifestDescriptor struct {
 	MediaType string `json:"mediaType"`
 	Digest    string `json:"digest"`
+	Size      *int64 `json:"size,omitempty"`
+}
+
+type imageManifestDocument struct {
+	MediaType     string               `json:"mediaType"`
+	SchemaVersion int                  `json:"schemaVersion"`
+	Config        *manifestDescriptor  `json:"config"`
+	Layers        []manifestDescriptor `json:"layers"`
+	Manifests     []manifestDescriptor `json:"manifests"`
+	FSLayers      []struct {
+		BlobSum string `json:"blobSum"`
+	} `json:"fsLayers"`
 }
 
 type imageLocation struct {
@@ -361,15 +374,25 @@ func (c *imageCache) handleManagementVerify(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	repo, target := c.managementRepoTarget(req.ImageRef, req.Repo, req.Target, req.Digest)
-	available := repo != "" && target != "" && c.localManifestAvailable(repo, target)
+	check, err := c.checkLocalImageGraph(r.Context(), repo, target, true)
+	available := err == nil
+	verificationError := ""
+	if err != nil {
+		verificationError = err.Error()
+	}
 	status := http.StatusOK
 	if !available {
 		status = http.StatusNotFound
 	}
 	writeManagementJSON(w, status, map[string]any{
-		"repo":      repo,
-		"target":    target,
-		"available": available,
+		"repo":                  repo,
+		"target":                target,
+		"available":             available,
+		"canonical_digest":      check.CanonicalDigest,
+		"referenced_blobs":      check.ReferencedBlobs,
+		"referenced_manifests":  check.ReferencedManifests,
+		"referenced_blob_bytes": check.ReferencedBlobBytes,
+		"error":                 verificationError,
 	})
 }
 
@@ -392,34 +415,47 @@ func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	ctx := r.Context()
+	logicalRef, digest := imageRef(c.registryBase, repo, target)
+	if digest == "" {
+		digest = strings.TrimSpace(req.Digest)
+	}
+	fail := func(err error) {
+		if reportErr := c.report(ctx, logicalRef, digest, "failed", err.Error()); reportErr != nil {
+			log.Printf("report failed replicated image ref=%s failed: %v", logicalRef, reportErr)
+		}
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
 	if source := trimRegistryBase(req.SourceCacheEndpoint); source != "" {
 		peerRef, _ := imageRef(source, repo, target)
 		localRef, _ := imageRef(c.localBase, repo, target)
 		if err := c.copyImage(ctx, peerRef, localRef); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			fail(fmt.Errorf("copy image: %w", err))
 			return
 		}
 		if err := c.ensureLocalManifest(ctx, source, repo, target); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			fail(fmt.Errorf("persist local manifest: %w", err))
 			return
 		}
 	} else if err := c.hydrate(ctx, repo, target); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		fail(fmt.Errorf("hydrate image: %w", err))
 		return
 	}
-	logicalRef, digest := imageRef(c.registryBase, repo, target)
-	if digest == "" {
-		digest = strings.TrimSpace(req.Digest)
+	check, err := c.checkLocalImageGraph(ctx, repo, target, true)
+	if err != nil {
+		fail(fmt.Errorf("verify replicated image graph: %w", err))
+		return
 	}
 	if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
 		http.Error(w, fmt.Sprintf("report replicated image location: %v", err), http.StatusBadGateway)
 		return
 	}
 	writeManagementJSON(w, http.StatusOK, map[string]any{
-		"repo":      repo,
-		"target":    target,
-		"task_id":   strings.TrimSpace(req.TaskID),
-		"available": c.localManifestAvailable(repo, target),
+		"repo":                  repo,
+		"target":                target,
+		"task_id":               strings.TrimSpace(req.TaskID),
+		"available":             true,
+		"canonical_digest":      check.CanonicalDigest,
+		"referenced_blob_bytes": check.ReferencedBlobBytes,
 	})
 }
 
@@ -1286,15 +1322,19 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 	}
 	out := []map[string]any{}
 	for _, record := range records {
-		// Persisted metadata is only a restart journal. A manifest list/index can
-		// remain on disk after one of its child manifests has disappeared, in
-		// which case replay rejects it and the local registry cannot serve it.
-		// Inventory is consumed as an availability signal, so only report records
-		// that the in-memory registry can actually serve.
-		if !c.localManifestAvailable(record.Repo, record.Target) {
+		// Persisted metadata is only a restart journal. A manifest can remain
+		// while a config/layer or child manifest has disappeared, so a manifest
+		// HEAD is not an availability proof. Walk the complete local graph and
+		// omit incomplete records from the inventory snapshot.
+		graph, err := c.checkLocalImageGraph(context.Background(), record.Repo, record.Target, false)
+		if err != nil {
 			continue
 		}
 		entry := manifestEntry(record, blobByDigest)
+		entry.Digest = graph.CanonicalDigest
+		entry.ReferencedBlobs = append([]string(nil), graph.ReferencedBlobs...)
+		entry.ReferencedManifests = append([]string(nil), graph.ReferencedManifests...)
+		entry.ReferencedBlobBytes = graph.ReferencedBlobBytes
 		out = append(out, map[string]any{
 			"repo":                  entry.Repo,
 			"target":                entry.Target,
@@ -2699,8 +2739,16 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 				_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
 				return err
 			}
+			if c.registry != nil {
+				if _, err := c.checkLocalImageGraph(ctx, repo, target, true); err != nil {
+					_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
+					return fmt.Errorf("verify hydrated peer image graph: %w", err)
+				}
+			}
 			log.Printf("hydrated %s from peer %s", logicalRef, peerBase)
-			_ = c.report(ctx, logicalRef, digest, "present", "")
+			if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
+				return fmt.Errorf("report hydrated peer image: %w", err)
+			}
 			return nil
 		} else {
 			log.Printf("peer hydrate %s from %s failed: %v", logicalRef, peerBase, err)
@@ -2718,8 +2766,16 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 				_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
 				return err
 			}
+			if c.registry != nil {
+				if _, err := c.checkLocalImageGraph(ctx, repo, target, true); err != nil {
+					_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
+					return fmt.Errorf("verify hydrated upstream image graph: %w", err)
+				}
+			}
 			log.Printf("hydrated %s from upstream %s", logicalRef, c.upstreamBase)
-			_ = c.report(ctx, logicalRef, digest, "present", "")
+			if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
+				return fmt.Errorf("report hydrated upstream image: %w", err)
+			}
 			return nil
 		} else {
 			_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
@@ -3012,11 +3068,43 @@ func registryObjectMissing(err error) bool {
 }
 
 func copyImage(ctx context.Context, src, dst string, jobs int) error {
-	opts := []crane.Option{crane.WithContext(ctx), crane.Insecure}
+	// A cache endpoint is also a transparent peer proxy.  crane performs
+	// existence checks before copying each descriptor; without this marker a
+	// missing destination blob can be satisfied by the source proxy and crane
+	// incorrectly concludes that the destination already owns the blob.  Keep
+	// every request in a replication operation local-only, including the
+	// destination checks.  Registry writes ignore the marker, while cache
+	// reads use it to disable peer/upstream fallback.
+	opts := []crane.Option{
+		crane.WithContext(ctx),
+		crane.Insecure,
+		crane.WithTransport(localOnlyRoundTripper{base: http.DefaultTransport}),
+	}
 	if jobs > 0 {
 		opts = append(opts, crane.WithJobs(jobs))
 	}
 	return crane.Copy(src, dst, opts...)
+}
+
+type localOnlyRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t localOnlyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, errors.New("nil registry request")
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
+	clone.Header.Set(imageCacheLocalOnlyHeader, "1")
+	return base.RoundTrip(clone)
 }
 
 func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, target string) error {
@@ -3027,7 +3115,10 @@ func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, re
 	if c == nil || c.registry == nil {
 		return nil
 	}
-	if c.localManifestAvailable(repo, target) {
+	// A manifest can survive while its config/layers have been pruned.  Treat
+	// the whole local graph as the cache hit; a manifest HEAD alone is not
+	// enough to skip hydration.
+	if _, err := c.checkLocalImageGraph(ctx, repo, target, false); err == nil {
 		return nil
 	}
 	key := sourceCacheKey(registryTargetManifest, repo, target)
@@ -3063,6 +3154,272 @@ func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, re
 		return fmt.Errorf("hydrated manifest is still unavailable locally for %s:%s", repo, target)
 	}
 	return nil
+}
+
+// localImageGraphResult is the evidence returned by a local image graph
+// check.  Referenced blobs and child manifests are deduplicated across the
+// complete graph (not just the root manifest), so callers can safely use the
+// byte count as an availability signal.
+type localImageGraphResult struct {
+	CanonicalDigest     string
+	ReferencedBlobs     []string
+	ReferencedManifests []string
+	ReferencedBlobBytes int64
+}
+
+// checkLocalImageGraph verifies that a manifest and every object it references
+// are available from this cache's local registry.  verifyBlobDigests controls
+// the expensive content hash pass: management verify and replication use
+// true, while periodic inventory uses false but still requires every blob to
+// exist locally with the declared size.
+func (c *imageCache) checkLocalImageGraph(ctx context.Context, repo, target string, verifyBlobDigests bool) (localImageGraphResult, error) {
+	if c == nil || c.registry == nil {
+		return localImageGraphResult{}, errors.New("local image registry is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	target = strings.TrimSpace(target)
+	if repo == "" || target == "" {
+		return localImageGraphResult{}, errors.New("image repo and target are required")
+	}
+
+	result := localImageGraphResult{}
+	seenManifests := map[string]struct{}{}
+	seenBlobs := map[string]int64{}
+	appendUnique := func(values *[]string, value string) {
+		for _, existing := range *values {
+			if existing == value {
+				return
+			}
+		}
+		*values = append(*values, value)
+	}
+
+	var visitManifest func(string, string, *int64, bool) error
+	visitManifest = func(manifestTarget, expectedDigest string, expectedSize *int64, root bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		body, err := c.localManifestBody(ctx, repo, manifestTarget)
+		if err != nil {
+			return err
+		}
+		if expectedSize != nil && int64(len(body)) != *expectedSize {
+			return fmt.Errorf("manifest %s has size %d, want %d", manifestTarget, len(body), *expectedSize)
+		}
+		actualDigest, err := strictImageCacheDigest(manifestBodyDigest(body))
+		if err != nil {
+			return fmt.Errorf("manifest %s has invalid canonical digest: %w", manifestTarget, err)
+		}
+		if expectedDigest != "" && actualDigest != expectedDigest {
+			return fmt.Errorf("manifest %s digest mismatch: got %s want %s", manifestTarget, actualDigest, expectedDigest)
+		}
+		if root {
+			result.CanonicalDigest = actualDigest
+		}
+		manifestKey := repo + "\x00" + actualDigest
+		if _, seen := seenManifests[manifestKey]; seen {
+			return nil
+		}
+		seenManifests[manifestKey] = struct{}{}
+
+		doc, err := decodeImageManifest(body)
+		if err != nil {
+			return fmt.Errorf("decode manifest %s: %w", manifestTarget, err)
+		}
+		checkBlob := func(descriptor manifestDescriptor, kind string) error {
+			digest, err := strictImageCacheDigest(descriptor.Digest)
+			if err != nil {
+				return fmt.Errorf("%s descriptor has invalid digest %q: %w", kind, descriptor.Digest, err)
+			}
+			var expected *int64
+			if descriptor.Size != nil {
+				size := *descriptor.Size
+				if size < 0 {
+					return fmt.Errorf("%s %s has negative size", kind, digest)
+				}
+				expected = &size
+			}
+			if previous, ok := seenBlobs[digest]; ok {
+				if expected != nil && previous != *expected {
+					return fmt.Errorf("blob %s has conflicting sizes %d and %d", digest, previous, *expected)
+				}
+				appendUnique(&result.ReferencedBlobs, digest)
+				return nil
+			}
+			actualSize, err := c.checkLocalImageBlob(ctx, repo, digest, expected, verifyBlobDigests)
+			if err != nil {
+				return fmt.Errorf("%s blob %s: %w", kind, digest, err)
+			}
+			seenBlobs[digest] = actualSize
+			result.ReferencedBlobBytes += actualSize
+			appendUnique(&result.ReferencedBlobs, digest)
+			return nil
+		}
+
+		if doc.Config != nil {
+			if err := checkBlob(*doc.Config, "config"); err != nil {
+				return err
+			}
+		}
+		for _, layer := range doc.Layers {
+			if err := checkBlob(layer, "layer"); err != nil {
+				return err
+			}
+		}
+		for _, layer := range doc.FSLayers {
+			if err := checkBlob(manifestDescriptor{Digest: layer.BlobSum}, "schema1 layer"); err != nil {
+				return err
+			}
+		}
+		for _, child := range doc.Manifests {
+			childDigest, err := strictImageCacheDigest(child.Digest)
+			if err != nil {
+				return fmt.Errorf("child manifest has invalid digest %q: %w", child.Digest, err)
+			}
+			appendUnique(&result.ReferencedManifests, childDigest)
+			if err := visitManifest(childDigest, childDigest, child.Size, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	requestedDigest := ""
+	if normalized := normalizeImageCacheDigest(target); normalized != "" {
+		requestedDigest, _ = strictImageCacheDigest(normalized)
+	}
+	if err := visitManifest(target, requestedDigest, nil, true); err != nil {
+		return localImageGraphResult{}, err
+	}
+	return result, nil
+}
+
+func strictImageCacheDigest(value string) (string, error) {
+	digest := normalizeImageCacheDigest(value)
+	parts := strings.SplitN(digest, ":", 2)
+	if len(parts) != 2 || parts[0] != "sha256" || len(parts[1]) != sha256.Size*2 {
+		return "", fmt.Errorf("expected sha256 digest")
+	}
+	return digest, nil
+}
+
+func decodeImageManifest(body []byte) (imageManifestDocument, error) {
+	var doc imageManifestDocument
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return doc, err
+	}
+	if doc.SchemaVersion != 1 && doc.SchemaVersion != 2 {
+		return doc, fmt.Errorf("unsupported schemaVersion %d", doc.SchemaVersion)
+	}
+	if doc.SchemaVersion == 2 {
+		switch {
+		case len(doc.Manifests) > 0 && doc.Config != nil:
+			return doc, errors.New("schema2 index cannot contain an image config")
+		case len(doc.Manifests) > 0 && len(doc.Layers) > 0:
+			return doc, errors.New("schema2 index cannot contain image layers")
+		case len(doc.Manifests) == 0 && doc.Config == nil:
+			return doc, errors.New("schema2 image manifest requires a config descriptor")
+		}
+	}
+	return doc, nil
+}
+
+func (c *imageCache) localManifestBody(ctx context.Context, repo, target string) ([]byte, error) {
+	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + strings.TrimSpace(target)
+	req := httptestRequest(http.MethodGet, path, "", nil).WithContext(ctx)
+	rec := &memoryResponseWriter{header: http.Header{}}
+	c.registry.ServeHTTP(rec, req)
+	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
+		return nil, fmt.Errorf("local manifest %s status=%d body=%s", target, rec.statusCode(), strings.TrimSpace(rec.body.String()))
+	}
+	if rec.body.Len() == 0 || rec.body.Len() > maxProxiedManifestBytes {
+		return nil, fmt.Errorf("local manifest %s has invalid size %d", target, rec.body.Len())
+	}
+	return append([]byte(nil), rec.body.Bytes()...), nil
+}
+
+func (c *imageCache) checkLocalImageBlob(ctx context.Context, repo, digest string, expectedSize *int64, verifyDigest bool) (int64, error) {
+	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/blobs/" + digest
+	if !verifyDigest {
+		req := httptestRequest(http.MethodHead, path, "", nil).WithContext(ctx)
+		rec := &memoryResponseWriter{header: http.Header{}}
+		c.registry.ServeHTTP(rec, req)
+		if rec.statusCode() < 200 || rec.statusCode() >= 300 {
+			return 0, fmt.Errorf("local status=%d", rec.statusCode())
+		}
+		actualSize := int64(-1)
+		if raw := strings.TrimSpace(rec.Header().Get("Content-Length")); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				actualSize = parsed
+			}
+		}
+		if actualSize < 0 {
+			if blobPath, err := imageCacheBlobStorePath(c.storeDir, digest); err == nil {
+				if info, err := os.Stat(blobPath); err == nil {
+					actualSize = info.Size()
+				}
+			}
+		}
+		if expectedSize != nil && actualSize >= 0 && actualSize != *expectedSize {
+			return 0, fmt.Errorf("size %d want %d", actualSize, *expectedSize)
+		}
+		if actualSize < 0 {
+			// Inventory is an availability signal used by placement. A blob
+			// whose size cannot be established is not safe to advertise: a
+			// zero byte count would recreate the manifest-only false positive.
+			return 0, errors.New("local blob size is unavailable")
+		}
+		return actualSize, nil
+	}
+
+	req := httptestRequest(http.MethodGet, path, "", nil).WithContext(ctx)
+	rec := &digestResponseWriter{header: http.Header{}, hasher: sha256.New()}
+	c.registry.ServeHTTP(rec, req)
+	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
+		return 0, fmt.Errorf("local status=%d", rec.statusCode())
+	}
+	if expectedSize != nil && rec.size != *expectedSize {
+		return 0, fmt.Errorf("size %d want %d", rec.size, *expectedSize)
+	}
+	actual := "sha256:" + hex.EncodeToString(rec.hasher.Sum(nil))
+	if actual != digest {
+		return 0, fmt.Errorf("digest %s want %s", actual, digest)
+	}
+	return rec.size, nil
+}
+
+type digestResponseWriter struct {
+	header http.Header
+	status int
+	hasher hash.Hash
+	size   int64
+}
+
+func (w *digestResponseWriter) Header() http.Header { return w.header }
+
+func (w *digestResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *digestResponseWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.hasher.Write(data)
+	w.size += int64(n)
+	return n, err
+}
+
+func (w *digestResponseWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
 }
 
 func (c *imageCache) localManifestAvailable(repo, target string) bool {

@@ -176,6 +176,52 @@ func TestManagementReplicateFailsWhenLocationReportFails(t *testing.T) {
 	}
 }
 
+func TestManagementReplicateReportsCopyFailure(t *testing.T) {
+	t.Parallel()
+
+	var statuses atomic.Int32
+	reportAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/image-locations" {
+			t.Fatalf("unexpected report request %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse report form: %v", err)
+		}
+		if r.Form.Get("status") == "failed" {
+			statuses.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(reportAPI.Close)
+
+	cache := &imageCache{
+		apiBase:         reportAPI.URL,
+		apiToken:        "token",
+		reportPath:      "/v1/image-locations",
+		registryBase:    "registry.fugue.internal:5000",
+		localBase:       "127.0.0.1:5000",
+		cacheEndpoint:   "http://10.0.0.2:5000",
+		managementToken: "token",
+		httpClient:      reportAPI.Client(),
+		copyImageFn: func(context.Context, string, string) error {
+			return errors.New("source cache unavailable")
+		},
+		registry: registry.New(),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/fugue/cache/v1/replicate", strings.NewReader(`{"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-copy","source_cache_endpoint":"10.0.0.3:5000"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("replicate copy failure status = %d, want %d; body=%q", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if statuses.Load() != 1 {
+		t.Fatalf("failed copy report count = %d, want 1", statuses.Load())
+	}
+}
+
 func TestManagementRepoTargetPreservesRepositoryPathWithoutRegistryHost(t *testing.T) {
 	t.Parallel()
 
@@ -702,6 +748,221 @@ func TestLocalOnlyRegistryPullDoesNotCascade(t *testing.T) {
 	}
 }
 
+func TestManagementVerifyRequiresCompleteOCIReferences(t *testing.T) {
+	t.Parallel()
+
+	const configBody = "{}"
+	const layerBody = "x"
+	configDigest := testImageCacheBlobDigest([]byte(configBody))
+	layerDigest := testImageCacheBlobDigest([]byte(layerBody))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+
+	missing := &imageCache{
+		registry: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/manifests/image-missing") && r.Method == http.MethodGet:
+				w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+				_, _ = io.WriteString(w, manifest)
+			case strings.HasSuffix(r.URL.Path, "/manifests/image-missing") && r.Method == http.MethodHead:
+				w.WriteHeader(http.StatusOK)
+			default:
+				http.NotFound(w, r)
+			}
+		}),
+	}
+	missingReq := httptest.NewRequest(http.MethodPost, "http://image-cache.test/fugue/cache/v1/verify", strings.NewReader(`{"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-missing"}`))
+	missingRec := httptest.NewRecorder()
+	missing.handleManagementVerify(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("manifest-only verify status = %d, want %d; body=%s", missingRec.Code, http.StatusNotFound, missingRec.Body.String())
+	}
+	var missingResponse map[string]any
+	if err := json.Unmarshal(missingRec.Body.Bytes(), &missingResponse); err != nil {
+		t.Fatalf("decode manifest-only verify response: %v", err)
+	}
+	if available, _ := missingResponse["available"].(bool); available {
+		t.Fatalf("manifest-only image was reported available: %v", missingResponse)
+	}
+
+	storeDir := t.TempDir()
+	complete := &imageCache{
+		registry: registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+	}
+	writeTestImageCacheBlob(t, storeDir, []byte(configBody))
+	writeTestImageCacheBlob(t, storeDir, []byte(layerBody))
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-complete", strings.NewReader(manifest))
+	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+	putRec := httptest.NewRecorder()
+	complete.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("complete manifest put status = %d, want %d; body=%s", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+	completeReq := httptest.NewRequest(http.MethodPost, "http://image-cache.test/fugue/cache/v1/verify", strings.NewReader(`{"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-complete"}`))
+	completeRec := httptest.NewRecorder()
+	complete.handleManagementVerify(completeRec, completeReq)
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("complete verify status = %d, want %d; body=%s", completeRec.Code, http.StatusOK, completeRec.Body.String())
+	}
+	var completeResponse struct {
+		Available           bool     `json:"available"`
+		CanonicalDigest     string   `json:"canonical_digest"`
+		ReferencedBlobs     []string `json:"referenced_blobs"`
+		ReferencedBlobBytes int64    `json:"referenced_blob_bytes"`
+	}
+	if err := json.Unmarshal(completeRec.Body.Bytes(), &completeResponse); err != nil {
+		t.Fatalf("decode complete verify response: %v", err)
+	}
+	if !completeResponse.Available || completeResponse.CanonicalDigest != manifestBodyDigest([]byte(manifest)) {
+		t.Fatalf("complete graph verification = %+v", completeResponse)
+	}
+	if len(completeResponse.ReferencedBlobs) != 2 || completeResponse.ReferencedBlobBytes != int64(len(configBody)+len(layerBody)) {
+		t.Fatalf("complete graph references = %+v", completeResponse)
+	}
+}
+
+func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+	}
+	configDigest := testImageCacheBlobDigest([]byte("{}"))
+	layerDigest := testImageCacheBlobDigest([]byte("x"))
+	manifest := []byte(testImageCacheManifest(configDigest, layerDigest))
+	if err := cache.persistManifest("fugue-apps/demo", "image-incomplete", "application/vnd.oci.image.manifest.v1+json", manifest); err != nil {
+		t.Fatalf("persist manifest journal: %v", err)
+	}
+	if err := cache.replayManifest(persistedManifest{Repo: "fugue-apps/demo", Target: "image-incomplete", ContentType: "application/vnd.oci.image.manifest.v1+json", Body: manifest}); err != nil {
+		t.Fatalf("replay manifest: %v", err)
+	}
+	inventory, err := cache.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("incomplete inventory: %v", err)
+	}
+	if len(inventory) != 0 {
+		t.Fatalf("manifest-only record was advertised: %+v", inventory)
+	}
+
+	writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	writeTestImageCacheBlob(t, storeDir, []byte("x"))
+	inventory, err = cache.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("complete inventory: %v", err)
+	}
+	if len(inventory) != 1 {
+		t.Fatalf("complete manifest inventory = %d, want 1: %+v", len(inventory), inventory)
+	}
+	for _, entry := range inventory {
+		if bytes, _ := entry["referenced_blob_bytes"].(int64); bytes != 3 {
+			t.Fatalf("referenced blob bytes = %v, want 3: %+v", entry["referenced_blob_bytes"], entry)
+		}
+		if digest, _ := entry["digest"].(string); digest != manifestBodyDigest(manifest) {
+			t.Fatalf("canonical digest = %q, want %q", digest, manifestBodyDigest(manifest))
+		}
+	}
+}
+
+func TestManagementManifestInventoryRejectsMissingChildBlob(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+	}
+	configDigest := testImageCacheBlobDigest([]byte("{}"))
+	layerDigest := testImageCacheBlobDigest([]byte("x"))
+	child := []byte(testImageCacheManifest(configDigest, layerDigest))
+	childDigest := manifestBodyDigest(child)
+	parent := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":%d,"platform":{"os":"linux","architecture":"amd64"}}]}`, childDigest, len(child)))
+	if err := cache.replayManifest(persistedManifest{Repo: "fugue-apps/demo", Target: childDigest, ContentType: "application/vnd.oci.image.manifest.v1+json", Body: child}); err != nil {
+		t.Fatalf("replay child manifest: %v", err)
+	}
+	if err := cache.replayManifest(persistedManifest{Repo: "fugue-apps/demo", Target: "image-index", ContentType: "application/vnd.docker.distribution.manifest.list.v2+json", Body: parent}); err != nil {
+		t.Fatalf("replay parent manifest: %v", err)
+	}
+	if err := cache.persistManifest("fugue-apps/demo", childDigest, "application/vnd.oci.image.manifest.v1+json", child); err != nil {
+		t.Fatalf("persist child journal: %v", err)
+	}
+	if err := cache.persistManifest("fugue-apps/demo", "image-index", "application/vnd.docker.distribution.manifest.list.v2+json", parent); err != nil {
+		t.Fatalf("persist parent journal: %v", err)
+	}
+	inventory, err := cache.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("missing child blob inventory: %v", err)
+	}
+	if len(inventory) != 0 {
+		t.Fatalf("index with missing child blobs was advertised: %+v", inventory)
+	}
+}
+
+func TestCopyImageForcesLocalOnlyOnSourceAndDestination(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	sourceCache := &imageCache{
+		registry: registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("x"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-copy", strings.NewReader(manifest))
+	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+	putRec := httptest.NewRecorder()
+	sourceCache.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("source manifest put status = %d, want %d; body=%s", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+
+	destinationDir := t.TempDir()
+	destinationCache := &imageCache{
+		storeDir: destinationDir,
+		registry: registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(destinationDir))),
+	}
+	var nonLocalSource atomic.Int32
+	var nonLocalDestination atomic.Int32
+	var destinationProxyHits atomic.Int32
+	active := atomic.Bool{}
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if active.Load() && r.Header.Get(imageCacheLocalOnlyHeader) != "1" {
+			nonLocalSource.Add(1)
+		}
+		sourceCache.ServeHTTP(w, r)
+	}))
+	t.Cleanup(source.Close)
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if active.Load() && r.Header.Get(imageCacheLocalOnlyHeader) != "1" {
+			nonLocalDestination.Add(1)
+			if strings.Contains(r.URL.Path, "/blobs/") {
+				destinationProxyHits.Add(1)
+				sourceCache.ServeHTTP(w, r)
+				return
+			}
+		}
+		destinationCache.ServeHTTP(w, r)
+	}))
+	t.Cleanup(destination.Close)
+
+	active.Store(true)
+	err := copyImage(context.Background(), strings.TrimPrefix(source.URL, "http://")+"/fugue-apps/demo:image-copy", strings.TrimPrefix(destination.URL, "http://")+"/fugue-apps/demo:image-copy", 1)
+	if err != nil {
+		t.Fatalf("copy image: %v", err)
+	}
+	if got := nonLocalSource.Load(); got != 0 {
+		t.Fatalf("source requests without local-only marker = %d", got)
+	}
+	if got := nonLocalDestination.Load(); got != 0 || destinationProxyHits.Load() != 0 {
+		t.Fatalf("destination requests bypassed local-only marker: non_local=%d proxy=%d", got, destinationProxyHits.Load())
+	}
+	if _, err := destinationCache.checkLocalImageGraph(context.Background(), "fugue-apps/demo", "image-copy", true); err != nil {
+		t.Fatalf("destination image graph incomplete after copy: %v", err)
+	}
+}
+
 func TestManifestMissMarksPeerMissingWithoutRecursiveProxy(t *testing.T) {
 	t.Parallel()
 
@@ -802,7 +1063,10 @@ func TestManifestReferencedTargetsIncludesDockerSchemaV1Layers(t *testing.T) {
 func TestHydrateEnsuresManifestWhenCopyDoesNotPopulateTag(t *testing.T) {
 	t.Parallel()
 
-	const manifest = `{"schemaVersion":1,"name":"fugue-apps/demo","tag":"image-test","fsLayers":[{"blobSum":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}`
+	// This fixture exercises manifest journaling, not blob hydration.  Keep the
+	// schema-1 graph empty so the stricter post-hydration integrity check can
+	// prove the tag was persisted without inventing a fake local layer.
+	const manifest = `{"schemaVersion":1,"name":"fugue-apps/demo","tag":"image-test","fsLayers":[]}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/fugue-apps/demo/manifests/image-test" {
 			t.Fatalf("upstream path = %q", r.URL.Path)
@@ -900,6 +1164,9 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 		manifestDir: manifestDir,
 	}
 	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`
+	if got := writeTestImageCacheBlob(t, storeDir, []byte("{}")); got != "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a" {
+		t.Fatalf("config blob digest = %s", got)
+	}
 	manifestDigest := manifestBodyDigest([]byte(manifest))
 	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", strings.NewReader(manifest))
 	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
