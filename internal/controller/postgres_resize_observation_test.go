@@ -96,11 +96,11 @@ func TestPatchPodContainerResourcesUsesResizeSubresource(t *testing.T) {
 			t.Fatalf("unexpected resize containers: %+v", patch.Spec.Containers)
 		}
 		resources := patch.Spec.Containers[0].Resources
-		if resources.Requests["cpu"] != "150m" || resources.Limits["memory"] != "1Gi" {
+		if resources.Requests["cpu"] != "150m" || resources.Requests["ephemeral-storage"] != "2Gi" || resources.Limits["memory"] != "1Gi" {
 			t.Fatalf("unexpected resize resources: %+v", resources)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"metadata":{"namespace":"tenant-a","name":"database-1","resourceVersion":"43","generation":8},"spec":{"containers":[{"name":"postgres","resources":{"requests":{"cpu":"150m","memory":"512Mi"},"limits":{"cpu":"500m","memory":"1Gi"}}}]}}`))
+		_, _ = w.Write([]byte(`{"metadata":{"namespace":"tenant-a","name":"database-1","uid":"pod-uid","resourceVersion":"43","generation":8},"spec":{"containers":[{"name":"postgres","resources":{"requests":{"cpu":"150m","memory":"512Mi","ephemeral-storage":"2Gi"},"limits":{"cpu":"500m","memory":"1Gi"}}}]}}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -114,11 +114,15 @@ func TestPatchPodContainerResourcesUsesResizeSubresource(t *testing.T) {
 		context.Background(),
 		"tenant-a",
 		"database-1",
+		"pod-uid",
 		"42",
 		managedPostgresMainContainerName,
 		kubeResourceRequirements{
-			Requests: map[string]string{"cpu": "150m", "memory": "512Mi"},
+			Requests: map[string]string{"cpu": "100m", "memory": "512Mi", "ephemeral-storage": "2Gi"},
 			Limits:   map[string]string{"cpu": "500m", "memory": "1Gi"},
+		},
+		kubeResourceRequirements{
+			Requests: map[string]string{"cpu": "150m", "memory": "512Mi"},
 		},
 	)
 	if err != nil {
@@ -136,8 +140,10 @@ func TestPatchPodContainerResourcesFailsClosed(t *testing.T) {
 			context.Background(),
 			"tenant-a",
 			"database-1",
+			"pod-uid",
 			"42",
 			managedPostgresMainContainerName,
+			kubeResourceRequirements{},
 			kubeResourceRequirements{Requests: map[string]string{"ephemeral-storage": "1Gi"}},
 		)
 		if err == nil {
@@ -155,8 +161,10 @@ func TestPatchPodContainerResourcesFailsClosed(t *testing.T) {
 			context.Background(),
 			"tenant-a",
 			"database-1",
+			"pod-uid",
 			"42",
 			managedPostgresMainContainerName,
+			kubeResourceRequirements{},
 			kubeResourceRequirements{Requests: map[string]string{"cpu": "150m"}},
 		)
 		if !errors.Is(err, errKubeConflict) {

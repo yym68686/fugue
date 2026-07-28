@@ -176,17 +176,22 @@ func (c *kubeClient) getPodResizeState(ctx context.Context, namespace, name stri
 // eligible; this method is the narrow Kubernetes transport primitive only.
 func (c *kubeClient) patchPodContainerResources(
 	ctx context.Context,
-	namespace, podName, resourceVersion, containerName string,
-	resources kubeResourceRequirements,
+	namespace, podName, podUID, resourceVersion, containerName string,
+	observedResources, resources kubeResourceRequirements,
 ) (kubeResizePod, error) {
 	namespace = strings.TrimSpace(namespace)
 	podName = strings.TrimSpace(podName)
+	podUID = strings.TrimSpace(podUID)
 	resourceVersion = strings.TrimSpace(resourceVersion)
 	containerName = strings.TrimSpace(containerName)
-	if namespace == "" || podName == "" || resourceVersion == "" || containerName == "" {
-		return kubeResizePod{}, fmt.Errorf("pod resize requires namespace, pod name, resource version, and container name")
+	if namespace == "" || podName == "" || podUID == "" || resourceVersion == "" || containerName == "" {
+		return kubeResizePod{}, fmt.Errorf("pod resize requires namespace, pod name, pod UID, resource version, and container name")
 	}
 	if err := validatePodResizeResources(resources); err != nil {
+		return kubeResizePod{}, err
+	}
+	mergedResources, err := mergePodResizeResources(observedResources, resources)
+	if err != nil {
 		return kubeResizePod{}, err
 	}
 
@@ -194,7 +199,7 @@ func (c *kubeClient) patchPodContainerResources(
 	patch.Metadata.ResourceVersion = resourceVersion
 	patch.Spec.Containers = []kubeResizeContainerSpec{{
 		Name:      containerName,
-		Resources: cloneKubeResourceRequirements(resources),
+		Resources: mergedResources,
 	}}
 	payload, err := json.Marshal(patch)
 	if err != nil {
@@ -212,7 +217,66 @@ func (c *kubeClient) patchPodContainerResources(
 	if err := json.Unmarshal(responseBody, &pod); err != nil {
 		return kubeResizePod{}, fmt.Errorf("decode pod resize response: %w", err)
 	}
+	if gotUID := strings.TrimSpace(pod.Metadata.UID); gotUID == "" || gotUID != podUID {
+		return kubeResizePod{}, fmt.Errorf("pod resize response changed pod identity: expected UID %s, got %s", podUID, gotUID)
+	}
 	return pod, nil
+}
+
+// mergePodResizeResources preserves resource dimensions that the resize caller
+// does not own. In particular, a request-only resize must not accidentally
+// remove an existing ephemeral-storage request or a limit. The Kubernetes
+// resize subresource receives the complete resource maps for the target
+// container, so replacing the maps blindly would be destructive.
+func mergePodResizeResources(current, requested kubeResourceRequirements) (kubeResourceRequirements, error) {
+	if err := validatePodResizeResources(requested); err != nil {
+		return kubeResourceRequirements{}, err
+	}
+	merged := cloneKubeResourceRequirements(current)
+	if merged.Requests == nil && len(requested.Requests) > 0 {
+		merged.Requests = map[string]string{}
+	}
+	if merged.Limits == nil && len(requested.Limits) > 0 {
+		merged.Limits = map[string]string{}
+	}
+	for name, value := range requested.Requests {
+		merged.Requests[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	for name, value := range requested.Limits {
+		merged.Limits[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	if err := validateMergedPodResourceRequirements(merged); err != nil {
+		return kubeResourceRequirements{}, err
+	}
+	return merged, nil
+}
+
+func validateMergedPodResourceRequirements(resources kubeResourceRequirements) error {
+	for field, values := range map[string]map[string]string{
+		"requests": resources.Requests,
+		"limits":   resources.Limits,
+	} {
+		for resourceName, raw := range values {
+			if strings.TrimSpace(resourceName) == "" {
+				return fmt.Errorf("pod resize %s contains an empty resource name", field)
+			}
+			quantity, err := resource.ParseQuantity(strings.TrimSpace(raw))
+			if err != nil {
+				return fmt.Errorf("parse pod resize %s.%s %q: %w", field, resourceName, raw, err)
+			}
+			if quantity.Sign() <= 0 {
+				return fmt.Errorf("pod resize %s.%s must be positive", field, resourceName)
+			}
+		}
+	}
+	for _, resourceName := range []string{"cpu", "memory"} {
+		request, hasRequest := parseResizeQuantity(resources.Requests[resourceName])
+		limit, hasLimit := parseResizeQuantity(resources.Limits[resourceName])
+		if hasRequest && hasLimit && request.Cmp(limit) > 0 {
+			return fmt.Errorf("pod resize %s request must not exceed its limit", resourceName)
+		}
+	}
+	return nil
 }
 
 func validatePodResizeResources(resources kubeResourceRequirements) error {
