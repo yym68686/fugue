@@ -84,7 +84,18 @@ case "$(basename "$0")" in
 		operational_report=""
 		if operational_report="$(fake_flag_value --operational-report "$@" 2>/dev/null)"; then
 		  [[ "${FAKE_OPERATIONAL_REPORT_ELIGIBLE:-false}" == "true" ]] || exit 2
-		  printf 'single\t%s\t%s\n' "${FAKE_DOMAIN}" "${FAKE_PLAN_DIGEST}"
+		  case "${FAKE_OPERATIONAL_REPORT_OUTCOME:-single}" in
+		    zero)
+		      : >"${bundle_dir}/operational-zero.marker" || exit 1
+		      chmod 600 "${bundle_dir}/operational-zero.marker" || exit 1
+		      printf 'zero\t%s\n' "${FAKE_PLAN_DIGEST}"
+		      ;;
+		    single)
+		      printf 'single\t%s\t%s\n' "${FAKE_DOMAIN}" "${FAKE_PLAN_DIGEST}"
+		      ;;
+		    multiple|unknown) exit 2 ;;
+		    *) exit 1 ;;
+		  esac
 		elif [[ "${FAKE_OUTCOME}" == "zero" ]]; then
           printf 'zero\t%s\n' "${FAKE_PLAN_DIGEST}"
         elif [[ "${FAKE_OUTCOME}" == "multiple" || "${FAKE_OUTCOME}" == "unknown" ]]; then
@@ -103,7 +114,9 @@ case "$(basename "$0")" in
         if [[ "${FAKE_VERIFY_FAIL_AT:-0}" == "${verify_count}" ]]; then
           exit 1
         fi
-        if [[ "${FAKE_OUTCOME}" == "zero" ]]; then
+        bundle_dir="$(fake_flag_value --bundle-dir "$@")" || exit 2
+        if [[ -f "${bundle_dir}/operational-zero.marker" ||
+          "${FAKE_OUTCOME}" == "zero" ]]; then
           printf 'zero\t%s\n' "${FAKE_PLAN_DIGEST}"
         else
           printf 'single\t%s\t%s\n' "${FAKE_DOMAIN}" "${FAKE_PLAN_DIGEST}"
@@ -634,6 +647,7 @@ setup_case() {
   FAKE_TAMPER_CLEANUP="false"
   FAKE_TAMPER_SEALED_ARGV="false"
 	FAKE_OPERATIONAL_REPORT_ELIGIBLE="false"
+  FAKE_OPERATIONAL_REPORT_OUTCOME="single"
   FAKE_SIGNAL_PRETRANSACTION="false"
   FAKE_SIGNAL_DURING_APPLY="false"
   FAKE_SIGNAL_DURING_ROLLBACK="false"
@@ -649,6 +663,7 @@ setup_case() {
   FAKE_REPOSITORY_VERIFY_COUNT=0
   export FAKE_OUTCOME FAKE_DOMAIN FAKE_PLAN_DIGEST FAKE_VERIFY_FAIL_AT FAKE_PUBLIC_FAIL
 	export FAKE_TAMPER_CLEANUP FAKE_OPERATIONAL_REPORT_ELIGIBLE
+	export FAKE_OPERATIONAL_REPORT_OUTCOME
 
   FUGUE_RELEASE_NAME="fugue"
   FUGUE_RELEASE_FULLNAME="fugue"
@@ -1350,6 +1365,89 @@ case_operational_apply_activates_complete_single_domain() {
 	assert_public_parent_and_cleanup
 }
 
+case_operational_apply_activates_verified_zero() {
+	setup_case
+	trap cleanup_case EXIT
+	FAKE_OUTCOME="unknown"
+	FAKE_DOMAIN="control-plane"
+	FAKE_OPERATIONAL_REPORT_ELIGIBLE="true"
+	FAKE_OPERATIONAL_REPORT_OUTCOME="zero"
+	export FAKE_OUTCOME FAKE_DOMAIN FAKE_OPERATIONAL_REPORT_ELIGIBLE
+	export FAKE_OPERATIONAL_REPORT_OUTCOME
+	rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	rm -rf "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL=""
+	[[ "$(run_release_status)" == "0" ]] ||
+	  fail_test "blocked prepare did not reach the durable zero-evidence boundary"
+	[[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+	  fail_test "blocked prepare published stale zero evidence"
+
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID="5678"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/5678"
+	[[ "$(run_release_status)" == "0" ]] ||
+	  fail_test "verified operational zero did not complete as a no-op"
+	assert_log_count 3 "dispatch:authorize:"
+	assert_log_count 1 "dispatch:verify:"
+	assert_log_count 0 "helm-upgrade:"
+	assert_log_count 0 "lease:acquire"
+	assert_file_contains "${FAKE_LOG}" \
+	  "--operational-report ${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	assert_file_contains "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" \
+	  "authorization-bundle-operational"
+	[[ ! -s "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}.trace" ]] ||
+	  fail_test "operational zero trace is not empty"
+	assert_public_parent_and_cleanup
+}
+
+case_operational_apply_rejects_unverified_zero() {
+	setup_case
+	trap cleanup_case EXIT
+	FAKE_OUTCOME="unknown"
+	FAKE_DOMAIN="control-plane"
+	FAKE_OPERATIONAL_REPORT_ELIGIBLE="true"
+	FAKE_OPERATIONAL_REPORT_OUTCOME="zero"
+	FAKE_VERIFY_FAIL_AT=1
+	export FAKE_OUTCOME FAKE_DOMAIN FAKE_OPERATIONAL_REPORT_ELIGIBLE
+	export FAKE_OPERATIONAL_REPORT_OUTCOME FAKE_VERIFY_FAIL_AT
+	rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	rm -rf "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL=""
+	[[ "$(run_release_status)" == "0" ]] ||
+	  fail_test "blocked prepare did not reach the durable zero-evidence boundary"
+
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID="5678"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/5678"
+	[[ "$(run_release_status)" == "2" ]] ||
+	  fail_test "unverified operational zero bypassed the release freeze"
+	assert_log_count 0 "helm-upgrade:"
+	assert_log_count 0 "lease:acquire"
+	assert_file_not_contains "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" \
+	  "authorization-bundle-operational"
+	assert_public_parent_and_cleanup
+}
+
 run_case() {
   local label="$1"
   local status=0
@@ -1374,6 +1472,8 @@ run_case build-activation-apply-upload-proof case_build_activation_apply_require
 run_case operational-apply-report-drift case_operational_apply_rejects_report_drift
 run_case build-activation-apply-report-drift case_operational_apply_rejects_build_activation_drift
 run_case operational-apply-activation case_operational_apply_activates_complete_single_domain
+run_case operational-apply-zero case_operational_apply_activates_verified_zero
+run_case operational-apply-zero-unverified case_operational_apply_rejects_unverified_zero
 run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch
 for domain in node-local authoritative-dns control-plane image-cache backup; do
   run_case "success-${domain}" case_domain_success "${domain}"

@@ -1203,6 +1203,28 @@ print(digest)
 PY
 }
 
+control_plane_release_domain_verify_zero_bundle_command() {
+	local expected_digest="$1"
+	local output=""
+	local status=0
+
+	(( $# == 1 )) || return 2
+	control_plane_release_domain_validate_digest "${expected_digest}" || return 2
+	rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_VERIFY_RESULT}"
+	if "${FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL}" verify \
+	  --bundle-dir "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}" \
+	  >"${CONTROL_PLANE_RELEASE_DOMAIN_VERIFY_RESULT}"; then
+	  status=0
+	else
+	  status=$?
+	fi
+	chmod 600 "${CONTROL_PLANE_RELEASE_DOMAIN_VERIFY_RESULT}" || return
+	output="$(control_plane_release_domain_read_exact_result \
+	  "${CONTROL_PLANE_RELEASE_DOMAIN_VERIFY_RESULT}")" || output=""
+	[[ "${status}" == "0" &&
+	  "${output}" == $'zero\t'"${expected_digest}" ]] || return 2
+}
+
 control_plane_release_domain_try_operational_activation() {
 	local conservative_bundle="${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}"
 	local activated_bundle="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization-bundle-operational"
@@ -1237,6 +1259,20 @@ control_plane_release_domain_try_operational_activation() {
 	result="$(control_plane_release_domain_read_exact_result \
 	  "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT}")" || return 2
 	case "${result}" in
+	  $'zero\t'sha256:*)
+	    IFS=$'\t' read -r outcome plan_digest <<<"${result}"
+	    [[ "${outcome}" == "zero" ]] || return 2
+	    control_plane_release_domain_validate_digest "${plan_digest}" || return 2
+	    if ! control_plane_release_domain_verify_zero_bundle_command "${plan_digest}"; then
+	      CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${conservative_bundle}"
+	      return 2
+	    fi
+	    CONTROL_PLANE_RELEASE_DOMAIN_SELECTED=""
+	    CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST="${plan_digest}"
+	    CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_ZERO_AUTHORIZED="true"
+	    rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked"
+	    return 0
+	    ;;
 	  $'single\tnode-local\t'sha256:*|$'single\tauthoritative-dns\t'sha256:*|\
 	  $'single\tcontrol-plane\t'sha256:*|$'single\timage-cache\t'sha256:*|\
 	  $'single\tbackup\t'sha256:*) ;;
@@ -1251,6 +1287,7 @@ control_plane_release_domain_try_operational_activation() {
 	CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="${selected}"
 	CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST="${plan_digest}"
 	CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME="single"
+	CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_ZERO_AUTHORIZED="false"
 	control_plane_release_domain_verify_bundle_command || return
 	rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked"
 }
@@ -2356,6 +2393,7 @@ control_plane_release_run_atomic_domain_release() {
   CONTROL_PLANE_RELEASE_DOMAIN_COMMITTED="false"
   CONTROL_PLANE_RELEASE_DOMAIN_LAST_TRACE_PHASE=""
   CONTROL_PLANE_RELEASE_DOMAIN_LAST_TRACE_STATE=""
+  CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_ZERO_AUTHORIZED="false"
 
   if control_plane_release_domain_regenerate_changed_evidence; then
     if control_plane_release_domain_classify_files; then
@@ -2456,7 +2494,11 @@ control_plane_release_run_atomic_domain_release() {
             IFS=$'\t' read -r outcome CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST <<<"${authorize_result}"
             control_plane_release_domain_validate_digest \
               "${CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST}" || final_status=2
-            [[ "${CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME}" == "zero" ]] || final_status=2
+            if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME}" != "zero" ]]; then
+              [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" &&
+                "${CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_ZERO_AUTHORIZED}" == "true" ]] ||
+                final_status=2
+            fi
             if (( final_status == 0 )); then
               # A zero bundle has no transaction, so its private trace remains
               # the canonical empty file and every write/rollback flag is false.
