@@ -411,7 +411,10 @@ func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Re
 	if digest == "" {
 		digest = strings.TrimSpace(req.Digest)
 	}
-	_ = c.report(ctx, logicalRef, digest, "present", "")
+	if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
+		http.Error(w, fmt.Sprintf("report replicated image location: %v", err), http.StatusBadGateway)
+		return
+	}
 	writeManagementJSON(w, http.StatusOK, map[string]any{
 		"repo":      repo,
 		"target":    target,

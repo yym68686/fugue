@@ -2046,6 +2046,86 @@ grep -q $'image-image-integrity\tmissing' "${REPORTS}"
 	}
 }
 
+func TestNodeUpdaterImageTasksRequireReplicaReportAcknowledgement(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+log_task() { :; }
+REPORT_CALLS=0
+CACHE_CALLS=0
+REPORT_FAIL_AT=0
+report_image_replica() {
+  REPORT_CALLS=$((REPORT_CALLS + 1))
+  if [ "${REPORT_CALLS}" -eq "${REPORT_FAIL_AT}" ]; then
+    return 41
+  fi
+  return 0
+}
+image_cache_api_json() {
+  CACHE_CALLS=$((CACHE_CALLS + 1))
+  return 0
+}
+
+FUGUE_NODE_UPDATE_TASK_ID="task-report-ack"
+FUGUE_NODE_UPDATE_TASK_IMAGE_ID="image-report-ack"
+FUGUE_NODE_UPDATE_TASK_IMAGE_REF="registry.example/app:report-ack"
+FUGUE_NODE_UPDATE_TASK_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+REPORT_FAIL_AT=1
+if replicate_app_image; then
+  echo "replication succeeded without copying report acknowledgement"
+  exit 1
+else
+  rc=$?
+  [ "${rc}" -eq 1 ] || { echo "copying report failure status=${rc}, want 1"; exit 1; }
+fi
+[ "${CACHE_CALLS}" -eq 0 ] || { echo "cache called before copying report acknowledgement"; exit 1; }
+
+REPORT_CALLS=0
+CACHE_CALLS=0
+REPORT_FAIL_AT=2
+if replicate_app_image; then
+  echo "replication succeeded without present report acknowledgement"
+  exit 1
+else
+  rc=$?
+  [ "${rc}" -eq 1 ] || { echo "present report failure status=${rc}, want 1"; exit 1; }
+fi
+[ "${CACHE_CALLS}" -eq 1 ] || { echo "cache calls=${CACHE_CALLS}, want 1"; exit 1; }
+
+REPORT_CALLS=0
+CACHE_CALLS=0
+REPORT_FAIL_AT=1
+if verify_image_cache; then
+  echo "verification succeeded without replica report acknowledgement"
+  exit 1
+else
+  rc=$?
+  [ "${rc}" -eq 1 ] || { echo "verification report failure status=${rc}, want 1"; exit 1; }
+fi
+[ "${CACHE_CALLS}" -eq 1 ] || { echo "verify cache calls=${CACHE_CALLS}, want 1"; exit 1; }
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-image-report-ack-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater image report acknowledgement harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater image report acknowledgement harness failed: %v\n%s", err, output)
+	}
+}
+
 func ageTaskInStoreFile(t *testing.T, storePath, taskID string, updatedAt time.Time) {
 	t.Helper()
 	raw, err := os.ReadFile(storePath)

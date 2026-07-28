@@ -63,7 +63,10 @@ func (s *Server) handleReportImageReplica(w http.ResponseWriter, r *http.Request
 		s.writeStoreError(w, err)
 		return
 	}
-	_, _ = s.store.UpsertImageLocation(imageLocationFromReplica(image, replica))
+	if _, err := s.store.UpsertImageLocation(imageLocationFromReplica(image, replica)); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"replica": replica})
 }
 
@@ -252,7 +255,10 @@ func (s *Server) handleNodeUpdaterReportImageReplica(w http.ResponseWriter, r *h
 		s.writeStoreError(w, err)
 		return
 	}
-	_, _ = s.store.UpsertImageLocation(imageLocationFromReplica(image, replica))
+	if _, err := s.store.UpsertImageLocation(imageLocationFromReplica(image, replica)); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"replica": replica})
 }
 

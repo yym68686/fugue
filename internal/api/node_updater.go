@@ -4315,7 +4315,7 @@ report_image_replica() {
     --data-urlencode "status=${status}" \
     --data-urlencode "cache_endpoint=${endpoint}" \
     --data-urlencode "last_error=${message}" \
-    >/dev/null || true
+    >/dev/null
 }
 
 replicate_app_image() {
@@ -4329,16 +4329,24 @@ replicate_app_image() {
   fi
   local body
   body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"source_cache_endpoint\":\"$(json_escape_shell "${source}")\",\"task_id\":\"$(json_escape_shell "${FUGUE_NODE_UPDATE_TASK_ID:-}")\"}"
-  report_image_replica "${image_id}" "${digest}" copying ""
+  if ! report_image_replica "${image_id}" "${digest}" copying ""; then
+    echo "image replica copying report failed" >&2
+    return 1
+  fi
   local rc=0
   if image_cache_api_json /fugue/cache/v1/replicate "${body}" >/dev/null; then
-    report_image_replica "${image_id}" "${digest}" present ""
+    if ! report_image_replica "${image_id}" "${digest}" present ""; then
+      echo "image replica present report failed" >&2
+      return 1
+    fi
     log_task "replicated app image ${image_ref:-${digest}}"
     return 0
   else
     rc=$?
   fi
-  report_image_replica "${image_id}" "${digest}" failed "image-cache replication failed"
+  if ! report_image_replica "${image_id}" "${digest}" failed "image-cache replication failed"; then
+    log_task "image replica failure report failed"
+  fi
   return "${rc}"
 }
 
@@ -4354,13 +4362,18 @@ verify_image_cache() {
   body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\"}"
   local rc=0
   if image_cache_api_json /fugue/cache/v1/verify "${body}" >/dev/null; then
-    report_image_replica "${image_id}" "${digest}" present ""
+    if ! report_image_replica "${image_id}" "${digest}" present ""; then
+      echo "image replica verification report failed" >&2
+      return 1
+    fi
     log_task "verified image cache for ${image_ref:-${digest}}"
     return 0
   else
     rc=$?
   fi
-  report_image_replica "${image_id}" "${digest}" missing "image-cache verify failed"
+  if ! report_image_replica "${image_id}" "${digest}" missing "image-cache verify failed"; then
+    log_task "image replica missing report failed"
+  fi
   return "${rc}"
 }
 

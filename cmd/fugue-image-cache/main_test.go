@@ -130,6 +130,52 @@ func TestManagementAPIRejectsUnauthenticatedRemoteRequests(t *testing.T) {
 	}
 }
 
+func TestManagementReplicateFailsWhenLocationReportFails(t *testing.T) {
+	t.Parallel()
+
+	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/fugue-apps/demo/manifests/image-test" {
+			t.Fatalf("unexpected source request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = io.WriteString(w, manifest)
+	}))
+	t.Cleanup(source.Close)
+
+	reportAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/image-locations" {
+			t.Fatalf("unexpected report request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "report backend unavailable")
+	}))
+	t.Cleanup(reportAPI.Close)
+
+	cache := &imageCache{
+		apiBase:       reportAPI.URL,
+		apiToken:      "token",
+		reportPath:    "/v1/image-locations",
+		registryBase:  "registry.fugue.internal:5000",
+		localBase:     "127.0.0.1:5000",
+		cacheEndpoint: "http://10.0.0.2:5000",
+		manifestDir:   filepath.Join(t.TempDir(), "manifests"),
+		httpClient:    reportAPI.Client(),
+		registry:      registry.New(),
+		copyImageFn:   func(context.Context, string, string) error { return nil },
+	}
+	body := `{"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-test","source_cache_endpoint":"` + source.URL + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/fugue/cache/v1/replicate", strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("replicate status = %d, want %d; body=%q", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+}
+
 func TestManagementRepoTargetPreservesRepositoryPathWithoutRegistryHost(t *testing.T) {
 	t.Parallel()
 

@@ -123,7 +123,7 @@ const (
 	// uses this value to enqueue a safe self-update task for active nodes; a
 	// content-only change would otherwise leave existing agents on the old
 	// script indefinitely.
-	NodeUpdaterCurrentVersion = "v31"
+	NodeUpdaterCurrentVersion = "v32"
 
 	NodeUpdaterCapabilityRejoinK3SNode     = "rejoin-k3s-node"
 	NodeUpdaterCapabilitySafeK3SNodeRejoin = "safe-k3s-node-rejoin"
