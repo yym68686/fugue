@@ -240,6 +240,110 @@ func TestResolveOperationalPlanAllowsExactBuiltOnlyZeroWithoutExecutionAuthoriza
 	}
 }
 
+func TestResolveOperationalPlanAllowsExactEmptyNoOpReconciliation(t *testing.T) {
+	base := md1Deployment("fugue-api", "api", "registry.example/api:live")
+	input := md1ActivationFixture(
+		t,
+		base,
+		base,
+		[]md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}},
+		nil,
+	)
+	conservative := BuildPlan(PlanInput{
+		Files: FileClassification{
+			Domains:  []Domain{},
+			Evidence: []Evidence{},
+			Unknown: []Evidence{{
+				Source: "file", Subject: "internal/automation/registry.go",
+				Reason: "fixture source classification is intentionally conservative",
+			}},
+		},
+		Rendered: input.ReleasePlan.Rendered,
+		Digests:  input.ReleasePlan.Digests,
+	})
+	if conservative.Result != OutcomeUnknown {
+		t.Fatalf("conservative result = %s, want unknown", conservative.Result)
+	}
+	input.ReleasePlan = conservative
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(input.BuildPlan.Artifacts) != 0 || len(activationPlan.Activations) != 0 ||
+		len(activationEvidence.BuiltOnlyArtifacts) != 0 || len(activationEvidence.Unresolved) != 0 ||
+		!activationEvidence.Complete {
+		t.Fatalf("empty no-op activation partition = plan=%#v evidence=%#v", activationPlan, activationEvidence)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: conservative.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         conservative.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{
+			Status: ChangeModified, Path: "internal/automation/registry.go",
+			ConsumerDomains: []Domain{DomainControlPlane},
+		}},
+	}
+	report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		conservative.Digests.BaseManifest, conservative.Digests.TargetManifest,
+		digestBytesSHA256(input.TargetManifest), conservative.Digests.Ownership, conservative,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Observation != OutcomeZero || report.AuthorizationEligible || report.ClassificationAgrees ||
+		!equalDomains(report.ConsumerDomains, []Domain{DomainControlPlane}) ||
+		!operationalZeroResolutionEligible(report) {
+		t.Fatalf("empty no-op report = %#v", report)
+	}
+
+	resolved, err := ResolveOperationalPlan(conservative, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Result != OutcomeZero || resolved.SelectedDomain != "" || len(resolved.Domains) != 0 ||
+		len(resolved.OperationalEvidence) != 1 {
+		t.Fatalf("resolved empty no-op plan = %#v", resolved)
+	}
+	if err := VerifyPlanDigest(resolved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ActivateOperationalPlan(conservative, report); err == nil {
+		t.Fatal("empty no-op report created a single-domain execution authorization")
+	}
+
+	for _, mutation := range []struct {
+		name   string
+		mutate func(*OperationalActivationWitness)
+	}{
+		{name: "target manifest", mutate: func(witness *OperationalActivationWitness) {
+			witness.TargetManifestDigest = md0Digest("9")
+		}},
+		{name: "immutable target manifest", mutate: func(witness *OperationalActivationWitness) {
+			witness.ImmutableTargetManifestDigest = md0Digest("9")
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			drifted := report
+			drifted.ActivationWitness = append([]OperationalActivationWitness(nil), report.ActivationWitness...)
+			mutation.mutate(&drifted.ActivationWitness[0])
+			drifted.Digest = operationalEvidenceDigest(drifted)
+			if err := VerifyOperationalDomainEvidence(drifted); err != nil {
+				t.Fatalf("externally bound digest drift should remain structurally verifiable: %v", err)
+			}
+			if _, err := ResolveOperationalPlan(conservative, drifted); err == nil {
+				t.Fatal("empty no-op resolution ignored manifest drift")
+			}
+		})
+	}
+}
+
 func TestActivationOperationalEvidenceReportsRenderedOnlyCandidateWithoutAuthorizingIt(t *testing.T) {
 	base := md1Deployment("fugue-api", "api", "registry.example/api:live")
 	target := strings.Replace(base,

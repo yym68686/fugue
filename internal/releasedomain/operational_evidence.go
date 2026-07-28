@@ -870,7 +870,8 @@ func buildRenderedOnlyOperationalObservation(
 // ResolveOperationalPlan returns a canonically reproducible operational plan
 // when a conservative multiple/unknown result is paired with complete live-
 // relative evidence. It can resolve either one executable domain or a proven
-// zero-write result whose built artifacts are all absent from the target.
+// zero-write result: built artifacts are all absent from the target, or the
+// empty build plan proves the immutable target already equals live state.
 func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
 	if err := VerifyPlanDigest(conservative); err != nil {
 		return Plan{}, fmt.Errorf("operational activation conservative plan: %w", err)
@@ -973,13 +974,25 @@ func operationalZeroResolutionEligible(report OperationalDomainEvidence) bool {
 		return false
 	}
 	witness := report.ActivationWitness[0]
-	return len(witness.BuildPlan.Artifacts) > 0 && len(witness.Plan.Activations) == 0 &&
-		witness.Evidence.Complete && len(witness.Evidence.Unresolved) == 0 &&
-		len(witness.Evidence.BuiltOnlyArtifacts) == len(witness.BuildPlan.Artifacts) &&
-		len(witness.Rendered.Domains) == 0 && len(witness.Rendered.Evidence) == 0 &&
-		len(witness.Rendered.Unknown) == 0 &&
-		witness.BaseManifestDigest == witness.TargetManifestDigest &&
-		witness.BaseManifestDigest == witness.ImmutableTargetManifestDigest
+	if len(witness.Plan.Activations) != 0 || !witness.Evidence.Complete ||
+		len(witness.Evidence.Unresolved) != 0 ||
+		len(witness.Evidence.BuiltOnlyArtifacts) != len(witness.BuildPlan.Artifacts) ||
+		len(witness.Rendered.Domains) != 0 || len(witness.Rendered.Evidence) != 0 ||
+		len(witness.Rendered.Unknown) != 0 {
+		return false
+	}
+	if witness.BaseManifestDigest != witness.TargetManifestDigest ||
+		witness.BaseManifestDigest != witness.ImmutableTargetManifestDigest {
+		return false
+	}
+	if len(witness.BuildPlan.Artifacts) > 0 {
+		return true
+	}
+	observation := report.RenderedOnlyObservations[0]
+	return observation.Applicable && len(observation.Issues) == 0 &&
+		observation.Observation == OutcomeZero && observation.CandidateDomain == "" &&
+		len(observation.RenderedDomains) == 0 && len(observation.AdapterDomains) == 0 &&
+		len(observation.IntersectionDomains) == 0
 }
 
 func operationalAuthorizationEligible(report OperationalDomainEvidence) bool {
