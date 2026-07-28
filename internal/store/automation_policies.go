@@ -154,6 +154,9 @@ func (s *Store) UpdateAutomationPolicy(policy model.AutomationPolicy, tenantID s
 		if err != nil {
 			return err
 		}
+		if err := validateAutomationPolicyParentsState(state, normalized); err != nil {
+			return err
+		}
 		for idx, candidate := range state.AutomationPolicies {
 			if idx != index && automationPolicyNameConflict(candidate, normalized) {
 				return ErrConflict
@@ -326,6 +329,9 @@ func validateAutomationPolicyParentsState(state *model.State, policy model.Autom
 		return ErrNotFound
 	}
 	if policy.ProjectID == "" {
+		if policy.Scope.Type == model.AutomationScopeApp {
+			return fmt.Errorf("%w: app-scoped automation policies require a project", ErrInvalidInput)
+		}
 		return nil
 	}
 	projectIndex := findProject(state, policy.ProjectID)
@@ -334,6 +340,16 @@ func validateAutomationPolicyParentsState(state *model.State, policy model.Autom
 	}
 	if projectDeleteRequested(state, policy.ProjectID) {
 		return ErrConflict
+	}
+	if policy.Scope.Type == model.AutomationScopeApp {
+		appIndex := findApp(state, policy.Scope.ID)
+		if appIndex < 0 ||
+			isDeletedApp(state.Apps[appIndex]) ||
+			strings.EqualFold(strings.TrimSpace(state.Apps[appIndex].Status.Phase), "deleting") ||
+			state.Apps[appIndex].TenantID != policy.TenantID ||
+			state.Apps[appIndex].ProjectID != policy.ProjectID {
+			return ErrNotFound
+		}
 	}
 	return nil
 }
@@ -483,6 +499,19 @@ func deleteAutomationPoliciesByProject(policies []model.AutomationPolicy, projec
 		if policy.ProjectID != projectID {
 			filtered = append(filtered, policy)
 		}
+	}
+	return filtered
+}
+
+func deleteAutomationPoliciesByAppScope(policies []model.AutomationPolicy, appID string) []model.AutomationPolicy {
+	appID = strings.TrimSpace(appID)
+	filtered := policies[:0]
+	for _, policy := range policies {
+		if strings.EqualFold(strings.TrimSpace(policy.Scope.Type), model.AutomationScopeApp) &&
+			strings.TrimSpace(policy.Scope.ID) == appID {
+			continue
+		}
+		filtered = append(filtered, policy)
 	}
 	return filtered
 }

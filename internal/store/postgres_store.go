@@ -2887,6 +2887,9 @@ func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	if err := s.pgDeleteOwnedBackingServicesByAppTx(ctx, tx, app.ID); err != nil {
 		return model.App{}, err
 	}
+	if err := s.pgDeleteAutomationPoliciesByAppTx(ctx, tx, app.ID); err != nil {
+		return model.App{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_apps WHERE id = $1`, app.ID); err != nil {
 		return model.App{}, fmt.Errorf("delete app %s: %w", app.ID, err)
 	}

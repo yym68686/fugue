@@ -133,6 +133,13 @@ func (s *Store) pgUpdateAutomationPolicy(policy model.AutomationPolicy, tenantID
 	}
 	defer tx.Rollback()
 
+	policy, err = normalizeAutomationPolicyForStore(policy)
+	if err != nil {
+		return model.AutomationPolicy{}, err
+	}
+	if err := pgLockAutomationPolicyParents(ctx, tx, policy); err != nil {
+		return model.AutomationPolicy{}, err
+	}
 	existing, err := pgGetAutomationPolicyForUpdate(ctx, tx, policy.ID, tenantID, platformAdmin)
 	if err != nil {
 		return model.AutomationPolicy{}, err
@@ -144,12 +151,8 @@ func (s *Store) pgUpdateAutomationPolicy(policy model.AutomationPolicy, tenantID
 		strings.TrimSpace(policy.ProjectID) != existing.ProjectID ||
 		strings.TrimSpace(policy.OwnerType) != existing.OwnerType ||
 		policy.Managed != existing.Managed ||
-		strings.TrimSpace(strings.ToLower(policy.Kind)) != existing.Kind {
+		policy.Kind != existing.Kind {
 		return model.AutomationPolicy{}, fmt.Errorf("%w: policy identity and ownership fields are immutable", ErrInvalidInput)
-	}
-	policy, err = normalizeAutomationPolicyForStore(policy)
-	if err != nil {
-		return model.AutomationPolicy{}, err
 	}
 	policy.ID = existing.ID
 	policy.TenantID = existing.TenantID
@@ -234,6 +237,16 @@ WHERE id = $1 AND generation = $2
 	return existing, nil
 }
 
+func (s *Store) pgDeleteAutomationPoliciesByAppTx(ctx context.Context, tx *sql.Tx, appID string) error {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_automation_policies
+WHERE scope_type = $1 AND scope_id = $2
+`, model.AutomationScopeApp, appID); err != nil {
+		return fmt.Errorf("delete automation policies for app %s: %w", appID, err)
+	}
+	return nil
+}
+
 func pgGetAutomationPolicyForUpdate(ctx context.Context, tx *sql.Tx, id, tenantID string, platformAdmin bool) (model.AutomationPolicy, error) {
 	query := `SELECT ` + automationPolicySelectColumns + `
 FROM fugue_automation_policies
@@ -262,6 +275,9 @@ FOR KEY SHARE
 		return mapDBErr(err)
 	}
 	if policy.ProjectID == "" {
+		if policy.Scope.Type == model.AutomationScopeApp {
+			return fmt.Errorf("%w: app-scoped automation policies require a project", ErrInvalidInput)
+		}
 		return nil
 	}
 	var (
@@ -281,6 +297,28 @@ FOR KEY SHARE
 	}
 	if deleteRequestedAt.Valid {
 		return ErrConflict
+	}
+	if policy.Scope.Type != model.AutomationScopeApp {
+		return nil
+	}
+	var (
+		appTenantID  string
+		appProjectID string
+		appPhase     string
+	)
+	if err := tx.QueryRowContext(ctx, `
+SELECT tenant_id, project_id, lower(COALESCE(status_json->>'phase', ''))
+FROM fugue_apps
+WHERE id = $1
+FOR KEY SHARE
+`, policy.Scope.ID).Scan(&appTenantID, &appProjectID, &appPhase); err != nil {
+		return mapDBErr(err)
+	}
+	if appTenantID != policy.TenantID ||
+		appProjectID != policy.ProjectID ||
+		appPhase == "deleted" ||
+		appPhase == "deleting" {
+		return ErrNotFound
 	}
 	return nil
 }

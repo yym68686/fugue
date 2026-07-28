@@ -63,6 +63,12 @@ func TestPostgresAutomationPolicyLifecycleUsesParentLocksAndGenerationCAS(t *tes
 	updatedRow.UpdatedAt = baseTime.Add(time.Minute)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id\s+FROM fugue_tenants\s+WHERE id = \$1\s+FOR KEY SHARE`).
+		WithArgs(update.TenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(update.TenantID))
+	mock.ExpectQuery(`(?s)SELECT tenant_id, delete_requested_at\s+FROM fugue_projects\s+WHERE id = \$1\s+FOR KEY SHARE`).
+		WithArgs(update.ProjectID).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "delete_requested_at"}).AddRow(update.TenantID, nil))
 	mock.ExpectQuery(`(?s)SELECT .*FROM fugue_automation_policies\s+WHERE id = \$1 AND tenant_id = \$2 FOR UPDATE`).
 		WithArgs(created.ID, created.TenantID).
 		WillReturnRows(automationPolicySQLRows(t, createdRow))
@@ -85,6 +91,12 @@ func TestPostgresAutomationPolicyLifecycleUsesParentLocksAndGenerationCAS(t *tes
 	}
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id\s+FROM fugue_tenants\s+WHERE id = \$1\s+FOR KEY SHARE`).
+		WithArgs(updated.TenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(updated.TenantID))
+	mock.ExpectQuery(`(?s)SELECT tenant_id, delete_requested_at\s+FROM fugue_projects\s+WHERE id = \$1\s+FOR KEY SHARE`).
+		WithArgs(updated.ProjectID).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "delete_requested_at"}).AddRow(updated.TenantID, nil))
 	mock.ExpectQuery(`(?s)SELECT .*FROM fugue_automation_policies\s+WHERE id = \$1 AND tenant_id = \$2 FOR UPDATE`).
 		WithArgs(updated.ID, updated.TenantID).
 		WillReturnRows(automationPolicySQLRows(t, updatedRow))

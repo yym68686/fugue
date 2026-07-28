@@ -74,6 +74,60 @@ func TestAutomationPolicyPostgresIntegration(t *testing.T) {
 		t.Fatalf("deleted policy get error=%v, want not found", err)
 	}
 
+	targetProject, err := stateStore.CreateProject(tenant.ID, "automation-pg-target-"+suffix, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "automation-pg-app-"+suffix, "", model.AppSpec{
+		Image:     "ghcr.io/example/automation-pg:latest",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appPolicy := testAutomationPolicy(tenant.ID, project.ID, "Postgres App Move")
+	appPolicy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: app.ID}
+	appPolicy, err = stateStore.CreateAutomationPolicy(appPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := stateStore.MoveAppProject(app.ID, AppProjectMoveOptions{TargetProjectID: targetProject.ID})
+	if err != nil {
+		t.Fatalf("move app with automation policy: %v blockers=%v", err, plan.Blockers)
+	}
+	movedPolicy, err := stateStore.GetAutomationPolicy(appPolicy.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedPolicy.ProjectID != targetProject.ID || movedPolicy.Generation != 2 {
+		t.Fatalf("Postgres policy did not follow app move: %+v", movedPolicy)
+	}
+
+	pendingApp, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "automation-pg-pending-"+suffix, "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/automation-pg-pending",
+		BuildStrategy: model.AppBuildStrategyBuildpacks,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	purgePolicy := testAutomationPolicy(tenant.ID, project.ID, "Postgres App Purge")
+	purgePolicy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: pendingApp.ID}
+	purgePolicy, err = stateStore.CreateAutomationPolicy(purgePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stateStore.PurgeApp(pendingApp.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stateStore.GetAutomationPolicy(purgePolicy.ID, tenant.ID, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("purged Postgres app policy error=%v, want not found", err)
+	}
+
 	// The test is intentionally independent of the JSON path and confirms the
 	// parent composite foreign key rejects a project from another tenant.
 	otherTenant, err := stateStore.CreateTenant("automation-pg-other-" + suffix)

@@ -281,12 +281,35 @@ func TestAutomationPolicyJSONStoreRejectsUnsafePersistence(t *testing.T) {
 	}
 
 	missingTenant := testAutomationPolicy("tenant_missing", "", "Missing Tenant")
+	missingTenant.Scope.ID = "project_missing"
 	if _, err := stateStore.CreateAutomationPolicy(missingTenant); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing tenant error=%v, want not found", err)
 	}
 	mismatchedProject := testAutomationPolicy(otherTenant.ID, project.ID, "Mismatched Project")
 	if _, err := stateStore.CreateAutomationPolicy(mismatchedProject); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("mismatched project error=%v, want not found", err)
+	}
+
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "validation-app", "", model.AppSpec{
+		Image: "ghcr.io/example/validation:latest", Replicas: 1, RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appPolicy := testAutomationPolicy(tenant.ID, project.ID, "Valid App Scope")
+	appPolicy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: app.ID}
+	if _, err := stateStore.CreateAutomationPolicy(appPolicy); err != nil {
+		t.Fatalf("valid app scope: %v", err)
+	}
+	missingApp := testAutomationPolicy(tenant.ID, project.ID, "Missing App Scope")
+	missingApp.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: "app_missing"}
+	if _, err := stateStore.CreateAutomationPolicy(missingApp); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing app scope error=%v, want not found", err)
+	}
+	missingProject := testAutomationPolicy(tenant.ID, "", "Missing App Project")
+	missingProject.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: app.ID}
+	if _, err := stateStore.CreateAutomationPolicy(missingProject); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("app scope without project error=%v, want invalid input", err)
 	}
 }
 
@@ -330,6 +353,225 @@ func TestAutomationPolicyJSONStoreCascadesTenantAndProjectDeletion(t *testing.T)
 	}
 	if len(policies) != 0 {
 		t.Fatalf("tenant deletion left policies: %+v", policies)
+	}
+}
+
+func TestAutomationPolicyJSONStoreFollowsAppProjectMoves(t *testing.T) {
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	tenant, err := stateStore.CreateTenant("Automation App Move")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceProject, err := stateStore.CreateProject(tenant.ID, "Source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetProject, err := stateStore.CreateProject(tenant.ID, "Target", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, sourceProject.ID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := testAutomationPolicy(tenant.ID, sourceProject.ID, "API Recovery")
+	policy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: app.ID}
+	created, err := stateStore.CreateAutomationPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dryRunPlan, err := stateStore.MoveAppProject(app.ID, AppProjectMoveOptions{
+		TargetProjectID: targetProject.ID,
+		DryRun:          true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run move app project: %v blockers=%v", err, dryRunPlan.Blockers)
+	}
+	if !strings.Contains(strings.Join(dryRunPlan.Warnings, "\n"), "automation policy API Recovery will move with app api") {
+		t.Fatalf("dry-run plan did not disclose policy move: %+v", dryRunPlan.Warnings)
+	}
+	unchanged, err := stateStore.GetAutomationPolicy(created.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.ProjectID != sourceProject.ID || unchanged.Generation != 1 {
+		t.Fatalf("dry run changed policy: %+v", unchanged)
+	}
+
+	movePlan, err := stateStore.MoveAppProject(app.ID, AppProjectMoveOptions{
+		TargetProjectID: targetProject.ID,
+	})
+	if err != nil {
+		t.Fatalf("move app project: %v blockers=%v", err, movePlan.Blockers)
+	}
+	moved, err := stateStore.GetAutomationPolicy(created.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ProjectID != targetProject.ID || moved.Generation != 2 || !moved.UpdatedAt.After(created.UpdatedAt) {
+		t.Fatalf("policy did not move with generation CAS boundary: before=%+v after=%+v", created, moved)
+	}
+	if _, err := stateStore.UpdateAutomationPolicy(moved, tenant.ID, false, created.Generation); !errors.Is(err, ErrConflict) {
+		t.Fatalf("pre-move generation remained usable: %v", err)
+	}
+}
+
+func TestAutomationPolicyJSONStoreBlocksProjectMoveNameConflict(t *testing.T) {
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	tenant, err := stateStore.CreateTenant("Automation App Move Conflict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceProject, err := stateStore.CreateProject(tenant.ID, "Source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetProject, err := stateStore.CreateProject(tenant.ID, "Target", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceApp, err := stateStore.CreateApp(tenant.ID, sourceProject.ID, "source-api", "", model.AppSpec{
+		Image: "ghcr.io/example/source:latest", Replicas: 1, RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetApp, err := stateStore.CreateApp(tenant.ID, targetProject.ID, "target-api", "", model.AppSpec{
+		Image: "ghcr.io/example/target:latest", Replicas: 1, RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourcePolicy := testAutomationPolicy(tenant.ID, sourceProject.ID, "API Recovery")
+	sourcePolicy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: sourceApp.ID}
+	created, err := stateStore.CreateAutomationPolicy(sourcePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPolicy := testAutomationPolicy(tenant.ID, targetProject.ID, "api recovery")
+	targetPolicy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: targetApp.ID}
+	if _, err := stateStore.CreateAutomationPolicy(targetPolicy); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := stateStore.MoveAppProject(sourceApp.ID, AppProjectMoveOptions{TargetProjectID: targetProject.ID})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("move conflict error=%v, want conflict", err)
+	}
+	if !strings.Contains(strings.Join(plan.Blockers, "\n"), "automation policy") {
+		t.Fatalf("move conflict did not identify automation policies: %+v", plan.Blockers)
+	}
+	appAfter, err := stateStore.GetApp(sourceApp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyAfter, err := stateStore.GetAutomationPolicy(created.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appAfter.ProjectID != sourceProject.ID || policyAfter.ProjectID != sourceProject.ID || policyAfter.Generation != 1 {
+		t.Fatalf("blocked move partially mutated state: app=%+v policy=%+v", appAfter, policyAfter)
+	}
+}
+
+func TestAutomationPolicyJSONStoreFollowsProjectSplit(t *testing.T) {
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	tenant, err := stateStore.CreateTenant("Automation Project Split")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceProject, err := stateStore.CreateProject(tenant.ID, "Source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetProject, err := stateStore.CreateProject(tenant.ID, "Target", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, sourceProject.ID, "worker", "", model.AppSpec{
+		Image: "ghcr.io/example/worker:latest", Replicas: 1, RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := testAutomationPolicy(tenant.ID, sourceProject.ID, "Worker Recovery")
+	policy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: app.ID}
+	created, err := stateStore.CreateAutomationPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := stateStore.SplitProject(sourceProject.ID, ProjectSplitOptions{
+		Targets: []ProjectSplitTarget{{
+			AppID:           app.ID,
+			TargetProjectID: targetProject.ID,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("split project: %v blockers=%v", err, plan.Blockers)
+	}
+	moved, err := stateStore.GetAutomationPolicy(created.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ProjectID != targetProject.ID || moved.Generation != 2 {
+		t.Fatalf("policy did not follow project split: %+v", moved)
+	}
+}
+
+func TestAutomationPolicyJSONStorePurgesAppScopedPolicies(t *testing.T) {
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	tenant, err := stateStore.CreateTenant("Automation App Purge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Imports", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "pending-import", "", model.AppSpec{
+		Replicas: 1, RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/pending-import",
+		BuildStrategy: model.AppBuildStrategyBuildpacks,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := testAutomationPolicy(tenant.ID, project.ID, "Pending Import Recovery")
+	policy.Scope = model.AutomationScope{Type: model.AutomationScopeApp, ID: app.ID}
+	created, err := stateStore.CreateAutomationPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := stateStore.PurgeApp(app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stateStore.GetAutomationPolicy(created.ID, tenant.ID, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("purged app policy error=%v, want not found", err)
+	}
+}
+
+func TestDefaultControlPlanePermissionAuditIncludesAutomationPolicyCRUD(t *testing.T) {
+	t.Parallel()
+
+	grants := strings.Join(defaultControlPlaneRequiredGrants(), "\n")
+	for _, required := range []string{
+		"fugue_automation_policies:select",
+		"fugue_automation_policies:insert",
+		"fugue_automation_policies:update",
+		"fugue_automation_policies:delete",
+	} {
+		if !strings.Contains(grants, required) {
+			t.Fatalf("default permission audit is missing %q", required)
+		}
 	}
 }
 
@@ -426,8 +668,8 @@ func testAutomationPolicy(tenantID, projectID, name string) model.AutomationPoli
 		Kind:      model.AutomationPolicyKindAppRecovery,
 		OwnerType: model.AutomationOwnerUser,
 		Scope: model.AutomationScope{
-			Type: "app",
-			ID:   "app_example",
+			Type: "project",
+			ID:   projectID,
 		},
 		Mode:     model.GatePolicyModeDisabled,
 		Priority: 100,

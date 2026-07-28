@@ -9,6 +9,8 @@ const (
 	AutomationPolicyKindManagedSystem = "managed_system"
 	AutomationPolicyKindAppRecovery   = "app_recovery"
 
+	AutomationScopeApp = "app"
+
 	AutomationTriggerInvariant      = "invariant"
 	AutomationTriggerRequestMetric  = "request_metric"
 	AutomationTriggerSyntheticProbe = "synthetic_probe"

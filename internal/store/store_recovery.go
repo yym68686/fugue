@@ -15,6 +15,23 @@ import (
 	"fugue/internal/model"
 )
 
+func defaultControlPlaneRequiredGrants() []string {
+	return []string{
+		"fugue_tenants:select",
+		"fugue_projects:select",
+		"fugue_apps:select",
+		"fugue_runtimes:select",
+		"fugue_edge_nodes:select",
+		"fugue_dns_nodes:select",
+		"fugue_automation_policies:select",
+		"fugue_automation_policies:insert",
+		"fugue_automation_policies:update",
+		"fugue_automation_policies:delete",
+		"fugue_store_promotions:insert",
+		"fugue_store_promotions:update",
+	}
+}
+
 func (s *Store) CreateProtectiveBackup(targetStore, generation string) (string, error) {
 	if s == nil {
 		return "", ErrInvalidInput
@@ -78,16 +95,7 @@ func (s *Store) VerifyControlPlanePermissions(requiredGrants []string) ([]model.
 		}}, nil
 	}
 	if len(requiredGrants) == 0 {
-		requiredGrants = []string{
-			"fugue_tenants:select",
-			"fugue_projects:select",
-			"fugue_apps:select",
-			"fugue_runtimes:select",
-			"fugue_edge_nodes:select",
-			"fugue_dns_nodes:select",
-			"fugue_store_promotions:insert",
-			"fugue_store_promotions:update",
-		}
+		requiredGrants = defaultControlPlaneRequiredGrants()
 	}
 	checks := make([]model.StoreInvariantCheck, 0, len(requiredGrants)+1)
 	for _, grant := range requiredGrants {

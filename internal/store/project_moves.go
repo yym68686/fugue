@@ -78,9 +78,10 @@ type projectMoveServiceTarget struct {
 }
 
 type projectMoveStateMutation struct {
-	appTargets     map[string]string
-	serviceTargets map[string]projectMoveServiceTarget
-	bindingTargets map[string]string
+	appTargets              map[string]string
+	serviceTargets          map[string]projectMoveServiceTarget
+	bindingTargets          map[string]string
+	automationPolicyTargets map[string]string
 }
 
 func (s *Store) MoveAppProject(id string, opts AppProjectMoveOptions) (ProjectMovePlan, error) {
@@ -171,9 +172,10 @@ func buildAppProjectMovePlanState(state *model.State, appID string, opts AppProj
 	}
 
 	mutation := projectMoveStateMutation{
-		appTargets:     map[string]string{app.ID: targetProject.ID},
-		serviceTargets: map[string]projectMoveServiceTarget{},
-		bindingTargets: map[string]string{},
+		appTargets:              map[string]string{app.ID: targetProject.ID},
+		serviceTargets:          map[string]projectMoveServiceTarget{},
+		bindingTargets:          map[string]string{},
+		automationPolicyTargets: map[string]string{},
 	}
 	if app.ProjectID == targetProject.ID {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("app %s is already in project %s", displayNameOrID(app.Name, app.ID), displayNameOrID(targetProject.Name, targetProject.ID)))
@@ -221,6 +223,7 @@ func buildAppProjectMovePlanState(state *model.State, appID string, opts AppProj
 		}
 		mutation.serviceTargets[service.ID] = target
 	}
+	plan = planAutomationPolicyProjectMovesState(state, plan, &mutation)
 
 	if len(plan.Blockers) > 0 {
 		sort.Strings(plan.Blockers)
@@ -274,9 +277,10 @@ func buildBackingServiceProjectMovePlanState(state *model.State, serviceID strin
 	}
 
 	mutation := projectMoveStateMutation{
-		appTargets:     map[string]string{},
-		serviceTargets: map[string]projectMoveServiceTarget{},
-		bindingTargets: map[string]string{},
+		appTargets:              map[string]string{},
+		serviceTargets:          map[string]projectMoveServiceTarget{},
+		bindingTargets:          map[string]string{},
+		automationPolicyTargets: map[string]string{},
 	}
 	if service.ProjectID != targetProject.ID {
 		movingApps := map[string]string{}
@@ -425,6 +429,7 @@ func buildProjectSplitPlanState(state *model.State, sourceProjectID string, opts
 
 	plan.TargetProjects = sortedProjectsFromMap(targetProjectsByID)
 	plan.CreatedProjects = sortedProjectsFromMap(createdProjectsByID)
+	plan = planAutomationPolicyProjectMovesState(state, plan, &mutation)
 	if len(plan.Blockers) > 0 {
 		sort.Strings(plan.Blockers)
 		sort.Strings(plan.Warnings)
@@ -544,8 +549,96 @@ func applyProjectMoveMutationState(state *model.State, plan ProjectMovePlan, mut
 	}
 	sortServiceBindings(bindings)
 	plan.Bindings = bindings
+
+	if apply {
+		for policyID, targetProjectID := range mutation.automationPolicyTargets {
+			index := findAutomationPolicyByID(state.AutomationPolicies, policyID)
+			if index < 0 || state.AutomationPolicies[index].ProjectID == targetProjectID {
+				continue
+			}
+			state.AutomationPolicies[index].ProjectID = targetProjectID
+			state.AutomationPolicies[index].Generation++
+			state.AutomationPolicies[index].UpdatedAt = now
+		}
+	}
 	sort.Strings(plan.Warnings)
 	sort.Strings(plan.Blockers)
+	return plan
+}
+
+func planAutomationPolicyProjectMovesState(state *model.State, plan ProjectMovePlan, mutation *projectMoveStateMutation) ProjectMovePlan {
+	if state == nil || mutation == nil || len(mutation.appTargets) == 0 {
+		return plan
+	}
+	if mutation.automationPolicyTargets == nil {
+		mutation.automationPolicyTargets = map[string]string{}
+	}
+
+	for _, policy := range state.AutomationPolicies {
+		if !strings.EqualFold(strings.TrimSpace(policy.Scope.Type), model.AutomationScopeApp) {
+			continue
+		}
+		appID := strings.TrimSpace(policy.Scope.ID)
+		targetProjectID, moving := mutation.appTargets[appID]
+		if !moving || policy.ProjectID == targetProjectID {
+			continue
+		}
+		appIndex := findApp(state, appID)
+		if appIndex < 0 || state.Apps[appIndex].TenantID != policy.TenantID {
+			plan.Blockers = append(plan.Blockers, fmt.Sprintf(
+				"automation policy %s does not belong to its scoped app %s",
+				displayNameOrID(policy.Name, policy.ID),
+				appID,
+			))
+			continue
+		}
+		if policy.ProjectID != state.Apps[appIndex].ProjectID {
+			plan.Blockers = append(plan.Blockers, fmt.Sprintf(
+				"automation policy %s project does not match scoped app %s",
+				displayNameOrID(policy.Name, policy.ID),
+				displayNameOrID(state.Apps[appIndex].Name, appID),
+			))
+			continue
+		}
+		mutation.automationPolicyTargets[policy.ID] = targetProjectID
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+			"automation policy %s will move with app %s to project %s",
+			displayNameOrID(policy.Name, policy.ID),
+			displayNameOrID(state.Apps[appIndex].Name, appID),
+			targetProjectID,
+		))
+	}
+
+	for leftIndex := 0; leftIndex < len(state.AutomationPolicies); leftIndex++ {
+		left := state.AutomationPolicies[leftIndex]
+		leftProjectID := left.ProjectID
+		leftTargetProjectID, leftMoving := mutation.automationPolicyTargets[left.ID]
+		if leftMoving {
+			leftProjectID = leftTargetProjectID
+		}
+		for rightIndex := leftIndex + 1; rightIndex < len(state.AutomationPolicies); rightIndex++ {
+			right := state.AutomationPolicies[rightIndex]
+			rightProjectID := right.ProjectID
+			rightTargetProjectID, rightMoving := mutation.automationPolicyTargets[right.ID]
+			if rightMoving {
+				rightProjectID = rightTargetProjectID
+			}
+			if !leftMoving && !rightMoving {
+				continue
+			}
+			if left.TenantID != right.TenantID ||
+				leftProjectID != rightProjectID ||
+				!strings.EqualFold(strings.TrimSpace(left.Name), strings.TrimSpace(right.Name)) {
+				continue
+			}
+			plan.Blockers = append(plan.Blockers, fmt.Sprintf(
+				"automation policy %s conflicts with policy %s in target project %s",
+				displayNameOrID(left.Name, left.ID),
+				displayNameOrID(right.Name, right.ID),
+				leftProjectID,
+			))
+		}
+	}
 	return plan
 }
 
@@ -850,7 +943,7 @@ func (s *Store) pgMoveAppProject(id string, opts AppProjectMoveOptions) (Project
 	}
 	defer tx.Rollback()
 
-	app, err := s.pgGetAppTx(ctx, tx, id, !opts.DryRun)
+	app, err := s.pgGetAppTx(ctx, tx, id, false)
 	if err != nil {
 		return ProjectMovePlan{}, mapDBErr(err)
 	}
@@ -1090,6 +1183,30 @@ ORDER BY created_at ASC
 	if err := operationRows.Err(); err != nil {
 		return state, fmt.Errorf("iterate project move operations: %w", err)
 	}
+
+	automationPolicyQuery := `SELECT ` + automationPolicySelectColumns + `
+FROM fugue_automation_policies
+WHERE tenant_id = $1
+ORDER BY created_at ASC
+`
+	if forUpdate {
+		automationPolicyQuery += ` FOR UPDATE`
+	}
+	automationPolicyRows, err := tx.QueryContext(ctx, automationPolicyQuery, tenantID)
+	if err != nil {
+		return state, fmt.Errorf("load project move automation policies: %w", err)
+	}
+	defer automationPolicyRows.Close()
+	for automationPolicyRows.Next() {
+		policy, err := scanAutomationPolicy(automationPolicyRows)
+		if err != nil {
+			return state, err
+		}
+		state.AutomationPolicies = append(state.AutomationPolicies, policy)
+	}
+	if err := automationPolicyRows.Err(); err != nil {
+		return state, fmt.Errorf("iterate project move automation policies: %w", err)
+	}
 	return state, nil
 }
 
@@ -1148,6 +1265,37 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			return err
 		}
 	}
+
+	beforeAutomationPolicies := make(map[string]model.AutomationPolicy, len(before.AutomationPolicies))
+	for _, policy := range before.AutomationPolicies {
+		beforeAutomationPolicies[policy.ID] = policy
+	}
+	for _, policy := range after.AutomationPolicies {
+		previous, ok := beforeAutomationPolicies[policy.ID]
+		if !ok {
+			continue
+		}
+		if previous.ProjectID == policy.ProjectID &&
+			previous.Generation == policy.Generation &&
+			previous.UpdatedAt.Equal(policy.UpdatedAt) {
+			continue
+		}
+		result, err := tx.ExecContext(ctx, `
+UPDATE fugue_automation_policies
+SET project_id = $2, generation = $3, updated_at = $4
+WHERE id = $1 AND generation = $5
+`, policy.ID, nullIfEmpty(policy.ProjectID), policy.Generation, policy.UpdatedAt, previous.Generation)
+		if err != nil {
+			return mapDBErr(err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read moved automation policy row count: %w", err)
+		}
+		if affected != 1 {
+			return ErrConflict
+		}
+	}
 	return nil
 }
 
@@ -1180,6 +1328,10 @@ func cloneProjectMoveState(state model.State) model.State {
 	}
 	out.BackingServices = cloneBackingServicesForProjectMove(state.BackingServices)
 	out.ServiceBindings = cloneServiceBindingsForProjectMove(state.ServiceBindings)
+	out.AutomationPolicies = make([]model.AutomationPolicy, 0, len(state.AutomationPolicies))
+	for _, policy := range state.AutomationPolicies {
+		out.AutomationPolicies = append(out.AutomationPolicies, cloneAutomationPolicy(policy))
+	}
 	return out
 }
 

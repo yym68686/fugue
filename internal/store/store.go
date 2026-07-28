@@ -2632,6 +2632,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.ReleaseAttempts = deleteReleaseAttemptsByApp(state.ReleaseAttempts, id)
 		state.ReleaseSteps = deleteReleaseStepsByAttemptIDs(state.ReleaseSteps, deletedReleaseAttemptIDs)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByApp(state.AppTrafficPolicies, id)
+		state.AutomationPolicies = deleteAutomationPoliciesByAppScope(state.AutomationPolicies, id)
 		state.AppSSHEndpoints = deleteAppSSHEndpointsByApp(state.AppSSHEndpoints, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByApp(state.AppDatabaseImportJobs, id)
 		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByApp(state.AppDatabaseAccessGrants, id)
