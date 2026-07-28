@@ -264,6 +264,26 @@ spec:
               value: {{ .Values.controller.migrationGuard.legacyControllerContainerName | quote }}
             - name: FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL
               value: {{ .Values.controller.migrationGuard.checkInterval | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.enabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.cpuRequestUpscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.cpuRequestDownscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.memoryRequestUpscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.memoryRequestDownscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.cpuLimitUpscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.cpuLimitDownscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.memoryLimitUpscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.memoryLimitDownscaleEnabled | quote }}
+            - name: FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED
+              value: {{ .Values.controller.managedPostgresInPlaceResize.recoveryEnabled | quote }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

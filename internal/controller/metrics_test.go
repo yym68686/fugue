@@ -22,6 +22,11 @@ func TestMetricsHandlerReportsControllerConfiguration(t *testing.T) {
 		FallbackPollInterval:      30 * time.Second,
 		ForegroundActivateWorkers: 4,
 		GitHubSyncActivateWorkers: 2,
+		ManagedPostgresInPlaceResize: config.ManagedPostgresInPlaceResizeConfig{
+			Enabled:                  true,
+			CPURequestUpscaleEnabled: true,
+			RecoveryEnabled:          true,
+		},
 	}, nil)
 
 	recorder := httptest.NewRecorder()
@@ -37,6 +42,10 @@ func TestMetricsHandlerReportsControllerConfiguration(t *testing.T) {
 		`fugue_controller_poll_interval_seconds 15.000000`,
 		`fugue_controller_workers_configured{lane="foreground_activate"} 4.000000`,
 		`fugue_controller_workers_configured{lane="github_sync_activate"} 2.000000`,
+		`fugue_managed_postgres_in_place_resize_enabled 1.000000`,
+		`fugue_managed_postgres_in_place_resize_capability_enabled{capability="cpu_request_upscale"} 1.000000`,
+		`fugue_managed_postgres_in_place_resize_capability_enabled{capability="memory_request_downscale"} 0.000000`,
+		`fugue_managed_postgres_in_place_resize_capability_enabled{capability="recovery"} 1.000000`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output missing %q:\n%s", want, body)

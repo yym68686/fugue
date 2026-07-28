@@ -84,6 +84,19 @@ type BackupCoordinationConfig struct {
 	RenewPeriod    time.Duration
 }
 
+type ManagedPostgresInPlaceResizeConfig struct {
+	Enabled                       bool
+	CPURequestUpscaleEnabled      bool
+	CPURequestDownscaleEnabled    bool
+	MemoryRequestUpscaleEnabled   bool
+	MemoryRequestDownscaleEnabled bool
+	CPULimitUpscaleEnabled        bool
+	CPULimitDownscaleEnabled      bool
+	MemoryLimitUpscaleEnabled     bool
+	MemoryLimitDownscaleEnabled   bool
+	RecoveryEnabled               bool
+}
+
 type ControllerConfig struct {
 	MetricsBindAddr                            string
 	StorePath                                  string
@@ -161,6 +174,10 @@ type ControllerConfig struct {
 	LegacyControllerLabelSelector              string
 	LegacyControllerContainerName              string
 	LegacyControllerCheckInterval              time.Duration
+	// Managed PostgreSQL in-place resize is intentionally split into explicit
+	// capabilities. All capabilities default to false so installing the code
+	// cannot change production behavior until each gate is deliberately armed.
+	ManagedPostgresInPlaceResize ManagedPostgresInPlaceResizeConfig
 }
 
 type AgentConfig struct {
@@ -500,6 +517,18 @@ func ControllerFromEnv() ControllerConfig {
 		LegacyControllerLabelSelector:              getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR", ""),
 		LegacyControllerContainerName:              getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME", "controller"),
 		LegacyControllerCheckInterval:              getenvDuration("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL", 2*time.Second),
+		ManagedPostgresInPlaceResize: ManagedPostgresInPlaceResizeConfig{
+			Enabled:                       getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", false),
+			CPURequestUpscaleEnabled:      getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", false),
+			CPURequestDownscaleEnabled:    getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED", false),
+			MemoryRequestUpscaleEnabled:   getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED", false),
+			MemoryRequestDownscaleEnabled: getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED", false),
+			CPULimitUpscaleEnabled:        getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED", false),
+			CPULimitDownscaleEnabled:      getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED", false),
+			MemoryLimitUpscaleEnabled:     getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED", false),
+			MemoryLimitDownscaleEnabled:   getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", false),
+			RecoveryEnabled:               getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", false),
+		},
 	}
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase

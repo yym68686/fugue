@@ -43,6 +43,40 @@ func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	}
 }
 
+func TestManagedPostgresInPlaceResizeGatesDefaultClosed(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	for _, name := range []string{
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED",
+	} {
+		needle := "            - name: " + name + "\n              value: \"false\""
+		if !strings.Contains(manifest, needle) {
+			t.Fatalf("controller manifest must keep %s closed by default:\n%s", name, manifest)
+		}
+	}
+}
+
 func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

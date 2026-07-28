@@ -186,6 +186,52 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerFromEnvDefaultsManagedPostgresInPlaceResizeClosed(t *testing.T) {
+	for _, key := range []string{
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED",
+		"FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED",
+	} {
+		t.Setenv(key, "")
+	}
+	cfg := ControllerFromEnv()
+	resize := cfg.ManagedPostgresInPlaceResize
+	if resize.Enabled || resize.CPURequestUpscaleEnabled || resize.CPURequestDownscaleEnabled ||
+		resize.MemoryRequestUpscaleEnabled || resize.MemoryRequestDownscaleEnabled || resize.CPULimitUpscaleEnabled ||
+		resize.CPULimitDownscaleEnabled || resize.MemoryLimitUpscaleEnabled || resize.MemoryLimitDownscaleEnabled ||
+		resize.RecoveryEnabled {
+		t.Fatalf("managed postgres in-place resize must be closed by default: %+v", cfg)
+	}
+}
+
+func TestControllerFromEnvReadsManagedPostgresInPlaceResizeGates(t *testing.T) {
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_RESIZE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_UPSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_REQUEST_DOWNSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_UPSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_REQUEST_DOWNSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_UPSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_CPU_LIMIT_DOWNSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_UPSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", "true")
+	t.Setenv("FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", "true")
+	cfg := ControllerFromEnv()
+	resize := cfg.ManagedPostgresInPlaceResize
+	if !resize.Enabled || !resize.CPURequestUpscaleEnabled || !resize.CPURequestDownscaleEnabled ||
+		!resize.MemoryRequestUpscaleEnabled || !resize.MemoryRequestDownscaleEnabled || !resize.CPULimitUpscaleEnabled ||
+		!resize.CPULimitDownscaleEnabled || !resize.MemoryLimitUpscaleEnabled || !resize.MemoryLimitDownscaleEnabled ||
+		!resize.RecoveryEnabled {
+		t.Fatalf("expected managed postgres in-place resize gates from env: %+v", cfg)
+	}
+}
+
 func TestControllerFromEnvReadsStrictDrainConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_STRICT_DRAIN_MODE", "fixed-sleep")
 	t.Setenv("FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS", "321")

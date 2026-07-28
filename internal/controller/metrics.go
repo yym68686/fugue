@@ -60,6 +60,25 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_controller_kubectl_apply_enabled", "Whether the controller applies Kubernetes resources.", nil, boolGauge(s.Config.KubectlApply))
 	observability.WriteGaugeMetric(w, "fugue_controller_poll_interval_seconds", "Configured foreground controller poll interval.", nil, s.Config.PollInterval.Seconds())
 	observability.WriteGaugeMetric(w, "fugue_controller_fallback_poll_interval_seconds", "Configured fallback controller poll interval.", nil, s.Config.FallbackPollInterval.Seconds())
+	resizeConfig := s.Config.ManagedPostgresInPlaceResize
+	observability.WriteGaugeMetric(w, "fugue_managed_postgres_in_place_resize_enabled", "Whether the global managed PostgreSQL in-place resize kill switch is enabled.", nil, boolGauge(resizeConfig.Enabled))
+	observability.WriteMetricHeader(w, "fugue_managed_postgres_in_place_resize_capability_enabled", "Whether each managed PostgreSQL in-place resize capability is enabled by configuration.", "gauge")
+	for _, capability := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "cpu_request_upscale", enabled: resizeConfig.CPURequestUpscaleEnabled},
+		{name: "cpu_request_downscale", enabled: resizeConfig.CPURequestDownscaleEnabled},
+		{name: "memory_request_upscale", enabled: resizeConfig.MemoryRequestUpscaleEnabled},
+		{name: "memory_request_downscale", enabled: resizeConfig.MemoryRequestDownscaleEnabled},
+		{name: "cpu_limit_upscale", enabled: resizeConfig.CPULimitUpscaleEnabled},
+		{name: "cpu_limit_downscale", enabled: resizeConfig.CPULimitDownscaleEnabled},
+		{name: "memory_limit_upscale", enabled: resizeConfig.MemoryLimitUpscaleEnabled},
+		{name: "memory_limit_downscale", enabled: resizeConfig.MemoryLimitDownscaleEnabled},
+		{name: "recovery", enabled: resizeConfig.RecoveryEnabled},
+	} {
+		observability.WriteMetricSample(w, "fugue_managed_postgres_in_place_resize_capability_enabled", map[string]string{"capability": capability.name}, boolGauge(capability.enabled))
+	}
 	activeLoopRunning, activeLoopStartedAt, leaderActive, leaderIdentity := s.controllerHealthSnapshot()
 	observability.WriteGaugeMetric(w, "fugue_controller_active_loop_running", "Whether this controller process is currently running the active reconciliation loop.", nil, boolGauge(activeLoopRunning))
 	activeLoopStarted := float64(0)

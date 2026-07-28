@@ -283,6 +283,17 @@ controller:
   migrationGuard:
     legacyControllerContainerName: controller
     checkInterval: 2s
+  managedPostgresInPlaceResize:
+    enabled: false
+    cpuRequestUpscaleEnabled: false
+    cpuRequestDownscaleEnabled: false
+    memoryRequestUpscaleEnabled: false
+    memoryRequestDownscaleEnabled: false
+    cpuLimitUpscaleEnabled: false
+    cpuLimitDownscaleEnabled: false
+    memoryLimitUpscaleEnabled: false
+    memoryLimitDownscaleEnabled: false
+    recoveryEnabled: false
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
