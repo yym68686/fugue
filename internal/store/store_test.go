@@ -281,6 +281,86 @@ func TestCreateAutoscalingDeployOperationRejectsAlreadyCurrentState(t *testing.T
 	}
 }
 
+func TestDeployCompletionPreservesIndependentlyUpdatedRightSizingPolicy(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Right-Sizing Policy Isolation")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{CPUMilliCores: 2000, MemoryMebibytes: 4096}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		RightSizing: &model.AppRightSizingSpec{
+			Mode:        model.AppRightSizingModeAuto,
+			WindowHours: 168,
+			MinSamples:  12,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	staleDesired := app.Spec
+	staleDesired.Replicas = 2
+	deploy, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &staleDesired,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	updated, err := s.UpdateAppRightSizing(app.ID, model.AppRightSizingSpec{
+		Mode:        model.AppRightSizingModeRecommend,
+		WindowHours: 24,
+		MinSamples:  6,
+	})
+	if err != nil {
+		t.Fatalf("update right-sizing policy while deploy is pending: %v", err)
+	}
+	if got := updated.Spec.RightSizing; got == nil || got.Mode != model.AppRightSizingModeRecommend {
+		t.Fatalf("unexpected independently updated policy: %+v", got)
+	}
+
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim deploy operation: %v", err)
+	} else if !found {
+		t.Fatal("expected pending deploy operation")
+	}
+	completed, err := s.CompleteManagedOperation(deploy.ID, "/tmp/demo.yaml", "deployed")
+	if err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+	if completed.DesiredSpec == nil || completed.DesiredSpec.RightSizing == nil || completed.DesiredSpec.RightSizing.Mode != model.AppRightSizingModeRecommend {
+		t.Fatalf("completed deploy snapshot rolled back right-sizing policy: %+v", completed.DesiredSpec)
+	}
+	stored, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get completed app: %v", err)
+	}
+	if stored.Spec.Replicas != 2 {
+		t.Fatalf("expected workload deploy to apply replicas=2, got %d", stored.Spec.Replicas)
+	}
+	if got := stored.Spec.RightSizing; got == nil || got.Mode != model.AppRightSizingModeRecommend || got.WindowHours != 24 || got.MinSamples != 6 {
+		t.Fatalf("deploy completion rolled back independent right-sizing policy: %+v", got)
+	}
+}
+
 func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	t.Parallel()
 

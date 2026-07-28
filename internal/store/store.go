@@ -2393,6 +2393,39 @@ func (s *Store) UpdateAppImageMirrorLimit(id string, limit int) (model.App, erro
 	return app, err
 }
 
+// UpdateAppRightSizing updates control-plane recommendation policy only. The
+// policy is not part of the Kubernetes workload template and must not enqueue
+// or apply a workload deployment.
+func (s *Store) UpdateAppRightSizing(id string, rightSizing model.AppRightSizingSpec) (model.App, error) {
+	id = strings.TrimSpace(id)
+	if id == "" || model.NormalizeAppRightSizingMode(rightSizing.Mode) == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	rightSizing = model.NormalizeAppRightSizingSpec(rightSizing)
+	if s.usingDatabase() {
+		return s.pgUpdateAppRightSizing(id, rightSizing)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+		app.Spec.RightSizing = cloneAppRightSizingSpec(&rightSizing)
+		app.UpdatedAt = time.Now().UTC()
+		state.Apps[index] = app
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
 func (s *Store) UpdateAppOriginSource(id string, source model.AppSource) (model.App, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -4512,6 +4545,24 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 	return &out
 }
 
+func cloneAppRightSizingSpec(in *model.AppRightSizingSpec) *model.AppRightSizingSpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+// Right-sizing mode/window/sample settings are control-plane policy. A
+// workload operation may have been queued from an older AppSpec snapshot, so
+// completing it must never roll this independently updated policy backward.
+func preserveAppRightSizingPolicy(desired *model.AppSpec, current model.AppSpec) {
+	if desired == nil {
+		return
+	}
+	desired.RightSizing = cloneAppRightSizingSpec(current.RightSizing)
+}
+
 func cloneAppNetworkPolicy(in *model.AppNetworkPolicySpec) *model.AppNetworkPolicySpec {
 	if in == nil {
 		return nil
@@ -4605,6 +4656,7 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		return nil
 	}
 	if op.DesiredSpec != nil {
+		preserveAppRightSizingPolicy(op.DesiredSpec, app.Spec)
 		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
 			return err
 		}

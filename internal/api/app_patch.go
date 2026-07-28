@@ -78,8 +78,27 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.RightSizing != nil {
+		if model.NormalizeAppRightSizingMode(req.RightSizing.Mode) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "right_sizing.mode must be disabled, recommend, or auto")
+			return
+		}
+		normalizedRightSizing := model.NormalizeAppRightSizingSpec(*req.RightSizing)
+		if !appRightSizingEqual(currentApp.Spec.RightSizing, &normalizedRightSizing) {
+			updatedApp, err := s.store.UpdateAppRightSizing(currentApp.ID, normalizedRightSizing)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			currentApp = updatedApp
+			responseApp = updatedApp
+			changed = true
+			auditMetadata["right_sizing"] = normalizedRightSizing.Mode
+		}
+	}
+
 	var operation *model.Operation
-	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.RightSizing != nil || req.TerminationGracePeriodSeconds != nil {
+	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.TerminationGracePeriodSeconds != nil {
 		spec, source, err := s.recoverAppDeployBaseline(currentApp)
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -89,7 +108,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		currentCommand := append([]string(nil), spec.Command...)
 		currentPersistentStorage := cloneAppSpec(spec).PersistentStorage
 		currentVolumeReplication := cloneAppSpec(spec).VolumeReplication
-		currentRightSizing := cloneAppSpec(spec).RightSizing
 		currentTerminationGracePeriodSeconds := spec.TerminationGracePeriodSeconds
 		spec.ImageMirrorLimit = model.EffectiveAppImageMirrorLimit(currentApp.Spec.ImageMirrorLimit)
 
@@ -137,19 +155,6 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				} else {
 					auditMetadata["volume_replication"] = spec.VolumeReplication.Mode
 				}
-			}
-		}
-
-		if req.RightSizing != nil {
-			normalizedRightSizing := model.NormalizeAppRightSizingSpec(*req.RightSizing)
-			if model.NormalizeAppRightSizingMode(req.RightSizing.Mode) == "" {
-				httpx.WriteError(w, http.StatusBadRequest, "right_sizing.mode must be disabled, recommend, or auto")
-				return
-			}
-			spec.RightSizing = &normalizedRightSizing
-			if !appRightSizingEqual(currentRightSizing, spec.RightSizing) {
-				deployChanged = true
-				auditMetadata["right_sizing"] = spec.RightSizing.Mode
 			}
 		}
 

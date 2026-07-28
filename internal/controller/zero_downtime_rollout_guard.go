@@ -15,6 +15,9 @@ type zeroDowntimeRolloutGuardDecision struct {
 	Reason             string
 	PolicyMode         string
 	RolloutIntent      string
+	Strategy           string
+	DowntimeClass      string
+	RolloutMode        string
 	PreviousReleaseKey string
 	DesiredReleaseKey  string
 	PodTemplateChanged bool
@@ -38,6 +41,9 @@ func (s *Service) refuseNonZeroDowntimeRolloutIfNeeded(
 		"operation_type":       strings.TrimSpace(op.Type),
 		"policy_mode":          decision.PolicyMode,
 		"rollout_intent":       decision.RolloutIntent,
+		"strategy":             decision.Strategy,
+		"downtime_class":       decision.DowntimeClass,
+		"rollout_mode":         decision.RolloutMode,
 		"reason":               decision.Reason,
 		"previous_release_key": decision.PreviousReleaseKey,
 		"desired_release_key":  decision.DesiredReleaseKey,
@@ -70,15 +76,6 @@ func (s *Service) zeroDowntimeRolloutGuardDecision(
 	if currentApp.Spec.Replicas <= 0 || !model.AppHasClusterService(currentApp.Spec) {
 		return decision
 	}
-
-	decision.PreviousReleaseKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(currentApp), scheduling))
-	decision.DesiredReleaseKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desiredApp), scheduling))
-	previousTemplate := s.zeroDowntimeManagedAppPodTemplate(currentApp, scheduling)
-	desiredTemplate := s.zeroDowntimeManagedAppPodTemplate(desiredApp, scheduling)
-	decision.PodTemplateChanged = !reflect.DeepEqual(previousTemplate, desiredTemplate)
-	if !decision.PodTemplateChanged {
-		return decision
-	}
 	if desiredApp.Spec.Replicas <= 0 {
 		decision.Refused = true
 		decision.Reason = "the requested restart removes every serving replica while zero downtime is enabled"
@@ -87,6 +84,32 @@ func (s *Service) zeroDowntimeRolloutGuardDecision(
 	if !model.AppHasClusterService(desiredApp.Spec) {
 		decision.Refused = true
 		decision.Reason = "the requested restart removes the cluster service while zero downtime is enabled"
+		return decision
+	}
+
+	decision.PreviousReleaseKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(currentApp), scheduling))
+	decision.DesiredReleaseKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desiredApp), scheduling))
+	desiredDeployment := s.zeroDowntimeManagedAppDeployment(desiredApp, scheduling)
+	decision.Strategy = deploymentStrategyTypeFromObject(desiredDeployment)
+	desiredAnnotations := objectStringMapValue(nestedObjectValue(desiredDeployment, "metadata", "annotations"))
+	decision.DowntimeClass = strings.TrimSpace(desiredAnnotations["fugue.io/downtime-class"])
+	decision.RolloutMode = strings.TrimSpace(desiredAnnotations["fugue.io/rollout-mode"])
+	if strings.TrimSpace(decision.Strategy) == "" {
+		decision.Refused = true
+		decision.Reason = "the rendered serving workload has no explicit deployment strategy while zero downtime is enabled"
+		return decision
+	}
+	if strings.EqualFold(decision.Strategy, "Recreate") ||
+		strings.EqualFold(decision.DowntimeClass, "downtime-required") ||
+		strings.EqualFold(decision.RolloutMode, "isolated-singleton") {
+		decision.Refused = true
+		decision.Reason = "the rendered serving workload requires a Recreate rollout while zero downtime is enabled"
+		return decision
+	}
+	previousTemplate := s.zeroDowntimeManagedAppPodTemplate(currentApp, scheduling)
+	desiredTemplate := nestedObjectValue(desiredDeployment, "spec", "template")
+	decision.PodTemplateChanged = !reflect.DeepEqual(previousTemplate, desiredTemplate)
+	if !decision.PodTemplateChanged {
 		return decision
 	}
 	if !appSupportsOnlineRolloutIntent(desiredApp) {
@@ -102,10 +125,13 @@ func (s *Service) zeroDowntimeRolloutGuardDecision(
 }
 
 func (s *Service) zeroDowntimeManagedAppPodTemplate(app model.App, scheduling runtime.SchedulingConstraints) any {
+	return nestedObjectValue(s.zeroDowntimeManagedAppDeployment(app, scheduling), "spec", "template")
+}
+
+func (s *Service) zeroDowntimeManagedAppDeployment(app model.App, scheduling runtime.SchedulingConstraints) map[string]any {
 	prepared := s.Renderer.PrepareApp(app)
 	objects := s.Renderer.BuildManagedAppChildObjects(prepared, scheduling, nil)
-	deployment := firstManagedAppDeploymentObject(objects, runtime.RuntimeAppResourceName(prepared))
-	return nestedObjectValue(deployment, "spec", "template")
+	return firstManagedAppDeploymentObject(objects, runtime.RuntimeAppResourceName(prepared))
 }
 
 func zeroDowntimePolicyMode(specs ...model.AppSpec) string {

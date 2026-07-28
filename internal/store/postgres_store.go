@@ -2635,6 +2635,39 @@ func (s *Store) pgUpdateAppImageMirrorLimit(id string, limit int) (model.App, er
 	return app, nil
 }
 
+func (s *Store) pgUpdateAppRightSizing(id string, rightSizing model.AppRightSizingSpec) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin update app right-sizing transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+
+	app.Spec.RightSizing = cloneAppRightSizingSpec(&rightSizing)
+	app.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit update app right-sizing transaction: %w", err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
 func (s *Store) pgUpdateAppOriginSource(id string, source model.AppSource) (model.App, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -5760,6 +5793,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		return nil
 	}
 	if op.DesiredSpec != nil {
+		preserveAppRightSizingPolicy(op.DesiredSpec, app.Spec)
 		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
 			return err
 		}

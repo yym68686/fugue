@@ -587,6 +587,78 @@ func TestPatchAppImageMirrorLimitUpdatesAppWithoutDeployOperation(t *testing.T) 
 	}
 }
 
+func TestPatchAppRightSizingUpdatesControlPlanePolicyWithoutDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		RightSizing: &model.AppRightSizingSpec{
+			Mode:        model.AppRightSizingModeAuto,
+			WindowHours: 168,
+			MinSamples:  12,
+		},
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"right_sizing": map[string]any{
+			"mode":         model.AppRightSizingModeRecommend,
+			"window_hours": 24,
+			"min_samples":  6,
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var patchResponse struct {
+		AlreadyCurrent bool             `json:"already_current"`
+		App            model.App        `json:"app"`
+		Operation      *model.Operation `json:"operation,omitempty"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected right-sizing policy patch to report a change")
+	}
+	if patchResponse.Operation != nil {
+		t.Fatalf("right-sizing policy-only patch must not create a deploy operation: %+v", patchResponse.Operation)
+	}
+	if got := patchResponse.App.Spec.RightSizing; got == nil || got.Mode != model.AppRightSizingModeRecommend || got.WindowHours != 24 || got.MinSamples != 6 {
+		t.Fatalf("unexpected right-sizing policy in response: %+v", got)
+	}
+
+	ops, err := s.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("right-sizing policy-only patch must not queue workload operations: %+v", ops)
+	}
+	updatedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if got := updatedApp.Spec.RightSizing; got == nil || got.Mode != model.AppRightSizingModeRecommend || got.WindowHours != 24 || got.MinSamples != 6 {
+		t.Fatalf("unexpected stored right-sizing policy: %+v", got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"right_sizing": map[string]any{
+			"mode":         model.AppRightSizingModeRecommend,
+			"window_hours": 24,
+			"min_samples":  6,
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if !patchResponse.AlreadyCurrent {
+		t.Fatal("expected repeated right-sizing policy patch to report already_current")
+	}
+}
+
 func TestPatchAppTerminationGracePeriodQueuesDeployOperation(t *testing.T) {
 	t.Parallel()
 

@@ -19039,6 +19039,7 @@ components:
         volume_replication:
           $ref: "#/components/schemas/AppVolumeReplicationSpec"
         right_sizing:
+          description: Control-plane recommendation policy. Updating this field is synchronous and does not create or apply a workload deployment.
           $ref: "#/components/schemas/AppRightSizingSpec"
         termination_grace_period_seconds:
           type: integer
@@ -21669,6 +21670,7 @@ components:
         already_current:
           type: boolean
         operation:
+          description: Workload operation created by patches that change runtime state. Omitted for synchronous control-plane-only patches such as right-sizing policy.
           $ref: "#/components/schemas/Operation"
     InspectGitHubTemplateRequest:
       type: object

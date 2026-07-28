@@ -146,6 +146,12 @@ func TestZeroDowntimeRolloutGuardRefusesPolicyDisableThatWouldRecreate(t *testin
 	if !decision.Refused {
 		t.Fatalf("expected policy disable that would trigger Recreate to fail closed: %+v", decision)
 	}
+	if decision.Strategy != "Recreate" || decision.DowntimeClass != "downtime-required" || decision.RolloutMode != "isolated-singleton" {
+		t.Fatalf("expected refusal to be based on the final rendered Recreate strategy: %+v", decision)
+	}
+	if decision.Reason != "the rendered serving workload requires a Recreate rollout while zero downtime is enabled" {
+		t.Fatalf("unexpected rendered-strategy refusal reason: %+v", decision)
+	}
 }
 
 func TestZeroDowntimeRolloutGuardDoesNotChangePolicyOffBehavior(t *testing.T) {
