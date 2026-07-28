@@ -180,4 +180,33 @@ func TestAutomationPolicyContracts(t *testing.T) {
 		showResponse.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/AutomationPolicyResponse" {
 		t.Fatal("automation show must return AutomationPolicyResponse")
 	}
+
+	userList := doc.Paths.Find("/v1/automations")
+	if userList == nil || userList.Get == nil || userList.Post == nil {
+		t.Fatal("missing tenant automation list/create operations")
+	}
+	if userList.Get.OperationID != "listUserAutomationPolicies" ||
+		userList.Post.OperationID != "createUserAutomationPolicy" {
+		t.Fatalf("unexpected tenant automation operations: get=%q post=%q", userList.Get.OperationID, userList.Post.OperationID)
+	}
+	if userList.Post.RequestBody == nil || userList.Post.RequestBody.Value == nil ||
+		userList.Post.RequestBody.Value.Required != true ||
+		userList.Post.RequestBody.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/CreateAutomationPolicyRequest" {
+		t.Fatal("automation create must require CreateAutomationPolicyRequest")
+	}
+	userItem := doc.Paths.Find("/v1/automations/{policy_id}")
+	if userItem == nil || userItem.Get == nil || userItem.Put == nil || userItem.Delete == nil {
+		t.Fatal("missing tenant automation lifecycle operations")
+	}
+	if userItem.Put.OperationID != "updateUserAutomationPolicy" ||
+		userItem.Delete.OperationID != "deleteUserAutomationPolicy" {
+		t.Fatalf("unexpected tenant automation lifecycle operation IDs: put=%q delete=%q", userItem.Put.OperationID, userItem.Delete.OperationID)
+	}
+	expectedGeneration := userItem.Delete.Parameters.GetByInAndName("query", "expected_generation")
+	if expectedGeneration == nil || !expectedGeneration.Required {
+		t.Fatal("automation delete must require expected_generation")
+	}
+	if _, ok := doc.Components.Schemas["AutomationRequestMetricSelector"]; !ok {
+		t.Fatal("missing typed automation request metric selector schema")
+	}
 }

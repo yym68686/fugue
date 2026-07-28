@@ -82,6 +82,7 @@ func resilienceRunbooks() []model.RunbookReference {
 		{Name: "platform safety kernel", Path: "docs/runbooks/platform-safety-kernel.md", IncidentClass: "platform_safety_kernel"},
 		{Name: "invariant registry", Path: "docs/runbooks/invariant-registry.md", IncidentClass: "platform_invariant"},
 		{Name: "action safety evaluator", Path: "docs/runbooks/action-safety-evaluator.md", IncidentClass: "automatic_action_safety"},
+		{Name: "application automation restart", Path: "docs/runbooks/app-automation-restart.md", IncidentClass: "app_request_unavailability"},
 		{Name: "consumer generation drift", Path: "docs/runbooks/consumer-generation-drift.md", IncidentClass: "platform_consumer_generation_drift"},
 		{Name: "LKG expired", Path: "docs/runbooks/lkg-expired.md", IncidentClass: "platform_lkg_expired"},
 		{Name: "node updater canary restore", Path: "docs/runbooks/node-updater-canary-restore.md", IncidentClass: "node_updater_generation"},

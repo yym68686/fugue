@@ -107,6 +107,27 @@ func TestAutomaticActionContractsAreBoundedAndAuditable(t *testing.T) {
 			t.Fatalf("action contract %s has unsafe allowed modes: %+v", contract.ID, contract.AllowedModes)
 		}
 	}
+
+	appRestart, ok := AutomaticActionContractByID(ActionContractAppRestart)
+	if !ok {
+		t.Fatal("app restart action contract is missing")
+	}
+	if appRestart.ActionType != "restart_app" ||
+		appRestart.Scope != model.GatePolicyScopeApp ||
+		appRestart.TriggerInvariant != "app.request_unavailability" ||
+		appRestart.GatePolicyID != "automation.app-restart" ||
+		appRestart.BlastRadius.MaxApps != 1 ||
+		!appRestart.RequiresRollbackTarget ||
+		!appRestart.RequiresAudit ||
+		!appRestart.RequiresWAL ||
+		!appRestart.RequiresIdempotencyKey ||
+		!appRestart.RequiresFencingToken {
+		t.Fatalf("app restart contract is not fail-closed: %+v", appRestart)
+	}
+	byAction, ok := AutomaticActionContractByActionType("restart_app")
+	if !ok || byAction.ID != appRestart.ID {
+		t.Fatalf("action-type lookup did not resolve app restart: %+v ok=%v", byAction, ok)
+	}
 }
 
 func TestConsumerAndLKGInventoriesCoverPlatformArtifactKinds(t *testing.T) {

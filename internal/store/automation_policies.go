@@ -258,6 +258,14 @@ func normalizeAutomationPolicyForStore(policy model.AutomationPolicy) (model.Aut
 		rule.Trigger.Type = strings.TrimSpace(strings.ToLower(rule.Trigger.Type))
 		rule.Trigger.Source = strings.TrimSpace(rule.Trigger.Source)
 		rule.Trigger.InvariantID = strings.TrimSpace(rule.Trigger.InvariantID)
+		if rule.Trigger.RequestMetric != nil {
+			selector := *rule.Trigger.RequestMetric
+			selector.Metric = strings.TrimSpace(strings.ToLower(selector.Metric))
+			selector.Window = strings.TrimSpace(selector.Window)
+			selector.StatusCodes = normalizeAutomationStatusCodes(selector.StatusCodes)
+			selector.ErrorClasses = normalizeAutomationStrings(selector.ErrorClasses)
+			rule.Trigger.RequestMetric = &selector
+		}
 		rule.Trigger.RequiredEvidence = normalizeAutomationStrings(rule.Trigger.RequiredEvidence)
 		rule.Action.Type = strings.TrimSpace(rule.Action.Type)
 		rule.Safety.ActionContractID = strings.TrimSpace(rule.Safety.ActionContractID)
@@ -277,6 +285,13 @@ func normalizeAutomationPolicyForStore(policy model.AutomationPolicy) (model.Aut
 		if rule.Trigger.Type == model.AutomationTriggerInvariant && rule.Trigger.InvariantID == "" {
 			return model.AutomationPolicy{}, fmt.Errorf("%w: invariant triggers require an invariant ID", ErrInvalidInput)
 		}
+		if rule.Trigger.Type == model.AutomationTriggerRequestMetric {
+			if err := validateAutomationRequestMetricSelector(rule.Trigger.RequestMetric); err != nil {
+				return model.AutomationPolicy{}, err
+			}
+		} else if rule.Trigger.RequestMetric != nil {
+			return model.AutomationPolicy{}, fmt.Errorf("%w: request_metric selector is only valid for request-metric triggers", ErrInvalidInput)
+		}
 		if _, exists := seenRuleIDs[rule.ID]; exists {
 			return model.AutomationPolicy{}, fmt.Errorf("%w: duplicate rule ID %q", ErrInvalidInput, rule.ID)
 		}
@@ -284,7 +299,8 @@ func normalizeAutomationPolicyForStore(policy model.AutomationPolicy) (model.Aut
 		if rule.Trigger.MinimumSamples < 0 || rule.Trigger.MinimumFailureDomains < 0 {
 			return model.AutomationPolicy{}, fmt.Errorf("%w: trigger sample and failure-domain limits must not be negative", ErrInvalidInput)
 		}
-		if rule.Safety.BlastRadius.MaxNodes < 0 ||
+		if rule.Safety.BlastRadius.MaxApps < 0 ||
+			rule.Safety.BlastRadius.MaxNodes < 0 ||
 			rule.Safety.BlastRadius.MaxEdgesPerGroup < 0 ||
 			rule.Safety.BlastRadius.PreserveMinHealthyEdgeGroups < 0 ||
 			rule.Safety.BlastRadius.PreserveMinEligibleEdgesPerHost < 0 {
@@ -431,6 +447,45 @@ func normalizeAutomationStrings(values []string) []string {
 	return out
 }
 
+func normalizeAutomationStatusCodes(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := append([]int(nil), values...)
+	sort.Ints(out)
+	writeIndex := 0
+	for _, value := range out {
+		if writeIndex > 0 && out[writeIndex-1] == value {
+			continue
+		}
+		out[writeIndex] = value
+		writeIndex++
+	}
+	return out[:writeIndex]
+}
+
+func validateAutomationRequestMetricSelector(selector *model.AutomationRequestMetricSelector) error {
+	if selector == nil {
+		return fmt.Errorf("%w: request-metric triggers require a request_metric selector", ErrInvalidInput)
+	}
+	if selector.Metric == "" || selector.Window == "" {
+		return fmt.Errorf("%w: request metric and window are required", ErrInvalidInput)
+	}
+	window, err := time.ParseDuration(selector.Window)
+	if err != nil || window <= 0 || window > 24*time.Hour {
+		return fmt.Errorf("%w: request metric window must be a positive duration no greater than 24h", ErrInvalidInput)
+	}
+	if len(selector.StatusCodes) == 0 && len(selector.ErrorClasses) == 0 {
+		return fmt.Errorf("%w: request metric selector requires status codes or error classes", ErrInvalidInput)
+	}
+	for _, statusCode := range selector.StatusCodes {
+		if statusCode < 100 || statusCode > 599 {
+			return fmt.Errorf("%w: request metric status codes must be between 100 and 599", ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
 func normalizeAutomationMap(values map[string]string) (map[string]string, error) {
 	if len(values) == 0 {
 		return nil, nil
@@ -466,6 +521,12 @@ func cloneAutomationPolicy(policy model.AutomationPolicy) model.AutomationPolicy
 	policy.Rules = append([]model.AutomationRule(nil), policy.Rules...)
 	for index := range policy.Rules {
 		policy.Rules[index].Trigger.RequiredEvidence = append([]string(nil), policy.Rules[index].Trigger.RequiredEvidence...)
+		if selector := policy.Rules[index].Trigger.RequestMetric; selector != nil {
+			cloned := *selector
+			cloned.StatusCodes = append([]int(nil), selector.StatusCodes...)
+			cloned.ErrorClasses = append([]string(nil), selector.ErrorClasses...)
+			policy.Rules[index].Trigger.RequestMetric = &cloned
+		}
 		policy.Rules[index].Action.Parameters = cloneAutomationMap(policy.Rules[index].Action.Parameters)
 	}
 	policy.Metadata = cloneAutomationMap(policy.Metadata)

@@ -9,6 +9,7 @@ const (
 	GatePolicyModeDisabled = "disabled"
 
 	GatePolicyScopeCluster   = "cluster"
+	GatePolicyScopeApp       = "app"
 	GatePolicyScopeNode      = "node"
 	GatePolicyScopeEdgeNode  = "edge-node"
 	GatePolicyScopeEdgeGroup = "edge-group"
@@ -18,6 +19,7 @@ const (
 )
 
 type GateBlastRadiusPolicy struct {
+	MaxApps                         int `json:"max_apps,omitempty"`
 	MaxNodes                        int `json:"max_nodes,omitempty"`
 	MaxEdgesPerGroup                int `json:"max_edges_per_group,omitempty"`
 	PreserveMinHealthyEdgeGroups    int `json:"preserve_min_healthy_edge_groups,omitempty"`

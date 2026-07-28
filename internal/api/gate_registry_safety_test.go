@@ -105,6 +105,23 @@ func TestUnknownGatePolicyIsForcedToShadow(t *testing.T) {
 	}
 }
 
+func TestAppGatePolicyReceivesOneAppCompiledBlastCap(t *testing.T) {
+	policies := mergeGatePolicies(nil, []model.GatePolicy{{
+		ID:         "extension.app-restart",
+		Mode:       model.GatePolicyModeEnforced,
+		Scope:      model.GatePolicyScopeApp,
+		RunbookRef: "docs/runbooks/app-automation-restart.md",
+	}})
+	if len(policies) != 1 {
+		t.Fatalf("expected one policy, got %+v", policies)
+	}
+	if policies[0].Mode != model.GatePolicyModeShadow ||
+		policies[0].Scope != model.GatePolicyScopeApp ||
+		policies[0].BlastRadius.MaxApps != 1 {
+		t.Fatalf("app gate did not receive the compiled one-app shadow boundary: %+v", policies[0])
+	}
+}
+
 func TestGateKillSwitchOnlyDowngradesMode(t *testing.T) {
 	const envName = "FUGUE_TEST_GATE_KILL_SWITCH"
 	policy := model.GatePolicy{

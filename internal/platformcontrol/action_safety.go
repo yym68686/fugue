@@ -225,6 +225,11 @@ func (e ActionSafetyEvaluator) Evaluate(request model.ActionSafetyRequest) model
 				decision.BlastRadius.Reason = "node blast radius cap exceeded"
 				addViolation("blast_radius.max_nodes", fmt.Sprintf("removed targets exceed max_nodes=%d", blastRadius.MaxNodes))
 			}
+			if blastRadius.MaxApps > 0 && removedCount(request.CurrentCounts, request.CandidateCounts) > blastRadius.MaxApps {
+				decision.BlastRadius.Pass = false
+				decision.BlastRadius.Reason = "app blast radius cap exceeded"
+				addViolation("blast_radius.max_apps", fmt.Sprintf("removed targets exceed max_apps=%d", blastRadius.MaxApps))
+			}
 		}
 	}
 
@@ -426,6 +431,7 @@ func longerDuration(left, right string) string {
 
 func tighterBlastRadius(left, right model.GateBlastRadiusPolicy) model.GateBlastRadiusPolicy {
 	return model.GateBlastRadiusPolicy{
+		MaxApps:                         smallerPositive(left.MaxApps, right.MaxApps),
 		MaxNodes:                        smallerPositive(left.MaxNodes, right.MaxNodes),
 		MaxEdgesPerGroup:                smallerPositive(left.MaxEdgesPerGroup, right.MaxEdgesPerGroup),
 		PreserveMinHealthyEdgeGroups:    maxInt(left.PreserveMinHealthyEdgeGroups, right.PreserveMinHealthyEdgeGroups),
@@ -447,7 +453,8 @@ func smallerPositive(left, right int) int {
 }
 
 func hasBlastRadiusLimit(policy model.GateBlastRadiusPolicy) bool {
-	return policy.MaxNodes > 0 ||
+	return policy.MaxApps > 0 ||
+		policy.MaxNodes > 0 ||
 		policy.MaxEdgesPerGroup > 0 ||
 		policy.PreserveMinHealthyEdgeGroups > 0 ||
 		policy.PreserveMinEligibleEdgesPerHost > 0

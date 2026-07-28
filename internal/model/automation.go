@@ -26,16 +26,27 @@ type AutomationScope struct {
 	ID   string `json:"id,omitempty"`
 }
 
+// AutomationRequestMetricSelector is the bounded, typed selector used by
+// request-metric triggers. It deliberately supports only observed metric
+// dimensions; it is not an expression language.
+type AutomationRequestMetricSelector struct {
+	Metric       string   `json:"metric"`
+	Window       string   `json:"window"`
+	StatusCodes  []int    `json:"status_codes,omitempty"`
+	ErrorClasses []string `json:"error_classes,omitempty"`
+}
+
 // AutomationTrigger is the common trigger envelope shared by managed system
 // automations and user-owned policies. Domain-specific configuration is added
 // through typed optional fields instead of arbitrary executable expressions.
 type AutomationTrigger struct {
-	Type                  string   `json:"type"`
-	Source                string   `json:"source"`
-	InvariantID           string   `json:"invariant_id,omitempty"`
-	RequiredEvidence      []string `json:"required_evidence,omitempty"`
-	MinimumSamples        int      `json:"minimum_samples,omitempty"`
-	MinimumFailureDomains int      `json:"minimum_failure_domains,omitempty"`
+	Type                  string                           `json:"type"`
+	Source                string                           `json:"source"`
+	InvariantID           string                           `json:"invariant_id,omitempty"`
+	RequestMetric         *AutomationRequestMetricSelector `json:"request_metric,omitempty"`
+	RequiredEvidence      []string                         `json:"required_evidence,omitempty"`
+	MinimumSamples        int                              `json:"minimum_samples,omitempty"`
+	MinimumFailureDomains int                              `json:"minimum_failure_domains,omitempty"`
 }
 
 // AutomationAction describes a typed Fugue action. Parameters are declarative
@@ -99,4 +110,57 @@ type AutomationPolicyListResponse struct {
 
 type AutomationPolicyResponse struct {
 	Policy AutomationPolicy `json:"policy"`
+}
+
+// AutomationTriggerInput excludes server-owned invariant bindings. The API
+// resolves those bindings from the registered action contract.
+type AutomationTriggerInput struct {
+	Type                  string                           `json:"type"`
+	Source                string                           `json:"source"`
+	RequestMetric         *AutomationRequestMetricSelector `json:"request_metric,omitempty"`
+	RequiredEvidence      []string                         `json:"required_evidence,omitempty"`
+	MinimumSamples        int                              `json:"minimum_samples,omitempty"`
+	MinimumFailureDomains int                              `json:"minimum_failure_domains,omitempty"`
+}
+
+type AutomationActionInput struct {
+	Type       string            `json:"type"`
+	Parameters map[string]string `json:"parameters,omitempty"`
+}
+
+type AutomationRuleInput struct {
+	ID          string                 `json:"id"`
+	Description string                 `json:"description,omitempty"`
+	Trigger     AutomationTriggerInput `json:"trigger"`
+	Action      AutomationActionInput  `json:"action"`
+}
+
+type CreateAutomationPolicyRequest struct {
+	TenantID    string                `json:"tenant_id,omitempty"`
+	ProjectID   string                `json:"project_id,omitempty"`
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
+	Kind        string                `json:"kind"`
+	Scope       AutomationScope       `json:"scope"`
+	Mode        string                `json:"mode"`
+	Priority    int                   `json:"priority,omitempty"`
+	SourceRef   string                `json:"source_ref,omitempty"`
+	Rules       []AutomationRuleInput `json:"rules"`
+	Metadata    map[string]string     `json:"metadata,omitempty"`
+}
+
+type UpdateAutomationPolicyRequest struct {
+	ExpectedGeneration int64                 `json:"expected_generation"`
+	Name               string                `json:"name"`
+	Description        string                `json:"description,omitempty"`
+	Mode               string                `json:"mode"`
+	Priority           int                   `json:"priority,omitempty"`
+	SourceRef          string                `json:"source_ref,omitempty"`
+	Rules              []AutomationRuleInput `json:"rules"`
+	Metadata           map[string]string     `json:"metadata,omitempty"`
+}
+
+type DeleteAutomationPolicyResponse struct {
+	Deleted bool             `json:"deleted"`
+	Policy  AutomationPolicy `json:"policy"`
 }

@@ -165,6 +165,27 @@ func TestActionSafetyEvaluatorRejectsUnknownContractAndExcessiveTTL(t *testing.T
 	assertActionViolation(t, ttlDecision, "action.invalid_ttl")
 }
 
+func TestActionSafetyEvaluatorEnforcesAppBlastRadius(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 28, 6, 0, 0, 0, time.UTC)
+	evaluator := actionEvaluatorFixture(now, model.GatePolicyModeEnforced)
+	evaluator.Contracts[0].Scope = model.GatePolicyScopeApp
+	evaluator.Contracts[0].BlastRadius = model.GateBlastRadiusPolicy{MaxApps: 1}
+	evaluator.Policies[0].Scope = model.GatePolicyScopeApp
+	evaluator.Policies[0].BlastRadius = model.GateBlastRadiusPolicy{MaxApps: 1}
+	request := passingActionRequest(now)
+	request.Scope = model.GatePolicyScopeApp
+	request.CurrentCounts = map[string]int{"app-a": 1, "app-b": 1}
+	request.CandidateCounts = map[string]int{"app-a": 0, "app-b": 0}
+
+	decision := evaluator.Evaluate(request)
+	if decision.Pass || decision.Allowed || decision.ProductionMutationAllowed {
+		t.Fatalf("two-app action must exceed the one-app contract: %+v", decision)
+	}
+	assertActionViolation(t, decision, "blast_radius.max_apps")
+}
+
 func actionEvaluatorFixture(now time.Time, mode string) ActionSafetyEvaluator {
 	contract := model.AutomaticActionContract{
 		ID:                     "test.action",

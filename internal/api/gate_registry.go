@@ -158,6 +158,7 @@ func defaultGatePolicies() []model.GatePolicy {
 	now := time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC)
 	rollbackSignals := []string{"public_synthetic_503_no_healthy_edge_groups", "release_guard_block_rollout"}
 	return []model.GatePolicy{
+		{ID: "automation.app-restart", Description: "bounded application restart proposals after sustained request unavailability", Mode: model.GatePolicyModeShadow, DefaultMode: model.GatePolicyModeShadow, Scope: model.GatePolicyScopeApp, IntroducedAt: now, SoakMinDuration: "24h", MinimumSamples: 3, MinimumFailureDomains: 1, BlastRadius: model.GateBlastRadiusPolicy{MaxApps: 1}, RollbackOn: []string{"app_restart_readiness_regression", "app_restart_loop_detected"}, KillSwitchEnv: "FUGUE_GATE_AUTOMATION_APP_RESTART_MODE", RunbookRef: "docs/runbooks/app-automation-restart.md"},
 		{ID: "node.kubernetes_service_dns", Description: "pod-network Kubernetes Service DNS deep health", Mode: model.GatePolicyModeShadow, DefaultMode: model.GatePolicyModeShadow, Scope: model.GatePolicyScopeNode, IntroducedAt: now, SoakMinDuration: "24h", MinimumSamples: 3, MinimumFailureDomains: 2, BlastRadius: model.GateBlastRadiusPolicy{MaxNodes: 1}, RollbackOn: rollbackSignals, KillSwitchEnv: "FUGUE_GATE_NODE_KUBERNETES_SERVICE_DNS_MODE", RunbookRef: "docs/runbooks/node-dns-failure.md"},
 		{ID: "node.kube_proxy_rules", Description: "kube-proxy and managed iptables deep health", Mode: model.GatePolicyModeShadow, DefaultMode: model.GatePolicyModeShadow, Scope: model.GatePolicyScopeNode, IntroducedAt: now, SoakMinDuration: "24h", MinimumSamples: 3, MinimumFailureDomains: 2, BlastRadius: model.GateBlastRadiusPolicy{MaxNodes: 1}, RollbackOn: rollbackSignals, KillSwitchEnv: "FUGUE_GATE_NODE_KUBE_PROXY_RULES_MODE", RunbookRef: "docs/runbooks/stale-iptables-managed-rule.md"},
 		{ID: "node.cni_bridge", Description: "node CNI bridge health", Mode: model.GatePolicyModeShadow, DefaultMode: model.GatePolicyModeShadow, Scope: model.GatePolicyScopeNode, IntroducedAt: now, SoakMinDuration: "24h", MinimumSamples: 3, MinimumFailureDomains: 2, BlastRadius: model.GateBlastRadiusPolicy{MaxNodes: 1}, RollbackOn: rollbackSignals, KillSwitchEnv: "FUGUE_GATE_NODE_CNI_BRIDGE_MODE", RunbookRef: "docs/runbooks/node-dns-failure.md"},
@@ -340,6 +341,7 @@ func longerGatePolicyDuration(baseRaw, overrideRaw string) string {
 
 func tighterGateBlastRadius(base, override model.GateBlastRadiusPolicy) model.GateBlastRadiusPolicy {
 	return model.GateBlastRadiusPolicy{
+		MaxApps:                         smallerPositiveInt(base.MaxApps, override.MaxApps),
 		MaxNodes:                        smallerPositiveInt(base.MaxNodes, override.MaxNodes),
 		MaxEdgesPerGroup:                smallerPositiveInt(base.MaxEdgesPerGroup, override.MaxEdgesPerGroup),
 		PreserveMinHealthyEdgeGroups:    gateMaxInt(base.PreserveMinHealthyEdgeGroups, override.PreserveMinHealthyEdgeGroups),
@@ -349,6 +351,8 @@ func tighterGateBlastRadius(base, override model.GateBlastRadiusPolicy) model.Ga
 
 func applyCompiledGateBlastRadiusFloor(scope string, policy model.GateBlastRadiusPolicy) model.GateBlastRadiusPolicy {
 	switch normalizeGatePolicyScope(scope) {
+	case model.GatePolicyScopeApp:
+		policy.MaxApps = clampPositiveMaximum(policy.MaxApps, 1)
 	case model.GatePolicyScopeNode, model.GatePolicyScopeRuntime:
 		policy.MaxNodes = clampPositiveMaximum(policy.MaxNodes, 1)
 	case model.GatePolicyScopeEdgeNode, model.GatePolicyScopeEdgeGroup:
@@ -367,6 +371,9 @@ func boundedCanaryFailureDomains(values []string, policy model.GateBlastRadiusPo
 	limit := policy.MaxNodes
 	if limit <= 0 {
 		limit = policy.MaxEdgesPerGroup
+	}
+	if limit <= 0 {
+		limit = policy.MaxApps
 	}
 	if limit > 0 && len(values) > limit {
 		return append([]string(nil), values[:limit]...)
@@ -493,6 +500,8 @@ func normalizeGatePolicyScope(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case model.GatePolicyScopeCluster:
 		return model.GatePolicyScopeCluster
+	case model.GatePolicyScopeApp:
+		return model.GatePolicyScopeApp
 	case model.GatePolicyScopeNode:
 		return model.GatePolicyScopeNode
 	case model.GatePolicyScopeEdgeNode:

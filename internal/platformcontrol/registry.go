@@ -20,10 +20,28 @@ const (
 	ActionContractStatelessRestart      = "component.stateless_restart"
 	ActionContractManagedIptablesRepair = "node.managed_iptables_repair"
 	ActionContractFreezeNodeGeneration  = "node_updater.freeze_generation"
+	ActionContractAppRestart            = "app.restart"
 )
 
 func InvariantDefinitions() []model.InvariantDefinition {
 	definitions := []model.InvariantDefinition{
+		invariant(
+			"app.request_unavailability",
+			"app",
+			model.GatePolicyScopeApp,
+			"application",
+			"bounded application request failures must be observable before an application restart is proposed",
+			model.RobustnessSeverityDegraded,
+			model.GatePolicyModeShadow,
+			"app_request_outcomes,app_revision,app_readiness",
+			"automation.app-restart",
+			ActionContractAppRestart,
+			"docs/runbooks/app-automation-restart.md",
+			"2m",
+			model.InvariantEvidenceBehaviorHold,
+			model.InvariantEvidenceBehaviorHold,
+			false,
+		),
 		invariant(
 			"release.no_new_block_publish",
 			"release",
@@ -611,7 +629,33 @@ func InvariantDefinitionByID(id string) (model.InvariantDefinition, bool) {
 }
 
 func AutomaticActionContracts() []model.AutomaticActionContract {
+	appRestart := actionContract(
+		ActionContractAppRestart,
+		"restart_app",
+		model.GatePolicyScopeApp,
+		"app.request_unavailability",
+		"automation.app-restart",
+		"FUGUE_AUTOMATION_APP_RESTART_ENABLED",
+		"FUGUE_AUTOMATION_APP_RESTART_KILL_SWITCH",
+		"5m",
+		3,
+		1,
+		model.GateBlastRadiusPolicy{MaxApps: 1},
+		"application request outcomes and readiness return to healthy",
+		"hold further restarts and restore the captured desired application revision",
+		"docs/runbooks/app-automation-restart.md",
+		true,
+		true,
+		true,
+		true,
+	)
+	appRestart.EvidenceSource = "app_request_outcomes"
+	appRestart.RequiredEvidence = []string{"app_request_outcomes", "app_revision", "app_readiness"}
+	appRestart.RequiresRollbackTarget = true
+	appRestart.Metadata = map[string]string{"executor": "app_recovery"}
+
 	contracts := []model.AutomaticActionContract{
+		appRestart,
 		actionContract(ActionContractNodeQuarantine, "quarantine_node", model.GatePolicyScopeNode, "node.quarantine_blast_radius", "scheduler.node_quarantine", "FUGUE_AUTONOMY_QUARANTINE_ENABLED", "FUGUE_AUTONOMY_NODE_QUARANTINE_KILL_SWITCH", "15m", 3, 1, model.GateBlastRadiusPolicy{MaxNodes: 1}, "clear quarantine after consecutive healthy reports", "clear node quarantine", "docs/runbooks/quarantine-blast-radius-exceeded.md", true, true, true, false),
 		actionContract(ActionContractEdgeQuarantine, "quarantine_edge", model.GatePolicyScopeEdgeNode, "edge.eligible_set_hard_gates", "edge.route_inventory_quarantine", "FUGUE_AUTONOMY_QUARANTINE_ENABLED", "FUGUE_AUTONOMY_EDGE_QUARANTINE_KILL_SWITCH", "15m", 3, 2, model.GateBlastRadiusPolicy{MaxEdgesPerGroup: 1, PreserveMinHealthyEdgeGroups: 1}, "restore edge after local and public probes pass", "remove temporary edge quarantine", "docs/runbooks/edge-quarantine.md", true, true, true, false),
 		actionContract(ActionContractDNSAnswerFilter, "dns_answer_filter", model.GatePolicyScopeHostname, "dns.answer_route_ready", "dns.answer_route_ready", "FUGUE_AUTONOMY_DNS_FILTERING_ENABLED", "FUGUE_AUTONOMY_DNS_FILTERING_KILL_SWITCH", "5m", 3, 2, model.GateBlastRadiusPolicy{PreserveMinEligibleEdgesPerHost: 1}, "restore previous verified answer after recovery threshold", "expire filter and restore previous verified answer", "docs/runbooks/edge-route-all-unhealthy.md", true, true, true, false),
@@ -636,6 +680,24 @@ func AutomaticActionContractByID(id string) (model.AutomaticActionContract, bool
 		}
 	}
 	return model.AutomaticActionContract{}, false
+}
+
+func AutomaticActionContractByActionType(actionType string) (model.AutomaticActionContract, bool) {
+	actionType = strings.TrimSpace(actionType)
+	var (
+		found      model.AutomaticActionContract
+		foundMatch bool
+	)
+	for _, contract := range AutomaticActionContracts() {
+		if strings.TrimSpace(contract.ActionType) == actionType {
+			if foundMatch {
+				return model.AutomaticActionContract{}, false
+			}
+			found = contract
+			foundMatch = true
+		}
+	}
+	return found, foundMatch
 }
 
 func ConsumerContracts() []model.PlatformConsumerContractDefinition {

@@ -1151,6 +1151,23 @@ paths:
       x-fugue-handler: handleListAutomationPolicies
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: owner_type
+          required: false
+          schema:
+            type: string
+            enum: [system, user]
       responses:
         '200':
           description: Successful response
@@ -1181,6 +1198,137 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AutomationPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/automations:
+    get:
+      operationId: listUserAutomationPolicies
+      summary: List User Automation Policies
+      tags: [Automations]
+      x-fugue-handler: handleListUserAutomationPolicies
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          description: Platform-admin-only tenant filter.
+          schema:
+            type: string
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationPolicyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createUserAutomationPolicy
+      summary: Create User Automation Policy
+      tags: [Automations]
+      x-fugue-handler: handleCreateUserAutomationPolicy
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAutomationPolicyRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/automations/{policy_id}:
+    get:
+      operationId: getUserAutomationPolicy
+      summary: Get User Automation Policy
+      tags: [Automations]
+      x-fugue-handler: handleGetUserAutomationPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: policy_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: updateUserAutomationPolicy
+      summary: Update User Automation Policy
+      tags: [Automations]
+      x-fugue-handler: handleUpdateUserAutomationPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: policy_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAutomationPolicyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteUserAutomationPolicy
+      summary: Delete User Automation Policy
+      tags: [Automations]
+      x-fugue-handler: handleDeleteUserAutomationPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: policy_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: expected_generation
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteAutomationPolicyResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/action-contracts:
@@ -24323,6 +24471,9 @@ components:
       type: object
       additionalProperties: false
       properties:
+        max_apps:
+          type: integer
+          format: int32
         max_nodes:
           type: integer
           format: int32
@@ -24349,7 +24500,7 @@ components:
           enum: [shadow, canary, enforced, disabled]
         scope:
           type: string
-          enum: [cluster, node, edge-node, edge-group, hostname, service, runtime]
+          enum: [cluster, app, node, edge-node, edge-group, hostname, service, runtime]
         default_mode:
           type: string
           enum: [shadow, canary, enforced, disabled]
@@ -25023,6 +25174,8 @@ components:
           type: string
         invariant_id:
           type: string
+        request_metric:
+          $ref: "#/components/schemas/AutomationRequestMetricSelector"
         required_evidence:
           type: array
           items:
@@ -25033,6 +25186,28 @@ components:
         minimum_failure_domains:
           type: integer
           format: int32
+    AutomationRequestMetricSelector:
+      type: object
+      additionalProperties: false
+      required: [metric, window]
+      properties:
+        metric:
+          type: string
+        window:
+          type: string
+        status_codes:
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            format: int32
+            minimum: 100
+            maximum: 599
+        error_classes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
     AutomationAction:
       type: object
       additionalProperties: false
@@ -25173,6 +25348,140 @@ components:
       additionalProperties: false
       required: [policy]
       properties:
+        policy:
+          $ref: "#/components/schemas/AutomationPolicy"
+    AutomationTriggerInput:
+      type: object
+      additionalProperties: false
+      required: [type, source, request_metric]
+      properties:
+        type:
+          type: string
+          enum: [request_metric]
+        source:
+          type: string
+          enum: [app_request_outcomes]
+        request_metric:
+          $ref: "#/components/schemas/AutomationRequestMetricSelector"
+        required_evidence:
+          type: array
+          items:
+            type: string
+        minimum_samples:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10000
+        minimum_failure_domains:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 1000
+    AutomationActionInput:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [restart_app]
+        parameters:
+          type: object
+          additionalProperties: false
+          properties:
+            reason:
+              type: string
+              minLength: 1
+              maxLength: 500
+    AutomationRuleInput:
+      type: object
+      additionalProperties: false
+      required: [id, trigger, action]
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        trigger:
+          $ref: "#/components/schemas/AutomationTriggerInput"
+        action:
+          $ref: "#/components/schemas/AutomationActionInput"
+    CreateAutomationPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, kind, scope, mode, rules]
+      properties:
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          type: string
+          enum: [app_recovery]
+        scope:
+          $ref: "#/components/schemas/AutomationScope"
+        mode:
+          type: string
+          enum: [disabled, shadow]
+        priority:
+          type: integer
+          format: int32
+          minimum: 0
+        source_ref:
+          type: string
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/AutomationRuleInput"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    UpdateAutomationPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_generation, name, mode, rules]
+      properties:
+        expected_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          type: string
+        description:
+          type: string
+        mode:
+          type: string
+          enum: [disabled, shadow]
+        priority:
+          type: integer
+          format: int32
+          minimum: 0
+        source_ref:
+          type: string
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/AutomationRuleInput"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    DeleteAutomationPolicyResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, policy]
+      properties:
+        deleted:
+          type: boolean
         policy:
           $ref: "#/components/schemas/AutomationPolicy"
     AutomaticActionContract:

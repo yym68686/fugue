@@ -55,6 +55,12 @@ func TestAutomationPolicyJSONStoreLifecycleAndIsolation(t *testing.T) {
 	if created.Rules[0].Action.Parameters["reason"] != "restart unhealthy app" {
 		t.Fatalf("parameters were not normalized: %+v", created.Rules[0].Action.Parameters)
 	}
+	if selector := created.Rules[0].Trigger.RequestMetric; selector == nil ||
+		len(selector.StatusCodes) != 2 ||
+		selector.StatusCodes[0] != 503 ||
+		selector.StatusCodes[1] != 504 {
+		t.Fatalf("request metric selector was not normalized: %+v", selector)
+	}
 
 	if _, err := stateStore.CreateAutomationPolicy(testAutomationPolicy(tenantA.ID, projectA.ID, " api recovery ")); !errors.Is(err, ErrConflict) {
 		t.Fatalf("case-insensitive duplicate name error=%v, want conflict", err)
@@ -255,6 +261,25 @@ func TestAutomationPolicyJSONStoreRejectsUnsafePersistence(t *testing.T) {
 			name: "negative trigger samples",
 			mutate: func(policy *model.AutomationPolicy) {
 				policy.Rules[0].Trigger.MinimumSamples = -1
+			},
+		},
+		{
+			name: "negative app blast radius",
+			mutate: func(policy *model.AutomationPolicy) {
+				policy.Rules[0].Safety.BlastRadius.MaxApps = -1
+			},
+		},
+		{
+			name: "request metric selector missing",
+			mutate: func(policy *model.AutomationPolicy) {
+				policy.Rules[0].Trigger.RequestMetric = nil
+			},
+		},
+		{
+			name: "request metric selector has no dimensions",
+			mutate: func(policy *model.AutomationPolicy) {
+				policy.Rules[0].Trigger.RequestMetric.StatusCodes = nil
+				policy.Rules[0].Trigger.RequestMetric.ErrorClasses = nil
 			},
 		},
 		{
@@ -677,8 +702,13 @@ func testAutomationPolicy(tenantID, projectID, name string) model.AutomationPoli
 		Rules: []model.AutomationRule{{
 			ID: "restart-on-unavailability",
 			Trigger: model.AutomationTrigger{
-				Type:                  model.AutomationTriggerRequestMetric,
-				Source:                "request_outcomes",
+				Type:   model.AutomationTriggerRequestMetric,
+				Source: "request_outcomes",
+				RequestMetric: &model.AutomationRequestMetricSelector{
+					Metric:      "http_status",
+					Window:      "2m",
+					StatusCodes: []int{504, 503, 503},
+				},
 				RequiredEvidence:      []string{" http_status ", "failure_domain", "http_status"},
 				MinimumSamples:        3,
 				MinimumFailureDomains: 2,
