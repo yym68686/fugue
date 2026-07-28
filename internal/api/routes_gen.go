@@ -22,6 +22,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/admin/artifacts/{artifact_id}/release", s.auth.RequireAPI(http.HandlerFunc(s.handleReleasePlatformArtifact)))
 	mux.Handle("POST /v1/admin/artifacts/{artifact_id}/rollback", s.auth.RequireAPI(http.HandlerFunc(s.handleRollbackPlatformArtifact)))
 	mux.Handle("POST /v1/admin/artifacts/{artifact_id}/validate", s.auth.RequireAPI(http.HandlerFunc(s.handleValidatePlatformArtifact)))
+	mux.Handle("GET /v1/admin/automations", s.auth.RequireAPI(http.HandlerFunc(s.handleListAutomationPolicies)))
+	mux.Handle("GET /v1/admin/automations/{policy_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAutomationPolicy)))
 	mux.Handle("GET /v1/admin/backups/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAdminBackupStatus)))
 	mux.Handle("POST /v1/admin/composite-release-transactions", s.auth.RequireAPI(http.HandlerFunc(s.handlePrepareCompositeReleaseTransaction)))
 	mux.Handle("POST /v1/admin/composite-release-transactions/{transaction_id}/execute-noop", s.auth.RequireAPI(http.HandlerFunc(s.handleRunCompositeReleaseTransactionNoop)))

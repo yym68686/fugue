@@ -189,6 +189,7 @@ Environment variables:
 	  fugue runtime enroll create edge-a
 	  fugue runtime doctor shared
 	  fugue admin runtime access show shared
+	  fugue admin automation ls
 	  fugue admin node-updater task ls --status pending
 	  fugue admin discovery bundle show
 	  fugue project overview

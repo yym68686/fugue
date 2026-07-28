@@ -16,6 +16,8 @@ tags:
     description: Authoritative DNS inventory, heartbeat, and delegation readiness endpoints.
   - name: Admin
     description: Platform administrator control-plane endpoints.
+  - name: Automations
+    description: Unified system and user rule/action policy endpoints.
   - name: Tenants
     description: Tenant lifecycle endpoints.
   - name: Projects
@@ -1139,6 +1141,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InvariantDefinitionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/automations:
+    get:
+      operationId: listAutomationPolicies
+      summary: List Automation Policies
+      tags: [Automations]
+      x-fugue-handler: handleListAutomationPolicies
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationPolicyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/automations/{policy_id}:
+    get:
+      operationId: getAutomationPolicy
+      summary: Get Automation Policy
+      tags: [Automations]
+      x-fugue-handler: handleGetAutomationPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: policy_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationPolicyResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/action-contracts:
@@ -24960,6 +25002,179 @@ components:
           type: string
         summary:
           type: string
+    AutomationScope:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+        id:
+          type: string
+    AutomationTrigger:
+      type: object
+      additionalProperties: false
+      required: [type, source]
+      properties:
+        type:
+          type: string
+          enum: [invariant, request_metric, synthetic_probe, event, schedule]
+        source:
+          type: string
+        invariant_id:
+          type: string
+        required_evidence:
+          type: array
+          items:
+            type: string
+        minimum_samples:
+          type: integer
+          format: int32
+        minimum_failure_domains:
+          type: integer
+          format: int32
+    AutomationAction:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+        parameters:
+          type: object
+          additionalProperties:
+            type: string
+    AutomationSafetyPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          action_contract_id,
+          gate_policy_id,
+          ttl,
+          recovery_condition,
+          rollback_action,
+        ]
+      properties:
+        action_contract_id:
+          type: string
+        gate_policy_id:
+          type: string
+        ttl:
+          type: string
+        blast_radius:
+          $ref: "#/components/schemas/GateBlastRadiusPolicy"
+        recovery_condition:
+          type: string
+        rollback_action:
+          type: string
+        requires_rollback_target:
+          type: boolean
+        requires_audit:
+          type: boolean
+        requires_wal:
+          type: boolean
+        requires_idempotency_key:
+          type: boolean
+        requires_fencing_token:
+          type: boolean
+    AutomationRule:
+      type: object
+      additionalProperties: false
+      required: [id, trigger, action, safety]
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        trigger:
+          $ref: "#/components/schemas/AutomationTrigger"
+        action:
+          $ref: "#/components/schemas/AutomationAction"
+        safety:
+          $ref: "#/components/schemas/AutomationSafetyPolicy"
+    AutomationPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          name,
+          kind,
+          owner_type,
+          scope,
+          mode,
+          managed,
+          rules,
+          generation,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          type: string
+          enum: [managed_system, app_recovery]
+        owner_type:
+          type: string
+          enum: [system, user]
+        scope:
+          $ref: "#/components/schemas/AutomationScope"
+        mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        priority:
+          type: integer
+          format: int32
+        managed:
+          type: boolean
+        source_ref:
+          type: string
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationRule"
+        generation:
+          type: integer
+          format: int64
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AutomationPolicyListResponse:
+      type: object
+      additionalProperties: false
+      required: [policies, generated_at]
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationPolicy"
+        generated_at:
+          type: string
+          format: date-time
+    AutomationPolicyResponse:
+      type: object
+      additionalProperties: false
+      required: [policy]
+      properties:
+        policy:
+          $ref: "#/components/schemas/AutomationPolicy"
     AutomaticActionContract:
       type: object
       additionalProperties: false

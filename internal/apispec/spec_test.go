@@ -129,3 +129,55 @@ func TestEdgeTLSAskAndSourceArchiveContracts(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomationPolicyContracts(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatalf("load embedded OpenAPI YAML: %v", err)
+	}
+
+	list := doc.Paths.Find("/v1/admin/automations")
+	if list == nil || list.Get == nil {
+		t.Fatal("missing GET /v1/admin/automations operation")
+	}
+	if list.Get.OperationID != "listAutomationPolicies" {
+		t.Fatalf("unexpected automation list operation id %q", list.Get.OperationID)
+	}
+	if list.Get.Extensions["x-fugue-handler"] != "handleListAutomationPolicies" {
+		t.Fatalf("unexpected automation list handler %v", list.Get.Extensions["x-fugue-handler"])
+	}
+	if list.Get.Security == nil || len(*list.Get.Security) != 1 {
+		t.Fatal("automation list must require BearerAuth")
+	}
+	if _, ok := (*list.Get.Security)[0]["BearerAuth"]; !ok {
+		t.Fatal("automation list must require BearerAuth")
+	}
+	listResponse := list.Get.Responses.Value("200")
+	if listResponse == nil || listResponse.Value == nil ||
+		listResponse.Value.Content.Get("application/json") == nil ||
+		listResponse.Value.Content.Get("application/json").Schema == nil ||
+		listResponse.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/AutomationPolicyListResponse" {
+		t.Fatal("automation list must return AutomationPolicyListResponse")
+	}
+
+	show := doc.Paths.Find("/v1/admin/automations/{policy_id}")
+	if show == nil || show.Get == nil {
+		t.Fatal("missing GET /v1/admin/automations/{policy_id} operation")
+	}
+	if show.Get.OperationID != "getAutomationPolicy" ||
+		show.Get.Extensions["x-fugue-handler"] != "handleGetAutomationPolicy" {
+		t.Fatalf("unexpected automation show operation: id=%q handler=%v", show.Get.OperationID, show.Get.Extensions["x-fugue-handler"])
+	}
+	policyID := show.Get.Parameters.GetByInAndName("path", "policy_id")
+	if policyID == nil || !policyID.Required {
+		t.Fatal("automation policy_id path parameter must be required")
+	}
+	showResponse := show.Get.Responses.Value("200")
+	if showResponse == nil || showResponse.Value == nil ||
+		showResponse.Value.Content.Get("application/json") == nil ||
+		showResponse.Value.Content.Get("application/json").Schema == nil ||
+		showResponse.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/AutomationPolicyResponse" {
+		t.Fatal("automation show must return AutomationPolicyResponse")
+	}
+}

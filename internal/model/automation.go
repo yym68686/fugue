@@ -89,3 +89,12 @@ type AutomationPolicy struct {
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
+
+type AutomationPolicyListResponse struct {
+	Policies    []AutomationPolicy `json:"policies"`
+	GeneratedAt time.Time          `json:"generated_at"`
+}
+
+type AutomationPolicyResponse struct {
+	Policy AutomationPolicy `json:"policy"`
+}

@@ -37,6 +37,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		c.newAdminEdgeCommand(),
 		c.newAdminDNSCommand(),
 		c.newAdminPlatformCommand(),
+		c.newAdminAutomationCommand(),
 		c.newAdminGateCommand(),
 		c.newAdminInvariantCommand(),
 		c.newAdminActionContractCommand(),
