@@ -35,7 +35,7 @@ func TestIssueNodeUpdaterImageCacheIdentityBindsAuthenticatedNode(t *testing.T) 
 		"machine-a",
 		model.NodeUpdaterCurrentVersion,
 		"join-v1",
-		[]string{"heartbeat"},
+		[]string{"heartbeat", model.NodeUpdaterCapabilityImageCachePlatformIdentityV1},
 	)
 	if err != nil {
 		t.Fatalf("enroll node updater: %v", err)
@@ -118,6 +118,33 @@ func TestIssueNodeUpdaterImageCacheIdentityBindsAuthenticatedNode(t *testing.T) 
 	}
 }
 
+func TestImageCachePlatformIdentityWindowCoversNodeUpdaterCadence(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pollInterval    = 5 * time.Minute
+		randomizedDelay = 30 * time.Second
+		minimumValidity = 30 * time.Second
+	)
+	maximumCadence := pollInterval + randomizedDelay
+	if imageCachePlatformIdentityRenewAfter > pollInterval {
+		t.Fatalf("renewal boundary %s exceeds the node updater poll interval %s", imageCachePlatformIdentityRenewAfter, pollInterval)
+	}
+	if imageCachePlatformIdentityTTL < 2*maximumCadence+minimumValidity {
+		t.Fatalf("credential TTL %s cannot tolerate two failed refresh cycles at cadence %s", imageCachePlatformIdentityTTL, maximumCadence)
+	}
+	var server Server
+	joinScript := server.joinClusterInstallScript("https://api.fugue.pro")
+	for _, contract := range []string{
+		`FUGUE_NODE_UPDATER_POLL_INTERVAL="${FUGUE_NODE_UPDATER_POLL_INTERVAL:-5min}"`,
+		`RandomizedDelaySec=30s`,
+	} {
+		if !strings.Contains(joinScript, contract) {
+			t.Fatalf("join script drifted from the credential cadence contract: missing %q", contract)
+		}
+	}
+}
+
 func TestIssueNodeUpdaterImageCacheIdentityFailsClosedWithoutSigner(t *testing.T) {
 	t.Parallel()
 
@@ -129,7 +156,7 @@ func TestIssueNodeUpdaterImageCacheIdentityFailsClosedWithoutSigner(t *testing.T
 	if err != nil {
 		t.Fatalf("create platform node key: %v", err)
 	}
-	_, updaterToken, err := stateStore.EnrollNodeUpdater(nodeKeySecret, "worker-a", "198.51.100.10", nil, "worker-a", "machine-a", model.NodeUpdaterCurrentVersion, "join-v1", []string{"heartbeat"})
+	_, updaterToken, err := stateStore.EnrollNodeUpdater(nodeKeySecret, "worker-a", "198.51.100.10", nil, "worker-a", "machine-a", model.NodeUpdaterCurrentVersion, "join-v1", []string{"heartbeat", model.NodeUpdaterCapabilityImageCachePlatformIdentityV1})
 	if err != nil {
 		t.Fatalf("enroll node updater: %v", err)
 	}
@@ -168,5 +195,17 @@ func TestIssueNodeUpdaterImageCacheIdentityRejectsNonUpdaterCredentials(t *testi
 				t.Fatalf("expected status %d, got %d body=%s", test.status, recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+	_, nodeKeySecret, err := stateStore.CreateScopedNodeKey("", "platform", model.NodeKeyScopePlatformNode)
+	if err != nil {
+		t.Fatalf("create platform node key: %v", err)
+	}
+	_, legacyUpdaterToken, err := stateStore.EnrollNodeUpdater(nodeKeySecret, "worker-a", "198.51.100.10", nil, "worker-a", "machine-a", model.NodeUpdaterCurrentVersion, "join-v1", []string{"heartbeat"})
+	if err != nil {
+		t.Fatalf("enroll legacy-capability updater: %v", err)
+	}
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/node-updater/image-cache/identity", legacyUpdaterToken, nil)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected unsupported updater capability status %d, got %d body=%s", http.StatusForbidden, recorder.Code, recorder.Body.String())
 	}
 }

@@ -104,11 +104,12 @@ components:
       - cmd/fugue-agent
       - internal/api/node_updater.go
       - internal/store/node_updater.go
+      - internal/store/node_updater_pg.go
     artifactKinds: [node-agent, node-updater]
     releaseLane: node-platform
     coordinator: release-control
-    ownedState: [node-policy, node-task, node-heartbeat]
-    contracts: [node-platform@v1]
+    ownedState: [node-policy, node-task, node-heartbeat, image-cache-platform-credential-lkg]
+    contracts: [node-platform@v1, platform-component-identity@v1]
     dependencies: []
     failureBoundary: node-platform
     lkgPolicy: required

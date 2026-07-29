@@ -166,11 +166,23 @@ gray/full publication remains non-bypassable until the independent consumer,
 chart, and rollback evidence are installed. The control plane now exposes the
 fixed-purpose `POST /v1/node-updater/image-cache/identity` bridge: it accepts
 only an authenticated active node updater, derives the node and scope from
-server-owned enrollment state, and issues a five-minute credential with exactly
+server-owned enrollment state, and issues a fifteen-minute credential with exactly
 the `image-cache:<node>` identity and `image_replication_plan` capability. The
 response is versioned, marked `no-store`, locally self-verified before return,
 and contains a renewal boundary; signer absence fails closed with retry guidance.
-No caller-provided node, scope, component, or artifact capability is accepted.
+No caller-provided node, scope, component, or artifact capability is accepted,
+and legacy updaters that do not advertise
+`image-cache-platform-identity-v1` cannot mint the credential.
+The node-platform script's rotator is deliberately default-disabled in this
+phase; when enabled it writes only a mode-0640, node-bound response under
+`/run/fugue/image-cache`, atomically replaces it, and never persists the bearer
+token under `/var/lib`. It rejects symlinked paths, cross-node responses,
+unexpected artifact capabilities, malformed timestamps, and short/expired TTLs.
+During a control-plane outage it retains a still-valid credential and removes
+an expired or corrupt one, so image-cache can stop new control-plane work while
+continuing to serve its local LKG. The five-minute node-updater cadence renews
+after the credential's five-minute renewal boundary and can tolerate two failed
+refresh cycles without extending the fixed fifteen-minute revocation window.
 
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a

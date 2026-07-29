@@ -1250,7 +1250,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,time-sync,__FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_CAPABILITY__"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -1260,6 +1260,12 @@ FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE="${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE:-
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/desired-state.json}"
 FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE="${FUGUE_NODE_UPDATER_REJOIN_METADATA_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/cluster-rejoin.env}"
 FUGUE_NODE_UPDATER_STATE_ENV_FILE="${FUGUE_NODE_UPDATER_STATE_ENV_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/state.env}"
+FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_ENABLED="${FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_ENABLED:-false}"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR:-/run/fugue/image-cache}"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR%/}/platform-component-credential.json"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_OWNER="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_OWNER:-0}"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_GROUP="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_GROUP:-65532}"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS:-30}"
 FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH="${FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH:-/var/lib/fugue/node-guardian/autonomy.wal}"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/rancher/k3s/config.yaml}"
 FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE="${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE:-/etc/rancher/k3s/registries.yaml}"
@@ -3208,6 +3214,232 @@ api_json() {
     -H "Authorization: Bearer ${FUGUE_NODE_UPDATER_TOKEN:?FUGUE_NODE_UPDATER_TOKEN is required}" \
     -H "Content-Type: application/json" \
     --data "${body}"
+}
+
+validate_image_cache_platform_credential_file() {
+  local path="$1"
+  local expected_node="$2"
+  local minimum_validity_seconds="${3:-30}"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "${path}" "${expected_node}" "${minimum_validity_seconds}" <<'PY_IMAGE_CACHE_PLATFORM_CREDENTIAL'
+import datetime
+import json
+import os
+import sys
+
+path, expected_node, minimum_validity_raw = sys.argv[1:]
+expected_node = expected_node.strip().lower()
+try:
+    minimum_validity = int(minimum_validity_raw)
+except ValueError:
+    raise SystemExit("image-cache platform credential minimum validity is invalid")
+if not expected_node or minimum_validity < 1 or minimum_validity > 600:
+    raise SystemExit("image-cache platform credential validation inputs are invalid")
+try:
+    response_size = os.path.getsize(path)
+except OSError:
+    raise SystemExit("image-cache platform credential response is unreadable")
+if response_size > 32768:
+    raise SystemExit("image-cache platform credential response exceeds 32 KiB")
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        response = json.load(fh)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit("image-cache platform credential response is not valid JSON")
+if not isinstance(response, dict) or not isinstance(response.get("credential"), dict):
+    raise SystemExit("image-cache platform credential response envelope is invalid")
+credential = response["credential"]
+
+def required_string(key):
+    value = credential.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit("image-cache platform credential field is invalid: " + key)
+    return value.strip()
+
+def parse_time(key):
+    value = required_string(key)
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        raise SystemExit("image-cache platform credential timestamp is invalid: " + key)
+    if parsed.tzinfo is None:
+        raise SystemExit("image-cache platform credential timestamp lacks timezone: " + key)
+    return parsed.astimezone(datetime.timezone.utc)
+
+if required_string("api_version") != "platform-component-identity.fugue.dev/v1":
+    raise SystemExit("image-cache platform credential API version is unsupported")
+if required_string("kind") != "PlatformComponentCredential":
+    raise SystemExit("image-cache platform credential kind is invalid")
+if required_string("component") != "image-cache":
+    raise SystemExit("image-cache platform credential component is invalid")
+if required_string("node_id").lower() != expected_node:
+    raise SystemExit("image-cache platform credential node identity mismatch")
+if required_string("credential_id") != "image-cache:" + expected_node:
+    raise SystemExit("image-cache platform credential ID mismatch")
+if required_string("scope_key") != "node:" + expected_node:
+    raise SystemExit("image-cache platform credential scope mismatch")
+if credential.get("artifact_kinds") != ["image_replication_plan"]:
+    raise SystemExit("image-cache platform credential artifact capability mismatch")
+token = required_string("token")
+if len(token) > 8192 or not token.startswith("fugue_pc_v1.") or any(char.isspace() for char in token):
+    raise SystemExit("image-cache platform credential token is invalid")
+if len(required_string("token_id")) > 256:
+    raise SystemExit("image-cache platform credential token ID is invalid")
+
+issued_at = parse_time("issued_at")
+expires_at = parse_time("expires_at")
+renew_after = parse_time("renew_after")
+now = datetime.datetime.now(datetime.timezone.utc)
+ttl_seconds = (expires_at - issued_at).total_seconds()
+renew_seconds = (renew_after - issued_at).total_seconds()
+if abs(ttl_seconds - 900) > 1:
+    raise SystemExit("image-cache platform credential TTL is not fifteen minutes")
+if abs(renew_seconds - 300) > 1 or not issued_at < renew_after < expires_at:
+    raise SystemExit("image-cache platform credential renewal boundary is invalid")
+if issued_at > now + datetime.timedelta(seconds=30):
+    raise SystemExit("image-cache platform credential was issued in the future")
+if expires_at <= now + datetime.timedelta(seconds=minimum_validity):
+    raise SystemExit("image-cache platform credential is expired or too close to expiry")
+PY_IMAGE_CACHE_PLATFORM_CREDENTIAL
+}
+
+prepare_image_cache_platform_credential_directory() {
+  local credential_dir="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR%/}"
+  local expected_file="${credential_dir}/platform-component-credential.json"
+  local physical_dir=""
+  if [ -z "${credential_dir}" ] || [ "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" != "${expected_file}" ]; then
+    log "image-cache platform credential path is inconsistent"
+    return 1
+  fi
+  case "${credential_dir}" in
+    /*) ;;
+    *)
+      log "image-cache platform credential directory must be absolute"
+      return 1
+      ;;
+  esac
+  case "/${credential_dir#/}/" in
+    *"/../"*|*"/./"*|*"//"*)
+      log "image-cache platform credential directory is not canonical"
+      return 1
+      ;;
+  esac
+  if ! [[ "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_OWNER}" =~ ^[0-9]+$ ]] ||
+     ! [[ "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_GROUP}" =~ ^[0-9]+$ ]]; then
+    log "image-cache platform credential owner or group is invalid"
+    return 1
+  fi
+  mkdir -p "${credential_dir}"
+  physical_dir="$(cd "${credential_dir}" && pwd -P)"
+  if [ "${physical_dir}" != "${credential_dir}" ] || [ -L "${credential_dir}" ]; then
+    log "image-cache platform credential directory resolves through a symlink"
+    return 1
+  fi
+  install -d -m 0750 \
+    -o "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_OWNER}" \
+    -g "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_GROUP}" \
+    "${credential_dir}"
+  if [ -L "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" ]; then
+    log "image-cache platform credential file is a symlink"
+    return 1
+  fi
+}
+
+install_image_cache_platform_credential_file() {
+  local source_path="$1"
+  local credential_dir="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR%/}"
+  local staged_path=""
+  prepare_image_cache_platform_credential_directory || return 1
+  staged_path="$(mktemp "${credential_dir}/.platform-component-credential.XXXXXX")"
+  if ! install -m 0640 \
+      -o "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_OWNER}" \
+      -g "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_GROUP}" \
+      "${source_path}" "${staged_path}"; then
+    rm -f "${staged_path}"
+    return 1
+  fi
+  if ! mv -f "${staged_path}" "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"; then
+    rm -f "${staged_path}"
+    return 1
+  fi
+  return 0
+}
+
+remove_image_cache_platform_credential_file() {
+  prepare_image_cache_platform_credential_directory || return 1
+  rm -f "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
+}
+
+retain_usable_image_cache_platform_credential() {
+  local expected_node="$1"
+  prepare_image_cache_platform_credential_directory || return 1
+  if [ -r "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" ] &&
+     validate_image_cache_platform_credential_file \
+       "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" \
+       "${expected_node}" \
+       "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS}"; then
+    log "retaining the current unexpired image-cache platform credential"
+    return 0
+  fi
+  remove_image_cache_platform_credential_file || true
+  return 1
+}
+
+refresh_image_cache_platform_identity() {
+  local expected_node=""
+  local required_command=""
+  local response_tmp=""
+  for required_command in curl python3 install tr; do
+    if ! command -v "${required_command}" >/dev/null 2>&1; then
+      log "cannot refresh image-cache platform identity: missing ${required_command}"
+      return 1
+    fi
+  done
+  expected_node="$(node_deep_health_cluster_node_name | tr '[:upper:]' '[:lower:]')"
+  if [ -z "${expected_node}" ]; then
+    log "cannot refresh image-cache platform identity: cluster node identity is unavailable"
+    remove_image_cache_platform_credential_file || true
+    return 1
+  fi
+  if ! prepare_image_cache_platform_credential_directory; then
+    return 1
+  fi
+  response_tmp="$(mktemp "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR%/}/.platform-credential-response.XXXXXX")"
+  if ! curl -fsS --retry 3 --retry-delay 2 --retry-max-time 30 \
+      --connect-timeout 5 --max-time 20 -X POST \
+      "${FUGUE_API_BASE%/}/v1/node-updater/image-cache/identity" \
+      -H "Authorization: Bearer ${FUGUE_NODE_UPDATER_TOKEN:?FUGUE_NODE_UPDATER_TOKEN is required}" \
+      -H "Accept: application/json" \
+      -o "${response_tmp}"; then
+    rm -f "${response_tmp}"
+    retain_usable_image_cache_platform_credential "${expected_node}"
+    return $?
+  fi
+  if ! validate_image_cache_platform_credential_file \
+      "${response_tmp}" \
+      "${expected_node}" \
+      "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS}"; then
+    rm -f "${response_tmp}"
+    retain_usable_image_cache_platform_credential "${expected_node}"
+    return $?
+  fi
+  if ! install_image_cache_platform_credential_file "${response_tmp}"; then
+    rm -f "${response_tmp}"
+    retain_usable_image_cache_platform_credential "${expected_node}"
+    return $?
+  fi
+  rm -f "${response_tmp}"
+  if ! validate_image_cache_platform_credential_file \
+      "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" \
+      "${expected_node}" \
+      "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS}"; then
+    remove_image_cache_platform_credential_file || true
+    return 1
+  fi
+  log "refreshed node-bound image-cache platform identity"
+  return 0
 }
 
 node_deep_health_cluster_node_name() {
@@ -5613,6 +5845,9 @@ run_once() {
     log "node state reconciliation did not make changes or could not complete"
   fi
   heartbeat || log "heartbeat failed"
+  if truthy "${FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_ENABLED}"; then
+    refresh_image_cache_platform_identity || log "image-cache platform identity refresh failed; retaining lane-local credential state"
+  fi
   task_env="$(mktemp)"
   if ! api_form GET "/v1/node-updater/tasks?format=env&limit=1" >"${task_env}"; then
     record_last_error "task poll failed; continuing in degraded offline mode"
@@ -5670,6 +5905,13 @@ case "${1:-run-once}" in
     require_cmd curl
     heartbeat
     ;;
+  refresh-image-cache-identity)
+    require_cmd curl
+    require_cmd python3
+    require_cmd install
+    require_cmd tr
+    refresh_image_cache_platform_identity
+    ;;
   version)
     printf '%s\n' "${FUGUE_NODE_UPDATER_VERSION}"
     ;;
@@ -5677,7 +5919,7 @@ case "${1:-run-once}" in
     printf '%s\n' "${FUGUE_NODE_UPDATER_CAPABILITIES}"
     ;;
   *)
-    echo "usage: fugue-node-updater [run-once|heartbeat|version|capabilities]" >&2
+    echo "usage: fugue-node-updater [run-once|heartbeat|refresh-image-cache-identity|version|capabilities]" >&2
     exit 2
     ;;
 esac
@@ -5685,6 +5927,7 @@ esac
 	return strings.NewReplacer(
 		"__FUGUE_API_BASE__", apiBase,
 		"__FUGUE_NODE_UPDATER_SCRIPT_VERSION__", nodeUpdaterScriptVersion,
+		"__FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_CAPABILITY__", model.NodeUpdaterCapabilityImageCachePlatformIdentityV1,
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
 	).Replace(script)
 }

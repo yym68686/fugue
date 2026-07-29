@@ -903,6 +903,13 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES`,
 		`restore_node_updater_static_env`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
+		`image-cache-platform-identity-v1`,
+		`FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_ENABLED="${FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_ENABLED:-false}"`,
+		`/run/fugue/image-cache`,
+		`/v1/node-updater/image-cache/identity`,
+		`validate_image_cache_platform_credential_file`,
+		`refresh_image_cache_platform_identity`,
+		`refresh-image-cache-identity)`,
 		`FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -978,6 +985,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`host-context DNS probe`,
 		`skipped from host resolver namespace`,
 		`__FUGUE_NODE_UPDATER_SCRIPT_VERSION__`,
+		`__FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_CAPABILITY__`,
 		`"kube-proxy iptables/ipvs rules present", not has_proxy`,
 	} {
 		if strings.Contains(script, forbidden) {
@@ -1035,6 +1043,147 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterImageCachePlatformCredentialRotationIsAtomicAndNodeBound(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{"bash", "python3", "install"} {
+		if _, err := exec.LookPath(command); err != nil {
+			t.Skipf("%s not available", command)
+		}
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	credentialResponse := func(nodeID, tokenID, token string, issuedAt time.Time) string {
+		t.Helper()
+		payload := model.PlatformComponentCredentialResponse{Credential: model.PlatformComponentCredential{
+			APIVersion:    model.PlatformComponentCredentialAPIVersionV1,
+			Kind:          model.PlatformComponentCredentialKind,
+			CredentialID:  "image-cache:" + nodeID,
+			Token:         token,
+			TokenID:       tokenID,
+			Component:     model.PlatformConsumerComponentImageCache,
+			NodeID:        nodeID,
+			ScopeKey:      "node:" + nodeID,
+			ArtifactKinds: []string{model.PlatformArtifactKindImageReplicationPlan},
+			IssuedAt:      issuedAt,
+			ExpiresAt:     issuedAt.Add(15 * time.Minute),
+			RenewAfter:    issuedAt.Add(5 * time.Minute),
+		}}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal platform credential: %v", err)
+		}
+		return string(raw)
+	}
+	validToken := "fugue_pc_v1.key.valid.signature"
+	crossNodeToken := "fugue_pc_v1.key.cross-node.signature"
+	expiredToken := "fugue_pc_v1.key.expired.signature"
+	validJSON := credentialResponse("worker-a", "token-valid", validToken, now)
+	crossNodeJSON := credentialResponse("worker-b", "token-cross-node", crossNodeToken, now)
+	expiredJSON := credentialResponse("worker-a", "token-expired", expiredToken, now.Add(-20*time.Minute))
+
+	harness := prefix + `
+curl() {
+  local output_file=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -o)
+        output_file="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  if [ "${FAKE_CURL_FAIL:-false}" = "true" ]; then
+    return 22
+  fi
+  [ -n "${output_file}" ] || return 23
+  printf '%s' "${FAKE_CREDENTIAL_JSON}" >"${output_file}"
+}
+
+runtime_root="${RUNTIME_ROOT}"
+credential_dir="${runtime_root}/identity"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR="${credential_dir}"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE="${credential_dir}/platform-component-credential.json"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_OWNER="$(id -u)"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_GROUP="$(id -g)"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS=30
+FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME="worker-a"
+FUGUE_NODE_UPDATER_TOKEN="node-updater-secret"
+FUGUE_API_BASE="https://api.fugue.test"
+
+FAKE_CREDENTIAL_JSON="${VALID_CREDENTIAL_JSON}"
+refresh_image_cache_platform_identity
+[ -f "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" ]
+printf '%s' "${VALID_CREDENTIAL_JSON}" >"${runtime_root}/expected.json"
+cmp -s "${runtime_root}/expected.json" "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
+mode="$(stat -f '%Lp' "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" 2>/dev/null || stat -c '%a' "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}")"
+[ "${mode}" = "640" ] || { echo "credential mode=${mode}, want 640" >&2; exit 1; }
+cp "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" "${runtime_root}/valid.snapshot"
+
+FAKE_CREDENTIAL_JSON="${CROSS_NODE_CREDENTIAL_JSON}"
+refresh_image_cache_platform_identity
+cmp -s "${runtime_root}/valid.snapshot" "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
+
+FAKE_CURL_FAIL=true
+refresh_image_cache_platform_identity
+cmp -s "${runtime_root}/valid.snapshot" "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
+
+printf '%s' "${EXPIRED_CREDENTIAL_JSON}" >"${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
+chmod 0640 "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
+if refresh_image_cache_platform_identity; then
+  echo "expired credential was retained after refresh failure" >&2
+  exit 1
+fi
+[ ! -e "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" ]
+
+FAKE_CURL_FAIL=false
+mkdir -p "${runtime_root}/real-identity"
+ln -s "${runtime_root}/real-identity" "${runtime_root}/linked-identity"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR="${runtime_root}/linked-identity"
+FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR}/platform-component-credential.json"
+FAKE_CREDENTIAL_JSON="${VALID_CREDENTIAL_JSON}"
+if refresh_image_cache_platform_identity; then
+  echo "symlinked credential directory was accepted" >&2
+  exit 1
+fi
+[ ! -e "${runtime_root}/real-identity/platform-component-credential.json" ]
+`
+
+	runtimeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve credential test root: %v", err)
+	}
+	scriptPath := filepath.Join(runtimeRoot, "node-updater-platform-credential-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater platform credential harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(),
+		"RUNTIME_ROOT="+runtimeRoot,
+		"VALID_CREDENTIAL_JSON="+validJSON,
+		"CROSS_NODE_CREDENTIAL_JSON="+crossNodeJSON,
+		"EXPIRED_CREDENTIAL_JSON="+expiredJSON,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node updater platform credential harness failed: %v\n%s", err, output)
+	}
+	for _, secret := range []string{validToken, crossNodeToken, expiredToken, "node-updater-secret"} {
+		if strings.Contains(string(output), secret) {
+			t.Fatalf("node updater platform credential output leaked a secret: %s", output)
+		}
 	}
 }
 

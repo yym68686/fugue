@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	imageCachePlatformIdentityTTL        = 5 * time.Minute
-	imageCachePlatformIdentityRenewAfter = 2 * time.Minute
+	imageCachePlatformIdentityTTL        = 15 * time.Minute
+	imageCachePlatformIdentityRenewAfter = 5 * time.Minute
 )
 
 // handleIssueNodeUpdaterImageCacheIdentity is deliberately a fixed-purpose
@@ -37,6 +37,10 @@ func (s *Server) handleIssueNodeUpdaterImageCacheIdentity(w http.ResponseWriter,
 	}
 	if !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) {
 		httpx.WriteError(w, http.StatusForbidden, "node updater is not active")
+		return
+	}
+	if !nodeUpdaterHasCapability(updater, model.NodeUpdaterCapabilityImageCachePlatformIdentityV1) {
+		httpx.WriteError(w, http.StatusForbidden, "node updater does not support image-cache platform identity v1")
 		return
 	}
 	nodeID := strings.ToLower(strings.TrimSpace(updater.ClusterNodeName))
