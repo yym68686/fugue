@@ -147,6 +147,10 @@ func TestReconcileDistributedImageIntegrityRepairsLegacyEmptyDigestRows(t *testi
 	if len(replicas) != 1 || replicas[0].Status != model.ImageReplicaStatusPresent || replicas[0].Digest != integrityTestDigest {
 		t.Fatalf("unexpected repaired replica: %+v", replicas)
 	}
+	if replicas[0].LastVerifiedAt == nil || !replicas[0].LastVerifiedAt.Equal(now) ||
+		replicas[0].LeaseExpiresAt == nil || !replicas[0].LeaseExpiresAt.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("repaired replica must carry bounded verification evidence: %+v", replicas[0])
+	}
 	locations, err := stateStore.ListImageLocations(model.ImageLocationFilter{AppID: image.AppID, PlatformAdmin: true})
 	if err != nil {
 		t.Fatalf("list repaired locations: %v", err)
@@ -245,5 +249,166 @@ func TestReconcileDistributedImageIntegrityDemotesAmbiguousEvidence(t *testing.T
 	}
 	if refreshed.LifecycleState != model.ImageLifecycleLost || refreshed.CanonicalDigest != "" {
 		t.Fatalf("ambiguous image must be demoted without guessed digest: %+v", refreshed)
+	}
+}
+
+func TestReconcileDistributedImageIntegrityDoesNotPromoteReplicaFromAnotherNodeEvidence(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        "tenant",
+		AppID:           "app",
+		ImageRef:        "registry.cache.example:5000/fugue-apps/demo:current",
+		CanonicalDigest: integrityTestDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("create image: %v", err)
+	}
+	replica, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        image.TenantID,
+		AppID:           image.AppID,
+		NodeID:          "node-a",
+		RuntimeID:       "runtime-a",
+		ClusterNodeName: "worker-a",
+		Status:          model.ImageReplicaStatusMissing,
+	})
+	if err != nil {
+		t.Fatalf("create legacy replica fixture: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:           "node-b",
+		RuntimeID:        "runtime-b",
+		ClusterNodeName:  "worker-b",
+		ObservedAt:       now,
+		SnapshotComplete: true,
+	}, []model.ImageCacheManifest{{
+		NodeID:          "node-b",
+		RuntimeID:       "runtime-b",
+		ClusterNodeName: "worker-b",
+		ImageRef:        image.ImageRef,
+		Repo:            "fugue-apps/demo",
+		Target:          "current",
+		Digest:          integrityTestDigest,
+		ReferencedBlobs: []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		TotalBlobBytes:  100,
+		LastSeenAt:      now,
+		Present:         true,
+	}}); err != nil {
+		t.Fatalf("record other-node cache evidence: %v", err)
+	}
+
+	// Simulate a legacy row that claimed Present before replica digests were
+	// mandatory. The only fresh physical proof is deliberately on node B.
+	raw, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var legacyState model.State
+	if err := json.Unmarshal(raw, &legacyState); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	for index := range legacyState.ImageReplicas {
+		if legacyState.ImageReplicas[index].ID == replica.ID {
+			legacyState.ImageReplicas[index].Status = model.ImageReplicaStatusPresent
+			legacyState.ImageReplicas[index].Digest = ""
+			legacyState.ImageReplicas[index].LastVerifiedAt = nil
+			legacyState.ImageReplicas[index].LeaseExpiresAt = nil
+		}
+	}
+	encoded, err := json.MarshalIndent(legacyState, "", "  ")
+	if err != nil {
+		t.Fatalf("encode legacy state: %v", err)
+	}
+	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreMode:         "distributed",
+			ImageCacheInventoryTTL: 2 * time.Hour,
+		},
+		now: func() time.Time { return now },
+	}
+	if err := svc.reconcileDistributedImageIntegrity(context.Background()); err != nil {
+		t.Fatalf("reconcile image integrity: %v", err)
+	}
+	replicas, err := stateStore.ListImageReplicas(model.ImageReplicaFilter{ImageID: image.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list replicas: %v", err)
+	}
+	if len(replicas) != 1 || replicas[0].Status != model.ImageReplicaStatusMissing || replicas[0].Digest != "" {
+		t.Fatalf("other-node evidence must not promote the legacy replica: %+v", replicas)
+	}
+}
+
+func TestImageIntegrityManifestForReplicaRequiresExactFreshCompleteProof(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-2 * time.Hour)
+	image := model.Image{
+		ImageRef:        "registry.cache.example:5000/fugue-apps/demo:current",
+		CanonicalDigest: integrityTestDigest,
+	}
+	replica := model.ImageReplica{
+		NodeID:          "node-a",
+		RuntimeID:       "runtime-a",
+		ClusterNodeName: "worker-a",
+	}
+	valid := model.ImageCacheManifest{
+		NodeID:          replica.NodeID,
+		RuntimeID:       replica.RuntimeID,
+		ClusterNodeName: replica.ClusterNodeName,
+		ImageRef:        image.ImageRef,
+		Repo:            "fugue-apps/demo",
+		Target:          "current",
+		Digest:          integrityTestDigest,
+		ReferencedBlobs: []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		TotalBlobBytes:  100,
+		LastSeenAt:      now,
+		Present:         true,
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*model.ImageCacheManifest)
+		want   bool
+	}{
+		{name: "exact proof", want: true},
+		{name: "other node", mutate: func(manifest *model.ImageCacheManifest) { manifest.NodeID = "node-b" }},
+		{name: "missing target identity", mutate: func(manifest *model.ImageCacheManifest) { manifest.NodeID = "" }},
+		{name: "wrong image reference", mutate: func(manifest *model.ImageCacheManifest) {
+			manifest.ImageRef = "registry.cache.example:5000/fugue-apps/other:current"
+			manifest.Repo = "fugue-apps/other"
+			manifest.Target = "current"
+		}},
+		{name: "wrong digest", mutate: func(manifest *model.ImageCacheManifest) {
+			manifest.Digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		}},
+		{name: "incomplete blob graph", mutate: func(manifest *model.ImageCacheManifest) { manifest.ReferencedBlobs = nil }},
+		{name: "stale inventory", mutate: func(manifest *model.ImageCacheManifest) { manifest.LastSeenAt = cutoff.Add(-time.Second) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := valid
+			if tt.mutate != nil {
+				tt.mutate(&manifest)
+			}
+			_, got := imageIntegrityManifestForReplica(image, replica, []model.ImageCacheManifest{manifest}, cutoff)
+			if got != tt.want {
+				t.Fatalf("proof=%v, want %v: %+v", got, tt.want, manifest)
+			}
+		})
 	}
 }

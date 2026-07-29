@@ -62,7 +62,7 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 					return fmt.Errorf("normalize canonical digest for image %s: %w", image.ID, err)
 				}
 			}
-			if err := s.repairDistributedImageReplicas(image, now); err != nil {
+			if err := s.repairDistributedImageReplicas(image, manifests, cutoff); err != nil {
 				return err
 			}
 			continue
@@ -87,7 +87,7 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 			}
 		}
 		if refreshed, err := s.Store.GetImage(image.ID, "", true); err == nil {
-			if err := s.repairDistributedImageReplicas(refreshed, now); err != nil {
+			if err := s.repairDistributedImageReplicas(refreshed, manifests, cutoff); err != nil {
 				return err
 			}
 		}
@@ -95,7 +95,11 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 	return nil
 }
 
-func (s *Service) repairDistributedImageReplicas(image model.Image, now time.Time) error {
+func (s *Service) repairDistributedImageReplicas(
+	image model.Image,
+	manifests []model.ImageCacheManifest,
+	cutoff time.Time,
+) error {
 	replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{ImageID: image.ID, PlatformAdmin: true})
 	if err != nil {
 		return fmt.Errorf("list replicas for image %s integrity repair: %w", image.ID, err)
@@ -109,20 +113,88 @@ func (s *Service) repairDistributedImageReplicas(image model.Image, now time.Tim
 			replica.Status = model.ImageReplicaStatusMissing
 			replica.LastError = "canonical image digest unavailable; replica cannot be trusted"
 		} else if rawDigest := strings.TrimSpace(replica.Digest); rawDigest == "" {
-			replica.Digest = digest
-			replica.LastVerifiedAt = &now
+			manifest, proven := imageIntegrityManifestForReplica(image, replica, manifests, cutoff)
+			if !proven {
+				replica.Status = model.ImageReplicaStatusMissing
+				replica.LastError = "no fresh complete image-cache manifest proves this replica on its exact target"
+			} else {
+				verifiedAt := manifest.LastSeenAt.UTC()
+				leaseExpiresAt := verifiedAt.Add(s.imageReplicaLeaseTTL())
+				replica.Digest = digest
+				replica.LastVerifiedAt = &verifiedAt
+				replica.LeaseExpiresAt = &leaseExpiresAt
+				replica.LastError = ""
+			}
 		} else if replicaDigest := store.CanonicalImageDigest(rawDigest); replicaDigest != digest {
 			replica.Status = model.ImageReplicaStatusMissing
 			replica.LastError = fmt.Sprintf("replica digest %s does not match canonical image digest %s", rawDigest, digest)
 		} else {
 			replica.Digest = replicaDigest
-			replica.LastVerifiedAt = &now
 		}
 		if _, err := s.Store.UpsertImageReplica(replica); err != nil {
 			return fmt.Errorf("repair replica %s for image %s: %w", replica.ID, image.ID, err)
 		}
 	}
 	return nil
+}
+
+func imageIntegrityManifestForReplica(
+	image model.Image,
+	replica model.ImageReplica,
+	manifests []model.ImageCacheManifest,
+	cutoff time.Time,
+) (model.ImageCacheManifest, bool) {
+	digest := store.CanonicalImageDigest(image.CanonicalDigest)
+	if digest == "" {
+		return model.ImageCacheManifest{}, false
+	}
+	keys := integrityImageReferenceKeys(image.ImageRef, digest)
+	var newest model.ImageCacheManifest
+	found := false
+	for _, manifest := range manifests {
+		if !imageIntegrityManifestUsable(manifest) ||
+			store.CanonicalImageDigest(manifest.Digest) != digest ||
+			!integrityManifestMatchesImageRepository(image.ImageRef, manifest) ||
+			!integrityManifestMatchesKeys(manifest, keys) ||
+			!integrityManifestMatchesReplicaIdentity(replica, manifest) ||
+			manifest.LastSeenAt.IsZero() || manifest.LastSeenAt.Before(cutoff) {
+			continue
+		}
+		if !found || manifest.LastSeenAt.After(newest.LastSeenAt) {
+			newest = manifest
+			found = true
+		}
+	}
+	return newest, found
+}
+
+func integrityManifestMatchesImageRepository(imageRef string, manifest model.ImageCacheManifest) bool {
+	repo, _, ok := imagecachekeys.SplitRepoTarget(imagecachekeys.StripRegistry(strings.TrimSpace(imageRef)))
+	if !ok {
+		return false
+	}
+	repo = strings.ToLower(strings.Trim(strings.TrimSpace(repo), "/"))
+	manifestRepo := strings.ToLower(strings.Trim(strings.TrimSpace(manifest.Repo), "/"))
+	return repo != "" && manifestRepo == repo
+}
+
+func integrityManifestMatchesReplicaIdentity(replica model.ImageReplica, manifest model.ImageCacheManifest) bool {
+	matched := false
+	for _, pair := range [][2]string{
+		{replica.NodeID, manifest.NodeID},
+		{replica.RuntimeID, manifest.RuntimeID},
+		{replica.ClusterNodeName, manifest.ClusterNodeName},
+	} {
+		replicaValue := strings.TrimSpace(pair[0])
+		if replicaValue == "" {
+			continue
+		}
+		matched = true
+		if manifestValue := strings.TrimSpace(pair[1]); manifestValue == "" || manifestValue != replicaValue {
+			return false
+		}
+	}
+	return matched
 }
 
 func (s *Service) repairDistributedImageLocations(ctx context.Context, manifests []model.ImageCacheManifest, now, cutoff time.Time) error {
