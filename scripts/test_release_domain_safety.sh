@@ -6271,6 +6271,125 @@ for artifact in document:
         raise SystemExit("verified image artifact immutable ref is inconsistent")
 PY
 
+BUILD_REUSE_AUTHORIZATION="${BUILD_DIGEST_FIXTURE_DIR}/convergence-successor.json"
+BUILD_REUSE_BASE_REF=3333333333333333333333333333333333333333
+python3 - "${BUILD_REUSE_AUTHORIZATION}" "${BUILD_DIGEST_REVISION}" "${BUILD_REUSE_BASE_REF}" <<'PY'
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+output, revision, base_ref = sys.argv[1:]
+artifact = {
+    "component": "image_cache",
+    "config_digest": "sha256:" + "2" * 64,
+    "immutable_ref": "ghcr.io/acme/fugue-image-cache@sha256:" + "e" * 64,
+    "oci_revision": revision,
+    "platform_manifest_digest": "sha256:" + "1" * 64,
+    "repository": "ghcr.io/acme/fugue-image-cache",
+    "source_tag": revision,
+    "top_digest": "sha256:" + "e" * 64,
+    "verification": "registry_manifest_config_and_layer_get",
+}
+canonical_artifacts = json.dumps([artifact], ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
+payload = {
+    "baseline_advanced": False,
+    "cluster_mutation_attempted": False,
+    "pending_activation_artifacts": ["image_cache"],
+    "recorded_at": "2026-07-29T04:00:00+00:00",
+    "repository": "acme/fugue",
+    "schema_version": 2,
+    "source_head_sha": revision,
+    "source_image_cache_artifact": artifact,
+    "source_image_cache_artifacts_digest": "sha256:" + hashlib.sha256(canonical_artifacts).hexdigest(),
+    "source_image_cache_base_ref": base_ref,
+    "source_run_attempt": 1,
+    "source_run_id": "555",
+    "successor_run_id": "777",
+    "successor_run_number": 11,
+    "successor_status": "queued",
+    "successor_target_sha": revision,
+    "workflow": "deploy-control-plane",
+    "workflow_dispatch_attempted": True,
+}
+Path(output).write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  GITHUB_REPOSITORY=acme/fugue \
+  GITHUB_RUN_ID=777 \
+  GITHUB_RUN_NUMBER=11 \
+  GITHUB_RUN_ATTEMPT=1 \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS=image_cache \
+  FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE="${BUILD_REUSE_AUTHORIZATION}" \
+  FUGUE_CONVERGENCE_SOURCE_RUN_ID=555 \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-image-cache \
+  FUGUE_IMAGE_CACHE_IMAGE_BASE_REF="${BUILD_REUSE_BASE_REF}" \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" image_cache_image_digest)" \
+  "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" \
+  "convergence reuse publishes the source image-cache digest"
+assert_eq "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f -name 'verify-image_cache' | wc -l | tr -d ' ')" "1" \
+  "convergence reuse re-verifies the immutable registry artifact once"
+[[ -z "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f ! -name 'verify-*' -print -quit)" ]] ||
+  fail "convergence reuse must not rebuild or push an image"
+grep -Fq 're-verifying authorized image_cache' "${BUILD_DIGEST_LOG}" ||
+  fail "convergence reuse must explain the immutable artifact verification"
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  GITHUB_REPOSITORY=acme/fugue \
+  GITHUB_RUN_ID=777 \
+  GITHUB_RUN_NUMBER=11 \
+  GITHUB_RUN_ATTEMPT=1 \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS=image_cache \
+  FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE="${BUILD_REUSE_AUTHORIZATION}" \
+  FUGUE_CONVERGENCE_SOURCE_RUN_ID=555 \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-image-cache \
+  FUGUE_IMAGE_CACHE_IMAGE_BASE_REF=4444444444444444444444444444444444444444 \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "convergence reuse must reject an image-cache base-ref drift"
+fi
+assert_build_digest_output_unchanged "convergence base-ref drift"
+[[ -z "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f -print -quit)" ]] ||
+  fail "convergence base-ref drift must fail before registry verification"
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  GITHUB_REPOSITORY=acme/fugue \
+  GITHUB_RUN_ID=777 \
+  GITHUB_RUN_NUMBER=11 \
+  GITHUB_RUN_ATTEMPT=1 \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_VERIFIER_MODE=malformed \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS=image_cache \
+  FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE="${BUILD_REUSE_AUTHORIZATION}" \
+  FUGUE_CONVERGENCE_SOURCE_RUN_ID=555 \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-image-cache \
+  FUGUE_IMAGE_CACHE_IMAGE_BASE_REF="${BUILD_REUSE_BASE_REF}" \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "convergence reuse must reject malformed registry verification"
+fi
+assert_build_digest_output_unchanged "convergence registry verification failure"
+[[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/verify-image_cache" ]] ||
+  fail "convergence registry failure fixture did not reach immutable verification"
+
 for preflight_mode in unknown duplicate missing_late_repository malformed_revision; do
   rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
   reset_build_digest_output
@@ -6605,6 +6724,32 @@ assert_build_plan() {
   done
   rm -f "${output_file}" "${log_file}"
 }
+
+CONVERGENCE_PLAN_OUTPUT="$(mktemp)"
+CONVERGENCE_PLAN_LOG="$(mktemp)"
+GITHUB_OUTPUT="${CONVERGENCE_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${REPO_ROOT}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_CHANGED_FILES= \
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE=true \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${CONVERGENCE_PLAN_LOG}"
+assert_eq "$(plan_value "${CONVERGENCE_PLAN_OUTPUT}" targets)" "image_cache" \
+  "authorized convergence plan selects only image_cache"
+assert_eq "$(plan_value "${CONVERGENCE_PLAN_OUTPUT}" target_count)" "1" \
+  "authorized convergence plan has exactly one target"
+assert_eq "$(plan_value "${CONVERGENCE_PLAN_OUTPUT}" build_image_cache)" "true" \
+  "authorized convergence plan marks image_cache"
+for target in api controller drain_agent telemetry_agent edge app_ssh; do
+  assert_eq "$(plan_value "${CONVERGENCE_PLAN_OUTPUT}" "build_${target}")" "false" \
+    "authorized convergence plan excludes ${target}"
+done
+if GITHUB_OUTPUT="${CONVERGENCE_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${REPO_ROOT}" \
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE=invalid \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${CONVERGENCE_PLAN_LOG}" 2>&1; then
+  fail "invalid convergence plan mode must fail closed"
+fi
+rm -f "${CONVERGENCE_PLAN_OUTPUT}" "${CONVERGENCE_PLAN_LOG}"
 
 assert_build_plan \
   $'internal/controller/safe_rollout.go' \

@@ -2824,7 +2824,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "5511df384f7a249aa66836d66d265f00c036bf7dc35254a06264d10cd0aeb76f")
+	assertWorkflowSourceDigest(t, data, "3d35c12775e7920f80ab629b983993629e979f201c70c0356a6dbadcc63be5ef")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2842,7 +2842,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                         "b6cd345bc149e79594801c98c85b3236380afb9d5be29f6eeae3275dc4b85db2",
+		"release-input-guard/Guard exact main commit authorization":                         "b2f72656d437b309270e295b75d0da0ac6d80d666b8c85436451574564fe3688",
 		"release-baseline/Resolve release-domain baseline":                                  "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
@@ -2864,7 +2864,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
-		"continue-release-convergence/Dispatch exact release convergence successor":         "7482b8f8b487c69e3e427d965d11fe839da8c218db77ff41b76b935c157852ca",
+		"continue-release-convergence/Dispatch exact release convergence successor":         "a8ba4e462a71905c05bf5b6a59a35c2a72fcb8e05beee06ed2d98787706a5396",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
 		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "45c936e0acd042ba3f4e9a88249f49912b4825e52df413e2020d4a2224d1f8d2",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
@@ -2905,6 +2905,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			Keys: []string{"needs", "outputs", "permissions", "runs-on", "steps"},
 			StepKeys: [][]string{
 				{"name", "uses", "with"},
+				{"name", "if", "uses", "with"},
 				{"name", "uses", "with"},
 				{"name", "id", "run"},
 				{"name", "id", "env", "run"},
@@ -3052,7 +3053,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"refs/heads/main", "^[0-9a-f]{40}$", `"${EXPECTED_SHA}" == "${ACTUAL_SHA}"`,
 		`[[ -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]`, "actions/runs/${CONVERGENCE_SOURCE_RUN_ID}",
 		`"${source_status}" == 'completed' && "${source_conclusion}" == 'success'`,
-		`"pending_activation_artifacts": ["image_cache"]`, `"successor_run_id": successor_run_id`,
+		`"pending_activation_artifacts": ["image_cache"]`, `"source_image_cache_artifact"`,
+		`"source_image_cache_artifacts_digest"`, `"schema_version": 2`,
+		`"successor_run_id": successor_run_id`,
 		"if raw != canonical:",
 	} {
 		if !strings.Contains(guard.Run, required) {
@@ -3221,8 +3224,14 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if strings.TrimSpace(build.If) != "" {
 		t.Fatalf("image build must run after the guarded dispatch without a bypass condition: %q", build.If)
 	}
-	if got, want := build.Permissions, map[string]string{"contents": "read", "packages": "write"}; !reflect.DeepEqual(got, want) {
+	if got, want := build.Permissions, map[string]string{"actions": "read", "contents": "read", "packages": "write"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("image build permissions drifted: got %v want %v", got, want)
+	}
+	buildAuthorization := workflowStepByName(t, build, "Download convergence image artifact authorization")
+	if buildAuthorization.If != "${{ inputs.image_cache_convergence }}" ||
+		buildAuthorization.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+		!reflect.DeepEqual(buildAuthorization.With, wantAuthorizationWith) {
+		t.Fatalf("build convergence authorization download drifted: %+v", buildAuthorization)
 	}
 	for key, want := range map[string]string{
 		"image_tag":                        "${{ steps.meta.outputs.image_tag }}",
@@ -3258,6 +3267,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := buildPlan.Env["FUGUE_RELEASE_TARGET_REF"], "${{ needs.release-baseline.outputs.target_ref }}"; got != want {
 		t.Fatalf("image build plan must use the baseline target ref: got %q want %q", got, want)
 	}
+	if got, want := buildPlan.Env["FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE"], "${{ inputs.image_cache_convergence && 'true' || 'false' }}"; got != want {
+		t.Fatalf("image build plan convergence input drifted: got %q want %q", got, want)
+	}
 	for component, want := range map[string]string{
 		"API":             "${{ needs.release-baseline.outputs.api_image_helm_drift }}",
 		"CONTROLLER":      "${{ needs.release-baseline.outputs.controller_image_helm_drift }}",
@@ -3283,6 +3295,15 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	if got, want := buildProvenance.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"], "${{ steps.plan.outputs.targets }}"; got != want {
 		t.Fatalf("image provenance target source drifted: got %q want %q", got, want)
+	}
+	for key, want := range map[string]string{
+		"FUGUE_IMAGE_CACHE_IMAGE_BASE_REF":                   "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
+		"FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE": "${{ inputs.image_cache_convergence && format('{0}/fugue-release-convergence-authorization/successor.json', runner.temp) || '' }}",
+		"FUGUE_CONVERGENCE_SOURCE_RUN_ID":                    "${{ inputs.convergence_source_run_id }}",
+	} {
+		if got := buildProvenance.Env[key]; got != want {
+			t.Fatalf("image provenance convergence env %s drifted: got %q want %q", key, got, want)
+		}
 	}
 
 	deploy, ok := workflow.Jobs["deploy"]
@@ -3713,10 +3734,16 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("release convergence successor id drifted: %+v", successor)
 	}
 	for key, want := range map[string]string{
-		"EXPECTED_SHA":                 "${{ inputs.expected_sha }}",
-		"PENDING_ACTIVATION_ARTIFACTS": "${{ needs.deploy.outputs.pending_activation_artifacts }}",
-		"GH_TOKEN":                     "${{ github.token }}",
-		"REPOSITORY":                   "${{ github.repository }}",
+		"EXPECTED_SHA":                           "${{ inputs.expected_sha }}",
+		"PENDING_ACTIVATION_ARTIFACTS":           "${{ needs.deploy.outputs.pending_activation_artifacts }}",
+		"SOURCE_IMAGE_CACHE_BASE_REF":            "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
+		"SOURCE_IMAGE_CACHE_IMAGE_DIGEST":        "${{ needs.build.outputs.image_cache_image_digest }}",
+		"SOURCE_IMAGE_CACHE_IMAGE_REPOSITORY":    "${{ needs.build.outputs.image_cache_image_repository }}",
+		"SOURCE_IMAGE_TARGETS":                   "${{ needs.build.outputs.image_targets }}",
+		"SOURCE_VERIFIED_IMAGE_ARTIFACTS_JSON":   "${{ needs.build.outputs.verified_image_artifacts_json }}",
+		"SOURCE_VERIFIED_IMAGE_ARTIFACTS_DIGEST": "${{ needs.build.outputs.verified_image_artifacts_digest }}",
+		"GH_TOKEN":                               "${{ github.token }}",
+		"REPOSITORY":                             "${{ github.repository }}",
 	} {
 		if got := successor.Env[key]; got != want {
 			t.Fatalf("release convergence successor env %s drifted: got %q want %q", key, got, want)
@@ -3734,6 +3761,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		`-f "inputs[convergence_source_run_id]=${GITHUB_RUN_ID}"`,
 		"successor_number > GITHUB_RUN_NUMBER",
 		`"${successor_sha}" == "${main_head}"`,
+		`"schema_version": 2`,
+		`"source_image_cache_artifact": image_cache_artifact`,
+		`"source_image_cache_artifacts_digest": bound_digest`,
 		`"baseline_advanced": False`,
 		`"workflow_dispatch_attempted": True`,
 	} {
@@ -4244,6 +4274,22 @@ func TestControlPlaneReleaseConvergenceSuccessorHarness(t *testing.T) {
 		expectedSHA = "1111111111111111111111111111111111111111"
 		driftedSHA  = "2222222222222222222222222222222222222222"
 	)
+	sourceArtifact := map[string]any{
+		"component":                "image_cache",
+		"config_digest":            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"immutable_ref":            "ghcr.io/example/fugue-image-cache@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"oci_revision":             expectedSHA,
+		"platform_manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"repository":               "ghcr.io/example/fugue-image-cache",
+		"source_tag":               expectedSHA,
+		"top_digest":               "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"verification":             "registry_manifest_config_and_layer_get",
+	}
+	sourceArtifactsJSON, err := json.Marshal([]any{sourceArtifact})
+	if err != nil {
+		t.Fatalf("marshal source image artifacts: %v", err)
+	}
+	sourceArtifactsDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(sourceArtifactsJSON))
 	tests := []struct {
 		name               string
 		workflowState      string
@@ -4302,6 +4348,12 @@ func TestControlPlaneReleaseConvergenceSuccessorHarness(t *testing.T) {
 				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"EXPECTED_SHA="+expectedSHA,
 				"PENDING_ACTIVATION_ARTIFACTS=image_cache",
+				"SOURCE_IMAGE_CACHE_BASE_REF="+driftedSHA,
+				"SOURCE_IMAGE_CACHE_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				"SOURCE_IMAGE_CACHE_IMAGE_REPOSITORY=ghcr.io/example/fugue-image-cache",
+				"SOURCE_IMAGE_TARGETS=image_cache",
+				"SOURCE_VERIFIED_IMAGE_ARTIFACTS_JSON="+string(sourceArtifactsJSON),
+				"SOURCE_VERIFIED_IMAGE_ARTIFACTS_DIGEST="+sourceArtifactsDigest,
 				"REPOSITORY=example/fugue",
 				"GH_TOKEN=test",
 				"WORKFLOW_STATE="+test.workflowState,
@@ -4347,7 +4399,8 @@ func TestControlPlaneReleaseConvergenceSuccessorHarness(t *testing.T) {
 					t.Fatalf("decode convergence successor evidence: %v", err)
 				}
 				if evidence["baseline_advanced"] != false || evidence["workflow_dispatch_attempted"] != true ||
-					evidence["successor_target_sha"] != expectedSHA {
+					evidence["successor_target_sha"] != expectedSHA || evidence["schema_version"] != float64(2) ||
+					evidence["source_image_cache_artifacts_digest"] != sourceArtifactsDigest {
 					t.Fatalf("convergence successor evidence drifted: %+v", evidence)
 				}
 			}
@@ -4370,24 +4423,27 @@ func TestControlPlaneReleaseConvergenceAuthorizationHarness(t *testing.T) {
 	guard := workflowStepByName(t, workflow.Jobs["release-input-guard"], "Guard exact main commit authorization")
 	const (
 		expectedSHA  = "1111111111111111111111111111111111111111"
+		imageBaseSHA = "2222222222222222222222222222222222222222"
 		sourceRunID  = "555"
 		successorRun = "777"
 		successorNum = 11
 		sourceRunNum = 10
 	)
 	tests := []struct {
-		name             string
-		convergence      string
-		sourceID         string
-		sourceConclusion string
-		wrongSuccessor   bool
-		noncanonical     bool
-		wantPass         bool
+		name              string
+		convergence       string
+		sourceID          string
+		sourceConclusion  string
+		wrongSuccessor    bool
+		badArtifactDigest bool
+		noncanonical      bool
+		wantPass          bool
 	}{
 		{name: "ordinary dispatch needs no successor proof", convergence: "false", wantPass: true},
 		{name: "ordinary dispatch rejects a source run", convergence: "false", sourceID: sourceRunID},
 		{name: "verified successor authorization passes", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", wantPass: true},
 		{name: "proof bound to another successor fails", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", wrongSuccessor: true},
+		{name: "proof with a drifted image artifact digest fails", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", badArtifactDigest: true},
 		{name: "failed source run is rejected", convergence: "true", sourceID: sourceRunID, sourceConclusion: "failure"},
 		{name: "noncanonical proof is rejected", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", noncanonical: true},
 	}
@@ -4418,22 +4474,44 @@ func TestControlPlaneReleaseConvergenceAuthorizationHarness(t *testing.T) {
 				if test.wrongSuccessor {
 					boundSuccessor = "778"
 				}
+				artifact := map[string]any{
+					"component":                "image_cache",
+					"config_digest":            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"immutable_ref":            "ghcr.io/example/fugue-image-cache@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					"oci_revision":             expectedSHA,
+					"platform_manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					"repository":               "ghcr.io/example/fugue-image-cache",
+					"source_tag":               expectedSHA,
+					"top_digest":               "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+					"verification":             "registry_manifest_config_and_layer_get",
+				}
+				artifactBytes, err := json.Marshal([]any{artifact})
+				if err != nil {
+					t.Fatalf("marshal image-cache artifact: %v", err)
+				}
+				artifactDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(artifactBytes))
+				if test.badArtifactDigest {
+					artifactDigest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+				}
 				proof := map[string]any{
-					"schema_version":               1,
-					"workflow":                     "deploy-control-plane",
-					"repository":                   "example/fugue",
-					"source_run_id":                sourceRunID,
-					"source_run_attempt":           1,
-					"source_head_sha":              expectedSHA,
-					"pending_activation_artifacts": []string{"image_cache"},
-					"successor_run_id":             boundSuccessor,
-					"successor_run_number":         successorNum,
-					"successor_status":             "queued",
-					"successor_target_sha":         expectedSHA,
-					"baseline_advanced":            false,
-					"cluster_mutation_attempted":   false,
-					"workflow_dispatch_attempted":  true,
-					"recorded_at":                  "2026-07-29T04:00:00+00:00",
+					"schema_version":                      2,
+					"workflow":                            "deploy-control-plane",
+					"repository":                          "example/fugue",
+					"source_run_id":                       sourceRunID,
+					"source_run_attempt":                  1,
+					"source_head_sha":                     expectedSHA,
+					"source_image_cache_artifact":         artifact,
+					"source_image_cache_artifacts_digest": artifactDigest,
+					"source_image_cache_base_ref":         imageBaseSHA,
+					"pending_activation_artifacts":        []string{"image_cache"},
+					"successor_run_id":                    boundSuccessor,
+					"successor_run_number":                successorNum,
+					"successor_status":                    "queued",
+					"successor_target_sha":                expectedSHA,
+					"baseline_advanced":                   false,
+					"cluster_mutation_attempted":          false,
+					"workflow_dispatch_attempted":         true,
+					"recorded_at":                         "2026-07-29T04:00:00+00:00",
 				}
 				encoded, err := json.Marshal(proof)
 				if err != nil {

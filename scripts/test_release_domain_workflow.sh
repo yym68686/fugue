@@ -116,6 +116,9 @@ for fragment in [
   'actions/runs/${CONVERGENCE_SOURCE_RUN_ID}',
   '"${source_status}" == \'completed\' && "${source_conclusion}" == \'success\'',
   'pending_activation_artifacts",',
+  'source_image_cache_artifact',
+  'source_image_cache_artifacts_digest',
+  '"schema_version": 2',
   '"successor_run_id": successor_run_id',
   'if raw != canonical:',
 ]
@@ -181,7 +184,29 @@ gate_commands = Array(gate["steps"]).map { |candidate| candidate["run"].to_s }.j
 fail_contract("release gate must run the workflow contract test") unless gate_commands.include?("bash scripts/test_release_domain_workflow.sh")
 
 build = jobs.fetch("build")
-assert_equal(build["permissions"], {"contents" => "read", "packages" => "write"}, "build permissions")
+assert_equal(build["permissions"], {"actions" => "read", "contents" => "read", "packages" => "write"}, "build permissions")
+build_authorization = step(build, "Download convergence image artifact authorization")
+assert_equal(build_authorization.fetch("if"), "${{ inputs.image_cache_convergence }}", "build convergence authorization condition")
+assert_equal(build_authorization.fetch("uses"), "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "build convergence authorization pin")
+assert_equal(
+  build_authorization.fetch("with"),
+  download_authorization.fetch("with"),
+  "build convergence authorization download contract",
+)
+build_plan = step(build, "Compute image build plan")
+assert_equal(
+  build_plan.fetch("env").fetch("FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE"),
+  "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
+  "build convergence plan input",
+)
+build_provenance = step(build, "Publish verified control-plane image provenance")
+{
+  "FUGUE_IMAGE_CACHE_IMAGE_BASE_REF" => "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
+  "FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE" => "${{ inputs.image_cache_convergence && format('{0}/fugue-release-convergence-authorization/successor.json', runner.temp) || '' }}",
+  "FUGUE_CONVERGENCE_SOURCE_RUN_ID" => "${{ inputs.convergence_source_run_id }}",
+}.each do |name, expected|
+  assert_equal(build_provenance.fetch("env").fetch(name), expected, "build provenance #{name}")
+end
 
 deploy = jobs.fetch("deploy")
 assert_equal(deploy["permissions"], {"actions" => "read", "contents" => "read"}, "deploy permissions")
@@ -508,6 +533,9 @@ for fragment in [
   '-f "inputs[convergence_source_run_id]=${GITHUB_RUN_ID}"',
   'successor_number > GITHUB_RUN_NUMBER',
   '"${successor_sha}" == "${main_head}"',
+  '"schema_version": 2',
+  '"source_image_cache_artifact": image_cache_artifact',
+  '"source_image_cache_artifacts_digest": bound_digest',
   '"baseline_advanced": False',
   '"workflow_dispatch_attempted": True',
 ]
@@ -733,7 +761,7 @@ assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}
 
 allowed_permissions = {
   "release-input-guard" => {"actions" => "read", "contents" => "read"},
-  "build" => {"contents" => "read", "packages" => "write"},
+  "build" => {"actions" => "read", "contents" => "read", "packages" => "write"},
   "deploy" => {"actions" => "read", "contents" => "read"},
   "continue-release-convergence" => {"actions" => "write", "contents" => "read"},
   "record-release-baseline" => {"contents" => "write"},

@@ -188,7 +188,250 @@ except BaseException:
 PY
 }
 
+reuse_authorized_image_cache_artifact() {
+  local authorization_file="${FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE:-}"
+  local metadata_root=""
+  local metadata_dir=""
+  local verified_artifacts_file=""
+  local verified_artifacts_digest_file=""
+  local top_digest_file=""
+  local verification_file=""
+  local staged_output=""
+  local top_digest=""
+  local cleanup_command=""
+
+  [[ "$(trim_field "${FUGUE_CONTROL_PLANE_IMAGE_TARGETS:-}")" == "image_cache" ]] || {
+    printf 'convergence artifact reuse requires the exact image_cache target\n' >&2
+    return 1
+  }
+  require_git_revision
+  require_env FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY
+  require_env FUGUE_IMAGE_CACHE_IMAGE_BASE_REF
+  require_env FUGUE_CONVERGENCE_SOURCE_RUN_ID
+  require_env GITHUB_REPOSITORY
+  require_env GITHUB_RUN_ID
+  require_env GITHUB_RUN_NUMBER
+  [[ "${GITHUB_RUN_ATTEMPT:-}" == "1" ]] || {
+    printf 'convergence artifact reuse requires run attempt 1\n' >&2
+    return 1
+  }
+  [[ -f "${authorization_file}" && ! -L "${authorization_file}" ]] || {
+    printf 'convergence artifact authorization must be a regular non-symlink file\n' >&2
+    return 1
+  }
+
+  metadata_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+  metadata_dir="$(mktemp -d "${metadata_root%/}/fugue-build-reuse-metadata.XXXXXX")"
+  verified_artifacts_file="${metadata_dir}/verified-image-artifacts.json"
+  verified_artifacts_digest_file="${metadata_dir}/verified-image-artifacts.digest"
+  top_digest_file="${metadata_dir}/image-cache.digest"
+  verification_file="${metadata_dir}/image-cache.verified.json"
+  staged_output="${metadata_dir}/outputs"
+  printf -v cleanup_command 'rm -rf -- %q' "${metadata_dir}"
+  trap "${cleanup_command}" EXIT
+
+  python3 - \
+    "${authorization_file}" \
+    "${GITHUB_REPOSITORY}" \
+    "${FUGUE_CONVERGENCE_SOURCE_RUN_ID}" \
+    "${GITHUB_RUN_ID}" \
+    "${GITHUB_RUN_NUMBER}" \
+    "${FUGUE_IMAGE_TAG}" \
+    "${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
+    "${FUGUE_IMAGE_CACHE_IMAGE_BASE_REF}" \
+    "${verified_artifacts_file}" \
+    "${verified_artifacts_digest_file}" \
+    "${top_digest_file}" <<'PY'
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+(
+    authorization_path,
+    expected_repository,
+    expected_source_run_id,
+    expected_successor_run_id,
+    expected_successor_run_number,
+    expected_revision,
+    expected_image_repository,
+    expected_image_base_ref,
+    artifacts_path,
+    artifacts_digest_path,
+    top_digest_path,
+) = sys.argv[1:]
+
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+AUTHORIZATION_KEYS = {
+    "baseline_advanced",
+    "cluster_mutation_attempted",
+    "pending_activation_artifacts",
+    "recorded_at",
+    "repository",
+    "schema_version",
+    "source_head_sha",
+    "source_image_cache_artifact",
+    "source_image_cache_artifacts_digest",
+    "source_image_cache_base_ref",
+    "source_run_attempt",
+    "source_run_id",
+    "successor_run_id",
+    "successor_run_number",
+    "successor_status",
+    "successor_target_sha",
+    "workflow",
+    "workflow_dispatch_attempted",
+}
+ARTIFACT_KEYS = {
+    "component",
+    "config_digest",
+    "immutable_ref",
+    "oci_revision",
+    "platform_manifest_digest",
+    "repository",
+    "source_tag",
+    "top_digest",
+    "verification",
+}
+
+raw = Path(authorization_path).read_bytes()
+if not raw or len(raw) > 128 * 1024:
+    raise SystemExit("convergence authorization size is invalid")
+value = json.loads(raw)
+if type(value) is not dict or set(value) != AUTHORIZATION_KEYS:
+    raise SystemExit("convergence authorization shape is invalid")
+if value != json.loads(json.dumps(value, sort_keys=True, separators=(",", ":"))):
+    raise SystemExit("convergence authorization value is not JSON-stable")
+canonical_authorization = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+if raw != canonical_authorization:
+    raise SystemExit("convergence authorization bytes are not canonical")
+if value["schema_version"] != 2 or value["workflow"] != "deploy-control-plane":
+    raise SystemExit("convergence authorization version is invalid")
+if value["repository"] != expected_repository:
+    raise SystemExit("convergence authorization repository is invalid")
+if value["source_run_id"] != expected_source_run_id or value["source_run_attempt"] != 1:
+    raise SystemExit("convergence authorization source run is invalid")
+if value["successor_run_id"] != expected_successor_run_id:
+    raise SystemExit("convergence authorization successor run is invalid")
+if value["successor_run_number"] != int(expected_successor_run_number):
+    raise SystemExit("convergence authorization successor number is invalid")
+if value["successor_status"] not in {"queued", "in_progress", "waiting", "pending", "requested"}:
+    raise SystemExit("convergence authorization successor status is invalid")
+if value["source_head_sha"] != expected_revision or value["successor_target_sha"] != expected_revision:
+    raise SystemExit("convergence authorization revision is invalid")
+if value["pending_activation_artifacts"] != ["image_cache"]:
+    raise SystemExit("convergence authorization pending artifact is invalid")
+if value["baseline_advanced"] is not False or value["cluster_mutation_attempted"] is not False:
+    raise SystemExit("convergence authorization mutation state is invalid")
+if value["workflow_dispatch_attempted"] is not True:
+    raise SystemExit("convergence authorization dispatch state is invalid")
+timestamp = datetime.datetime.fromisoformat(value["recorded_at"])
+if timestamp.tzinfo is None or timestamp.utcoffset() != datetime.timedelta(0):
+    raise SystemExit("convergence authorization timestamp is invalid")
+if SHA_RE.fullmatch(value["source_image_cache_base_ref"] or "") is None:
+    raise SystemExit("convergence image-cache base ref is invalid")
+if value["source_image_cache_base_ref"] != expected_image_base_ref:
+    raise SystemExit("convergence image-cache base ref changed after authorization")
+
+artifact = value["source_image_cache_artifact"]
+if type(artifact) is not dict or set(artifact) != ARTIFACT_KEYS:
+    raise SystemExit("convergence image-cache artifact shape is invalid")
+if artifact["component"] != "image_cache":
+    raise SystemExit("convergence artifact component is invalid")
+if artifact["repository"] != expected_image_repository:
+    raise SystemExit("convergence artifact repository is invalid")
+if artifact["source_tag"] != expected_revision or artifact["oci_revision"] != expected_revision:
+    raise SystemExit("convergence artifact revision is invalid")
+for field in ("top_digest", "config_digest", "platform_manifest_digest"):
+    if DIGEST_RE.fullmatch(artifact[field] or "") is None:
+        raise SystemExit(f"convergence artifact {field} is invalid")
+if artifact["immutable_ref"] != f'{expected_image_repository}@{artifact["top_digest"]}':
+    raise SystemExit("convergence artifact immutable ref is invalid")
+if artifact["verification"] != "registry_manifest_config_and_layer_get":
+    raise SystemExit("convergence artifact verification is invalid")
+
+canonical_artifacts = json.dumps([artifact], ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
+artifacts_digest = "sha256:" + hashlib.sha256(canonical_artifacts).hexdigest()
+if value["source_image_cache_artifacts_digest"] != artifacts_digest:
+    raise SystemExit("convergence artifact provenance digest is invalid")
+Path(artifacts_path).write_bytes(canonical_artifacts)
+Path(artifacts_digest_path).write_text(artifacts_digest, encoding="ascii")
+Path(top_digest_path).write_text(artifact["top_digest"], encoding="ascii")
+PY
+
+  top_digest="$(cat "${top_digest_file}")"
+  printf 're-verifying authorized image_cache -> %s@%s\n' \
+    "${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" "${top_digest}"
+  python3 "${REPO_ROOT}/scripts/verify_registry_image.py" \
+    --image "${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}@${top_digest}" \
+    --platform linux/amd64 \
+    --expected-revision "${FUGUE_IMAGE_TAG}" >"${verification_file}"
+
+  python3 - \
+    "${verified_artifacts_file}" \
+    "${verification_file}" \
+    "${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
+    "${top_digest}" \
+    "${FUGUE_IMAGE_TAG}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+artifacts_path, verification_path, repository, top_digest, revision = sys.argv[1:]
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+artifacts = json.loads(Path(artifacts_path).read_text())
+verification = json.loads(Path(verification_path).read_text())
+if type(artifacts) is not list or len(artifacts) != 1:
+    raise SystemExit("authorized image artifact inventory is invalid")
+artifact = artifacts[0]
+expected_verification_keys = {
+    "blob_count", "config_digest", "image", "index_digest",
+    "layer_get_probe_count", "manifest_digest", "oci_revision", "platform",
+    "request_count", "total_layer_bytes", "verification",
+}
+if type(verification) is not dict or set(verification) != expected_verification_keys:
+    raise SystemExit("registry re-verification shape is invalid")
+for field in ("blob_count", "layer_get_probe_count", "request_count", "total_layer_bytes"):
+    value = verification[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SystemExit(f"registry re-verification {field} is invalid")
+if verification["image"] != f"{repository}@{top_digest}":
+    raise SystemExit("registry re-verification image is invalid")
+if verification["platform"] != "linux/amd64" or verification["oci_revision"] != revision:
+    raise SystemExit("registry re-verification revision is invalid")
+if verification["verification"] != "registry_manifest_config_and_layer_get":
+    raise SystemExit("registry re-verification method is invalid")
+if verification["config_digest"] != artifact["config_digest"]:
+    raise SystemExit("registry config digest changed after authorization")
+if verification["manifest_digest"] != artifact["platform_manifest_digest"]:
+    raise SystemExit("registry platform manifest digest changed after authorization")
+index_digest = verification["index_digest"]
+if not isinstance(index_digest, str):
+    raise SystemExit("registry index digest type is invalid")
+if index_digest:
+    if DIGEST_RE.fullmatch(index_digest) is None or index_digest != top_digest:
+        raise SystemExit("registry index digest changed after authorization")
+elif verification["manifest_digest"] != top_digest:
+    raise SystemExit("registry manifest digest changed after authorization")
+PY
+
+  : >"${staged_output}"
+  printf 'image_cache_image_digest=%s\n' "${top_digest}" >>"${staged_output}"
+  printf 'verified_image_artifacts_json=%s\n' "$(cat "${verified_artifacts_file}")" >>"${staged_output}"
+  printf 'verified_image_artifacts_digest=%s\n' "$(cat "${verified_artifacts_digest_file}")" >>"${staged_output}"
+  trap '' INT TERM
+  publish_outputs "${staged_output}"
+}
+
 targets="$(trim_field "${FUGUE_CONTROL_PLANE_IMAGE_TARGETS:-}")"
+if [[ -n "${FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE:-}" ]]; then
+  reuse_authorized_image_cache_artifact
+  exit 0
+fi
 if [[ -z "${targets}" ]]; then
   metadata_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
   metadata_dir="$(mktemp -d "${metadata_root%/}/fugue-build-metadata.XXXXXX")"

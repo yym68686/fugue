@@ -118,12 +118,14 @@ grep_membership() {
 image_reason_matches_component_baseline() {
   local image="$1"
   local reason="$2"
-  local marker="${tmp_dir}/component-baseline-${image}"
-  local changed="${tmp_dir}/component-changed-files-${image}"
+  local marker=""
+  local changed=""
 
   case "${reason}" in
-    unknown-change-set|helm-live-image-drift|component-source-drift) return 0 ;;
+    unknown-change-set|helm-live-image-drift|component-source-drift|authorized-convergence-successor) return 0 ;;
   esac
+  marker="${tmp_dir}/component-baseline-${image}"
+  changed="${tmp_dir}/component-changed-files-${image}"
   [[ -e "${marker}" ]] || return 0
   grep_membership exact "${reason}" "${changed}" "${image} component baseline"
 }
@@ -208,6 +210,38 @@ image_reasons_value() {
     app_ssh) printf '%s' "${REASONS_APP_SSH}" ;;
     *) return 1 ;;
   esac
+}
+
+emit_plan() {
+  local image=""
+  local build_value=""
+  local targets_joined=""
+  local reasons=""
+  local -a targets=()
+
+  for image in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
+    build_value="$(image_build_value "${image}")"
+    emit_output "build_${image}" "${build_value}"
+    if [[ "${build_value}" == "true" ]]; then
+      targets+=("${image}")
+    fi
+  done
+
+  targets_joined="${targets[*]-}"
+  emit_output "target_count" "${#targets[@]}"
+  emit_output "targets" "${targets_joined}"
+
+  for image in ${targets_joined}; do
+    printf 'will build %s image' "${image}"
+    reasons="$(image_reasons_value "${image}")"
+    if [[ -n "${reasons}" ]]; then
+      printf ' (%s)' "${reasons}"
+    fi
+    printf '\n'
+  done
+  if [[ "${#targets[@]}" -eq 0 ]]; then
+    printf 'no control-plane images need rebuilding for this change set\n'
+  fi
 }
 
 image_commands() {
@@ -451,6 +485,23 @@ component_source_changed_since_baseline() {
   return 1
 }
 
+case "${FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE:-false}" in
+  false) ;;
+  true)
+    # The workflow input is accepted only after release-input-guard validates
+    # the source-run authorization artifact. A convergence successor must not
+    # recompute an empty same-SHA plan or acquire authority over any artifact
+    # other than the one named by that authorization.
+    mark_image image_cache "authorized-convergence-successor"
+    emit_plan
+    exit 0
+    ;;
+  *)
+    printf 'FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE must be true or false\n' >&2
+    exit 1
+    ;;
+esac
+
 tmp_dir="$(mktemp -d)"
 cleanup() {
   rm -rf "${tmp_dir}"
@@ -656,27 +707,4 @@ else
   done <"${changed_file}"
 fi
 
-targets=()
-for image in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
-  build_value="$(image_build_value "${image}")"
-  emit_output "build_${image}" "${build_value}"
-  if [[ "${build_value}" == "true" ]]; then
-    targets+=("${image}")
-  fi
-done
-
-targets_joined="${targets[*]-}"
-emit_output "target_count" "${#targets[@]}"
-emit_output "targets" "${targets_joined}"
-
-for image in ${targets_joined}; do
-  printf 'will build %s image' "${image}"
-  reasons="$(image_reasons_value "${image}")"
-  if [[ -n "${reasons}" ]]; then
-    printf ' (%s)' "${reasons}"
-  fi
-  printf '\n'
-done
-if [[ "${#targets[@]}" -eq 0 ]]; then
-  printf 'no control-plane images need rebuilding for this change set\n'
-fi
+emit_plan
