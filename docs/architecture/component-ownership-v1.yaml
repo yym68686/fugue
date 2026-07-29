@@ -24,6 +24,7 @@ components:
       - docs/architecture
       - internal/componentmanifest
       - internal/platformcontrol
+      - internal/releasecontrol
       - scripts/upgrade_fugue_control_plane.sh
       - .github/workflows/deploy-control-plane.yml
     artifactKinds: [release-control, component-release-plan]
