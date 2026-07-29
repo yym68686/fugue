@@ -393,7 +393,8 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 		model.NodeUpdateTaskTypeDecommissionLocalPV,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
-		model.NodeUpdateTaskTypeRestartStatelessNodeService:
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeReconcileHostZRAM:
 		return 3
 	default:
 		return 4

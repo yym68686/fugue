@@ -719,9 +719,56 @@ control_plane_release_domain_classify_files() {
   esac
 }
 
+control_plane_release_domain_select_render_focus() {
+  local target=""
+  local focus="${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED}"
+  local image_cache="false"
+  local convergence_mode="${FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE:-false}"
+  local observed_targets=" "
+  local -a targets=()
+
+  if [[ -n "${FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS:-}" ]]; then
+    read -r -a targets <<<"${FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS}"
+  fi
+  if (( ${#targets[@]} > 0 )); then
+    for target in "${targets[@]}"; do
+      [[ -n "${target}" ]] || return 2
+      case "${observed_targets}" in
+        *" ${target} "*) return 2 ;;
+      esac
+      observed_targets="${observed_targets}${target} "
+      case "${target}" in
+        edge|api|controller|drain_agent) ;;
+        image_cache) image_cache="true" ;;
+        telemetry_agent|app_ssh) ;;
+        *) return 2 ;;
+      esac
+    done
+  fi
+
+  # A normal release keeps the classifier's exact domain. Only a successor
+  # whose previous run authorization was verified by the workflow may focus
+  # the independently activated image-cache artifact.
+  case "${convergence_mode}" in
+    false) ;;
+    true)
+      [[ "${image_cache}" == "true" ]] || return 2
+      focus="image-cache"
+      ;;
+    *) return 2 ;;
+  esac
+  case "${focus}" in
+    node-local|authoritative-dns|control-plane|image-cache|backup|"") ;;
+    *) return 2 ;;
+  esac
+  CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED="${focus}"
+}
+
 control_plane_release_domain_set_preservation_modes() {
+  local selected="${CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED:-${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED}}"
+
   CONTROL_PLANE_RELEASE_DOMAIN_DNS_ONLY="false"
-  case "${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED}" in
+  case "${selected}" in
     node-local)
       FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE=preserve
       FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE=preserve
@@ -793,7 +840,7 @@ control_plane_release_domain_build_binding_args() {
 }
 
 control_plane_release_domain_prepare_fixed_preservation() {
-  local selected="${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED}"
+  local selected="${CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED:-${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED}}"
   local strict_build_preservation="false"
 
   # The planner owns classification. Never re-run the legacy changed-file
@@ -2394,13 +2441,15 @@ control_plane_release_run_atomic_domain_release() {
   CONTROL_PLANE_RELEASE_DOMAIN_LAST_TRACE_PHASE=""
   CONTROL_PLANE_RELEASE_DOMAIN_LAST_TRACE_STATE=""
   CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_ZERO_AUTHORIZED="false"
+  CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED=""
 
   if control_plane_release_domain_regenerate_changed_evidence; then
     if control_plane_release_domain_classify_files; then
       if control_plane_release_domain_build_binding_args; then
         case "${CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME}" in
           multiple|unknown|zero|single)
-            if control_plane_release_domain_set_preservation_modes; then
+            if control_plane_release_domain_select_render_focus &&
+              control_plane_release_domain_set_preservation_modes; then
               if control_plane_release_domain_with_private_tmp \
                 control_plane_release_domain_prepare_render_inputs; then
                 control_plane_release_domain_render_and_authorize || final_status=$?

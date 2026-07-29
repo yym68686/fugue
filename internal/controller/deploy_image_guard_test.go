@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -484,6 +485,87 @@ func TestEnsureManagedDeployImageReadyAllowsRuntimeDigestWhenManagedSourceTagIsS
 	}
 	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
 		t.Fatalf("expected inspect refs [%q %q], got %v", managedRef, runtimePushRef, inspected)
+	}
+}
+
+func TestManagedReconcileImageGuardTrustsMatchingServingDeployment(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.internal:5000/fugue-apps/demo:git-current",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+		Source: &model.AppSource{ResolvedImageRef: "registry.fugue.internal:5000/fugue-apps/demo:git-current"},
+	}
+	scheduling := runtimepkg.SchedulingConstraints{}
+	svc := &Service{
+		Config: config.ControllerConfig{ImageStoreMode: "distributed"},
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("a matching serving deployment must bypass inventory inspection")
+			return false, nil, nil
+		},
+	}
+	deployment := readyKubeDeployment(runtimepkg.RuntimeAppResourceName(app), app.Spec.Replicas)
+	setKubeDeploymentPrimaryImage(&deployment, app.Name, app.Spec.Image)
+	deployment.Metadata.Annotations = map[string]string{
+		runtimepkg.FugueAnnotationReleaseKey: svc.expectedManagedAppReleaseKey(app, scheduling),
+	}
+	payload, err := json.Marshal(deployment)
+	if err != nil {
+		t.Fatalf("marshal deployment: %v", err)
+	}
+	client := &kubeClient{
+		baseURL: "https://kubernetes.example",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodGet || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/app-demo" {
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+			}
+			return okJSONResponse(string(payload)), nil
+		})},
+	}
+
+	if err := svc.ensureManagedReconcileDeployImageReady(context.Background(), client, "tenant-demo", app, scheduling); err != nil {
+		t.Fatalf("matching serving deployment should satisfy image guard: %v", err)
+	}
+}
+
+func TestManagedReconcileImageGuardChecksChangedRelease(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.internal:5000/fugue-apps/demo:git-next",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+		Source: &model.AppSource{ResolvedImageRef: "registry.fugue.internal:5000/fugue-apps/demo:git-next"},
+	}
+	svc := &Service{Config: config.ControllerConfig{ImageStoreMode: "distributed"}}
+	deployment := readyKubeDeployment(runtimepkg.RuntimeAppResourceName(app), app.Spec.Replicas)
+	setKubeDeploymentPrimaryImage(&deployment, app.Name, "registry.fugue.internal:5000/fugue-apps/demo:git-current")
+	deployment.Metadata.Annotations = map[string]string{runtimepkg.FugueAnnotationReleaseKey: "release-current"}
+	payload, err := json.Marshal(deployment)
+	if err != nil {
+		t.Fatalf("marshal deployment: %v", err)
+	}
+	client := &kubeClient{
+		baseURL: "https://kubernetes.example",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return okJSONResponse(string(payload)), nil
+		})},
+	}
+
+	err = svc.ensureManagedReconcileDeployImageReady(context.Background(), client, "tenant-demo", app, runtimepkg.SchedulingConstraints{})
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("changed release must still require image evidence, got %v", err)
 	}
 }
 

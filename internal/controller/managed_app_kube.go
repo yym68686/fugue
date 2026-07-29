@@ -326,7 +326,7 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 	if err != nil || !found {
 		return "", false, err
 	}
-	if skipExistingCloudNativePGWrites(ctx) {
+	if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
 		return "apply_skipped_existing", true, nil
 	}
 	if desiredObjectAlreadyApplied(current, obj) {
@@ -379,6 +379,13 @@ func guardKubernetesNoopObject(obj map[string]any) bool {
 	if _, ok := obj["spec"]; !ok {
 		return false
 	}
+	apiVersion := strings.TrimSpace(objectStringField(obj, "apiVersion"))
+	kind := strings.TrimSpace(objectStringField(obj, "kind"))
+	return (apiVersion == runtime.CloudNativePGAPIVersion && kind == runtime.CloudNativePGClusterKind) ||
+		(apiVersion == runtime.ManagedAppAPIVersion && kind == runtime.ManagedAppKind)
+}
+
+func cloudNativePGObject(obj map[string]any) bool {
 	return strings.TrimSpace(objectStringField(obj, "apiVersion")) == runtime.CloudNativePGAPIVersion &&
 		strings.TrimSpace(objectStringField(obj, "kind")) == runtime.CloudNativePGClusterKind
 }
@@ -405,7 +412,7 @@ func desiredSpecAlreadyApplied(current, desired map[string]any) bool {
 	if !ok {
 		return false
 	}
-	if guardKubernetesNoopObject(desired) {
+	if cloudNativePGObject(desired) {
 		return desiredCloudNativePGSpecAlreadyApplied(currentSpec, desiredSpec)
 	}
 	return normalizedKubeValueEqual(currentSpec, desiredSpec)
@@ -827,7 +834,7 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 			return err
 		}
 		if found {
-			if skipExistingCloudNativePGWrites(ctx) {
+			if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
 				c.writeStats.record("replace_spec_skipped_existing", obj)
 				return nil
 			}

@@ -1246,6 +1246,55 @@ case_operational_report_binds_build_target_before_dispatch() {
   assert_public_parent_and_cleanup
 }
 
+case_render_focus_serializes_activation_domains() {
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="false"
+  CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="control-plane"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="image_cache controller edge telemetry_agent app_ssh"
+  control_plane_release_domain_select_render_focus ||
+    fail_test "multi-domain build target focus selection failed"
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED}" == "control-plane" ]] ||
+    fail_test "render focus displaced the classified control-plane domain"
+
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="true"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="image_cache edge telemetry_agent app_ssh"
+  control_plane_release_domain_select_render_focus ||
+    fail_test "image-cache successor render focus selection failed"
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED}" == "image-cache" ]] ||
+    fail_test "render focus did not advance to the mandatory image-cache domain"
+
+  CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="backup"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="image_cache telemetry_agent app_ssh"
+  control_plane_release_domain_select_render_focus ||
+    fail_test "image-cache render focus selection failed"
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED}" == "image-cache" ]] ||
+    fail_test "render focus did not advance to image-cache"
+
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="false"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="telemetry_agent app_ssh"
+  control_plane_release_domain_select_render_focus ||
+    fail_test "audit-only render focus selection failed"
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_RENDER_SELECTED}" == "backup" ]] ||
+    fail_test "audit-only build targets displaced the conservative domain"
+}
+
+case_render_focus_rejects_ambiguous_targets() {
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="false"
+  CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="control-plane"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="image_cache image_cache"
+  if control_plane_release_domain_select_render_focus; then
+    fail_test "duplicate image target was accepted"
+  fi
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="future_component"
+  if control_plane_release_domain_select_render_focus; then
+    fail_test "unknown image target was accepted"
+  fi
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="true"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="controller"
+  if control_plane_release_domain_select_render_focus; then
+    fail_test "image-cache convergence was accepted without an image-cache build target"
+  fi
+}
+
 case_operational_prepare_stops_before_dispatch() {
   setup_case
   trap cleanup_case EXIT
@@ -1475,6 +1524,8 @@ run_case operational-apply-activation case_operational_apply_activates_complete_
 run_case operational-apply-zero case_operational_apply_activates_verified_zero
 run_case operational-apply-zero-unverified case_operational_apply_rejects_unverified_zero
 run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch
+run_case render-focus-serial case_render_focus_serializes_activation_domains
+run_case render-focus-invalid case_render_focus_rejects_ambiguous_targets
 for domain in node-local authoritative-dns control-plane image-cache backup; do
   run_case "success-${domain}" case_domain_success "${domain}"
 done

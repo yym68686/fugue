@@ -340,6 +340,39 @@ func TestOverlayAppStatusFromManagedAppUsesObservedReadyReplicas(t *testing.T) {
 	}
 }
 
+func TestOverlayAppStatusFromManagedAppRetainsDurableStateUntilGenerationObserved(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Status: model.AppStatus{
+			Phase:           "deployed",
+			CurrentReplicas: 1,
+		},
+	}
+	managed := ManagedAppObject{
+		Metadata: ManagedAppMeta{Generation: 2},
+		Status: ManagedAppStatus{
+			Phase:              ManagedAppPhaseError,
+			Message:            "previous generation error",
+			ReadyReplicas:      0,
+			ObservedGeneration: 1,
+		},
+	}
+
+	updated := OverlayAppStatusFromManagedApp(app, managed)
+	if updated.Status.Phase != app.Status.Phase || updated.Status.CurrentReplicas != app.Status.CurrentReplicas {
+		t.Fatalf("unobserved status must not replace durable state, got %+v", updated.Status)
+	}
+
+	managed.Status.ObservedGeneration = managed.Metadata.Generation
+	updated = OverlayAppStatusFromManagedApp(app, managed)
+	if updated.Status.Phase != "failed" || updated.Status.CurrentReplicas != 0 {
+		t.Fatalf("observed status must replace durable state, got %+v", updated.Status)
+	}
+}
+
 func TestOverlayAppStatusFromManagedAppOverlaysRuntimeTimestamps(t *testing.T) {
 	releaseStartedAt := time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC)
 	releaseReadyAt := releaseStartedAt.Add(2 * time.Minute)

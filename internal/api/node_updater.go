@@ -576,7 +576,8 @@ func nodeUpdateTaskIsRepair(taskType string) bool {
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeRunDeepHealth:
+		model.NodeUpdateTaskTypeRunDeepHealth,
+		model.NodeUpdateTaskTypeReconcileHostZRAM:
 		return true
 	default:
 		return false
@@ -598,6 +599,9 @@ func refuseUnsafeNodeRepairTaskClaim(task model.NodeUpdateTask) string {
 		default:
 			return "refuse stateless node service restart before execution: service is not in the Fugue managed allowlist"
 		}
+	}
+	if task.Type == model.NodeUpdateTaskTypeReconcileHostZRAM && !nodeUpdatePayloadBool(task.Payload["allow_restart"]) {
+		return "refuse host zram reconciliation before execution: allow_restart=true is required"
 	}
 	return ""
 }
@@ -895,7 +899,8 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeRunDeepHealth:
+		model.NodeUpdateTaskTypeRunDeepHealth,
+		model.NodeUpdateTaskTypeReconcileHostZRAM:
 		if task.Status == model.NodeUpdateTaskStatusCompleted {
 			action = "node_repair_completed"
 			if taskPayloadTruthy(task.Payload, "dry_run") {
@@ -937,7 +942,13 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		"safety_class",
 		"dry_run",
 		"allow_delete",
+		"allow_restart",
 		"service",
+		"mode",
+		"size_percent",
+		"min_node_bytes",
+		"min_bytes",
+		"max_bytes",
 		"after_probe",
 	} {
 		if value := strings.TrimSpace(task.Payload[key]); value != "" {
@@ -1238,7 +1249,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="__FUGUE_NODE_UPDATER_SCRIPT_VERSION__"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,reconcile-host-zram,time-sync"
 export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
@@ -1272,6 +1283,8 @@ FUGUE_NODE_UPDATER_CLOCK_SKEW_REPAIR_THRESHOLD_SEC="${FUGUE_NODE_UPDATER_CLOCK_S
 FUGUE_LOCALPV_VG_NAME="${FUGUE_LOCALPV_VG_NAME:-fugue-vg}"
 FUGUE_LOCALPV_IMAGE_PATH="${FUGUE_LOCALPV_IMAGE_PATH:-/var/lib/fugue/lvm-localpv/${FUGUE_LOCALPV_VG_NAME}.img}"
 FUGUE_LOCALPV_LOOP_SERVICE="${FUGUE_LOCALPV_LOOP_SERVICE:-fugue-lvm-localpv-loop.service}"
+
+__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__
 
 log() {
   printf '[fugue-node-updater] %s\n' "$*" >&2
@@ -3971,6 +3984,37 @@ except Exception as exc:
     checks.append(check("memory_pressure", "resource", "warning", str(exc), "/proc/meminfo readable"))
 
 try:
+    zram_env_path = "/etc/fugue/host-zram.env"
+    if os.path.isfile(zram_env_path):
+        zram_env = {}
+        with open(zram_env_path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                key, separator, value = raw_line.strip().partition("=")
+                if separator and key:
+                    zram_env[key] = value.strip().strip('"').strip("'")
+        if zram_env.get("FUGUE_HOST_ZRAM_MANAGED", "").lower() in {"1", "true"}:
+            device = zram_env.get("FUGUE_HOST_ZRAM_DEVICE", "/dev/zram0")
+            expected_size = zram_env.get("FUGUE_HOST_ZRAM_SIZE_BYTES", "0")
+            sys_block = zram_env.get("FUGUE_HOST_ZRAM_SYS_BLOCK", "/sys/block/zram0")
+            active_devices = []
+            with open("/proc/swaps", "r", encoding="utf-8") as fh:
+                for index, line in enumerate(fh):
+                    if index == 0:
+                        continue
+                    fields = line.split()
+                    if fields:
+                        active_devices.append(fields[0])
+            with open(os.path.join(sys_block, "disksize"), "r", encoding="utf-8") as fh:
+                actual_size = fh.read().strip()
+            active = device in active_devices
+            size_matches = expected_size.isdigit() and actual_size == expected_size
+            status = "pass" if active and size_matches else "warning"
+            detail = "device=%s active=%s size_bytes=%s expected_size_bytes=%s" % (device, str(active).lower(), actual_size, expected_size)
+            checks.append(check("host_zram", "resource", status, detail, "Fugue-managed host zram active at its planned size", False, repair_action="reconcile-host-zram" if status != "pass" else "", evidence={"device": device, "active": str(active).lower(), "size_bytes": actual_size, "expected_size_bytes": expected_size}))
+except Exception as exc:
+    checks.append(check("host_zram", "resource", "warning", str(exc), "Fugue-managed host zram state readable", False, repair_action="reconcile-host-zram"))
+
+try:
     with open("/proc/loadavg", "r", encoding="utf-8") as fh:
         load1 = float(fh.read().split()[0])
     cpus = os.cpu_count() or 1
@@ -5359,6 +5403,121 @@ run_deep_health_task() {
   log_task "deep health heartbeat submitted"
 }
 
+restore_host_zram_k3s_config() {
+  local backup_dir="$1"
+  local config_file="$2"
+  if [ "$(cat "${backup_dir}/config.state" 2>/dev/null || true)" = "present" ]; then
+    mkdir -p "$(dirname "${config_file}")"
+    cp -p "${backup_dir}/config" "${config_file}"
+  else
+    rm -f "${config_file}"
+  fi
+}
+
+recover_k3s_agent_after_host_zram_failure() {
+  local backup_dir="$1"
+  local config_file="$2"
+  local config_changed="$3"
+  if ! fugue_host_zram_rollback; then
+    log_task "host zram rollback was incomplete; preserving fail-swap-on=false for recoverability"
+    return 1
+  fi
+  restore_host_zram_k3s_config "${backup_dir}" "${config_file}"
+  if [ "${config_changed}" -eq 1 ]; then
+    log_task "restored k3s config after host zram failure; restarting k3s-agent"
+    if ! systemctl restart k3s-agent || ! wait_for_unit_active k3s-agent 900; then
+      log_task "k3s-agent recovery failed after host zram rollback"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+reconcile_host_zram_task() {
+  local config_file="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+  local backup_dir=""
+  local config_changed=0
+  local patch_rc=0
+
+  if ! truthy "${FUGUE_NODE_UPDATE_TASK_ALLOW_RESTART:-}"; then
+    echo "reconcile-host-zram requires allow_restart=true" >&2
+    return 2
+  fi
+  FUGUE_HOST_ZRAM_MODE="${FUGUE_NODE_UPDATE_TASK_MODE:-auto}"
+  if [ "${FUGUE_HOST_ZRAM_MODE}" != "auto" ]; then
+    echo "reconcile-host-zram only supports mode=auto" >&2
+    return 2
+  fi
+  FUGUE_HOST_ZRAM_K3S_VERSION="$(k3s_version)"
+  if [ -n "${FUGUE_NODE_UPDATE_TASK_SIZE_PERCENT:-}" ]; then
+    FUGUE_HOST_ZRAM_PERCENT="${FUGUE_NODE_UPDATE_TASK_SIZE_PERCENT}"
+  fi
+  if [ -n "${FUGUE_NODE_UPDATE_TASK_MIN_NODE_BYTES:-}" ]; then
+    FUGUE_HOST_ZRAM_MIN_NODE_BYTES="${FUGUE_NODE_UPDATE_TASK_MIN_NODE_BYTES}"
+  fi
+  if [ -n "${FUGUE_NODE_UPDATE_TASK_MIN_BYTES:-}" ]; then
+    FUGUE_HOST_ZRAM_MIN_BYTES="${FUGUE_NODE_UPDATE_TASK_MIN_BYTES}"
+  fi
+  if [ -n "${FUGUE_NODE_UPDATE_TASK_MAX_BYTES:-}" ]; then
+    FUGUE_HOST_ZRAM_MAX_BYTES="${FUGUE_NODE_UPDATE_TASK_MAX_BYTES}"
+  fi
+
+  if ! fugue_host_zram_plan; then
+    FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="host zram skipped safely: ${FUGUE_HOST_ZRAM_REASON}"
+    log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
+    return 0
+  fi
+  log_task "host zram plan accepted: size_bytes=${FUGUE_HOST_ZRAM_SIZE_BYTES}, pod_swap=NoSwap"
+
+  backup_dir="$(mktemp -d)"
+  if [ -e "${config_file}" ]; then
+    cp -p "${config_file}" "${backup_dir}/config"
+    printf 'present\n' >"${backup_dir}/config.state"
+  else
+    printf 'absent\n' >"${backup_dir}/config.state"
+  fi
+
+  if fugue_k3s_config_ensure_fail_swap_on_false "${config_file}"; then
+    config_changed=1
+  else
+    patch_rc=$?
+    if [ "${patch_rc}" -ne 1 ]; then
+      restore_host_zram_k3s_config "${backup_dir}" "${config_file}"
+      rm -rf "${backup_dir}"
+      echo "failed to render fail-swap-on=false in ${config_file}" >&2
+      return "${patch_rc}"
+    fi
+  fi
+
+  if ! fugue_host_zram_stage; then
+    restore_host_zram_k3s_config "${backup_dir}" "${config_file}"
+    rm -rf "${backup_dir}"
+    echo "host zram staging failed and was rolled back: ${FUGUE_HOST_ZRAM_REASON}" >&2
+    return 1
+  fi
+
+  if [ "${config_changed}" -eq 1 ]; then
+    log_task "k3s kubelet swap compatibility changed; restarting k3s-agent before enabling zram"
+    if ! systemctl restart k3s-agent || ! wait_for_unit_active k3s-agent 900; then
+      recover_k3s_agent_after_host_zram_failure "${backup_dir}" "${config_file}" "${config_changed}" || true
+      rm -rf "${backup_dir}"
+      echo "k3s-agent rejected host swap compatibility configuration" >&2
+      return 1
+    fi
+  fi
+
+  if ! fugue_host_zram_activate; then
+    recover_k3s_agent_after_host_zram_failure "${backup_dir}" "${config_file}" "${config_changed}" || true
+    rm -rf "${backup_dir}"
+    echo "host zram activation failed and was rolled back: ${FUGUE_HOST_ZRAM_REASON}" >&2
+    return 1
+  fi
+
+  rm -rf "${backup_dir}"
+  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="host-only zram active: size_bytes=${FUGUE_HOST_ZRAM_SIZE_BYTES}, pod_swap=NoSwap"
+  log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
+}
+
 run_task() {
   case "${FUGUE_NODE_UPDATE_TASK_TYPE}" in
     refresh-join-config)
@@ -5425,6 +5584,9 @@ run_task() {
       ;;
     run-deep-health)
       run_deep_health_task
+      ;;
+    reconcile-host-zram)
+      reconcile_host_zram_task
       ;;
     *)
       echo "unsupported node update task type: ${FUGUE_NODE_UPDATE_TASK_TYPE}" >&2
@@ -5516,5 +5678,6 @@ esac
 	return strings.NewReplacer(
 		"__FUGUE_API_BASE__", apiBase,
 		"__FUGUE_NODE_UPDATER_SCRIPT_VERSION__", nodeUpdaterScriptVersion,
+		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary(),
 	).Replace(script)
 }

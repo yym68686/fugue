@@ -46,21 +46,57 @@ fail_contract("workflow trigger is missing") unless trigger.is_a?(Hash)
 assert_equal(trigger.keys, ["workflow_dispatch"], "release must be dispatch-only")
 dispatch = trigger.fetch("workflow_dispatch")
 inputs = dispatch.fetch("inputs")
-assert_equal(inputs.keys, ["expected_sha"], "dispatch input set")
+assert_equal(
+  inputs.keys,
+  ["expected_sha", "image_cache_convergence", "convergence_source_run_id"],
+  "dispatch input set",
+)
 expected_sha = inputs.fetch("expected_sha")
 assert_equal(expected_sha["required"], true, "expected_sha required flag")
 assert_equal(expected_sha["type"], "string", "expected_sha type")
 fail_contract("expected_sha must not have a default") if expected_sha.key?("default")
+image_cache_convergence = inputs.fetch("image_cache_convergence")
+assert_equal(image_cache_convergence["required"], true, "image-cache convergence required flag")
+assert_equal(image_cache_convergence["type"], "boolean", "image-cache convergence type")
+assert_equal(image_cache_convergence["default"], false, "image-cache convergence default")
+convergence_source = inputs.fetch("convergence_source_run_id")
+assert_equal(convergence_source["required"], false, "convergence source required flag")
+assert_equal(convergence_source["type"], "string", "convergence source type")
+assert_equal(convergence_source["default"], "", "convergence source default")
 
 assert_equal(workflow["permissions"], {"contents" => "read"}, "top-level permissions")
 jobs = workflow.fetch("jobs")
 
 guard = jobs.fetch("release-input-guard")
 assert_equal(needs(guard), [], "input guard dependencies")
+assert_equal(guard.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "input guard permissions")
+download_authorization = step(guard, "Download convergence successor authorization")
+assert_equal(download_authorization.fetch("if"), "${{ inputs.image_cache_convergence }}", "convergence authorization condition")
+assert_equal(
+  download_authorization.fetch("uses"),
+  "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+  "convergence authorization action pin",
+)
+assert_equal(
+  download_authorization.fetch("with"),
+  {
+    "name" => "fugue-release-convergence-successor-${{ inputs.convergence_source_run_id }}-1",
+    "path" => "${{ runner.temp }}/fugue-release-convergence-authorization",
+    "github-token" => "${{ github.token }}",
+    "repository" => "${{ github.repository }}",
+    "run-id" => "${{ inputs.convergence_source_run_id }}",
+  },
+  "convergence authorization download contract",
+)
 guard_step = step(guard, "Guard exact main commit authorization")
 {
   "EXPECTED_SHA" => "${{ inputs.expected_sha }}",
   "ACTUAL_SHA" => "${{ github.sha }}",
+  "IMAGE_CACHE_CONVERGENCE" => "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
+  "CONVERGENCE_SOURCE_RUN_ID" => "${{ inputs.convergence_source_run_id }}",
+  "CONVERGENCE_AUTHORIZATION_FILE" => "${{ runner.temp }}/fugue-release-convergence-authorization/successor.json",
+  "GH_TOKEN" => "${{ github.token }}",
+  "REPOSITORY" => "${{ github.repository }}",
   "EVENT_NAME" => "${{ github.event_name }}",
   "EVENT_REF" => "${{ github.ref }}",
   "EVENT_REF_NAME" => "${{ github.ref_name }}",
@@ -74,6 +110,14 @@ for fragment in [
   '"${EVENT_REF_TYPE}" == "branch"',
   '^[0-9a-f]{40}$',
   '"${EXPECTED_SHA}" == "${ACTUAL_SHA}"',
+  'false)',
+  '[[ -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]',
+  'true)',
+  'actions/runs/${CONVERGENCE_SOURCE_RUN_ID}',
+  '"${source_status}" == \'completed\' && "${source_conclusion}" == \'success\'',
+  'pending_activation_artifacts",',
+  '"successor_run_id": successor_run_id',
+  'if raw != canonical:',
 ]
   fail_contract("input guard is missing #{fragment.inspect}") unless guard_step.fetch("run").include?(fragment)
 end
@@ -277,6 +321,7 @@ assert_equal(
 )
 
 upgrade = step(deploy, "Upgrade Fugue control plane through uploaded operational evidence")
+assert_equal(upgrade["id"], "guarded_deploy", "guarded deploy step id")
 assert_equal(upgrade["uses"], "./.github/actions/operational-domain-guarded-deploy", "guarded deploy action")
 fail_contract("guarded deploy workflow step must not define a run body") if upgrade.key?("run")
 upgrade_env = upgrade.fetch("env")
@@ -290,6 +335,7 @@ upgrade_env = upgrade.fetch("env")
   "FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR" => "${{ runner.temp }}/fugue-release-domain-public/build-activation-evidence",
   "FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST" => "${{ needs.build.outputs.verified_image_artifacts_digest }}",
   "FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS" => "${{ needs.build.outputs.image_targets }}",
+  "FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE" => "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
   "FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
   "FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST" => "${{ needs.build.outputs.api_image_digest }}",
   "FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA" => "${{ needs.release-baseline.outputs.controller_image_baseline_ref }}",
@@ -321,6 +367,20 @@ assert_equal(public_upload.fetch("with").fetch("retention-days"), 90, "public ev
 assert_equal(public_upload.fetch("with").fetch("include-hidden-files"), false, "public evidence hidden-file policy")
 assert_equal(public_upload.fetch("with").fetch("overwrite"), false, "public evidence overwrite policy")
 assert_equal(operational_action.fetch("runs").fetch("using"), "composite", "operational action runtime")
+assert_equal(
+  operational_action.fetch("outputs"),
+  {
+    "image-activation-convergence" => {
+      "description" => "complete only when no mandatory image-cache build remains build-only",
+      "value" => "${{ steps.image-activation-convergence.outputs.status }}",
+    },
+    "pending-activation-artifacts" => {
+      "description" => "canonical comma-separated mandatory image-cache built-only artifacts",
+      "value" => "${{ steps.image-activation-convergence.outputs.pending_artifacts }}",
+    },
+  },
+  "operational action outputs",
+)
 action_steps = operational_action.fetch("runs").fetch("steps")
 assert_equal(
   action_steps.map { |candidate| candidate.fetch("name") },
@@ -329,6 +389,7 @@ assert_equal(
     "Upload operational-domain report-only evidence",
     "Upload build-vs-activation report-only evidence",
     "Apply exact authorized control-plane release",
+    "Verify image activation convergence",
   ],
   "operational action step order",
 )
@@ -404,8 +465,59 @@ assert_equal(
   "apply build-activation artifact URL proof",
 )
 assert_equal(apply.fetch("run"), "./scripts/upgrade_fugue_control_plane.sh", "apply entrypoint")
+convergence = action_step(operational_action, "Verify image activation convergence")
+assert_equal(convergence["id"], "image-activation-convergence", "image convergence step id")
+for fragment in [
+  'image-activation-convergence',
+  '--build-artifact-plan "${evidence_dir}/build-artifact-plan.json"',
+  '--image-activation-plan "${evidence_dir}/image-activation-plan.json"',
+  '--image-activation-evidence "${evidence_dir}/image-activation-evidence.json"',
+  "complete)",
+  "pending)",
+  "printf 'status=%s\\n'",
+  "printf 'pending_artifacts=%s\\n'",
+]
+  fail_contract("image convergence step is missing #{fragment.inspect}") unless convergence.fetch("run").include?(fragment)
+end
 deploy_uploads = Array(deploy["steps"]).select { |candidate| candidate["uses"].to_s.start_with?("actions/upload-artifact@") }
 assert_equal(deploy_uploads.length, 1, "outer deploy artifact upload count")
+
+continuation = jobs.fetch("continue-release-convergence")
+assert_equal(
+  needs(continuation),
+  ["release-input-guard", "release-baseline", "release-gate", "build", "deploy"],
+  "release convergence continuation dependencies",
+)
+assert_equal(continuation["permissions"], {"actions" => "write", "contents" => "read"}, "release convergence continuation permissions")
+for fragment in [
+  "needs.deploy.outputs.image_activation_convergence == 'pending'",
+  "needs.deploy.result == 'success'",
+]
+  fail_contract("release convergence continuation condition omits #{fragment.inspect}") unless continuation.fetch("if").include?(fragment)
+end
+successor = step(continuation, "Dispatch exact release convergence successor")
+for fragment in [
+  '"${EXPECTED_SHA}" == "${GITHUB_SHA}"',
+  '"${PENDING_ACTIVATION_ARTIFACTS}" == \'image_cache\'',
+  '"${state}" == \'active\'',
+  '"${main_head}" == "${EXPECTED_SHA}"',
+  '[[ -z "${before}" ]] || exit 1',
+  'actions/workflows/${workflow_id}/dispatches',
+  '-f "inputs[expected_sha]=${main_head}"',
+  "-f 'inputs[image_cache_convergence]=true'",
+  '-f "inputs[convergence_source_run_id]=${GITHUB_RUN_ID}"',
+  'successor_number > GITHUB_RUN_NUMBER',
+  '"${successor_sha}" == "${main_head}"',
+  '"baseline_advanced": False',
+  '"workflow_dispatch_attempted": True',
+]
+  fail_contract("release convergence successor is missing #{fragment.inspect}") unless successor.fetch("run").include?(fragment)
+end
+for forbidden in ["/enable", "/disable", "/cancel", "git push", "updateRefs", "helm ", "kubectl "]
+  fail_contract("release convergence successor contains out-of-scope capability #{forbidden.inspect}") if successor.fetch("run").include?(forbidden)
+end
+continuation_upload = step(continuation, "Upload release convergence successor evidence")
+assert_equal(continuation_upload.fetch("with").fetch("if-no-files-found"), "error", "continuation absent artifact policy")
 
 record = jobs.fetch("record-release-baseline")
 assert_equal(
@@ -416,7 +528,7 @@ assert_equal(
 assert_equal(record["permissions"], {"contents" => "write"}, "record-release-baseline permissions")
 assert_equal(
   record["if"],
-  "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' }}",
+  "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}",
   "record-release-baseline success condition",
 )
 assert_equal(record.fetch("steps").length, 2, "record baseline exact step inventory")
@@ -597,18 +709,33 @@ assert_equal(success_rearm_upload.fetch("with").fetch("if-no-files-found"), "err
 
 freeze = jobs.fetch("freeze-release-lane-on-failure")
 freeze_needs = [
-  "release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline",
-  "rearm-release-lane-on-success",
+  "release-input-guard", "release-baseline", "release-gate", "build", "deploy", "continue-release-convergence",
+  "record-release-baseline", "rearm-release-lane-on-success",
 ]
 assert_equal(needs(freeze), freeze_needs, "freeze finalizer dependencies")
-freeze_needs.each do |job_name|
+[
+  "release-input-guard", "release-baseline", "release-gate", "build", "deploy",
+].each do |job_name|
   fail_contract("freeze condition omits #{job_name}") unless freeze.fetch("if").include?("needs.#{job_name}.result != 'success'")
+end
+for fragment in [
+  "needs.deploy.outputs.image_activation_convergence == 'complete'",
+  "needs.record-release-baseline.result != 'success'",
+  "needs.rearm-release-lane-on-success.result != 'success'",
+  "needs.deploy.outputs.image_activation_convergence == 'pending'",
+  "needs.continue-release-convergence.result != 'success'",
+  "needs.deploy.outputs.image_activation_convergence != 'complete'",
+  "needs.deploy.outputs.image_activation_convergence != 'pending'",
+]
+  fail_contract("freeze convergence condition omits #{fragment.inspect}") unless freeze.fetch("if").include?(fragment)
 end
 assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}, "freeze permissions")
 
 allowed_permissions = {
+  "release-input-guard" => {"actions" => "read", "contents" => "read"},
   "build" => {"contents" => "read", "packages" => "write"},
   "deploy" => {"actions" => "read", "contents" => "read"},
+  "continue-release-convergence" => {"actions" => "write", "contents" => "read"},
   "record-release-baseline" => {"contents" => "write"},
   "rearm-release-lane-on-success" => {"actions" => "write", "contents" => "read"},
   "freeze-release-lane-on-failure" => {"actions" => "write", "contents" => "read"},
@@ -635,6 +762,7 @@ allowed_uploads = [
   ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
+  ["continue-release-convergence", "${{ runner.temp }}/fugue-release-convergence-successor/successor.json"],
   ["rearm-release-lane-on-success", "${{ runner.temp }}/fugue-release-lane-success-rearm/success-rearm.json"],
   ["freeze-release-lane-on-failure", "${{ runner.temp }}/fugue-release-lane-freeze/lane-freeze.json"],
 ]

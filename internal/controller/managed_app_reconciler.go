@@ -19,6 +19,7 @@ import (
 const (
 	managedPostgresExistingServiceInitGracePeriod = 15 * time.Minute
 	managedAppOrphanWorkloadZeroConditionType     = "OrphanWorkloadZero"
+	managedAppDeployImageBlockedConditionType     = "DeployImageBlocked"
 )
 
 func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) error {
@@ -305,10 +306,10 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		app = preparedApp
 	}
 	if err := validateManagedAppDeployableImage(app); err != nil {
-		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+		return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	if err := s.ensureManagedDeployImageReady(ctx, app, managed.Spec.Scheduling); err != nil {
-		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	if err := s.ensureManagedReconcileDeployImageReady(ctx, client, namespace, app, managed.Spec.Scheduling); err != nil {
+		return patchManagedAppDeployImageBlockedStatus(ctx, client, namespace, managed, app, err)
 	}
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
@@ -1054,6 +1055,42 @@ func managedAppZeroDowntimeBlockedStatusCurrent(status runtime.ManagedAppStatus,
 	return false
 }
 
+func patchManagedAppDeployImageBlockedStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	cause error,
+) error {
+	status := managedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, cause)
+	// Image readiness is a pre-apply guard: none of the serving child objects
+	// have changed when it fails. The shared pre-apply status builder only keeps
+	// routing to the known-good release after a fresh, complete Deployment
+	// readiness check; stale ManagedApp status must never keep a dead upstream
+	// published.
+	conditions := make([]runtime.ManagedAppCondition, 0, len(status.Conditions)+1)
+	for _, condition := range status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), managedAppDeployImageBlockedConditionType) {
+			continue
+		}
+		conditions = append(conditions, condition)
+	}
+	status.Conditions = append(conditions, runtime.ManagedAppCondition{
+		Type:    managedAppDeployImageBlockedConditionType,
+		Status:  "True",
+		Reason:  "PreflightFailed",
+		Message: status.Message,
+	})
+	if managedAppStatusEquivalent(managed.Status, status) {
+		return nil
+	}
+	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+		return fmt.Errorf("%w (also failed to patch deploy-image blocked status: %v)", cause, err)
+	}
+	return cause
+}
+
 func patchManagedAppStorageExpansionErrorStatus(
 	ctx context.Context,
 	client *kubeClient,
@@ -1062,6 +1099,32 @@ func patchManagedAppStorageExpansionErrorStatus(
 	app model.App,
 	cause error,
 ) error {
+	return patchManagedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, cause)
+}
+
+func patchManagedAppPreApplyErrorStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	cause error,
+) error {
+	status := managedAppPreApplyErrorStatus(ctx, client, namespace, managed, app, cause)
+	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+		return fmt.Errorf("%w (also failed to patch managed app status: %v)", cause, err)
+	}
+	return cause
+}
+
+func managedAppPreApplyErrorStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	cause error,
+) runtime.ManagedAppStatus {
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
 	status.Message = strings.TrimSpace(cause.Error())
@@ -1072,11 +1135,9 @@ func patchManagedAppStorageExpansionErrorStatus(
 	status.PendingReleaseStartedAt = strings.TrimSpace(managed.Status.PendingReleaseStartedAt)
 	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), managed.Status.BackingServices...)
 
-	// The preflight runs before any child object is applied. If the existing
-	// Deployment is still fully ready, preserving its observed replica count
-	// is the availability contract with the API proxy: the phase and message
-	// retain the storage error for operators, while a nonzero ready count keeps
-	// the last known-good release serving until the resize is repaired.
+	// Pre-apply failures have not changed any child object. Preserve the routing
+	// signal only when a fresh Kubernetes read proves the existing Deployment is
+	// fully ready. Missing, unhealthy, or unreadable workloads fail closed.
 	if client != nil && app.Spec.Replicas > 0 {
 		deployment, found, readErr := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 		if readErr == nil && found && managedDeploymentStatusReady(deployment, app.Spec.Replicas) {
@@ -1086,11 +1147,7 @@ func patchManagedAppStorageExpansionErrorStatus(
 			status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
 		}
 	}
-
-	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
-		return fmt.Errorf("%w (also failed to patch managed app status: %v)", cause, err)
-	}
-	return cause
+	return status
 }
 
 func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool, pods []kubePod, backingServiceStatuses []runtime.ManagedBackingServiceStatus, releaseKeys ...string) runtime.ManagedAppStatus {
