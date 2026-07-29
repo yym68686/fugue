@@ -371,8 +371,16 @@ build_dns_helm_set_args() { DNS_HELM_SET_ARGS=(--set-string fake.dns=target); }
 prepare_helm_post_renderer() { HELM_POST_RENDERER_ARGS=(); }
 
 node_local_dns_split_release_enabled() { [[ "${FAKE_SPLIT:-false}" == "true" ]]; }
+node_local_dns_active_filesystem_pressure_policy() {
+  case "${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN:-}" in
+    node-local|authoritative-dns|image-cache|backup) printf 'enforce\n' ;;
+    control-plane) printf 'observe\n' ;;
+    *) return 2 ;;
+  esac
+}
 run_release_preflight() {
-  fake_log "preflight:${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN}"
+  local active_filesystem_pressure_policy="${1:-enforce}"
+  fake_log "preflight:${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN}:${active_filesystem_pressure_policy}"
   if [[ "${FAKE_PREFLIGHT_EXIT:-false}" == "true" ]]; then
     exit 41
   fi
@@ -899,18 +907,21 @@ case_domain_success() {
   assert_log_count 0 "FORBIDDEN:"
   case "${domain}" in
     node-local)
+      assert_log_count 1 "preflight:node-local:enforce"
       assert_log_count 1 "dig:node-local"
       assert_log_count 1 "node-local:central-coredns"
       assert_log_count 0 "lease:acquire"
       assert_log_count 0 "dns:apply"
       ;;
     authoritative-dns)
+      assert_log_count 1 "preflight:authoritative-dns:enforce"
       assert_log_count 1 "dig:authoritative-dns"
       assert_log_count 1 "dns:apply"
       assert_log_count 1 "dns:finalize-before-commit"
       assert_log_count 0 "lease:acquire"
       ;;
     control-plane)
+      assert_log_count 1 "preflight:control-plane:observe"
       assert_log_count 1 "rollback-image:preflight"
       assert_log_count 1 "lease:acquire"
       assert_log_count 1 "lease:release"
@@ -921,12 +932,14 @@ case_domain_success() {
       assert_log_order "rollback-image:preflight" "helm-upgrade:control-plane"
       ;;
     image-cache)
+      assert_log_count 1 "preflight:image-cache:enforce"
       assert_log_count 1 "image-cache:prepare"
       assert_log_count 1 "image-cache:rollout"
       assert_log_count 0 "lease:acquire"
       assert_log_count 0 "dns:apply"
       ;;
     backup)
+      assert_log_count 1 "preflight:backup:enforce"
       assert_log_count 1 "lease:acquire"
       assert_log_count 1 "lease:release"
       assert_log_count 1 "backup:live-api-validation"
