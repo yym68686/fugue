@@ -3116,12 +3116,30 @@ func (t localOnlyRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		resp.Body.Close()
 		return nil, fmt.Errorf("local-only registry redirect has invalid location: %w", locationErr)
 	}
-	if location.IsAbs() &&
-		(location.Scheme != clone.URL.Scheme || !strings.EqualFold(location.Host, clone.URL.Host)) {
+	if localOnlyRedirectEscapesOrigin(clone.URL, location) {
 		resp.Body.Close()
 		return nil, fmt.Errorf("local-only registry request redirected from %s://%s to %s://%s", clone.URL.Scheme, clone.URL.Host, location.Scheme, location.Host)
 	}
 	return resp, nil
+}
+
+// localOnlyRedirectEscapesOrigin accepts relative paths and same-origin
+// redirects, including scheme-relative URLs for the same host. Any redirect
+// that names a different host or an explicit different scheme would let a
+// registry proxy satisfy a supposedly local-only request from another cache.
+func localOnlyRedirectEscapesOrigin(origin, location *url.URL) bool {
+	if origin == nil || location == nil {
+		return true
+	}
+	if location.Host == "" {
+		// A path-relative redirect is local. A non-empty scheme without a host
+		// is malformed and must not be allowed to escape the local-only guard.
+		return location.Scheme != ""
+	}
+	if !strings.EqualFold(location.Host, origin.Host) {
+		return true
+	}
+	return location.Scheme != "" && !strings.EqualFold(location.Scheme, origin.Scheme)
 }
 
 func isHTTPRedirect(status int) bool {

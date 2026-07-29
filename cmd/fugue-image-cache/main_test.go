@@ -991,6 +991,33 @@ func TestLocalOnlyRoundTripperRejectsCrossHostRedirect(t *testing.T) {
 	}
 }
 
+func TestLocalOnlyRoundTripperRejectsSchemeRelativeCrossHostRedirect(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("scheme-relative cross-host redirect reached upstream: %s", r.URL.String())
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "//"+upstreamURL.Host+"/v2/fugue-apps/demo/blobs/sha256:test")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirect.Close)
+
+	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	resp, err := client.Get(redirect.URL + "/v2/fugue-apps/demo/blobs/sha256:test")
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "local-only registry request redirected") {
+		t.Fatalf("scheme-relative cross-host redirect error = %v, want local-only rejection", err)
+	}
+}
+
 func TestLocalOnlyRoundTripperAllowsSameHostRedirect(t *testing.T) {
 	t.Parallel()
 
