@@ -103,11 +103,11 @@ func (manifest Manifest) Validate() error {
 	if manifest.Kind != Kind {
 		return fmt.Errorf("component manifest kind must be %q", Kind)
 	}
-	if strings.TrimSpace(manifest.MigrationPhase) == "" {
-		return errors.New("component manifest migrationPhase must not be empty")
+	if err := validateIdentifier(manifest.MigrationPhase, "migration phase"); err != nil {
+		return err
 	}
-	if strings.TrimSpace(manifest.LegacyRelease) == "" {
-		return errors.New("component manifest legacyRelease must not be empty")
+	if err := validateIdentifier(manifest.LegacyRelease, "legacy release"); err != nil {
+		return err
 	}
 	if len(manifest.Components) == 0 {
 		return errors.New("component manifest must define at least one component")

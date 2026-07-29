@@ -51,3 +51,30 @@ func TestRunRejectsMissingOrUnexpectedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestRunEmitsObservationOnlyCoordinationPlan(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	manifest := filepath.Join("..", "..", "docs", "architecture", "component-ownership-v1.yaml")
+	err := run([]string{
+		"--manifest", manifest,
+		"--coordination",
+		"--path", "cmd/fugue-image-cache/main.go",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run() error = %v (stderr=%s)", err, stderr.String())
+	}
+	var plan struct {
+		ObservationOnly           bool   `json:"observationOnly"`
+		ProductionMutationAllowed bool   `json:"productionMutationAllowed"`
+		CoordinationDigest        string `json:"coordinationDigest"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if !plan.ObservationOnly || plan.ProductionMutationAllowed {
+		t.Fatalf("coordination output can mutate production: %+v", plan)
+	}
+	if !strings.HasPrefix(plan.CoordinationDigest, "sha256:") {
+		t.Fatalf("coordinationDigest = %q, want sha256 digest", plan.CoordinationDigest)
+	}
+}
