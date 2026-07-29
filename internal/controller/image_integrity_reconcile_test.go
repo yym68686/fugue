@@ -170,6 +170,140 @@ func TestReconcileDistributedImageIntegrityRepairsLegacyEmptyDigestRows(t *testi
 	}
 }
 
+func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalIdentityExists(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	const legacySeedDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	imageRef := "registry.cache.example:5000/fugue-apps/demo:current"
+	legacy, err := stateStore.UpsertImage(model.Image{
+		TenantID:        "tenant",
+		AppID:           "app",
+		ImageRef:        imageRef,
+		CanonicalDigest: legacySeedDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("create legacy image seed: %v", err)
+	}
+	legacyReplica, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         legacy.ID,
+		TenantID:        legacy.TenantID,
+		AppID:           legacy.AppID,
+		Digest:          legacySeedDigest,
+		NodeID:          "node-legacy",
+		RuntimeID:       "runtime-legacy",
+		ClusterNodeName: "worker-legacy",
+		Status:          model.ImageReplicaStatusPresent,
+	})
+	if err != nil {
+		t.Fatalf("create legacy replica seed: %v", err)
+	}
+	canonical, err := stateStore.UpsertImage(model.Image{
+		TenantID:        legacy.TenantID,
+		AppID:           legacy.AppID,
+		ImageRef:        imageRef,
+		CanonicalDigest: integrityTestDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("create existing canonical image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:           "node-canonical",
+		RuntimeID:        "runtime-canonical",
+		ClusterNodeName:  "worker-canonical",
+		ObservedAt:       now,
+		SnapshotComplete: true,
+	}, []model.ImageCacheManifest{{
+		NodeID:          "node-canonical",
+		RuntimeID:       "runtime-canonical",
+		ClusterNodeName: "worker-canonical",
+		ImageRef:        imageRef,
+		Repo:            "fugue-apps/demo",
+		Target:          "current",
+		Digest:          integrityTestDigest,
+		ReferencedBlobs: []string{"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+		TotalBlobBytes:  100,
+		LastSeenAt:      now,
+		Present:         true,
+	}}); err != nil {
+		t.Fatalf("record canonical cache evidence: %v", err)
+	}
+
+	// Recreate the pre-enforcement duplicate: the legacy row has the same
+	// tenant/ref as the canonical row but no digest, and its replica claimed
+	// Present without content-addressed identity.
+	raw, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var state model.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	for index := range state.Images {
+		if state.Images[index].ID == legacy.ID {
+			state.Images[index].CanonicalDigest = ""
+			state.Images[index].LifecycleState = model.ImageLifecycleAvailable
+			state.Images[index].UpdatedAt = now
+		}
+	}
+	for index := range state.ImageReplicas {
+		if state.ImageReplicas[index].ID == legacyReplica.ID {
+			state.ImageReplicas[index].Digest = ""
+			state.ImageReplicas[index].Status = model.ImageReplicaStatusPresent
+			state.ImageReplicas[index].LastVerifiedAt = nil
+			state.ImageReplicas[index].LeaseExpiresAt = nil
+		}
+	}
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("encode legacy duplicate state: %v", err)
+	}
+	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
+		t.Fatalf("write legacy duplicate state: %v", err)
+	}
+
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreMode:         "distributed",
+			ImageCacheInventoryTTL: 2 * time.Hour,
+		},
+		now: func() time.Time { return now },
+	}
+	if err := svc.reconcileDistributedImageIntegrity(context.Background()); err != nil {
+		t.Fatalf("reconcile duplicate image identity: %v", err)
+	}
+	refreshedCanonical, err := stateStore.GetImage(canonical.ID, "", true)
+	if err != nil {
+		t.Fatalf("get canonical image: %v", err)
+	}
+	if refreshedCanonical.CanonicalDigest != integrityTestDigest || refreshedCanonical.LifecycleState != model.ImageLifecycleAvailable {
+		t.Fatalf("canonical image must remain available: %+v", refreshedCanonical)
+	}
+	refreshedLegacy, err := stateStore.GetImage(legacy.ID, "", true)
+	if err != nil {
+		t.Fatalf("get demoted legacy image: %v", err)
+	}
+	if refreshedLegacy.CanonicalDigest != "" || refreshedLegacy.LifecycleState != model.ImageLifecycleLost {
+		t.Fatalf("legacy duplicate must be demoted without overwriting canonical identity: %+v", refreshedLegacy)
+	}
+	replicas, err := stateStore.ListImageReplicas(model.ImageReplicaFilter{ImageID: legacy.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list legacy replicas: %v", err)
+	}
+	if len(replicas) != 1 || replicas[0].Status != model.ImageReplicaStatusMissing || replicas[0].Digest != "" {
+		t.Fatalf("legacy duplicate replica must be demoted: %+v", replicas)
+	}
+}
+
 func TestReconcileDistributedImageIntegrityDemotesAmbiguousEvidence(t *testing.T) {
 	t.Parallel()
 

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -73,9 +74,35 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 		candidates := imageIntegrityDigestsForRef(image.ImageRef, manifests)
 		if len(candidates) == 1 {
 			for digest := range candidates {
+				if distributedImageIdentityExists(images, image, digest) {
+					image.LifecycleState = model.ImageLifecycleLost
+					if _, err := s.Store.UpsertImage(image); err != nil {
+						return fmt.Errorf("demote superseded legacy image %s: %w", image.ID, err)
+					}
+					break
+				}
+
 				image.CanonicalDigest = digest
 				if _, err := s.Store.UpsertImage(image); err != nil {
-					return fmt.Errorf("backfill canonical digest for image %s: %w", image.ID, err)
+					// A concurrent import may have materialized the same canonical
+					// identity after the initial snapshot. Re-read only on a unique
+					// conflict and demote the legacy empty-digest row when the exact
+					// identity is now present; unrelated conflicts still fail closed.
+					if !errors.Is(err, store.ErrConflict) {
+						return fmt.Errorf("backfill canonical digest for image %s: %w", image.ID, err)
+					}
+					latest, listErr := s.Store.ListImages(model.ImageFilter{PlatformAdmin: true})
+					if listErr != nil {
+						return fmt.Errorf("re-read distributed images after identity conflict for image %s: %w", image.ID, listErr)
+					}
+					if !distributedImageIdentityExists(latest, image, digest) {
+						return fmt.Errorf("backfill canonical digest for image %s: %w", image.ID, err)
+					}
+					image.CanonicalDigest = ""
+					image.LifecycleState = model.ImageLifecycleLost
+					if _, demoteErr := s.Store.UpsertImage(image); demoteErr != nil {
+						return fmt.Errorf("demote concurrently superseded legacy image %s: %w", image.ID, demoteErr)
+					}
 				}
 			}
 		} else {
@@ -93,6 +120,23 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 		}
 	}
 	return nil
+}
+
+func distributedImageIdentityExists(images []model.Image, legacy model.Image, digest string) bool {
+	digest = store.CanonicalImageDigest(digest)
+	if digest == "" {
+		return false
+	}
+	for _, candidate := range images {
+		if candidate.ID == legacy.ID || strings.TrimSpace(candidate.TenantID) != strings.TrimSpace(legacy.TenantID) ||
+			strings.TrimSpace(candidate.ImageRef) != strings.TrimSpace(legacy.ImageRef) {
+			continue
+		}
+		if store.CanonicalImageDigest(candidate.CanonicalDigest) == digest {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) repairDistributedImageReplicas(
