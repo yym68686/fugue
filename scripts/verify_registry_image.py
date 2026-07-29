@@ -42,6 +42,10 @@ class VerificationError(Exception):
     pass
 
 
+class RegistryTransportError(VerificationError):
+    pass
+
+
 def parse_image_ref(image_ref):
     if "://" in image_ref or "@" not in image_ref:
         raise VerificationError("image must be registry/repository@sha256:digest")
@@ -80,10 +84,24 @@ def content_digest(data):
 
 
 class RegistryClient:
-    def __init__(self, registry, repository, timeout_seconds, insecure):
+    TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+
+    def __init__(
+        self,
+        registry,
+        repository,
+        timeout_seconds,
+        request_timeout_seconds,
+        max_attempts,
+        retry_delay_seconds,
+        insecure,
+    ):
         self.registry = registry
         self.repository = repository
         self.deadline = time.monotonic() + timeout_seconds
+        self.request_timeout_seconds = request_timeout_seconds
+        self.max_attempts = max_attempts
+        self.retry_delay_seconds = retry_delay_seconds
         self.scheme = "http" if insecure else "https"
         self.token = ""
         self.request_count = 0
@@ -132,10 +150,11 @@ class RegistryClient:
             lines.append(f'header = "{escaped}"\n')
         return "".join(lines)
 
-    def _open(self, method, url, headers, body_limit):
+    def _open_once(self, method, url, headers, body_limit):
         self.request_count += 1
         remaining = self._remaining()
-        connect_timeout = min(5.0, remaining)
+        request_timeout = min(self.request_timeout_seconds, remaining)
+        connect_timeout = min(5.0, request_timeout)
         allowed_protocols = "=http,https" if self.insecure else "=https"
         with tempfile.TemporaryDirectory(prefix="fugue-registry-verify-") as temp_dir:
             headers_path = f"{temp_dir}/headers"
@@ -154,7 +173,7 @@ class RegistryClient:
                 "--connect-timeout",
                 f"{connect_timeout:.3f}",
                 "--max-time",
-                f"{remaining:.3f}",
+                f"{request_timeout:.3f}",
                 "--dump-header",
                 headers_path,
                 "--output",
@@ -186,7 +205,7 @@ class RegistryClient:
                 parsed = urllib.parse.urlsplit(url)
                 safe_target = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
                 detail = completed.stderr.strip() or f"curl exit {completed.returncode}"
-                raise VerificationError(f"registry {method} {safe_target} failed: {detail}")
+                raise RegistryTransportError(f"registry {method} {safe_target} failed: {detail}")
             try:
                 status = int(completed.stdout.strip())
             except ValueError as exc:
@@ -204,6 +223,38 @@ class RegistryClient:
             if method != "HEAD" and len(body) > body_limit:
                 raise VerificationError(f"registry response exceeds {body_limit} bytes")
             return status, self._parse_final_headers(raw_headers), body
+
+    def _open(self, method, url, headers, body_limit):
+        last_error = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                result = self._open_once(method, url, headers, body_limit)
+            except RegistryTransportError as exc:
+                last_error = exc
+            else:
+                status = result[0]
+                if status not in self.TRANSIENT_STATUS_CODES:
+                    return result
+                parsed = urllib.parse.urlsplit(url)
+                safe_target = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+                last_error = RegistryTransportError(
+                    f"registry {method} {safe_target} returned transient HTTP {status}"
+                )
+            if attempt == self.max_attempts:
+                break
+            remaining = self._remaining()
+            delay = min(self.retry_delay_seconds * (2 ** (attempt - 1)), max(0.0, remaining - 0.05))
+            if delay <= 0:
+                break
+            print(
+                f"[verify_registry_image] transient request failure; retrying attempt "
+                f"{attempt + 1}/{self.max_attempts}: {last_error}",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+        if last_error is None:
+            raise VerificationError("registry request retry state is invalid")
+        raise RegistryTransportError(f"{last_error} after {attempt} attempt(s)")
 
     def _authenticate(self, challenge):
         if not challenge or not challenge.lower().startswith("bearer "):
@@ -466,18 +517,50 @@ def main():
         default=None,
         help="Require an exact lowercase 40-character Git revision in the OCI revision label",
     )
-    parser.add_argument("--timeout-seconds", type=float, default=20.0, help="Total registry verification timeout")
+    parser.add_argument("--timeout-seconds", type=float, default=90.0, help="Total registry verification timeout")
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=float,
+        default=10.0,
+        help="Maximum timeout for one registry transport attempt",
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for transient transport and HTTP failures",
+    )
+    parser.add_argument(
+        "--retry-delay-seconds",
+        type=float,
+        default=0.25,
+        help="Initial bounded exponential retry delay",
+    )
     parser.add_argument("--insecure", action="store_true", help="Allow HTTP and unverified TLS for local tests only")
     args = parser.parse_args()
 
     try:
         if args.timeout_seconds <= 0:
             raise VerificationError("timeout must be greater than zero")
+        if args.request_timeout_seconds <= 0:
+            raise VerificationError("request timeout must be greater than zero")
+        if args.max_attempts < 1 or args.max_attempts > 5:
+            raise VerificationError("max attempts must be between 1 and 5")
+        if args.retry_delay_seconds < 0 or args.retry_delay_seconds > 10:
+            raise VerificationError("retry delay must be between zero and 10 seconds")
         if args.expected_revision is not None and GIT_REVISION_RE.fullmatch(args.expected_revision) is None:
             raise VerificationError("expected revision must be a complete lowercase 40-character Git revision")
         registry, repository, digest = parse_image_ref(args.image)
         platform = parse_platform(args.platform)
-        client = RegistryClient(registry, repository, args.timeout_seconds, args.insecure)
+        client = RegistryClient(
+            registry,
+            repository,
+            args.timeout_seconds,
+            args.request_timeout_seconds,
+            args.max_attempts,
+            args.retry_delay_seconds,
+            args.insecure,
+        )
         result = verify_image(client, digest, platform, args.expected_revision)
         result["image"] = args.image
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))

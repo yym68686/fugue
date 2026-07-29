@@ -84,6 +84,7 @@ class RegistryFixture:
         self.deny_layer_get = False
         self.ignore_layer_range = False
         self.invalid_layer_content_range = False
+        self.transient_layer_get_failures = 0
         self.lock = threading.Lock()
 
     def record(self, method, path):
@@ -161,6 +162,11 @@ def fixture_handler(fixture):
                     self.send_bytes(404, b'{"errors":[{"code":"BLOB_UNKNOWN"}]}', "application/json")
                     return
                 if self.headers.get("Range") == "bytes=0-0" and body:
+                    with fixture.lock:
+                        if fixture.transient_layer_get_failures > 0:
+                            fixture.transient_layer_get_failures -= 1
+                            self.send_bytes(503)
+                            return
                     if fixture.deny_layer_get:
                         self.send_bytes(403)
                         return
@@ -201,7 +207,7 @@ def fixture_handler(fixture):
     return Handler
 
 
-def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_revision=None):
+def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_revision=None, extra_args=None):
     server = ThreadingHTTPServer(("127.0.0.1", 0), fixture_handler(fixture))
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -222,6 +228,7 @@ def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_re
         ]
         if expected_revision is not None:
             command.extend(("--expected-revision", expected_revision))
+        command.extend(extra_args or [])
         return subprocess.run(
             command,
             check=False,
@@ -352,6 +359,34 @@ class RegistryImageVerificationTests(unittest.TestCase):
         self.assertIn("bounded GET returned HTTP 403", result.stderr)
         self.assertIn(("HEAD", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
         self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+
+    def test_transient_layer_get_is_retried_within_total_budget(self):
+        fixture = RegistryFixture()
+        fixture.transient_layer_get_failures = 2
+        result = run_verifier(fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["verification"], "registry_manifest_config_and_layer_get")
+        self.assertIn("retrying attempt 2/3", result.stderr)
+        self.assertIn("retrying attempt 3/3", result.stderr)
+        layer_get = ("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}")
+        self.assertEqual(fixture.requests.count(layer_get), 3)
+
+    def test_persistent_transient_layer_get_fails_after_attempt_limit(self):
+        fixture = RegistryFixture()
+        fixture.transient_layer_get_failures = 4
+        result = run_verifier(fixture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("transient HTTP 503 after 3 attempt(s)", result.stderr)
+        layer_get = ("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}")
+        self.assertEqual(fixture.requests.count(layer_get), 3)
+
+    def test_invalid_retry_bounds_fail_before_network(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, extra_args=["--max-attempts", "0"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("max attempts must be between 1 and 5", result.stderr)
+        self.assertEqual(fixture.requests, [])
 
     def test_registry_must_honor_bounded_layer_range(self):
         fixture = RegistryFixture()
