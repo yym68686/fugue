@@ -300,6 +300,7 @@ func (s *Server) imageReplicationPlanHeartbeatContract(
 ) (*model.ImageReplicationPlanHeartbeatContract, error) {
 	contract := &model.ImageReplicationPlanHeartbeatContract{
 		ExpectedConsumerSetID: set.ID,
+		ReleaseSetID:          set.ReleaseSetID,
 		ArtifactReleaseID:     release.ID,
 		FencingToken:          release.FencingToken,
 		ProtocolVersion:       model.PlatformConsumerProtocolVersionV1,

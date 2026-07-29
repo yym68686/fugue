@@ -27800,9 +27800,11 @@ components:
     ImageReplicationPlanHeartbeatContract:
       type: object
       additionalProperties: false
-      required: [expected_consumer_set_id, artifact_release_id, fencing_token, sequence_floor, protocol_version, schema_version]
+      required: [expected_consumer_set_id, release_set_id, artifact_release_id, fencing_token, sequence_floor, protocol_version, schema_version]
       properties:
         expected_consumer_set_id:
+          type: string
+        release_set_id:
           type: string
         artifact_release_id:
           type: string

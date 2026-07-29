@@ -188,8 +188,9 @@ also fixed-purpose: node, scope, artifact kind, and `shadow` channel come only
 from the verified identity. It returns a versioned desired/LKG response after
 rechecking artifact, release, signature, hash, expiry, and node binding. Its
 heartbeat contract carries the exact active artifact-release fence and the
-last server-accepted sequence/time floor, allowing a restarted component to
-resume without trusting a lost local cursor. The trusted heartbeat transaction
+release-set binding plus the last server-accepted sequence/time floor, allowing
+a restarted component to construct canonical evidence and resume without
+trusting a lost local cursor. The trusted heartbeat transaction
 locks that referenced release and rejects caller-selected fencing tokens or a
 superseded expected set. A generation sequence may decrease only for a new
 expected set behind a strictly newer release fence, which makes an intentional

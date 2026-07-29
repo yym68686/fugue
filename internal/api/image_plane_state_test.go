@@ -59,6 +59,7 @@ func TestImageReplicationPlanStateIsIdentityBoundShadowAndRecoverable(t *testing
 	}
 	if state.Heartbeat == nil ||
 		state.Heartbeat.ExpectedConsumerSetID != workerA.ExpectedConsumerSet.ID ||
+		state.Heartbeat.ReleaseSetID != workerA.ExpectedConsumerSet.ReleaseSetID ||
 		state.Heartbeat.ArtifactReleaseID != workerA.Release.ID ||
 		state.Heartbeat.FencingToken != workerA.Release.FencingToken ||
 		state.Heartbeat.SequenceFloor != 0 || state.Heartbeat.IssuedAtFloor != nil ||
@@ -82,21 +83,35 @@ func TestImageReplicationPlanStateIsIdentityBoundShadowAndRecoverable(t *testing
 	if strings.Contains(response.Body.String(), workerAToken) {
 		t.Fatal("image-plane state response reflected its bearer credential")
 	}
-	claims, err := platformcontrol.ParsePlatformComponentIdentity(keyring, workerAToken, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("parse worker-a identity: %v", err)
-	}
 	heartbeatIssuedAt := time.Now().UTC().Truncate(time.Millisecond)
-	heartbeat := trustedPlatformHeartbeatRequest(
-		t,
-		claims,
-		workerA.ExpectedConsumerSet,
-		heartbeatIssuedAt,
-		7,
-		workerA.Artifact.GenerationSequence,
-		workerA.Release.FencingToken,
-		"nonce-image-plane-state-0001",
-	)
+	// Construct this request exclusively from identity claims and the HTTP
+	// response. An out-of-process component cannot inspect the server's
+	// expected-consumer-set row when calculating its canonical evidence hash.
+	heartbeat := platformcontrol.PlatformConsumerHeartbeatEnvelope{
+		ConsumerID:            state.Component + ":" + state.NodeID,
+		Component:             state.Component,
+		NodeID:                state.NodeID,
+		ArtifactKind:          state.ArtifactKind,
+		ScopeKey:              state.ScopeKey,
+		ReleaseSetID:          state.Heartbeat.ReleaseSetID,
+		ExpectedConsumerSetID: state.Heartbeat.ExpectedConsumerSetID,
+		FencingToken:          state.Heartbeat.FencingToken,
+		ProtocolVersion:       state.Heartbeat.ProtocolVersion,
+		SchemaVersion:         state.Heartbeat.SchemaVersion,
+		Sequence:              7,
+		IssuedAt:              heartbeatIssuedAt,
+		Nonce:                 "nonce-image-plane-state-0001",
+		GenerationSequence:    state.Artifact.GenerationSequence,
+		DesiredGeneration:     state.Generation,
+		ActualGeneration:      state.Generation,
+		ApplyStatus:           model.PlatformConsumerApplyStatusApplied,
+		ProbeStatus:           model.PlatformConsumerProbeStatusPassed,
+	}
+	evidenceHash, err := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
+	if err != nil {
+		t.Fatalf("hash response-only image-cache heartbeat: %v", err)
+	}
+	heartbeat.EvidenceHash = evidenceHash
 	acceptedHeartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", workerAToken, heartbeat)
 	if acceptedHeartbeat.Code != http.StatusOK {
 		t.Fatalf("server-bound image-cache heartbeat failed: status=%d body=%s", acceptedHeartbeat.Code, acceptedHeartbeat.Body.String())

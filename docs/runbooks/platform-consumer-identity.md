@@ -79,7 +79,7 @@ fugue admin artifact lkg <artifact-id-or-generation> --json
 
 Record the exact release set, artifact kind, scope, expected consumer id,
 artifact release id, observed consumer id, credential id, token id, signing key
-id, sequence and server sequence floor, issued-at and server issued-at floor,
+id, release set id, sequence and server sequence floor, issued-at and server issued-at floor,
 generation sequence, fencing token, and evidence hash. Do not record the bearer
 token or signing secret.
 

@@ -43,6 +43,7 @@ type ImageReplicationPlanStateResponse struct {
 // SequenceFloor and an issued_at value after IssuedAtFloor.
 type ImageReplicationPlanHeartbeatContract struct {
 	ExpectedConsumerSetID string     `json:"expected_consumer_set_id"`
+	ReleaseSetID          string     `json:"release_set_id"`
 	ArtifactReleaseID     string     `json:"artifact_release_id"`
 	FencingToken          int64      `json:"fencing_token"`
 	SequenceFloor         int64      `json:"sequence_floor"`
