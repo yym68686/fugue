@@ -2823,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "528f283f702032a9bdc1b1ac422a979ff03050a2b940482f5771d4373f7856ca")
+	assertWorkflowSourceDigest(t, data, "e45eaad3c22c1361fdfef67447bc269802ebd34682d218413e7144a4153bf88a")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2864,7 +2864,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
-		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "8f53d7d52326bc3dffe3a81d053a2543f0d98e9267b472eeba1006fc57e4c30b",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "36df21b23afa1e408c0c9e25b586fd1579dcb6e75ea4bb01d592bcd26626c48d",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "647f2abd75678bcf08439bbb465cc0fc976c2d6c8949f82bcd3a045fbfbd7022",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
@@ -3759,7 +3759,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
 		`"${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}"`,
-		`"${main_head}" == "${EXPECTED_SHA}"`,
+		`"${main_head}" =~ ^[0-9a-f]{40}$`,
+		`"main_matches_release_sha": main_matches == "true"`,
+		`"observed_main_sha": main_head`,
 		"git/ref/heads/fugue-control-plane-release-baseline",
 		"for run_status in queued in_progress waiting pending requested",
 		"actions/workflows/${workflow_id}/runs?status=${run_status}",
@@ -3781,6 +3783,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, forbidden := range []string{
 		"/enable", "/dispatches", "/cancel", "git push", "git update-ref", "updateRefs", "createRef", "deleteRef",
 		"--method POST", "--method PATCH", "--method DELETE", "helm ", "kubectl ", "k3s kubectl", "fugue app ",
+		`[[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1`,
 	} {
 		if strings.Contains(successRearmStep.Run, forbidden) {
 			t.Fatalf("successful lane rearm contains out-of-scope capability %q", forbidden)
@@ -3904,6 +3907,7 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 		mutate       string
 		putExit      string
 		mainDrift    bool
+		invalidMain  bool
 		otherRuns    string
 		deployResult string
 		wantPass     bool
@@ -3914,7 +3918,8 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 		{name: "lost response settles by readback", initialState: "active", mutate: "true", putExit: "23", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
 		{name: "unsettled disable fails closed", initialState: "active", mutate: "false", putExit: "23", wantPass: false, wantState: "active", wantWrites: "PUT\n"},
 		{name: "already disabled cannot replay", initialState: "disabled_manually", mutate: "false", putExit: "0", wantPass: false, wantState: "disabled_manually"},
-		{name: "main drift blocks before disable", initialState: "active", mutate: "false", putExit: "0", mainDrift: true, wantPass: false, wantState: "active"},
+		{name: "main advancement still closes one-shot lane", initialState: "active", mutate: "true", putExit: "0", mainDrift: true, wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
+		{name: "invalid main ref blocks before disable", initialState: "active", mutate: "false", putExit: "0", invalidMain: true, wantPass: false, wantState: "active"},
 		{name: "active deploy run blocks before disable", initialState: "active", mutate: "false", putExit: "0", otherRuns: "999\n", wantPass: false, wantState: "active"},
 		{name: "failed release result blocks before disable", initialState: "active", mutate: "false", putExit: "0", deployResult: "failure", wantPass: false, wantState: "active"},
 	}
@@ -3949,6 +3954,9 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 			observedMain := expectedSHA
 			if test.mainDrift {
 				observedMain = driftedOID
+			}
+			if test.invalidMain {
+				observedMain = "invalid-main-ref"
 			}
 			deployResult := test.deployResult
 			if deployResult == "" {
@@ -4016,7 +4024,8 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 				}
 				if evidence["state_before"] != "active" || evidence["state_after"] != "disabled_manually" ||
 					evidence["workflow_mutation_attempted"] != true || evidence["rearm_production_write"] != false ||
-					evidence["baseline_ref_object"] != expectedBaseline {
+					evidence["baseline_ref_object"] != expectedBaseline || evidence["observed_main_sha"] != observedMain ||
+					evidence["main_matches_release_sha"] != !test.mainDrift {
 					t.Fatalf("successful lane rearm evidence drifted: %+v", evidence)
 				}
 			}

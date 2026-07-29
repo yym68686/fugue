@@ -554,7 +554,9 @@ assert_equal(success_rearm.fetch("steps").length, 2, "successful lane rearm exac
 success_rearm_step = step(success_rearm, "Disable successful release lane with exact readback")
 for fragment in [
   '"${EXPECTED_SHA}" == "${GITHUB_SHA}"',
-  '"${main_head}" == "${EXPECTED_SHA}"',
+  '"${main_head}" =~ ^[0-9a-f]{40}$',
+  '"main_matches_release_sha": main_matches == "true"',
+  '"observed_main_sha": main_head',
   "git/ref/heads/fugue-control-plane-release-baseline",
   "for run_status in queued in_progress waiting pending requested",
   "actions/workflows/${workflow_id}/runs?status=${run_status}",
@@ -574,6 +576,7 @@ end
 for forbidden in [
   "/enable", "/dispatches", "/cancel", "git push", "git update-ref", "updateRefs", "createRef", "deleteRef",
   "--method POST", "--method PATCH", "--method DELETE", "helm ", "kubectl ", "k3s kubectl", "fugue app ",
+  '[[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1',
 ]
   fail_contract("successful lane rearm contains out-of-scope capability #{forbidden.inspect}") if success_rearm_step.fetch("run").include?(forbidden)
 end

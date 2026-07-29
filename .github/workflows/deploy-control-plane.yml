@@ -1268,10 +1268,15 @@ jobs:
 
           main_head="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
           baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
-          printf 'release lane rearm checkpoint=refs main_matches=%s baseline_oid_valid=%s\n' \
-            "$([[ "${main_head}" == "${EXPECTED_SHA}" ]] && printf true || printf false)" \
+          main_matches='false'
+          if [[ "${main_head}" == "${EXPECTED_SHA}" ]]; then
+            main_matches='true'
+          fi
+          printf 'release lane rearm checkpoint=refs main_head_valid=%s main_matches=%s baseline_oid_valid=%s\n' \
+            "$([[ "${main_head}" =~ ^[0-9a-f]{40}$ ]] && printf true || printf false)" \
+            "${main_matches}" \
             "$([[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] && printf true || printf false)" >&2
-          [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${main_head}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           for run_status in queued in_progress waiting pending requested; do
             other_runs="$(timeout --kill-after=2s 10s gh api --paginate "repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[].id' | awk -v current="${GITHUB_RUN_ID}" '$0 != current')" || exit 1
@@ -1306,9 +1311,11 @@ jobs:
           done
           [[ "${settled}" == 'true' && "${state_after}" == 'disabled_manually' ]] || exit 1
 
-          python3 - "${evidence_dir}/success-rearm.json" "${baseline_oid}" "${state_before}" "${state_after}" "${mutation_status}" <<'PY'
+          python3 - "${evidence_dir}/success-rearm.json" "${baseline_oid}" "${main_head}" "${main_matches}" "${state_before}" "${state_after}" "${mutation_status}" <<'PY'
           import datetime, json, os, sys
-          output, baseline_oid, before, after, mutation_status = sys.argv[1:]
+          output, baseline_oid, main_head, main_matches, before, after, mutation_status = sys.argv[1:]
+          if main_matches not in {"true", "false"}:
+              raise SystemExit("main ref equality evidence is invalid")
           payload = {
               "schema_version": 1,
               "workflow": os.environ["GITHUB_WORKFLOW"],
@@ -1316,6 +1323,8 @@ jobs:
               "run_id": os.environ["GITHUB_RUN_ID"],
               "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
               "head_sha": os.environ["GITHUB_SHA"],
+              "observed_main_sha": main_head,
+              "main_matches_release_sha": main_matches == "true",
               "baseline_ref_object": baseline_oid,
               "state_before": before,
               "state_after": after,
