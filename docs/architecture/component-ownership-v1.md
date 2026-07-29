@@ -52,6 +52,20 @@ go run ./cmd/fugue-component-plan \
   --path cmd/fugue-image-cache/main.go
 ```
 
+To produce the exact body for the existing shadow artifact endpoint, provide
+trusted revision evidence explicitly:
+
+```console
+go run ./cmd/fugue-component-plan \
+  --artifact-request \
+  --base-commit <40-hex-base> \
+  --target-commit <40-hex-target> \
+  --path cmd/fugue-image-cache/main.go
+```
+
+This only prints JSON. It does not submit the request or acquire a release
+fence.
+
 The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination
 output includes the globally sorted lane/resource lock order and recovery lanes,

@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"fugue/internal/componentmanifest"
+	"fugue/internal/model"
 )
 
 func TestRunEmitsDigestBoundShadowPlan(t *testing.T) {
@@ -76,5 +79,59 @@ func TestRunEmitsObservationOnlyCoordinationPlan(t *testing.T) {
 	}
 	if !strings.HasPrefix(plan.CoordinationDigest, "sha256:") {
 		t.Fatalf("coordinationDigest = %q, want sha256 digest", plan.CoordinationDigest)
+	}
+}
+
+func TestRunEmitsExactShadowArtifactCreateRequestWithoutSideEffects(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	manifest := filepath.Join("..", "..", "docs", "architecture", "component-ownership-v1.yaml")
+	err := run([]string{
+		"--manifest", manifest,
+		"--artifact-request",
+		"--base-commit", "1111111111111111111111111111111111111111",
+		"--target-commit", "2222222222222222222222222222222222222222",
+		"--path", "cmd/fugue-image-cache/main.go",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run() error = %v (stderr=%s)", err, stderr.String())
+	}
+	var request model.PlatformArtifactCreateRequest
+	if err := json.Unmarshal(stdout.Bytes(), &request); err != nil {
+		t.Fatalf("decode artifact request: %v", err)
+	}
+	if request.ArtifactKind != model.PlatformArtifactKindComponentReleasePlan ||
+		request.Generation != "git-2222222222222222222222222222222222222222" ||
+		request.Scope.ScopeType != componentmanifest.ShadowArtifactScopeType ||
+		request.Scope.Key == "" ||
+		request.CompatibilityFloor != componentmanifest.ShadowArtifactSchemaVersionV1 {
+		t.Fatalf("unexpected artifact request identity: %+v", request)
+	}
+	if err := componentmanifest.ValidateArtifactBinding(
+		request.Content,
+		request.Scope.ScopeType,
+		request.Scope.Key,
+		request.Scope.Key,
+		request.Generation,
+	); err != nil {
+		t.Fatalf("artifact request content is not bound: %v", err)
+	}
+	if !strings.HasSuffix(stdout.String(), "\n") {
+		t.Fatal("output is not newline terminated")
+	}
+}
+
+func TestRunRejectsUnsafeArtifactRequestFlagCombinations(t *testing.T) {
+	manifest := filepath.Join("..", "..", "docs", "architecture", "component-ownership-v1.yaml")
+	for name, args := range map[string][]string{
+		"missing commits":         {"--manifest", manifest, "--artifact-request", "--path", "cmd/fugue-image-cache/main.go"},
+		"coordination conflict":   {"--manifest", manifest, "--coordination", "--artifact-request", "--base-commit", "1111111111111111111111111111111111111111", "--target-commit", "2222222222222222222222222222222222222222", "--path", "cmd/fugue-image-cache/main.go"},
+		"commit without artifact": {"--manifest", manifest, "--base-commit", "1111111111111111111111111111111111111111", "--path", "cmd/fugue-image-cache/main.go"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := run(args, &stdout, &stderr); err == nil {
+				t.Fatal("run() unexpectedly accepted unsafe flag combination")
+			}
+		})
 	}
 }
