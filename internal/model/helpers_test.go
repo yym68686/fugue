@@ -57,6 +57,17 @@ func TestDNS1035LabelTruncatesWithoutTrailingDash(t *testing.T) {
 	}
 }
 
+func TestNormalizePostgresServiceNameCanonicalizesMixedCase(t *testing.T) {
+	t.Parallel()
+
+	if got := NormalizePostgresServiceName("MecGod", "fallback-postgres"); got != "mecgod" {
+		t.Fatalf("expected mixed-case postgres service name to normalize to mecgod, got %q", got)
+	}
+	if got := NormalizePostgresServiceName("", "Example-Postgres"); got != "example-postgres" {
+		t.Fatalf("expected fallback postgres service name to be canonicalized, got %q", got)
+	}
+}
+
 func TestImageDigestFromReferenceParsesFugueMirrorTags(t *testing.T) {
 	t.Parallel()
 

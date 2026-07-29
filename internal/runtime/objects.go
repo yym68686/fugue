@@ -3143,11 +3143,7 @@ func postgresSecretName(appName string) string {
 }
 
 func normalizePostgresResourceName(name, baseName string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		name = postgresResourceName(baseName)
-	}
-	return model.DNS1035Label(name, "postgres")
+	return model.NormalizePostgresServiceName(name, postgresResourceName(baseName))
 }
 
 func normalizePostgresAuxiliaryName(base, suffix string) string {

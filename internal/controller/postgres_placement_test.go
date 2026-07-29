@@ -27,7 +27,7 @@ func TestManagedPostgresPlacementRequestUsesRuntimeTarget(t *testing.T) {
 	}
 }
 
-func TestManagedPostgresPlacementsPinsSharedPrimaryToObservedPrimaryNode(t *testing.T) {
+func TestManagedPostgresPlacementsCanonicalizesMixedCaseServiceName(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -62,7 +62,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToObservedPrimaryNode(t *test
 				Database:                "demo",
 				User:                    "demo",
 				Password:                "secret",
-				ServiceName:             "demo-postgres",
+				ServiceName:             "MecGod",
 				RuntimeID:               sourceRuntimeID,
 				FailoverTargetRuntimeID: targetRuntime.ID,
 				Instances:               2,
@@ -72,17 +72,17 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToObservedPrimaryNode(t *test
 	}
 
 	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
-	primaryPodName := "demo-postgres-1"
+	primaryPodName := "mecgod-1"
 	sourceNodeName := "shared-us-1"
 
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case cloudNativePGClusterAPIPath(namespace, "demo-postgres"):
+		case cloudNativePGClusterAPIPath(namespace, "mecgod"):
 			if err := json.NewEncoder(w).Encode(map[string]any{
 				"metadata": map[string]any{
-					"name": "demo-postgres",
+					"name": "mecgod",
 				},
 				"status": map[string]any{
 					"currentPrimary": primaryPodName,
@@ -138,7 +138,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToObservedPrimaryNode(t *test
 		t.Fatalf("resolve postgres placements: %v", err)
 	}
 
-	servicePlacements := placements["demo-postgres"]
+	servicePlacements := placements["mecgod"]
 	if len(servicePlacements) != 2 {
 		t.Fatalf("expected two placements, got %d", len(servicePlacements))
 	}

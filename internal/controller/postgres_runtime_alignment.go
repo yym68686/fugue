@@ -130,6 +130,7 @@ func (s *Service) observedManagedPostgresPrimaryRuntimeID(ctx context.Context, a
 	if strings.TrimSpace(app.TenantID) == "" || strings.TrimSpace(spec.ServiceName) == "" {
 		return "", "", nil
 	}
+	clusterName := model.NormalizePostgresServiceName(spec.ServiceName, "")
 
 	client, err := s.kubeClient()
 	if err != nil {
@@ -137,9 +138,9 @@ func (s *Service) observedManagedPostgresPrimaryRuntimeID(ctx context.Context, a
 	}
 
 	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
-	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, spec.ServiceName)
+	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
 	if err != nil {
-		return "", "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, spec.ServiceName, err)
+		return "", "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
 	}
 	if !found {
 		return "", "", nil
@@ -155,10 +156,10 @@ func (s *Service) observedManagedPostgresPrimaryRuntimeID(ctx context.Context, a
 		}
 	}
 
-	pvcSelector := "cnpg.io/cluster=" + spec.ServiceName + ",role=primary"
+	pvcSelector := "cnpg.io/cluster=" + clusterName + ",role=primary"
 	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, pvcSelector)
 	if err != nil {
-		return "", "", fmt.Errorf("list primary postgres pvcs for %s/%s: %w", namespace, spec.ServiceName, err)
+		return "", "", fmt.Errorf("list primary postgres pvcs for %s/%s: %w", namespace, clusterName, err)
 	}
 	for _, pvcName := range pvcNames {
 		runtimeID, detail, err := s.runtimeIDForPersistentVolumeClaim(ctx, client, namespace, pvcName)

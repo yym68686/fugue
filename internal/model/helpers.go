@@ -82,6 +82,17 @@ func DNS1035Label(input, fallbackPrefix string) string {
 	return name
 }
 
+// NormalizePostgresServiceName returns the canonical Kubernetes resource name
+// used for a managed PostgreSQL service. Persisting this canonical form keeps
+// store lookups, placement maps, and CloudNativePG API calls on the same key.
+func NormalizePostgresServiceName(name, fallbackName string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = strings.TrimSpace(fallbackName)
+	}
+	return DNS1035Label(name, "postgres")
+}
+
 func slugify(input string) string {
 	input = strings.ToLower(strings.TrimSpace(input))
 	var b strings.Builder

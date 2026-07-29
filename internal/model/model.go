@@ -2137,7 +2137,7 @@ func PostgresRWServiceName(serviceName string) string {
 	if serviceName == "" {
 		return ""
 	}
-	return serviceName + "-rw"
+	return NormalizePostgresServiceName(serviceName, "") + "-rw"
 }
 
 type BackingServiceSpec struct {

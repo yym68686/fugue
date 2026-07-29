@@ -645,9 +645,7 @@ func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPo
 	if strings.TrimSpace(out.User) == "" {
 		out.User = model.DefaultManagedPostgresUser(appName)
 	}
-	if strings.TrimSpace(out.ServiceName) == "" {
-		out.ServiceName = resourceName
-	}
+	out.ServiceName = model.NormalizePostgresServiceName(out.ServiceName, resourceName)
 	out.RuntimeID = strings.TrimSpace(out.RuntimeID)
 	if out.RuntimeID == "" {
 		out.RuntimeID = strings.TrimSpace(appRuntimeID)

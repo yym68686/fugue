@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +22,142 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestRecoverableManagedPostgresTransitionErrorPreservesCause(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("connection reset after status patch")
+	err := recoverableManagedPostgresTransitionError("switchover request", cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("expected recoverable transition error to preserve cause, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "recoverable from observed cluster state") ||
+		!strings.Contains(err.Error(), "without issuing a blind rollback") {
+		t.Fatalf("expected actionable recovery semantics, got %v", err)
+	}
+}
+
+func TestManagedPostgresReplicationLSNConverged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		primary    string
+		standby    string
+		inRecovery bool
+		want       bool
+		wantErr    bool
+	}{
+		{name: "equal", primary: "0/16B6C50", standby: "0/16B6C50", inRecovery: true, want: true},
+		{name: "standby ahead", primary: "0/16B6C50", standby: "0/16B6D00", inRecovery: true, want: true},
+		{name: "standby behind", primary: "1/00000010", standby: "0/FFFFFFFF", inRecovery: true, want: false},
+		{name: "promoted target", primary: "0/16B6C50", standby: "0/16B6C50", wantErr: true},
+		{name: "missing replay lsn", primary: "0/16B6C50", standby: "", inRecovery: true, want: false},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := managedPostgresReplicationLSNConverged(test.primary, test.standby, test.inRecovery)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("convergence error = %v, wantErr=%t", err, test.wantErr)
+			}
+			if got != test.want {
+				t.Fatalf("convergence = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestManagedPostgresPodDatabaseURLHandlesIPv6AndEscapesCredentials(t *testing.T) {
+	t.Parallel()
+
+	raw := managedPostgresPodDatabaseURL("2001:db8::10", model.AppPostgresSpec{
+		Database: "example db",
+		User:     "example/user",
+		Password: "secret:@/value",
+	})
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	if parsed.Host != "[2001:db8::10]:5432" || parsed.Path != "/example db" {
+		t.Fatalf("unexpected database URL target: host=%q path=%q", parsed.Host, parsed.Path)
+	}
+	if parsed.User.Username() != "example/user" {
+		t.Fatalf("unexpected database URL user %q", parsed.User.Username())
+	}
+	password, ok := parsed.User.Password()
+	if !ok || password != "secret:@/value" {
+		t.Fatal("database URL password did not round-trip")
+	}
+	if parsed.Query().Get("sslmode") != "disable" || parsed.Query().Get("connect_timeout") != "5" {
+		t.Fatalf("unexpected database URL query %q", parsed.RawQuery)
+	}
+}
+
+func TestRollbackManagedPostgresStageRestoresThroughForcedApply(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Rollback Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Rollback Project", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "rollback-app", "", model.AppSpec{
+		Image:     "ghcr.io/example/rollback-app:latest",
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desired := app.Spec
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &desired,
+	})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	claimed, found, err := stateStore.ClaimNextPendingOperation()
+	if err != nil || !found || claimed.ID != op.ID {
+		t.Fatalf("claim operation: found=%t operation=%+v err=%v", found, claimed, err)
+	}
+
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+	cause := errors.New("standby readiness timed out")
+	rollbackCalled := false
+	err = svc.rollbackManagedPostgresStage(context.Background(), claimed, cause, func(rollbackCtx context.Context) error {
+		rollbackCalled = true
+		if !forceExistingCloudNativePGWrites(rollbackCtx) {
+			t.Fatal("expected rollback to force reconciliation of the previous CloudNativePG spec")
+		}
+		return nil
+	})
+	if !rollbackCalled {
+		t.Fatal("expected staged-state rollback callback to run")
+	}
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "was rolled back") {
+		t.Fatalf("expected original failure plus successful rollback evidence, got %v", err)
+	}
+	stored, getErr := stateStore.GetOperation(op.ID)
+	if getErr != nil {
+		t.Fatalf("get operation: %v", getErr)
+	}
+	if stored.Status != model.OperationStatusRunning || !strings.Contains(stored.ResultMessage, "previous stable state restored") {
+		t.Fatalf("expected running operation to record rollback phase, got %+v", stored)
+	}
+}
 
 func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
 	t.Parallel()

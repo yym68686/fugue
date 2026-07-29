@@ -19,6 +19,8 @@ func (s *Service) managedPostgresPlacements(ctx context.Context, app model.App) 
 		if serviceName == "" {
 			return nil
 		}
+		serviceName = model.NormalizePostgresServiceName(serviceName, "")
+		spec.ServiceName = serviceName
 
 		scheduling, err := s.managedPostgresServicePlacements(ctx, app, serviceName, appRuntimeID, spec)
 		if err != nil {

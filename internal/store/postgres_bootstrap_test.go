@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -13,6 +15,78 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type postgresServiceNameJSONArg string
+
+func (want postgresServiceNameJSONArg) Match(value driver.Value) bool {
+	var raw []byte
+	switch typed := value.(type) {
+	case []byte:
+		raw = typed
+	case string:
+		raw = []byte(typed)
+	default:
+		return false
+	}
+	var document struct {
+		Postgres *struct {
+			ServiceName string `json:"service_name"`
+		} `json:"postgres"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil || document.Postgres == nil {
+		return false
+	}
+	return document.Postgres.ServiceName == string(want)
+}
+
+func TestEnsureManagedPostgresServiceNamesTxCanonicalizesPersistedNames(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock db: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+
+	mock.ExpectQuery(`SELECT id, spec_json FROM fugue_backing_services WHERE type = \$1 AND provisioner = \$2`).
+		WithArgs("postgres", "managed").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "spec_json"}).
+			AddRow("service-mixed", `{"postgres":{"service_name":"MecGod"}}`).
+			AddRow("service-canonical", `{"postgres":{"service_name":"already-canonical"}}`))
+	mock.ExpectExec(`UPDATE fugue_backing_services SET spec_json = \$2, updated_at = NOW\(\) WHERE id = \$1`).
+		WithArgs("service-mixed", postgresServiceNameJSONArg("mecgod")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE fugue_service_bindings SET env_json = jsonb_set\(env_json, '\{DB_HOST\}', to_jsonb\(\$2::text\), true\), updated_at = NOW\(\) WHERE service_id = \$1 AND env_json IS NOT NULL AND LOWER\(BTRIM\(COALESCE\(env_json->>'DB_HOST', ''\)\)\) = LOWER\(\$3\)`).
+		WithArgs("service-mixed", "mecgod", "MecGod").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE fugue_service_bindings SET env_json = jsonb_set\(env_json, '\{DB_HOST\}', to_jsonb\(\$2::text\), true\), updated_at = NOW\(\) WHERE service_id = \$1 AND env_json IS NOT NULL AND LOWER\(BTRIM\(COALESCE\(env_json->>'DB_HOST', ''\)\)\) = LOWER\(\$3\)`).
+		WithArgs("service-mixed", "mecgod-rw", "MecGod-rw").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT id, spec_json FROM fugue_apps WHERE spec_json->'postgres' IS NOT NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "spec_json"}).
+			AddRow("app-mixed", `{"image":"example/app","replicas":1,"runtime_id":"runtime-a","postgres":{"service_name":"MecGod"}}`))
+	mock.ExpectExec(`UPDATE fugue_apps SET spec_json = \$2, updated_at = NOW\(\) WHERE id = \$1`).
+		WithArgs("app-mixed", postgresServiceNameJSONArg("mecgod")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := (&Store{}).ensureManagedPostgresServiceNamesTx(context.Background(), tx); err != nil {
+		t.Fatalf("ensureManagedPostgresServiceNamesTx: %v", err)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback tx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
 
 func TestApplyPostgresSchemaTxSkipsDDLWhenFingerprintMatches(t *testing.T) {
 	t.Parallel()

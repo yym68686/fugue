@@ -2142,6 +2142,9 @@ func (s *Store) bootstrapDatabaseOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.ensureManagedPostgresServiceNamesTx(ctx, tx); err != nil {
+		return err
+	}
 	if err := s.ensureManagedRuntimeTx(ctx, tx); err != nil {
 		return err
 	}
@@ -2186,6 +2189,172 @@ func (s *Store) applyPostgresSchemaTx(ctx context.Context, tx *sql.Tx) (bool, er
 		return false, err
 	}
 	return true, nil
+}
+
+type managedPostgresServiceNameUpdate struct {
+	id       string
+	oldName  string
+	newName  string
+	specJSON []byte
+}
+
+// ensureManagedPostgresServiceNamesTx repairs service names written before
+// managed PostgreSQL names were canonicalized at the store boundary. The
+// repair runs under the bootstrap advisory lock and in the bootstrap
+// transaction, so every control-plane replica observes one atomic migration.
+func (s *Store) ensureManagedPostgresServiceNamesTx(ctx context.Context, tx *sql.Tx) error {
+	serviceRows, err := tx.QueryContext(ctx, `
+SELECT id, spec_json
+FROM fugue_backing_services
+WHERE type = $1 AND provisioner = $2
+`, model.BackingServiceTypePostgres, model.BackingServiceProvisionerManaged)
+	if err != nil {
+		return fmt.Errorf("query managed postgres service names: %w", err)
+	}
+
+	serviceUpdates := make([]managedPostgresServiceNameUpdate, 0)
+	for serviceRows.Next() {
+		var id string
+		var specJSON []byte
+		if err := serviceRows.Scan(&id, &specJSON); err != nil {
+			serviceRows.Close()
+			return fmt.Errorf("scan managed postgres service name: %w", err)
+		}
+		var spec model.BackingServiceSpec
+		if err := json.Unmarshal(specJSON, &spec); err != nil {
+			serviceRows.Close()
+			return fmt.Errorf("decode managed postgres service %s spec: %w", id, err)
+		}
+		if spec.Postgres == nil {
+			continue
+		}
+		storedName := spec.Postgres.ServiceName
+		oldName := strings.TrimSpace(storedName)
+		if oldName == "" {
+			continue
+		}
+		newName := model.NormalizePostgresServiceName(oldName, "")
+		if newName == storedName {
+			continue
+		}
+		spec.Postgres.ServiceName = newName
+		nextJSON, err := marshalJSON(spec)
+		if err != nil {
+			serviceRows.Close()
+			return fmt.Errorf("encode managed postgres service %s spec: %w", id, err)
+		}
+		serviceUpdates = append(serviceUpdates, managedPostgresServiceNameUpdate{
+			id:       id,
+			oldName:  oldName,
+			newName:  newName,
+			specJSON: nextJSON,
+		})
+	}
+	if err := serviceRows.Err(); err != nil {
+		serviceRows.Close()
+		return fmt.Errorf("iterate managed postgres service names: %w", err)
+	}
+	if err := serviceRows.Close(); err != nil {
+		return fmt.Errorf("close managed postgres service name rows: %w", err)
+	}
+
+	for _, update := range serviceUpdates {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_backing_services
+SET spec_json = $2, updated_at = NOW()
+WHERE id = $1
+`, update.id, update.specJSON); err != nil {
+			return fmt.Errorf("normalize managed postgres service %s name: %w", update.id, err)
+		}
+		// Only rewrite the generated DB_HOST value. A custom binding hostname
+		// must remain untouched.
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_service_bindings
+SET env_json = jsonb_set(env_json, '{DB_HOST}', to_jsonb($2::text), true),
+	updated_at = NOW()
+WHERE service_id = $1
+  AND env_json IS NOT NULL
+  AND LOWER(BTRIM(COALESCE(env_json->>'DB_HOST', ''))) = LOWER($3)
+`, update.id, update.newName, update.oldName); err != nil {
+			return fmt.Errorf("normalize managed postgres service %s binding host: %w", update.id, err)
+		}
+		// Older generated bindings used CloudNativePG's direct read/write
+		// service rather than Fugue's stable service alias.
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_service_bindings
+SET env_json = jsonb_set(env_json, '{DB_HOST}', to_jsonb($2::text), true),
+	updated_at = NOW()
+WHERE service_id = $1
+  AND env_json IS NOT NULL
+  AND LOWER(BTRIM(COALESCE(env_json->>'DB_HOST', ''))) = LOWER($3)
+`, update.id, model.PostgresRWServiceName(update.newName), update.oldName+"-rw"); err != nil {
+			return fmt.Errorf("normalize managed postgres service %s direct binding host: %w", update.id, err)
+		}
+	}
+
+	appRows, err := tx.QueryContext(ctx, `
+SELECT id, spec_json
+FROM fugue_apps
+WHERE spec_json->'postgres' IS NOT NULL
+`)
+	if err != nil {
+		return fmt.Errorf("query app-owned managed postgres service names: %w", err)
+	}
+	type appUpdate struct {
+		id       string
+		specJSON []byte
+	}
+	appUpdates := make([]appUpdate, 0)
+	for appRows.Next() {
+		var id string
+		var specJSON []byte
+		if err := appRows.Scan(&id, &specJSON); err != nil {
+			appRows.Close()
+			return fmt.Errorf("scan app-owned managed postgres service name: %w", err)
+		}
+		var spec model.AppSpec
+		if err := json.Unmarshal(specJSON, &spec); err != nil {
+			appRows.Close()
+			return fmt.Errorf("decode app %s managed postgres spec: %w", id, err)
+		}
+		if spec.Postgres == nil {
+			continue
+		}
+		storedName := spec.Postgres.ServiceName
+		oldName := strings.TrimSpace(storedName)
+		if oldName == "" {
+			continue
+		}
+		newName := model.NormalizePostgresServiceName(oldName, "")
+		if newName == storedName {
+			continue
+		}
+		spec.Postgres.ServiceName = newName
+		nextJSON, err := marshalJSON(spec)
+		if err != nil {
+			appRows.Close()
+			return fmt.Errorf("encode app %s managed postgres spec: %w", id, err)
+		}
+		appUpdates = append(appUpdates, appUpdate{id: id, specJSON: nextJSON})
+	}
+	if err := appRows.Err(); err != nil {
+		appRows.Close()
+		return fmt.Errorf("iterate app-owned managed postgres service names: %w", err)
+	}
+	if err := appRows.Close(); err != nil {
+		return fmt.Errorf("close app-owned managed postgres service name rows: %w", err)
+	}
+
+	for _, update := range appUpdates {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_apps
+SET spec_json = $2, updated_at = NOW()
+WHERE id = $1
+`, update.id, update.specJSON); err != nil {
+			return fmt.Errorf("normalize app %s managed postgres service name: %w", update.id, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureFailedImportAppStatusTx(ctx context.Context, tx *sql.Tx) error {

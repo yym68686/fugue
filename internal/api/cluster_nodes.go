@@ -2292,7 +2292,7 @@ func clusterNodeWorkloadForService(service model.BackingService, namespace strin
 func clusterBackingServiceResourceName(service model.BackingService) string {
 	if service.Spec.Postgres != nil {
 		if serviceName := strings.TrimSpace(service.Spec.Postgres.ServiceName); serviceName != "" {
-			return serviceName
+			return model.NormalizePostgresServiceName(serviceName, "")
 		}
 	}
 
