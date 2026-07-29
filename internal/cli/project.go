@@ -1114,14 +1114,20 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 							"image_store_mode":    usage.ImageStoreMode,
 							"measurement_status":  usage.MeasurementStatus,
 							"measurement_note":    usage.MeasurementNote,
+							"measurement_reasons": usage.MeasurementReasons,
 							"project":             summary,
 						})
 					}
 					projectName := firstNonEmptyTrimmed(projectNames[summary.ProjectID], project.Name, summary.ProjectID)
+					measurementReasons := summary.MeasurementReasons
+					if len(measurementReasons) == 0 {
+						measurementReasons = usage.MeasurementReasons
+					}
 					if err := writeKeyValues(c.stdout,
 						kvPair{Key: "project", Value: formatDisplayName(projectName, summary.ProjectID, c.showIDs())},
 						kvPair{Key: "image_store_mode", Value: firstNonEmpty(usage.ImageStoreMode, "unknown")},
 						kvPair{Key: "measurement_status", Value: firstNonEmpty(summary.MeasurementStatus, usage.MeasurementStatus)},
+						kvPair{Key: "measurement_reasons", Value: strings.Join(measurementReasons, ",")},
 						kvPair{Key: "version_count", Value: fmt.Sprintf("%d", summary.VersionCount)},
 						kvPair{Key: "total_size", Value: formatBytes(summary.TotalSizeBytes)},
 						kvPair{Key: "reclaimable", Value: formatBytes(summary.ReclaimableSizeBytes)},
@@ -1146,6 +1152,7 @@ func (c *CLI) newProjectImageUsageCommand() *cobra.Command {
 				kvPair{Key: "reclaim_requires_gc", Value: fmt.Sprintf("%t", usage.ReclaimRequiresGC)},
 				kvPair{Key: "image_store_mode", Value: firstNonEmpty(usage.ImageStoreMode, "unknown")},
 				kvPair{Key: "measurement_status", Value: usage.MeasurementStatus},
+				kvPair{Key: "measurement_reasons", Value: strings.Join(usage.MeasurementReasons, ",")},
 			); err != nil {
 				return err
 			}

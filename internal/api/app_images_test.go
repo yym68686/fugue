@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,74 @@ func mustRuntimeDigestRefForAppImagesTest(t *testing.T, pushBase, pullBase, imag
 		t.Fatalf("expected runtime digest ref for %q with digest %q", imageRef, digest)
 	}
 	return runtimeImageRef
+}
+
+func TestMergeProjectImageMeasurementReasonsIsStableAndUnique(t *testing.T) {
+	t.Parallel()
+
+	got := mergeProjectImageMeasurementReasons(
+		[]string{projectImageUsageReasonSizeConflict, projectImageUsageReasonDigestConflict},
+		[]string{projectImageUsageReasonStaleInventory, projectImageUsageReasonSizeConflict, ""},
+	)
+	want := []string{
+		projectImageUsageReasonDigestConflict,
+		projectImageUsageReasonSizeConflict,
+		projectImageUsageReasonStaleInventory,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("measurement reasons = %#v, want stable unique order %#v", got, want)
+	}
+}
+
+func TestDistributedImageCandidateMeasurementReportsKnownDigestLocationConflict(t *testing.T) {
+	t.Parallel()
+
+	const (
+		appID             = "app-conflict"
+		imageRef          = "registry.example/fugue-apps/example:git-111111111111"
+		canonicalDigest   = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		conflictingDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	candidate := appImageCandidate{ImageRef: imageRef, Current: true}
+	manifest := model.ImageCacheManifest{
+		Repo:              "fugue-apps/example",
+		Target:            "git-111111111111",
+		Digest:            canonicalDigest,
+		ManifestSizeBytes: 12,
+		TotalBlobBytes:    180,
+		Present:           true,
+	}
+	manifestsByKey := map[string][]model.ImageCacheManifest{}
+	for _, key := range distributedImageManifestKeys(manifest) {
+		manifestsByKey[key] = append(manifestsByKey[key], manifest)
+	}
+	evidence := distributedImageUsageEvidence{
+		imagesByAppID: map[string][]model.Image{
+			appID: {{
+				AppID:           appID,
+				ImageRef:        imageRef,
+				CanonicalDigest: canonicalDigest,
+				LifecycleState:  model.ImageLifecycleAvailable,
+			}},
+		},
+		locationsByAppID: map[string][]model.ImageLocation{
+			appID: {
+				{AppID: appID, ImageRef: imageRef, Digest: canonicalDigest, Status: model.ImageLocationStatusPresent},
+				{AppID: appID, ImageRef: imageRef, Digest: conflictingDigest, Status: model.ImageLocationStatusPresent},
+			},
+		},
+		staleLocationsByAppID: map[string][]model.ImageLocation{},
+		manifestsByKey:        manifestsByKey,
+		staleManifestsByKey:   map[string][]model.ImageCacheManifest{},
+	}
+
+	measurement := distributedImageCandidateMeasurementFor(model.App{ID: appID}, candidate, evidence)
+	if measurement.digest != canonicalDigest || measurement.hasSize || !measurement.digestConflict {
+		t.Fatalf("expected canonical digest with unavailable conflicting location evidence, got %#v", measurement)
+	}
+	if want := []string{projectImageUsageReasonDigestConflict}; !reflect.DeepEqual(measurement.reasons, want) {
+		t.Fatalf("expected stable location digest-conflict attribution, got %#v", measurement.reasons)
+	}
 }
 
 func TestHandleGetAppImagesReturnsCurrentAndHistoricalVersions(t *testing.T) {
@@ -169,6 +238,9 @@ func TestHandleGetAppImagesUsesRuntimeImageLocationEvidence(t *testing.T) {
 	if response.MeasurementStatus != projectImageUsageMeasurementPartial {
 		t.Fatalf("expected mixed registry and location evidence to be marked partial, got %#v", response)
 	}
+	if want := []string{projectImageUsageReasonMissingManifestEvidence}; !reflect.DeepEqual(currentVersion.SizeMeasurementReasons, want) || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected stable missing-manifest attribution, version=%#v response=%#v", currentVersion.SizeMeasurementReasons, response.MeasurementReasons)
+	}
 }
 
 func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
@@ -212,6 +284,124 @@ func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
 	}
 	if summary.Apps[0].AppID != app.ID {
 		t.Fatalf("expected app summary for %q, got %#v", app.ID, summary.Apps[0])
+	}
+}
+
+func TestCachedProjectImageUsageColdMissWaitsForInitialSnapshot(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, tenant, project, app, fakeRegistry, _, _, _ := setupAppImagesTestServer(t)
+	inspectStarted := make(chan struct{}, 1)
+	inspectRelease := make(chan struct{})
+	fakeRegistry.inspectStarted = inspectStarted
+	fakeRegistry.inspectRelease = inspectRelease
+
+	principal := model.Principal{TenantID: tenant.ID}
+	resultCh := make(chan projectImageUsageLoadResult, 1)
+	go func() {
+		response, err := server.cachedProjectImageUsageResponse(context.Background(), principal)
+		resultCh <- projectImageUsageLoadResult{response: response, err: err}
+	}()
+
+	select {
+	case <-inspectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the initial image inventory load to start")
+	}
+
+	select {
+	case result := <-resultCh:
+		close(inspectRelease)
+		t.Fatalf("cold-cache request returned before its first truthful snapshot: response=%#v err=%v", result.response, result.err)
+	case <-time.After(2 * projectImageUsageSoftWait):
+	}
+
+	close(inspectRelease)
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("load initial project image usage: %v", result.err)
+		}
+		if len(result.response.Projects) != 1 {
+			t.Fatalf("expected the initial snapshot to retain project %q, got %#v", project.ID, result.response.Projects)
+		}
+		if result.response.Projects[0].ProjectID != project.ID || len(result.response.Projects[0].Apps) != 1 || result.response.Projects[0].Apps[0].AppID != app.ID {
+			t.Fatalf("expected the initial snapshot to retain project/current app, got %#v", result.response.Projects[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the initial image usage snapshot")
+	}
+}
+
+func TestCachedProjectImageUsageExpiredEntryUsesStaleWhileRevalidate(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, tenant, project, app, fakeRegistry, _, _, _ := setupAppImagesTestServer(t)
+	principal := model.Principal{TenantID: tenant.ID}
+	key := projectImageUsageCacheKey(principal)
+	observedAt := time.Now().UTC().Add(-time.Hour)
+	stale := projectImageUsageResponse{
+		RegistryConfigured: true,
+		MeasurementStatus:  projectImageUsageMeasurementComplete,
+		ObservedAt:         &observedAt,
+		Projects: []projectImageUsageSummary{{
+			ProjectID: project.ID,
+			Apps: []projectImageUsageAppSummary{{
+				AppID:   app.ID,
+				AppName: app.Name,
+			}},
+		}},
+	}
+	server.projectImageUsageCache.set(key, stale)
+	server.projectImageUsageCache.mu.Lock()
+	entry := server.projectImageUsageCache.byKey[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	server.projectImageUsageCache.byKey[key] = entry
+	server.projectImageUsageCache.mu.Unlock()
+
+	inspectStarted := make(chan struct{}, 1)
+	inspectRelease := make(chan struct{})
+	fakeRegistry.inspectStarted = inspectStarted
+	fakeRegistry.inspectRelease = inspectRelease
+
+	resultCh := make(chan projectImageUsageLoadResult, 1)
+	go func() {
+		response, err := server.cachedProjectImageUsageResponse(context.Background(), principal)
+		resultCh <- projectImageUsageLoadResult{response: response, err: err}
+	}()
+
+	select {
+	case <-inspectStarted:
+	case <-time.After(time.Second):
+		close(inspectRelease)
+		t.Fatal("timed out waiting for the stale image usage refresh to start")
+	}
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			close(inspectRelease)
+			t.Fatalf("load stale project image usage: %v", result.err)
+		}
+		if !reflect.DeepEqual(result.response, stale) {
+			close(inspectRelease)
+			t.Fatalf("expected the expired snapshot while refresh is blocked, got %#v", result.response)
+		}
+	case <-time.After(5 * projectImageUsageSoftWait):
+		close(inspectRelease)
+		t.Fatal("timed out waiting for stale-while-revalidate response")
+	}
+
+	close(inspectRelease)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if fresh, ok := server.projectImageUsageCache.get(key); ok && !reflect.DeepEqual(fresh, stale) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the background image usage refresh to finish")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -448,6 +638,67 @@ func TestHandleGetAppImagesUsesKnownDigestEvidenceAcrossCacheNodes(t *testing.T)
 	}
 }
 
+func TestHandleGetAppImagesReportsDigestConflictAgainstKnownCanonicalDigest(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, newImageRef, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	canonicalDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	conflictingDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		CanonicalDigest: canonicalDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert canonical distributed image metadata: %v", err)
+	}
+	for _, inventory := range []struct {
+		nodeID   string
+		nodeName string
+		digest   string
+	}{
+		{nodeID: "node-a", nodeName: "worker-a", digest: canonicalDigest},
+		{nodeID: "node-b", nodeName: "worker-b", digest: conflictingDigest},
+	} {
+		if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+			NodeID:          inventory.nodeID,
+			ClusterNodeName: inventory.nodeName,
+			ObservedAt:      now,
+		}, []model.ImageCacheManifest{{
+			Repo:              "fugue-apps/example-demo-web",
+			Target:            "git-222222222222",
+			Digest:            inventory.digest,
+			ManifestSizeBytes: 12,
+			TotalBlobBytes:    180,
+			LastSeenAt:        now,
+			Present:           true,
+		}}); err != nil {
+			t.Fatalf("upsert distributed image cache inventory: %v", err)
+		}
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 {
+		t.Fatalf("expected current version, got %#v", response.Versions)
+	}
+	version := response.Versions[0]
+	want := []string{projectImageUsageReasonDigestConflict}
+	if version.Digest != canonicalDigest || version.SizeBytes != 0 || version.SizeMeasurementStatus != projectImageUsageMeasurementUnavailable || !reflect.DeepEqual(version.SizeMeasurementReasons, want) {
+		t.Fatalf("expected canonical digest with unavailable conflicting size evidence, got %#v", version)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected app-level digest conflict attribution, got %#v", response)
+	}
+}
+
 func TestHandleGetAppImagesDoesNotCountModelMetadataWithoutFreshPhysicalEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -481,6 +732,49 @@ func TestHandleGetAppImagesDoesNotCountModelMetadataWithoutFreshPhysicalEvidence
 	}
 	if version.Status != appImageStatusMissing || response.Summary.TotalSizeBytes != 0 || response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
 		t.Fatalf("expected no physical cache claim from model metadata alone, got %#v", response)
+	}
+	if want := []string{projectImageUsageReasonNoStorageEvidence}; !reflect.DeepEqual(version.SizeMeasurementReasons, want) || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected stable no-storage attribution, version=%#v response=%#v", version.SizeMeasurementReasons, response.MeasurementReasons)
+	}
+}
+
+func TestHandleGetAppImagesReportsMissingBlobSizeEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, _, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-a",
+		ClusterNodeName: "worker-a",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{{
+		Repo:              "fugue-apps/example-demo-web",
+		Target:            "git-222222222222",
+		Digest:            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ManifestSizeBytes: 12,
+		LastSeenAt:        now,
+		Present:           true,
+	}}); err != nil {
+		t.Fatalf("upsert manifest-only cache inventory: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 {
+		t.Fatalf("expected current version, got %#v", response.Versions)
+	}
+	version := response.Versions[0]
+	want := []string{projectImageUsageReasonMissingBlobSize}
+	if version.SizeBytes != 12 || version.SizeMeasurementStatus != projectImageUsageMeasurementPartial || !reflect.DeepEqual(version.SizeMeasurementReasons, want) {
+		t.Fatalf("expected manifest-only lower bound with a stable reason, got %#v", version)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementPartial || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected app-level missing-blob-size attribution, got %#v", response)
 	}
 }
 
@@ -524,6 +818,9 @@ func TestHandleGetAppImagesRejectsConflictingCompleteSizesForSameDigest(t *testi
 	}
 	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
 		t.Fatalf("expected unavailable app measurement, got %#v", response)
+	}
+	if want := []string{projectImageUsageReasonSizeConflict}; !reflect.DeepEqual(version.SizeMeasurementReasons, want) || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected stable size-conflict attribution, version=%#v response=%#v", version.SizeMeasurementReasons, response.MeasurementReasons)
 	}
 }
 
@@ -578,18 +875,21 @@ func TestHandleGetAppImagesRejectsConflictingUnpinnedTagSizes(t *testing.T) {
 	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
 		t.Fatalf("expected unavailable app measurement, got %#v", response)
 	}
+	if want := []string{projectImageUsageReasonDigestConflict}; !reflect.DeepEqual(version.SizeMeasurementReasons, want) || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected stable digest-conflict attribution, version=%#v response=%#v", version.SizeMeasurementReasons, response.MeasurementReasons)
+	}
 }
 
 func TestHandleGetAppImagesIgnoresStaleDistributedLocationEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore, server, apiKey, _, _, app, _, oldImageRef, _, _ := setupAppImagesTestServer(t)
+	stateStore, server, apiKey, _, _, app, _, _, newImageRef, _ := setupAppImagesTestServer(t)
 	server.imageStoreMode = "distributed"
 	staleSeen := time.Now().UTC().Add(-defaultImageCacheInventoryTTL - time.Minute)
 	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID:        app.TenantID,
 		AppID:           app.ID,
-		ImageRef:        oldImageRef,
+		ImageRef:        newImageRef,
 		NodeID:          "node-a",
 		ClusterNodeName: "worker-a",
 		Status:          model.ImageLocationStatusPresent,
@@ -609,6 +909,9 @@ func TestHandleGetAppImagesIgnoresStaleDistributedLocationEvidence(t *testing.T)
 	}
 	if response.MeasurementStatus != projectImageUsageMeasurementUnavailable {
 		t.Fatalf("expected current generation without fresh size evidence to be unavailable, got %#v", response)
+	}
+	if want := []string{projectImageUsageReasonStaleInventory}; !reflect.DeepEqual(response.Versions[0].SizeMeasurementReasons, want) || !reflect.DeepEqual(response.MeasurementReasons, want) {
+		t.Fatalf("expected stable stale-inventory attribution, version=%#v response=%#v", response.Versions[0].SizeMeasurementReasons, response.MeasurementReasons)
 	}
 }
 
@@ -632,6 +935,12 @@ func TestHandleListProjectImageUsageDoesNotSerializeNullProjectsWhenDistributedE
 	}
 	if raw["measurement_status"] != projectImageUsageMeasurementUnavailable {
 		t.Fatalf("expected unavailable measurement status, got %#v", raw["measurement_status"])
+	}
+	var response projectImageUsageResponse
+	mustDecodeJSON(t, recorder, &response)
+	want := []string{projectImageUsageReasonNoStorageEvidence}
+	if !reflect.DeepEqual(response.MeasurementReasons, want) || len(response.Projects) != 1 || !reflect.DeepEqual(response.Projects[0].MeasurementReasons, want) || len(response.Projects[0].Apps) != 1 || !reflect.DeepEqual(response.Projects[0].Apps[0].MeasurementReasons, want) {
+		t.Fatalf("expected stable reasons at app, project, and response levels, got %#v", response)
 	}
 }
 
@@ -799,13 +1108,28 @@ func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCRequestFails(t *test
 }
 
 type fakeAppImageRegistry struct {
-	deleted      []string
-	images       map[string]appImageRegistryInspectResult
-	inspectCalls atomic.Int64
+	deleted        []string
+	images         map[string]appImageRegistryInspectResult
+	inspectCalls   atomic.Int64
+	inspectStarted chan<- struct{}
+	inspectRelease <-chan struct{}
 }
 
-func (f *fakeAppImageRegistry) InspectImage(_ context.Context, imageRef string) (appImageRegistryInspectResult, error) {
+func (f *fakeAppImageRegistry) InspectImage(ctx context.Context, imageRef string) (appImageRegistryInspectResult, error) {
 	f.inspectCalls.Add(1)
+	if f.inspectStarted != nil {
+		select {
+		case f.inspectStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.inspectRelease != nil {
+		select {
+		case <-f.inspectRelease:
+		case <-ctx.Done():
+			return appImageRegistryInspectResult{}, ctx.Err()
+		}
+	}
 	if result, ok := f.images[imageRef]; ok {
 		return cloneAppImageRegistryInspectResult(result), nil
 	}

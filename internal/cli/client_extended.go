@@ -52,17 +52,19 @@ type appImageSummary struct {
 }
 
 type appImageVersion struct {
-	ImageRef             string           `json:"image_ref"`
-	RuntimeImageRef      string           `json:"runtime_image_ref,omitempty"`
-	Digest               string           `json:"digest,omitempty"`
-	Status               string           `json:"status"`
-	Current              bool             `json:"current"`
-	SizeBytes            int64            `json:"size_bytes,omitempty"`
-	ReclaimableSizeBytes int64            `json:"reclaimable_size_bytes,omitempty"`
-	DeleteSupported      bool             `json:"delete_supported"`
-	RedeploySupported    bool             `json:"redeploy_supported"`
-	LastDeployedAt       *time.Time       `json:"last_deployed_at,omitempty"`
-	Source               *model.AppSource `json:"source,omitempty"`
+	ImageRef               string           `json:"image_ref"`
+	RuntimeImageRef        string           `json:"runtime_image_ref,omitempty"`
+	Digest                 string           `json:"digest,omitempty"`
+	Status                 string           `json:"status"`
+	Current                bool             `json:"current"`
+	SizeBytes              int64            `json:"size_bytes,omitempty"`
+	SizeMeasurementStatus  string           `json:"size_measurement_status,omitempty"`
+	SizeMeasurementReasons []string         `json:"size_measurement_reasons,omitempty"`
+	ReclaimableSizeBytes   int64            `json:"reclaimable_size_bytes,omitempty"`
+	DeleteSupported        bool             `json:"delete_supported"`
+	RedeploySupported      bool             `json:"redeploy_supported"`
+	LastDeployedAt         *time.Time       `json:"last_deployed_at,omitempty"`
+	Source                 *model.AppSource `json:"source,omitempty"`
 }
 
 type appImageInventoryResponse struct {
@@ -70,6 +72,9 @@ type appImageInventoryResponse struct {
 	RegistryConfigured bool              `json:"registry_configured"`
 	ReclaimRequiresGC  bool              `json:"reclaim_requires_gc"`
 	ReclaimNote        string            `json:"reclaim_note,omitempty"`
+	MeasurementStatus  string            `json:"measurement_status,omitempty"`
+	MeasurementNote    string            `json:"measurement_note,omitempty"`
+	MeasurementReasons []string          `json:"measurement_reasons,omitempty"`
 	Summary            appImageSummary   `json:"summary"`
 	Versions           []appImageVersion `json:"versions"`
 }
@@ -162,16 +167,17 @@ type appContinuityResponse struct {
 }
 
 type projectImageUsageAppSummary struct {
-	AppID                string `json:"app_id"`
-	AppName              string `json:"app_name"`
-	VersionCount         int    `json:"version_count"`
-	CurrentVersionCount  int    `json:"current_version_count"`
-	StaleVersionCount    int    `json:"stale_version_count"`
-	TotalSizeBytes       int64  `json:"total_size_bytes"`
-	CurrentSizeBytes     int64  `json:"current_size_bytes"`
-	StaleSizeBytes       int64  `json:"stale_size_bytes"`
-	ReclaimableSizeBytes int64  `json:"reclaimable_size_bytes"`
-	MeasurementStatus    string `json:"measurement_status,omitempty"`
+	AppID                string   `json:"app_id"`
+	AppName              string   `json:"app_name"`
+	VersionCount         int      `json:"version_count"`
+	CurrentVersionCount  int      `json:"current_version_count"`
+	StaleVersionCount    int      `json:"stale_version_count"`
+	TotalSizeBytes       int64    `json:"total_size_bytes"`
+	CurrentSizeBytes     int64    `json:"current_size_bytes"`
+	StaleSizeBytes       int64    `json:"stale_size_bytes"`
+	ReclaimableSizeBytes int64    `json:"reclaimable_size_bytes"`
+	MeasurementStatus    string   `json:"measurement_status,omitempty"`
+	MeasurementReasons   []string `json:"measurement_reasons,omitempty"`
 }
 
 type projectImageUsageSummary struct {
@@ -185,6 +191,7 @@ type projectImageUsageSummary struct {
 	ReclaimableSizeBytes int64                         `json:"reclaimable_size_bytes"`
 	Apps                 []projectImageUsageAppSummary `json:"apps"`
 	MeasurementStatus    string                        `json:"measurement_status,omitempty"`
+	MeasurementReasons   []string                      `json:"measurement_reasons,omitempty"`
 }
 
 type projectImageUsageResponse struct {
@@ -194,6 +201,7 @@ type projectImageUsageResponse struct {
 	ImageStoreMode     string                     `json:"image_store_mode,omitempty"`
 	MeasurementStatus  string                     `json:"measurement_status,omitempty"`
 	MeasurementNote    string                     `json:"measurement_note,omitempty"`
+	MeasurementReasons []string                   `json:"measurement_reasons,omitempty"`
 	ObservedAt         *time.Time                 `json:"observed_at,omitempty"`
 	Projects           []projectImageUsageSummary `json:"projects"`
 }

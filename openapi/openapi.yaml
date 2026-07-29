@@ -19196,6 +19196,27 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClusterNode"
+    ImageMeasurementReason:
+      type: string
+      description: >-
+        Stable, machine-readable attribution for an incomplete image-size
+        measurement. Evidence-oriented codes describe what the control plane
+        can prove; missing_*_evidence does not by itself assert that the
+        underlying registry object is physically absent.
+      enum:
+        [
+          digest_conflict,
+          size_conflict,
+          stale_inventory,
+          missing_manifest_evidence,
+          missing_size_evidence,
+          missing_manifest_size_evidence,
+          missing_blob_size_evidence,
+          missing_child_manifest,
+          missing_blob,
+          no_storage_evidence,
+          registry_not_configured
+        ]
     AppImageSummary:
       type: object
       additionalProperties: false
@@ -19257,6 +19278,12 @@ components:
             image-cache evidence may be partial when a manifest graph does not
             include complete referenced-blob bytes.
           enum: [complete, partial, unavailable]
+        size_measurement_reasons:
+          type: array
+          description: Stable reasons why this version's size is not complete.
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ImageMeasurementReason"
         reclaimable_size_bytes:
           type: integer
           format: int64
@@ -19861,6 +19888,12 @@ components:
         measurement_note:
           type: string
           description: Human-readable explanation of the image-size evidence source.
+        measurement_reasons:
+          type: array
+          description: Stable aggregate reasons for incomplete version measurements.
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ImageMeasurementReason"
         summary:
           $ref: "#/components/schemas/AppImageSummary"
         versions:
@@ -19942,6 +19975,12 @@ components:
           type: string
           description: Image-size measurement status for this app summary.
           enum: [complete, partial, unavailable]
+        measurement_reasons:
+          type: array
+          description: Stable aggregate reasons for incomplete version measurements.
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ImageMeasurementReason"
     ProjectImageUsageSummary:
       type: object
       additionalProperties: false
@@ -19989,6 +20028,12 @@ components:
           type: string
           description: Image-size measurement status for this project summary.
           enum: [complete, partial, unavailable]
+        measurement_reasons:
+          type: array
+          description: Stable aggregate reasons for incomplete app measurements.
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ImageMeasurementReason"
     ProjectImageUsageResponse:
       type: object
       additionalProperties: false
@@ -20011,6 +20056,12 @@ components:
         measurement_note:
           type: string
           description: Human-readable explanation of the image-size evidence source.
+        measurement_reasons:
+          type: array
+          description: Stable aggregate reasons for incomplete project measurements.
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ImageMeasurementReason"
         observed_at:
           type: string
           format: date-time

@@ -913,6 +913,8 @@ func (c *CLI) newAppReleaseListCommand() *cobra.Command {
 			if err := writeKeyValues(c.stdout,
 				kvPair{Key: "app_id", Value: inventory.AppID},
 				kvPair{Key: "registry_configured", Value: fmt.Sprintf("%t", inventory.RegistryConfigured)},
+				kvPair{Key: "measurement_status", Value: inventory.MeasurementStatus},
+				kvPair{Key: "measurement_reasons", Value: strings.Join(inventory.MeasurementReasons, ",")},
 				kvPair{Key: "version_count", Value: fmt.Sprintf("%d", inventory.Summary.VersionCount)},
 				kvPair{Key: "reclaimable", Value: formatBytes(inventory.Summary.ReclaimableSizeBytes)},
 			); err != nil {

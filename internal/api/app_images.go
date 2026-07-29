@@ -19,16 +19,25 @@ import (
 )
 
 const (
-	appImageStatusAvailable                 = "available"
-	appImageStatusMissing                   = "missing"
-	projectImageUsageModeRegistry           = "registry"
-	projectImageUsageModeDistributed        = "distributed"
-	projectImageUsageMeasurementComplete    = "complete"
-	projectImageUsageMeasurementPartial     = "partial"
-	projectImageUsageMeasurementUnavailable = "unavailable"
-	defaultProjectImageUsageCacheTTL        = 5 * time.Minute
-	projectImageUsageAppBuildLimit          = 8
-	projectImageUsageSoftWait               = 50 * time.Millisecond
+	appImageStatusAvailable                        = "available"
+	appImageStatusMissing                          = "missing"
+	projectImageUsageModeRegistry                  = "registry"
+	projectImageUsageModeDistributed               = "distributed"
+	projectImageUsageMeasurementComplete           = "complete"
+	projectImageUsageMeasurementPartial            = "partial"
+	projectImageUsageMeasurementUnavailable        = "unavailable"
+	projectImageUsageReasonDigestConflict          = "digest_conflict"
+	projectImageUsageReasonSizeConflict            = "size_conflict"
+	projectImageUsageReasonStaleInventory          = "stale_inventory"
+	projectImageUsageReasonMissingManifestEvidence = "missing_manifest_evidence"
+	projectImageUsageReasonMissingSizeEvidence     = "missing_size_evidence"
+	projectImageUsageReasonMissingManifestSize     = "missing_manifest_size_evidence"
+	projectImageUsageReasonMissingBlobSize         = "missing_blob_size_evidence"
+	projectImageUsageReasonNoStorageEvidence       = "no_storage_evidence"
+	projectImageUsageReasonRegistryNotConfigured   = "registry_not_configured"
+	defaultProjectImageUsageCacheTTL               = 5 * time.Minute
+	projectImageUsageAppBuildLimit                 = 8
+	projectImageUsageSoftWait                      = 50 * time.Millisecond
 )
 
 type appImageSummary struct {
@@ -42,18 +51,19 @@ type appImageSummary struct {
 }
 
 type appImageVersion struct {
-	ImageRef              string           `json:"image_ref"`
-	RuntimeImageRef       string           `json:"runtime_image_ref,omitempty"`
-	Digest                string           `json:"digest,omitempty"`
-	Status                string           `json:"status"`
-	Current               bool             `json:"current"`
-	SizeBytes             int64            `json:"size_bytes,omitempty"`
-	SizeMeasurementStatus string           `json:"size_measurement_status,omitempty"`
-	ReclaimableSizeBytes  int64            `json:"reclaimable_size_bytes,omitempty"`
-	DeleteSupported       bool             `json:"delete_supported"`
-	RedeploySupported     bool             `json:"redeploy_supported"`
-	LastDeployedAt        *time.Time       `json:"last_deployed_at,omitempty"`
-	Source                *model.AppSource `json:"source,omitempty"`
+	ImageRef               string           `json:"image_ref"`
+	RuntimeImageRef        string           `json:"runtime_image_ref,omitempty"`
+	Digest                 string           `json:"digest,omitempty"`
+	Status                 string           `json:"status"`
+	Current                bool             `json:"current"`
+	SizeBytes              int64            `json:"size_bytes,omitempty"`
+	SizeMeasurementStatus  string           `json:"size_measurement_status,omitempty"`
+	SizeMeasurementReasons []string         `json:"size_measurement_reasons,omitempty"`
+	ReclaimableSizeBytes   int64            `json:"reclaimable_size_bytes,omitempty"`
+	DeleteSupported        bool             `json:"delete_supported"`
+	RedeploySupported      bool             `json:"redeploy_supported"`
+	LastDeployedAt         *time.Time       `json:"last_deployed_at,omitempty"`
+	Source                 *model.AppSource `json:"source,omitempty"`
 }
 
 type appImageInventoryResponse struct {
@@ -63,6 +73,7 @@ type appImageInventoryResponse struct {
 	ReclaimNote        string            `json:"reclaim_note,omitempty"`
 	MeasurementStatus  string            `json:"measurement_status,omitempty"`
 	MeasurementNote    string            `json:"measurement_note,omitempty"`
+	MeasurementReasons []string          `json:"measurement_reasons,omitempty"`
 	Summary            appImageSummary   `json:"summary"`
 	Versions           []appImageVersion `json:"versions"`
 }
@@ -87,16 +98,17 @@ type appImageRedeployResponse struct {
 }
 
 type projectImageUsageAppSummary struct {
-	AppID                string `json:"app_id"`
-	AppName              string `json:"app_name"`
-	VersionCount         int    `json:"version_count"`
-	CurrentVersionCount  int    `json:"current_version_count"`
-	StaleVersionCount    int    `json:"stale_version_count"`
-	TotalSizeBytes       int64  `json:"total_size_bytes"`
-	CurrentSizeBytes     int64  `json:"current_size_bytes"`
-	StaleSizeBytes       int64  `json:"stale_size_bytes"`
-	ReclaimableSizeBytes int64  `json:"reclaimable_size_bytes"`
-	MeasurementStatus    string `json:"measurement_status,omitempty"`
+	AppID                string   `json:"app_id"`
+	AppName              string   `json:"app_name"`
+	VersionCount         int      `json:"version_count"`
+	CurrentVersionCount  int      `json:"current_version_count"`
+	StaleVersionCount    int      `json:"stale_version_count"`
+	TotalSizeBytes       int64    `json:"total_size_bytes"`
+	CurrentSizeBytes     int64    `json:"current_size_bytes"`
+	StaleSizeBytes       int64    `json:"stale_size_bytes"`
+	ReclaimableSizeBytes int64    `json:"reclaimable_size_bytes"`
+	MeasurementStatus    string   `json:"measurement_status,omitempty"`
+	MeasurementReasons   []string `json:"measurement_reasons,omitempty"`
 }
 
 type projectImageUsageSummary struct {
@@ -110,6 +122,7 @@ type projectImageUsageSummary struct {
 	ReclaimableSizeBytes int64                         `json:"reclaimable_size_bytes"`
 	Apps                 []projectImageUsageAppSummary `json:"apps"`
 	MeasurementStatus    string                        `json:"measurement_status,omitempty"`
+	MeasurementReasons   []string                      `json:"measurement_reasons,omitempty"`
 }
 
 type projectImageUsageResponse struct {
@@ -119,6 +132,7 @@ type projectImageUsageResponse struct {
 	ImageStoreMode     string                     `json:"image_store_mode,omitempty"`
 	MeasurementStatus  string                     `json:"measurement_status,omitempty"`
 	MeasurementNote    string                     `json:"measurement_note,omitempty"`
+	MeasurementReasons []string                   `json:"measurement_reasons,omitempty"`
 	ObservedAt         *time.Time                 `json:"observed_at,omitempty"`
 	Projects           []projectImageUsageSummary `json:"projects"`
 }
@@ -182,6 +196,7 @@ func (s *Server) cachedProjectImageUsageResponse(
 	if response, ok := s.projectImageUsageCache.get(key); ok {
 		return response, nil
 	}
+	staleEntry, hasStaleEntry := s.projectImageUsageCache.getEntry(key)
 
 	resultCh := make(chan projectImageUsageLoadResult, 1)
 	refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -192,6 +207,22 @@ func (s *Server) cachedProjectImageUsageResponse(
 		})
 		resultCh <- projectImageUsageLoadResult{err: err, response: response}
 	}()
+
+	// A cold cache has no truthful project/app skeleton to return. Wait for the
+	// initial load instead of fabricating an empty project list. The bounded
+	// soft wait is only a stale-while-revalidate optimization for callers that
+	// already have a previously observed snapshot.
+	if !hasStaleEntry {
+		select {
+		case result := <-resultCh:
+			if result.err != nil {
+				return projectImageUsageResponse{}, result.err
+			}
+			return result.response, nil
+		case <-ctx.Done():
+			return projectImageUsageResponse{}, ctx.Err()
+		}
+	}
 
 	timer := time.NewTimer(projectImageUsageSoftWait)
 	defer timer.Stop()
@@ -211,18 +242,8 @@ func (s *Server) cachedProjectImageUsageResponse(
 	case <-timer.C:
 	}
 
-	if entry, ok := s.projectImageUsageCache.getEntry(key); ok {
-		go s.logProjectImageUsageRefreshResult(resultCh)
-		return entry.value, nil
-	}
 	go s.logProjectImageUsageRefreshResult(resultCh)
-	return projectImageUsageResponse{
-		RegistryConfigured: s.appImageInventoryConfigured(),
-		ImageStoreMode:     projectImageUsageStoreMode(s),
-		MeasurementStatus:  projectImageUsageMeasurementUnavailable,
-		MeasurementNote:    "image usage refresh is still in progress",
-		Projects:           []projectImageUsageSummary{},
-	}, nil
+	return staleEntry.value, nil
 }
 
 func projectImageUsageCacheKey(principal model.Principal) string {
@@ -536,6 +557,7 @@ func (s *Server) buildProjectImageUsageResponse(
 	if !response.RegistryConfigured {
 		response.MeasurementStatus = projectImageUsageMeasurementUnavailable
 		response.MeasurementNote = "managed image registry inventory is not configured"
+		response.MeasurementReasons = []string{projectImageUsageReasonRegistryNotConfigured}
 		return response, nil
 	}
 
@@ -590,6 +612,7 @@ func (s *Server) buildAppImageInventory(
 		}
 		inventory.Response.MeasurementStatus = projectImageUsageMeasurementUnavailable
 		inventory.Response.MeasurementNote = "managed image registry inventory is not configured"
+		inventory.Response.MeasurementReasons = []string{projectImageUsageReasonRegistryNotConfigured}
 		return inventory, nil
 	}
 
@@ -689,30 +712,38 @@ func (s *Server) buildAppImageInventory(
 			}
 		}
 		version := appImageVersion{
-			ImageRef:              candidate.ImageRef,
-			RuntimeImageRef:       candidate.RuntimeImageRef,
-			Digest:                inspectResult.Digest,
-			Status:                appImageStatusMissing,
-			Current:               candidate.Current,
-			SizeMeasurementStatus: projectImageUsageMeasurementUnavailable,
-			DeleteSupported:       false,
-			RedeploySupported:     false,
-			LastDeployedAt:        cloneTimePointer(candidate.LastDeployedAt),
-			ReclaimableSizeBytes:  reclaimableSizeBytes,
-			Source:                sanitizeAppSourceForAPI(&candidate.Source),
+			ImageRef:               candidate.ImageRef,
+			RuntimeImageRef:        candidate.RuntimeImageRef,
+			Digest:                 inspectResult.Digest,
+			Status:                 appImageStatusMissing,
+			Current:                candidate.Current,
+			SizeMeasurementStatus:  projectImageUsageMeasurementUnavailable,
+			SizeMeasurementReasons: []string{projectImageUsageReasonNoStorageEvidence},
+			DeleteSupported:        false,
+			RedeploySupported:      false,
+			LastDeployedAt:         cloneTimePointer(candidate.LastDeployedAt),
+			ReclaimableSizeBytes:   reclaimableSizeBytes,
+			Source:                 sanitizeAppSourceForAPI(&candidate.Source),
 		}
 		if inspectResult.Exists {
 			version.Status = appImageStatusAvailable
 			version.SizeBytes = inspectResult.SizeBytes
 			version.SizeMeasurementStatus = projectImageUsageMeasurementComplete
+			version.SizeMeasurementReasons = nil
 			version.DeleteSupported = !candidate.Current
 			version.RedeploySupported = true
 		} else if locationEvidence, ok := locationEvidenceByImageRef[candidate.ImageRef]; ok {
 			version.Status = appImageStatusAvailable
 			version.Digest = strings.TrimSpace(locationEvidence.Digest)
 			version.SizeBytes = locationEvidence.SizeBytes
+			version.SizeMeasurementReasons = []string{projectImageUsageReasonMissingManifestEvidence}
 			if locationEvidence.SizeBytes > 0 {
 				version.SizeMeasurementStatus = projectImageUsageMeasurementPartial
+			} else {
+				version.SizeMeasurementReasons = mergeProjectImageMeasurementReasons(
+					version.SizeMeasurementReasons,
+					[]string{projectImageUsageReasonMissingSizeEvidence},
+				)
 			}
 			version.RedeploySupported = true
 		}
@@ -740,6 +771,7 @@ func (s *Server) buildAppImageInventory(
 		ReclaimableSizeBytes: sumAppImageBlobSizes(inventory.ReclaimableBlobSizes),
 	}
 	inventory.Response.MeasurementStatus = summarizeAppImageVersionMeasurementStatus(inventory.Response.Versions)
+	inventory.Response.MeasurementReasons = summarizeAppImageVersionMeasurementReasons(inventory.Response.Versions)
 	return inventory, nil
 }
 

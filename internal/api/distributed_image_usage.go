@@ -22,22 +22,33 @@ type projectImageUsageInventoryResult struct {
 }
 
 type distributedImageUsageEvidence struct {
-	imagesByAppID    map[string][]model.Image
-	locationsByAppID map[string][]model.ImageLocation
-	manifestsByKey   map[string][]model.ImageCacheManifest
-	observedAt       time.Time
+	imagesByAppID         map[string][]model.Image
+	locationsByAppID      map[string][]model.ImageLocation
+	staleLocationsByAppID map[string][]model.ImageLocation
+	manifestsByKey        map[string][]model.ImageCacheManifest
+	staleManifestsByKey   map[string][]model.ImageCacheManifest
+	observedAt            time.Time
 }
 
 type distributedImageCandidateMeasurement struct {
-	locations   []model.ImageLocation
-	manifests   []model.ImageCacheManifest
-	manifest    model.ImageCacheManifest
-	hasManifest bool
-	digest      string
-	sizeBytes   int64
-	hasSize     bool
-	complete    bool
-	conflict    bool
+	locations        []model.ImageLocation
+	manifests        []model.ImageCacheManifest
+	manifest         model.ImageCacheManifest
+	hasManifest      bool
+	hadFreshEvidence bool
+	staleEvidence    bool
+	digest           string
+	sizeBytes        int64
+	hasSize          bool
+	complete         bool
+	digestConflict   bool
+	sizeConflict     bool
+	reasons          []string
+}
+
+type distributedImageManifestConflict struct {
+	digest bool
+	size   bool
 }
 
 func projectImageUsageStoreMode(s *Server) string {
@@ -53,9 +64,11 @@ func projectImageUsageStoreMode(s *Server) string {
 func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []model.App) (distributedImageUsageEvidence, error) {
 	_ = ctx
 	evidence := distributedImageUsageEvidence{
-		imagesByAppID:    make(map[string][]model.Image),
-		locationsByAppID: make(map[string][]model.ImageLocation),
-		manifestsByKey:   make(map[string][]model.ImageCacheManifest),
+		imagesByAppID:         make(map[string][]model.Image),
+		locationsByAppID:      make(map[string][]model.ImageLocation),
+		staleLocationsByAppID: make(map[string][]model.ImageLocation),
+		manifestsByKey:        make(map[string][]model.ImageCacheManifest),
+		staleManifestsByKey:   make(map[string][]model.ImageCacheManifest),
 	}
 	appIDs := make(map[string]struct{}, len(apps))
 	for _, app := range apps {
@@ -90,31 +103,32 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 		if _, ok := appIDs[strings.TrimSpace(location.AppID)]; !ok {
 			continue
 		}
-		if !distributedImageLocationIsFresh(location, cutoff) {
-			continue
-		}
-		evidence.locationsByAppID[location.AppID] = append(evidence.locationsByAppID[location.AppID], location)
-		if observed := distributedImageLocationObservedAt(location); observed.After(evidence.observedAt) {
-			evidence.observedAt = observed
+		if distributedImageLocationIsFresh(location, cutoff) {
+			evidence.locationsByAppID[location.AppID] = append(evidence.locationsByAppID[location.AppID], location)
+			if observed := distributedImageLocationObservedAt(location); observed.After(evidence.observedAt) {
+				evidence.observedAt = observed
+			}
+		} else {
+			evidence.staleLocationsByAppID[location.AppID] = append(evidence.staleLocationsByAppID[location.AppID], location)
 		}
 	}
 
 	manifests, err := s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{
 		PresentOnly: true,
-		SeenAfter:   cutoff,
 	})
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
 	}
 	for _, manifest := range manifests {
-		if !distributedImageManifestIsFresh(manifest, cutoff) {
-			continue
+		index := evidence.staleManifestsByKey
+		if distributedImageManifestIsFresh(manifest, cutoff) {
+			index = evidence.manifestsByKey
+			if manifest.LastSeenAt.After(evidence.observedAt) {
+				evidence.observedAt = manifest.LastSeenAt.UTC()
+			}
 		}
 		for _, key := range distributedImageManifestKeys(manifest) {
-			evidence.manifestsByKey[key] = append(evidence.manifestsByKey[key], manifest)
-		}
-		if manifest.LastSeenAt.After(evidence.observedAt) {
-			evidence.observedAt = manifest.LastSeenAt.UTC()
+			index[key] = append(index[key], manifest)
 		}
 	}
 	return evidence, nil
@@ -137,8 +151,9 @@ func aggregateProjectImageUsageInventories(
 		if accumulator == nil {
 			accumulator = &projectImageUsageAccumulator{
 				Summary: projectImageUsageSummary{
-					ProjectID:         projectID,
-					MeasurementStatus: inventory.Response.MeasurementStatus,
+					ProjectID:          projectID,
+					MeasurementStatus:  inventory.Response.MeasurementStatus,
+					MeasurementReasons: append([]string(nil), inventory.Response.MeasurementReasons...),
 				},
 				TotalBlobSizes:       make(map[string]int64),
 				CurrentBlobSizes:     make(map[string]int64),
@@ -155,6 +170,10 @@ func aggregateProjectImageUsageInventories(
 			accumulator.Summary.MeasurementStatus,
 			inventory.Response.MeasurementStatus,
 		)
+		accumulator.Summary.MeasurementReasons = mergeProjectImageMeasurementReasons(
+			accumulator.Summary.MeasurementReasons,
+			inventory.Response.MeasurementReasons,
+		)
 		accumulator.Summary.Apps = append(accumulator.Summary.Apps, projectImageUsageAppSummary{
 			AppID:                app.ID,
 			AppName:              app.Name,
@@ -166,6 +185,7 @@ func aggregateProjectImageUsageInventories(
 			StaleSizeBytes:       inventory.Response.Summary.StaleSizeBytes,
 			ReclaimableSizeBytes: inventory.Response.Summary.ReclaimableSizeBytes,
 			MeasurementStatus:    inventory.Response.MeasurementStatus,
+			MeasurementReasons:   append([]string(nil), inventory.Response.MeasurementReasons...),
 		})
 		unionAppImageBlobSizes(accumulator.TotalBlobSizes, inventory.TotalBlobSizes)
 		unionAppImageBlobSizes(accumulator.CurrentBlobSizes, inventory.CurrentBlobSizes)
@@ -200,10 +220,13 @@ func aggregateProjectImageUsageInventories(
 		}
 	} else {
 		status := ""
+		reasons := []string(nil)
 		for _, project := range response.Projects {
 			status = combineProjectImageMeasurementStatus(status, project.MeasurementStatus)
+			reasons = mergeProjectImageMeasurementReasons(reasons, project.MeasurementReasons)
 		}
 		response.MeasurementStatus = status
+		response.MeasurementReasons = reasons
 	}
 	return response
 }
@@ -323,17 +346,18 @@ func (s *Server) buildDistributedAppImageInventory(
 		}
 		measurement := measurements[candidate.ImageRef]
 		version := appImageVersion{
-			ImageRef:              candidate.ImageRef,
-			RuntimeImageRef:       candidate.RuntimeImageRef,
-			Digest:                measurement.digest,
-			Status:                appImageStatusMissing,
-			Current:               candidate.Current,
-			SizeBytes:             measurement.sizeBytes,
-			SizeMeasurementStatus: distributedMeasurementStatus(measurement),
-			DeleteSupported:       false,
-			RedeploySupported:     false,
-			LastDeployedAt:        cloneTimePointer(candidate.LastDeployedAt),
-			Source:                sanitizeAppSourceForAPI(&candidate.Source),
+			ImageRef:               candidate.ImageRef,
+			RuntimeImageRef:        candidate.RuntimeImageRef,
+			Digest:                 measurement.digest,
+			Status:                 appImageStatusMissing,
+			Current:                candidate.Current,
+			SizeBytes:              measurement.sizeBytes,
+			SizeMeasurementStatus:  distributedMeasurementStatus(measurement),
+			SizeMeasurementReasons: append([]string(nil), measurement.reasons...),
+			DeleteSupported:        false,
+			RedeploySupported:      false,
+			LastDeployedAt:         cloneTimePointer(candidate.LastDeployedAt),
+			Source:                 sanitizeAppSourceForAPI(&candidate.Source),
 		}
 		if measurement.hasEvidence() {
 			version.Status = appImageStatusAvailable
@@ -355,6 +379,7 @@ func (s *Server) buildDistributedAppImageInventory(
 		ReclaimableSizeBytes: sumAppImageBlobSizes(inventory.ReclaimableBlobSizes),
 	}
 	inventory.Response.MeasurementStatus = summarizeAppImageVersionMeasurementStatus(inventory.Response.Versions)
+	inventory.Response.MeasurementReasons = summarizeAppImageVersionMeasurementReasons(inventory.Response.Versions)
 	return inventory
 }
 
@@ -367,36 +392,59 @@ func distributedImageCandidateMeasurementFor(
 	candidate appImageCandidate,
 	evidence distributedImageUsageEvidence,
 ) distributedImageCandidateMeasurement {
+	locations := distributedImageLocationsForCandidate(app.ID, candidate, evidence)
+	manifests := distributedImageManifestsForCandidate(candidate, evidence)
 	measurement := distributedImageCandidateMeasurement{
-		locations: distributedImageLocationsForCandidate(app.ID, candidate, evidence),
-		manifests: distributedImageManifestsForCandidate(candidate, evidence),
+		locations:        locations,
+		manifests:        manifests,
+		hadFreshEvidence: len(locations) > 0 || len(manifests) > 0,
+		staleEvidence: len(distributedImageLocationsForCandidateFromIndex(
+			app.ID,
+			candidate,
+			evidence.staleLocationsByAppID,
+		)) > 0 || len(distributedImageManifestsForCandidateFromIndex(
+			candidate,
+			evidence.staleManifestsByKey,
+		)) > 0,
 	}
 	if image, ok := distributedImageForCandidate(app.ID, candidate, evidence); ok {
 		measurement.digest = strings.TrimSpace(image.CanonicalDigest)
 	}
 
-	manifests := measurement.manifests
 	expectedDigest := firstNonEmptyDistributedDigest(measurement.digest, managedImageDigest(candidate.ImageRef))
 	if expectedDigest != "" {
 		matchingLocations := make([]model.ImageLocation, 0, len(measurement.locations))
 		for _, location := range measurement.locations {
 			locationDigest := firstNonEmptyDistributedDigest(location.Digest, managedImageDigest(location.ImageRef))
-			if strings.EqualFold(locationDigest, expectedDigest) {
+			switch {
+			case locationDigest == "":
+				// A location without digest evidence cannot corroborate or
+				// contradict the canonical digest.
+			case strings.EqualFold(locationDigest, expectedDigest):
 				matchingLocations = append(matchingLocations, location)
+			default:
+				measurement.digestConflict = true
 			}
 		}
 		measurement.locations = matchingLocations
 
 		matched := make([]model.ImageCacheManifest, 0, len(manifests))
 		for _, manifest := range manifests {
-			if strings.EqualFold(strings.TrimSpace(manifest.Digest), expectedDigest) {
+			manifestDigest := strings.TrimSpace(manifest.Digest)
+			switch {
+			case manifestDigest == "":
+				// A manifest without digest evidence cannot corroborate or
+				// contradict the canonical digest.
+			case strings.EqualFold(manifestDigest, expectedDigest):
 				matched = append(matched, manifest)
+			default:
+				measurement.digestConflict = true
 			}
 		}
 		if len(matched) > 0 {
 			manifests = matched
 		} else if len(manifests) > 0 {
-			measurement.conflict = true
+			measurement.digestConflict = true
 			manifests = nil
 		}
 	} else if len(measurement.locations) > 0 {
@@ -428,9 +476,10 @@ func distributedImageCandidateMeasurementFor(
 			measurement.hasSize = true
 			measurement.complete = complete
 		}
-		measurement.conflict = measurement.conflict || conflict
+		measurement.digestConflict = measurement.digestConflict || conflict.digest
+		measurement.sizeConflict = measurement.sizeConflict || conflict.size
 	}
-	if measurement.conflict {
+	if measurement.digestConflict || measurement.sizeConflict {
 		measurement.complete = false
 		measurement.hasSize = false
 		measurement.sizeBytes = 0
@@ -440,6 +489,7 @@ func distributedImageCandidateMeasurementFor(
 			measurement.digest = ""
 		}
 	}
+	measurement.reasons = distributedImageMeasurementReasons(measurement)
 	return measurement
 }
 
@@ -463,9 +513,17 @@ func distributedImageForCandidate(appID string, candidate appImageCandidate, evi
 }
 
 func distributedImageLocationsForCandidate(appID string, candidate appImageCandidate, evidence distributedImageUsageEvidence) []model.ImageLocation {
+	return distributedImageLocationsForCandidateFromIndex(appID, candidate, evidence.locationsByAppID)
+}
+
+func distributedImageLocationsForCandidateFromIndex(
+	appID string,
+	candidate appImageCandidate,
+	locationsByAppID map[string][]model.ImageLocation,
+) []model.ImageLocation {
 	keys := distributedImageCandidateKeys(candidate, "")
 	locations := make([]model.ImageLocation, 0)
-	for _, location := range evidence.locationsByAppID[appID] {
+	for _, location := range locationsByAppID[appID] {
 		if strings.TrimSpace(location.Status) != model.ImageLocationStatusPresent {
 			continue
 		}
@@ -478,11 +536,18 @@ func distributedImageLocationsForCandidate(appID string, candidate appImageCandi
 }
 
 func distributedImageManifestsForCandidate(candidate appImageCandidate, evidence distributedImageUsageEvidence) []model.ImageCacheManifest {
+	return distributedImageManifestsForCandidateFromIndex(candidate, evidence.manifestsByKey)
+}
+
+func distributedImageManifestsForCandidateFromIndex(
+	candidate appImageCandidate,
+	manifestsByKey map[string][]model.ImageCacheManifest,
+) []model.ImageCacheManifest {
 	keys := distributedImageCandidateKeys(candidate, "")
 	seen := map[string]struct{}{}
 	out := make([]model.ImageCacheManifest, 0)
 	for _, key := range keys {
-		for _, manifest := range evidence.manifestsByKey[key] {
+		for _, manifest := range manifestsByKey[key] {
 			identity := distributedImageManifestIdentity(manifest)
 			if _, ok := seen[identity]; ok {
 				continue
@@ -494,9 +559,9 @@ func distributedImageManifestsForCandidate(candidate appImageCandidate, evidence
 	return out
 }
 
-func selectDistributedManifest(manifests []model.ImageCacheManifest) (model.ImageCacheManifest, bool, bool) {
+func selectDistributedManifest(manifests []model.ImageCacheManifest) (model.ImageCacheManifest, bool, distributedImageManifestConflict) {
 	if len(manifests) == 0 {
-		return model.ImageCacheManifest{}, false, false
+		return model.ImageCacheManifest{}, false, distributedImageManifestConflict{}
 	}
 	digests := map[string]struct{}{}
 	completeSizes := map[int64]struct{}{}
@@ -508,7 +573,10 @@ func selectDistributedManifest(manifests []model.ImageCacheManifest) (model.Imag
 			completeSizes[size] = struct{}{}
 		}
 	}
-	conflict := len(digests) > 1 || (len(digests) <= 1 && len(completeSizes) > 1)
+	conflict := distributedImageManifestConflict{
+		digest: len(digests) > 1,
+		size:   len(digests) <= 1 && len(completeSizes) > 1,
+	}
 	sort.SliceStable(manifests, func(i, j int) bool {
 		leftSize, _ := distributedManifestSize(manifests[i])
 		rightSize, _ := distributedManifestSize(manifests[j])
@@ -539,10 +607,44 @@ func distributedMeasurementStatus(measurement distributedImageCandidateMeasureme
 	if !measurement.hasSize {
 		return projectImageUsageMeasurementUnavailable
 	}
-	if measurement.complete && !measurement.conflict {
+	if measurement.complete && !measurement.digestConflict && !measurement.sizeConflict {
 		return projectImageUsageMeasurementComplete
 	}
 	return projectImageUsageMeasurementPartial
+}
+
+func distributedImageMeasurementReasons(measurement distributedImageCandidateMeasurement) []string {
+	reasons := []string{}
+	if measurement.digestConflict {
+		reasons = append(reasons, projectImageUsageReasonDigestConflict)
+	}
+	if measurement.sizeConflict {
+		reasons = append(reasons, projectImageUsageReasonSizeConflict)
+	}
+	if len(reasons) > 0 {
+		return mergeProjectImageMeasurementReasons(reasons)
+	}
+	if !measurement.hasManifest {
+		switch {
+		case len(measurement.locations) > 0 || measurement.hadFreshEvidence:
+			reasons = append(reasons, projectImageUsageReasonMissingManifestEvidence)
+		case measurement.staleEvidence:
+			reasons = append(reasons, projectImageUsageReasonStaleInventory)
+		default:
+			reasons = append(reasons, projectImageUsageReasonNoStorageEvidence)
+		}
+		return reasons
+	}
+	if measurement.manifest.ManifestSizeBytes <= 0 {
+		reasons = append(reasons, projectImageUsageReasonMissingManifestSize)
+	}
+	if measurement.manifest.TotalBlobBytes <= 0 {
+		reasons = append(reasons, projectImageUsageReasonMissingBlobSize)
+	}
+	if !measurement.hasSize && len(reasons) == 0 {
+		reasons = append(reasons, projectImageUsageReasonMissingSizeEvidence)
+	}
+	return mergeProjectImageMeasurementReasons(reasons)
 }
 
 func distributedImageUsageSizeKey(candidate appImageCandidate, digest string) string {
@@ -711,6 +813,35 @@ func summarizeAppImageVersionMeasurementStatus(versions []appImageVersion) strin
 		status = combineProjectImageMeasurementStatus(status, versionStatus)
 	}
 	return status
+}
+
+func summarizeAppImageVersionMeasurementReasons(versions []appImageVersion) []string {
+	reasons := []string(nil)
+	for _, version := range versions {
+		reasons = mergeProjectImageMeasurementReasons(reasons, version.SizeMeasurementReasons)
+	}
+	return reasons
+}
+
+func mergeProjectImageMeasurementReasons(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	for _, group := range groups {
+		for _, reason := range group {
+			reason = strings.TrimSpace(reason)
+			if reason != "" {
+				seen[reason] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for reason := range seen {
+		out = append(out, reason)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func firstNonEmptyDistributedDigest(values ...string) string {
