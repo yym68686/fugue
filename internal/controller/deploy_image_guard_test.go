@@ -30,30 +30,27 @@ func TestRecordImportedDistributedImageStrictVerifiesExactDestinationCacheGraph(
 	const (
 		managedRef      = "registry.fugue.internal:5000/fugue-apps/demo:image-abc123"
 		cacheEndpoint   = "http://203.0.113.20:5000"
-		cacheRef        = "203.0.113.20:5000/fugue-apps/demo:image-abc123"
 		canonicalDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		configDigest    = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	)
-	immutableCacheRef := imageRefWithDigest(cacheRef, canonicalDigest)
-	resolveCalls := 0
-	inspectCalls := 0
+	verifyCalls := 0
 	svc := &Service{
 		Store:  stateStore,
 		Logger: log.New(io.Discard, "", 0),
 		Config: config.ControllerConfig{ImageStoreMode: "distributed"},
-		resolveManagedImageDigestRef: func(_ context.Context, imageRef string) (string, error) {
-			resolveCalls++
-			if imageRef != cacheRef {
-				t.Fatalf("digest resolution must use exact destination cache ref %q, got %q", cacheRef, imageRef)
+		verifyDestinationImageCache: func(_ context.Context, endpoint, imageRef string) (destinationImageCacheVerification, error) {
+			verifyCalls++
+			if endpoint != cacheEndpoint || imageRef != managedRef {
+				t.Fatalf("local graph verification target = %q %q, want %q %q", endpoint, imageRef, cacheEndpoint, managedRef)
 			}
-			return immutableCacheRef, nil
-		},
-		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
-			inspectCalls++
-			if imageRef != immutableCacheRef {
-				t.Fatalf("manifest inspection must use immutable destination cache ref %q, got %q", immutableCacheRef, imageRef)
-			}
-			return true, map[string]int64{canonicalDigest: 256, configDigest: 128}, nil
+			return destinationImageCacheVerification{
+				Repo:                "fugue-apps/demo",
+				Target:              "image-abc123",
+				Available:           true,
+				CanonicalDigest:     canonicalDigest,
+				ReferencedBlobs:     []string{configDigest},
+				ReferencedBlobBytes: 128,
+			}, nil
 		},
 	}
 	app := model.App{ID: "app_1", TenantID: "tenant_1"}
@@ -68,8 +65,8 @@ func TestRecordImportedDistributedImageStrictVerifiesExactDestinationCacheGraph(
 	if err != nil {
 		t.Fatalf("record strict distributed import: %v", err)
 	}
-	if resolveCalls != 1 || inspectCalls != 1 {
-		t.Fatalf("expected one exact-cache resolve and inspection, got resolve=%d inspect=%d", resolveCalls, inspectCalls)
+	if verifyCalls != 1 {
+		t.Fatalf("expected one exact destination local-graph verification, got %d", verifyCalls)
 	}
 	images, err := stateStore.ListImages(model.ImageFilter{AppID: app.ID, PlatformAdmin: true})
 	if err != nil {
@@ -93,18 +90,17 @@ func TestRecordImportedDistributedImageStrictRejectsIncompleteDestinationCacheGr
 	const (
 		managedRef      = "registry.fugue.internal:5000/fugue-apps/demo:image-abc123"
 		cacheEndpoint   = "http://203.0.113.20:5000"
-		cacheRef        = "203.0.113.20:5000/fugue-apps/demo:image-abc123"
 		canonicalDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		otherDigest     = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	)
-	immutableCacheRef := imageRefWithDigest(cacheRef, canonicalDigest)
 	tests := []struct {
-		name      string
-		blobSizes map[string]int64
+		name         string
+		verification destinationImageCacheVerification
 	}{
-		{name: "empty graph"},
-		{name: "root missing", blobSizes: map[string]int64{otherDigest: 128}},
-		{name: "invalid blob size", blobSizes: map[string]int64{canonicalDigest: 0}},
+		{name: "unavailable", verification: destinationImageCacheVerification{Repo: "fugue-apps/demo", Target: "image-abc123"}},
+		{name: "empty graph", verification: destinationImageCacheVerification{Repo: "fugue-apps/demo", Target: "image-abc123", Available: true, CanonicalDigest: canonicalDigest}},
+		{name: "invalid graph digest", verification: destinationImageCacheVerification{Repo: "fugue-apps/demo", Target: "image-abc123", Available: true, CanonicalDigest: canonicalDigest, ReferencedBlobs: []string{"invalid"}, ReferencedBlobBytes: 128}},
+		{name: "empty graph bytes", verification: destinationImageCacheVerification{Repo: "fugue-apps/demo", Target: "image-abc123", Available: true, CanonicalDigest: canonicalDigest, ReferencedBlobs: []string{otherDigest}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -116,17 +112,11 @@ func TestRecordImportedDistributedImageStrictRejectsIncompleteDestinationCacheGr
 				Store:  stateStore,
 				Logger: log.New(io.Discard, "", 0),
 				Config: config.ControllerConfig{ImageStoreMode: "distributed"},
-				resolveManagedImageDigestRef: func(_ context.Context, imageRef string) (string, error) {
-					if imageRef != cacheRef {
-						t.Fatalf("must not resolve through central registry, got %q", imageRef)
+				verifyDestinationImageCache: func(_ context.Context, endpoint, imageRef string) (destinationImageCacheVerification, error) {
+					if endpoint != cacheEndpoint || imageRef != managedRef {
+						t.Fatalf("unexpected local graph verification target %q %q", endpoint, imageRef)
 					}
-					return immutableCacheRef, nil
-				},
-				inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
-					if imageRef != immutableCacheRef {
-						t.Fatalf("must not inspect central registry, got %q", imageRef)
-					}
-					return true, tt.blobSizes, nil
+					return tt.verification, nil
 				},
 			}
 			app := model.App{ID: "app_1", TenantID: "tenant_1"}
@@ -138,7 +128,7 @@ func TestRecordImportedDistributedImageStrictRejectsIncompleteDestinationCacheGr
 				managedRef,
 				importImageDestination{CacheEndpoint: cacheEndpoint},
 			)
-			if err == nil || !strings.Contains(err.Error(), "no complete manifest graph") {
+			if err == nil || !strings.Contains(err.Error(), "destination image-cache") {
 				t.Fatalf("expected incomplete graph rejection, got %v", err)
 			}
 			images, listErr := stateStore.ListImages(model.ImageFilter{PlatformAdmin: true})

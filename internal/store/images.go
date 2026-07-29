@@ -55,6 +55,55 @@ func (s *Store) UpsertImage(image model.Image) (model.Image, error) {
 	return out, err
 }
 
+func (s *Store) DemoteLegacyImageIfAvailableCanonicalPeer(
+	legacyID,
+	tenantID,
+	imageRef,
+	canonicalDigest string,
+) (model.Image, error) {
+	legacyID = strings.TrimSpace(legacyID)
+	tenantID = strings.TrimSpace(tenantID)
+	imageRef = strings.TrimSpace(imageRef)
+	canonicalDigest = CanonicalImageDigest(canonicalDigest)
+	if legacyID == "" || imageRef == "" || canonicalDigest == "" {
+		return model.Image{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDemoteLegacyImageIfAvailableCanonicalPeer(legacyID, tenantID, imageRef, canonicalDigest)
+	}
+	var out model.Image
+	err := s.withLockedState(true, func(state *model.State) error {
+		legacyIndex := -1
+		peerAvailable := false
+		for index, image := range state.Images {
+			if image.ID == legacyID {
+				legacyIndex = index
+				continue
+			}
+			if strings.TrimSpace(image.TenantID) == tenantID && strings.TrimSpace(image.ImageRef) == imageRef &&
+				CanonicalImageDigest(image.CanonicalDigest) == canonicalDigest &&
+				strings.EqualFold(strings.TrimSpace(image.LifecycleState), model.ImageLifecycleAvailable) {
+				peerAvailable = true
+			}
+		}
+		if legacyIndex < 0 {
+			return ErrNotFound
+		}
+		legacy := state.Images[legacyIndex]
+		if strings.TrimSpace(legacy.TenantID) != tenantID || strings.TrimSpace(legacy.ImageRef) != imageRef ||
+			CanonicalImageDigest(legacy.CanonicalDigest) != "" ||
+			!strings.EqualFold(strings.TrimSpace(legacy.LifecycleState), model.ImageLifecycleAvailable) || !peerAvailable {
+			return ErrConflict
+		}
+		legacy.LifecycleState = model.ImageLifecycleLost
+		legacy.UpdatedAt = time.Now().UTC()
+		state.Images[legacyIndex] = legacy
+		out = legacy
+		return nil
+	})
+	return out, err
+}
+
 func (s *Store) GetImage(id, tenantID string, platformAdmin bool) (model.Image, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {

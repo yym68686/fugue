@@ -1,12 +1,72 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestDemoteLegacyImageRequiresAtomicallyAvailableCanonicalPeer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		imageRef = "registry.fugue.internal:5000/fugue-apps/demo:image-abc123"
+		digest   = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	for _, test := range []struct {
+		name          string
+		peerLifecycle string
+		wantSuccess   bool
+	}{
+		{name: "available peer", peerLifecycle: " AVAILABLE ", wantSuccess: true},
+		{name: "lost peer", peerLifecycle: model.ImageLifecycleLost},
+		{name: "deleting peer", peerLifecycle: model.ImageLifecycleDeleting},
+		{name: "deleted peer", peerLifecycle: model.ImageLifecycleDeleted},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			s := New(filepath.Join(t.TempDir(), "store.json"))
+			if err := s.Init(); err != nil {
+				t.Fatalf("init store: %v", err)
+			}
+			err := s.withLockedState(true, func(state *model.State) error {
+				state.Images = append(state.Images,
+					model.Image{ID: "legacy", TenantID: "tenant", AppID: "app", ImageRef: imageRef, LifecycleState: model.ImageLifecycleAvailable},
+					model.Image{ID: "canonical", TenantID: "tenant", AppID: "app", ImageRef: imageRef, CanonicalDigest: digest, LifecycleState: test.peerLifecycle},
+				)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("seed duplicate images: %v", err)
+			}
+
+			updated, err := s.DemoteLegacyImageIfAvailableCanonicalPeer("legacy", "tenant", imageRef, digest)
+			if test.wantSuccess {
+				if err != nil {
+					t.Fatalf("demote legacy image: %v", err)
+				}
+				if updated.CanonicalDigest != "" || updated.LifecycleState != model.ImageLifecycleLost {
+					t.Fatalf("demoted legacy image = %+v", updated)
+				}
+				return
+			}
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("non-serving peer error = %v, want conflict", err)
+			}
+			legacy, getErr := s.GetImage("legacy", "", true)
+			if getErr != nil {
+				t.Fatalf("get unchanged legacy image: %v", getErr)
+			}
+			if legacy.CanonicalDigest != "" || legacy.LifecycleState != model.ImageLifecycleAvailable {
+				t.Fatalf("legacy image changed without an available peer: %+v", legacy)
+			}
+		})
+	}
+}
 
 func TestImageStoreReplicaPinAndTaskSemantics(t *testing.T) {
 	t.Parallel()

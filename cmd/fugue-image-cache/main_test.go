@@ -820,6 +820,48 @@ func TestManagementVerifyRequiresCompleteOCIReferences(t *testing.T) {
 	}
 }
 
+func TestManagementVerifyRejectsRemoteFallbackWhenLocalGraphIsMissing(t *testing.T) {
+	t.Parallel()
+
+	var upstreamHits atomic.Int32
+	var copyCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = io.WriteString(w, `{"schemaVersion":2}`)
+	}))
+	t.Cleanup(upstream.Close)
+	cache := &imageCache{
+		managementToken: "management-secret",
+		upstreamBase:    strings.TrimPrefix(upstream.URL, "http://"),
+		registry: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.NotFound(w, nil)
+		}),
+		copyImageFn: func(context.Context, string, string) error {
+			copyCalls.Add(1)
+			return nil
+		},
+	}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"http://image-cache.test/fugue/cache/v1/verify",
+		strings.NewReader(`{"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-remote-only"}`),
+	)
+	req.Header.Set("Authorization", "Bearer management-secret")
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("remote-only verification status = %d, want %d; body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Fatalf("management verification reached upstream %d times", got)
+	}
+	if got := copyCalls.Load(); got != 0 {
+		t.Fatalf("management verification attempted hydration %d times", got)
+	}
+}
+
 func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 	t.Parallel()
 

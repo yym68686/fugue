@@ -35,6 +35,7 @@ type Service struct {
 	readRegistryMaintenance         func(context.Context) registryMaintenanceStatus
 	resolveManagedImageDigestRef    func(context.Context, string) (string, error)
 	resolveRemoteImageDigest        func(context.Context, string) (string, error)
+	verifyDestinationImageCache     destinationImageCacheVerifyFunc
 	releaseGateMetricsQuerier       releaseflow.ReleaseGateMetricsQuerier
 	releaseGateHTTPClient           releaseflow.HTTPDoer
 	safeRolloutEdgeBundleObserver   safeRolloutEdgeBundleObserver
@@ -124,6 +125,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		builderRegistryPushBase:        strings.TrimSpace(cfg.BuilderRegistryPushBase),
 		resolveManagedImageDigestRef:   sourceimport.ResolveRemoteImageDigestRef,
 		resolveRemoteImageDigest:       sourceimport.ResolveRemoteImageDigest,
+		verifyDestinationImageCache:    newDestinationImageCacheVerifier(cfg.BootstrapAdminKey),
 		releaseGateMetricsQuerier:      controllerReleaseGateMetricsQuerier(cfg),
 		safeRolloutDrainMetricsQuerier: controllerSafeRolloutDrainMetricsQuerier(cfg),
 		latestGitHubCommit:             sourceimport.LatestGitHubCommit,

@@ -111,6 +111,62 @@ RETURNING `+imageColumns(), image.ID, nullIfEmpty(image.TenantID), image.AppID, 
 	return inserted, nil
 }
 
+func (s *Store) pgDemoteLegacyImageIfAvailableCanonicalPeer(
+	legacyID,
+	tenantID,
+	imageRef,
+	canonicalDigest string,
+) (model.Image, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Image{}, mapDBErr(err)
+	}
+	defer tx.Rollback()
+	var peerID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT id
+FROM fugue_images
+WHERE id <> $1
+  AND COALESCE(tenant_id, '') = COALESCE($2::text, '')
+  AND image_ref = $3
+  AND canonical_digest = $4
+  AND LOWER(BTRIM(lifecycle_state)) = $5
+ORDER BY id
+LIMIT 1
+FOR SHARE
+`, legacyID, nullIfEmpty(tenantID), imageRef, canonicalDigest, model.ImageLifecycleAvailable).Scan(&peerID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Image{}, ErrConflict
+		}
+		return model.Image{}, mapDBErr(err)
+	}
+	if strings.TrimSpace(peerID) == "" {
+		return model.Image{}, ErrConflict
+	}
+	updated, err := scanImage(tx.QueryRowContext(ctx, `
+UPDATE fugue_images
+SET lifecycle_state = $5,
+	updated_at = $6
+WHERE id = $1
+  AND COALESCE(tenant_id, '') = COALESCE($2::text, '')
+  AND image_ref = $3
+  AND COALESCE(canonical_digest, '') = ''
+  AND LOWER(BTRIM(lifecycle_state)) = $4
+RETURNING `+imageColumns(), legacyID, nullIfEmpty(tenantID), imageRef, model.ImageLifecycleAvailable, model.ImageLifecycleLost, time.Now().UTC()))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Image{}, ErrConflict
+		}
+		return model.Image{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Image{}, mapDBErr(err)
+	}
+	return updated, nil
+}
+
 func (s *Store) pgGetImage(id, tenantID string, platformAdmin bool) (model.Image, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

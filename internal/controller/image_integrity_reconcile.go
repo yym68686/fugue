@@ -75,11 +75,18 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 		if len(candidates) == 1 {
 			for digest := range candidates {
 				if distributedImageIdentityExists(images, image, digest) {
-					image.LifecycleState = model.ImageLifecycleLost
-					if _, err := s.Store.UpsertImage(image); err != nil {
+					if _, err := s.Store.DemoteLegacyImageIfAvailableCanonicalPeer(
+						image.ID,
+						image.TenantID,
+						image.ImageRef,
+						digest,
+					); err != nil {
 						return fmt.Errorf("demote superseded legacy image %s: %w", image.ID, err)
 					}
 					break
+				}
+				if distributedImageIdentityExistsAtAnyLifecycle(images, image, digest) {
+					return fmt.Errorf("backfill canonical digest for image %s: canonical peer is not available", image.ID)
 				}
 
 				image.CanonicalDigest = digest
@@ -98,9 +105,12 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 					if !distributedImageIdentityExists(latest, image, digest) {
 						return fmt.Errorf("backfill canonical digest for image %s: %w", image.ID, err)
 					}
-					image.CanonicalDigest = ""
-					image.LifecycleState = model.ImageLifecycleLost
-					if _, demoteErr := s.Store.UpsertImage(image); demoteErr != nil {
+					if _, demoteErr := s.Store.DemoteLegacyImageIfAvailableCanonicalPeer(
+						image.ID,
+						image.TenantID,
+						image.ImageRef,
+						digest,
+					); demoteErr != nil {
 						return fmt.Errorf("demote concurrently superseded legacy image %s: %w", image.ID, demoteErr)
 					}
 				}
@@ -123,13 +133,28 @@ func (s *Service) repairDistributedImages(ctx context.Context, manifests []model
 }
 
 func distributedImageIdentityExists(images []model.Image, legacy model.Image, digest string) bool {
+	return distributedImageIdentityExistsMatching(images, legacy, digest, func(candidate model.Image) bool {
+		return strings.EqualFold(strings.TrimSpace(candidate.LifecycleState), model.ImageLifecycleAvailable)
+	})
+}
+
+func distributedImageIdentityExistsAtAnyLifecycle(images []model.Image, legacy model.Image, digest string) bool {
+	return distributedImageIdentityExistsMatching(images, legacy, digest, func(model.Image) bool { return true })
+}
+
+func distributedImageIdentityExistsMatching(
+	images []model.Image,
+	legacy model.Image,
+	digest string,
+	accept func(model.Image) bool,
+) bool {
 	digest = store.CanonicalImageDigest(digest)
-	if digest == "" {
+	if digest == "" || accept == nil {
 		return false
 	}
 	for _, candidate := range images {
 		if candidate.ID == legacy.ID || strings.TrimSpace(candidate.TenantID) != strings.TrimSpace(legacy.TenantID) ||
-			strings.TrimSpace(candidate.ImageRef) != strings.TrimSpace(legacy.ImageRef) {
+			strings.TrimSpace(candidate.ImageRef) != strings.TrimSpace(legacy.ImageRef) || !accept(candidate) {
 			continue
 		}
 		if store.CanonicalImageDigest(candidate.CanonicalDigest) == digest {
