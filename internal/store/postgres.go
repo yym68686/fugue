@@ -1366,17 +1366,10 @@ var postgresSchemaStatements = []string{
 		manifest_digest TEXT NOT NULL DEFAULT '',
 		manifest_json JSONB NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
-		deleted_at TIMESTAMPTZ NULL,
-		physical_deleted_at TIMESTAMPTZ NULL,
-		physical_delete_attempted_at TIMESTAMPTZ NULL,
-		physical_delete_error TEXT NOT NULL DEFAULT ''
+		deleted_at TIMESTAMPTZ NULL
 	)`,
-	`ALTER TABLE fugue_backup_artifacts ADD COLUMN IF NOT EXISTS physical_deleted_at TIMESTAMPTZ NULL`,
-	`ALTER TABLE fugue_backup_artifacts ADD COLUMN IF NOT EXISTS physical_delete_attempted_at TIMESTAMPTZ NULL`,
-	`ALTER TABLE fugue_backup_artifacts ADD COLUMN IF NOT EXISTS physical_delete_error TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_artifacts_policy_created ON fugue_backup_artifacts (policy_id, created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_artifacts_run ON fugue_backup_artifacts (run_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_artifacts_physical_gc ON fugue_backup_artifacts (status, physical_delete_attempted_at, deleted_at) WHERE physical_deleted_at IS NULL AND status IN ('deleted', 'expired')`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_artifacts_target_history ON fugue_backup_artifacts (target_type, target_tenant_id, target_project_id, target_app_id, created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_artifacts_billable ON fugue_backup_artifacts (tenant_id, billable, status) WHERE billable = true AND status = 'active'`,
 	`CREATE TABLE IF NOT EXISTS fugue_backup_restore_plans (

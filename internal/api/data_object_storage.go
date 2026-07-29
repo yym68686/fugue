@@ -515,33 +515,17 @@ func (b *dataObjectBackend) deleteObjects(ctx context.Context, keys []string) er
 	}
 }
 
-// deleteLogicalObjects accepts the same logical keys used by putObject and
-// applies the backend prefix exactly once. deleteObjects itself intentionally
-// continues to accept physical keys because listObjects returns physical S3
-// keys and the data-workspace GC passes those through directly.
-func (b *dataObjectBackend) deleteLogicalObjects(ctx context.Context, keys []string) error {
-	physical := make([]string, 0, len(keys))
-	for _, key := range keys {
-		physical = append(physical, b.objectKey(key))
-	}
-	return b.deleteObjects(ctx, physical)
-}
-
 func (b *dataObjectBackend) deleteObjectBatch(ctx context.Context, batch []string) error {
 	objects := make([]types.ObjectIdentifier, 0, len(batch))
 	for _, key := range batch {
 		objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
 	}
-	resp, err := b.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+	_, err := b.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 		Bucket: aws.String(b.backend.Bucket),
 		Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
 	})
 	if err != nil {
 		return err
-	}
-	if resp != nil && len(resp.Errors) > 0 {
-		first := resp.Errors[0]
-		return fmt.Errorf("delete object %s failed (%s): %s", aws.ToString(first.Key), aws.ToString(first.Code), aws.ToString(first.Message))
 	}
 	return nil
 }

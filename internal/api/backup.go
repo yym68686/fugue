@@ -38,10 +38,6 @@ const (
 	backupRunHeartbeatPeriod = 30 * time.Second
 	backupBackendProbeTTL    = 30 * time.Second
 	backupRunMaxRetries      = 3
-	backupArtifactGCGrace    = time.Hour
-	backupArtifactGCLimit    = 20
-	backupArtifactGCLockName = "fugue-backup-artifact-physical-gc-v1"
-	backupArtifactGCTimeout  = 45 * time.Second
 
 	managedPostgresSuspendedBackupMessage = "managed_postgres_suspended: resume before backup"
 )
@@ -109,168 +105,13 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 	ticker := time.NewTicker(backupSchedulerInterval)
 	defer ticker.Stop()
 	s.enqueueDueBackups(ctx)
-	go s.sweepDeletedBackupArtifacts(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			s.enqueueDueBackups(ctx)
-			go s.sweepDeletedBackupArtifacts(ctx)
 		}
-	}
-}
-
-func (s *Server) sweepDeletedBackupArtifacts(parent context.Context) {
-	if s == nil || s.store == nil {
-		return
-	}
-	if parent == nil {
-		parent = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parent, backupArtifactGCTimeout)
-	defer cancel()
-	acquired, err := s.store.WithAdvisoryLock(ctx, backupArtifactGCLockName, func() error {
-		artifacts, err := s.store.ListBackupArtifactCleanupCandidates(store.BackupArtifactCleanupFilter{
-			Before: time.Now().UTC().Add(-backupArtifactGCGrace),
-			Limit:  backupArtifactGCLimit,
-		})
-		if err != nil {
-			return err
-		}
-		deletedCount := 0
-		var deletedBytes int64
-		for _, artifact := range artifacts {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := s.deleteBackupArtifactObjects(ctx, artifact); err != nil {
-				if s.log != nil {
-					s.log.Printf("backup artifact physical cleanup failed artifact=%s backend=%s: %v", artifact.ID, artifact.BackendID, err)
-				}
-				if recordErr := s.store.RecordBackupArtifactPhysicalCleanupFailure(artifact.ID, time.Now().UTC(), err.Error()); recordErr != nil && s.log != nil {
-					s.log.Printf("backup artifact physical cleanup failure marker failed artifact=%s: %v", artifact.ID, recordErr)
-				}
-				continue
-			}
-			if err := s.store.MarkBackupArtifactPhysicalDeleted(artifact.ID, time.Now().UTC()); err != nil {
-				if s.log != nil {
-					s.log.Printf("backup artifact physical cleanup marker failed artifact=%s: %v", artifact.ID, err)
-				}
-				continue
-			}
-			deletedCount++
-			deletedBytes += artifact.SizeBytes
-		}
-		if deletedCount > 0 && s.log != nil {
-			s.log.Printf("backup artifact physical cleanup completed artifacts=%d recorded_bytes=%d", deletedCount, deletedBytes)
-		}
-		return nil
-	})
-	if err != nil && s.log != nil && !errors.Is(err, context.Canceled) {
-		s.log.Printf("backup artifact physical cleanup sweep failed: %v", err)
-	}
-	if !acquired {
-		return
-	}
-}
-
-func (s *Server) deleteBackupArtifactObjects(ctx context.Context, artifact model.BackupArtifact) error {
-	artifact = model.NormalizeBackupArtifact(artifact)
-	if artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired {
-		return fmt.Errorf("artifact is not terminal")
-	}
-	if artifact.Protected {
-		return fmt.Errorf("artifact is protected")
-	}
-	logicalKeys, err := backupArtifactObjectKeysForDeletion(artifact)
-	if err != nil {
-		return err
-	}
-	if len(logicalKeys) == 0 {
-		return nil
-	}
-	platformAdmin := artifact.TenantID == ""
-	backend, err := s.store.GetBackupBackendForUse(artifact.BackendID, artifact.TenantID, platformAdmin)
-	if err != nil {
-		return fmt.Errorf("resolve backup backend: %w", err)
-	}
-	dataBackend := model.BackupBackendAsDataBackend(backend)
-	if !dataBackendSupportsDirectObjectStorage(dataBackend) {
-		return fmt.Errorf("backup backend does not support direct object deletion")
-	}
-	objectBackend, err := newDataObjectBackend(dataBackend)
-	if err != nil {
-		return fmt.Errorf("open backup backend: %w", err)
-	}
-	if err := objectBackend.deleteLogicalObjects(ctx, logicalKeys); err != nil {
-		return fmt.Errorf("delete backup objects: %w", err)
-	}
-	return nil
-}
-
-func backupArtifactObjectKeysForDeletion(artifact model.BackupArtifact) ([]string, error) {
-	artifact = model.NormalizeBackupArtifact(artifact)
-	runID := strings.TrimSpace(artifact.RunID)
-	if runID == "" {
-		return nil, fmt.Errorf("artifact has no run id")
-	}
-	keys := make([]string, 0, 2)
-	if artifact.Kind != model.BackupArtifactKindDataSnapshot && artifact.ObjectKey != "" {
-		keys = append(keys, artifact.ObjectKey)
-	}
-	if artifact.ManifestObjectKey != "" {
-		keys = append(keys, artifact.ManifestObjectKey)
-	}
-	seen := map[string]struct{}{}
-	validated := make([]string, 0, len(keys))
-	for _, key := range keys {
-		key = strings.Trim(strings.TrimSpace(key), "/")
-		if key == "" || path.Clean(key) != key || strings.ContainsRune(key, '\x00') {
-			return nil, fmt.Errorf("artifact contains an unsafe object key")
-		}
-		if !pathHasSegment(key, runID) {
-			return nil, fmt.Errorf("artifact object key is not scoped to its run")
-		}
-		if key == strings.Trim(strings.TrimSpace(artifact.ManifestObjectKey), "/") {
-			if path.Base(key) != "manifest.json" {
-				return nil, fmt.Errorf("artifact manifest key has an unexpected filename")
-			}
-		} else if !backupArtifactDataObjectFilenameAllowed(artifact.Kind, path.Base(key)) {
-			return nil, fmt.Errorf("artifact data object key has an unexpected filename")
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		validated = append(validated, key)
-	}
-	return validated, nil
-}
-
-func pathHasSegment(key, segment string) bool {
-	for _, part := range strings.Split(key, "/") {
-		if part == segment {
-			return true
-		}
-	}
-	return false
-}
-
-func backupArtifactDataObjectFilenameAllowed(kind, filename string) bool {
-	switch model.NormalizeBackupArtifactKind(kind) {
-	case model.BackupArtifactKindControlPlanePGDump:
-		return filename == "control-plane.dump"
-	case model.BackupArtifactKindAppPGDump:
-		return filename == "database.dump"
-	case model.BackupArtifactKindFileArchive:
-		return filename == "persistent-storage.tar.gz"
-	case model.BackupArtifactKindRegistryArchive:
-		return filename == "registry.tar.gz"
-	case model.BackupArtifactKindManifest:
-		return false
-	default:
-		return false
 	}
 }
 
@@ -3176,7 +3017,7 @@ func (s *Server) testBackupBackend(ctx context.Context, backendID string, princi
 	if string(readPayload) != string(payload) {
 		return false, "read probe returned different payload"
 	}
-	if err := objectBackend.deleteLogicalObjects(ctx, []string{key}); err != nil {
+	if err := objectBackend.deleteObjects(ctx, []string{objectBackend.objectKey(key)}); err != nil {
 		return false, "delete probe failed: " + err.Error()
 	}
 	return true, "write/read/list/head/delete probe succeeded"
