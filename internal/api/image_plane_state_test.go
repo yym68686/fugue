@@ -19,6 +19,7 @@ func TestImageReplicationPlanStateIsIdentityBoundShadowAndRecoverable(t *testing
 	storeState, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	keyring := imagePlaneStateTestKeyring()
 	server.auth.PlatformComponentIdentityKeyring = keyring
+	server.heartbeatAuditKeyring = trustedHeartbeatAuditTestKeyring()
 
 	workerA := seedImageReplicationPlanState(t, storeState, server, platformAdminKey, "worker-a", "image-plan-a-1", true)
 	_ = seedImageReplicationPlanState(t, storeState, server, platformAdminKey, "worker-b", "image-plan-b-1", true)
@@ -56,6 +57,15 @@ func TestImageReplicationPlanStateIsIdentityBoundShadowAndRecoverable(t *testing
 	if state.ExpectedConsumerSetID != workerA.ExpectedConsumerSet.ID {
 		t.Fatalf("heartbeat binding=%q, want %q", state.ExpectedConsumerSetID, workerA.ExpectedConsumerSet.ID)
 	}
+	if state.Heartbeat == nil ||
+		state.Heartbeat.ExpectedConsumerSetID != workerA.ExpectedConsumerSet.ID ||
+		state.Heartbeat.ArtifactReleaseID != workerA.Release.ID ||
+		state.Heartbeat.FencingToken != workerA.Release.FencingToken ||
+		state.Heartbeat.SequenceFloor != 0 || state.Heartbeat.IssuedAtFloor != nil ||
+		state.Heartbeat.ProtocolVersion != model.PlatformConsumerProtocolVersionV1 ||
+		state.Heartbeat.SchemaVersion != model.PlatformConsumerSchemaVersionV1 {
+		t.Fatalf("unexpected initial image-cache heartbeat contract: %+v", state.Heartbeat)
+	}
 	if state.LKG == nil || state.LKGArtifact == nil ||
 		state.LKG.ArtifactID != state.LKGArtifact.ID ||
 		state.LKG.Generation != state.LKGArtifact.Generation ||
@@ -68,6 +78,53 @@ func TestImageReplicationPlanStateIsIdentityBoundShadowAndRecoverable(t *testing
 	}
 	if strings.Contains(response.Body.String(), "worker-b") {
 		t.Fatalf("worker-a response disclosed worker-b state: %s", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), workerAToken) {
+		t.Fatal("image-plane state response reflected its bearer credential")
+	}
+	claims, err := platformcontrol.ParsePlatformComponentIdentity(keyring, workerAToken, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("parse worker-a identity: %v", err)
+	}
+	heartbeatIssuedAt := time.Now().UTC().Truncate(time.Millisecond)
+	heartbeat := trustedPlatformHeartbeatRequest(
+		t,
+		claims,
+		workerA.ExpectedConsumerSet,
+		heartbeatIssuedAt,
+		7,
+		workerA.Artifact.GenerationSequence,
+		workerA.Release.FencingToken,
+		"nonce-image-plane-state-0001",
+	)
+	acceptedHeartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", workerAToken, heartbeat)
+	if acceptedHeartbeat.Code != http.StatusOK {
+		t.Fatalf("server-bound image-cache heartbeat failed: status=%d body=%s", acceptedHeartbeat.Code, acceptedHeartbeat.Body.String())
+	}
+	stateAfterHeartbeatResponse := performJSONRequest(t, server, http.MethodGet, "/v1/image-plane/replication-plan", workerAToken, nil)
+	if stateAfterHeartbeatResponse.Code != http.StatusOK {
+		t.Fatalf("reload image-plane state after heartbeat: status=%d body=%s", stateAfterHeartbeatResponse.Code, stateAfterHeartbeatResponse.Body.String())
+	}
+	var stateAfterHeartbeat model.ImageReplicationPlanStateResponse
+	mustDecodeJSON(t, stateAfterHeartbeatResponse, &stateAfterHeartbeat)
+	if stateAfterHeartbeat.Heartbeat == nil ||
+		stateAfterHeartbeat.Heartbeat.SequenceFloor != heartbeat.Sequence ||
+		stateAfterHeartbeat.Heartbeat.IssuedAtFloor == nil ||
+		!stateAfterHeartbeat.Heartbeat.IssuedAtFloor.Equal(heartbeatIssuedAt) {
+		t.Fatalf("image-cache restart cursor did not advance: %+v", stateAfterHeartbeat.Heartbeat)
+	}
+	wrongFence := heartbeat
+	wrongFence.Sequence++
+	wrongFence.IssuedAt = heartbeatIssuedAt.Add(time.Second)
+	wrongFence.Nonce = "nonce-image-plane-state-0002"
+	wrongFence.FencingToken++
+	wrongFence.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(wrongFence)
+	if err != nil {
+		t.Fatalf("hash wrong-fence heartbeat: %v", err)
+	}
+	rejectedFence := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", workerAToken, wrongFence)
+	if rejectedFence.Code != http.StatusConflict || !strings.Contains(rejectedFence.Body.String(), "active artifact release") {
+		t.Fatalf("client-selected heartbeat fence was not rejected: status=%d body=%s", rejectedFence.Code, rejectedFence.Body.String())
 	}
 	tamperedArtifact := *state.Artifact
 	tamperedArtifact.Content = map[string]any{"apiVersion": model.ImagePlaneAPIVersionV1, "kind": model.ImageReplicationPlanKind, "tampered": true}
@@ -143,7 +200,7 @@ func TestImageReplicationPlanStateWithoutDesiredStateIsSafeAndImmediate(t *testi
 	var state model.ImageReplicationPlanStateResponse
 	mustDecodeJSON(t, response, &state)
 	if state.Artifact != nil || state.Release != nil || state.LKG != nil || state.LKGArtifact != nil ||
-		state.ExpectedConsumerSetID != "" || state.Generation != "" || state.Waited ||
+		state.ExpectedConsumerSetID != "" || state.Heartbeat != nil || state.Generation != "" || state.Waited ||
 		state.NodeID != "worker-empty" || state.ScopeKey != "node:worker-empty" {
 		t.Fatalf("unexpected empty image-plane state: %+v", state)
 	}
@@ -245,7 +302,7 @@ func seedImageReplicationPlanState(
 
 	now := time.Now().UTC()
 	expectedSet, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
-		ReleaseSetID:      "image-plan-release-set-" + nodeID,
+		ReleaseSetID:      "image-plan-release-set-" + nodeID + "-" + generation,
 		ArtifactReleaseID: released.Release.ID,
 		ArtifactKind:      model.PlatformArtifactKindImageReplicationPlan,
 		Scope:             released.Artifact.Scope,

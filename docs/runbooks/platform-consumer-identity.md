@@ -4,8 +4,8 @@
 
 Use this runbook when a platform consumer heartbeat reports an identity,
 protocol, replay, fencing, or generation violation. Platform consumers include
-edge workers, DNS servers, Caddy edge fronts, node updaters/guardians, and
-runtime agents.
+edge workers, DNS servers, Caddy edge fronts, node updaters/guardians, runtime
+agents, and node-local image caches.
 
 The response priority is:
 
@@ -40,9 +40,11 @@ substitute for this binding.
 
 ## Current Rollout State
 
-The short-lived identity token and heartbeat validation primitives exist, but
-production credential issuance and heartbeat handler enforcement are not yet
-wired. Until that integration is complete:
+The short-lived identity token and trusted heartbeat handler are wired in the
+control plane. The image-cache lane is the first fixed-purpose integration: its
+credential issuer, plan read API, and heartbeat release/cursor contract exist,
+but the consumer loop and production chart enablement remain default-off.
+Until each real consumer integration is complete:
 
 - legacy heartbeat rows are not trusted promotion evidence;
 - do not enable consumer convergence enforcement merely because rows exist;
@@ -60,6 +62,8 @@ Treat any of these as a security or release-integrity signal:
 - nonce is already in the retained replay window;
 - heartbeat is older than its freshness policy;
 - generation sequence or fencing token decreases;
+- expected consumer set points to a superseded or non-active artifact release;
+- heartbeat fencing token differs from the exact release-ledger token;
 - canonical evidence hash does not match the body;
 - protocol/schema version is missing or incompatible.
 
@@ -74,9 +78,10 @@ fugue admin artifact lkg <artifact-id-or-generation> --json
 ```
 
 Record the exact release set, artifact kind, scope, expected consumer id,
-observed consumer id, credential id, token id, signing key id, sequence,
-issued-at, generation sequence, fencing token, and evidence hash. Do not record
-the bearer token or signing secret.
+artifact release id, observed consumer id, credential id, token id, signing key
+id, sequence and server sequence floor, issued-at and server issued-at floor,
+generation sequence, fencing token, and evidence hash. Do not record the bearer
+token or signing secret.
 
 ## Containment
 
@@ -101,6 +106,8 @@ Resume release verification only after all are true:
 - the expected consumer set revision is unchanged or deliberately regenerated;
 - every required consumer has a newly authenticated heartbeat;
 - sequence, nonce, time window, generation sequence, and fencing token validate;
+- the expected set still references the active release and the release-ledger
+  fence exactly matches the accepted heartbeat;
 - desired/actual generation and apply/probe evidence converge;
 - no revoked credential or signing key appears in accepted evidence;
 - local probes, public synthetics, and the changed-subsystem watch window pass;

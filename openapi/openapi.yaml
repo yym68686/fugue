@@ -2268,6 +2268,8 @@ paths:
         Returns only the image_replication_plan state for the node and scope embedded in the verified
         image-cache component credential. The release channel is fixed to shadow. Callers cannot select
         another scope, node, artifact kind, or release channel. The optional long poll is bounded to 30 seconds.
+        When an expected consumer set exists, the heartbeat contract returns the exact active-release fence
+        and last accepted sequence/time floor needed for restart-safe trusted status reporting.
       tags: [Image Plane]
       x-fugue-handler: handleGetImageReplicationPlanState
       security:
@@ -27786,6 +27788,8 @@ components:
           $ref: "#/components/schemas/PlatformArtifact"
         expected_consumer_set_id:
           type: string
+        heartbeat:
+          $ref: "#/components/schemas/ImageReplicationPlanHeartbeatContract"
         generation:
           type: string
         waited:
@@ -27793,6 +27797,32 @@ components:
         server_time:
           type: string
           format: date-time
+    ImageReplicationPlanHeartbeatContract:
+      type: object
+      additionalProperties: false
+      required: [expected_consumer_set_id, artifact_release_id, fencing_token, sequence_floor, protocol_version, schema_version]
+      properties:
+        expected_consumer_set_id:
+          type: string
+        artifact_release_id:
+          type: string
+        fencing_token:
+          type: integer
+          format: int64
+          minimum: 1
+        sequence_floor:
+          type: integer
+          format: int64
+          minimum: 0
+        issued_at_floor:
+          type: string
+          format: date-time
+        protocol_version:
+          type: string
+          enum: [v1]
+        schema_version:
+          type: string
+          enum: [v1]
     PlatformConsumerHeartbeatResponse:
       type: object
       additionalProperties: false

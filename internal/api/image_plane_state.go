@@ -91,7 +91,15 @@ func (s *Server) handleGetImageReplicationPlanState(w http.ResponseWriter, r *ht
 		response.Artifact = &artifact
 		response.Release = &release
 		response.Generation = artifact.Generation
-		response.ExpectedConsumerSetID, err = s.imageReplicationPlanExpectedConsumerSetID(claims, artifact, release)
+		expectedSet, expectedErr := s.imageReplicationPlanExpectedConsumerSet(claims, artifact, release)
+		if expectedErr != nil {
+			s.writeStoreError(w, expectedErr)
+			return
+		}
+		if expectedSet != nil {
+			response.ExpectedConsumerSetID = expectedSet.ID
+			response.Heartbeat, err = s.imageReplicationPlanHeartbeatContract(claims, *expectedSet, release)
+		}
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -253,11 +261,11 @@ func (s *Server) loadImageReplicationPlanLKG(
 	return lkg, &artifact, nil
 }
 
-func (s *Server) imageReplicationPlanExpectedConsumerSetID(
+func (s *Server) imageReplicationPlanExpectedConsumerSet(
 	claims platformcontrol.PlatformComponentIdentityClaims,
 	artifact model.PlatformArtifact,
 	release model.PlatformArtifactRelease,
-) (string, error) {
+) (*model.PlatformExpectedConsumerSet, error) {
 	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{
 		ArtifactReleaseID: release.ID,
 		ArtifactKind:      model.PlatformArtifactKindImageReplicationPlan,
@@ -265,11 +273,11 @@ func (s *Server) imageReplicationPlanExpectedConsumerSetID(
 		Limit:             1,
 	})
 	if err != nil || len(sets) == 0 {
-		return "", err
+		return nil, err
 	}
 	set := sets[0]
 	if set.ExpectedGeneration != artifact.Generation {
-		return "", nil
+		return nil, nil
 	}
 	expectedConsumerID := model.PlatformConsumerComponentImageCache + ":" + claims.NodeID
 	for _, consumer := range set.Consumers {
@@ -279,10 +287,58 @@ func (s *Server) imageReplicationPlanExpectedConsumerSetID(
 			consumer.ArtifactKind == model.PlatformArtifactKindImageReplicationPlan &&
 			consumer.ScopeKey == claims.ScopeKey &&
 			consumer.ExpectedGeneration == artifact.Generation {
-			return set.ID, nil
+			return &set, nil
 		}
 	}
-	return "", nil
+	return nil, nil
+}
+
+func (s *Server) imageReplicationPlanHeartbeatContract(
+	claims platformcontrol.PlatformComponentIdentityClaims,
+	set model.PlatformExpectedConsumerSet,
+	release model.PlatformArtifactRelease,
+) (*model.ImageReplicationPlanHeartbeatContract, error) {
+	contract := &model.ImageReplicationPlanHeartbeatContract{
+		ExpectedConsumerSetID: set.ID,
+		ArtifactReleaseID:     release.ID,
+		FencingToken:          release.FencingToken,
+		ProtocolVersion:       model.PlatformConsumerProtocolVersionV1,
+		SchemaVersion:         model.PlatformConsumerSchemaVersionV1,
+	}
+	consumers, err := s.store.ListPlatformConsumers(model.PlatformArtifactKindImageReplicationPlan, claims.ScopeKey)
+	if err != nil {
+		return nil, err
+	}
+	expectedConsumerID := model.PlatformConsumerComponentImageCache + ":" + claims.NodeID
+	matches := 0
+	for _, consumer := range consumers {
+		if consumer.ConsumerID != expectedConsumerID ||
+			consumer.Component != model.PlatformConsumerComponentImageCache ||
+			!strings.EqualFold(consumer.NodeID, claims.NodeID) {
+			continue
+		}
+		matches++
+		cursor, err := platformcontrol.PlatformConsumerHeartbeatCursorFromInstance(consumer)
+		if err != nil {
+			return nil, err
+		}
+		if cursor == nil {
+			continue
+		}
+		if cursor.FencingToken > release.FencingToken ||
+			(strings.TrimSpace(cursor.DesiredGeneration) != "" &&
+				strings.TrimSpace(cursor.DesiredGeneration) != strings.TrimSpace(set.ExpectedGeneration) &&
+				release.FencingToken <= cursor.FencingToken) {
+			return nil, errors.New("image-cache heartbeat cursor is ahead of the active release fence")
+		}
+		contract.SequenceFloor = cursor.Sequence
+		issuedAt := cursor.IssuedAt.UTC()
+		contract.IssuedAtFloor = &issuedAt
+	}
+	if matches > 1 {
+		return nil, errors.New("multiple image-cache heartbeat cursors exist for one node scope")
+	}
+	return contract, nil
 }
 
 func setImagePlaneStateNoStoreHeaders(w http.ResponseWriter) {

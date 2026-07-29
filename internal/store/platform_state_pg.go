@@ -1449,6 +1449,41 @@ FOR SHARE`, expectedSetID))
 	if err != nil {
 		return model.PlatformConsumerInstance{}, mapDBErr(err)
 	}
+	if strings.EqualFold(strings.TrimSpace(claims.Component), model.PlatformConsumerComponentImageCache) {
+		var release model.PlatformArtifactRelease
+		err = tx.QueryRowContext(ctx, `
+SELECT id, artifact_id, artifact_kind, scope_key, generation,
+	release_channel, status, fencing_token, verification_state
+FROM fugue_platform_artifact_releases
+WHERE id = $1
+FOR SHARE`, expectedSet.ArtifactReleaseID).Scan(
+			&release.ID,
+			&release.ArtifactID,
+			&release.ArtifactKind,
+			&release.ScopeKey,
+			&release.Generation,
+			&release.ReleaseChannel,
+			&release.Status,
+			&release.FencingToken,
+			&release.VerificationState,
+		)
+		if err != nil {
+			if mapDBErr(err) == ErrNotFound {
+				return model.PlatformConsumerInstance{}, platformcontrol.ErrPlatformConsumerHeartbeatRelease
+			}
+			return model.PlatformConsumerInstance{}, mapDBErr(err)
+		}
+		heartbeat, err = platformcontrol.BindPlatformConsumerHeartbeatToArtifactRelease(
+			expectedSet,
+			release,
+			model.PlatformArtifactReleaseChannelShadow,
+			heartbeat,
+		)
+		if err != nil {
+			return model.PlatformConsumerInstance{}, err
+		}
+		policy.RequireFencedReleaseTransition = true
+	}
 	heartbeat.ExpectedConsumerSetID = firstNonEmptyStoreValue(heartbeat.ExpectedConsumerSetID, expectedSetID)
 	bound, err := platformcontrol.BindPlatformConsumerHeartbeatToExpectedSet(claims, expectedSet, heartbeat)
 	if err != nil {

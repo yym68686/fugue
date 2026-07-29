@@ -623,6 +623,8 @@ func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error
 		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack),
 		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatFencingBack):
 		httpx.WriteError(w, http.StatusConflict, "trusted heartbeat is not monotonic")
+	case errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatRelease):
+		httpx.WriteError(w, http.StatusConflict, "trusted heartbeat is not bound to the active artifact release")
 	case errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatInvalid),
 		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatStale),
 		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatFuture),
