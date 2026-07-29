@@ -129,50 +129,12 @@ func normalizeAppStatusForRead(app *model.App) {
 
 func repairAllAppStatuses(state *model.State) bool {
 	changed := false
-	latestFailures := make(map[string]model.Operation)
-	for _, op := range state.Operations {
-		if op.Status != model.OperationStatusFailed || strings.TrimSpace(op.AppID) == "" {
-			continue
-		}
-		if existing, ok := latestFailures[op.AppID]; ok && !operationIsNewerForStatusRepair(op, existing) {
-			continue
-		}
-		latestFailures[op.AppID] = op
-	}
 	for index := range state.Apps {
 		if repairFailedAppPhase(&state.Apps[index]) {
 			changed = true
 		}
-		failure := model.AppOperationFailureFromOperation(latestFailures[state.Apps[index].ID])
-		if !appOperationFailureEqual(state.Apps[index].Status.LastFailedOperation, failure) {
-			state.Apps[index].Status.LastFailedOperation = failure
-			changed = true
-		}
 	}
 	return changed
-}
-
-func operationIsNewerForStatusRepair(candidate, existing model.Operation) bool {
-	if candidate.UpdatedAt.Equal(existing.UpdatedAt) {
-		if candidate.CreatedAt.Equal(existing.CreatedAt) {
-			return candidate.ID > existing.ID
-		}
-		return candidate.CreatedAt.After(existing.CreatedAt)
-	}
-	return candidate.UpdatedAt.After(existing.UpdatedAt)
-}
-
-func appOperationFailureEqual(left, right *model.AppOperationFailure) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	if left.ID != right.ID || left.Type != right.Type || left.ErrorMessage != right.ErrorMessage || left.ResultMessage != right.ResultMessage || left.RequestedByType != right.RequestedByType || left.RequestedByID != right.RequestedByID || !left.CreatedAt.Equal(right.CreatedAt) || !left.UpdatedAt.Equal(right.UpdatedAt) {
-		return false
-	}
-	if left.CompletedAt == nil || right.CompletedAt == nil {
-		return left.CompletedAt == nil && right.CompletedAt == nil
-	}
-	return left.CompletedAt.Equal(*right.CompletedAt)
 }
 
 func deletedAppName(name, operationID string) string {

@@ -14,7 +14,6 @@ func sanitizeAppForAPI(app model.App) model.App {
 	if out.StoredStatus == nil {
 		stored := out.Status
 		stored.SourceSync = model.CloneAppSourceSyncStatus(out.Status.SourceSync)
-		stored.LastFailedOperation = cloneAppOperationFailure(out.Status.LastFailedOperation)
 		out.StoredStatus = &stored
 	}
 	out.Source = sanitizeAppSourceForAPI(out.Source)
@@ -207,11 +206,9 @@ func redactSecretFilesInSpec(spec model.AppSpec) model.AppSpec {
 
 func cloneApp(app model.App) model.App {
 	out := app
-	out.Status.LastFailedOperation = cloneAppOperationFailure(app.Status.LastFailedOperation)
 	if app.StoredStatus != nil {
 		stored := *app.StoredStatus
 		stored.SourceSync = model.CloneAppSourceSyncStatus(app.StoredStatus.SourceSync)
-		stored.LastFailedOperation = cloneAppOperationFailure(app.StoredStatus.LastFailedOperation)
 		out.StoredStatus = &stored
 	}
 	if app.ObservedStatus != nil {
@@ -232,28 +229,10 @@ func cloneApp(app model.App) model.App {
 			present := *app.ObservedStatus.ServicePresent
 			observed.ServicePresent = &present
 		}
-		if app.ObservedStatus.EndpointPresent != nil {
-			present := *app.ObservedStatus.EndpointPresent
-			observed.EndpointPresent = &present
-		}
 		if app.ObservedStatus.EndpointReady != nil {
 			ready := *app.ObservedStatus.EndpointReady
 			observed.EndpointReady = &ready
 		}
-		if app.ObservedStatus.PhysicalReplicas != nil {
-			replicas := *app.ObservedStatus.PhysicalReplicas
-			observed.PhysicalReplicas = &replicas
-		}
-		if app.ObservedStatus.PhysicalDesired != nil {
-			desired := *app.ObservedStatus.PhysicalDesired
-			observed.PhysicalDesired = &desired
-		}
-		if app.ObservedStatus.ImagePresent != nil {
-			present := *app.ObservedStatus.ImagePresent
-			observed.ImagePresent = &present
-		}
-		observed.EvidenceSources = append([]string(nil), app.ObservedStatus.EvidenceSources...)
-		observed.InvariantViolations = append([]string(nil), app.ObservedStatus.InvariantViolations...)
 		out.ObservedStatus = &observed
 	}
 	out.Source = cloneAppSource(app.Source)
@@ -272,18 +251,6 @@ func cloneApp(app model.App) model.App {
 		out.TechStack = append([]model.AppTechnology(nil), app.TechStack...)
 	}
 	return out
-}
-
-func cloneAppOperationFailure(in *model.AppOperationFailure) *model.AppOperationFailure {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	if in.CompletedAt != nil {
-		completedAt := in.CompletedAt.UTC()
-		out.CompletedAt = &completedAt
-	}
-	return &out
 }
 
 func sanitizeAppSourceForAPI(source *model.AppSource) *model.AppSource {
