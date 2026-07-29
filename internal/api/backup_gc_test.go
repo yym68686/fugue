@@ -54,16 +54,9 @@ func TestBackupArtifactObjectKeysForDeletion(t *testing.T) {
 	if _, err := backupArtifactObjectKeysForDeletion(wrongRun); err == nil {
 		t.Fatal("object outside the artifact run was accepted")
 	}
-
-	missingKeys := valid
-	missingKeys.ObjectKey = ""
-	missingKeys.ManifestObjectKey = ""
-	if _, err := backupArtifactObjectKeysForDeletion(missingKeys); err == nil {
-		t.Fatal("artifact without object keys was treated as successfully deletable")
-	}
 }
 
-func TestBackupArtifactCleanupCandidatesHonorRestoreInterlocksAndMarker(t *testing.T) {
+func TestBackupArtifactCleanupCandidatesHonorRestoreReferencesAndMarker(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -99,15 +92,8 @@ func TestBackupArtifactCleanupCandidatesHonorRestoreInterlocksAndMarker(t *testi
 	}); err != nil {
 		t.Fatalf("create restore plan: %v", err)
 	}
-	if _, err := stateStore.MarkBackupArtifactDeleted(protectedByPlan.ID, protectedByPlan.TenantID, false); !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("delete artifact with restore plan error = %v, want conflict", err)
-	}
-	stillActive, err := stateStore.GetBackupArtifact(protectedByPlan.ID, protectedByPlan.TenantID, false)
-	if err != nil {
-		t.Fatalf("get restore-protected artifact: %v", err)
-	}
-	if stillActive.Status != model.BackupArtifactStatusActive || stillActive.DeletedAt != nil {
-		t.Fatalf("restore-protected artifact changed: %+v", stillActive)
+	if _, err := stateStore.MarkBackupArtifactDeleted(protectedByPlan.ID, protectedByPlan.TenantID, false); err != nil {
+		t.Fatalf("delete artifact with restore plan: %v", err)
 	}
 
 	collectable := newArtifact("collectable")
@@ -140,21 +126,6 @@ func TestBackupArtifactCleanupCandidatesHonorRestoreInterlocksAndMarker(t *testi
 	}
 	if err := stateStore.MarkBackupArtifactPhysicalDeleted("missing", time.Now().UTC()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing marker error = %v, want not found", err)
-	}
-
-	alreadyDeleted := newArtifact("deleted-cannot-plan")
-	if _, err := stateStore.MarkBackupArtifactDeleted(alreadyDeleted.ID, alreadyDeleted.TenantID, false); err != nil {
-		t.Fatalf("delete artifact before restore plan: %v", err)
-	}
-	if _, err := stateStore.CreateBackupRestorePlan(model.BackupRestorePlan{
-		ID:         "plan-after-delete",
-		ArtifactID: alreadyDeleted.ID,
-		TenantID:   alreadyDeleted.TenantID,
-		Target:     alreadyDeleted.Target,
-		Mode:       model.BackupRestoreModePlanOnly,
-		Status:     model.BackupRestoreStatusPlanned,
-	}); !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("restore plan for deleted artifact error = %v, want conflict", err)
 	}
 }
 

@@ -22,11 +22,9 @@ func TestPGMarkBackupArtifactDeletedFiltersTenantAtomically(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	stateStore := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
 
-	mock.ExpectBegin()
-	mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_artifacts WHERE id = \$1 AND tenant_id = \$2 FOR UPDATE`).
-		WithArgs("artifact_victim", "tenant_attacker").
+	mock.ExpectQuery(`(?s)UPDATE fugue_backup_artifacts SET status = 'deleted', deleted_at = \$2 WHERE id = \$1 AND protected = FALSE AND tenant_id = \$3 RETURNING`).
+		WithArgs("artifact_victim", sqlmock.AnyArg(), "tenant_attacker").
 		WillReturnError(sql.ErrNoRows)
-	mock.ExpectRollback()
 	if _, err := stateStore.MarkBackupArtifactDeleted("artifact_victim", "tenant_attacker", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected tenant-filtered delete miss to return ErrNotFound, got %v", err)
 	}
