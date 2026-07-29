@@ -152,6 +152,13 @@ external writable store and verifies the same graceful-stop contract. Request-
 scoped image-graph checks inherit cancellation instead of creating an
 uncancelable process-wide operation.
 
+The repository-wide Go CI baseline likewise runs feature branches through the
+PR event only and direct `main` updates through the push event. PR runs share a
+PR-number concurrency key so obsolete revisions are canceled locally, while
+`main` runs use their unique commit SHA and therefore cannot cancel one
+another. This removes duplicate validation without creating a new global
+component or production-release mutex.
+
 The explicit enablement contract is file-based and has no token environment
 variable: `FUGUE_RELEASE_CONTROL_ENABLED=true`,
 `FUGUE_RELEASE_CONTROL_SPEC_FILE=/run/fugue/component-plan.json`,
