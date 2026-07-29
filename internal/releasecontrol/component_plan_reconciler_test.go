@@ -20,9 +20,7 @@ func TestReconcileComponentPlanPersistsIdempotentLaneLocalShadowStatus(t *testin
 	t.Parallel()
 
 	stateStore, artifact := testValidatedComponentPlanArtifact(t)
-	spec := ComponentPlanSpec{
-		ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation,
-	}
+	spec := testComponentPlanSpec(artifact)
 	principal := testReleaseControlPrincipal()
 	first, err := ReconcileComponentPlan(context.Background(), testComponentPlanStore{stateStore}, spec, principal)
 	if err != nil {
@@ -69,7 +67,7 @@ func TestReconcileComponentPlanConvergesConcurrentWorkersToOneRelease(t *testing
 	t.Parallel()
 
 	stateStore, artifact := testValidatedComponentPlanArtifact(t)
-	spec := ComponentPlanSpec{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation}
+	spec := testComponentPlanSpec(artifact)
 	const workers = 12
 	start := make(chan struct{})
 	statuses := make(chan ComponentPlanStatus, workers)
@@ -119,7 +117,7 @@ func TestReconcileComponentPlanFailsClosedBeforePublishing(t *testing.T) {
 	t.Parallel()
 
 	stateStore, artifact := testValidatedComponentPlanArtifact(t)
-	valid := ComponentPlanSpec{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation}
+	valid := testComponentPlanSpec(artifact)
 	for name, test := range map[string]struct {
 		mutate    func(*ComponentPlanSpec)
 		principal model.Principal
@@ -136,6 +134,14 @@ func TestReconcileComponentPlanFailsClosedBeforePublishing(t *testing.T) {
 		},
 		"generation": {
 			mutate:    func(spec *ComponentPlanSpec) { spec.Generation = "git-3333333333333333333333333333333333333333" },
+			principal: testReleaseControlPrincipal(),
+		},
+		"api version": {
+			mutate:    func(spec *ComponentPlanSpec) { spec.APIVersion = "release-control.fugue.dev/v2" },
+			principal: testReleaseControlPrincipal(),
+		},
+		"kind": {
+			mutate:    func(spec *ComponentPlanSpec) { spec.Kind = "OtherSpec" },
 			principal: testReleaseControlPrincipal(),
 		},
 		"principal": {
@@ -208,7 +214,7 @@ func TestReconcileComponentPlanRejectsCanceledContextAndCorruptStoreOutput(t *te
 	t.Parallel()
 
 	stateStore, artifact := testValidatedComponentPlanArtifact(t)
-	spec := ComponentPlanSpec{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation}
+	spec := testComponentPlanSpec(artifact)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := ReconcileComponentPlan(ctx, testComponentPlanStore{stateStore}, spec, testReleaseControlPrincipal()); err == nil {
@@ -232,7 +238,7 @@ func TestVerifyComponentPlanStatusDetectsMutation(t *testing.T) {
 	status, err := ReconcileComponentPlan(
 		context.Background(),
 		testComponentPlanStore{stateStore},
-		ComponentPlanSpec{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation},
+		testComponentPlanSpec(artifact),
 		testReleaseControlPrincipal(),
 	)
 	if err != nil {
@@ -483,6 +489,16 @@ func testReleaseControlPrincipal() model.Principal {
 			"artifact.release_shadow":               {},
 			model.PlatformComponentPlanObserveScope: {},
 		},
+	}
+}
+
+func testComponentPlanSpec(artifact model.PlatformArtifact) ComponentPlanSpec {
+	return ComponentPlanSpec{
+		APIVersion:  ComponentPlanSpecAPIVersion,
+		Kind:        ComponentPlanSpecKind,
+		ArtifactID:  artifact.ID,
+		ContentHash: artifact.ContentHash,
+		Generation:  artifact.Generation,
 	}
 }
 

@@ -6,6 +6,7 @@ legacyRelease: fugue
 # These paths are intentionally shared during the migration.  They are not
 # evidence that the target components may write each other's state.
 sharedSourceRoots:
+  - Makefile
   - go.mod
   - go.sum
   - internal/model
@@ -21,6 +22,7 @@ components:
     ownershipMode: transitional-shared
     sourceRoots:
       - cmd/fugue-component-plan
+      - cmd/fugue-release-control
       - docs/architecture
       - internal/componentmanifest
       - internal/platformcontrol

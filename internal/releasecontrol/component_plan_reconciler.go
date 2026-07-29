@@ -20,6 +20,8 @@ import (
 )
 
 const (
+	ComponentPlanSpecAPIVersion   = "release-control.fugue.dev/v1"
+	ComponentPlanSpecKind         = "ComponentPlanSpec"
 	ComponentPlanStatusAPIVersion = "release-control.fugue.dev/v1"
 	ComponentPlanStatusKind       = "ComponentPlanStatus"
 	ComponentPlanStatusPolicy     = "artifact-ledger-shadow-v1"
@@ -29,6 +31,8 @@ const (
 
 var (
 	ErrComponentPlanReconcile      = errors.New("component release plan reconciliation failed")
+	ErrComponentPlanSpec           = errors.New("component release plan spec is invalid")
+	componentPlanArtifactIDRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	componentPlanDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	componentPlanGenerationPattern = regexp.MustCompile(`^git-[0-9a-f]{40}$`)
 	componentPlanScopePattern      = regexp.MustCompile(`^component-release-plan:[0-9a-f]{40}\.\.[0-9a-f]{40}$`)
@@ -51,6 +55,8 @@ type ComponentPlanStore interface {
 // attempt. The caller must bind both identity and content to remove a mutable
 // lookup from the control-loop boundary.
 type ComponentPlanSpec struct {
+	APIVersion  string `json:"apiVersion"`
+	Kind        string `json:"kind"`
 	ArtifactID  string `json:"artifactId"`
 	ContentHash string `json:"contentHash"`
 	Generation  string `json:"generation"`
@@ -100,10 +106,8 @@ func ReconcileComponentPlan(
 		strings.TrimSpace(principal.ActorID) == "" {
 		return ComponentPlanStatus{}, fmt.Errorf("%w: authorized release-control observer identity is required", ErrComponentPlanReconcile)
 	}
-	if strings.TrimSpace(spec.ArtifactID) == "" ||
-		!componentPlanDigestPattern.MatchString(spec.ContentHash) ||
-		strings.TrimSpace(spec.Generation) == "" {
-		return ComponentPlanStatus{}, fmt.Errorf("%w: spec identity is incomplete", ErrComponentPlanReconcile)
+	if err := ValidateComponentPlanSpec(spec); err != nil {
+		return ComponentPlanStatus{}, fmt.Errorf("%w: validate spec: %w", ErrComponentPlanReconcile, err)
 	}
 
 	artifact, err := store.GetPlatformArtifact(ctx, spec.ArtifactID)
@@ -175,6 +179,24 @@ func ReconcileComponentPlan(
 		return ComponentPlanStatus{}, fmt.Errorf("%w: build status: %v", ErrComponentPlanReconcile, err)
 	}
 	return status, nil
+}
+
+// ValidateComponentPlanSpec rejects version, kind, identity, and whitespace
+// drift before the control loop opens an API connection.
+func ValidateComponentPlanSpec(spec ComponentPlanSpec) error {
+	if spec.APIVersion != ComponentPlanSpecAPIVersion || spec.Kind != ComponentPlanSpecKind {
+		return fmt.Errorf("%w: apiVersion and kind must be %q and %q", ErrComponentPlanSpec, ComponentPlanSpecAPIVersion, ComponentPlanSpecKind)
+	}
+	if !componentPlanArtifactIDRE.MatchString(spec.ArtifactID) || strings.TrimSpace(spec.ArtifactID) != spec.ArtifactID {
+		return fmt.Errorf("%w: artifactId is invalid", ErrComponentPlanSpec)
+	}
+	if !componentPlanDigestPattern.MatchString(spec.ContentHash) {
+		return fmt.Errorf("%w: contentHash is invalid", ErrComponentPlanSpec)
+	}
+	if !componentPlanGenerationPattern.MatchString(spec.Generation) {
+		return fmt.Errorf("%w: generation is invalid", ErrComponentPlanSpec)
+	}
+	return nil
 }
 
 func componentPlanPrincipalAuthorized(principal model.Principal) bool {

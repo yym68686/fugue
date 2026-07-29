@@ -91,9 +91,31 @@ release-control credential must explicitly hold only `artifact.read`,
 exception to one validated `component_release_plan`, its envelope-derived
 idempotency key, the fixed observation reason, and the shadow channel. The
 credential cannot release other artifact kinds or request gray/full, canary,
-override, force-publish, or break-glass behavior. A future release-control Pod
-must use this scoped identity and must not mount a platform administrator
+override, force-publish, or break-glass behavior. Any release-control Pod must
+use this scoped identity and must not mount a platform administrator
 credential.
+
+`cmd/fugue-release-control` is the first independently buildable process
+boundary. It is excluded from the legacy aggregate build and is disabled by
+default. Disabled mode performs no file or network I/O and remains unready so
+an accidentally deployed no-op process cannot look operational. When explicitly
+enabled, one lane-local loop rereads an absolute-path v1 `ComponentPlanSpec`
+and a file-mounted scoped token on every bounded attempt, talks only to the
+versioned HTTP adapter, and serializes retries. A bad spec, rotated credential,
+or temporary API failure makes only this process unready; the last successful
+status remains visible as local last-known-good evidence and the next attempt
+can recover without a restart. `/healthz`, `/readyz`, and `/v1/status` expose
+credential-free state, and no inbound endpoint accepts a plan or release
+command. There is still no image, Helm object, service account, or production
+enablement for this process in Gate A.
+
+The explicit enablement contract is file-based and has no token environment
+variable: `FUGUE_RELEASE_CONTROL_ENABLED=true`,
+`FUGUE_RELEASE_CONTROL_SPEC_FILE=/run/fugue/component-plan.json`,
+`FUGUE_RELEASE_CONTROL_TOKEN_FILE=/run/secrets/release-control/token`, and
+`FUGUE_RELEASE_CONTROL_API_BASE_URL=https://<versioned-api-endpoint>`. The
+process rejects relative paths, ambiguous booleans, unbounded timeouts, and
+oversized responses before starting the loop.
 
 The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination

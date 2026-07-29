@@ -141,9 +141,7 @@ func TestHTTPComponentPlanStoreReconcilesThroughVersionedAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve principal: %v", err)
 	}
-	status, err := ReconcileComponentPlan(context.Background(), apiStore, ComponentPlanSpec{
-		ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation,
-	}, resolved)
+	status, err := ReconcileComponentPlan(context.Background(), apiStore, testComponentPlanSpec(artifact), resolved)
 	if err != nil {
 		t.Fatalf("reconcile through API: %v", err)
 	}
@@ -367,6 +365,8 @@ func TestReconcileComponentPlanPreservesAPIRetryClassification(t *testing.T) {
 		t.Fatalf("new HTTP store: %v", err)
 	}
 	_, err = ReconcileComponentPlan(context.Background(), apiStore, ComponentPlanSpec{
+		APIVersion:  ComponentPlanSpecAPIVersion,
+		Kind:        ComponentPlanSpecKind,
 		ArtifactID:  "artifact_1_abcdef",
 		ContentHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Generation:  "git-1111111111111111111111111111111111111111",

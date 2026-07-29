@@ -2,7 +2,7 @@ GOCACHE ?= $(CURDIR)/.gocache
 BIN_DIR ?= $(CURDIR)/bin
 DOCKER ?= docker
 
-.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
+.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-release-control build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
 	bash ./scripts/scan_hardcoded_production_facts.sh
@@ -52,6 +52,12 @@ build-telemetry-agent:
 build-observability-pilot:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-observability-pilot ./cmd/fugue-observability-pilot
+
+# Kept outside the legacy aggregate build so release-control has an independent
+# artifact boundary and cannot accidentally join the control-plane image lane.
+build-release-control:
+	mkdir -p $(BIN_DIR)
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-release-control ./cmd/fugue-release-control
 
 build-image-cache:
 	mkdir -p $(BIN_DIR)
