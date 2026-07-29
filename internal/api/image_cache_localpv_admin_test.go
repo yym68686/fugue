@@ -482,6 +482,34 @@ func TestImageCachePrunePlanClassifiesDeletedGenerationAPI(t *testing.T) {
 	}
 }
 
+func TestImageCachePrunePlanProtectsAliasesSharingDigestAPI(t *testing.T) {
+	t.Parallel()
+
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	candidates := protectImageCacheSharedDigestAliases([]model.ImageCachePruneCandidate{
+		{
+			Repo:                "fugue-apps/demo",
+			Target:              "current",
+			Digest:              digest,
+			Protected:           true,
+			SkipReason:          "current_workload",
+			MatchedWorkloadRefs: []string{"registry.fugue.internal:5000/fugue-apps/demo:current"},
+		},
+		{
+			Repo:   "fugue-apps/demo",
+			Target: digest,
+			Digest: digest,
+			Reason: "missing_control_plane_image",
+		},
+	})
+	if len(candidates) != 2 || !candidates[1].Protected || candidates[1].SkipReason != "shared_digest_protected_alias" || candidates[1].Reason != "" {
+		t.Fatalf("expected digest alias protection, got %+v", candidates)
+	}
+	if len(candidates[1].MatchedWorkloadRefs) != 1 {
+		t.Fatalf("expected inherited workload evidence, got %+v", candidates[1])
+	}
+}
+
 func TestEvaluateLocalPVDecommissionSafetyGates(t *testing.T) {
 	t.Parallel()
 

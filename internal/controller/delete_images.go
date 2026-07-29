@@ -36,7 +36,8 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 		s.registryPushBase,
 		s.registryPullBase,
 	)
-	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, append(append([]model.App(nil), remainingApps...), app)))
+	liveLookupApps := append(append([]model.App(nil), remainingApps...), app)
+	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSetWithLookup(ctx, remainingApps, liveLookupApps))
 
 	imageRefs := appimages.ManagedImageRefs(
 		app,

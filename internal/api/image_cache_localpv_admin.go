@@ -538,8 +538,12 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		plan.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
 		plan.RuntimeID = strings.TrimSpace(filter.RuntimeID)
 	}
+	classified := make([]model.ImageCachePruneCandidate, 0, len(manifests))
 	for _, manifest := range manifests {
-		candidate := imageCachePruneCandidateForManifest(manifest, protected, now)
+		classified = append(classified, imageCachePruneCandidateForManifest(manifest, protected, now))
+	}
+	classified = protectImageCacheSharedDigestAliases(classified)
+	for _, candidate := range classified {
 		if candidate.Protected {
 			plan.ProtectedManifestCount++
 			plan.ProtectionSummary[candidate.SkipReason]++
@@ -931,6 +935,64 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 	}
 	out.Reason = "missing_control_plane_image"
 	return out
+}
+
+func protectImageCacheSharedDigestAliases(candidates []model.ImageCachePruneCandidate) []model.ImageCachePruneCandidate {
+	protectedByDigest := map[string][]model.ImageCachePruneCandidate{}
+	for _, candidate := range candidates {
+		if !candidate.Protected {
+			continue
+		}
+		key := imageCacheDigestGroupKey(candidate.Repo, candidate.Digest)
+		if key == "" {
+			continue
+		}
+		protectedByDigest[key] = append(protectedByDigest[key], candidate)
+	}
+	for key := range protectedByDigest {
+		sort.SliceStable(protectedByDigest[key], func(i, j int) bool {
+			left := protectedByDigest[key][i]
+			right := protectedByDigest[key][j]
+			if left.Target != right.Target {
+				return left.Target < right.Target
+			}
+			return left.SkipReason < right.SkipReason
+		})
+	}
+	for idx := range candidates {
+		candidate := &candidates[idx]
+		if candidate.Protected {
+			continue
+		}
+		protectors := protectedByDigest[imageCacheDigestGroupKey(candidate.Repo, candidate.Digest)]
+		if len(protectors) == 0 {
+			continue
+		}
+		protector := protectors[0]
+		candidate.Protected = true
+		candidate.Reason = ""
+		candidate.SkipReason = "shared_digest_protected_alias"
+		candidate.SkipDetails = []string{fmt.Sprintf(
+			"same repository digest is protected by target %q (%s)",
+			protector.Target,
+			protector.SkipReason,
+		)}
+		candidate.MatchedImageIDs = uniqueNonEmptyStrings(append(candidate.MatchedImageIDs, protector.MatchedImageIDs...))
+		candidate.MatchedPinIDs = uniqueNonEmptyStrings(append(candidate.MatchedPinIDs, protector.MatchedPinIDs...))
+		candidate.MatchedTaskIDs = uniqueNonEmptyStrings(append(candidate.MatchedTaskIDs, protector.MatchedTaskIDs...))
+		candidate.MatchedWorkloadRefs = uniqueNonEmptyStrings(append(candidate.MatchedWorkloadRefs, protector.MatchedWorkloadRefs...))
+		candidate.MatchedReplicaIDs = uniqueNonEmptyStrings(append(candidate.MatchedReplicaIDs, protector.MatchedReplicaIDs...))
+	}
+	return candidates
+}
+
+func imageCacheDigestGroupKey(repo, digest string) string {
+	repo = strings.ToLower(strings.Trim(strings.TrimSpace(repo), "/"))
+	digest = imagecachekeys.NormalizeDigest(digest)
+	if repo == "" || digest == "" {
+		return ""
+	}
+	return repo + "\x00" + digest
 }
 
 func imageCacheReplicaCandidateReason(status string) string {

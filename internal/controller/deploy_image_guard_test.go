@@ -1176,6 +1176,61 @@ func TestStrictDistributedDeployUsesLegacyLocationEvidenceWithoutRegistryFallbac
 	}
 }
 
+func TestStrictDistributedDeployIgnoresExpiredLegacyLocationEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Expired Registryless Location Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	imageRef := "registry.fugue.internal:5000/fugue-apps/legacy:git-abc"
+	app := model.App{
+		ID:       "app_1",
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:     imageRef,
+			Replicas:  1,
+			RuntimeID: "runtime_1",
+		},
+		Source: &model.AppSource{ResolvedImageRef: imageRef},
+	}
+	reportedAt := time.Now().UTC()
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        imageRef,
+		RuntimeID:       "runtime_1",
+		ClusterNodeName: "worker-1",
+		CacheEndpoint:   "http://worker-1.example.com:5000",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &reportedAt,
+	}); err != nil {
+		t.Fatalf("upsert legacy image location: %v", err)
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed", ImageCacheInventoryTTL: 2 * time.Hour},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		now:              func() time.Time { return reportedAt.Add(3 * time.Hour) },
+	}
+
+	available, err := svc.deployImageRefAvailable(context.Background(), app, deployImageTarget{
+		RuntimeID:       "runtime_1",
+		ClusterNodeName: "worker-1",
+	}, imageRef)
+	if err != nil {
+		t.Fatalf("deploy image ref available: %v", err)
+	}
+	if available {
+		t.Fatal("expired image-location evidence must not make a missing image deployable")
+	}
+}
+
 func TestScheduleImageHydrationSkipsLegacyUpdaterWithoutWarning(t *testing.T) {
 	t.Parallel()
 

@@ -489,6 +489,17 @@ func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
 	}
 }
 
+func TestImageCacheAutomaticDeleteRejectsMissingControlPlaneMetadata(t *testing.T) {
+	t.Parallel()
+
+	if reason := imageCacheAutomaticDeleteUnsafeCandidateReason("missing_control_plane_image"); reason == "" {
+		t.Fatal("missing control-plane metadata must not authorize destructive image-cache pruning")
+	}
+	if reason := imageCacheAutomaticDeleteUnsafeCandidateReason("lost_image"); reason == "" {
+		t.Fatal("a lost image must preserve any rediscovered physical manifest for recovery")
+	}
+}
+
 func TestNodeUpdaterLocalPVDecommissionCompletionWritesAudit(t *testing.T) {
 	t.Parallel()
 
@@ -2012,7 +2023,7 @@ func containsNodeUpdaterTestString(values []string, want string) bool {
 	return false
 }
 
-func TestNodeUpdaterPrepullAppImagesSkipsMissingManifestRefs(t *testing.T) {
+func TestNodeUpdaterPrepullAppImagesFailsWhenAnyManifestIsMissing(t *testing.T) {
 	t.Parallel()
 
 	if _, err := exec.LookPath("bash"); err != nil {
@@ -2054,14 +2065,14 @@ pull_container_image() {
 }
 
 FUGUE_NODE_UPDATE_TASK_IMAGES="registry.example/app:present,registry.example/app:missing"
-if ! prepull_app_images; then
-  echo "missing manifest should not fail non-blocking pre-pull"
-  cat "${logs}" || true
+if prepull_app_images; then
+  echo "missing manifest must fail pre-pull"
   exit 1
 fi
 grep -q $'registry.example/app:present\tpresent' "${reports}"
 grep -q $'registry.example/app:missing\tmissing' "${reports}"
-grep -q 'skipping stale app image registry.example/app:missing' "${logs}"
+grep -q 'app image registry.example/app:missing is missing from the registry' "${logs}"
+grep -q 'pre-pull failed with 1 missing registry manifest(s) and 1 present app image(s)' "${logs}"
 
 : >"${reports}"
 : >"${logs}"

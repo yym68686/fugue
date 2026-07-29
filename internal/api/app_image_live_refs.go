@@ -27,19 +27,26 @@ func (s *Server) liveManagedImageRefSet(ctx context.Context, apps []model.App) m
 }
 
 func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.App) []liveManagedImageReference {
+	return s.liveManagedImageReferencesWithLookup(ctx, apps, apps)
+}
+
+func (s *Server) liveManagedImageReferencesWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) []liveManagedImageReference {
 	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return nil
+	}
+	var out []liveManagedImageReference
+	for _, app := range desiredApps {
+		out = append(out, s.desiredManagedImageReferencesFromApp(app)...)
 	}
 	client, err := s.requireClusterNodeClient()
 	if err != nil {
 		if s.log != nil {
-			s.log.Printf("skip live managed image reference scan: %v", err)
+			s.log.Printf("skip Kubernetes live managed image reference scan; preserving desired app refs: %v", err)
 		}
-		return nil
+		return out
 	}
 	defer client.closeIdleConnections()
 
-	var out []liveManagedImageReference
 	if deployments, err := client.listDeploymentObjects(ctx); err != nil {
 		if s.log != nil {
 			s.log.Printf("skip cluster live managed image reference scan for deployments: %v", err)
@@ -80,7 +87,7 @@ func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.Ap
 
 	// Keep the per-app lookup as a fallback for clusters whose API credentials
 	// can read named deployments but cannot list workloads cluster-wide.
-	for _, app := range apps {
+	for _, app := range lookupApps {
 		if strings.TrimSpace(app.ID) == "" || strings.TrimSpace(app.TenantID) == "" {
 			continue
 		}
@@ -97,6 +104,51 @@ func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.Ap
 			continue
 		}
 		out = append(out, s.liveManagedImageReferencesFromDeployment(deployment)...)
+	}
+	return out
+}
+
+func (s *Server) desiredManagedImageReferencesFromApp(app model.App) []liveManagedImageReference {
+	if s == nil || app.Spec.Replicas <= 0 {
+		return nil
+	}
+	values := []struct {
+		value  string
+		source string
+	}{
+		{value: app.Spec.Image, source: "app desired runtime image"},
+	}
+	for _, item := range []struct {
+		source *model.AppSource
+		label  string
+	}{
+		{source: app.Source, label: "app source resolved image"},
+		{source: app.BuildSource, label: "app build source resolved image"},
+		{source: app.OriginSource, label: "app origin source resolved image"},
+		{source: model.AppBuildSource(app), label: "app normalized build source resolved image"},
+	} {
+		if item.source != nil {
+			values = append(values, struct {
+				value  string
+				source string
+			}{value: item.source.ResolvedImageRef, source: item.label})
+		}
+	}
+	seen := map[string]struct{}{}
+	out := make([]liveManagedImageReference, 0, len(values))
+	for _, item := range values {
+		ref := strings.TrimSpace(s.managedImageRefFromRuntimeValue(item.value))
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		out = append(out, liveManagedImageReference{
+			ImageRef: ref,
+			Source:   fmt.Sprintf("app %s %s", strings.TrimSpace(app.ID), item.source),
+		})
 	}
 	return out
 }
