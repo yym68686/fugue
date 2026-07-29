@@ -232,6 +232,41 @@ func TestAutomationActionDispatchCreateRejectsUnknownStateAndUnboundedSafetyTTL(
 	}
 }
 
+func TestCloneActionSafetyDecisionPreservesIndependentMaps(t *testing.T) {
+	t.Parallel()
+
+	original := model.ActionSafetyDecision{
+		EvidenceStates: map[string]string{
+			"app_readiness": model.InvariantEvidenceStatePass,
+		},
+		BlastRadius: model.BlastRadiusEvaluation{
+			Before: map[string]int{"app-a": 2},
+			After:  map[string]int{"app-a": 1},
+			Violations: map[string]string{
+				"app-a": "preserve one healthy replica",
+			},
+		},
+	}
+	cloned := cloneActionSafetyDecision(original)
+	if cloned.EvidenceStates["app_readiness"] != model.InvariantEvidenceStatePass ||
+		cloned.BlastRadius.Before["app-a"] != 2 ||
+		cloned.BlastRadius.After["app-a"] != 1 ||
+		cloned.BlastRadius.Violations["app-a"] != "preserve one healthy replica" {
+		t.Fatalf("cloned safety decision lost map content: %+v", cloned)
+	}
+
+	cloned.EvidenceStates["app_readiness"] = model.InvariantEvidenceStateFail
+	cloned.BlastRadius.Before["app-a"] = 99
+	cloned.BlastRadius.After["app-a"] = 98
+	cloned.BlastRadius.Violations["app-a"] = "changed"
+	if original.EvidenceStates["app_readiness"] != model.InvariantEvidenceStatePass ||
+		original.BlastRadius.Before["app-a"] != 2 ||
+		original.BlastRadius.After["app-a"] != 1 ||
+		original.BlastRadius.Violations["app-a"] != "preserve one healthy replica" {
+		t.Fatalf("mutating cloned safety decision changed the source: %+v", original)
+	}
+}
+
 func testAutomationActionDispatch(
 	intent model.AutomationActionIntent,
 	now time.Time,

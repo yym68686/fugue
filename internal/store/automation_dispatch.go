@@ -914,16 +914,18 @@ func cloneActionSafetyDecision(
 		decision.Violations = append([]model.ActionSafetyViolation(nil), decision.Violations...)
 	}
 	if decision.EvidenceStates != nil {
-		decision.EvidenceStates = make(map[string]string, len(decision.EvidenceStates))
-		for key, value := range decision.EvidenceStates {
+		evidenceStates := decision.EvidenceStates
+		decision.EvidenceStates = make(map[string]string, len(evidenceStates))
+		for key, value := range evidenceStates {
 			decision.EvidenceStates[key] = value
 		}
 	}
 	decision.BlastRadius.Before = cloneIntMap(decision.BlastRadius.Before)
 	decision.BlastRadius.After = cloneIntMap(decision.BlastRadius.After)
 	if decision.BlastRadius.Violations != nil {
-		decision.BlastRadius.Violations = make(map[string]string, len(decision.BlastRadius.Violations))
-		for key, value := range decision.BlastRadius.Violations {
+		blastRadiusViolations := decision.BlastRadius.Violations
+		decision.BlastRadius.Violations = make(map[string]string, len(blastRadiusViolations))
+		for key, value := range blastRadiusViolations {
 			decision.BlastRadius.Violations[key] = value
 		}
 	}
