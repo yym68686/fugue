@@ -43,6 +43,10 @@ func EvaluatePolicy(input EvaluationInput) (EvaluationResult, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	// Evaluation decisions are persisted both inside JSONB and alongside
+	// TIMESTAMPTZ columns. PostgreSQL stores timestamps at microsecond
+	// precision, so canonicalize before deriving any immutable timestamps.
+	now = now.Truncate(time.Microsecond)
 	policy := input.Policy
 	policy.ID = strings.TrimSpace(policy.ID)
 	policy.Kind = strings.TrimSpace(strings.ToLower(policy.Kind))

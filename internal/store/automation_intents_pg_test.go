@@ -20,13 +20,14 @@ func TestPostgresAutomationActionIntentAppendReuseAndScopedReads(t *testing.T) {
 	}
 	defer db.Close()
 	stateStore := &Store{db: db, databaseURL: "postgres://automation-intent-test", dbReady: true}
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Date(2026, 7, 29, 1, 0, 0, 123456789, time.UTC)
 	policy, app := postgresAutomationIntentFixture(t, now)
 	intent := testObservedAutomationIntent(t, policy, app, now)
 	intent.ID = "automation_intent_test"
 	storedRow := intent
-	storedRow.CreatedAt = now
-	storedRow.UpdatedAt = now
+	storedRow.ExpiresAt = storedRow.ExpiresAt.Round(time.Microsecond)
+	storedRow.CreatedAt = now.Round(time.Microsecond)
+	storedRow.UpdatedAt = now.Round(time.Microsecond)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)FROM fugue_automation_action_intents\s+WHERE idempotency_key = \$1 FOR SHARE`).

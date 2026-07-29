@@ -54,6 +54,36 @@ func TestEvaluatePolicyCreatesDeterministicObserveOnlyIntent(t *testing.T) {
 	}
 }
 
+func TestEvaluatePolicyCanonicalizesIntentTimestampForPostgres(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 29, 1, 0, 0, 123456789, time.UTC)
+	result, err := EvaluatePolicy(evaluationFixture(now))
+	if err != nil {
+		t.Fatalf("evaluate policy: %v", err)
+	}
+	expectedEvaluatedAt := now.Truncate(time.Microsecond)
+	if !result.Decision.EvaluatedAt.Equal(expectedEvaluatedAt) {
+		t.Fatalf(
+			"evaluation timestamp was not canonicalized: got=%s want=%s",
+			result.Decision.EvaluatedAt.Format(time.RFC3339Nano),
+			expectedEvaluatedAt.Format(time.RFC3339Nano),
+		)
+	}
+
+	intent, err := NewObservedActionIntent(evaluationFixture(now).Policy, result)
+	if err != nil {
+		t.Fatalf("build observed intent: %v", err)
+	}
+	persisted := intent
+	// PostgreSQL TIMESTAMPTZ has microsecond precision. The decision remains
+	// inside JSONB while expires_at is returned from a timestamp column.
+	persisted.ExpiresAt = persisted.ExpiresAt.Round(time.Microsecond)
+	if _, err := NormalizeObservedIntent(persisted); err != nil {
+		t.Fatalf("normalize PostgreSQL timestamp round trip: %v", err)
+	}
+}
+
 func TestEvaluatePolicyDisabledAndInsufficientEvidenceDoNotCreateIntent(t *testing.T) {
 	t.Parallel()
 
