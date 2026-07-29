@@ -7353,6 +7353,34 @@ assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "3" "fallback 
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "true" "fallback cross-package rename API build flag"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "fallback cross-package rename controller build flag"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "true" "fallback cross-package rename edge build flag"
+
+# A node-local image may lag behind the core API/controller baselines. Its
+# source drift must still select a fresh image even when the core release diff
+# contains only unrelated files; otherwise the live stale image is silently
+# preserved forever.
+COMPONENT_PLAN_IMAGE_CACHE_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+printf '\n// stale image-cache activation fixture\n' >>"${COMPONENT_PLAN_REPO}/cmd/fugue-image-cache/main.go"
+printf '\ncomponent baseline attribution fixture\n' >>"${COMPONENT_PLAN_REPO}/docs/fugue-platform-resilience-control-loop-plan.md"
+git -C "${COMPONENT_PLAN_REPO}" add \
+  cmd/fugue-image-cache/main.go \
+  docs/fugue-platform-resilience-control-loop-plan.md
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m image-cache-baseline-drift
+COMPONENT_PLAN_IMAGE_CACHE_TARGET="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES=docs/fugue-platform-resilience-control-loop-plan.md \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_IMAGE_CACHE_TARGET}" \
+  FUGUE_IMAGE_CACHE_IMAGE_BASE_REF="${COMPONENT_PLAN_IMAGE_CACHE_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" \
+  "stale image-cache component source drift build count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_image_cache)" "true" \
+  "stale image-cache component source drift build flag"
+grep -Fq 'will build image_cache image (component-source-drift)' "${COMPONENT_PLAN_LOG}" ||
+  fail "stale image-cache component source drift build reason must be observable"
+
 rm -rf "${COMPONENT_PLAN_REPO}"
 rm -f "${COMPONENT_PLAN_OUTPUT}" "${COMPONENT_PLAN_LOG}"
 
@@ -11599,6 +11627,7 @@ restore_temp_release_env
 FUGUE_RELEASE_FULLNAME=fugue-fugue
 FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
 FUGUE_RELEASE_AFTER_SHA="${IMAGE_CACHE_REF}"
+RELEASE_CHANGED_FILES_EFFECTIVE=""
 live_daemonset_container_image() {
   printf 'ghcr.io/acme/fugue-image-cache:%s' "${SCRIPT_REF}"
 }
@@ -11615,6 +11644,7 @@ fi
 FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
 FUGUE_RELEASE_AFTER_SHA="${IMAGE_CACHE_REF}"
 FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go'
+RELEASE_CHANGED_FILES_EFFECTIVE=""
 live_daemonset_container_image() {
   printf 'ghcr.io/acme/fugue-image-cache:missing-live-ref'
 }
@@ -11623,6 +11653,17 @@ FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main_test.go'
 if node_local_build_plane_image_rollout_allowed; then
   fail "image-cache test-only changes must not allow a fallback rollout"
 fi
+FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh'
+RELEASE_CHANGED_FILES_EFFECTIVE=""
+FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS='api controller image_cache'
+FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST="sha256:$(printf '%064d' 0 | tr '0' 'a')"
+node_local_build_plane_image_rollout_allowed ||
+  fail "a verified selected image-cache target must allow rollout when the live ref is unavailable"
+FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST=''
+if node_local_build_plane_image_rollout_allowed; then
+  fail "an image-cache target without a verified digest must not allow fallback rollout"
+fi
+unset FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST
 REPO_ROOT="${ORIGINAL_REPO_ROOT}"
 
 FUGUE_REGISTRY_DEPLOYMENT_NAME=fugue-fugue-registry

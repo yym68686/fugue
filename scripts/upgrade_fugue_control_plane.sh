@@ -3368,6 +3368,14 @@ image_cache_source_changed_in_release_files() {
 	return 1
 }
 
+image_cache_image_target_selected() {
+  local target=""
+  for target in ${FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS:-}; do
+    [[ "${target}" == "image_cache" ]] && return 0
+  done
+  return 1
+}
+
 source_changed_between_refs() {
 	local old_ref="$1"
 	local new_ref="$2"
@@ -3457,15 +3465,21 @@ node_local_build_plane_image_rollout_allowed() {
   else
     source_status=$?
   fi
-  if [[ "${source_status}" == "2" ]] && image_cache_source_changed_in_release_files; then
+  if [[ "${source_status}" == "2" ]] &&
+    image_cache_source_changed_in_release_files; then
     # A live image tag is normally a Git commit, but old tags can outlive the
     # repository's reachable object set.  The release baseline/build plan has
-    # already attributed the changed source files and built the target image;
-    # refusing the rollout here would silently preserve the vulnerable live
-    # image forever.  Fall back only for an unavailable old ref, only when the
-    # target tag is the exact release SHA, and only when a production source
-    # file (not a test) changed.
+    # already attributed the changed source files; refusing the rollout here
+    # would silently preserve the vulnerable live image forever. Fall back
+    # only for an unavailable old ref, only when the target tag is the exact
+    # release SHA, and only when a production source file (not a test) changed.
     log "live image-cache source ref ${live_tag} is unavailable; using explicit release-file attribution to allow rollout to ${target_tag}"
+    return 0
+  fi
+  if [[ "${source_status}" == "2" ]] &&
+    image_cache_image_target_selected &&
+    release_image_digest_valid "${FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST:-}"; then
+    log "live image-cache source ref ${live_tag} is unavailable; using verified image-cache target ${target_tag} (${FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST})"
     return 0
   fi
   return 1

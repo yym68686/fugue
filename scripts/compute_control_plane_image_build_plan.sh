@@ -122,7 +122,7 @@ image_reason_matches_component_baseline() {
   local changed="${tmp_dir}/component-changed-files-${image}"
 
   case "${reason}" in
-    unknown-change-set|helm-live-image-drift) return 0 ;;
+    unknown-change-set|helm-live-image-drift|component-source-drift) return 0 ;;
   esac
   [[ -e "${marker}" ]] || return 0
   grep_membership exact "${reason}" "${changed}" "${image} component baseline"
@@ -376,6 +376,81 @@ mark_go_package_images() {
   [[ "${matched}" == "true" ]]
 }
 
+image_component_dockerfile() {
+  case "$1" in
+    api) printf '%s' Dockerfile.api ;;
+    controller) printf '%s' Dockerfile.controller ;;
+    drain_agent) printf '%s' Dockerfile.drain-agent ;;
+    telemetry_agent) printf '%s' Dockerfile.telemetry-agent ;;
+    image_cache) printf '%s' Dockerfile.image-cache ;;
+    edge) printf '%s' Dockerfile.edge ;;
+    *) return 1 ;;
+  esac
+}
+
+component_source_changed_since_baseline() {
+  local image="$1"
+  local changed="${tmp_dir}/component-changed-files-${image}"
+  local file=""
+  local package_dir=""
+  local fixture_package_dir=""
+  local dockerfile=""
+
+  [[ -e "${tmp_dir}/component-baseline-${image}" ]] || return 1
+  [[ -s "${changed}" ]] || return 1
+  dockerfile="$(image_component_dockerfile "${image}")" || return 1
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+
+    case "${file}" in
+      go.mod|go.sum|"${dockerfile}")
+        return 0
+        ;;
+      *_test.go)
+        continue
+        ;;
+    esac
+
+    # A deleted production source file may no longer be present in the target
+    # dependency graph. Treat it conservatively as component source drift.
+    if [[ ! -e "${REPO_ROOT}/${file}" && ( "${file}" == cmd/* || "${file}" == internal/* ) ]]; then
+      return 0
+    fi
+
+    if [[ "${file}" == *.go ]]; then
+      package_dir="$(dirname "${file}")"
+      if grep_membership exact "${package_dir}" "${tmp_dir}/deps-${image}" \
+        "${image} component baseline source"; then
+        return 0
+      fi
+      continue
+    fi
+
+    # Runtime assets under a package consumed by this image can change the
+    # binary through //go:embed. Testdata/fixtures are checked with Go's embed
+    # metadata so test-only assets do not cause an image rebuild.
+    if fixture_package_dir="$(go_fixture_package_dir "${file}")" &&
+      go_package_is_valid "${fixture_package_dir}"; then
+      if grep_membership exact "${fixture_package_dir}" "${tmp_dir}/deps-${image}" \
+        "${image} component baseline fixture" &&
+        go_fixture_is_runtime_asset "${file}" "${fixture_package_dir}"; then
+        return 0
+      fi
+      continue
+    fi
+    if [[ "${file}" == internal/* ]]; then
+      package_dir="$(dirname "${file}")"
+      if grep_membership exact "${package_dir}" "${tmp_dir}/deps-${image}" \
+        "${image} component baseline runtime asset"; then
+        return 0
+      fi
+    fi
+  done <"${changed}"
+  return 1
+}
+
 tmp_dir="$(mktemp -d)"
 cleanup() {
   rm -rf "${tmp_dir}"
@@ -393,6 +468,7 @@ if [[ -n "${target_ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${target_ref}^
     [[ -n "${base_ref}" ]] || continue
     if ! git -C "${REPO_ROOT}" cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
       printf 'component image baseline is not a local commit; using fail-safe union for %s: %s\n' "${image}" "${base_ref}" >&2
+      touch "${tmp_dir}/component-baseline-unavailable-${image}"
       continue
     fi
     component_changed="${tmp_dir}/component-changed-files-${image}"
@@ -456,6 +532,21 @@ else
         done >>"${deps_file}"
     done < <(image_commands "${image}")
     sort -u "${deps_file}" -o "${deps_file}"
+  done
+
+  # The live-to-target release diff is intentionally rooted at the core API
+  # and controller refs. A node-local image can still be far behind those
+  # refs, however, so its source changes may not appear in the release change
+  # set at all. Rebuild the node-local image-cache when its own trusted live
+  # baseline contains production source drift; otherwise a stale image can be
+  # preserved forever. Other image domains retain their existing baseline
+  # suppression semantics.
+  for image in image_cache; do
+    if [[ -e "${tmp_dir}/component-baseline-unavailable-${image}" ]]; then
+      mark_image "${image}" "unknown-change-set"
+    elif component_source_changed_since_baseline "${image}"; then
+      mark_image "${image}" "component-source-drift"
+    fi
   done
 
   while IFS= read -r raw_file; do
