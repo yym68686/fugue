@@ -120,6 +120,51 @@ RETURNING id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id
 	return inserted, nil
 }
 
+func (s *Store) pgDemoteLegacyImageLocationIfUnchanged(
+	id string,
+	expectedUpdatedAt time.Time,
+	observedAt time.Time,
+	updatedAt time.Time,
+	lastError string,
+) (model.ImageLocation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	location, err := scanImageLocation(s.db.QueryRowContext(ctx, `
+UPDATE fugue_image_locations
+SET status = $3,
+	last_seen_at = $4,
+	last_error = $5,
+	updated_at = $6
+WHERE id = $1
+	AND updated_at = $2
+	AND LOWER(BTRIM(status)) = $7
+	AND BTRIM(digest) = ''
+	AND (
+		BTRIM(node_id) <> '' OR
+		BTRIM(runtime_id) <> '' OR
+		BTRIM(cluster_node_name) <> '' OR
+		BTRIM(cache_endpoint) <> ''
+	)
+RETURNING id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id, runtime_id, cluster_node_name, cache_endpoint, status, last_seen_at, size_bytes, last_error, created_at, updated_at
+`,
+		id,
+		expectedUpdatedAt,
+		model.ImageLocationStatusMissing,
+		observedAt,
+		lastError,
+		updatedAt,
+		model.ImageLocationStatusPresent,
+	))
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.ImageLocation{}, ErrConflict
+	}
+	if err != nil {
+		return model.ImageLocation{}, mapDBErr(err)
+	}
+	return location, nil
+}
+
 func (s *Store) pgListImageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

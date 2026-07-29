@@ -181,6 +181,7 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 	}
 	const legacySeedDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	imageRef := "registry.cache.example:5000/fugue-apps/demo:current"
+	locationImageRef := "registry.cache.example:5000/fugue-apps/demo@" + integrityTestDigest
 	legacy, err := stateStore.UpsertImage(model.Image{
 		TenantID:        "tenant",
 		AppID:           "app",
@@ -241,6 +242,7 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 		t.Fatalf("create canonical digest alias seed: %v", err)
 	}
 	now := time.Now().UTC()
+	staleLocationSeenAt := now.Add(-3 * time.Hour)
 	expiresAt := now.Add(time.Hour)
 	legacyPin, err := stateStore.UpsertImagePin(model.ImagePin{
 		ImageID:     legacy.ID,
@@ -269,7 +271,7 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 	legacyLocation, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID:        legacy.TenantID,
 		AppID:           legacy.AppID,
-		ImageRef:        imageRef,
+		ImageRef:        locationImageRef,
 		Digest:          legacySeedDigest,
 		NodeID:          "node-canonical",
 		RuntimeID:       "runtime-canonical",
@@ -283,8 +285,8 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 	}
 	canonicalLocation, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID:        canonical.TenantID,
-		AppID:           canonical.AppID,
-		ImageRef:        imageRef,
+		AppID:           "canonical-location-app",
+		ImageRef:        locationImageRef,
 		Digest:          integrityTestDigest,
 		NodeID:          "node-canonical",
 		RuntimeID:       "runtime-canonical",
@@ -309,7 +311,7 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 		NodeID:          "node-canonical",
 		RuntimeID:       "runtime-canonical",
 		ClusterNodeName: "worker-canonical",
-		ImageRef:        imageRef,
+		ImageRef:        locationImageRef,
 		Repo:            "fugue-apps/demo",
 		Target:          "current",
 		Digest:          integrityTestDigest,
@@ -351,8 +353,8 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 		if state.ImageLocations[index].ID == legacyLocation.ID {
 			state.ImageLocations[index].Digest = ""
 			state.ImageLocations[index].Status = model.ImageLocationStatusPresent
-			state.ImageLocations[index].LastSeenAt = &now
-			state.ImageLocations[index].UpdatedAt = now
+			state.ImageLocations[index].LastSeenAt = &staleLocationSeenAt
+			state.ImageLocations[index].UpdatedAt = staleLocationSeenAt
 		}
 	}
 	encoded, err := json.MarshalIndent(state, "", "  ")
@@ -362,7 +364,11 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
 		t.Fatalf("write legacy duplicate state: %v", err)
 	}
-	seededLocations, err := stateStore.ListImageLocations(model.ImageLocationFilter{AppID: legacy.AppID, PlatformAdmin: true})
+	seededLocations, err := stateStore.ListImageLocations(model.ImageLocationFilter{
+		ImageRef:      locationImageRef,
+		Status:        model.ImageLocationStatusPresent,
+		PlatformAdmin: true,
+	})
 	if err != nil {
 		t.Fatalf("list seeded duplicate locations: %v", err)
 	}
@@ -438,7 +444,7 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 		t.Fatalf("canonical pin changed during identity demotion: %+v", canonicalPins)
 	}
 	presentLocations, err := stateStore.ListImageLocations(model.ImageLocationFilter{
-		AppID:         legacy.AppID,
+		ImageRef:      locationImageRef,
 		Status:        model.ImageLocationStatusPresent,
 		PlatformAdmin: true,
 	})
@@ -446,7 +452,10 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 		t.Fatalf("list present duplicate image locations: %v", err)
 	}
 	if len(presentLocations) != 1 || presentLocations[0].ID != canonicalLocation.ID ||
-		presentLocations[0].Digest != integrityTestDigest || presentLocations[0].Status != model.ImageLocationStatusPresent {
+		presentLocations[0].AppID != canonicalLocation.AppID || presentLocations[0].Digest != integrityTestDigest ||
+		presentLocations[0].Status != model.ImageLocationStatusPresent ||
+		presentLocations[0].LastError != canonicalLocation.LastError ||
+		!presentLocations[0].UpdatedAt.Equal(canonicalLocation.UpdatedAt) {
 		t.Fatalf("canonical location changed during identity demotion: %+v", presentLocations)
 	}
 	missingLocations, err := stateStore.ListImageLocations(model.ImageLocationFilter{
@@ -458,8 +467,78 @@ func TestReconcileDistributedImageIntegrityDemotesLegacyDuplicateWhenCanonicalId
 		t.Fatalf("list missing duplicate image locations: %v", err)
 	}
 	if len(missingLocations) != 1 || missingLocations[0].ID != legacyLocation.ID ||
-		missingLocations[0].Digest != "" || missingLocations[0].Status != model.ImageLocationStatusMissing {
+		missingLocations[0].Digest != "" || missingLocations[0].Status != model.ImageLocationStatusMissing ||
+		missingLocations[0].LastError != "image location evidence is stale and has no canonical digest" ||
+		missingLocations[0].LastSeenAt == nil || !missingLocations[0].LastSeenAt.Equal(now) {
 		t.Fatalf("legacy tag-only location was not demoted: %+v", missingLocations)
+	}
+}
+
+func TestDemoteLegacyImageLocationDefersConcurrentRefreshWithoutMaintenanceError(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	location, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        "tenant",
+		AppID:           "app",
+		ImageRef:        "registry.cache.example:5000/fugue-apps/demo:current",
+		NodeID:          "node",
+		RuntimeID:       "runtime",
+		ClusterNodeName: "worker",
+		CacheEndpoint:   "http://worker:5000",
+		Status:          model.ImageLocationStatusPulling,
+	})
+	if err != nil {
+		t.Fatalf("create legacy location fixture: %v", err)
+	}
+	refreshedAt := location.UpdatedAt.Add(time.Second)
+	raw, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var state model.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	for index := range state.ImageLocations {
+		if state.ImageLocations[index].ID == location.ID {
+			state.ImageLocations[index].Status = model.ImageLocationStatusPresent
+			state.ImageLocations[index].LastSeenAt = &refreshedAt
+			state.ImageLocations[index].UpdatedAt = refreshedAt
+		}
+	}
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("encode refreshed state: %v", err)
+	}
+	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
+		t.Fatalf("write refreshed state: %v", err)
+	}
+
+	svc := &Service{Store: stateStore}
+	if err := svc.demoteLegacyImageLocationIfUnchanged(
+		location.ID,
+		location.UpdatedAt,
+		refreshedAt.Add(time.Second),
+		"stale maintenance classification",
+	); err != nil {
+		t.Fatalf("concurrent refresh should defer without maintenance error: %v", err)
+	}
+	present, err := stateStore.ListImageLocations(model.ImageLocationFilter{
+		NodeID:        location.NodeID,
+		Status:        model.ImageLocationStatusPresent,
+		PlatformAdmin: true,
+	})
+	if err != nil {
+		t.Fatalf("list concurrently refreshed location: %v", err)
+	}
+	if len(present) != 1 || present[0].ID != location.ID || present[0].Digest != "" ||
+		!present[0].UpdatedAt.Equal(refreshedAt) {
+		t.Fatalf("concurrently refreshed location was changed: %+v", present)
 	}
 }
 

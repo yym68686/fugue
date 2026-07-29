@@ -81,6 +81,69 @@ func (s *Store) UpsertImageLocation(location model.ImageLocation) (model.ImageLo
 	return out, err
 }
 
+// DemoteLegacyImageLocationIfUnchanged marks a historical distributed
+// Present row Missing without re-normalizing its identity. Legacy rows may
+// have an empty digest even when ImageRef is digest-qualified; sending them
+// through UpsertImageLocation would derive that digest and can collide with
+// the canonical row that superseded them. The UpdatedAt predicate is the
+// compare-and-swap fence against a concurrent reporter refreshing the row.
+func (s *Store) DemoteLegacyImageLocationIfUnchanged(
+	id string,
+	expectedUpdatedAt time.Time,
+	observedAt time.Time,
+	lastError string,
+) (model.ImageLocation, error) {
+	id = strings.TrimSpace(id)
+	lastError = strings.TrimSpace(lastError)
+	if id == "" || expectedUpdatedAt.IsZero() || observedAt.IsZero() || lastError == "" {
+		return model.ImageLocation{}, ErrInvalidInput
+	}
+	expectedUpdatedAt = expectedUpdatedAt.UTC()
+	observedAt = observedAt.UTC()
+	updatedAt := time.Now().UTC()
+	if minimum := expectedUpdatedAt.Add(time.Microsecond); updatedAt.Before(minimum) {
+		updatedAt = minimum
+	}
+	if s.usingDatabase() {
+		return s.pgDemoteLegacyImageLocationIfUnchanged(
+			id,
+			expectedUpdatedAt,
+			observedAt,
+			updatedAt,
+			lastError,
+		)
+	}
+
+	var out model.ImageLocation
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := -1
+		for candidateIndex, candidate := range state.ImageLocations {
+			if strings.TrimSpace(candidate.ID) == id {
+				index = candidateIndex
+				break
+			}
+		}
+		if index < 0 {
+			return ErrConflict
+		}
+		current := state.ImageLocations[index]
+		if !current.UpdatedAt.Equal(expectedUpdatedAt) ||
+			!strings.EqualFold(strings.TrimSpace(current.Status), model.ImageLocationStatusPresent) ||
+			strings.TrimSpace(current.Digest) != "" ||
+			!ImageLocationIsDistributed(current) {
+			return ErrConflict
+		}
+		current.Status = model.ImageLocationStatusMissing
+		current.LastError = lastError
+		current.LastSeenAt = &observedAt
+		current.UpdatedAt = updatedAt
+		state.ImageLocations[index] = current
+		out = current
+		return nil
+	})
+	return out, err
+}
+
 // resolveImageLocationDigest bridges compatibility reports that identify an
 // image by tag while still keeping distributed Present records
 // content-addressed.  The lookup is intentionally conservative: a digest is
