@@ -514,9 +514,16 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		plan.RuntimeID = nodes[0].RuntimeID
 		plan.NodePressure = imageCacheNodePressure(nodes[0])
 		for _, blob := range nodes[0].UnreferencedBlobs {
-			if strings.TrimSpace(blob.Digest) == "" {
+			digest := managedImageDigest(blob.Digest)
+			if digest == "" {
 				continue
 			}
+			if _, protectedBlob := protected.protectedBlobDigests[digest]; protectedBlob {
+				plan.ProtectedBlobCount++
+				plan.ProtectionSummary["current_workload"]++
+				continue
+			}
+			blob.Digest = digest
 			if blob.Reason == "" {
 				blob.Reason = "unreferenced_blob"
 			}
@@ -599,6 +606,7 @@ type imageCacheProtectedSet struct {
 	replicaIDsByRef      map[string][]string
 	minReplicaKeeperRefs map[string][]imageCacheReplicaCandidate
 	replicaCandidateRefs map[string][]imageCacheReplicaCandidate
+	protectedBlobDigests map[string]struct{}
 }
 
 type imageCacheReplicaCandidate struct {
@@ -632,6 +640,7 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	protected.replicaIDsByRef = map[string][]string{}
 	protected.minReplicaKeeperRefs = map[string][]imageCacheReplicaCandidate{}
 	protected.replicaCandidateRefs = map[string][]imageCacheReplicaCandidate{}
+	protected.protectedBlobDigests = map[string]struct{}{}
 
 	images, err := s.store.ListImages(model.ImageFilter{PlatformAdmin: true})
 	if err != nil {
@@ -683,6 +692,9 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
 		addKeys(protected.pinnedRefs, keys...)
 		addImageCacheDetail(protected.pinIDsByRef, keys, pin.ID)
+		if digest := managedImageDigest(image.CanonicalDigest); digest != "" {
+			protected.protectedBlobDigests[digest] = struct{}{}
+		}
 	}
 	apps, err := s.store.ListAppsMetadata("", true)
 	if err == nil {
@@ -690,6 +702,23 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			keys := exactImageReferenceKeys(ref, "")
 			addKeys(protected.liveRefs, keys...)
 			addImageCacheDetail(protected.workloadRefsByRef, keys, ref)
+			if digest := managedImageDigest(ref); digest != "" {
+				protected.protectedBlobDigests[digest] = struct{}{}
+			}
+		}
+		activeApps := map[string]struct{}{}
+		for _, app := range apps {
+			if app.Spec.Replicas > 0 {
+				activeApps[strings.TrimSpace(app.ID)] = struct{}{}
+			}
+		}
+		for _, image := range images {
+			if _, ok := activeApps[strings.TrimSpace(image.AppID)]; !ok {
+				continue
+			}
+			if digest := managedImageDigest(image.CanonicalDigest); digest != "" {
+				protected.protectedBlobDigests[digest] = struct{}{}
+			}
 		}
 	}
 	for _, status := range []string{model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning} {
@@ -862,6 +891,14 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 	}
 	if manifest.CreatedAtObserved != nil {
 		out.CreatedAtObserved = manifest.CreatedAtObserved.UTC().Format(time.RFC3339)
+	}
+	if digest := managedImageDigest(manifest.Digest); digest != "" {
+		if _, active := protected.protectedBlobDigests[digest]; active {
+			out.Protected = true
+			out.SkipReason = "active_image_digest"
+			out.SkipDetails = []string{"canonical digest is used by an active workload or pin"}
+			return out
+		}
 	}
 	if manifest.PinnedLocally {
 		out.Protected = true
@@ -1197,6 +1234,9 @@ func healthyImageReplicasAPI(replicas []model.ImageReplica, now time.Time) []mod
 	out := make([]model.ImageReplica, 0, len(replicas))
 	for _, replica := range replicas {
 		if replica.Status != model.ImageReplicaStatusPresent {
+			continue
+		}
+		if managedImageDigest(replica.Digest) == "" {
 			continue
 		}
 		if replica.LeaseExpiresAt != nil && replica.LeaseExpiresAt.Before(now) {

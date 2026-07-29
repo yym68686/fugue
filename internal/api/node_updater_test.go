@@ -785,6 +785,15 @@ func TestNodeUpdaterCanReportImageLocationForAppTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	if _, err := s.UpsertImage(model.Image{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        app.Spec.Image,
+		CanonicalDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("create verified image identity: %v", err)
+	}
 	_, nodeSecret, err := s.CreateNodeKey(nodeTenant.ID, "default")
 	if err != nil {
 		t.Fatalf("create node key: %v", err)

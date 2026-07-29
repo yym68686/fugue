@@ -383,9 +383,10 @@ FROM fugue_node_update_tasks
 WHERE node_updater_id = $1 AND status = $2
 ORDER BY CASE
 	WHEN task_type = 'upgrade-node-updater' THEN 0
-	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 1
-	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 2
-	ELSE 3
+	WHEN task_type = 'replicate-app-image' AND COALESCE(payload_json->>'priority', '') = 'deploy_blocking' THEN 1
+	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 2
+	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 3
+	ELSE 4
 END, created_at ASC, id ASC
 LIMIT $3
 `, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, limit)

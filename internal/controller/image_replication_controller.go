@@ -272,6 +272,17 @@ func (s *Service) completeSatisfiedImageReplicationTasks(ctx context.Context) er
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		image, err := s.Store.GetImage(task.ImageID, "", true)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return err
+		}
+		wantDigest := store.CanonicalImageDigest(image.CanonicalDigest)
+		if wantDigest == "" {
+			continue
+		}
 		replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
 			ImageID:         task.ImageID,
 			NodeID:          task.TargetNodeID,
@@ -283,7 +294,14 @@ func (s *Service) completeSatisfiedImageReplicationTasks(ctx context.Context) er
 		if err != nil {
 			return err
 		}
-		if len(healthyImageReplicas(replicas, now)) == 0 {
+		satisfied := false
+		for _, replica := range healthyImageReplicas(replicas, now) {
+			if store.CanonicalImageDigest(replica.Digest) == wantDigest {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
 			continue
 		}
 		task.Status = model.ImageReplicationTaskStatusCompleted
@@ -338,6 +356,9 @@ func healthyImageReplicas(replicas []model.ImageReplica, now time.Time) []model.
 	out := make([]model.ImageReplica, 0, len(replicas))
 	for _, replica := range replicas {
 		if replica.Status != model.ImageReplicaStatusPresent {
+			continue
+		}
+		if store.CanonicalImageDigest(replica.Digest) == "" {
 			continue
 		}
 		if replica.LeaseExpiresAt != nil && replica.LeaseExpiresAt.Before(now) {

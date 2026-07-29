@@ -680,6 +680,7 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageM
 			"heartbeat",
 			"tasks",
 			model.NodeUpdateTaskTypePrepullAppImages,
+			model.NodeUpdateTaskTypeReplicateAppImage,
 			model.NodeUpdateTaskTypeReportImageCache,
 			model.NodeUpdateTaskTypePruneImageCache,
 			model.NodeUpdateTaskTypeDecommissionLocalPV,
@@ -700,6 +701,13 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageM
 	})
 	if err != nil {
 		t.Fatalf("create prepull task: %v", err)
+	}
+	replicate, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReplicateAppImage, map[string]string{
+		"priority": model.ImageReplicationPriorityDeployBlocking,
+		"image_id": "image_1",
+	})
+	if err != nil {
+		t.Fatalf("create deploy-blocking replication task: %v", err)
 	}
 	report, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReportImageCache, map[string]string{
 		"reason": "test-inventory",
@@ -736,13 +744,14 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageM
 	if err != nil {
 		t.Fatalf("list all pending tasks: %v", err)
 	}
-	if len(pending) != 5 ||
+	if len(pending) != 6 ||
 		pending[0].ID != upgrade.ID ||
-		pending[1].ID != report.ID ||
-		pending[2].ID != prune.ID ||
-		pending[3].ID != decommission.ID ||
-		pending[4].ID != prepull.ID {
-		t.Fatalf("expected upgrade, inventory, storage maintenance, then prepull, got %+v", pending)
+		pending[1].ID != replicate.ID ||
+		pending[2].ID != report.ID ||
+		pending[3].ID != prune.ID ||
+		pending[4].ID != decommission.ID ||
+		pending[5].ID != prepull.ID {
+		t.Fatalf("expected upgrade, deploy-blocking replication, inventory, storage maintenance, then prepull, got %+v", pending)
 	}
 }
 

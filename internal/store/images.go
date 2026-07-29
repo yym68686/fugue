@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,9 @@ func (s *Store) UpsertImage(image model.Image) (model.Image, error) {
 	}
 	if image.LifecycleState == "" {
 		return model.Image{}, ErrInvalidInput
+	}
+	if err := validateAvailableImage(image); err != nil {
+		return model.Image{}, err
 	}
 	if s.usingDatabase() {
 		return s.pgUpsertImage(image)
@@ -157,9 +161,34 @@ func (s *Store) ListImageAliases(filter model.ImageAliasFilter) ([]model.ImageAl
 }
 
 func (s *Store) UpsertImageReplica(replica model.ImageReplica) (model.ImageReplica, error) {
+	rawReplicaDigest := strings.TrimSpace(replica.Digest)
 	replica = normalizeImageReplica(replica)
 	if replica.ImageID == "" || replica.Status == "" {
 		return model.ImageReplica{}, ErrInvalidInput
+	}
+	if replica.Status == model.ImageReplicaStatusPresent {
+		image, err := s.GetImage(replica.ImageID, "", true)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return model.ImageReplica{}, err
+		}
+		if err == nil {
+			wantDigest := CanonicalImageDigest(image.CanonicalDigest)
+			gotDigest := CanonicalImageDigest(replica.Digest)
+			if wantDigest == "" {
+				return model.ImageReplica{}, errors.Join(ErrInvalidInput, ErrCanonicalDigestRequired)
+			}
+			if rawReplicaDigest != "" && gotDigest == "" {
+				return model.ImageReplica{}, errors.Join(ErrInvalidInput, ErrCanonicalDigestRequired)
+			}
+			if gotDigest == "" {
+				replica.Digest = wantDigest
+			} else if wantDigest != "" && gotDigest != wantDigest {
+				return model.ImageReplica{}, errors.Join(ErrInvalidInput, ErrImageDigestMismatch)
+			}
+		}
+	}
+	if err := validatePresentImageReplica(replica); err != nil {
+		return model.ImageReplica{}, err
 	}
 	if s.usingDatabase() {
 		return s.pgUpsertImageReplica(replica)
@@ -396,16 +425,27 @@ func (s *Store) ListImageReplicationTasks(filter model.ImageReplicationTaskFilte
 }
 
 func normalizeImage(image model.Image) model.Image {
+	rawLifecycle := strings.TrimSpace(image.LifecycleState)
 	image.TenantID = strings.TrimSpace(image.TenantID)
 	image.AppID = strings.TrimSpace(image.AppID)
 	image.ImageRef = strings.TrimSpace(image.ImageRef)
 	image.CanonicalDigest = normalizeImageDigest(image.CanonicalDigest)
+	if image.CanonicalDigest == "" {
+		image.CanonicalDigest = imageDigestFromReference(image.ImageRef)
+	}
 	image.MediaType = strings.TrimSpace(image.MediaType)
 	image.ManifestJSON = strings.TrimSpace(image.ManifestJSON)
 	image.SourceOperationID = strings.TrimSpace(image.SourceOperationID)
 	image.LifecycleState = normalizeImageLifecycleState(image.LifecycleState)
-	if image.LifecycleState == "" {
-		image.LifecycleState = model.ImageLifecycleAvailable
+	if rawLifecycle == "" {
+		// An image without a verified content identity is still being imported
+		// or repaired.  It must never silently enter Available merely because a
+		// caller omitted the lifecycle field.
+		if image.CanonicalDigest == "" {
+			image.LifecycleState = model.ImageLifecycleImporting
+		} else {
+			image.LifecycleState = model.ImageLifecycleAvailable
+		}
 	}
 	if image.ManifestSizeBytes < 0 {
 		image.ManifestSizeBytes = 0

@@ -31,6 +31,9 @@ func (s *Service) runImageCacheStorageMaintenance(ctx context.Context) error {
 	if err := s.scheduleImageCacheInventoryReports(ctx); err != nil {
 		return err
 	}
+	if err := s.reconcileDistributedImageIntegrity(ctx); err != nil {
+		return err
+	}
 	if err := s.reconcileLegacyDistributedImageMetadata(ctx); err != nil {
 		return err
 	}
@@ -425,9 +428,16 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 		NodePressure:      controllerImageCacheNodePressure(node),
 	}
 	for _, blob := range node.UnreferencedBlobs {
-		if strings.TrimSpace(blob.Digest) == "" {
+		digest := store.CanonicalImageDigest(blob.Digest)
+		if digest == "" {
 			continue
 		}
+		if _, protectedBlob := protected.protectedBlobDigests[digest]; protectedBlob {
+			plan.ProtectedBlobCount++
+			plan.ProtectionSummary["current_workload"]++
+			continue
+		}
+		blob.Digest = digest
 		if blob.Reason == "" {
 			blob.Reason = "unreferenced_blob"
 		}
@@ -552,6 +562,7 @@ type controllerImageCacheProtectedSet struct {
 	replicaIDsByRef      map[string][]string
 	minReplicaKeeperRefs map[string][]controllerImageCacheReplicaCandidate
 	replicaCandidateRefs map[string][]controllerImageCacheReplicaCandidate
+	protectedBlobDigests map[string]struct{}
 }
 
 type controllerImageCacheReplicaCandidate struct {
@@ -578,6 +589,7 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 		replicaIDsByRef:      map[string][]string{},
 		minReplicaKeeperRefs: map[string][]controllerImageCacheReplicaCandidate{},
 		replicaCandidateRefs: map[string][]controllerImageCacheReplicaCandidate{},
+		protectedBlobDigests: map[string]struct{}{},
 	}
 	images, err := s.Store.ListImages(model.ImageFilter{PlatformAdmin: true})
 	if err != nil {
@@ -629,6 +641,9 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
 		addControllerImageKeys(protected.pinnedRefs, keys...)
 		addControllerImageDetails(protected.pinIDsByRef, keys, pin.ID)
+		if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+			protected.protectedBlobDigests[digest] = struct{}{}
+		}
 	}
 	apps, err := s.Store.ListAppsMetadata("", true)
 	if err == nil {
@@ -636,6 +651,23 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 			keys := controllerImageReferenceKeys(ref, "")
 			addControllerImageKeys(protected.liveRefs, keys...)
 			addControllerImageDetails(protected.workloadRefsByRef, keys, ref)
+			if digest := imageDigest(ref); digest != "" {
+				protected.protectedBlobDigests[digest] = struct{}{}
+			}
+		}
+		activeApps := map[string]struct{}{}
+		for _, app := range apps {
+			if app.Spec.Replicas > 0 {
+				activeApps[strings.TrimSpace(app.ID)] = struct{}{}
+			}
+		}
+		for _, image := range images {
+			if _, ok := activeApps[strings.TrimSpace(image.AppID)]; !ok {
+				continue
+			}
+			if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+				protected.protectedBlobDigests[digest] = struct{}{}
+			}
 		}
 	}
 	if err := s.populateControllerImageTaskRefs(&protected, imageByID); err != nil {
@@ -813,6 +845,14 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 	}
 	if manifest.CreatedAtObserved != nil {
 		out.CreatedAtObserved = manifest.CreatedAtObserved.UTC().Format(time.RFC3339)
+	}
+	if digest := store.CanonicalImageDigest(manifest.Digest); digest != "" {
+		if _, active := protected.protectedBlobDigests[digest]; active {
+			out.Protected = true
+			out.SkipReason = "active_image_digest"
+			out.SkipDetails = []string{"canonical digest is used by an active workload or pin"}
+			return out
+		}
 	}
 	for _, rule := range []struct {
 		refs   map[string]struct{}

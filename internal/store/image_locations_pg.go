@@ -25,14 +25,15 @@ func (s *Store) pgUpsertImageLocation(location model.ImageLocation) (model.Image
 	existing, err := scanImageLocation(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id, runtime_id, cluster_node_name, cache_endpoint, status, last_seen_at, size_bytes, last_error, created_at, updated_at
 FROM fugue_image_locations
-WHERE COALESCE(tenant_id, '') = COALESCE($1::text, '')
-  AND image_ref = $2
-  AND digest = $3
-  AND node_id = $4
-  AND runtime_id = $5
-  AND cluster_node_name = $6
+WHERE ($1 <> '' AND id = $1)
+   OR ($1 = '' AND COALESCE(tenant_id, '') = COALESCE($2::text, '')
+       AND image_ref = $3
+       AND digest = $4
+       AND node_id = $5
+       AND runtime_id = $6
+       AND cluster_node_name = $7)
 FOR UPDATE
-`, nullIfEmpty(location.TenantID), location.ImageRef, location.Digest, location.NodeID, location.RuntimeID, location.ClusterNodeName))
+`, location.ID, nullIfEmpty(location.TenantID), location.ImageRef, location.Digest, location.NodeID, location.RuntimeID, location.ClusterNodeName))
 	if err == nil {
 		if location.TenantID == "" {
 			location.TenantID = existing.TenantID
@@ -65,19 +66,21 @@ FOR UPDATE
 UPDATE fugue_image_locations
 SET tenant_id = $2,
 	app_id = $3,
-	source_operation_id = $4,
-	node_id = $5,
-	runtime_id = $6,
-	cluster_node_name = $7,
-	cache_endpoint = $8,
-	status = $9,
-	last_seen_at = $10,
-	size_bytes = $11,
-	last_error = $12,
-	updated_at = $13
+	image_ref = $4,
+	digest = $5,
+	source_operation_id = $6,
+	node_id = $7,
+	runtime_id = $8,
+	cluster_node_name = $9,
+	cache_endpoint = $10,
+	status = $11,
+	last_seen_at = $12,
+	size_bytes = $13,
+	last_error = $14,
+	updated_at = $15
 WHERE id = $1
 RETURNING id, tenant_id, app_id, image_ref, digest, source_operation_id, node_id, runtime_id, cluster_node_name, cache_endpoint, status, last_seen_at, size_bytes, last_error, created_at, updated_at
-`, location.ID, nullIfEmpty(location.TenantID), location.AppID, location.SourceOperationID, location.NodeID, location.RuntimeID, location.ClusterNodeName, location.CacheEndpoint, location.Status, location.LastSeenAt, location.SizeBytes, location.LastError, location.UpdatedAt))
+`, location.ID, nullIfEmpty(location.TenantID), location.AppID, location.ImageRef, location.Digest, location.SourceOperationID, location.NodeID, location.RuntimeID, location.ClusterNodeName, location.CacheEndpoint, location.Status, location.LastSeenAt, location.SizeBytes, location.LastError, location.UpdatedAt))
 		if updateErr != nil {
 			return model.ImageLocation{}, mapDBErr(updateErr)
 		}

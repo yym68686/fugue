@@ -206,11 +206,12 @@ func TestCancelObsoletePendingNodeImageUpdateTasksCancelsOrphanReplicationLinks(
 		t.Fatalf("enroll app updater: %v", err)
 	}
 	image, err := stateStore.UpsertImage(model.Image{
-		ID:             "img_keep",
-		TenantID:       "tenant",
-		AppID:          "app",
-		ImageRef:       "registry.fugue.internal:5000/fugue-apps/demo:current",
-		LifecycleState: model.ImageLifecycleAvailable,
+		ID:              "img_keep",
+		TenantID:        "tenant",
+		AppID:           "app",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:current",
+		CanonicalDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		LifecycleState:  model.ImageLifecycleAvailable,
 	})
 	if err != nil {
 		t.Fatalf("create image: %v", err)

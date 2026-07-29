@@ -58,6 +58,11 @@ func (s *Server) handleReportImageReplica(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	replica.CacheEndpoint, err = normalizeReportedImageCacheEndpoint(replica.CacheEndpoint, "", imageReplicaReportIsPresent(replica.Status) && (replica.NodeID != "" || replica.RuntimeID != "" || replica.ClusterNodeName != ""))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	replica, err = s.store.UpsertImageReplica(replica)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -235,7 +240,7 @@ func (s *Server) handleNodeUpdaterReportImageReplica(w http.ResponseWriter, r *h
 		s.writeStoreError(w, err)
 		return
 	}
-	replica, err := s.store.UpsertImageReplica(model.ImageReplica{
+	replica := model.ImageReplica{
 		ImageID:         image.ID,
 		TenantID:        image.TenantID,
 		AppID:           firstNonEmptyImageAPIString(req.AppID, image.AppID),
@@ -250,7 +255,14 @@ func (s *Server) handleNodeUpdaterReportImageReplica(w http.ResponseWriter, r *h
 		LeaseExpiresAt:  req.LeaseExpiresAt,
 		SizeBytes:       req.SizeBytes,
 		LastError:       strings.TrimSpace(req.LastError),
-	})
+	}
+	derivedEndpoint := s.nodeUpdaterImageCacheEndpoint(updater)
+	replica.CacheEndpoint, err = normalizeReportedImageCacheEndpoint(replica.CacheEndpoint, derivedEndpoint, imageReplicaReportIsPresent(replica.Status))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	replica, err = s.store.UpsertImageReplica(replica)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -260,6 +272,11 @@ func (s *Server) handleNodeUpdaterReportImageReplica(w http.ResponseWriter, r *h
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"replica": replica})
+}
+
+func imageReplicaReportIsPresent(status string) bool {
+	status = strings.TrimSpace(status)
+	return status == "" || status == model.ImageReplicaStatusPresent
 }
 
 func (s *Server) handleNodeUpdaterListImageReplicationTasks(w http.ResponseWriter, r *http.Request) {

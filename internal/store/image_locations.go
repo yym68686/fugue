@@ -11,6 +11,13 @@ import (
 func (s *Store) UpsertImageLocation(location model.ImageLocation) (model.ImageLocation, error) {
 	rawStatus := strings.TrimSpace(location.Status)
 	location = normalizeImageLocation(location)
+	if location.Digest == "" && location.Status == model.ImageLocationStatusPresent {
+		resolved, err := s.resolveImageLocationDigest(location)
+		if err != nil {
+			return model.ImageLocation{}, err
+		}
+		location.Digest = resolved
+	}
 	if location.ImageRef == "" && location.Digest == "" {
 		return model.ImageLocation{}, ErrInvalidInput
 	}
@@ -74,6 +81,54 @@ func (s *Store) UpsertImageLocation(location model.ImageLocation) (model.ImageLo
 	return out, err
 }
 
+// resolveImageLocationDigest bridges compatibility reports that identify an
+// image by tag while still keeping distributed Present records
+// content-addressed.  The lookup is intentionally conservative: a digest is
+// adopted only when exactly one canonical image identity matches the report.
+func (s *Store) resolveImageLocationDigest(location model.ImageLocation) (string, error) {
+	if digest := CanonicalImageDigest(location.Digest); digest != "" {
+		return digest, nil
+	}
+	if digest := imageDigestFromReference(location.ImageRef); digest != "" {
+		return digest, nil
+	}
+	filter := model.ImageFilter{PlatformAdmin: true}
+	if strings.TrimSpace(location.AppID) != "" {
+		filter.AppID = strings.TrimSpace(location.AppID)
+	}
+	if strings.TrimSpace(location.TenantID) != "" {
+		filter.TenantID = strings.TrimSpace(location.TenantID)
+	}
+	if strings.TrimSpace(location.ImageRef) != "" {
+		filter.ImageRef = strings.TrimSpace(location.ImageRef)
+	}
+	images, err := s.ListImages(filter)
+	if err != nil {
+		return "", err
+	}
+	digests := map[string]struct{}{}
+	for _, image := range images {
+		if digest := CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+			digests[digest] = struct{}{}
+		}
+	}
+	if len(digests) == 1 {
+		for digest := range digests {
+			return digest, nil
+		}
+	}
+	return "", nil
+}
+
+// ResolveImageLocationDigest returns the sole canonical image identity that
+// can be proven for a tag-only location report.  An empty result is
+// intentionally ambiguous/missing evidence and must not be promoted to a
+// distributed Present row.
+func (s *Store) ResolveImageLocationDigest(location model.ImageLocation) (string, error) {
+	location = normalizeImageLocation(location)
+	return s.resolveImageLocationDigest(location)
+}
+
 func (s *Store) ListImageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
 	filter = normalizeImageLocationFilter(filter)
 	if s.usingDatabase() {
@@ -106,6 +161,9 @@ func normalizeImageLocation(location model.ImageLocation) model.ImageLocation {
 	location.AppID = strings.TrimSpace(location.AppID)
 	location.ImageRef = strings.TrimSpace(location.ImageRef)
 	location.Digest = normalizeImageDigest(location.Digest)
+	if location.Digest == "" {
+		location.Digest = imageDigestFromReference(location.ImageRef)
+	}
 	location.SourceOperationID = strings.TrimSpace(location.SourceOperationID)
 	location.NodeID = strings.TrimSpace(location.NodeID)
 	location.RuntimeID = strings.TrimSpace(location.RuntimeID)
@@ -161,6 +219,13 @@ func normalizeImageDigest(raw string) string {
 }
 
 func findImageLocation(state *model.State, location model.ImageLocation) int {
+	if strings.TrimSpace(location.ID) != "" {
+		for idx, existing := range state.ImageLocations {
+			if strings.TrimSpace(existing.ID) == strings.TrimSpace(location.ID) {
+				return idx
+			}
+		}
+	}
 	for idx, existing := range state.ImageLocations {
 		if strings.TrimSpace(existing.ImageRef) != location.ImageRef {
 			continue

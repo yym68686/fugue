@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func (s *Server) handleListImageLocations(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +26,15 @@ func (s *Server) handleReportImageLocation(w http.ResponseWriter, r *http.Reques
 	principal := mustPrincipal(r)
 	location, err := s.decodeImageLocationReport(r, principal)
 	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	location.CacheEndpoint, err = normalizeReportedImageCacheEndpoint(location.CacheEndpoint, "", imageLocationReportIsPresent(location.Status) && store.ImageLocationIsDistributed(location))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.enrichAndValidateDistributedImageLocation(&location); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -88,6 +98,17 @@ func (s *Server) handleNodeUpdaterReportImageLocation(w http.ResponseWriter, r *
 	if location.CacheEndpoint == "" {
 		location.CacheEndpoint = s.nodeUpdaterImageCacheEndpoint(updater)
 	}
+	derivedEndpoint := s.nodeUpdaterImageCacheEndpoint(updater)
+	endpoint, endpointErr := normalizeReportedImageCacheEndpoint(location.CacheEndpoint, derivedEndpoint, imageLocationReportIsPresent(location.Status))
+	if endpointErr != nil {
+		httpx.WriteError(w, http.StatusBadRequest, endpointErr.Error())
+		return
+	}
+	location.CacheEndpoint = endpoint
+	if err := s.enrichAndValidateDistributedImageLocation(&location); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	location, err = s.store.UpsertImageLocation(location)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -134,6 +155,16 @@ func (s *Server) handleAgentReportImageLocation(w http.ResponseWriter, r *http.R
 	}
 	if location.ClusterNodeName == "" {
 		location.ClusterNodeName = runtimeObj.ClusterNodeName
+	}
+	endpoint, endpointErr := normalizeReportedImageCacheEndpoint(location.CacheEndpoint, "", imageLocationReportIsPresent(location.Status))
+	if endpointErr != nil {
+		httpx.WriteError(w, http.StatusBadRequest, endpointErr.Error())
+		return
+	}
+	location.CacheEndpoint = endpoint
+	if err := s.enrichAndValidateDistributedImageLocation(&location); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	location, err = s.store.UpsertImageLocation(location)
 	if err != nil {
@@ -301,6 +332,63 @@ func imageLocationReachableCacheHost(host string) bool {
 		return false
 	}
 	return true
+}
+
+// normalizeReportedImageCacheEndpoint prevents a node from publishing a
+// loopback or otherwise unusable cache address as a cross-node replica.  A
+// control-plane-derived endpoint wins whenever one is available; a Present
+// report without any reachable endpoint is rejected instead of being stored as
+// healthy metadata.
+func normalizeReportedImageCacheEndpoint(reported, derived string, required bool) (string, error) {
+	reported = strings.TrimRight(strings.TrimSpace(reported), "/")
+	derived = strings.TrimRight(strings.TrimSpace(derived), "/")
+	if derived != "" && imageLocationEndpointUsable(derived) {
+		return derived, nil
+	}
+	if imageLocationEndpointUsable(reported) {
+		return reported, nil
+	}
+	if required {
+		return "", errBadImageLocation("present image location requires a reachable non-loopback cache endpoint")
+	}
+	return reported, nil
+}
+
+func imageLocationEndpointUsable(raw string) bool {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return false
+	}
+	host := imageLocationEndpointHost(raw)
+	if !imageLocationReachableCacheHost(host) {
+		return false
+	}
+	return imageLocationRegistryBasePort(raw) != ""
+}
+
+func (s *Server) enrichAndValidateDistributedImageLocation(location *model.ImageLocation) error {
+	if location == nil {
+		return nil
+	}
+	if strings.TrimSpace(location.Status) == "" {
+		location.Status = model.ImageLocationStatusPresent
+	}
+	if location.Status != model.ImageLocationStatusPresent || !store.ImageLocationIsDistributed(*location) {
+		return nil
+	}
+	if strings.TrimSpace(location.Digest) == "" {
+		digest, err := s.store.ResolveImageLocationDigest(*location)
+		if err != nil {
+			return err
+		}
+		location.Digest = digest
+	}
+	return store.ValidateDistributedImageLocation(*location)
+}
+
+func imageLocationReportIsPresent(status string) bool {
+	status = strings.TrimSpace(status)
+	return status == "" || status == model.ImageLocationStatusPresent
 }
 
 type badImageLocationError string

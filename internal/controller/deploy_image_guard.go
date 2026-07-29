@@ -445,8 +445,13 @@ func (s *Service) handlePendingDeployImageReplication(op model.Operation, cause 
 	if strings.TrimSpace(op.ID) == "" {
 		return cause
 	}
-	if _, err := s.Store.FailOperation(op.ID, message); err != nil {
-		return fmt.Errorf("mark deploy operation pending image replication: %w", err)
+	// Image replication is an asynchronous, recoverable prerequisite.  A
+	// transient pending task must not turn the user operation into a terminal
+	// failure (which previously required a manual second migration). Requeue
+	// the same operation so the normal controller loop can claim it again after
+	// the updater reports the replica.
+	if _, err := s.Store.RequeueManagedOperation(op.ID, message); err != nil {
+		return fmt.Errorf("requeue deploy operation pending image replication: %w", err)
 	}
 	return errOperationNoLongerActive
 }
@@ -1020,6 +1025,50 @@ func (s *Service) resolveImportedImageDigest(ctx context.Context, refs ...string
 	for _, ref := range compactImageRefs(refs) {
 		if digest := imageDigest(ref); digest != "" {
 			return digest, imageRefWithDigest(ref, digest)
+		}
+	}
+	// In strict distributed mode a tag-only import may still be safely reused
+	// when the control plane already has one unambiguous, content-addressed
+	// image identity for that reference (for example, a previous verified
+	// replica report).  Resolve from local metadata before considering any
+	// registry lookup; never infer a digest from a tag or a manifest HEAD.
+	if s != nil && s.Store != nil {
+		digests := map[string]struct{}{}
+		for _, ref := range compactImageRefs(refs) {
+			ref = strings.TrimSpace(ref)
+			if ref == "" {
+				continue
+			}
+			images, err := s.Store.ListImages(model.ImageFilter{ImageRef: ref, PlatformAdmin: true})
+			if err == nil {
+				for _, image := range images {
+					if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+						digests[digest] = struct{}{}
+					}
+				}
+			}
+			aliases, err := s.Store.ListImageAliases(model.ImageAliasFilter{AliasRef: ref, PlatformAdmin: true})
+			if err == nil {
+				for _, alias := range aliases {
+					if digest := store.CanonicalImageDigest(alias.Digest); digest != "" {
+						digests[digest] = struct{}{}
+						continue
+					}
+					if strings.TrimSpace(alias.ImageID) == "" {
+						continue
+					}
+					if image, imageErr := s.Store.GetImage(alias.ImageID, "", true); imageErr == nil {
+						if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+							digests[digest] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+		if len(digests) == 1 {
+			for digest := range digests {
+				return digest, imageRefWithDigest(refs[0], digest)
+			}
 		}
 	}
 	if s == nil || s.resolveManagedImageDigestRef == nil || s.imageStoreStrictDistributedMode() {

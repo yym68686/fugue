@@ -379,17 +379,24 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
 		return 0
 	}
+	// A deploy-blocking image copy is on the critical path of an app
+	// operation.  It must outrank periodic inventory reports; otherwise a
+	// continuously scheduled inventory stream can starve the copy forever.
+	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage &&
+		strings.EqualFold(strings.TrimSpace(task.Payload["priority"]), model.ImageReplicationPriorityDeployBlocking) {
+		return 1
+	}
 	switch task.Type {
 	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
-		return 1
+		return 2
 	case model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeDecommissionLocalPV,
 		model.NodeUpdateTaskTypeRepairManagedIPTables,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService:
-		return 2
-	default:
 		return 3
+	default:
+		return 4
 	}
 }
 

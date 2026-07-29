@@ -749,6 +749,18 @@ func (s *Server) handleNodeUpdaterCompleteTask(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	current, err := s.store.GetNodeUpdateTaskForUpdater(r.PathValue("id"), principal.ActorID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if reason, err := s.validateNodeImageTaskCompletion(current, req.Status, req.ErrorMessage); err != nil {
+		s.writeStoreError(w, err)
+		return
+	} else if reason != "" {
+		httpx.WriteError(w, http.StatusConflict, reason)
+		return
+	}
 	task, err := s.store.CompleteNodeUpdateTask(r.PathValue("id"), principal.ActorID, req.Status, req.Message, req.ErrorMessage)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -756,6 +768,108 @@ func (s *Server) handleNodeUpdaterCompleteTask(w http.ResponseWriter, r *http.Re
 	}
 	s.appendNodeUpdateTaskMaintenanceAudit(principal, task)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
+// validateNodeImageTaskCompletion closes the acknowledgement loop for image
+// replication. A node task may be marked completed only after the control
+// plane has accepted a Present replica with the exact image digest. This keeps
+// a successful shell command from masking a dropped/failed report.
+func (s *Server) validateNodeImageTaskCompletion(task model.NodeUpdateTask, requestedStatus, errorMessage string) (string, error) {
+	if task.Type != model.NodeUpdateTaskTypeReplicateAppImage {
+		return "", nil
+	}
+	replicationTaskID := strings.TrimSpace(task.Payload["replication_task_id"])
+	if replicationTaskID == "" {
+		return "", nil
+	}
+	status := strings.TrimSpace(strings.ToLower(requestedStatus))
+	if status != model.NodeUpdateTaskStatusCompleted && status != model.NodeUpdateTaskStatusFailed {
+		return "", nil
+	}
+	replicationTasks, err := s.store.ListImageReplicationTasks(model.ImageReplicationTaskFilter{PlatformAdmin: true})
+	if err != nil {
+		return "", err
+	}
+	var linked *model.ImageReplicationTask
+	for index := range replicationTasks {
+		if replicationTasks[index].ID == replicationTaskID {
+			linked = &replicationTasks[index]
+			break
+		}
+	}
+	if linked == nil {
+		return "replication task acknowledgement is missing", nil
+	}
+	if status == model.NodeUpdateTaskStatusFailed {
+		linked.Status = model.ImageReplicationTaskStatusFailed
+		linked.LastError = strings.TrimSpace(errorMessage)
+		now := time.Now().UTC()
+		linked.CompletedAt = &now
+		if _, err := s.store.UpsertImageReplicationTask(*linked); err != nil && !errors.Is(err, store.ErrConflict) {
+			return "", err
+		}
+		return "", nil
+	}
+	image, err := s.store.GetImage(linked.ImageID, "", true)
+	if err != nil {
+		return "", err
+	}
+	wantDigest := store.CanonicalImageDigest(image.CanonicalDigest)
+	if wantDigest == "" {
+		return "completed replication has no canonical image digest", nil
+	}
+	switch strings.TrimSpace(linked.Status) {
+	case "", model.ImageReplicationTaskStatusPending, model.ImageReplicationTaskStatusRunning, model.ImageReplicationTaskStatusCompleted:
+	default:
+		return "linked replication task is already terminal without a successful acknowledgement", nil
+	}
+	replicas, err := s.store.ListImageReplicas(model.ImageReplicaFilter{
+		ImageID:       linked.ImageID,
+		PlatformAdmin: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	for _, replica := range replicas {
+		if replica.Status != model.ImageReplicaStatusPresent {
+			continue
+		}
+		targetNodeID := strings.TrimSpace(linked.TargetNodeID)
+		if targetNodeID == "" {
+			targetNodeID = strings.TrimSpace(task.MachineID)
+		}
+		targetRuntimeID := strings.TrimSpace(linked.TargetRuntimeID)
+		if targetRuntimeID == "" {
+			targetRuntimeID = strings.TrimSpace(task.RuntimeID)
+		}
+		targetClusterNodeName := strings.TrimSpace(linked.TargetClusterNodeName)
+		if targetClusterNodeName == "" {
+			targetClusterNodeName = strings.TrimSpace(task.ClusterNodeName)
+		}
+		if targetNodeID != "" && strings.TrimSpace(replica.NodeID) != targetNodeID {
+			continue
+		}
+		if targetRuntimeID != "" && strings.TrimSpace(replica.RuntimeID) != targetRuntimeID {
+			continue
+		}
+		if targetClusterNodeName != "" && strings.TrimSpace(replica.ClusterNodeName) != targetClusterNodeName {
+			continue
+		}
+		if store.CanonicalImageDigest(replica.Digest) != wantDigest {
+			continue
+		}
+		if linked.Status != model.ImageReplicationTaskStatusCompleted {
+			linked.Status = model.ImageReplicationTaskStatusCompleted
+			linked.LastError = ""
+			now := time.Now().UTC()
+			linked.CompletedAt = &now
+			if _, err := s.store.UpsertImageReplicationTask(*linked); err != nil && !errors.Is(err, store.ErrConflict) {
+				return "", err
+			}
+		}
+		return "", nil
+	}
+	return "replication task cannot complete before a control-plane-confirmed Present replica with the canonical digest is recorded", nil
 }
 
 func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal, task model.NodeUpdateTask) {
@@ -4001,7 +4115,7 @@ complete_task() {
   api_form POST "/v1/node-updater/tasks/${FUGUE_NODE_UPDATE_TASK_ID}/complete" \
     --data-urlencode "status=${status}" \
     --data-urlencode "message=${message}" \
-    --data-urlencode "error_message=${error_message}" >/dev/null || true
+    --data-urlencode "error_message=${error_message}" >/dev/null
 }
 
 wait_for_unit_active() {
@@ -4437,15 +4551,15 @@ replicate_app_image() {
     return 1
   fi
   local rc=0
-  if image_cache_api_json /fugue/cache/v1/replicate "${body}" >/dev/null; then
+  image_cache_api_json /fugue/cache/v1/replicate "${body}" >/dev/null
+  rc=$?
+  if [ "${rc}" -eq 0 ]; then
     if ! report_image_replica "${image_id}" "${digest}" present ""; then
       echo "image replica present report failed" >&2
       return 1
     fi
     log_task "replicated app image ${image_ref:-${digest}}"
     return 0
-  else
-    rc=$?
   fi
   if ! report_image_replica "${image_id}" "${digest}" failed "image-cache replication failed"; then
     log_task "image replica failure report failed"
@@ -4464,15 +4578,15 @@ verify_image_cache() {
   local body
   body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\"}"
   local rc=0
-  if image_cache_api_json /fugue/cache/v1/verify "${body}" >/dev/null; then
+  image_cache_api_json /fugue/cache/v1/verify "${body}" >/dev/null
+  rc=$?
+  if [ "${rc}" -eq 0 ]; then
     if ! report_image_replica "${image_id}" "${digest}" present ""; then
       echo "image replica verification report failed" >&2
       return 1
     fi
     log_task "verified image cache for ${image_ref:-${digest}}"
     return 0
-  else
-    rc=$?
   fi
   if ! report_image_replica "${image_id}" "${digest}" missing "image-cache verify failed"; then
     log_task "image replica missing report failed"
@@ -5353,18 +5467,25 @@ run_once() {
   log "claiming task ${FUGUE_NODE_UPDATE_TASK_ID} (${FUGUE_NODE_UPDATE_TASK_TYPE})"
   claim_task
   FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE=""
-  if run_task; then
+  run_task
+  rc=$?
+  if [ "${rc}" -eq 0 ]; then
     clear_last_error
-    complete_task completed "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE:-node update task completed}"
+    if ! complete_task completed "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE:-node update task completed}"; then
+      record_last_error "task ${FUGUE_NODE_UPDATE_TASK_ID} completion acknowledgement failed"
+      log "task completion acknowledgement failed"
+      heartbeat || true
+      return 1
+    fi
     heartbeat || true
     return 0
-  else
-    rc=$?
-    record_last_error "task ${FUGUE_NODE_UPDATE_TASK_ID} failed with exit code ${rc}"
-    complete_task failed "node update task failed" "$(last_error)"
-    heartbeat || true
-    return "${rc}"
   fi
+  record_last_error "task ${FUGUE_NODE_UPDATE_TASK_ID} failed with exit code ${rc}"
+  if ! complete_task failed "node update task failed" "$(last_error)"; then
+    log "task failure acknowledgement failed"
+  fi
+  heartbeat || true
+  return "${rc}"
 }
 
 case "${1:-run-once}" in

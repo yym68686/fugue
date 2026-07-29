@@ -1,0 +1,267 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"fugue/internal/imagecachekeys"
+	"fugue/internal/model"
+	"fugue/internal/store"
+)
+
+// reconcileDistributedImageIntegrity repairs legacy rows that were written
+// before canonical digest enforcement existed.  It is intentionally
+// evidence-based: a fresh, unique image-cache manifest graph may promote a
+// row to its digest; missing or ambiguous evidence is demoted to a
+// non-serving state and never guessed.
+func (s *Service) reconcileDistributedImageIntegrity(ctx context.Context) error {
+	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
+		return nil
+	}
+	ttl := s.Config.ImageCacheInventoryTTL
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
+	now := time.Now().UTC()
+	if s.now != nil {
+		now = s.now().UTC()
+	}
+	cutoff := now.Add(-ttl)
+	manifests, err := s.Store.ListImageCacheManifests(model.ImageCacheManifestFilter{
+		SeenAfter:   cutoff,
+		PresentOnly: true,
+	})
+	if err != nil {
+		return fmt.Errorf("list image-cache manifests for integrity repair: %w", err)
+	}
+
+	if err := s.repairDistributedImages(ctx, manifests, now, cutoff); err != nil {
+		return err
+	}
+	if err := s.repairDistributedImageLocations(ctx, manifests, now, cutoff); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) repairDistributedImages(ctx context.Context, manifests []model.ImageCacheManifest, now, cutoff time.Time) error {
+	images, err := s.Store.ListImages(model.ImageFilter{PlatformAdmin: true})
+	if err != nil {
+		return fmt.Errorf("list distributed images for integrity repair: %w", err)
+	}
+	for _, image := range images {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+			if image.CanonicalDigest != digest {
+				image.CanonicalDigest = digest
+				if _, err := s.Store.UpsertImage(image); err != nil {
+					return fmt.Errorf("normalize canonical digest for image %s: %w", image.ID, err)
+				}
+			}
+			if err := s.repairDistributedImageReplicas(image, now); err != nil {
+				return err
+			}
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(image.LifecycleState), model.ImageLifecycleAvailable) {
+			continue
+		}
+		candidates := imageIntegrityDigestsForRef(image.ImageRef, manifests)
+		if len(candidates) == 1 {
+			for digest := range candidates {
+				image.CanonicalDigest = digest
+				if _, err := s.Store.UpsertImage(image); err != nil {
+					return fmt.Errorf("backfill canonical digest for image %s: %w", image.ID, err)
+				}
+			}
+		} else {
+			// An Available image with no unique physical proof is not safe to
+			// serve or prune. Lost is recoverable by a later fresh inventory.
+			image.LifecycleState = model.ImageLifecycleLost
+			if _, err := s.Store.UpsertImage(image); err != nil {
+				return fmt.Errorf("demote unverified image %s: %w", image.ID, err)
+			}
+		}
+		if refreshed, err := s.Store.GetImage(image.ID, "", true); err == nil {
+			if err := s.repairDistributedImageReplicas(refreshed, now); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) repairDistributedImageReplicas(image model.Image, now time.Time) error {
+	replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{ImageID: image.ID, PlatformAdmin: true})
+	if err != nil {
+		return fmt.Errorf("list replicas for image %s integrity repair: %w", image.ID, err)
+	}
+	digest := store.CanonicalImageDigest(image.CanonicalDigest)
+	for _, replica := range replicas {
+		if replica.Status != model.ImageReplicaStatusPresent {
+			continue
+		}
+		if digest == "" {
+			replica.Status = model.ImageReplicaStatusMissing
+			replica.LastError = "canonical image digest unavailable; replica cannot be trusted"
+		} else if rawDigest := strings.TrimSpace(replica.Digest); rawDigest == "" {
+			replica.Digest = digest
+			replica.LastVerifiedAt = &now
+		} else if replicaDigest := store.CanonicalImageDigest(rawDigest); replicaDigest != digest {
+			replica.Status = model.ImageReplicaStatusMissing
+			replica.LastError = fmt.Sprintf("replica digest %s does not match canonical image digest %s", rawDigest, digest)
+		} else {
+			replica.Digest = replicaDigest
+			replica.LastVerifiedAt = &now
+		}
+		if _, err := s.Store.UpsertImageReplica(replica); err != nil {
+			return fmt.Errorf("repair replica %s for image %s: %w", replica.ID, image.ID, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) repairDistributedImageLocations(ctx context.Context, manifests []model.ImageCacheManifest, now, cutoff time.Time) error {
+	locations, err := s.Store.ListImageLocations(model.ImageLocationFilter{Status: model.ImageLocationStatusPresent, PlatformAdmin: true})
+	if err != nil {
+		return fmt.Errorf("list image locations for integrity repair: %w", err)
+	}
+	for _, location := range locations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !store.ImageLocationIsDistributed(location) || strings.TrimSpace(location.Digest) != "" {
+			continue
+		}
+		if !distributedImageLocationFreshForIntegrity(location, cutoff) {
+			location.Status = model.ImageLocationStatusMissing
+			location.LastError = "image location evidence is stale and has no canonical digest"
+			location.LastSeenAt = timePointer(now)
+			if _, err := s.Store.UpsertImageLocation(location); err != nil {
+				return fmt.Errorf("demote stale image location %s: %w", location.ID, err)
+			}
+			continue
+		}
+		candidates := imageIntegrityDigestsForLocation(location, manifests)
+		if len(candidates) == 1 {
+			for digest := range candidates {
+				repaired := location
+				// The canonical digest is a new identity.  Do not carry the
+				// legacy row ID into the upsert, otherwise an ID-based update
+				// would overwrite the row that must be retained as Missing.
+				repaired.ID = ""
+				repaired.Digest = digest
+				repaired.LastSeenAt = timePointer(now)
+				if _, err := s.Store.UpsertImageLocation(repaired); err != nil {
+					return fmt.Errorf("backfill canonical digest for image location %s: %w", location.ID, err)
+				}
+			}
+			location.Status = model.ImageLocationStatusMissing
+			location.LastError = "superseded by canonical-digest image location"
+			location.LastSeenAt = timePointer(now)
+		} else {
+			location.Status = model.ImageLocationStatusMissing
+			if len(candidates) == 0 {
+				location.LastError = "no fresh complete image-cache manifest proves this location"
+			} else {
+				location.LastError = "multiple image-cache digests match this location"
+			}
+			location.LastSeenAt = timePointer(now)
+		}
+		if _, err := s.Store.UpsertImageLocation(location); err != nil {
+			return fmt.Errorf("finalize legacy image location %s: %w", location.ID, err)
+		}
+	}
+	return nil
+}
+
+func imageIntegrityDigestsForRef(ref string, manifests []model.ImageCacheManifest) map[string]struct{} {
+	keys := integrityImageReferenceKeys(ref, "")
+	out := map[string]struct{}{}
+	for _, manifest := range manifests {
+		digest := store.CanonicalImageDigest(manifest.Digest)
+		if !imageIntegrityManifestUsable(manifest) || digest == "" || !integrityManifestMatchesKeys(manifest, keys) {
+			continue
+		}
+		out[digest] = struct{}{}
+	}
+	return out
+}
+
+func imageIntegrityDigestsForLocation(location model.ImageLocation, manifests []model.ImageCacheManifest) map[string]struct{} {
+	keys := integrityImageReferenceKeys(location.ImageRef, location.Digest)
+	out := map[string]struct{}{}
+	for _, manifest := range manifests {
+		if !integrityManifestMatchesPhysicalIdentity(location, manifest) {
+			continue
+		}
+		digest := store.CanonicalImageDigest(manifest.Digest)
+		if !imageIntegrityManifestUsable(manifest) || digest == "" || !integrityManifestMatchesKeys(manifest, keys) {
+			continue
+		}
+		out[digest] = struct{}{}
+	}
+	return out
+}
+
+// imageIntegrityManifestUsable deliberately requires the complete blob graph
+// evidence emitted by the image-cache inventory endpoint.  A manifest row
+// with only a HEAD/digest (or with referenced_blob_bytes=0) is exactly the
+// historical false-positive that allowed a Present/Available record to be
+// recreated while config/layers were missing.
+func imageIntegrityManifestUsable(manifest model.ImageCacheManifest) bool {
+	if !manifest.Present || store.CanonicalImageDigest(manifest.Digest) == "" || len(manifest.ReferencedBlobs) == 0 {
+		return false
+	}
+	for _, blob := range manifest.ReferencedBlobs {
+		if store.CanonicalImageDigest(blob) == "" {
+			return false
+		}
+	}
+	return manifest.TotalBlobBytes > 0
+}
+
+func integrityImageReferenceKeys(ref, digest string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, key := range imagecachekeys.ExactImageReferenceKeys(strings.TrimSpace(ref), store.CanonicalImageDigest(digest)) {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key != "" {
+			out[key] = struct{}{}
+		}
+	}
+	return out
+}
+
+func integrityManifestMatchesKeys(manifest model.ImageCacheManifest, keys map[string]struct{}) bool {
+	for _, key := range imagecachekeys.ExactManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef) {
+		if _, ok := keys[strings.ToLower(strings.TrimSpace(key))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func integrityManifestMatchesPhysicalIdentity(location model.ImageLocation, manifest model.ImageCacheManifest) bool {
+	if location.NodeID != "" && manifest.NodeID != "" && strings.TrimSpace(location.NodeID) != strings.TrimSpace(manifest.NodeID) {
+		return false
+	}
+	if location.RuntimeID != "" && manifest.RuntimeID != "" && strings.TrimSpace(location.RuntimeID) != strings.TrimSpace(manifest.RuntimeID) {
+		return false
+	}
+	if location.ClusterNodeName != "" && manifest.ClusterNodeName != "" && strings.TrimSpace(location.ClusterNodeName) != strings.TrimSpace(manifest.ClusterNodeName) {
+		return false
+	}
+	return true
+}
+
+func distributedImageLocationFreshForIntegrity(location model.ImageLocation, cutoff time.Time) bool {
+	observed := location.UpdatedAt
+	if location.LastSeenAt != nil && !location.LastSeenAt.IsZero() {
+		observed = *location.LastSeenAt
+	}
+	return !observed.IsZero() && !observed.Before(cutoff)
+}

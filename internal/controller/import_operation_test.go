@@ -635,10 +635,21 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 	}
 
 	const imageRef = "registry.fugue.internal:5000/fugue-apps/runtime:git-abc123"
+	const imageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           "app_template",
+		ImageRef:        imageRef,
+		CanonicalDigest: imageDigest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("record verified image identity: %v", err)
+	}
 	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID:        tenant.ID,
 		AppID:           "app_template",
 		ImageRef:        imageRef,
+		Digest:          imageDigest,
 		RuntimeID:       sourceUpdater.RuntimeID,
 		ClusterNodeName: sourceUpdater.ClusterNodeName,
 		CacheEndpoint:   "http://203.0.113.10:5000",

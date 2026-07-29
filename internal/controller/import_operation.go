@@ -223,12 +223,16 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	finalSpec.Env = mergeImportEnv(finalSpec.Env, output.ImportResult.SuggestedEnv)
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 	finalSpec.RestartToken = model.NewID("restart")
+	// Materialize the distributed image identity before publishing any
+	// node-local Present location. A location report may identify a tag, but it
+	// must be enriched from the verified image record rather than creating an
+	// empty-digest Present row.
+	if err := s.recordImportedDistributedImage(importCtx, app, op, managedImageRef, runtimeImageRef, imageDestination); err != nil {
+		return err
+	}
 	s.recordImportedImageLocation(app, op, managedImageRef, runtimeImageRef)
 	if imageDestination.CacheEndpoint != "" {
 		s.recordImportedImageLocationOnTarget(app, op, imageDestination.Target, imageDestination.CacheEndpoint, managedImageRef, runtimeImageRef)
-	}
-	if err := s.recordImportedDistributedImage(importCtx, app, op, managedImageRef, runtimeImageRef, imageDestination); err != nil {
-		return err
 	}
 	hydrateApp := app
 	hydrateApp.Spec = finalSpec
