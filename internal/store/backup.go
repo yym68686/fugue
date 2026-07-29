@@ -93,15 +93,6 @@ type BackupArtifactFilter struct {
 	Limit         int
 }
 
-// BackupArtifactCleanupFilter describes artifacts whose durable metadata says
-// they are no longer restorable and whose physical objects may be collected.
-// The API layer performs the object-store deletion; the store is responsible
-// for applying the same restore-reference safety rules in both storage modes.
-type BackupArtifactCleanupFilter struct {
-	Before time.Time
-	Limit  int
-}
-
 type BackupRunUpdate struct {
 	Status        *string
 	LeaseOwner    *string
@@ -1559,16 +1550,6 @@ func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin boo
 		if artifact.Protected {
 			return ErrConflict
 		}
-		if artifact.Status == model.BackupArtifactStatusDeleted || artifact.Status == model.BackupArtifactStatusExpired {
-			deleted = artifact
-			return nil
-		}
-		if backupArtifactHasInFlightRestore(state, artifact.ID) {
-			return ErrConflict
-		}
-		if artifact.Status != model.BackupArtifactStatusActive {
-			return ErrConflict
-		}
 		now := time.Now().UTC()
 		artifact.Status = model.BackupArtifactStatusDeleted
 		artifact.DeletedAt = &now
@@ -1577,168 +1558,6 @@ func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin boo
 		return nil
 	})
 	return deleted, err
-}
-
-// ListBackupArtifactCleanupCandidates returns only terminal artifacts that are
-// past the deletion grace period, are not protected, have not already had
-// their physical objects removed, and are not referenced by an in-flight
-// restore. Object deletion remains an API-layer responsibility because the
-// store does not hold backup backend credentials.
-func (s *Store) ListBackupArtifactCleanupCandidates(filter BackupArtifactCleanupFilter) ([]model.BackupArtifact, error) {
-	if filter.Before.IsZero() {
-		return nil, ErrInvalidInput
-	}
-	filter.Before = filter.Before.UTC()
-	if filter.Limit <= 0 {
-		filter.Limit = defaultBackupArtifactHistoryLimit
-	}
-	if s.usingDatabase() {
-		return s.pgListBackupArtifactCleanupCandidates(filter)
-	}
-
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	cleaned := make(map[string]struct{}, len(s.backupArtifactPhysicalCleanup))
-	for id := range s.backupArtifactPhysicalCleanup {
-		cleaned[id] = struct{}{}
-	}
-	attempted := make(map[string]time.Time, len(s.backupArtifactPhysicalAttempts))
-	for id, attemptedAt := range s.backupArtifactPhysicalAttempts {
-		attempted[id] = attemptedAt
-	}
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-
-	artifacts := []model.BackupArtifact{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.BackupArtifacts {
-			artifact = model.NormalizeBackupArtifact(artifact)
-			if _, ok := cleaned[artifact.ID]; ok {
-				continue
-			}
-			if artifact.Protected || artifact.DeletedAt == nil || artifact.DeletedAt.After(filter.Before) {
-				continue
-			}
-			if artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired {
-				continue
-			}
-			if backupArtifactHasInFlightRestore(state, artifact.ID) {
-				continue
-			}
-			artifacts = append(artifacts, artifact)
-		}
-		sort.Slice(artifacts, func(i, j int) bool {
-			iAttempted, iOK := attempted[artifacts[i].ID]
-			jAttempted, jOK := attempted[artifacts[j].ID]
-			if iOK != jOK {
-				return !iOK
-			}
-			if iOK && !iAttempted.Equal(jAttempted) {
-				return iAttempted.Before(jAttempted)
-			}
-			if artifacts[i].DeletedAt != nil && artifacts[j].DeletedAt != nil && !artifacts[i].DeletedAt.Equal(*artifacts[j].DeletedAt) {
-				return artifacts[i].DeletedAt.Before(*artifacts[j].DeletedAt)
-			}
-			return artifacts[i].ID < artifacts[j].ID
-		})
-		if len(artifacts) > filter.Limit {
-			artifacts = artifacts[:filter.Limit]
-		}
-		return nil
-	})
-	return artifacts, err
-}
-
-// MarkBackupArtifactPhysicalDeleted records the successful, idempotent object
-// deletion. The marker is intentionally separate from logical deletion so a
-// failed R2 operation remains retryable by the background collector.
-func (s *Store) MarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Time) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ErrInvalidInput
-	}
-	if deletedAt.IsZero() {
-		deletedAt = time.Now().UTC()
-	} else {
-		deletedAt = deletedAt.UTC()
-	}
-	if s.usingDatabase() {
-		return s.pgMarkBackupArtifactPhysicalDeleted(id, deletedAt)
-	}
-	artifact, err := s.GetBackupArtifact(id, "", true)
-	if err != nil {
-		return err
-	}
-	if artifact.Protected || (artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired) {
-		return ErrConflict
-	}
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	if s.backupArtifactPhysicalCleanup == nil {
-		s.backupArtifactPhysicalCleanup = map[string]time.Time{}
-	}
-	s.backupArtifactPhysicalCleanup[id] = deletedAt
-	if s.backupArtifactPhysicalAttempts == nil {
-		s.backupArtifactPhysicalAttempts = map[string]time.Time{}
-	}
-	s.backupArtifactPhysicalAttempts[id] = deletedAt
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-	return nil
-}
-
-func (s *Store) RecordBackupArtifactPhysicalCleanupFailure(id string, attemptedAt time.Time, message string) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ErrInvalidInput
-	}
-	if attemptedAt.IsZero() {
-		attemptedAt = time.Now().UTC()
-	} else {
-		attemptedAt = attemptedAt.UTC()
-	}
-	message = strings.TrimSpace(message)
-	if runes := []rune(message); len(runes) > 2000 {
-		message = string(runes[:2000])
-	}
-	if s.usingDatabase() {
-		return s.pgRecordBackupArtifactPhysicalCleanupFailure(id, attemptedAt, message)
-	}
-	artifact, err := s.GetBackupArtifact(id, "", true)
-	if err != nil {
-		return err
-	}
-	if artifact.Protected || (artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired) {
-		return ErrConflict
-	}
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	if s.backupArtifactPhysicalAttempts == nil {
-		s.backupArtifactPhysicalAttempts = map[string]time.Time{}
-	}
-	s.backupArtifactPhysicalAttempts[id] = attemptedAt
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-	return nil
-}
-
-func backupArtifactHasInFlightRestore(state *model.State, artifactID string) bool {
-	for _, plan := range state.BackupRestorePlans {
-		plan = model.NormalizeBackupRestorePlan(plan)
-		if plan.ArtifactID == artifactID && !backupRestoreStatusTerminal(plan.Status) {
-			return true
-		}
-	}
-	for _, run := range state.BackupRestoreRuns {
-		run = model.NormalizeBackupRestoreRun(run)
-		if run.ArtifactID == artifactID && !backupRestoreStatusTerminal(run.Status) {
-			return true
-		}
-	}
-	return false
-}
-
-func backupRestoreStatusTerminal(status string) bool {
-	switch strings.TrimSpace(strings.ToLower(status)) {
-	case model.BackupRestoreStatusSucceeded, model.BackupRestoreStatusFailed, model.BackupRestoreStatusCanceled:
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
@@ -1756,9 +1575,6 @@ func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.Bac
 			return ErrNotFound
 		}
 		artifact := model.NormalizeBackupArtifact(state.BackupArtifacts[artifactIndex])
-		if artifact.Status != model.BackupArtifactStatusActive {
-			return ErrConflict
-		}
 		now := time.Now().UTC()
 		if plan.ID == "" {
 			plan.ID = model.NewID("backup_restore_plan")
@@ -2014,7 +1830,7 @@ func applyBackupRetentionInState(state *model.State, policyID string) {
 	var candidates []int
 	for idx, artifact := range state.BackupArtifacts {
 		artifact = model.NormalizeBackupArtifact(artifact)
-		if artifact.PolicyID != policyID || artifact.Status != model.BackupArtifactStatusActive || artifact.Protected || backupArtifactHasInFlightRestore(state, artifact.ID) {
+		if artifact.PolicyID != policyID || artifact.Status != model.BackupArtifactStatusActive || artifact.Protected {
 			continue
 		}
 		candidates = append(candidates, idx)
@@ -4270,134 +4086,19 @@ func (s *Store) pgGetBackupArtifact(id string, tenantID string, platformAdmin bo
 func (s *Store) pgMarkBackupArtifactDeleted(id, tenantID string, platformAdmin bool) (model.BackupArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.BackupArtifact{}, err
-	}
-	defer tx.Rollback()
-
-	query := backupArtifactSelectSQL() + ` WHERE id = $1`
-	args := []any{id}
-	if !platformAdmin {
-		args = append(args, tenantID)
-		query += ` AND tenant_id = $2`
-	}
-	query += ` FOR UPDATE`
-	artifact, err := scanBackupArtifact(tx.QueryRowContext(ctx, query, args...))
-	if err != nil {
-		return model.BackupArtifact{}, mapDBErr(err)
-	}
-	if artifact.Protected {
-		return model.BackupArtifact{}, ErrConflict
-	}
-	if artifact.Status == model.BackupArtifactStatusDeleted || artifact.Status == model.BackupArtifactStatusExpired {
-		if err := tx.Commit(); err != nil {
-			return model.BackupArtifact{}, err
-		}
-		return artifact, nil
-	}
-	if artifact.Status != model.BackupArtifactStatusActive {
-		return model.BackupArtifact{}, ErrConflict
-	}
-
-	var restoreInFlight bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-	SELECT 1 FROM fugue_backup_restore_plans p
-	WHERE p.artifact_id = $1 AND p.status NOT IN ('succeeded', 'failed', 'canceled')
-	UNION ALL
-	SELECT 1 FROM fugue_backup_restore_runs rr
-	WHERE rr.artifact_id = $1 AND rr.status NOT IN ('succeeded', 'failed', 'canceled')
-)`, id).Scan(&restoreInFlight); err != nil {
-		return model.BackupArtifact{}, mapDBErr(err)
-	}
-	if restoreInFlight {
-		return model.BackupArtifact{}, ErrConflict
-	}
-
 	now := time.Now().UTC()
-	artifact, err = scanBackupArtifact(tx.QueryRowContext(ctx, `
-UPDATE fugue_backup_artifacts
-SET status = 'deleted', deleted_at = $2
-WHERE id = $1 AND status = 'active' AND protected = FALSE
-RETURNING `+backupArtifactReturningColumns(), id, now))
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return model.BackupArtifact{}, ErrConflict
-		}
-		return model.BackupArtifact{}, err
+	query := `UPDATE fugue_backup_artifacts SET status = 'deleted', deleted_at = $2 WHERE id = $1 AND protected = FALSE`
+	args := []any{id, now}
+	if !platformAdmin {
+		query += ` AND tenant_id = $3`
+		args = append(args, tenantID)
 	}
-	if err := tx.Commit(); err != nil {
-		return model.BackupArtifact{}, err
+	query += ` RETURNING ` + backupArtifactReturningColumns()
+	artifact, err := scanBackupArtifact(s.db.QueryRowContext(ctx, query, args...))
+	if err != nil {
+		return model.BackupArtifact{}, mapDBErr(err)
 	}
 	return artifact, nil
-}
-
-func (s *Store) pgListBackupArtifactCleanupCandidates(filter BackupArtifactCleanupFilter) ([]model.BackupArtifact, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	query := backupArtifactSelectSQL() + ` WHERE status IN ('deleted', 'expired') AND protected = FALSE AND deleted_at IS NOT NULL AND deleted_at <= $1 AND physical_deleted_at IS NULL
-		AND NOT EXISTS (
-			SELECT 1 FROM fugue_backup_restore_plans p
-			WHERE p.artifact_id = fugue_backup_artifacts.id
-			  AND p.status NOT IN ('succeeded', 'failed', 'canceled')
-		)
-		AND NOT EXISTS (
-			SELECT 1 FROM fugue_backup_restore_runs rr
-			WHERE rr.artifact_id = fugue_backup_artifacts.id
-			  AND rr.status NOT IN ('succeeded', 'failed', 'canceled')
-		)
-		ORDER BY physical_delete_attempted_at ASC NULLS FIRST, deleted_at ASC, id ASC`
-	args := []any{filter.Before, filter.Limit}
-	query += ` LIMIT $2`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, mapDBErr(err)
-	}
-	defer rows.Close()
-	artifacts := []model.BackupArtifact{}
-	for rows.Next() {
-		artifact, err := scanBackupArtifact(rows)
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, artifact)
-	}
-	return artifacts, mapDBErr(rows.Err())
-}
-
-func (s *Store) pgMarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_deleted_at = COALESCE(physical_deleted_at, $2), physical_delete_attempted_at = $2, physical_delete_error = '' WHERE id = $1 AND status IN ('deleted', 'expired') AND protected = FALSE`, id, deletedAt)
-	if err != nil {
-		return mapDBErr(err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows != 1 {
-		return ErrConflict
-	}
-	return nil
-}
-
-func (s *Store) pgRecordBackupArtifactPhysicalCleanupFailure(id string, attemptedAt time.Time, message string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_delete_attempted_at = $2, physical_delete_error = $3 WHERE id = $1 AND physical_deleted_at IS NULL AND status IN ('deleted', 'expired') AND protected = FALSE`, id, attemptedAt, message)
-	if err != nil {
-		return mapDBErr(err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows != 1 {
-		return ErrConflict
-	}
-	return nil
 }
 
 func (s *Store) pgApplyBackupRetention(policyID string) error {
@@ -4437,22 +4138,9 @@ func (s *Store) pgApplyBackupRetention(policyID string) error {
 
 func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
 	plan.ArtifactID = strings.TrimSpace(plan.ArtifactID)
-	if plan.ArtifactID == "" {
-		return model.BackupRestorePlan{}, ErrInvalidInput
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	artifact, err := s.pgGetBackupArtifact(plan.ArtifactID, "", true)
 	if err != nil {
 		return model.BackupRestorePlan{}, err
-	}
-	defer tx.Rollback()
-	artifact, err := scanBackupArtifact(tx.QueryRowContext(ctx, backupArtifactSelectSQL()+` WHERE id = $1 FOR UPDATE`, plan.ArtifactID))
-	if err != nil {
-		return model.BackupRestorePlan{}, mapDBErr(err)
-	}
-	if artifact.Status != model.BackupArtifactStatusActive {
-		return model.BackupRestorePlan{}, ErrConflict
 	}
 	now := time.Now().UTC()
 	if plan.ID == "" {
@@ -4490,17 +4178,12 @@ func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.B
 	if err != nil {
 		return model.BackupRestorePlan{}, err
 	}
-	created, err := scanBackupRestorePlan(tx.QueryRowContext(ctx, `
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return scanBackupRestorePlan(s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_backup_restore_plans (id, tenant_id, project_id, app_id, artifact_id, target_type, target_json, mode, status, warnings_json, phases_json, created_by_type, created_by_id, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING `+backupRestorePlanReturningColumns(), plan.ID, nullIfEmpty(plan.TenantID), nullIfEmpty(plan.ProjectID), nullIfEmpty(plan.AppID), plan.ArtifactID, plan.Target.Type, targetJSON, plan.Mode, plan.Status, warningsJSON, phasesJSON, plan.CreatedByType, plan.CreatedByID, plan.CreatedAt, plan.UpdatedAt))
-	if err != nil {
-		return model.BackupRestorePlan{}, mapDBErr(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return model.BackupRestorePlan{}, err
-	}
-	return created, nil
 }
 
 func (s *Store) pgListBackupRestorePlans(tenantID string, platformAdmin bool, limit int) ([]model.BackupRestorePlan, error) {

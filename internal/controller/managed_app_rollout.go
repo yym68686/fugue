@@ -903,6 +903,12 @@ func expectedManagedAppSpecHash(app model.App, scheduling runtime.SchedulingCons
 	if err != nil {
 		return ""
 	}
+	for index := range managed.Spec.BackingServices {
+		managed.Spec.BackingServices[index].RuntimeStatus = nil
+		managed.Spec.BackingServices[index].CurrentResourceUsage = nil
+		managed.Spec.BackingServices[index].CurrentRuntimeStartedAt = nil
+		managed.Spec.BackingServices[index].CurrentRuntimeReadyAt = nil
+	}
 	return strings.TrimSpace(runtime.ManagedAppSpecHash(managed.Spec))
 }
 
