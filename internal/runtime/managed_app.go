@@ -406,6 +406,7 @@ func cloneManagedBackingServices(services []model.BackingService) []model.Backin
 	for index, service := range services {
 		out[index] = service
 		out[index].RuntimeStatus = nil
+		out[index].CurrentResourceUsage = nil
 		out[index].CurrentRuntimeStartedAt = nil
 		out[index].CurrentRuntimeReadyAt = nil
 		if service.Spec.Postgres == nil {

@@ -142,6 +142,58 @@ func TestBuildManagedAppObjectOmitsInjectedFugueEnvFromSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppObjectOmitsObservedBackingServiceStateFromDesiredSpec(t *testing.T) {
+	memoryBytes := int64(128 * 1024 * 1024)
+	now := time.Date(2026, time.July, 29, 18, 0, 0, 0, time.UTC)
+	app := model.App{
+		ID:        "app_demo_123",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+		BackingServices: []model.BackingService{{
+			ID:        "service_demo",
+			TenantID:  "tenant_demo",
+			ProjectID: "project_demo",
+			Name:      "demo-postgres",
+			Type:      model.BackingServiceTypePostgres,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				ServiceName: "demo-postgres",
+			}},
+			RuntimeStatus: &model.BackingServiceRuntimeStatus{
+				Phase: model.ManagedPostgresRuntimePhaseActive,
+			},
+			CurrentResourceUsage: &model.ResourceUsage{
+				MemoryBytes: &memoryBytes,
+			},
+			CurrentRuntimeStartedAt: &now,
+			CurrentRuntimeReadyAt:   &now,
+		}},
+	}
+
+	managed, err := ManagedAppObjectFromMap(BuildManagedAppObject(app, SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode managed app object: %v", err)
+	}
+	if len(managed.Spec.BackingServices) != 1 {
+		t.Fatalf("expected one backing service, got %d", len(managed.Spec.BackingServices))
+	}
+	service := managed.Spec.BackingServices[0]
+	if service.RuntimeStatus != nil {
+		t.Fatalf("expected runtime status to be omitted, got %#v", service.RuntimeStatus)
+	}
+	if service.CurrentResourceUsage != nil {
+		t.Fatalf("expected resource usage to be omitted, got %#v", service.CurrentResourceUsage)
+	}
+	if service.CurrentRuntimeStartedAt != nil || service.CurrentRuntimeReadyAt != nil {
+		t.Fatalf("expected runtime timestamps to be omitted, got started=%v ready=%v", service.CurrentRuntimeStartedAt, service.CurrentRuntimeReadyAt)
+	}
+}
+
 func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

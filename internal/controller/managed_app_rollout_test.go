@@ -771,6 +771,54 @@ func TestManagedAppRuntimeSchedulingReadyRequiresObservedExpectedSpec(t *testing
 	}
 }
 
+func TestManagedAppRuntimeSchedulingReadyIgnoresObservedBackingServiceUsage(t *testing.T) {
+	t.Parallel()
+
+	memoryBytes := int64(128 * 1024 * 1024)
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.pull.example/fugue-apps/demo@sha256:new",
+			Replicas:  1,
+			RuntimeID: "runtime_agent",
+		},
+		BackingServices: []model.BackingService{{
+			ID:        "service_demo",
+			TenantID:  "tenant_demo",
+			ProjectID: "project_demo",
+			Name:      "demo-postgres",
+			Type:      model.BackingServiceTypePostgres,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				ServiceName: "demo-postgres",
+			}},
+			CurrentResourceUsage: &model.ResourceUsage{MemoryBytes: &memoryBytes},
+		}},
+	}
+	expected := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{runtime.RuntimeIDLabelKey: "runtime_agent"},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, expected))
+	if err != nil {
+		t.Fatalf("decode managed app: %v", err)
+	}
+	// Kubernetes prunes observational fields that are not in the ManagedApp
+	// desired-state schema. The expected hash must be computed from the same
+	// durable subset or the rollout waiter can never converge.
+	managed.Spec.BackingServices[0].CurrentResourceUsage = nil
+	managed.Metadata.Generation = 7
+	managed.Status.ObservedGeneration = 7
+	expectedSpecHash := expectedManagedAppSpecHash(app, expected)
+	managed.Status.LastAppliedSpecHash = runtime.ManagedAppSpecHash(managed.Spec)
+
+	ready, message := managedAppRuntimeSchedulingReady(managed, true, app, expected, expectedSpecHash)
+	if !ready {
+		t.Fatalf("expected observed backing service usage to be excluded from rollout identity, got %q", message)
+	}
+}
+
 func TestDeploymentRolloutPolicyReadyRejectsRecreateForOnlineRestart(t *testing.T) {
 	t.Parallel()
 
