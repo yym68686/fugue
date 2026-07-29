@@ -604,6 +604,14 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 		claims.ExpiresAtUnix <= 0 {
 		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
 	}
+	if claims.Component == model.PlatformConsumerComponentImageCache {
+		expectedScope := "node:" + strings.ToLower(claims.NodeID)
+		if claims.ScopeKey != expectedScope ||
+			len(claims.ArtifactKinds) != 1 ||
+			claims.ArtifactKinds[0] != model.PlatformArtifactKindImageReplicationPlan {
+			return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
+		}
+	}
 	return claims, nil
 }
 
@@ -614,7 +622,8 @@ func knownPlatformConsumerComponent(component string) bool {
 		model.PlatformConsumerComponentCaddyEdgeFront,
 		model.PlatformConsumerComponentNodeUpdater,
 		model.PlatformConsumerComponentNodeGuardian,
-		model.PlatformConsumerComponentRuntimeAgent:
+		model.PlatformConsumerComponentRuntimeAgent,
+		model.PlatformConsumerComponentImageCache:
 		return true
 	default:
 		return false

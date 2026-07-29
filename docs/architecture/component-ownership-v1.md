@@ -152,6 +152,19 @@ external writable store and verifies the same graceful-stop contract. Request-
 scoped image-graph checks inherit cancellation instead of creating an
 uncancelable process-wide operation.
 
+The first image-plane spec/status contract is now registered as
+`image_replication_plan` with `image-plane.fugue.dev/v1` as its versioned
+payload namespace. Expected consumers are derived server-side as one
+`image-cache:<node>` identity per matching node, never accepted from a caller's
+self-reported component or node. Each credential is restricted to the
+image-cache component, one node scope, and the image replication artifact kind.
+The declared LKG location is lane-local
+`/var/lib/fugue/image-cache/replication-plan.json`; an expired control-plane
+plan must preserve already cached images while holding new replication. During
+this migration phase the safety kernel permits this artifact only in `shadow`;
+gray/full publication remains non-bypassable until the independent consumer,
+credential issuer, chart, and rollback evidence are installed.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

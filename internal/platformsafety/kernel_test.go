@@ -117,6 +117,51 @@ func TestComponentReleasePlanIsGitBoundAndPermanentlyShadowOnly(t *testing.T) {
 	}
 }
 
+func TestImageReplicationPlanStartsShadowOnly(t *testing.T) {
+	artifact := testSignedPlatformArtifact(t, map[string]any{
+		"apiVersion": "image-plane.fugue.dev/v1",
+		"kind":       "ImageReplicationPlan",
+	})
+	artifact.ArtifactKind = model.PlatformArtifactKindImageReplicationPlan
+	artifact, err := SignPlatformArtifact(artifact, testPlatformSafetyKeyring())
+	if err != nil {
+		t.Fatalf("sign image replication plan: %v", err)
+	}
+	if decision := EvaluateArtifactRelease(
+		artifact,
+		model.PlatformArtifactReleaseChannelShadow,
+		"",
+		"",
+		0,
+		testPlatformSafetyKeyring(),
+	); !decision.Pass {
+		t.Fatalf("image replication plan did not pass shadow publication: %+v", decision)
+	}
+	for _, test := range []struct {
+		channel       string
+		rollback      string
+		canaryRuleRef string
+	}{
+		{channel: model.PlatformArtifactReleaseChannelGray, canaryRuleRef: "node:test-node"},
+		{channel: model.PlatformArtifactReleaseChannelFull, rollback: "image-plan-stable"},
+	} {
+		decision := EvaluateArtifactReleaseWithOverride(
+			artifact,
+			test.channel,
+			test.rollback,
+			test.canaryRuleRef,
+			0,
+			model.PlatformArtifactOverrideModeKernelBreakGlass,
+			testPlatformSafetyKeyring(),
+		)
+		if decision.Pass ||
+			!decisionHasInvariant(decision, InvariantShadowNoProductionImpact) ||
+			decisionHasBypassedInvariant(decision, InvariantShadowNoProductionImpact) {
+			t.Fatalf("image replication plan escaped shadow through %s: %+v", test.channel, decision)
+		}
+	}
+}
+
 func testSignedComponentReleasePlanArtifact(t *testing.T) model.PlatformArtifact {
 	t.Helper()
 	manifestFile, err := os.Open(filepath.Join("..", "..", "docs", "architecture", "component-ownership-v1.yaml"))

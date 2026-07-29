@@ -293,6 +293,13 @@ func evaluateArtifactPublication(
 			Message:   "component release plans are observation-only and may be published only to shadow",
 		})
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindImageReplicationPlan &&
+		channel != model.PlatformArtifactReleaseChannelShadow {
+		violations = append(violations, Violation{
+			Invariant: InvariantShadowNoProductionImpact,
+			Message:   "image replication plans remain migration-only and may be published only to shadow",
+		})
+	}
 	return Decision{Pass: len(violations) == 0, Violations: violations}
 }
 

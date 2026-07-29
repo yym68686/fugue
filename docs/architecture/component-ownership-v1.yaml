@@ -71,11 +71,11 @@ components:
       - internal/imagecacheusage
       - internal/releaseimageconsumer
       - scripts/test_image_plane_image.sh
-    artifactKinds: [image-cache]
+    artifactKinds: [image-cache, image-replication-plan]
     releaseLane: image-plane
     coordinator: release-control
-    ownedState: [image-inventory, image-replica-status, image-gc-state]
-    contracts: [image-availability@v1, image-evidence@v1]
+    ownedState: [image-replication-spec, image-inventory, image-replica-status, image-gc-state]
+    contracts: [image-replication-plan@v1, image-availability@v1, image-evidence@v1]
     dependencies: []
     failureBoundary: image-plane
     lkgPolicy: required

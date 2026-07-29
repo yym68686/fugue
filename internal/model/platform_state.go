@@ -22,6 +22,7 @@ const (
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"
 	PlatformArtifactKindGatePolicyRegistry        = "gate_policy_registry"
 	PlatformArtifactKindAutomaticActionContracts  = "automatic_action_contracts"
+	PlatformArtifactKindImageReplicationPlan      = "image_replication_plan"
 	PlatformComponentPlanObserveScope             = "component_plan.observe"
 	PlatformComponentPlanObservationReason        = "release-control component plan shadow observation"
 
@@ -55,6 +56,7 @@ const (
 	PlatformConsumerComponentNodeUpdater    = "node-updater"
 	PlatformConsumerComponentNodeGuardian   = "node-guardian"
 	PlatformConsumerComponentRuntimeAgent   = "runtime-agent"
+	PlatformConsumerComponentImageCache     = "image-cache"
 
 	PlatformConsumerProtocolVersionV1 = "v1"
 	PlatformConsumerSchemaVersionV1   = "v1"
