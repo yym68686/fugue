@@ -17,10 +17,10 @@ type legacyDistributedImageManifestGroup struct {
 }
 
 // reconcileLegacyDistributedImageMetadata materializes the distributed image
-// records that predate the distributed image index. Only fresh physical cache
-// evidence for an app's current desired image is accepted. Missing or
-// ambiguous evidence remains untouched and therefore cannot become deletion
-// authority.
+// records that predate the distributed image index. Only fresh, complete
+// physical cache evidence for an app's current desired image is accepted.
+// Missing, ambiguous, or digest-only evidence remains untouched and therefore
+// cannot become serving or deletion authority.
 func (s *Service) reconcileLegacyDistributedImageMetadata(ctx context.Context) error {
 	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
 		return nil
@@ -128,7 +128,7 @@ func legacyDistributedImageManifestForRefs(refs []string, manifests []model.Imag
 		for _, manifest := range manifests {
 			manifestRepo := strings.ToLower(strings.Trim(strings.TrimSpace(manifest.Repo), "/"))
 			digest := imagecachekeys.NormalizeDigest(manifest.Digest)
-			if manifestRepo != repo || digest == "" ||
+			if manifestRepo != repo || digest == "" || !imageIntegrityManifestUsable(manifest) ||
 				!controllerKeySetContainsAny(refKeys, imagecachekeys.ExactManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)...) {
 				continue
 			}
