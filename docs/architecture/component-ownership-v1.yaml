@@ -31,7 +31,7 @@ components:
     releaseLane: release-control
     coordinator: release-control
     ownedState: [release-intent, release-ledger, lane-lease, release-evidence, component-release-plan]
-    contracts: [release-intent@v1, release-evidence@v1, component-release-plan@v1]
+    contracts: [release-intent@v1, release-evidence@v1, component-release-plan@v1, component-plan-api@v1]
     dependencies: []
     failureBoundary: release-control
     lkgPolicy: required

@@ -34,12 +34,13 @@ var (
 	componentPlanScopePattern      = regexp.MustCompile(`^component-release-plan:[0-9a-f]{40}\.\.[0-9a-f]{40}$`)
 )
 
-// ComponentPlanStore is the smallest durable boundary required by the shadow
-// reconciler. The existing platform store implements it; the package does not
-// import that concrete store or any deployment adapter.
+// ComponentPlanStore is the smallest context-aware durable boundary required
+// by the shadow reconciler. Production implementations communicate through a
+// versioned API; the package does not import the concrete control-plane store.
 type ComponentPlanStore interface {
-	GetPlatformArtifact(idOrGeneration string) (model.PlatformArtifact, error)
+	GetPlatformArtifact(ctx context.Context, id string) (model.PlatformArtifact, error)
 	ReleasePlatformArtifact(
+		ctx context.Context,
 		id string,
 		req model.PlatformArtifactReleaseRequest,
 		principal model.Principal,
@@ -105,9 +106,9 @@ func ReconcileComponentPlan(
 		return ComponentPlanStatus{}, fmt.Errorf("%w: spec identity is incomplete", ErrComponentPlanReconcile)
 	}
 
-	artifact, err := store.GetPlatformArtifact(spec.ArtifactID)
+	artifact, err := store.GetPlatformArtifact(ctx, spec.ArtifactID)
 	if err != nil {
-		return ComponentPlanStatus{}, fmt.Errorf("%w: read artifact: %v", ErrComponentPlanReconcile, err)
+		return ComponentPlanStatus{}, fmt.Errorf("%w: read artifact: %w", ErrComponentPlanReconcile, err)
 	}
 	if artifact.ID != spec.ArtifactID ||
 		artifact.ContentHash != spec.ContentHash ||
@@ -134,6 +135,7 @@ func ReconcileComponentPlan(
 	}
 
 	returnedArtifact, release, message, _, err := store.ReleasePlatformArtifact(
+		ctx,
 		artifact.ID,
 		model.PlatformArtifactReleaseRequest{
 			ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
@@ -143,7 +145,7 @@ func ReconcileComponentPlan(
 		principal,
 	)
 	if err != nil {
-		return ComponentPlanStatus{}, fmt.Errorf("%w: persist shadow status: %v", ErrComponentPlanReconcile, err)
+		return ComponentPlanStatus{}, fmt.Errorf("%w: persist shadow status: %w", ErrComponentPlanReconcile, err)
 	}
 	if err := verifyShadowReleaseResult(artifact, returnedArtifact, release, message, envelope, principal); err != nil {
 		return ComponentPlanStatus{}, fmt.Errorf("%w: %v", ErrComponentPlanReconcile, err)
@@ -188,16 +190,17 @@ func verifyShadowReleaseResult(
 		expectedArtifact.ScopeKey,
 		model.PlatformArtifactReleaseChannelShadow,
 	)
-	if returnedArtifact.ID != expectedArtifact.ID ||
+	if !canonicalJSONEqual(returnedArtifact, expectedArtifact) ||
+		returnedArtifact.ID != expectedArtifact.ID ||
 		returnedArtifact.ArtifactKind != model.PlatformArtifactKindComponentReleasePlan ||
 		returnedArtifact.Status != model.PlatformArtifactStatusValidated ||
 		returnedArtifact.ContentHash != expectedArtifact.ContentHash ||
 		returnedArtifact.Generation != expectedArtifact.Generation ||
 		returnedArtifact.Scope != expectedArtifact.Scope ||
 		returnedArtifact.ScopeKey != expectedArtifact.ScopeKey ||
-		!canonicalContentEqual(returnedArtifact.Content, expectedArtifact.Content) ||
 		release.ArtifactID != expectedArtifact.ID ||
 		release.ArtifactKind != model.PlatformArtifactKindComponentReleasePlan ||
+		release.Scope != expectedArtifact.Scope ||
 		release.ScopeKey != expectedArtifact.ScopeKey ||
 		release.Generation != expectedArtifact.Generation ||
 		release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
@@ -206,6 +209,7 @@ func verifyShadowReleaseResult(
 		release.FencingToken <= 0 ||
 		release.Version <= 0 ||
 		release.IdempotencyKey != envelope.CoordinationPlan.IdempotencyKey ||
+		release.CandidateGeneration != expectedArtifact.Generation ||
 		release.Reason != componentPlanReleaseReason ||
 		release.CanaryRuleRef != "" ||
 		release.OverrideMode != model.PlatformArtifactOverrideModeNone ||
@@ -215,9 +219,11 @@ func verifyShadowReleaseResult(
 		release.ReleasedByID != strings.TrimSpace(principal.ActorID) {
 		return errors.New("store returned an unbound or production-capable shadow release")
 	}
-	if message.ReleaseID != release.ID ||
+	if strings.TrimSpace(message.ID) == "" ||
+		message.ReleaseID != release.ID ||
 		message.ArtifactID != expectedArtifact.ID ||
 		message.ArtifactKind != model.PlatformArtifactKindComponentReleasePlan ||
+		message.Scope != expectedArtifact.Scope ||
 		message.ScopeKey != expectedArtifact.ScopeKey ||
 		message.Generation != expectedArtifact.Generation ||
 		message.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
@@ -227,7 +233,7 @@ func verifyShadowReleaseResult(
 	return nil
 }
 
-func canonicalContentEqual(left, right map[string]any) bool {
+func canonicalJSONEqual(left, right any) bool {
 	leftBytes, leftErr := json.Marshal(left)
 	rightBytes, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftBytes, rightBytes)
