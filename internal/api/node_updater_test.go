@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -2262,6 +2263,67 @@ fi
 	cmd := exec.Command("bash", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node updater image report acknowledgement harness failed: %v\n%s", err, output)
+	}
+}
+
+func TestNodeUpdaterRunOnceAcknowledgesFailedTaskUnderErrexit(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+load_cached_env_file() { return 1; }
+restore_node_updater_static_env() { :; }
+reconcile_node_state() { return 1; }
+heartbeat() { :; }
+log() { :; }
+claim_task() { :; }
+record_last_error() { LAST_ERROR="$1"; }
+last_error() { printf '%s' "${LAST_ERROR:-}"; }
+api_form() {
+  if [ "$1" = "GET" ]; then
+    printf '%s\n' \
+      "FUGUE_NODE_UPDATE_TASK_ID='task-failure'" \
+      "FUGUE_NODE_UPDATE_TASK_TYPE='diagnose-node'"
+  fi
+}
+run_task() { return 37; }
+complete_task() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"${COMPLETIONS}"
+}
+run_once
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "node-updater-run-once-failure-test.sh")
+	completionPath := filepath.Join(tmpDir, "completions")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater run-once harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(),
+		"COMPLETIONS="+completionPath,
+		"FUGUE_NODE_UPDATER_WORK_DIR="+filepath.Join(tmpDir, "work"),
+	)
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 37 {
+		t.Fatalf("run-once failure status=%v, want 37\n%s", err, output)
+	}
+	completed, err := os.ReadFile(completionPath)
+	if err != nil {
+		t.Fatalf("failed task was not acknowledged: %v\n%s", err, output)
+	}
+	if !strings.HasPrefix(string(completed), "failed\tnode update task failed\t") {
+		t.Fatalf("unexpected failed task acknowledgement %q", completed)
 	}
 }
 

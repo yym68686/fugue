@@ -5629,8 +5629,14 @@ run_once() {
   log "claiming task ${FUGUE_NODE_UPDATE_TASK_ID} (${FUGUE_NODE_UPDATE_TASK_TYPE})"
   claim_task
   FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE=""
+  # run_task is expected to return the task's exact status so this function
+  # can durably acknowledge success or failure. Capture it with the outer
+  # errexit disabled; otherwise a non-zero task exits the updater before the
+  # failure acknowledgement and leaves the task stuck in running.
+  set +e
   run_task
   rc=$?
+  set -e
   if [ "${rc}" -eq 0 ]; then
     clear_last_error
     if ! complete_task completed "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE:-node update task completed}"; then
