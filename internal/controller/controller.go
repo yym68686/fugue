@@ -1109,6 +1109,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				}
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
 			}
+			timer.Mark("rollout_wait")
 			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 				backingServiceDeployments := runtime.ManagedBackingServiceDeploymentsWithPlacements(
 					app,
@@ -1142,13 +1143,13 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				if err := alignmentResult.Error(); err != nil {
 					return fmt.Errorf("wait for managed app alignment after safe rollout %s: %w", app.ID, err)
 				}
+				timer.Mark("stable_alignment_wait")
 				stableReleaseAligned, err := s.alignSafeRolloutPromotedStableRelease(ctx, op, safeRollout)
 				if err != nil {
 					return err
 				}
 				if !stableReleaseAligned {
 					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "stable desired state aligned but edge route bundle has not confirmed canonical stable release yet", safeRollout.Candidate.ID, nil)
-					timer.Mark("rollout_wait")
 					break
 				}
 				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusCompleted, "stable desired state aligned after edge route confirmation", safeRollout.Candidate.ID, nil)
@@ -1156,7 +1157,6 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			} else if safeRollout != nil {
 				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "stable desired state alignment paused until edge route and retire gates pass", safeRollout.Candidate.ID, nil)
 			}
-			timer.Mark("rollout_wait")
 		}
 	}
 

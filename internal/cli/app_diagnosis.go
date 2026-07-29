@@ -773,32 +773,62 @@ func describePodIssue(pod model.ClusterPod, expectedImage string) string {
 		return ""
 	}
 	for _, container := range pod.Containers {
-		if containerCompletedSuccessfully(container) {
+		if containerCompletedSuccessfully(container) || container.Ready {
 			continue
 		}
-		if expectedImage != "" && containerImageComparable(container.Image) && !strings.EqualFold(strings.TrimSpace(container.Image), expectedImage) {
-			if hasExpectedImage {
+		state := strings.ToLower(strings.TrimSpace(container.State))
+		if strings.TrimSpace(container.Reason) == "" && strings.TrimSpace(container.Message) == "" && (state == "" || state == "running") {
+			continue
+		}
+		return describePodContainerStateIssue(pod, container)
+	}
+	if expectedImage != "" && !hasExpectedImage {
+		for _, container := range pod.Containers {
+			if containerCompletedSuccessfully(container) || appDiagnosticPlatformHelperContainer(container.Name) || !containerImageComparable(container.Image) {
 				continue
 			}
 			return fmt.Sprintf("pod %s container %s is running image %s, expected %s", pod.Name, container.Name, container.Image, expectedImage)
 		}
+		for _, container := range pod.Containers {
+			if containerCompletedSuccessfully(container) || !containerImageComparable(container.Image) {
+				continue
+			}
+			return fmt.Sprintf("pod %s container %s is running image %s, expected %s", pod.Name, container.Name, container.Image, expectedImage)
+		}
+	}
+	for _, container := range pod.Containers {
+		if containerCompletedSuccessfully(container) {
+			continue
+		}
 		if container.Ready && strings.EqualFold(strings.TrimSpace(container.State), "running") && strings.TrimSpace(container.Reason) == "" && strings.TrimSpace(container.Message) == "" {
 			continue
 		}
-		detail := strings.TrimSpace(container.Reason)
-		if message := strings.TrimSpace(container.Message); message != "" {
-			if detail != "" {
-				detail += ": "
-			}
-			detail += message
-		}
-		detail = firstNonEmptyTrimmed(detail, strings.TrimSpace(container.State), strings.TrimSpace(pod.Phase))
-		return fmt.Sprintf("pod %s container %s %s", pod.Name, container.Name, detail)
+		return describePodContainerStateIssue(pod, container)
 	}
 	if !pod.Ready {
 		return fmt.Sprintf("pod %s is not ready", pod.Name)
 	}
 	return ""
+}
+
+func describePodContainerStateIssue(pod model.ClusterPod, container model.ClusterPodContainer) string {
+	detail := strings.TrimSpace(container.Reason)
+	if message := strings.TrimSpace(container.Message); message != "" {
+		if detail != "" {
+			detail += ": "
+		}
+		detail += message
+	}
+	detail = firstNonEmptyTrimmed(detail, strings.TrimSpace(container.State), strings.TrimSpace(pod.Phase))
+	return fmt.Sprintf("pod %s container %s %s", pod.Name, container.Name, detail)
+}
+
+func appDiagnosticPlatformHelperContainer(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == "fugue-drain-agent" ||
+		name == "fugue-workspace" ||
+		name == "wait-postgres" ||
+		strings.HasPrefix(name, "wait-postgres-")
 }
 
 func containerImageComparable(image string) bool {

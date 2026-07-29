@@ -457,14 +457,15 @@ func appStorageViewFromSpec(app model.App) appStorageView {
 }
 
 func (c *CLI) renderAppStorageState(app model.App, operation *model.Operation, resetRequested bool) error {
-	view := appStorageViewFromSpec(app)
+	outputApp := redactAppForOutput(app)
+	view := appStorageViewFromSpec(outputApp)
 	if c.wantsJSON() {
 		payload := map[string]any{
-			"app":     app,
+			"app":     outputApp,
 			"storage": view,
 		}
 		if operation != nil {
-			payload["operation"] = operation
+			payload["operation"] = redactOperationPtrForOutput(operation)
 		}
 		if resetRequested {
 			payload["reset_requested"] = true

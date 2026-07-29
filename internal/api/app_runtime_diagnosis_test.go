@@ -287,6 +287,62 @@ func TestGetAppDiagnosisCountsOnlyActivePodsWhenReadyReplicaExists(t *testing.T)
 	}
 }
 
+func TestGetAppDiagnosisPrefersCurrentImagePullFailureOverHistoricalEviction(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	evictedPod := fakePod("demo-old", "Failed", time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC), containerName)
+	evictedPod.Spec.NodeName = "old-node"
+	evictedPod.Status.Reason = "Evicted"
+	evictedPod.Status.Message = "The node was low on ephemeral-storage."
+
+	pendingPod := fakePod("demo-current", "Pending", time.Date(2026, 4, 16, 0, 1, 0, 0, time.UTC), containerName)
+	pendingPod.Spec.NodeName = "current-node"
+	pendingPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Ready: false,
+		State: kubeRuntimeState{Waiting: &kubeStateDetail{
+			Reason:  "ImagePullBackOff",
+			Message: "failed to pull and unpack image: manifest unknown",
+		}},
+	}}
+
+	fake.setPods(selector, []kubePodInfo{evictedPod, pendingPod})
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Category != "pod-failure" {
+		t.Fatalf("expected current pod failure diagnosis, got %+v", response.Diagnosis)
+	}
+	if response.Diagnosis.ImplicatedPod != "demo-current" || response.Diagnosis.ImplicatedNode != "current-node" {
+		t.Fatalf("expected current pending pod to be implicated, got %+v", response.Diagnosis)
+	}
+	if !strings.Contains(response.Diagnosis.Summary, "ImagePullBackOff") || strings.Contains(response.Diagnosis.Summary, "Evicted") {
+		t.Fatalf("expected current image pull failure summary, got %q", response.Diagnosis.Summary)
+	}
+}
+
 func TestGetAppDiagnosisIncludesStrictDrainEvidence(t *testing.T) {
 	t.Parallel()
 

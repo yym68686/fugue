@@ -132,9 +132,11 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.waitForOptionalOperation(client, &response.Operation, opts.Wait); err != nil {
+			finalOperation, err := c.waitForAppRebuildOperation(client, app.ID, response.Operation, opts.Wait)
+			if err != nil {
 				return err
 			}
+			response.Operation = finalOperation
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
 					"app":       redactAppForOutput(app),

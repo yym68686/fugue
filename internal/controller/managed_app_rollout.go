@@ -320,7 +320,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			}
 			if s.Store != nil {
 				if err := s.refreshManagedAppStatus(waitCtx, client, app); err != nil {
-					s.Logger.Printf("refresh managed app status after rollout failed for %s/%s: %v", namespace, name, err)
+					return fmt.Errorf("publish managed app ready status for %s/%s: %w", namespace, name, err)
 				}
 			}
 			return nil
@@ -803,6 +803,7 @@ func isBenignManagedAppRolloutFailureMessage(message string) bool {
 }
 
 func (s *Service) refreshManagedAppStatus(ctx context.Context, client *kubeClient, app model.App) error {
+	app = s.Renderer.PrepareApp(app)
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	name := runtime.ManagedAppResourceName(app)
 	managed, found, err := client.getManagedApp(ctx, namespace, name)
@@ -812,7 +813,18 @@ func (s *Service) refreshManagedAppStatus(ctx context.Context, client *kubeClien
 	if !found {
 		return nil
 	}
-	return s.reconcileManagedAppObject(ctx, client, managed)
+	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
+	if err != nil {
+		return fmt.Errorf("resolve postgres placements while refreshing managed app status: %w", err)
+	}
+	releaseKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(app, managed.Spec.Scheduling))
+	// The rollout waiter runs while its operation is still active. The normal
+	// reconciler deliberately skips every active-operation app so it cannot
+	// compete with the operation-owned apply. Refresh only observed status here:
+	// reading the already-applied children and publishing their terminal state
+	// cannot mutate desired workload state, and prevents routes from remaining
+	// unavailable until a later fallback scan.
+	return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, app, postgresPlacements, releaseKey, false)
 }
 
 func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplicas int, deploymentName, expectedReleaseKey, expectedImage string) (bool, string, error) {
