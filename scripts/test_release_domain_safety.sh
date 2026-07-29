@@ -845,7 +845,7 @@ with open(output_file, "a", encoding="utf-8") as stream:
   }
 
   nested_timeout_release_function() {
-    run_with_wall_timeout 1 command sleep 0.7
+    run_with_wall_timeout 1 command sleep 2
   }
 
   nested_errexit_disabled_release_function() {
@@ -1072,7 +1072,7 @@ rm -f "${RENEWER_STOP_RACE_TMP}/health"
     CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID="$$"
     CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE="${direct_deadline_file}"
     status=0
-    if run_with_wall_timeout 1 command sleep 0.7; then
+    if run_with_wall_timeout 1 command sleep 2; then
       status=0
     else
       status=$?
@@ -13462,8 +13462,17 @@ for nested_timeout_mode in inner outer; do
     nested_started="$(release_monotonic_millis)"
     nested_timeout_status=0
     case "${nested_timeout_mode}" in
-      inner) outer_timeout=3 ;;
-      outer) outer_timeout=1 ;;
+      # Keep the fallback outer deadline well beyond the assertion bound so
+      # scheduler-delayed descendant cleanup cannot be mistaken for an
+      # ignored inner deadline.
+      inner)
+        outer_timeout=6
+        nested_elapsed_limit=4500
+        ;;
+      outer)
+        outer_timeout=1
+        nested_elapsed_limit=3000
+        ;;
     esac
     if run_with_wall_timeout "${outer_timeout}" nested_wall_timeout; then
       fail "nested ${nested_timeout_mode} deadline must not allow an unbounded child"
@@ -13472,7 +13481,8 @@ for nested_timeout_mode in inner outer; do
     fi
     nested_elapsed=$(( $(release_monotonic_millis) - nested_started ))
     assert_eq "${nested_timeout_status}" "124" "nested ${nested_timeout_mode} wall timeout status"
-    (( nested_elapsed < 2500 )) || fail "nested ${nested_timeout_mode} deadline escaped its total wall bound: ${nested_elapsed}ms"
+    (( nested_elapsed < nested_elapsed_limit )) ||
+      fail "nested ${nested_timeout_mode} deadline escaped its total wall bound: ${nested_elapsed}ms"
     nested_child_pid="$(cat "${nested_child_file}" 2>/dev/null || true)"
     [[ "${nested_child_pid}" =~ ^[1-9][0-9]*$ ]] || fail "nested ${nested_timeout_mode} test did not record its child"
     if kill -0 "${nested_child_pid}" >/dev/null 2>&1; then
