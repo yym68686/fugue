@@ -10,6 +10,93 @@ import (
 	"fugue/internal/observability"
 )
 
+func TestAutomationActionDispatchPreservesUserPolicyModeCeiling(t *testing.T) {
+	t.Setenv("FUGUE_AUTONOMY_KILL_SWITCH", "false")
+	t.Setenv("FUGUE_AUTOMATION_APP_RESTART_ENABLED", "true")
+	t.Setenv("FUGUE_AUTOMATION_APP_RESTART_KILL_SWITCH", "false")
+	t.Setenv("FUGUE_GATE_AUTOMATION_APP_RESTART_MODE", "")
+
+	fixture := setupAutomationAPITestServer(t)
+	createRequest := automationCreateRequest(fixture.app)
+	createRequest.Mode = model.GatePolicyModeShadow
+	create := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/automations", fixture.writeKey, createRequest)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create policy: status=%d body=%s", create.Code, create.Body.String())
+	}
+	var policyResponse model.AutomationPolicyResponse
+	mustDecodeJSON(t, create, &policyResponse)
+
+	promote := performJSONRequest(
+		t,
+		fixture.server,
+		http.MethodPost,
+		"/v1/admin/gates/automation.app-restart/promote",
+		fixture.platformAdminKey,
+		model.GatePolicyPromoteRequest{
+			Mode:   model.GatePolicyModeEnforced,
+			Reason: "verify user policy mode ceiling",
+		},
+	)
+	if promote.Code != http.StatusOK {
+		t.Fatalf("promote app restart gate: status=%d body=%s", promote.Code, promote.Body.String())
+	}
+	var promotion model.GatePolicyPromotionResponse
+	mustDecodeJSON(t, promote, &promotion)
+	verifyPlatformArtifactReleaseAPI(t, fixture.server, fixture.platformAdminKey, promotion.Release, true)
+	gatePolicy, ok := gatePolicyByID(fixture.server.gatePolicyRegistry(), "automation.app-restart")
+	if !ok || gatePolicy.Mode != model.GatePolicyModeEnforced {
+		t.Fatalf("app restart gate was not promoted: %+v found=%t", gatePolicy, ok)
+	}
+
+	fixture.server.automationShadowLoopConfig = AutomationShadowLoopConfig{
+		Enabled:  true,
+		Interval: 30 * time.Second,
+	}
+	fixture.server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: "http://clickhouse.example.test",
+	}.Normalize()
+	fixture.server.automationRequestOutcomeQuery = func(
+		_ context.Context,
+		_ string,
+		_ []int,
+		startedAt time.Time,
+		endedAt time.Time,
+	) ([]model.AutomationRequestOutcomeAggregate, string, error) {
+		return []model.AutomationRequestOutcomeAggregate{
+			{StatusCode: 503, Count: 2, FailureDomain: "edge:edge-us"},
+			{StatusCode: 504, Count: 1, FailureDomain: "edge:edge-us"},
+		}, "edge", nil
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, _, err := fixture.server.runAutomationShadowLoopOnce(
+		context.Background(),
+		now,
+		automationShadowLoopCursor{},
+	); err != nil {
+		t.Fatalf("run shadow loop: %v", err)
+	}
+	intents, err := fixture.server.store.ListAutomationActionIntents(
+		automationIntentFilterForTest(policyResponse.Policy, fixture.app),
+	)
+	if err != nil || len(intents) != 1 {
+		t.Fatalf("list generated intents: count=%d err=%v", len(intents), err)
+	}
+	intent := intents[0]
+	if intent.Mode != model.GatePolicyModeShadow {
+		t.Fatalf("intent mode=%q, want immutable shadow policy mode", intent.Mode)
+	}
+	dispatch, err := fixture.server.store.GetAutomationActionDispatchByIntent(intent.ID)
+	if err != nil {
+		t.Fatalf("get generated dispatch: %v", err)
+	}
+	if dispatch.SafetyDecision.EffectiveMode != model.GatePolicyModeShadow ||
+		dispatch.SafetyDecision.ProductionMutationAllowed ||
+		dispatch.Status != model.AutomationActionDispatchStatusHeld {
+		t.Fatalf("platform promotion elevated user policy intent: %+v", dispatch)
+	}
+}
+
 func TestAutomationActionDispatchReadEndpointsRespectBoundary(t *testing.T) {
 	t.Parallel()
 

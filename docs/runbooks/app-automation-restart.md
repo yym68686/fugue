@@ -26,6 +26,9 @@ generation must reuse the idempotency key.
 
 The initial user-facing policy modes are `disabled` and `shadow`. Shadow mode
 may emit a `would_action` decision but must not mutate an application.
+The effective action mode is the more restrictive of the immutable user-policy
+snapshot and the current platform gate. A gate change may tighten an existing
+intent, but it cannot elevate that intent beyond the user's authorized mode.
 
 ## Shadow control loop
 
