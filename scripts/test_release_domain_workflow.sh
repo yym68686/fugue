@@ -560,7 +560,13 @@ for fragment in [
   "git/ref/heads/fugue-control-plane-release-baseline",
   "for run_status in queued in_progress waiting pending requested",
   "actions/workflows/${workflow_id}/runs?status=${run_status}",
-  '"${state_before}" == \'active\'',
+  'run_number <= current_run_number or attempt != 1',
+  'event != "workflow_dispatch" or branch != "main"',
+  'workflow_path != ".github/workflows/deploy-control-plane.yml"',
+  '"successor_run_count": len(successors)',
+  '"successor_runs": successors',
+  '"settlement_mode": settlement_mode',
+  '"${state_before}" == \'active\' || "${state_before}" == \'disabled_manually\'',
   "actions/workflows/${workflow_id}/disable",
   "mutation_status=$?",
   "for attempt in 1 2 3 4 5",
@@ -577,6 +583,7 @@ for forbidden in [
   "/enable", "/dispatches", "/cancel", "git push", "git update-ref", "updateRefs", "createRef", "deleteRef",
   "--method POST", "--method PATCH", "--method DELETE", "helm ", "kubectl ", "k3s kubectl", "fugue app ",
   '[[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1',
+  '[[ -z "${other_runs}" ]] || exit 1',
 ]
   fail_contract("successful lane rearm contains out-of-scope capability #{forbidden.inspect}") if success_rearm_step.fetch("run").include?(forbidden)
 end

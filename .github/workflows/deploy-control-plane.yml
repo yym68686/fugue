@@ -1278,44 +1278,125 @@ jobs:
             "$([[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] && printf true || printf false)" >&2
           [[ "${main_head}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "${baseline_oid}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          successor_rows="${evidence_dir}/successor-runs.tsv"
+          : >"${successor_rows}"
           for run_status in queued in_progress waiting pending requested; do
-            other_runs="$(timeout --kill-after=2s 10s gh api --paginate "repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[].id' | awk -v current="${GITHUB_RUN_ID}" '$0 != current')" || exit 1
-            other_run_count="$(printf '%s\n' "${other_runs}" | awk 'NF { count++ } END { print count + 0 }')"
+            other_runs="$(timeout --kill-after=2s 10s gh api --paginate "repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[] | [.id, .run_number, .run_attempt, .event, .head_branch, .head_sha, .status, .path] | @tsv')" || exit 1
+            other_run_count=0
+            while IFS=$'\t' read -r run_id run_number run_attempt run_event head_branch head_sha observed_status workflow_path extra; do
+              [[ -n "${run_id}" ]] || continue
+              [[ "${run_id}" == "${GITHUB_RUN_ID}" ]] && continue
+              [[ -z "${extra:-}" ]] || exit 1
+              printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${run_id}" "${run_number}" "${run_attempt}" "${run_event}" \
+                "${head_branch}" "${head_sha}" "${observed_status}" "${workflow_path}" >>"${successor_rows}"
+              other_run_count=$((other_run_count + 1))
+            done <<<"${other_runs}"
             printf 'release lane rearm checkpoint=concurrency status=%s other_run_count=%s\n' \
               "${run_status}" "${other_run_count}" >&2
-            [[ -z "${other_runs}" ]] || exit 1
           done
+          successor_json="$(python3 - "${successor_rows}" "${GITHUB_RUN_ID}" "${GITHUB_RUN_NUMBER}" <<'PY'
+          import json, re, sys
+
+          path, current_run_id_raw, current_run_number_raw = sys.argv[1:]
+          if re.fullmatch(r"[1-9][0-9]*", current_run_id_raw) is None:
+              raise SystemExit("current run id is invalid")
+          if re.fullmatch(r"[1-9][0-9]*", current_run_number_raw) is None:
+              raise SystemExit("current run number is invalid")
+          current_run_id = int(current_run_id_raw)
+          current_run_number = int(current_run_number_raw)
+          allowed_statuses = {"queued", "in_progress", "waiting", "pending", "requested"}
+          successors_by_id = {}
+          with open(path, "r", encoding="utf-8") as handle:
+              for raw in handle:
+                  fields = raw.rstrip("\n").split("\t")
+                  if len(fields) != 8:
+                      raise SystemExit("successor run row shape drifted")
+                  run_id_raw, run_number_raw, attempt_raw, event, branch, sha, status, workflow_path = fields
+                  if any(re.fullmatch(r"[1-9][0-9]*", value) is None for value in (run_id_raw, run_number_raw, attempt_raw)):
+                      raise SystemExit("successor run numeric identity drifted")
+                  run_id, run_number, attempt = map(int, (run_id_raw, run_number_raw, attempt_raw))
+                  if run_id == current_run_id:
+                      raise SystemExit("successor run identity is current")
+                  if run_number <= current_run_number or attempt != 1:
+                      raise SystemExit("active run is not a first-attempt successor")
+                  if event != "workflow_dispatch" or branch != "main":
+                      raise SystemExit("successor trigger identity drifted")
+                  if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+                      raise SystemExit("successor head SHA drifted")
+                  if status not in allowed_statuses:
+                      raise SystemExit("successor status drifted")
+                  if workflow_path != ".github/workflows/deploy-control-plane.yml":
+                      raise SystemExit("successor workflow path drifted")
+                  candidate = {
+                      "id": run_id_raw,
+                      "run_number": run_number,
+                      "run_attempt": attempt,
+                      "head_sha": sha,
+                  }
+                  existing = successors_by_id.get(run_id)
+                  if existing is not None:
+                      if any(existing[key] != candidate[key] for key in candidate):
+                          raise SystemExit("successor identity changed across active-status snapshots")
+                      existing["observed_statuses"].add(status)
+                  else:
+                      candidate["observed_statuses"] = {status}
+                      successors_by_id[run_id] = candidate
+          successors = list(successors_by_id.values())
+          for successor in successors:
+              successor["observed_statuses"] = sorted(successor["observed_statuses"])
+          successors.sort(key=lambda value: (value["run_number"], int(value["id"])))
+          print(json.dumps(successors, sort_keys=True, separators=(",", ":")))
+          PY
+          )" || exit 1
+          successor_count="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "${successor_json}")" || exit 1
+          printf 'release lane rearm checkpoint=successors validated_count=%s\n' "${successor_count}" >&2
 
           state_before="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || exit 1
-          printf 'release lane rearm checkpoint=state_before state=%s expected=active\n' "${state_before}" >&2
-          [[ "${state_before}" == 'active' ]] || exit 1
+          printf 'release lane rearm checkpoint=state_before state=%s expected=active_or_disabled_manually\n' "${state_before}" >&2
+          [[ "${state_before}" == 'active' || "${state_before}" == 'disabled_manually' ]] || exit 1
           mutation_status=0
-          set +e
-          timeout --kill-after=2s 10s gh api --method PUT "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" >/dev/null
-          mutation_status=$?
-          set -e
-          printf 'release lane rearm checkpoint=disable mutation_status=%s\n' "${mutation_status}" >&2
-          state_after=''
-          settled='false'
-          for attempt in 1 2 3 4 5; do
-            read_status=0
-            state_after="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || read_status=$?
-            printf 'release lane rearm checkpoint=readback attempt=%s read_status=%s state=%s\n' \
-              "${attempt}" "${read_status}" "${state_after:-unknown}" >&2
-            [[ "${read_status}" == '0' ]] || exit 1
-            if [[ "${state_after}" == 'disabled_manually' ]]; then
-              settled='true'
-              break
-            fi
-            sleep 1
-          done
+          mutation_attempted='false'
+          settlement_mode='already_disabled'
+          state_after="${state_before}"
+          settled='true'
+          if [[ "${state_before}" == 'active' ]]; then
+            mutation_attempted='true'
+            settlement_mode='disabled'
+            set +e
+            timeout --kill-after=2s 10s gh api --method PUT "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" >/dev/null
+            mutation_status=$?
+            set -e
+            printf 'release lane rearm checkpoint=disable mutation_status=%s\n' "${mutation_status}" >&2
+            state_after=''
+            settled='false'
+            for attempt in 1 2 3 4 5; do
+              read_status=0
+              state_after="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/workflows/${workflow_id}" --jq '.state')" || read_status=$?
+              printf 'release lane rearm checkpoint=readback attempt=%s read_status=%s state=%s\n' \
+                "${attempt}" "${read_status}" "${state_after:-unknown}" >&2
+              [[ "${read_status}" == '0' ]] || exit 1
+              if [[ "${state_after}" == 'disabled_manually' ]]; then
+                settled='true'
+                break
+              fi
+              sleep 1
+            done
+          fi
           [[ "${settled}" == 'true' && "${state_after}" == 'disabled_manually' ]] || exit 1
 
-          python3 - "${evidence_dir}/success-rearm.json" "${baseline_oid}" "${main_head}" "${main_matches}" "${state_before}" "${state_after}" "${mutation_status}" <<'PY'
+          python3 - "${evidence_dir}/success-rearm.json" "${baseline_oid}" "${main_head}" "${main_matches}" "${state_before}" "${state_after}" "${mutation_attempted}" "${mutation_status}" "${settlement_mode}" "${successor_json}" <<'PY'
           import datetime, json, os, sys
-          output, baseline_oid, main_head, main_matches, before, after, mutation_status = sys.argv[1:]
+          output, baseline_oid, main_head, main_matches, before, after, mutation_attempted, mutation_status, settlement_mode, successor_json = sys.argv[1:]
           if main_matches not in {"true", "false"}:
               raise SystemExit("main ref equality evidence is invalid")
+          if mutation_attempted not in {"true", "false"}:
+              raise SystemExit("workflow mutation evidence is invalid")
+          if settlement_mode not in {"disabled", "already_disabled"}:
+              raise SystemExit("release lane settlement mode is invalid")
+          successors = json.loads(successor_json)
+          if type(successors) is not list:
+              raise SystemExit("successor evidence is invalid")
           payload = {
               "schema_version": 1,
               "workflow": os.environ["GITHUB_WORKFLOW"],
@@ -1328,6 +1409,9 @@ jobs:
               "baseline_ref_object": baseline_oid,
               "state_before": before,
               "state_after": after,
+              "settlement_mode": settlement_mode,
+              "successor_run_count": len(successors),
+              "successor_runs": successors,
               "release_job_results": {
                   "release_input_guard": os.environ["RELEASE_INPUT_GUARD_RESULT"],
                   "release_baseline": os.environ["RELEASE_BASELINE_RESULT"],
@@ -1336,7 +1420,7 @@ jobs:
                   "deploy": os.environ["DEPLOY_RESULT"],
                   "record_release_baseline": os.environ["RECORD_RELEASE_BASELINE_RESULT"],
               },
-              "workflow_mutation_attempted": True,
+              "workflow_mutation_attempted": mutation_attempted == "true",
               "workflow_mutation_status": int(mutation_status),
               "rearm_ref_mutation_attempted": False,
               "rearm_runtime_mutation_attempted": False,

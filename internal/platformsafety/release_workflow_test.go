@@ -2823,7 +2823,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "e45eaad3c22c1361fdfef67447bc269802ebd34682d218413e7144a4153bf88a")
+	assertWorkflowSourceDigest(t, data, "9e95927e66536678321bffab7bf8eb56fa06297960e8f5feb45bc3d234e31f66")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2864,7 +2864,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
-		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "36df21b23afa1e408c0c9e25b586fd1579dcb6e75ea4bb01d592bcd26626c48d",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "45c936e0acd042ba3f4e9a88249f49912b4825e52df413e2020d4a2224d1f8d2",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "647f2abd75678bcf08439bbb465cc0fc976c2d6c8949f82bcd3a045fbfbd7022",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
@@ -3765,7 +3765,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"git/ref/heads/fugue-control-plane-release-baseline",
 		"for run_status in queued in_progress waiting pending requested",
 		"actions/workflows/${workflow_id}/runs?status=${run_status}",
-		`"${state_before}" == 'active'`,
+		`run_number <= current_run_number or attempt != 1`,
+		`event != "workflow_dispatch" or branch != "main"`,
+		`workflow_path != ".github/workflows/deploy-control-plane.yml"`,
+		`"successor_run_count": len(successors)`,
+		`"successor_runs": successors`,
+		`"settlement_mode": settlement_mode`,
+		`"${state_before}" == 'active' || "${state_before}" == 'disabled_manually'`,
 		"actions/workflows/${workflow_id}/disable",
 		"mutation_status=$?",
 		"for attempt in 1 2 3 4 5",
@@ -3784,6 +3790,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"/enable", "/dispatches", "/cancel", "git push", "git update-ref", "updateRefs", "createRef", "deleteRef",
 		"--method POST", "--method PATCH", "--method DELETE", "helm ", "kubectl ", "k3s kubectl", "fugue app ",
 		`[[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1`,
+		`[[ -z "${other_runs}" ]] || exit 1`,
 	} {
 		if strings.Contains(successRearmStep.Run, forbidden) {
 			t.Fatalf("successful lane rearm contains out-of-scope capability %q", forbidden)
@@ -3902,25 +3909,34 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 		driftedOID       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	tests := []struct {
-		name         string
-		initialState string
-		mutate       string
-		putExit      string
-		mainDrift    bool
-		invalidMain  bool
-		otherRuns    string
-		deployResult string
-		wantPass     bool
-		wantState    string
-		wantWrites   string
+		name           string
+		initialState   string
+		mutate         string
+		putExit        string
+		mainDrift      bool
+		invalidMain    bool
+		otherRunRows   string
+		otherRunStatus string
+		deployResult   string
+		wantPass       bool
+		wantState      string
+		wantWrites     string
+		wantSuccessors int
+		wantSettlement string
+		wantMutation   bool
 	}{
-		{name: "successful response settles", initialState: "active", mutate: "true", putExit: "0", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
-		{name: "lost response settles by readback", initialState: "active", mutate: "true", putExit: "23", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
+		{name: "successful response settles", initialState: "active", mutate: "true", putExit: "0", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n", wantSettlement: "disabled", wantMutation: true},
+		{name: "lost response settles by readback", initialState: "active", mutate: "true", putExit: "23", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n", wantSettlement: "disabled", wantMutation: true},
 		{name: "unsettled disable fails closed", initialState: "active", mutate: "false", putExit: "23", wantPass: false, wantState: "active", wantWrites: "PUT\n"},
-		{name: "already disabled cannot replay", initialState: "disabled_manually", mutate: "false", putExit: "0", wantPass: false, wantState: "disabled_manually"},
-		{name: "main advancement still closes one-shot lane", initialState: "active", mutate: "true", putExit: "0", mainDrift: true, wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n"},
+		{name: "already disabled is idempotently settled", initialState: "disabled_manually", mutate: "false", putExit: "0", wantPass: true, wantState: "disabled_manually", wantSettlement: "already_disabled"},
+		{name: "main advancement still closes one-shot lane", initialState: "active", mutate: "true", putExit: "0", mainDrift: true, wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n", wantSettlement: "disabled", wantMutation: true},
 		{name: "invalid main ref blocks before disable", initialState: "active", mutate: "false", putExit: "0", invalidMain: true, wantPass: false, wantState: "active"},
-		{name: "active deploy run blocks before disable", initialState: "active", mutate: "false", putExit: "0", otherRuns: "999\n", wantPass: false, wantState: "active"},
+		{name: "validated successor survives lane closure", initialState: "active", mutate: "true", putExit: "0", otherRunRows: "999\t11\t1\tworkflow_dispatch\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/deploy-control-plane.yml\n", otherRunStatus: "pending", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n", wantSuccessors: 1, wantSettlement: "disabled", wantMutation: true},
+		{name: "duplicate successor snapshot is deduplicated", initialState: "active", mutate: "true", putExit: "0", otherRunRows: "999\t11\t1\tworkflow_dispatch\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/deploy-control-plane.yml\n999\t11\t1\tworkflow_dispatch\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/deploy-control-plane.yml\n", otherRunStatus: "pending", wantPass: true, wantState: "disabled_manually", wantWrites: "PUT\n", wantSuccessors: 1, wantSettlement: "disabled", wantMutation: true},
+		{name: "older active run fails closed", initialState: "active", mutate: "false", putExit: "0", otherRunRows: "444\t9\t1\tworkflow_dispatch\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/deploy-control-plane.yml\n", otherRunStatus: "pending", wantPass: false, wantState: "active"},
+		{name: "non-dispatch active run fails closed", initialState: "active", mutate: "false", putExit: "0", otherRunRows: "999\t11\t1\tpush\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/deploy-control-plane.yml\n", otherRunStatus: "pending", wantPass: false, wantState: "active"},
+		{name: "retried successor fails closed", initialState: "active", mutate: "false", putExit: "0", otherRunRows: "999\t11\t2\tworkflow_dispatch\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/deploy-control-plane.yml\n", otherRunStatus: "pending", wantPass: false, wantState: "active"},
+		{name: "wrong workflow path fails closed", initialState: "active", mutate: "false", putExit: "0", otherRunRows: "999\t11\t1\tworkflow_dispatch\tmain\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpending\t.github/workflows/other.yml\n", otherRunStatus: "pending", wantPass: false, wantState: "active"},
 		{name: "failed release result blocks before disable", initialState: "active", mutate: "false", putExit: "0", deployResult: "failure", wantPass: false, wantState: "active"},
 	}
 	for _, test := range tests {
@@ -3948,7 +3964,10 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 				"fi\n"+
 				"if [[ \"$*\" == *\"git/ref/heads/main\"* ]]; then printf '%s\\n' \"${OBSERVED_MAIN_SHA}\"; exit 0; fi\n"+
 				"if [[ \"$*\" == *\"git/ref/heads/fugue-control-plane-release-baseline\"* ]]; then printf '%s\\n' \"${OBSERVED_BASELINE_OID}\"; exit 0; fi\n"+
-				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/runs?status=\"* ]]; then printf '%s' \"${OTHER_RUNS}\"; exit 0; fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/runs?status=\"* ]]; then\n"+
+				"  if [[ -n \"${OTHER_RUN_STATUS}\" && \"$*\" == *\"status=${OTHER_RUN_STATUS}&\"* ]]; then printf '%s' \"${OTHER_RUN_ROWS}\"; fi\n"+
+				"  exit 0\n"+
+				"fi\n"+
 				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml\"* ]]; then cat \"${STATE_FILE}\"; exit 0; fi\n"+
 				"exit 91\n")
 			observedMain := expectedSHA
@@ -3978,10 +3997,12 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 				"RECORD_RELEASE_BASELINE_RESULT=success",
 				"OBSERVED_MAIN_SHA="+observedMain,
 				"OBSERVED_BASELINE_OID="+expectedBaseline,
-				"OTHER_RUNS="+test.otherRuns,
+				"OTHER_RUN_ROWS="+test.otherRunRows,
+				"OTHER_RUN_STATUS="+test.otherRunStatus,
 				"GITHUB_EVENT_NAME=workflow_dispatch",
 				"GITHUB_REF=refs/heads/main",
 				"GITHUB_RUN_ID=555",
+				"GITHUB_RUN_NUMBER=10",
 				"GITHUB_RUN_ATTEMPT=1",
 				"GITHUB_SHA="+expectedSHA,
 				"GITHUB_WORKFLOW=deploy-control-plane",
@@ -4022,11 +4043,27 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 				if err := json.Unmarshal(evidenceData, &evidence); err != nil {
 					t.Fatalf("decode successful lane rearm evidence: %v", err)
 				}
-				if evidence["state_before"] != "active" || evidence["state_after"] != "disabled_manually" ||
-					evidence["workflow_mutation_attempted"] != true || evidence["rearm_production_write"] != false ||
+				if evidence["state_before"] != test.initialState || evidence["state_after"] != "disabled_manually" ||
+					evidence["workflow_mutation_attempted"] != test.wantMutation || evidence["rearm_production_write"] != false ||
 					evidence["baseline_ref_object"] != expectedBaseline || evidence["observed_main_sha"] != observedMain ||
-					evidence["main_matches_release_sha"] != !test.mainDrift {
+					evidence["main_matches_release_sha"] != !test.mainDrift ||
+					evidence["successor_run_count"] != float64(test.wantSuccessors) || evidence["settlement_mode"] != test.wantSettlement {
 					t.Fatalf("successful lane rearm evidence drifted: %+v", evidence)
+				}
+				successors, ok := evidence["successor_runs"].([]any)
+				if !ok || len(successors) != test.wantSuccessors {
+					t.Fatalf("successor evidence drifted: %+v", evidence["successor_runs"])
+				}
+				if test.wantSuccessors == 1 {
+					successor, ok := successors[0].(map[string]any)
+					if !ok || successor["id"] != "999" || successor["run_number"] != float64(11) ||
+						successor["run_attempt"] != float64(1) || successor["head_sha"] != driftedOID {
+						t.Fatalf("validated successor identity drifted: %+v", successors[0])
+					}
+					statuses, ok := successor["observed_statuses"].([]any)
+					if !ok || !reflect.DeepEqual(statuses, []any{"pending"}) {
+						t.Fatalf("validated successor statuses drifted: %+v", successor)
+					}
 				}
 			}
 		})
