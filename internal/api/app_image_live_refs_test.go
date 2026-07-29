@@ -3,14 +3,41 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"fugue/internal/model"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestLiveManagedImageReferencesPreserveDesiredRefsWhenKubernetesUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		registryPushBase: "registry.push.example",
+		registryPullBase: "registry.pull.example",
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return nil, errors.New("synthetic Kubernetes outage")
+		},
+	}
+	app := model.App{
+		ID: "app-synthetic",
+		Spec: model.AppSpec{
+			Image:    "registry.pull.example/fugue-apps/demo:current",
+			Replicas: 1,
+		},
+	}
+	refs := server.liveManagedImageRefSet(context.Background(), []model.App{app})
+	want := "registry.push.example/fugue-apps/demo:current"
+	if _, ok := refs[want]; !ok {
+		t.Fatalf("expected desired ref %q to survive Kubernetes outage, got %#v", want, refs)
+	}
+}
 
 func TestLiveManagedImageReferencesScansAllWorkloadKinds(t *testing.T) {
 	t.Parallel()

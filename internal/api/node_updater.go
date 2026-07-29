@@ -709,7 +709,7 @@ func keySetFromValues(values []string) map[string]struct{} {
 
 func imageCacheAutomaticDeleteUnsafeCandidateReason(reason string) string {
 	switch strings.TrimSpace(reason) {
-	case "missing_control_plane_image", "lost_image", "deleted_image_generation", "stale_replica", "excess_replica":
+	case "deleted_image_generation", "stale_replica", "excess_replica":
 		return ""
 	case "":
 		return "missing candidate reason"
@@ -4282,7 +4282,7 @@ prepull_app_images() {
       present_count=$((present_count + 1))
     else
       if prepull_app_image_missing_manifest "${pull_output}"; then
-        log_task "skipping stale app image ${image}: registry manifest is missing"
+        log_task "app image ${image} is missing from the registry; pre-pull cannot repair it"
         report_image_location "${image}" missing "${pull_output}"
         missing_count=$((missing_count + 1))
         continue
@@ -4293,7 +4293,8 @@ prepull_app_images() {
     fi
   done
   if [ "${missing_count}" -gt 0 ]; then
-    log_task "pre-pull completed with ${missing_count} missing stale app image(s) and ${present_count} present app image(s)"
+    log_task "pre-pull failed with ${missing_count} missing registry manifest(s) and ${present_count} present app image(s)"
+    return 1
   fi
 }
 

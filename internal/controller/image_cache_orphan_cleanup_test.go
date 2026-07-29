@@ -125,6 +125,15 @@ func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testin
 		t.Fatalf("enroll updater: %v", err)
 	}
 	upsertControllerImageCacheManifest(t, stateStore)
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        "tenant_1",
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
+		CanonicalDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		LifecycleState:  model.ImageLifecycleDeleted,
+	}); err != nil {
+		t.Fatalf("upsert explicitly deleted image generation: %v", err)
+	}
 	svc := &Service{
 		Store: stateStore,
 		Config: config.ControllerConfig{
@@ -158,6 +167,61 @@ func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testin
 	}
 	if len(targets) != 1 || targets[0]["repo"] != "fugue-apps/demo" {
 		t.Fatalf("unexpected targets: %+v", targets)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneDeleteRefusesUntrackedManifest(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	upsertControllerImageCacheManifest(t, stateStore)
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("untracked manifest created a destructive prune task: %+v", tasks)
+	}
+	plans, err := stateStore.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Mode: model.ImageCachePruneModeDelete})
+	if err != nil {
+		t.Fatalf("list plans: %v", err)
+	}
+	if len(plans) != 1 || plans[0].CandidateSummary["missing_control_plane_image"] != 1 {
+		t.Fatalf("expected an observable but non-deletable untracked candidate, got %+v", plans)
+	}
+}
+
+func TestControllerImageCacheAutomaticDeleteRequiresPositiveRemovalEvidence(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []string{"missing_control_plane_image", "lost_image"} {
+		plan := model.ImageCachePrunePlan{Candidates: []model.ImageCachePruneCandidate{{Reason: reason}}}
+		if unsafe := controllerImageCacheAutomaticDeleteUnsafeReason(plan); unsafe == "" {
+			t.Fatalf("reason %q unexpectedly authorized automatic deletion", reason)
+		}
+	}
+	for _, reason := range []string{"deleted_image_generation", "stale_replica", "excess_replica"} {
+		plan := model.ImageCachePrunePlan{Candidates: []model.ImageCachePruneCandidate{{Reason: reason}}}
+		if unsafe := controllerImageCacheAutomaticDeleteUnsafeReason(plan); unsafe != "" {
+			t.Fatalf("explicit removal reason %q was rejected as %q", reason, unsafe)
+		}
 	}
 }
 
@@ -290,6 +354,88 @@ func TestControllerImageCacheProtectsDigestWorkloadRef(t *testing.T) {
 	}, protected, time.Now().UTC())
 	if !candidate.Protected || candidate.SkipReason != "current_workload" {
 		t.Fatalf("expected digest workload ref to protect cache manifest, got %+v", candidate)
+	}
+}
+
+func TestControllerImageCachePrunePlanProtectsAliasesSharingLiveDigest(t *testing.T) {
+	t.Parallel()
+
+	stateStore, _ := newImageCacheControllerTestStore(t)
+	digest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
+	created := time.Now().UTC().Add(-48 * time.Hour)
+	now := time.Now().UTC()
+	node := model.ImageCacheNodeInventory{
+		NodeID:          "machine-1",
+		ClusterNodeName: "worker-1",
+		RuntimeID:       "runtime-1",
+		CacheEndpoint:   "http://worker-1:5000",
+		ManifestCount:   2,
+		ObservedAt:      now,
+		Status:          "reported",
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(node, []model.ImageCacheManifest{
+		{
+			ImageRef:          "registry.fugue.internal:5000/fugue-apps/demo:current",
+			Repo:              "fugue-apps/demo",
+			Target:            "current",
+			Digest:            digest,
+			TotalBlobBytes:    500,
+			ReferencedBlobs:   []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			LastSeenAt:        now,
+			CreatedAtObserved: &created,
+			Present:           true,
+		},
+		{
+			Repo:              "fugue-apps/demo",
+			Target:            digest,
+			Digest:            digest,
+			TotalBlobBytes:    500,
+			ReferencedBlobs:   []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			LastSeenAt:        now,
+			CreatedAtObserved: &created,
+			Present:           true,
+		},
+	}); err != nil {
+		t.Fatalf("upsert image cache inventory: %v", err)
+	}
+	liveRef := "registry.fugue.internal:5000/fugue-apps/demo:current"
+	protected := controllerImageCacheProtectedSet{
+		liveRefs:          map[string]struct{}{},
+		workloadRefsByRef: map[string][]string{},
+	}
+	liveKeys := controllerImageReferenceKeys(liveRef, "")
+	addControllerImageKeys(protected.liveRefs, liveKeys...)
+	addControllerImageDetails(protected.workloadRefsByRef, liveKeys, liveRef)
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	plan, err := svc.computeControllerImageCachePrunePlan(context.Background(), node, protected, model.ImageCachePruneModeObserve)
+	if err != nil {
+		t.Fatalf("compute plan: %v", err)
+	}
+	if plan.CandidateManifestCount != 0 || plan.ProtectedManifestCount != 2 {
+		t.Fatalf("expected both digest aliases protected, got %+v", plan)
+	}
+	if plan.ProtectionSummary["current_workload"] != 1 || plan.ProtectionSummary["shared_digest_protected_alias"] != 1 {
+		t.Fatalf("unexpected protection summary: %+v", plan.ProtectionSummary)
+	}
+	var digestAlias *model.ImageCachePruneCandidate
+	for idx := range plan.ProtectedManifests {
+		if plan.ProtectedManifests[idx].Target == digest {
+			digestAlias = &plan.ProtectedManifests[idx]
+			break
+		}
+	}
+	if digestAlias == nil || digestAlias.SkipReason != "shared_digest_protected_alias" || len(digestAlias.MatchedWorkloadRefs) != 1 {
+		t.Fatalf("expected digest alias to inherit live workload protection, got %+v", digestAlias)
+	}
+	if targets := controllerImageCachePruneTargets(plan.Candidates, 10); len(targets) != 0 {
+		t.Fatalf("protected digest group produced prune targets: %+v", targets)
 	}
 }
 

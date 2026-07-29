@@ -32,7 +32,11 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 		s.registryPushBase,
 		s.registryPullBase,
 	)
-	liveRefs := s.liveManagedImageRefSet(ctx, append(append([]model.App(nil), remainingApps...), app))
+	liveLookupApps := append(append([]model.App(nil), remainingApps...), app)
+	liveRefs := make(map[string]struct{})
+	for _, reference := range s.liveManagedImageReferencesWithLookup(ctx, remainingApps, liveLookupApps) {
+		liveRefs[reference.ImageRef] = struct{}{}
+	}
 	mergeManagedImageRefSets(remainingRefs, liveRefs)
 
 	imageRefs := appimages.ManagedImageRefs(

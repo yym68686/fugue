@@ -11,15 +11,24 @@ import (
 )
 
 func (s *Service) liveManagedImageRefSet(ctx context.Context, apps []model.App) map[string]struct{} {
+	return s.liveManagedImageRefSetWithLookup(ctx, apps, apps)
+}
+
+func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) map[string]struct{} {
 	refs := make(map[string]struct{})
 	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return refs
+	}
+	for _, app := range desiredApps {
+		for _, ref := range s.desiredManagedImageRefsForApp(app) {
+			refs[ref] = struct{}{}
+		}
 	}
 
 	client, err := s.kubeClient()
 	if err != nil {
 		if s.Logger != nil {
-			s.Logger.Printf("skip live managed image reference scan: %v", err)
+			s.Logger.Printf("skip Kubernetes live managed image reference scan; preserving desired app refs: %v", err)
 		}
 		return refs
 	}
@@ -39,7 +48,7 @@ func (s *Service) liveManagedImageRefSet(ctx context.Context, apps []model.App) 
 		}
 	}
 
-	for _, app := range apps {
+	for _, app := range lookupApps {
 		if strings.TrimSpace(app.ID) == "" || strings.TrimSpace(app.TenantID) == "" {
 			continue
 		}
@@ -58,6 +67,37 @@ func (s *Service) liveManagedImageRefSet(ctx context.Context, apps []model.App) 
 		for imageRef := range s.liveManagedImageRefsFromDeployment(deployment) {
 			refs[imageRef] = struct{}{}
 		}
+	}
+	return refs
+}
+
+func (s *Service) desiredManagedImageRefsForApp(app model.App) []string {
+	if s == nil || app.Spec.Replicas <= 0 {
+		return nil
+	}
+	values := []string{s.managedDeployImageRef(app), app.Spec.Image}
+	for _, source := range []*model.AppSource{
+		app.Source,
+		app.BuildSource,
+		app.OriginSource,
+		model.AppBuildSource(app),
+	} {
+		if source != nil {
+			values = append(values, source.ResolvedImageRef)
+		}
+	}
+	seen := map[string]struct{}{}
+	refs := make([]string, 0, len(values))
+	for _, value := range values {
+		ref := strings.TrimSpace(s.managedImageRefFromRuntimeValue(value))
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
 	}
 	return refs
 }

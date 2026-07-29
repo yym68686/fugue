@@ -214,6 +214,9 @@ func (s *Service) presentImageLocations(app model.App, refs ...string) ([]model.
 	seen := map[string]struct{}{}
 	out := []model.ImageLocation{}
 	appendLocation := func(location model.ImageLocation) {
+		if !s.imageLocationEvidenceFresh(location) {
+			return
+		}
 		key := strings.TrimSpace(location.ID)
 		if key == "" {
 			key = strings.Join([]string{location.ImageRef, location.Digest, location.NodeID, location.RuntimeID, location.ClusterNodeName}, "\x00")
@@ -817,6 +820,22 @@ func imageLocationObservedAt(location model.ImageLocation) time.Time {
 		}
 	}
 	return observedAt
+}
+
+func (s *Service) imageLocationEvidenceFresh(location model.ImageLocation) bool {
+	observedAt := imageLocationObservedAt(location)
+	if observedAt.IsZero() {
+		return false
+	}
+	ttl := 2 * time.Hour
+	if s != nil && s.Config.ImageCacheInventoryTTL > 0 {
+		ttl = s.Config.ImageCacheInventoryTTL
+	}
+	now := time.Now().UTC()
+	if s != nil && s.now != nil {
+		now = s.now().UTC()
+	}
+	return !observedAt.Before(now.Add(-ttl))
 }
 
 func (s *Service) nodeHydrationImageRef(imageRef string) string {
