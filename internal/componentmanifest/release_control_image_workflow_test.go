@@ -23,6 +23,15 @@ func TestReleaseControlImageWorkflowIsPathScopedBuildOnly(t *testing.T) {
 	var workflow struct {
 		Name        string            `yaml:"name"`
 		Permissions map[string]string `yaml:"permissions"`
+		On          struct {
+			Push struct {
+				Branches []string `yaml:"branches"`
+				Paths    []string `yaml:"paths"`
+			} `yaml:"push"`
+			PullRequest struct {
+				Paths []string `yaml:"paths"`
+			} `yaml:"pull_request"`
+		} `yaml:"on"`
 		Concurrency struct {
 			Group            string `yaml:"group"`
 			CancelInProgress bool   `yaml:"cancel-in-progress"`
@@ -38,6 +47,9 @@ func TestReleaseControlImageWorkflowIsPathScopedBuildOnly(t *testing.T) {
 	}
 	if workflow.Name != "build release-control image" ||
 		!reflect.DeepEqual(workflow.Permissions, map[string]string{"contents": "read"}) ||
+		!reflect.DeepEqual(workflow.On.Push.Branches, []string{"main"}) ||
+		len(workflow.On.Push.Paths) == 0 || len(workflow.On.PullRequest.Paths) == 0 ||
+		!reflect.DeepEqual(workflow.On.Push.Paths, workflow.On.PullRequest.Paths) ||
 		workflow.Concurrency.Group != "release-control-image-${{ github.ref }}" || !workflow.Concurrency.CancelInProgress ||
 		len(workflow.Jobs) != 1 {
 		t.Fatalf("workflow safety boundary drifted: %+v", workflow)

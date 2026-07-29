@@ -110,13 +110,15 @@ command.
 
 `Dockerfile.release-control` copies only the process's declared local package
 dependency closure into its build stage and produces a CA-enabled `scratch`
-image running as numeric user/group `65532:65532`. The path-scoped
+image running as numeric user/group `65532:65532`. The path-scoped main-push/PR
 `build release-control image` workflow has only `contents: read`, uses a
 release-control-specific concurrency group, builds with `--load`, and probes
 the local disabled image. It has no registry login, package write permission,
 push, promotion, Helm install/upgrade, or deploy step. Thus Gate A has an
 independently tested container artifact boundary but still no published image,
 installed Kubernetes object, service account, or production enablement.
+Feature-branch pushes are covered by the PR event only, so the same revision is
+not built twice; direct `main` updates retain the push check.
 
 `deploy/helm/fugue-release-control` is a separate chart rather than another
 template in the legacy `fugue` release. It renders no Kubernetes resources by

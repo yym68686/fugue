@@ -2,6 +2,8 @@ name: build release-control image
 
 on:
   push:
+    branches:
+      - main
     paths:
       - Dockerfile.release-control
       - cmd/fugue-release-control/**
