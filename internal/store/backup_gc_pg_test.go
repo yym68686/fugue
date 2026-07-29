@@ -1,9 +1,13 @@
 package store
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/model"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -49,4 +53,139 @@ func TestPGBackupArtifactPhysicalCleanupIsRestoreSafeAndDurable(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sqlmock expectations: %v", err)
 	}
+}
+
+func TestPGBackupArtifactRestoreMutationInterlockUsesArtifactRowLock(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, time.July, 29, 9, 0, 0, 0, time.UTC)
+	artifact := model.NormalizeBackupArtifact(model.BackupArtifact{
+		ID:        "artifact_restore_interlock",
+		TenantID:  "tenant_restore_interlock",
+		Target:    model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_restore_interlock", AppID: "app_restore_interlock"},
+		Kind:      model.BackupArtifactKindAppPGDump,
+		Status:    model.BackupArtifactStatusActive,
+		CreatedAt: createdAt,
+	})
+	plan := model.NormalizeBackupRestorePlan(model.BackupRestorePlan{
+		ID:         "restore_plan_interlock",
+		ArtifactID: artifact.ID,
+		TenantID:   artifact.TenantID,
+		AppID:      artifact.Target.AppID,
+		Target:     artifact.Target,
+		Mode:       model.BackupRestoreModePlanOnly,
+		Status:     model.BackupRestoreStatusPlanned,
+		CreatedAt:  createdAt.Add(time.Minute),
+		UpdatedAt:  createdAt.Add(time.Minute),
+	})
+
+	t.Run("restore plan locks active artifact before insert", func(t *testing.T) {
+		s, mock := newBackupSchedulePGTestStore(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_artifacts WHERE id = \$1 FOR UPDATE`).
+			WithArgs(artifact.ID).
+			WillReturnRows(backupScheduleArtifactRows(artifact))
+		mock.ExpectQuery(`(?s)INSERT INTO fugue_backup_restore_plans .*RETURNING`).
+			WillReturnRows(backupGCRestorePlanRows(plan))
+		mock.ExpectCommit()
+
+		created, err := s.CreateBackupRestorePlan(plan)
+		if err != nil {
+			t.Fatalf("create restore plan: %v", err)
+		}
+		if created.ID != plan.ID || created.ArtifactID != artifact.ID {
+			t.Fatalf("unexpected restore plan: %+v", created)
+		}
+		assertBackupSchedulePGExpectations(t, mock)
+	})
+
+	t.Run("restore plan rejects deleted artifact under lock", func(t *testing.T) {
+		s, mock := newBackupSchedulePGTestStore(t)
+		deleted := artifact
+		deleted.Status = model.BackupArtifactStatusDeleted
+		deletedAt := createdAt.Add(time.Minute)
+		deleted.DeletedAt = &deletedAt
+		mock.ExpectBegin()
+		mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_artifacts WHERE id = \$1 FOR UPDATE`).
+			WithArgs(artifact.ID).
+			WillReturnRows(backupScheduleArtifactRows(deleted))
+		mock.ExpectRollback()
+
+		if _, err := s.CreateBackupRestorePlan(plan); !errors.Is(err, ErrConflict) {
+			t.Fatalf("restore plan error = %v, want conflict", err)
+		}
+		assertBackupSchedulePGExpectations(t, mock)
+	})
+
+	t.Run("delete rejects in-flight restore after locking artifact", func(t *testing.T) {
+		s, mock := newBackupSchedulePGTestStore(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_artifacts WHERE id = \$1.*FOR UPDATE`).
+			WithArgs(artifact.ID, artifact.TenantID).
+			WillReturnRows(backupScheduleArtifactRows(artifact))
+		mock.ExpectQuery(`(?s)SELECT EXISTS \(.*fugue_backup_restore_plans.*UNION ALL.*fugue_backup_restore_runs.*\)`).
+			WithArgs(artifact.ID).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectRollback()
+
+		if _, err := s.MarkBackupArtifactDeleted(artifact.ID, artifact.TenantID, false); !errors.Is(err, ErrConflict) {
+			t.Fatalf("delete artifact error = %v, want conflict", err)
+		}
+		assertBackupSchedulePGExpectations(t, mock)
+	})
+
+	t.Run("delete locks and updates artifact when no restore is active", func(t *testing.T) {
+		s, mock := newBackupSchedulePGTestStore(t)
+		deleted := artifact
+		deleted.Status = model.BackupArtifactStatusDeleted
+		deletedAt := createdAt.Add(2 * time.Minute)
+		deleted.DeletedAt = &deletedAt
+		mock.ExpectBegin()
+		mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_artifacts WHERE id = \$1.*FOR UPDATE`).
+			WithArgs(artifact.ID, artifact.TenantID).
+			WillReturnRows(backupScheduleArtifactRows(artifact))
+		mock.ExpectQuery(`(?s)SELECT EXISTS \(.*fugue_backup_restore_plans.*UNION ALL.*fugue_backup_restore_runs.*\)`).
+			WithArgs(artifact.ID).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		mock.ExpectQuery(`(?s)UPDATE fugue_backup_artifacts.*SET status = 'deleted'.*WHERE id = \$1 AND status = 'active' AND protected = FALSE.*RETURNING`).
+			WithArgs(artifact.ID, sqlmock.AnyArg()).
+			WillReturnRows(backupScheduleArtifactRows(deleted))
+		mock.ExpectCommit()
+
+		got, err := s.MarkBackupArtifactDeleted(artifact.ID, artifact.TenantID, false)
+		if err != nil {
+			t.Fatalf("delete artifact: %v", err)
+		}
+		if got.Status != model.BackupArtifactStatusDeleted {
+			t.Fatalf("unexpected deleted artifact: %+v", got)
+		}
+		assertBackupSchedulePGExpectations(t, mock)
+	})
+}
+
+func backupGCRestorePlanRows(plans ...model.BackupRestorePlan) *sqlmock.Rows {
+	rows := sqlmock.NewRows(strings.Split(backupRestorePlanReturningColumns(), ", "))
+	for _, plan := range plans {
+		plan = model.NormalizeBackupRestorePlan(plan)
+		targetJSON, _ := json.Marshal(plan.Target)
+		warningsJSON, _ := json.Marshal(plan.Warnings)
+		phasesJSON, _ := json.Marshal(plan.Phases)
+		rows.AddRow(
+			plan.ID,
+			backupScheduleNullableString(plan.TenantID),
+			backupScheduleNullableString(plan.ProjectID),
+			backupScheduleNullableString(plan.AppID),
+			plan.ArtifactID,
+			targetJSON,
+			plan.Mode,
+			plan.Status,
+			warningsJSON,
+			phasesJSON,
+			plan.CreatedByType,
+			plan.CreatedByID,
+			plan.CreatedAt,
+			plan.UpdatedAt,
+		)
+	}
+	return rows
 }

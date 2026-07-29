@@ -222,6 +222,9 @@ func backupArtifactObjectKeysForDeletion(artifact model.BackupArtifact) ([]strin
 	if artifact.ManifestObjectKey != "" {
 		keys = append(keys, artifact.ManifestObjectKey)
 	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("artifact has no deletable object keys")
+	}
 	seen := map[string]struct{}{}
 	validated := make([]string, 0, len(keys))
 	for _, key := range keys {
