@@ -26773,7 +26773,7 @@ components:
           type: string
         artifact_kind:
           type: string
-          enum: [edge_route_bundle, dns_answer_bundle, caddy_route_config, discovery_bundle, node_desired_state, runtime_placement_plan, runtime_continuity_plan, node_guardian_policy, release_guard_policy, edge_ranking_policy, traffic_safety_policy, subsystem_failure_contracts, gate_policy_registry, automatic_action_contracts]
+          enum: [edge_route_bundle, dns_answer_bundle, caddy_route_config, discovery_bundle, node_desired_state, runtime_placement_plan, runtime_continuity_plan, node_guardian_policy, release_guard_policy, component_release_plan, edge_ranking_policy, traffic_safety_policy, subsystem_failure_contracts, gate_policy_registry, automatic_action_contracts]
         scope:
           $ref: "#/components/schemas/PlatformArtifactScope"
         scope_key:

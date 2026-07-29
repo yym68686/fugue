@@ -34,6 +34,26 @@ func TestPlanRepositoryImageChangeIsShadowOnly(t *testing.T) {
 	}
 }
 
+func TestPlanRepositoryReleaseControlOwnsMigrationPlanner(t *testing.T) {
+	manifest := loadRepositoryManifest(t)
+	for _, changedPath := range []string{
+		"cmd/fugue-component-plan/main.go",
+		"docs/architecture/component-ownership-v1.yaml",
+		"internal/componentmanifest/artifact.go",
+	} {
+		plan, err := PlanChanges(manifest, []string{changedPath})
+		if err != nil {
+			t.Fatalf("PlanChanges(%q) error = %v", changedPath, err)
+		}
+		if got, want := impactIDs(plan.ImpactedComponents), []string{"release-control"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) impacted components = %v, want %v", changedPath, got, want)
+		}
+		if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
+			t.Fatalf("PlanChanges(%q) = mode %q legacy=%v", changedPath, plan.DispatchMode, plan.RequiresLegacyRelease)
+		}
+	}
+}
+
 func TestPlanRepositorySharedChangeFailsSafeToLegacy(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	plan, err := PlanChanges(manifest, []string{"internal/model/model.go"})

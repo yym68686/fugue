@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/componentmanifest"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
@@ -677,6 +678,19 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 		return releaseSignalPolicyValidationResult(artifact)
 	case model.PlatformArtifactKindGatePolicyRegistry:
 		return gatePolicyValidationResult(artifact)
+	case model.PlatformArtifactKindComponentReleasePlan:
+		err := componentmanifest.ValidateArtifactBinding(
+			artifact.Content,
+			artifact.Scope.ScopeType,
+			artifact.Scope.Key,
+			artifact.ScopeKey,
+			artifact.Generation,
+		)
+		pass = err == nil
+		message = "component release plan envelope, scope, and generation must match exact Git evidence"
+		if err != nil {
+			message = err.Error()
+		}
 	}
 	return model.PlatformArtifactValidationResult{
 		Name:     "invariant." + artifact.ArtifactKind,

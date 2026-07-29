@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"reflect"
 	"regexp"
 )
 
-const ShadowArtifactSchemaVersionV1 = "v1"
+const (
+	ShadowArtifactSchemaVersionV1 = "v1"
+	ShadowArtifactScopeType       = "component-release-plan"
+)
 
 var exactGitCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -24,6 +26,55 @@ type ShadowArtifactEnvelope struct {
 	Manifest         Manifest               `json:"manifest"`
 	ChangePlan       ChangePlan             `json:"changePlan"`
 	CoordinationPlan ShadowCoordinationPlan `json:"coordinationPlan"`
+}
+
+// ShadowArtifactIdentity is the deterministic identity used by the generic
+// platform artifact ledger. A base/target pair gets its own release lane, so
+// recording unrelated shadow plans cannot recreate a global release mutex.
+type ShadowArtifactIdentity struct {
+	ScopeType  string
+	ScopeKey   string
+	Generation string
+}
+
+// ArtifactIdentity binds the platform artifact identity to the same exact Git
+// evidence as the envelope. The generation deliberately names the immutable
+// target commit while the scope distinguishes different comparison bases.
+func (envelope ShadowArtifactEnvelope) ArtifactIdentity() (ShadowArtifactIdentity, error) {
+	if err := envelope.Validate(); err != nil {
+		return ShadowArtifactIdentity{}, err
+	}
+	return ShadowArtifactIdentity{
+		ScopeType:  ShadowArtifactScopeType,
+		ScopeKey:   ShadowArtifactScopeType + ":" + envelope.BaseCommit + ".." + envelope.TargetCommit,
+		Generation: "git-" + envelope.TargetCommit,
+	}, nil
+}
+
+// ValidateArtifactBinding rejects a valid envelope stored under a misleading
+// scope or generation. Callers pass normalized platform artifact fields.
+func ValidateArtifactBinding(content map[string]any, scopeType, scopeObjectKey, scopeKey, generation string) error {
+	envelope, err := DecodeShadowArtifactContent(content)
+	if err != nil {
+		return err
+	}
+	identity, err := envelope.ArtifactIdentity()
+	if err != nil {
+		return err
+	}
+	if scopeType != identity.ScopeType {
+		return fmt.Errorf("shadow artifact scope type must be %q", identity.ScopeType)
+	}
+	if scopeObjectKey != identity.ScopeKey {
+		return fmt.Errorf("shadow artifact scope object key does not match its exact Git comparison")
+	}
+	if scopeKey != identity.ScopeKey {
+		return fmt.Errorf("shadow artifact scope key does not match its exact Git comparison")
+	}
+	if generation != identity.Generation {
+		return fmt.Errorf("shadow artifact generation does not match its target commit")
+	}
+	return nil
 }
 
 // BuildShadowArtifactEnvelope verifies both plan layers and binds them to
@@ -82,14 +133,30 @@ func (envelope ShadowArtifactEnvelope) Validate() error {
 	if err != nil {
 		return fmt.Errorf("rebuild shadow artifact change plan: %w", err)
 	}
-	if !reflect.DeepEqual(envelope.ChangePlan, expectedChangePlan) {
+	changePlanBytes, err := json.Marshal(envelope.ChangePlan)
+	if err != nil {
+		return fmt.Errorf("encode stored shadow artifact change plan: %w", err)
+	}
+	expectedChangePlanBytes, err := json.Marshal(expectedChangePlan)
+	if err != nil {
+		return fmt.Errorf("encode rebuilt shadow artifact change plan: %w", err)
+	}
+	if !bytes.Equal(changePlanBytes, expectedChangePlanBytes) {
 		return fmt.Errorf("shadow artifact change plan does not exactly match its manifest and paths")
 	}
 	expectedCoordination, err := BuildShadowCoordinationPlan(envelope.ChangePlan)
 	if err != nil {
 		return fmt.Errorf("rebuild shadow artifact coordination plan: %w", err)
 	}
-	if !reflect.DeepEqual(envelope.CoordinationPlan, expectedCoordination) {
+	coordinationBytes, err := json.Marshal(envelope.CoordinationPlan)
+	if err != nil {
+		return fmt.Errorf("encode stored shadow artifact coordination plan: %w", err)
+	}
+	expectedCoordinationBytes, err := json.Marshal(expectedCoordination)
+	if err != nil {
+		return fmt.Errorf("encode rebuilt shadow artifact coordination plan: %w", err)
+	}
+	if !bytes.Equal(coordinationBytes, expectedCoordinationBytes) {
 		return fmt.Errorf("shadow artifact coordination plan does not exactly match its change plan")
 	}
 	if err := envelope.CoordinationPlan.VerifyDigest(); err != nil {
