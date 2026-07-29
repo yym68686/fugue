@@ -963,6 +963,13 @@ func (s *Service) recordImportedDistributedImage(ctx context.Context, app model.
 		now = s.now().UTC()
 	}
 	digest, digestRef := s.resolveImportedImageDigest(ctx, managedImageRef, runtimeImageRef)
+	if digest == "" && s.imageStoreStrictDistributedMode() {
+		var verifyErr error
+		digest, digestRef, verifyErr = s.resolveImportedImageDigestFromDestinationCache(ctx, managedImageRef, destination)
+		if verifyErr != nil {
+			return fmt.Errorf("verify imported distributed image on destination cache: %w", verifyErr)
+		}
+	}
 	image, err := s.Store.UpsertImage(model.Image{
 		TenantID:                 strings.TrimSpace(app.TenantID),
 		AppID:                    strings.TrimSpace(app.ID),
@@ -1120,6 +1127,64 @@ func (s *Service) resolveImportedImageDigest(ctx context.Context, refs ...string
 		}
 	}
 	return "", ""
+}
+
+func (s *Service) resolveImportedImageDigestFromDestinationCache(
+	ctx context.Context,
+	managedImageRef string,
+	destination importImageDestination,
+) (string, string, error) {
+	cacheRef := cacheEndpointImageRef(destination.CacheEndpoint, managedImageRef)
+	if cacheRef == "" {
+		return "", "", fmt.Errorf("exact destination image-cache reference is unavailable")
+	}
+	if s == nil || s.resolveManagedImageDigestRef == nil {
+		return "", "", fmt.Errorf("destination image-cache digest resolver is not configured")
+	}
+	if s.inspectManagedImage == nil {
+		return "", "", fmt.Errorf("destination image-cache manifest inspector is not configured")
+	}
+
+	verifyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resolvedRef, err := s.resolveManagedImageDigestRef(verifyCtx, cacheRef)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve destination image-cache digest for %s: %w", cacheRef, err)
+	}
+	digest := store.CanonicalImageDigest(imageDigest(resolvedRef))
+	if digest == "" {
+		return "", "", fmt.Errorf("destination image-cache returned no canonical digest for %s", cacheRef)
+	}
+	immutableCacheRef := imageRefWithDigest(cacheRef, digest)
+	exists, blobSizes, err := s.inspectManagedImage(verifyCtx, immutableCacheRef)
+	if err != nil {
+		return "", "", fmt.Errorf("inspect destination image-cache manifest graph for %s: %w", immutableCacheRef, err)
+	}
+	if !exists {
+		return "", "", fmt.Errorf("destination image-cache does not contain %s", immutableCacheRef)
+	}
+	if !importedImageBlobGraphComplete(digest, blobSizes) {
+		return "", "", fmt.Errorf("destination image-cache has no complete manifest graph for %s", immutableCacheRef)
+	}
+	return digest, imageRefWithDigest(managedImageRef, digest), nil
+}
+
+func importedImageBlobGraphComplete(rootDigest string, blobSizes map[string]int64) bool {
+	rootDigest = store.CanonicalImageDigest(rootDigest)
+	if rootDigest == "" || len(blobSizes) == 0 {
+		return false
+	}
+	rootPresent := false
+	for rawDigest, sizeBytes := range blobSizes {
+		digest := store.CanonicalImageDigest(rawDigest)
+		if digest == "" || sizeBytes <= 0 {
+			return false
+		}
+		if digest == rootDigest {
+			rootPresent = true
+		}
+	}
+	return rootPresent
 }
 
 func imageRefWithDigest(ref, digest string) string {
