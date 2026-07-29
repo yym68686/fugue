@@ -65,8 +65,12 @@ components:
     runtimeKinds: [deployment, daemonset]
     ownershipMode: transitional-shared
     sourceRoots:
+      - Dockerfile.image-cache
+      - .github/workflows/build-image-plane-image.yml
       - cmd/fugue-image-cache
+      - internal/imagecacheusage
       - internal/releaseimageconsumer
+      - scripts/test_image_plane_image.sh
     artifactKinds: [image-cache]
     releaseLane: image-plane
     coordinator: release-control

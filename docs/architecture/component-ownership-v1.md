@@ -130,13 +130,24 @@ readiness so an API outage affects only this lane. CI only lints and renders
 the chart; there is still no chart packaging, installation, image publication,
 release dispatch, or production mutation.
 
+The `image-plane` now also has a build-only artifact lane. Its image Dockerfile
+copies only `cmd/fugue-image-cache` and the currently proven local dependency
+`internal/imagecacheusage`, with both multi-architecture base images pinned by
+digest. A component-specific push/PR workflow compiles and probes that image
+under `image-plane-image-${ref}` concurrency with read-only repository
+permission and no registry login, package write, push, Helm, kubectl, or
+production environment. This is an independent compilation boundary only: the
+live image-cache DaemonSet remains owned by the legacy `fugue` Helm release, so
+the new lane cannot publish or replace it yet.
+
 The explicit enablement contract is file-based and has no token environment
 variable: `FUGUE_RELEASE_CONTROL_ENABLED=true`,
 `FUGUE_RELEASE_CONTROL_SPEC_FILE=/run/fugue/component-plan.json`,
 `FUGUE_RELEASE_CONTROL_TOKEN_FILE=/run/secrets/release-control/token`, and
-`FUGUE_RELEASE_CONTROL_API_BASE_URL=https://<versioned-api-endpoint>`. The
-process rejects relative paths, ambiguous booleans, unbounded timeouts, and
-oversized responses before starting the loop.
+`FUGUE_RELEASE_CONTROL_API_BASE_URL=https://<api-root>`. The adapter appends
+the versioned `/v1` paths. The process rejects relative paths, ambiguous
+booleans, unbounded timeouts, and oversized responses before starting the
+loop.
 
 The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination
