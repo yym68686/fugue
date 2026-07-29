@@ -956,6 +956,10 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`pod-netns resolver resolves same-namespace ClusterIP service FQDN`,
 		`missing marker requires corroborating node evidence before hard gating`,
 		`ok_link, link_out = run_capture(["ip", "link", "show"], 3)`,
+		`def direct_k3s_server_url(raw):`,
+		`return ["kubectl", "--kubeconfig", kubeconfig_path, "--server=" + query_server]`,
+		`tcp_listener_check("local_apiserver_127_0_0_1_6444"`,
+		`"kubernetes_apiserver_query_transport"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)
@@ -963,6 +967,9 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	}
 	if strings.Contains(script, `ok_link, link_out = run(["ip", "link", "show"], 3)`) {
 		t.Fatal("node-updater deep health must inspect the complete ip link output before deciding whether cni0 is absent")
+	}
+	if strings.Contains(script, `tcp_connect_check("local_apiserver_127_0_0_1_6444"`) {
+		t.Fatal("node-updater deep health must not open a connection through the local k3s agent load balancer")
 	}
 	if strings.Contains(script, `node_name = os.uname().nodename`) ||
 		strings.Contains(script, `["get", "node", os.uname().nodename`) {
@@ -988,6 +995,99 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterDeepHealthBuildsOnlySafeKubectlCommands(t *testing.T) {
+	t.Parallel()
+
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	_, pythonScript, ok := strings.Cut(script, "python3 - <<'PY_NODE_DEEP_HEALTH'\n")
+	if !ok {
+		t.Fatal("node updater script missing deep-health Python heredoc")
+	}
+	pythonPrefix, _, ok := strings.Cut(pythonScript, `systemd_or_process_check("k3s_agent_process"`)
+	if !ok {
+		t.Fatal("node updater deep-health Python missing first active check")
+	}
+	pythonHarness := pythonPrefix + `
+safe_kubectl = kubectl_base_command()
+os.environ["FUGUE_HEARTBEAT_K3S_SERVER"] = "https://127.0.0.1:6444"
+loopback_kubectl = kubectl_base_command()
+print(json.dumps({
+    "direct": direct_k3s_server_url("https://203.0.113.10:7443/"),
+    "kubectl": safe_kubectl,
+    "loopback_kubectl": loopback_kubectl,
+    "loopback": direct_k3s_server_url("https://127.0.0.1:6444"),
+    "ipv6_loopback": direct_k3s_server_url("https://[::1]:6443"),
+    "plaintext": direct_k3s_server_url("http://203.0.113.10:6443"),
+    "credentialed": direct_k3s_server_url("https://user:password@203.0.113.10:6443"),
+    "invalid_port": direct_k3s_server_url("https://203.0.113.10:not-a-port"),
+    "control_api": normalized_k3s_server_url("https://127.0.0.1:6443", True),
+    "control_proxy": normalized_k3s_server_url("https://127.0.0.1:6444", True),
+    "listener_present": tcp_listener_present([
+        "0: 0100007F:192C 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 0 1 0000000000000000 100 0 0 10 0"
+    ], "127.0.0.1", 6444),
+}, separators=(",", ":")))
+`
+
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create fake bin dir: %v", err)
+	}
+	writeFakeNodeUpdaterCommand(t, binDir, "kubectl", "#!/bin/sh\nexit 0\n")
+	cmd := exec.Command(pythonPath, "-")
+	cmd.Stdin = strings.NewReader(pythonHarness)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"KUBECONFIG="+filepath.Join(tmpDir, "kubeconfig"),
+		"FUGUE_HEARTBEAT_K3S_SERVER=https://203.0.113.10:7443/",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run deep-health transport harness: %v\n%s", err, output)
+	}
+	var got struct {
+		Direct          string   `json:"direct"`
+		Kubectl         []string `json:"kubectl"`
+		LoopbackKubectl []string `json:"loopback_kubectl"`
+		Loopback        string   `json:"loopback"`
+		IPv6Loopback    string   `json:"ipv6_loopback"`
+		Plaintext       string   `json:"plaintext"`
+		Credentialed    string   `json:"credentialed"`
+		InvalidPort     string   `json:"invalid_port"`
+		ControlAPI      string   `json:"control_api"`
+		ControlProxy    string   `json:"control_proxy"`
+		ListenerPresent bool     `json:"listener_present"`
+	}
+	if err := json.Unmarshal(output, &got); err != nil {
+		t.Fatalf("decode deep-health transport harness: %v\n%s", err, output)
+	}
+	if got.Direct != "https://203.0.113.10:7443" {
+		t.Fatalf("direct server = %q, want normalized non-loopback HTTPS endpoint", got.Direct)
+	}
+	wantKubectl := []string{"kubectl", "--server=https://203.0.113.10:7443"}
+	if fmt.Sprint(got.Kubectl) != fmt.Sprint(wantKubectl) {
+		t.Fatalf("kubectl base = %v, want %v", got.Kubectl, wantKubectl)
+	}
+	if got.LoopbackKubectl != nil {
+		t.Fatalf("loopback endpoint must disable kubectl health queries, got %v", got.LoopbackKubectl)
+	}
+	if got.Loopback != "" || got.IPv6Loopback != "" || got.Plaintext != "" || got.Credentialed != "" || got.InvalidPort != "" {
+		t.Fatalf("unsafe endpoints must be rejected: %+v", got)
+	}
+	if got.ControlAPI != "https://127.0.0.1:6443" || got.ControlProxy != "" {
+		t.Fatalf("only the control-plane-local 6443 API may use loopback: %+v", got)
+	}
+	if !got.ListenerPresent {
+		t.Fatal("passive /proc/net/tcp listener fixture was not detected")
 	}
 }
 

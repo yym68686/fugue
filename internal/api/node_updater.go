@@ -3193,6 +3193,7 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_REJOIN_QUARANTINE_FILE="$(current_rejoin_metadata_value FUGUE_K3S_REJOIN_QUARANTINE_FILE || true)" \
   python3 - <<'PY_NODE_DEEP_HEALTH'
 import datetime
+import ipaddress
 import json
 import os
 import shutil
@@ -3242,6 +3243,30 @@ def tcp_connect_check(name, category, host, port, expected, hard=False, timeout=
     except Exception as exc:
         checks.append(check(name, category, "fail" if hard else "warning", str(exc), expected, hard))
 
+def tcp_listener_present(lines, host, port):
+    packed_host = socket.inet_aton(host)
+    proc_host = packed_host[::-1].hex().upper()
+    proc_port = "%04X" % int(port)
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 4 or fields[3] != "0A":
+            continue
+        local_address = fields[1].upper()
+        if local_address in {proc_host + ":" + proc_port, "00000000:" + proc_port}:
+            return True
+    return False
+
+def tcp_listener_check(name, category, host, port, expected, hard=False):
+    try:
+        with open("/proc/net/tcp", "r", encoding="utf-8") as fh:
+            found = tcp_listener_present(fh, host, port)
+        if found:
+            checks.append(check(name, category, "pass", f"{host}:{port} listening", expected, False))
+        else:
+            checks.append(check(name, category, "fail" if hard else "warning", f"{host}:{port} not listening", expected, hard))
+    except Exception as exc:
+        checks.append(check(name, category, "fail" if hard else "warning", str(exc), expected, hard))
+
 def systemd_or_process_check(name, unit, process_names):
     ok, out = run(["systemctl", "is-active", unit], 3)
     if ok:
@@ -3260,28 +3285,100 @@ def parse_host_port(raw, default_port):
         return "", default_port
     if "://" not in raw:
         raw = "https://" + raw
-    parsed = urllib.parse.urlparse(raw)
-    host = parsed.hostname or ""
-    port = parsed.port or default_port
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        host = parsed.hostname or ""
+        port = parsed.port or default_port
+    except ValueError:
+        return "", default_port
     return host, port
+
+def normalized_k3s_server_url(raw, allow_control_plane_loopback=False):
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        host = (parsed.hostname or "").strip()
+        port = parsed.port or 6443
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        return ""
+    try:
+        loopback = ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        loopback = host.rstrip(".").lower() == "localhost"
+    if loopback and not (allow_control_plane_loopback and port == 6443):
+        return ""
+    rendered_host = "[" + host + "]" if ":" in host and not host.startswith("[") else host
+    return "https://%s:%d" % (rendered_host, port)
+
+def direct_k3s_server_url(raw):
+    return normalized_k3s_server_url(raw, False)
+
+def control_plane_kubeconfig_server_url(kubeconfig_path):
+    if os.path.normpath(kubeconfig_path) != "/etc/rancher/k3s/k3s.yaml":
+        return ""
+    try:
+        with open(kubeconfig_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped.startswith("server:"):
+                    continue
+                raw = stripped.split(":", 1)[1].strip().strip("'\"")
+                return normalized_k3s_server_url(raw, True)
+    except OSError:
+        return ""
+    return ""
 
 def kubectl_base_command():
     if not shutil.which("kubectl"):
         return None
+    # Agent kubeconfigs normally target the local 6444 load balancer. A
+    # short-lived kubectl process can leave that proxy's upstream connection
+    # alive, so health queries must use the authoritative API endpoint. The
+    # only loopback exception is the control plane's actual 6443 API socket.
+    direct_server = direct_k3s_server_url(os.environ.get("FUGUE_HEARTBEAT_K3S_SERVER", ""))
     if os.environ.get("KUBECONFIG"):
-        return ["kubectl"]
+        if not direct_server:
+            return None
+        return ["kubectl", "--server=" + direct_server]
     for kubeconfig_path in (
         "/etc/rancher/k3s/k3s.yaml",
         "/var/lib/rancher/k3s/agent/kubelet.kubeconfig",
         "/var/lib/rancher/k3s/agent/k3scontroller.kubeconfig",
     ):
         if os.path.exists(kubeconfig_path):
-            return ["kubectl", "--kubeconfig", kubeconfig_path]
-    return ["kubectl"]
+            query_server = direct_server or control_plane_kubeconfig_server_url(kubeconfig_path)
+            if not query_server:
+                return None
+            return ["kubectl", "--kubeconfig", kubeconfig_path, "--server=" + query_server]
+    if not direct_server:
+        return None
+    return ["kubectl", "--server=" + direct_server]
+
+def kubectl_query_server(base):
+    for arg in base or []:
+        if arg.startswith("--server="):
+            return arg.split("=", 1)[1]
+    return ""
 
 systemd_or_process_check("k3s_agent_process", "k3s-agent", ["k3s agent", "k3s-agent"])
 systemd_or_process_check("kubelet_process", "k3s-agent", ["kubelet"])
-tcp_connect_check("local_apiserver_127_0_0_1_6444", "kubernetes", "127.0.0.1", 6444, "local k3s agent apiserver listens on 127.0.0.1:6444", True)
+# Inspect the listening socket without opening a connection through the 6444
+# proxy; an active connect would recreate the leak this check is meant to catch.
+tcp_listener_check("local_apiserver_127_0_0_1_6444", "kubernetes", "127.0.0.1", 6444, "local k3s agent apiserver listens on 127.0.0.1:6444", True)
 
 k3s_server = os.environ.get("FUGUE_HEARTBEAT_K3S_SERVER", "")
 server_host, server_port = parse_host_port(k3s_server, 6443)
@@ -3292,6 +3389,11 @@ else:
 
 node_name = os.environ.get("FUGUE_HEARTBEAT_CLUSTER_NODE_NAME", "").strip() or os.uname().nodename
 kubectl_base = kubectl_base_command()
+kubectl_server = kubectl_query_server(kubectl_base)
+if kubectl_server:
+    checks.append(check("kubernetes_apiserver_query_transport", "kubernetes", "pass", kubectl_server, "kubectl health queries bypass the local k3s agent load balancer"))
+else:
+    checks.append(check("kubernetes_apiserver_query_transport", "kubernetes", "warning", "safe Kubernetes API endpoint unavailable", "non-loopback HTTPS endpoint or the control-plane-local 6443 API"))
 cluster_rejoin = {}
 desired_state_file = os.environ.get("FUGUE_HEARTBEAT_DESIRED_STATE_FILE", "").strip()
 if desired_state_file:
