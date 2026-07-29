@@ -279,15 +279,18 @@ func (s *Service) repairDistributedImageLocations(ctx context.Context, manifests
 			continue
 		}
 		if !distributedImageLocationFreshForIntegrity(location, cutoff) {
-			location.Status = model.ImageLocationStatusMissing
-			location.LastError = "image location evidence is stale and has no canonical digest"
-			location.LastSeenAt = timePointer(now)
-			if _, err := s.Store.UpsertImageLocation(location); err != nil {
+			if err := s.demoteLegacyImageLocationIfUnchanged(
+				location.ID,
+				location.UpdatedAt,
+				now,
+				"image location evidence is stale and has no canonical digest",
+			); err != nil {
 				return fmt.Errorf("demote stale image location %s: %w", location.ID, err)
 			}
 			continue
 		}
 		candidates := imageIntegrityDigestsForLocation(location, manifests)
+		demotionReason := ""
 		if len(candidates) == 1 {
 			for digest := range candidates {
 				repaired := location
@@ -301,23 +304,45 @@ func (s *Service) repairDistributedImageLocations(ctx context.Context, manifests
 					return fmt.Errorf("backfill canonical digest for image location %s: %w", location.ID, err)
 				}
 			}
-			location.Status = model.ImageLocationStatusMissing
-			location.LastError = "superseded by canonical-digest image location"
-			location.LastSeenAt = timePointer(now)
+			demotionReason = "superseded by canonical-digest image location"
 		} else {
-			location.Status = model.ImageLocationStatusMissing
 			if len(candidates) == 0 {
-				location.LastError = "no fresh complete image-cache manifest proves this location"
+				demotionReason = "no fresh complete image-cache manifest proves this location"
 			} else {
-				location.LastError = "multiple image-cache digests match this location"
+				demotionReason = "multiple image-cache digests match this location"
 			}
-			location.LastSeenAt = timePointer(now)
 		}
-		if _, err := s.Store.UpsertImageLocation(location); err != nil {
+		if err := s.demoteLegacyImageLocationIfUnchanged(
+			location.ID,
+			location.UpdatedAt,
+			now,
+			demotionReason,
+		); err != nil {
 			return fmt.Errorf("finalize legacy image location %s: %w", location.ID, err)
 		}
 	}
 	return nil
+}
+
+func (s *Service) demoteLegacyImageLocationIfUnchanged(
+	id string,
+	expectedUpdatedAt time.Time,
+	observedAt time.Time,
+	lastError string,
+) error {
+	_, err := s.Store.DemoteLegacyImageLocationIfUnchanged(
+		id,
+		expectedUpdatedAt,
+		observedAt,
+		lastError,
+	)
+	// A reporter may refresh or supersede the row after the maintenance scan.
+	// The CAS conflict proves this pass did not mutate that newer evidence; the
+	// periodic maintenance loop will classify the refreshed row again.
+	if errors.Is(err, store.ErrConflict) {
+		return nil
+	}
+	return err
 }
 
 func imageIntegrityDigestsForRef(ref string, manifests []model.ImageCacheManifest) map[string]struct{} {

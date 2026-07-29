@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install
 Windows PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/yym68686/fugue/main/scripts/install_fugue_cli.ps1' | iex"
 ```
 
 Create or copy an access key from the Access keys page:

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -195,6 +196,7 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 	if err != nil {
 		return nil, err
 	}
+	apps = s.overlayManagedAppStatuses(context.Background(), apps)
 	updaters, err := s.store.ListNodeUpdaters("", true)
 	if err != nil {
 		return nil, err
@@ -223,6 +225,7 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 		runtimeID := firstNonEmpty(strings.TrimSpace(app.Status.CurrentRuntimeID), strings.TrimSpace(app.Spec.RuntimeID))
 		desired := app.Spec.Replicas
 		ready := app.Status.CurrentReplicas
+		phase := strings.TrimSpace(app.Status.Phase)
 		stateless := appContinuityStateless(app)
 		status := model.RuntimeContinuityStatus{
 			AppID:           app.ID,
@@ -233,8 +236,28 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			ReadyReplicas:   ready,
 			RuntimeID:       runtimeID,
 			Evidence: map[string]string{
-				"phase": app.Status.Phase,
+				"phase": phase,
 			},
+		}
+		if observed := app.ObservedStatus; observed != nil {
+			status.Evidence["observed_at"] = observed.ObservedAt.UTC().Format(time.RFC3339Nano)
+			status.Evidence["evidence_source"] = observed.EvidenceSource
+			status.Evidence["cluster_id"] = observed.ClusterID
+			status.Evidence["generation"] = fmt.Sprintf("%d", observed.Generation)
+			status.Evidence["observed_generation"] = fmt.Sprintf("%d", observed.ObservedGeneration)
+			status.Evidence["fresh"] = fmt.Sprintf("%t", observed.Fresh)
+			if observed.ReadyReplicas != nil {
+				ready = *observed.ReadyReplicas
+				status.ReadyReplicas = ready
+			}
+			phase = observed.Phase
+			status.Evidence["phase"] = phase
+			if !observed.Fresh || phase == "unknown" {
+				status.Blockers = append(status.Blockers, "runtime observation is not fresh")
+			}
+			if observed.RuntimeObjectPresent != nil && !*observed.RuntimeObjectPresent {
+				status.Blockers = append(status.Blockers, "managed app runtime object not found")
+			}
 		}
 		if app.Route != nil {
 			status.Hostname = normalizeExternalAppDomain(app.Route.Hostname)

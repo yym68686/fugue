@@ -16132,6 +16132,7 @@ components:
       type: object
       additionalProperties: false
       required: [phase, current_replicas, updated_at]
+      description: Legacy effective status projection. Use stored_status for durable control-plane state and observed_status for fresh runtime decisions.
       properties:
         phase:
           type: string
@@ -16155,6 +16156,51 @@ components:
           format: date-time
         source_sync:
           $ref: "#/components/schemas/AppSourceSyncStatus"
+    AppObservedStatus:
+      type: object
+      additionalProperties: false
+      required: [phase, desired_replicas, fresh, observed_at, evidence_source, reason]
+      description: Point-in-time runtime evidence kept separate from the desired spec and durable stored status. Omitted presence/readiness fields mean the observation could not determine that fact.
+      properties:
+        phase:
+          type: string
+          enum: [deployed, deploying, disabled, deleting, failed, unavailable, unknown]
+        runtime_id:
+          type: string
+        desired_replicas:
+          type: integer
+          format: int32
+        ready_replicas:
+          type: integer
+          format: int32
+        runtime_object_present:
+          type: boolean
+        namespace_present:
+          type: boolean
+        service_present:
+          type: boolean
+        endpoint_ready:
+          type: boolean
+        fresh:
+          type: boolean
+        observed_at:
+          type: string
+          format: date-time
+        cluster_id:
+          type: string
+          description: Stable identity of the observed Kubernetes cluster incarnation.
+        generation:
+          type: integer
+          format: int64
+        observed_generation:
+          type: integer
+          format: int64
+        evidence_source:
+          type: string
+        reason:
+          type: string
+        message:
+          type: string
     AppSpec:
       type: object
       additionalProperties: false
@@ -16577,6 +16623,11 @@ components:
           $ref: "#/components/schemas/AppSpec"
         status:
           $ref: "#/components/schemas/AppStatus"
+        stored_status:
+          description: Durable control-plane status before any live observation is projected into the compatibility status field.
+          $ref: "#/components/schemas/AppStatus"
+        observed_status:
+          $ref: "#/components/schemas/AppObservedStatus"
         current_resource_usage:
           $ref: "#/components/schemas/ResourceUsage"
         bindings:

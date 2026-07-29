@@ -119,7 +119,7 @@ func (s *Server) prepareAutomationActionDispatch(
 		Scope:            contract.Scope,
 		Subject:          intent.Scope.ID,
 		Evidence:         evidence,
-		CurrentMode:      gatePolicy.Mode,
+		CurrentMode:      intent.Mode,
 		CurrentCounts:    map[string]int{intent.Scope.ID: 1},
 		CandidateCounts:  map[string]int{intent.Scope.ID: 1},
 		FailureDomains:   append([]string(nil), intent.Decision.FailureDomains...),

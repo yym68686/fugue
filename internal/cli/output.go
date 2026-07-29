@@ -190,7 +190,18 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 	if app.Route != nil {
 		url = strings.TrimSpace(app.Route.PublicURL)
 	}
+	phase := strings.TrimSpace(app.Status.Phase)
+	currentReplicas := app.Status.CurrentReplicas
 	runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID)
+	var observed *model.AppObservedStatus
+	if app.ObservedStatus != nil {
+		observed = app.ObservedStatus
+		phase = strings.TrimSpace(observed.Phase)
+		if observed.ReadyReplicas != nil {
+			currentReplicas = *observed.ReadyReplicas
+		}
+		runtimeID = strings.TrimSpace(observed.RuntimeID)
+	}
 	if runtimeID == "" {
 		runtimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}
@@ -219,9 +230,9 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 		kvPair{Key: "app", Value: formatDisplayName(app.Name, app.ID, showIDs)},
 		kvPair{Key: "tenant", Value: formatDisplayName(tenantName, app.TenantID, showIDs)},
 		kvPair{Key: "project", Value: formatDisplayName(projectName, app.ProjectID, showIDs)},
-		kvPair{Key: "phase", Value: strings.TrimSpace(app.Status.Phase)},
+		kvPair{Key: "phase", Value: phase},
 		kvPair{Key: "desired_replicas", Value: fmt.Sprintf("%d", app.Spec.Replicas)},
-		kvPair{Key: "current_replicas", Value: fmt.Sprintf("%d", app.Status.CurrentReplicas)},
+		kvPair{Key: "current_replicas", Value: fmt.Sprintf("%d", currentReplicas)},
 		kvPair{Key: "runtime", Value: formatDisplayName(runtimeName, runtimeID, showIDs)},
 		kvPair{Key: "source", Value: sourceType},
 		kvPair{Key: "source_ref", Value: sourceRef(app.Source)},
@@ -237,6 +248,19 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 		kvPair{Key: "release_started_at", Value: formatModeTime(app.Status.CurrentReleaseStartedAt)},
 		kvPair{Key: "release_ready_at", Value: formatModeTime(app.Status.CurrentReleaseReadyAt)},
 		kvPair{Key: "updated_at", Value: formatTime(app.UpdatedAt)},
+	}
+	if observed != nil {
+		pairs = append(pairs,
+			kvPair{Key: "observed_fresh", Value: fmt.Sprintf("%t", observed.Fresh)},
+			kvPair{Key: "observed_at", Value: formatTime(observed.ObservedAt)},
+			kvPair{Key: "observed_cluster_id", Value: observed.ClusterID},
+			kvPair{Key: "observed_generation", Value: fmt.Sprintf("%d/%d", observed.ObservedGeneration, observed.Generation)},
+			kvPair{Key: "observed_evidence_source", Value: observed.EvidenceSource},
+			kvPair{Key: "observed_reason", Value: observed.Reason},
+		)
+		if observed.RuntimeObjectPresent != nil {
+			pairs = append(pairs, kvPair{Key: "runtime_object_present", Value: fmt.Sprintf("%t", *observed.RuntimeObjectPresent)})
+		}
 	}
 	if app.Route != nil {
 		pairs = append(pairs,

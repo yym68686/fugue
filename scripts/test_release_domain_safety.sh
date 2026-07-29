@@ -9395,6 +9395,69 @@ PY
     fi
   }
 
+  offline_policy_gate_with_selection_context() {
+    local domain="$1"
+    local gate_active="$2"
+    local transaction_active="$3"
+    local authorized_domain="$4"
+    shift 4
+    local -r CONTROL_PLANE_RELEASE_SELECTED_DOMAIN="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="${authorized_domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE="${gate_active}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE="${transaction_active}"
+    local active_filesystem_pressure_policy=""
+
+    active_filesystem_pressure_policy="$(node_local_dns_active_filesystem_pressure_policy)" || return
+    node_local_dns_offline_preserve_policy_gate "$@" \
+      "${active_filesystem_pressure_policy}"
+  }
+
+  offline_policy_gate_in_sealed_domain() {
+    local domain="$1"
+    shift
+
+    offline_policy_gate_with_selection_context \
+      "${domain}" true true "${domain}" "$@"
+  }
+
+  offline_policy_gate_in_wall_bounded_sealed_domain() {
+    local domain="$1"
+    shift
+    local -r CONTROL_PLANE_RELEASE_SELECTED_DOMAIN="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE=true
+    local CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE=true
+    local active_filesystem_pressure_policy=""
+
+    active_filesystem_pressure_policy="$(node_local_dns_active_filesystem_pressure_policy)" || return
+    run_with_wall_timeout 5 node_local_dns_offline_preserve_policy_gate \
+      "$@" "${active_filesystem_pressure_policy}"
+  }
+
+  platform_autonomy_summary_in_sealed_domain() {
+    local domain="$1"
+    local -r CONTROL_PLANE_RELEASE_SELECTED_DOMAIN="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE=true
+    local CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE=true
+    local active_filesystem_pressure_policy=""
+
+    active_filesystem_pressure_policy="$(node_local_dns_active_filesystem_pressure_policy)" || return
+    platform_autonomy_status_summary "${active_filesystem_pressure_policy}"
+  }
+
+  release_preflight_in_sealed_domain() {
+    local domain="$1"
+    local -r CONTROL_PLANE_RELEASE_SELECTED_DOMAIN="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_SELECTED="${domain}"
+    local CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE=true
+    local CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE=true
+    local active_filesystem_pressure_policy=""
+
+    active_filesystem_pressure_policy="$(node_local_dns_active_filesystem_pressure_policy)" || return
+    run_release_preflight "${active_filesystem_pressure_policy}"
+  }
+
   FUGUE_NODE_LOCAL_DNS_ENABLED=true
   NODE_LOCAL_DNS_SPLIT_COHORT=true
   NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES=dmit
@@ -9403,7 +9466,7 @@ PY
   reset_offline_policy_fixture
   assert_eq \
     "$(node_local_dns_offline_preserve_policy_gate "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
-    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a active_filesystem_pressure_policy=enforce active_filesystem_pressure=none" \
     "offline-preserve policy gate accepts the exact isolated blocker"
 
   for mutation in \
@@ -9433,6 +9496,72 @@ PY
     fail "offline-preserve policy gate did not identify the active pressure node: ${active_pressure_error}"
   fi
 
+  for mutation_domain in node-local authoritative-dns image-cache backup; do
+    if offline_policy_gate_in_sealed_domain "${mutation_domain}" \
+      "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test >/dev/null 2>&1; then
+      fail "offline-preserve policy gate accepted active pressure for ${mutation_domain} mutation"
+    fi
+  done
+
+  assert_eq \
+    "$(offline_policy_gate_in_sealed_domain control-plane \
+      "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a active_filesystem_pressure_policy=observe active_filesystem_pressure=node-a" \
+    "offline-preserve policy gate observes active pressure without blocking the sealed control-plane-only target"
+  assert_eq \
+    "$(offline_policy_gate_in_wall_bounded_sealed_domain control-plane \
+      "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a active_filesystem_pressure_policy=observe active_filesystem_pressure=node-a" \
+    "wall-bounded preflight inherits the readonly sealed control-plane selection"
+
+  for broken_context in gate-inactive transaction-inactive selection-mismatch; do
+    case "${broken_context}" in
+      gate-inactive)
+        gate_active=false
+        transaction_active=true
+        authorized_domain=control-plane
+        ;;
+      transaction-inactive)
+        gate_active=true
+        transaction_active=false
+        authorized_domain=control-plane
+        ;;
+      selection-mismatch)
+        gate_active=true
+        transaction_active=true
+        authorized_domain=backup
+        ;;
+    esac
+    if offline_policy_gate_with_selection_context \
+      control-plane "${gate_active}" "${transaction_active}" "${authorized_domain}" \
+      "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test >/dev/null 2>&1; then
+      fail "${broken_context} selection context bypassed active filesystem pressure"
+    fi
+  done
+
+  if offline_policy_gate_with_selection_context \
+    unknown-domain true true unknown-domain \
+    "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test >/dev/null 2>&1; then
+    fail "unknown readonly release domain bypassed active filesystem pressure"
+  fi
+
+  CONTROL_PLANE_RELEASE_SELECTED_DOMAIN=control-plane
+  CONTROL_PLANE_RELEASE_DOMAIN_SELECTED=control-plane
+  CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE=true
+  CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE=true
+  if node_local_dns_offline_preserve_policy_gate \
+    "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test >/dev/null 2>&1; then
+    fail "mutable environment selection bypassed active filesystem pressure"
+  fi
+  unset CONTROL_PLANE_RELEASE_SELECTED_DOMAIN CONTROL_PLANE_RELEASE_DOMAIN_SELECTED
+  unset CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE
+
+  mutate_offline_policy_fixture role_drift
+  if offline_policy_gate_in_sealed_domain control-plane \
+    "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test >/dev/null 2>&1; then
+    fail "sealed control-plane preservation bypassed a preserved-cohort invariant"
+  fi
+
   mutate_offline_policy_fixture malformed_summary_counter
   malformed_summary_error=""
   if malformed_summary_error="$(node_local_dns_offline_preserve_policy_gate \
@@ -9446,13 +9575,13 @@ PY
   mutate_offline_policy_fixture pressure_drift
   assert_eq \
     "$(node_local_dns_offline_preserve_policy_gate "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
-    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a active_filesystem_pressure_policy=enforce active_filesystem_pressure=none" \
     "offline-preserve policy gate keeps a preserved-node filesystem warning observable without changing that node"
 
   mutate_offline_policy_fixture unrelated_pressure
   assert_eq \
     "$(node_local_dns_offline_preserve_policy_gate "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
-    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a active_filesystem_pressure_policy=enforce active_filesystem_pressure=none" \
     "offline-preserve policy gate keeps a non-target filesystem warning observable without blocking the active cohort"
 
   reset_offline_policy_fixture
@@ -9493,11 +9622,16 @@ PY
     [[ "${TEST_PRESERVED_STATE_VALID}" == "true" ]]
   }
   assert_eq \
-    "$(platform_autonomy_status_summary)" \
-    "NodeLocal offline-preserve policy gate passed phase=post-deploy preserved=dmit active=node-a" \
+    "$(platform_autonomy_summary_in_sealed_domain control-plane)" \
+    "NodeLocal offline-preserve policy gate passed phase=post-deploy preserved=dmit active=node-a active_filesystem_pressure_policy=observe active_filesystem_pressure=none" \
     "split post-deploy autonomy gate accepts only the exact preserved blocker"
+  mutate_offline_policy_fixture active_pressure
+  assert_eq \
+    "$(platform_autonomy_summary_in_sealed_domain control-plane)" \
+    "NodeLocal offline-preserve policy gate passed phase=post-deploy preserved=dmit active=node-a active_filesystem_pressure_policy=observe active_filesystem_pressure=node-a" \
+    "split post-deploy control-plane gate keeps active filesystem pressure observable"
   TEST_PRESERVED_STATE_VALID=false
-  if platform_autonomy_status_summary >/dev/null 2>&1; then
+  if platform_autonomy_summary_in_sealed_domain control-plane >/dev/null 2>&1; then
     fail "split post-deploy autonomy gate accepted preserved DaemonSet or Pod drift"
   fi
 
@@ -9583,13 +9717,19 @@ PY
     return 0
   }
 
-  run_release_preflight || fail "split preflight must continue through exact NodePolicy validation when DiscoveryBundle is missing"
+  mutate_offline_policy_fixture active_pressure
+  release_preflight_in_sealed_domain control-plane ||
+    fail "sealed control-plane preflight must preserve NodeLocal while keeping active pressure observable"
   grep -Fqx 'https://api.example.test/v1/admin/platform/autonomy/status' "${PREFLIGHT_CURL_CALLS}" ||
     fail "DiscoveryBundle fallback returned before querying platform autonomy"
   grep -Fqx 'https://api.example.test/v1/cluster/node-policies/status' "${PREFLIGHT_CURL_CALLS}" ||
     fail "DiscoveryBundle fallback returned before querying NodePolicy status"
   [[ ! -e "${OLD_IMAGE_CACHE_OVERRIDE_MARKER}" ]] ||
     fail "split preflight evaluated the legacy image-cache override"
+
+  if (release_preflight_in_sealed_domain node-local >/dev/null 2>&1); then
+    fail "sealed NodeLocal preflight accepted active filesystem pressure"
+  fi
 
   mutate_offline_policy_fixture role_drift
   rm -f "${OLD_IMAGE_CACHE_OVERRIDE_MARKER}"

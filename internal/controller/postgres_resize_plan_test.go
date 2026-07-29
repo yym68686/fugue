@@ -122,6 +122,68 @@ func TestManagedPostgresResizeInvariantBaselineRejectsIdentityDrift(t *testing.T
 	}
 }
 
+func TestManagedPostgresResizeInvariantAdvancesOnlyForOneAuthenticatedResizeGeneration(t *testing.T) {
+	cluster, observation := managedPostgresResizeInvariantFixture(t)
+	baseline, err := captureManagedPostgresResizeInvariantBaseline("tenant-demo", "demo-postgres", cluster, observation)
+	if err != nil {
+		t.Fatalf("capture baseline: %v", err)
+	}
+
+	accepted := observation
+	accepted.Generation++
+	accepted.ResourceVersion = "201"
+	// The apiserver has accepted the new desired generation while the kubelet
+	// still reports the previously observed generation.
+	if err := advanceManagedPostgresResizeInvariantBaseline(&baseline, cluster, accepted); err != nil {
+		t.Fatalf("advance authenticated resize generation: %v", err)
+	}
+	if baseline.PodGeneration != accepted.Generation {
+		t.Fatalf("baseline generation = %d, want %d", baseline.PodGeneration, accepted.Generation)
+	}
+	if err := validateManagedPostgresResizeInvariantDuringResize(baseline, cluster, accepted); err != nil {
+		t.Fatalf("validate accepted resize while observedGeneration lags: %v", err)
+	}
+	if err := validateManagedPostgresResizeInvariantBaseline(baseline, cluster, accepted); err == nil || !strings.Contains(err.Error(), "observed Pod identity") {
+		t.Fatalf("expected terminal validation to reject observedGeneration lag, got %v", err)
+	}
+
+	converged := accepted
+	converged.ObservedGeneration = converged.Generation
+	if err := validateManagedPostgresResizeInvariantBaseline(baseline, cluster, converged); err != nil {
+		t.Fatalf("validate converged resize generation: %v", err)
+	}
+	ahead := converged
+	ahead.ObservedGeneration++
+	if err := validateManagedPostgresResizeInvariantDuringResize(baseline, cluster, ahead); err == nil || !strings.Contains(err.Error(), "observed Pod identity") {
+		t.Fatalf("expected impossible observedGeneration lead to fail closed, got %v", err)
+	}
+}
+
+func TestManagedPostgresResizeInvariantRejectsUnattributedGenerationMovement(t *testing.T) {
+	cluster, observation := managedPostgresResizeInvariantFixture(t)
+	baseline, err := captureManagedPostgresResizeInvariantBaseline("tenant-demo", "demo-postgres", cluster, observation)
+	if err != nil {
+		t.Fatalf("capture baseline: %v", err)
+	}
+
+	jumped := observation
+	jumped.Generation += 2
+	jumped.ObservedGeneration = jumped.Generation
+	if err := advanceManagedPostgresResizeInvariantBaseline(&baseline, cluster, jumped); err == nil || !strings.Contains(err.Error(), "expected 4, got 5") {
+		t.Fatalf("expected multi-generation jump to fail closed, got %v", err)
+	}
+	if baseline.PodGeneration != observation.Generation {
+		t.Fatalf("failed generation advance mutated baseline to %d", baseline.PodGeneration)
+	}
+
+	drifted := observation
+	drifted.Generation++
+	drifted.ObservedGeneration = drifted.Generation
+	if err := validateManagedPostgresResizeInvariantDuringResize(baseline, cluster, drifted); err == nil || !strings.Contains(err.Error(), "Pod generation") {
+		t.Fatalf("expected unaccepted generation drift to fail closed, got %v", err)
+	}
+}
+
 func managedPostgresResizeInvariantFixture(t *testing.T) (kubeCloudNativePGCluster, managedPostgresResizeObservation) {
 	t.Helper()
 	controller := true

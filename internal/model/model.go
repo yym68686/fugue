@@ -2239,6 +2239,30 @@ type AppStatus struct {
 	SourceSync              *AppSourceSyncStatus `json:"source_sync,omitempty"`
 }
 
+// AppObservedStatus is a point-in-time runtime observation. It is deliberately
+// separate from AppStatus: AppStatus is durable control-plane state, while this
+// structure records what an evidence source actually observed in a specific
+// cluster. Pointer booleans and replica counts distinguish an authoritative
+// false/zero result from an observation that could not be completed.
+type AppObservedStatus struct {
+	Phase                string    `json:"phase"`
+	RuntimeID            string    `json:"runtime_id,omitempty"`
+	DesiredReplicas      int       `json:"desired_replicas"`
+	ReadyReplicas        *int      `json:"ready_replicas,omitempty"`
+	RuntimeObjectPresent *bool     `json:"runtime_object_present,omitempty"`
+	NamespacePresent     *bool     `json:"namespace_present,omitempty"`
+	ServicePresent       *bool     `json:"service_present,omitempty"`
+	EndpointReady        *bool     `json:"endpoint_ready,omitempty"`
+	Fresh                bool      `json:"fresh"`
+	ObservedAt           time.Time `json:"observed_at"`
+	ClusterID            string    `json:"cluster_id,omitempty"`
+	Generation           int64     `json:"generation,omitempty"`
+	ObservedGeneration   int64     `json:"observed_generation,omitempty"`
+	EvidenceSource       string    `json:"evidence_source"`
+	Reason               string    `json:"reason"`
+	Message              string    `json:"message,omitempty"`
+}
+
 type App struct {
 	ID                   string              `json:"id"`
 	TenantID             string              `json:"tenant_id"`
@@ -2252,6 +2276,8 @@ type App struct {
 	InternalService      *AppInternalService `json:"internal_service,omitempty"`
 	Spec                 AppSpec             `json:"spec"`
 	Status               AppStatus           `json:"status"`
+	StoredStatus         *AppStatus          `json:"stored_status,omitempty"`
+	ObservedStatus       *AppObservedStatus  `json:"observed_status,omitempty"`
 	CurrentResourceUsage *ResourceUsage      `json:"current_resource_usage,omitempty"`
 	Bindings             []ServiceBinding    `json:"bindings,omitempty"`
 	BackingServices      []BackingService    `json:"backing_services,omitempty"`

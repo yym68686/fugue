@@ -25,6 +25,11 @@ type managedPostgresResizeInvariantBaseline struct {
 	ContainerStartedAt string
 }
 
+type managedPostgresResizeIdentityOptions struct {
+	AllowResizeCondition       bool
+	AllowObservedGenerationLag bool
+}
+
 func captureManagedPostgresResizeInvariantBaseline(
 	namespace, clusterName string,
 	cluster kubeCloudNativePGCluster,
@@ -53,12 +58,82 @@ func validateManagedPostgresResizeInvariantBaseline(
 	cluster kubeCloudNativePGCluster,
 	observation managedPostgresResizeObservation,
 ) error {
-	if err := validateManagedPostgresResizeLiveIdentity(
+	return validateManagedPostgresResizeInvariantState(
+		baseline,
+		cluster,
+		observation,
+		managedPostgresResizeIdentityOptions{AllowResizeCondition: true},
+	)
+}
+
+// validateManagedPostgresResizeInvariantDuringResize permits only the kubelet
+// observedGeneration lag that is expected after the apiserver has accepted a
+// /resize request. The exact Pod generation remains fenced by the baseline.
+func validateManagedPostgresResizeInvariantDuringResize(
+	baseline managedPostgresResizeInvariantBaseline,
+	cluster kubeCloudNativePGCluster,
+	observation managedPostgresResizeObservation,
+) error {
+	return validateManagedPostgresResizeInvariantState(
+		baseline,
+		cluster,
+		observation,
+		managedPostgresResizeIdentityOptions{
+			AllowResizeCondition:       true,
+			AllowObservedGenerationLag: true,
+		},
+	)
+}
+
+// advanceManagedPostgresResizeInvariantBaseline authenticates the single Pod
+// generation increment produced by Kubernetes' podResizeStrategy. No other
+// generation movement is accepted, and every non-resource identity invariant
+// is revalidated before the new generation becomes trusted.
+func advanceManagedPostgresResizeInvariantBaseline(
+	baseline *managedPostgresResizeInvariantBaseline,
+	cluster kubeCloudNativePGCluster,
+	observation managedPostgresResizeObservation,
+) error {
+	if baseline == nil || baseline.PodGeneration <= 0 {
+		return fmt.Errorf("managed postgres resize requires an exact Pod generation baseline")
+	}
+	expectedGeneration := baseline.PodGeneration + 1
+	if observation.Generation != expectedGeneration {
+		return fmt.Errorf(
+			"managed postgres resize response changed Pod generation unexpectedly: expected %d, got %d",
+			expectedGeneration,
+			observation.Generation,
+		)
+	}
+	next := *baseline
+	next.PodGeneration = expectedGeneration
+	if err := validateManagedPostgresResizeInvariantState(
+		next,
+		cluster,
+		observation,
+		managedPostgresResizeIdentityOptions{
+			AllowResizeCondition:       true,
+			AllowObservedGenerationLag: true,
+		},
+	); err != nil {
+		return err
+	}
+	*baseline = next
+	return nil
+}
+
+func validateManagedPostgresResizeInvariantState(
+	baseline managedPostgresResizeInvariantBaseline,
+	cluster kubeCloudNativePGCluster,
+	observation managedPostgresResizeObservation,
+	options managedPostgresResizeIdentityOptions,
+) error {
+	if err := validateManagedPostgresResizeLiveIdentityWithOptions(
 		baseline.Namespace,
 		baseline.ClusterName,
 		cluster,
 		observation,
-		true,
+		options,
 	); err != nil {
 		return err
 	}
@@ -105,6 +180,21 @@ func validateManagedPostgresResizeLiveIdentity(
 	observation managedPostgresResizeObservation,
 	allowResizeCondition bool,
 ) error {
+	return validateManagedPostgresResizeLiveIdentityWithOptions(
+		namespace,
+		clusterName,
+		cluster,
+		observation,
+		managedPostgresResizeIdentityOptions{AllowResizeCondition: allowResizeCondition},
+	)
+}
+
+func validateManagedPostgresResizeLiveIdentityWithOptions(
+	namespace, clusterName string,
+	cluster kubeCloudNativePGCluster,
+	observation managedPostgresResizeObservation,
+	options managedPostgresResizeIdentityOptions,
+) error {
 	namespace = strings.TrimSpace(namespace)
 	clusterName = strings.TrimSpace(clusterName)
 	if namespace == "" || clusterName == "" {
@@ -135,7 +225,9 @@ func validateManagedPostgresResizeLiveIdentity(
 		strings.TrimSpace(observation.PodUID) == "" ||
 		strings.TrimSpace(observation.ResourceVersion) == "" ||
 		observation.Generation <= 0 ||
-		observation.ObservedGeneration < observation.Generation {
+		observation.ObservedGeneration <= 0 ||
+		observation.ObservedGeneration > observation.Generation ||
+		(!options.AllowObservedGenerationLag && observation.ObservedGeneration != observation.Generation) {
 		return fmt.Errorf("managed postgres resize requires an exact observed Pod identity and generation")
 	}
 	if strings.TrimSpace(observation.DeletionTimestamp) != "" {
@@ -148,7 +240,7 @@ func validateManagedPostgresResizeLiveIdentity(
 		observation.ActualResources == nil {
 		return fmt.Errorf("managed postgres resize requires a scheduled, Running, Ready Pod with actual resources")
 	}
-	if !allowResizeCondition && resizePendingCondition(observation.Conditions) != nil {
+	if !options.AllowResizeCondition && resizePendingCondition(observation.Conditions) != nil {
 		return fmt.Errorf("managed postgres resize preflight found another resize already pending")
 	}
 	if strings.TrimSpace(observation.Labels[cloudNativePGClusterLabel]) != clusterName ||

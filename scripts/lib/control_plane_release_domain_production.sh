@@ -938,9 +938,15 @@ control_plane_release_domain_prepare_registry_zero_preservation() {
 control_plane_release_domain_release_preflight_worker() {
   local targets_file="$1"
   local override_file="$2"
+  local pressure_policy_file="$3"
+  local active_filesystem_pressure_policy="$4"
 
-  (( $# == 2 )) || return 2
-  run_release_preflight || return
+  (( $# == 4 )) || return 2
+  case "${active_filesystem_pressure_policy}" in
+    enforce|observe) ;;
+    *) return 2 ;;
+  esac
+  run_release_preflight "${active_filesystem_pressure_policy}" || return
   case "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED:-false}" in
     true|false) ;;
     *) return 1 ;;
@@ -948,7 +954,8 @@ control_plane_release_domain_release_preflight_worker() {
   umask 077
   printf '%s' "${NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES:-}" >"${targets_file}" || return
   printf '%s\n' "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED:-false}" >"${override_file}" || return
-  chmod 600 "${targets_file}" "${override_file}"
+  printf '%s\n' "${active_filesystem_pressure_policy}" >"${pressure_policy_file}" || return
+  chmod 600 "${targets_file}" "${override_file}" "${pressure_policy_file}"
 }
 
 control_plane_release_domain_run_release_preflight_handoff() {
@@ -956,11 +963,19 @@ control_plane_release_domain_run_release_preflight_handoff() {
   local handoff_dir="${CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR}/release-preflight-${mode}"
   local targets_file="${handoff_dir}/node-local-targets"
   local override_file="${handoff_dir}/build-plane-override"
+  local pressure_policy_file="${handoff_dir}/active-filesystem-pressure-policy"
   local observed_targets=""
   local observed_override=""
+  local observed_pressure_policy=""
+  local expected_pressure_policy=""
   local timeout_seconds="${FUGUE_RELEASE_PREFLIGHT_OUTER_TIMEOUT_SECONDS:-300}"
 
   [[ "${mode}" == "verify" ]] || return 2
+  expected_pressure_policy="$(node_local_dns_active_filesystem_pressure_policy)" || return 2
+  case "${expected_pressure_policy}" in
+    enforce|observe) ;;
+    *) return 2 ;;
+  esac
   [[ ! -e "${handoff_dir}" ]] || return 2
   mkdir "${handoff_dir}" || return
   chmod 700 "${handoff_dir}" || return
@@ -968,16 +983,18 @@ control_plane_release_domain_run_release_preflight_handoff() {
   if ! control_plane_release_domain_with_private_tmp run_release_long_command \
     "${timeout_seconds}" "release-domain ${mode} release preflight" \
     control_plane_release_domain_release_preflight_worker \
-    "${targets_file}" "${override_file}"; then
+    "${targets_file}" "${override_file}" "${pressure_policy_file}" \
+    "${expected_pressure_policy}"; then
     return 1
   fi
-  python3 - "${handoff_dir}" "${targets_file}" "${override_file}" <<'PY' || return
+  python3 - "${handoff_dir}" "${targets_file}" "${override_file}" \
+    "${pressure_policy_file}" <<'PY' || return
 import os
 import re
 import stat
 import sys
 
-directory, targets_path, override_path = sys.argv[1:]
+directory, targets_path, override_path, pressure_policy_path = sys.argv[1:]
 metadata = os.lstat(directory)
 if (
     not stat.S_ISDIR(metadata.st_mode)
@@ -986,7 +1003,7 @@ if (
     or metadata.st_uid != os.geteuid()
 ):
     raise SystemExit(1)
-for path in (targets_path, override_path):
+for path in (targets_path, override_path, pressure_policy_path):
     item = os.lstat(path)
     if (
         not stat.S_ISREG(item.st_mode)
@@ -1003,15 +1020,19 @@ for target in targets.splitlines():
         raise SystemExit(1)
 if open(override_path, encoding="ascii").read().strip() not in {"true", "false"}:
     raise SystemExit(1)
+if open(pressure_policy_path, encoding="ascii").read().strip() not in {"enforce", "observe"}:
+    raise SystemExit(1)
 PY
   observed_targets="$(<"${targets_file}")" || return
   observed_override="$(<"${override_file}")" || return
-  rm -f "${targets_file}" "${override_file}" || return
+  observed_pressure_policy="$(<"${pressure_policy_file}")" || return
+  rm -f "${targets_file}" "${override_file}" "${pressure_policy_file}" || return
   rmdir "${handoff_dir}" || return
   CONTROL_PLANE_RELEASE_DOMAIN_OBSERVED_BUILD_OVERRIDE="${observed_override}"
   [[ "${NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES:-}" == "${observed_targets}" &&
     "${CONTROL_PLANE_RELEASE_DOMAIN_PINNED_BUILD_OVERRIDE:-}" == \
-      "${observed_override}" ]]
+      "${observed_override}" &&
+    "${observed_pressure_policy}" == "${expected_pressure_policy}" ]]
 }
 
 # Records the exact mutable file inputs referenced by the frozen argv. Tests
@@ -2254,7 +2275,8 @@ control_plane_release_domain_validate_dependencies() {
     run_node_local_dns_phase_with_state_handoff prepare_node_local_dns_helm_args \
     write_upgrade_override_values build_dns_helm_set_args prepare_helm_post_renderer \
     control_plane_postgres_name helm_current_revision run_release_long_command \
-    duration_to_seconds run_release_preflight authoritative_dns_dig_preflight \
+    duration_to_seconds run_release_preflight \
+    node_local_dns_active_filesystem_pressure_policy authoritative_dns_dig_preflight \
     validate_control_plane_release_job_budget validate_node_local_dns_release_budget_pre_mutation \
     run_control_plane_rollback_image_preflight \
     terminate_active_control_plane_release_command \

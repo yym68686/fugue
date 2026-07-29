@@ -11,6 +11,11 @@ const apiRedactedSecretValue = "[redacted]"
 
 func sanitizeAppForAPI(app model.App) model.App {
 	out := cloneApp(app)
+	if out.StoredStatus == nil {
+		stored := out.Status
+		stored.SourceSync = model.CloneAppSourceSyncStatus(out.Status.SourceSync)
+		out.StoredStatus = &stored
+	}
 	out.Source = sanitizeAppSourceForAPI(out.Source)
 	out.OriginSource = sanitizeAppSourceForAPI(out.OriginSource)
 	out.BuildSource = sanitizeAppSourceForAPI(out.BuildSource)
@@ -201,6 +206,35 @@ func redactSecretFilesInSpec(spec model.AppSpec) model.AppSpec {
 
 func cloneApp(app model.App) model.App {
 	out := app
+	if app.StoredStatus != nil {
+		stored := *app.StoredStatus
+		stored.SourceSync = model.CloneAppSourceSyncStatus(app.StoredStatus.SourceSync)
+		out.StoredStatus = &stored
+	}
+	if app.ObservedStatus != nil {
+		observed := *app.ObservedStatus
+		if app.ObservedStatus.ReadyReplicas != nil {
+			ready := *app.ObservedStatus.ReadyReplicas
+			observed.ReadyReplicas = &ready
+		}
+		if app.ObservedStatus.RuntimeObjectPresent != nil {
+			present := *app.ObservedStatus.RuntimeObjectPresent
+			observed.RuntimeObjectPresent = &present
+		}
+		if app.ObservedStatus.NamespacePresent != nil {
+			present := *app.ObservedStatus.NamespacePresent
+			observed.NamespacePresent = &present
+		}
+		if app.ObservedStatus.ServicePresent != nil {
+			present := *app.ObservedStatus.ServicePresent
+			observed.ServicePresent = &present
+		}
+		if app.ObservedStatus.EndpointReady != nil {
+			ready := *app.ObservedStatus.EndpointReady
+			observed.EndpointReady = &ready
+		}
+		out.ObservedStatus = &observed
+	}
 	out.Source = cloneAppSource(app.Source)
 	out.OriginSource = cloneAppSource(app.OriginSource)
 	out.BuildSource = cloneAppSource(app.BuildSource)

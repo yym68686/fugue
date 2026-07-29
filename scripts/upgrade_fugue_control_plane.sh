@@ -11223,15 +11223,55 @@ node_local_dns_pin_preflight_targets() {
   NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES="${active_nodes}"
 }
 
+node_local_dns_active_filesystem_pressure_policy() {
+  local selected="${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN:-}"
+  local selected_declaration=""
+
+  # The pre-domain release path treated every enabled NodeLocal cohort as a
+  # rollout target. The atomic-domain dispatcher now seals the rendered diff
+  # before entering an adapter, so active-node storage headroom is a mutation
+  # prerequisite only for adapters that actually replace Pods on that cohort.
+  #
+  # Observe-only mode is legal exclusively inside the dispatcher's readonly,
+  # dynamically-scoped selection and its active transaction. Environment or
+  # legacy callers remain fail-closed in enforce mode.
+  if ! selected_declaration="$(declare -p CONTROL_PLANE_RELEASE_SELECTED_DOMAIN 2>/dev/null)" ||
+    [[ "${selected_declaration}" != 'declare -r CONTROL_PLANE_RELEASE_SELECTED_DOMAIN='* ]] ||
+    [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" != "true" ]] ||
+    [[ "${CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE:-false}" != "true" ]] ||
+    [[ -z "${selected}" || "${selected}" != "${CONTROL_PLANE_RELEASE_DOMAIN_SELECTED:-}" ]]; then
+    printf 'enforce\n'
+    return 0
+  fi
+
+  case "${selected}" in
+    node-local|authoritative-dns|image-cache|backup)
+      printf 'enforce\n'
+      ;;
+    control-plane)
+      printf 'observe\n'
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
 node_local_dns_offline_preserve_policy_gate() {
   local autonomy_status_file="$1"
   local node_policies_file="$2"
   local phase="${3:-release}"
+  local active_filesystem_pressure_policy="${4:-enforce}"
 
   node_local_dns_split_release_enabled || return 1
   [[ -n "$(trim_field "${NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES:-}")" ]] || return 1
+  case "${active_filesystem_pressure_policy}" in
+    enforce|observe) ;;
+    *) return 1 ;;
+  esac
   AUTONOMY_STATUS_FILE="${autonomy_status_file}" NODE_POLICIES_FILE="${node_policies_file}" \
     PRESERVED_NODES="${NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES}" ACTIVE_NODES="${NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES}" \
+    ACTIVE_FILESYSTEM_PRESSURE_POLICY="${active_filesystem_pressure_policy}" \
     GATE_PHASE="${phase}" python3 -c '
 import json
 import os
@@ -11277,6 +11317,9 @@ if not isinstance(store, dict) or store.get("block_rollout") is not False or str
 
 preserved = set(names(os.environ["PRESERVED_NODES"]))
 active = set(names(os.environ["ACTIVE_NODES"]))
+active_filesystem_pressure_policy = os.environ.get("ACTIVE_FILESYSTEM_PRESSURE_POLICY", "")
+if active_filesystem_pressure_policy not in {"enforce", "observe"}:
+    reject("active filesystem pressure policy is invalid")
 if preserved & active:
     reject("active and preserved cohorts overlap")
 raw_statuses = policy_payload.get("node_policies")
@@ -11341,7 +11384,11 @@ for name, item in by_name.items():
         ):
             reject(f"preserved node isolation invariant failed node={name}")
     else:
-        if name in active and filesystem_pressure is not False:
+        if (
+            name in active
+            and filesystem_pressure is not False
+            and active_filesystem_pressure_policy == "enforce"
+        ):
             reject(f"active node reports filesystem pressure node={name}")
         if (
             item.get("ready") is not True
@@ -11353,6 +11400,9 @@ for name, item in by_name.items():
 
 filesystem_pressure_count = sum(
     1 for item in by_name.values() if item.get("filesystem_pressure") is True
+)
+active_filesystem_pressure = sorted(
+    name for name in active if by_name[name].get("filesystem_pressure") is True
 )
 summary = policy_payload.get("summary")
 if not isinstance(summary, dict):
@@ -11380,11 +11430,14 @@ print(
     + f" phase={phase}"
     + " preserved=" + ",".join(sorted(preserved))
     + " active=" + ",".join(sorted(active))
+    + f" active_filesystem_pressure_policy={active_filesystem_pressure_policy}"
+    + " active_filesystem_pressure=" + (",".join(active_filesystem_pressure) or "none")
 )
 '
 }
 
 run_release_preflight() {
+  local active_filesystem_pressure_policy="${1:-enforce}"
   local api_base=""
   local token=""
   local discovery_headers=""
@@ -11399,6 +11452,11 @@ run_release_preflight() {
   local discovery_missing="false"
   local node_local_dns_offline_override_allowed="false"
   local node_local_dns_offline_override_message=""
+
+  case "${active_filesystem_pressure_policy}" in
+    enforce|observe) ;;
+    *) fail "release preflight active filesystem pressure policy must be enforce or observe" ;;
+  esac
 
   case "${FUGUE_RELEASE_PREFLIGHT_ENABLED:-true}" in
     1|true|TRUE|yes|YES)
@@ -11499,7 +11557,9 @@ PY
   local autonomy_override_message=""
   local node_local_build_plane_override_allowed="false"
   if node_local_dns_split_release_enabled; then
-    if ! node_local_dns_offline_override_message="$(node_local_dns_offline_preserve_policy_gate "${autonomy_status_file}" "${node_policies_file}" preflight)"; then
+    if ! node_local_dns_offline_override_message="$(node_local_dns_offline_preserve_policy_gate \
+      "${autonomy_status_file}" "${node_policies_file}" preflight \
+      "${active_filesystem_pressure_policy}")"; then
       rm -f "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${image_cache_status_file}"
       fail "offline-preserve NodeLocal DNSCache preflight policy gate failed"
     fi
@@ -18859,7 +18919,13 @@ release_status_request() {
 }
 
 platform_autonomy_status_summary() {
+  local active_filesystem_pressure_policy="${1:-enforce}"
   local api_base token status_file node_policies_file rc summary
+
+  case "${active_filesystem_pressure_policy}" in
+    enforce|observe) ;;
+    *) return 1 ;;
+  esac
 
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
@@ -18876,7 +18942,9 @@ platform_autonomy_status_summary() {
       printf 'NodeLocal offline-preserve node policy status request failed'
       return 1
     fi
-    if ! summary="$(node_local_dns_offline_preserve_policy_gate "${status_file}" "${node_policies_file}" post-deploy)"; then
+    if ! summary="$(node_local_dns_offline_preserve_policy_gate \
+      "${status_file}" "${node_policies_file}" post-deploy \
+      "${active_filesystem_pressure_policy}")"; then
       rm -f "${status_file}" "${node_policies_file}"
       printf 'NodeLocal offline-preserve policy gate failed'
       return 1
