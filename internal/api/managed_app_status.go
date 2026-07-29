@@ -17,6 +17,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -55,16 +56,80 @@ type managedAppStatusCacheEntry struct {
 	found       bool
 	ok          bool
 	clusterID   string
+	evidence    managedAppRuntimeEvidence
 	refreshedAt time.Time
 	expiresAt   time.Time
 }
 
 type managedAppStatusListCacheEntry struct {
 	items       map[string]runtime.ManagedAppObject
+	evidence    map[string]managedAppRuntimeEvidence
 	ok          bool
 	clusterID   string
 	refreshedAt time.Time
 	expiresAt   time.Time
+}
+
+// managedAppRuntimeEvidence contains only authoritative results from the same
+// Kubernetes snapshot as the ManagedApp observation. Nil fields mean that a
+// resource is not applicable (for example a background app has no Service),
+// while a non-nil false is an authoritative absence.
+type managedAppRuntimeEvidence struct {
+	namespacePresent        *bool
+	servicePresent          *bool
+	endpointPresent         *bool
+	endpointReady           *bool
+	physicalReplicas        *int
+	physicalDesiredReplicas *int
+	imagePresent            *bool
+	imageRef                string
+	invariantViolations     []string
+	evidenceSources         []string
+}
+
+type managedAppKubeSnapshot struct {
+	namespaces  map[string]struct{}
+	deployments map[string]kubeDeploymentRuntimeEvidence
+	services    map[string]struct{}
+	endpoints   map[string]kubeEndpointRuntimeEvidence
+}
+
+type kubeResourceList struct {
+	Items    []map[string]any `json:"items"`
+	Metadata struct {
+		Continue string `json:"continue"`
+	} `json:"metadata"`
+}
+
+type kubeDeploymentRuntimeEvidence struct {
+	Metadata struct {
+		Name       string `json:"name"`
+		Namespace  string `json:"namespace"`
+		Generation int64  `json:"generation"`
+	} `json:"metadata"`
+	Spec struct {
+		Replicas *int `json:"replicas"`
+		Template struct {
+			Spec struct {
+				Containers []struct {
+					Name  string `json:"name"`
+					Image string `json:"image"`
+				} `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		Replicas           int   `json:"replicas"`
+		ReadyReplicas      int   `json:"readyReplicas"`
+		AvailableReplicas  int   `json:"availableReplicas"`
+		ObservedGeneration int64 `json:"observedGeneration"`
+	} `json:"status"`
+}
+
+type kubeEndpointRuntimeEvidence struct {
+	Present           bool
+	ReadyAddresses    int
+	NotReadyAddresses int
 }
 
 type managedAppList struct {
@@ -221,6 +286,7 @@ func (c *managedAppStatusCache) setList(entry managedAppStatusListCacheEntry) {
 			found:       true,
 			ok:          true,
 			clusterID:   entry.clusterID,
+			evidence:    entry.evidence[appID],
 			refreshedAt: entry.refreshedAt,
 			expiresAt:   entry.expiresAt,
 		}
@@ -231,6 +297,7 @@ func (c *managedAppStatusCache) setList(entry managedAppStatusListCacheEntry) {
 			found:       false,
 			ok:          true,
 			clusterID:   entry.clusterID,
+			evidence:    entry.evidence[appID],
 			refreshedAt: entry.refreshedAt,
 			expiresAt:   entry.expiresAt,
 		}
@@ -350,6 +417,168 @@ func (c *managedAppStatusClient) listManagedAppsByAppID(ctx context.Context) (ma
 	}
 }
 
+func (c *managedAppStatusClient) listKubeResources(ctx context.Context, basePath string) ([]map[string]any, error) {
+	basePath = strings.TrimSpace(basePath)
+	if basePath == "" {
+		return nil, fmt.Errorf("kubernetes resource list path is empty")
+	}
+	items := make([]map[string]any, 0)
+	seenContinue := make(map[string]struct{})
+	path := basePath
+	for {
+		var list kubeResourceList
+		if err := c.doJSON(ctx, path, &list); err != nil {
+			return nil, err
+		}
+		items = append(items, list.Items...)
+		continuation := strings.TrimSpace(list.Metadata.Continue)
+		if continuation == "" {
+			return items, nil
+		}
+		if _, exists := seenContinue[continuation]; exists {
+			return nil, fmt.Errorf("kubernetes resource inventory pagination repeated continue token for %s", basePath)
+		}
+		seenContinue[continuation] = struct{}{}
+		values := url.Values{}
+		values.Set("continue", continuation)
+		path = basePath + "?" + values.Encode()
+	}
+}
+
+func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (managedAppKubeSnapshot, error) {
+	var namespaceItems, deploymentItems, serviceItems, endpointItems []map[string]any
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		namespaceItems, err = c.listKubeResources(groupCtx, "/api/v1/namespaces")
+		if err != nil {
+			return fmt.Errorf("list kubernetes namespaces: %w", err)
+		}
+		return nil
+	})
+	group.Go(func() error {
+		var err error
+		deploymentItems, err = c.listKubeResources(groupCtx, "/apis/apps/v1/deployments")
+		if err != nil {
+			return fmt.Errorf("list kubernetes deployments: %w", err)
+		}
+		return nil
+	})
+	group.Go(func() error {
+		var err error
+		serviceItems, err = c.listKubeResources(groupCtx, "/api/v1/services")
+		if err != nil {
+			return fmt.Errorf("list kubernetes services: %w", err)
+		}
+		return nil
+	})
+	group.Go(func() error {
+		var err error
+		endpointItems, err = c.listKubeResources(groupCtx, "/api/v1/endpoints")
+		if err != nil {
+			return fmt.Errorf("list kubernetes endpoints: %w", err)
+		}
+		return nil
+	})
+	if err := group.Wait(); err != nil {
+		return managedAppKubeSnapshot{}, err
+	}
+
+	snapshot := managedAppKubeSnapshot{
+		namespaces:  make(map[string]struct{}, len(namespaceItems)),
+		deployments: make(map[string]kubeDeploymentRuntimeEvidence, len(deploymentItems)),
+		services:    make(map[string]struct{}, len(serviceItems)),
+		endpoints:   make(map[string]kubeEndpointRuntimeEvidence, len(endpointItems)),
+	}
+	for _, raw := range namespaceItems {
+		if name := kubeObjectNamespaceOrName(raw, ""); name != "" {
+			snapshot.namespaces[name] = struct{}{}
+		}
+	}
+	for _, raw := range deploymentItems {
+		var deployment kubeDeploymentRuntimeEvidence
+		if err := decodeKubeObject(raw, &deployment); err != nil {
+			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes deployment: %w", err)
+		}
+		key := kubeNamespacedKey(deployment.Metadata.Namespace, deployment.Metadata.Name)
+		if key == "/" {
+			continue
+		}
+		snapshot.deployments[key] = deployment
+	}
+	for _, raw := range serviceItems {
+		key := kubeObjectNamespacedKey(raw)
+		if key != "/" {
+			snapshot.services[key] = struct{}{}
+		}
+	}
+	for _, raw := range endpointItems {
+		metadata := kubeObjectMetadata(raw)
+		key := kubeNamespacedKey(metadata.namespace, metadata.name)
+		if key == "/" {
+			continue
+		}
+		evidence := kubeEndpointRuntimeEvidence{Present: true}
+		if subsets, ok := raw["subsets"].([]any); ok {
+			for _, rawSubset := range subsets {
+				subset, ok := rawSubset.(map[string]any)
+				if !ok {
+					continue
+				}
+				evidence.ReadyAddresses += kubeAddressCount(subset["addresses"])
+				evidence.NotReadyAddresses += kubeAddressCount(subset["notReadyAddresses"])
+			}
+		}
+		snapshot.endpoints[key] = evidence
+	}
+	return snapshot, nil
+}
+
+func decodeKubeObject(raw map[string]any, out any) error {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+type kubeObjectMetadataView struct {
+	name      string
+	namespace string
+}
+
+func kubeObjectMetadata(raw map[string]any) kubeObjectMetadataView {
+	metadata, _ := raw["metadata"].(map[string]any)
+	name, _ := metadata["name"].(string)
+	namespace, _ := metadata["namespace"].(string)
+	return kubeObjectMetadataView{name: strings.TrimSpace(name), namespace: strings.TrimSpace(namespace)}
+}
+
+func kubeObjectNamespaceOrName(raw map[string]any, fallback string) string {
+	metadata := kubeObjectMetadata(raw)
+	if metadata.name != "" {
+		return metadata.name
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func kubeObjectNamespacedKey(raw map[string]any) string {
+	metadata := kubeObjectMetadata(raw)
+	return kubeNamespacedKey(metadata.namespace, metadata.name)
+}
+
+func kubeNamespacedKey(namespace, name string) string {
+	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
+}
+
+func kubeAddressCount(value any) int {
+	items, ok := value.([]any)
+	if !ok {
+		return 0
+	}
+	return len(items)
+}
+
 func (c *managedAppStatusClient) doJSON(ctx context.Context, apiPath string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+apiPath, nil)
 	if err != nil {
@@ -442,12 +671,14 @@ func (s *Server) overlayManagedAppStatusCached(app model.App) model.App {
 			found:       false,
 			ok:          true,
 			clusterID:   list.clusterID,
+			evidence:    list.evidence[strings.TrimSpace(app.ID)],
 			refreshedAt: list.refreshedAt,
 			expiresAt:   list.expiresAt,
 		}
 		if managed, found := list.items[strings.TrimSpace(app.ID)]; found {
 			entry.managed = managed
 			entry.found = true
+			entry.evidence = list.evidence[strings.TrimSpace(app.ID)]
 		}
 		return s.applyManagedAppObservation(app, entry, s.observationRuntimeByID([]model.App{app}), !listExpired, "")
 	}
@@ -495,14 +726,24 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		errorMessage = "live runtime observation is unavailable"
 	}
 	observed := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
-		ManagedApp:     entry.managed,
-		Found:          entry.found,
-		Complete:       complete,
-		Fresh:          fresh && complete,
-		ObservedAt:     entry.refreshedAt,
-		ClusterID:      entry.clusterID,
-		EvidenceSource: runtime.AppObservationSourceKubernetesAPI,
-		ErrorMessage:   errorMessage,
+		ManagedApp:              entry.managed,
+		Found:                   entry.found,
+		Complete:                complete,
+		Fresh:                   fresh && complete,
+		ObservedAt:              entry.refreshedAt,
+		ClusterID:               entry.clusterID,
+		EvidenceSource:          runtime.AppObservationSourceKubernetesAPI,
+		EvidenceSources:         entry.evidence.evidenceSources,
+		NamespacePresent:        entry.evidence.namespacePresent,
+		ServicePresent:          entry.evidence.servicePresent,
+		EndpointPresent:         entry.evidence.endpointPresent,
+		EndpointReady:           entry.evidence.endpointReady,
+		PhysicalReplicas:        entry.evidence.physicalReplicas,
+		PhysicalDesiredReplicas: entry.evidence.physicalDesiredReplicas,
+		ImagePresent:            entry.evidence.imagePresent,
+		ImageRef:                entry.evidence.imageRef,
+		InvariantViolations:     entry.evidence.invariantViolations,
+		ErrorMessage:            errorMessage,
 	})
 	return runtime.ApplyAppObservedStatus(app, observed)
 }
@@ -511,11 +752,13 @@ func (s *Server) applyManagedAppListObservation(apps []model.App, entry managedA
 	out := make([]model.App, 0, len(apps))
 	for _, app := range apps {
 		managed, found := entry.items[strings.TrimSpace(app.ID)]
+		evidence := entry.evidence[strings.TrimSpace(app.ID)]
 		out = append(out, s.applyManagedAppObservation(app, managedAppStatusCacheEntry{
 			managed:     managed,
 			found:       found,
 			ok:          entry.ok,
 			clusterID:   entry.clusterID,
+			evidence:    evidence,
 			refreshedAt: entry.refreshedAt,
 			expiresAt:   entry.expiresAt,
 		}, runtimeByID, fresh, errorMessage))
@@ -611,6 +854,175 @@ func (s *Server) shouldLogManagedAppStatusError(err error) bool {
 	return err != nil && !errors.Is(err, errManagedAppStatusClientUnavailable) && !errors.Is(err, errManagedAppStatusRefreshBackoff)
 }
 
+func (s *Server) buildManagedAppRuntimeEvidence(
+	app model.App,
+	managed runtime.ManagedAppObject,
+	found bool,
+	snapshot managedAppKubeSnapshot,
+) (managedAppRuntimeEvidence, error) {
+	evidence := managedAppRuntimeEvidence{
+		evidenceSources: []string{runtime.AppObservationSourceKubernetesAPI},
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	_, namespaceExists := snapshot.namespaces[strings.TrimSpace(namespace)]
+	namespacePresent := namespaceExists
+	evidence.namespacePresent = &namespacePresent
+
+	// Use the durable spec as the identity source. A found ManagedApp can
+	// carry a stale/foreign spec during a migration; its metadata identity is
+	// still authoritative for generation, while child names must remain tied
+	// to the app being observed.
+	serviceRequired := model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec)
+	deploymentRequired := app.Spec.Replicas > 0 || strings.TrimSpace(app.Spec.Image) != ""
+	serviceName := runtime.RuntimeAppServiceName(app)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	serviceKey := kubeNamespacedKey(namespace, serviceName)
+	deploymentKey := kubeNamespacedKey(namespace, deploymentName)
+
+	if serviceRequired {
+		_, serviceExists := snapshot.services[serviceKey]
+		servicePresent := serviceExists
+		evidence.servicePresent = &servicePresent
+		endpoint, endpointExists := snapshot.endpoints[serviceKey]
+		endpointPresent := endpointExists && endpoint.Present
+		endpointReady := endpointPresent && endpoint.ReadyAddresses > 0
+		evidence.endpointPresent = &endpointPresent
+		evidence.endpointReady = &endpointReady
+	}
+	if deploymentRequired {
+		deployment, deploymentExists := snapshot.deployments[deploymentKey]
+		physicalDesired := 0
+		physicalReady := 0
+		if deploymentExists {
+			if deployment.Spec.Replicas != nil {
+				physicalDesired = *deployment.Spec.Replicas
+			}
+			physicalReady = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
+		}
+		evidence.physicalDesiredReplicas = &physicalDesired
+		evidence.physicalReplicas = &physicalReady
+		if deploymentExists && (deployment.Metadata.Generation <= 0 || deployment.Status.ObservedGeneration < deployment.Metadata.Generation) {
+			evidence.invariantViolations = append(evidence.invariantViolations, "deployment_generation_unobserved")
+		}
+	}
+
+	imageRef := strings.TrimSpace(app.Spec.Image)
+	if imageRef == "" && found {
+		imageRef = strings.TrimSpace(managed.Spec.AppSpec.Image)
+	}
+	if imageRef != "" {
+		evidence.imageRef = imageRef
+		managedImage := strings.Contains(imageRef, "/fugue-apps/")
+		if managedImage && s != nil && s.store != nil {
+			present, err := s.currentManagedImagePresence(app, imageRef)
+			if err != nil {
+				return managedAppRuntimeEvidence{}, err
+			}
+			evidence.imagePresent = present
+			evidence.evidenceSources = append(evidence.evidenceSources, "image_location_store")
+		}
+		if deployment, deploymentExists := snapshot.deployments[deploymentKey]; deploymentExists &&
+			deployment.Metadata.Generation > 0 &&
+			deployment.Status.ObservedGeneration >= deployment.Metadata.Generation &&
+			maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas) > 0 {
+			deployedImage := firstDeploymentContainerImage(deployment)
+			if deployedImage != "" {
+				matches := deployedImage == imageRef
+				evidence.imagePresent = &matches
+				if !matches {
+					evidence.invariantViolations = append(evidence.invariantViolations, "current_image_mismatch")
+				}
+			}
+		}
+	}
+
+	// Record contradictions as explicit invariant evidence. The calculator
+	// decides the observed phase; this list is never inferred from stored
+	// replicas alone.
+	if found && app.Spec.Replicas > 0 {
+		if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deployed") && managed.Status.ReadyReplicas == 0 {
+			evidence.invariantViolations = append(evidence.invariantViolations, "stored_deployed_but_observed_ready_zero")
+		}
+	}
+	return evidence, nil
+}
+
+func firstDeploymentContainerImage(deployment kubeDeploymentRuntimeEvidence) string {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if image := strings.TrimSpace(container.Image); image != "" {
+			return image
+		}
+	}
+	return ""
+}
+
+func (s *Server) currentManagedImagePresence(app model.App, imageRef string) (*bool, error) {
+	refs := []string{strings.TrimSpace(imageRef)}
+	if app.Source != nil {
+		refs = append(refs, strings.TrimSpace(app.Source.ResolvedImageRef), strings.TrimSpace(app.Source.ImageRef))
+	}
+	seenRefs := make(map[string]struct{}, len(refs))
+	cutoff := time.Now().UTC().Add(-defaultImageCacheInventoryTTL)
+	hasFreshNegative := false
+	hasFreshPending := false
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		if _, exists := seenRefs[ref]; exists {
+			continue
+		}
+		seenRefs[ref] = struct{}{}
+		for _, status := range []string{
+			model.ImageLocationStatusPresent,
+			model.ImageLocationStatusPulling,
+			model.ImageLocationStatusMissing,
+			model.ImageLocationStatusFailed,
+		} {
+			locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
+				TenantID: strings.TrimSpace(app.TenantID),
+				AppID:    strings.TrimSpace(app.ID),
+				ImageRef: ref,
+				Status:   status,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("list current image locations: %w", err)
+			}
+			for _, location := range locations {
+				observedAt := location.UpdatedAt.UTC()
+				if location.LastSeenAt != nil && location.LastSeenAt.After(observedAt) {
+					observedAt = location.LastSeenAt.UTC()
+				}
+				if observedAt.IsZero() || observedAt.Before(cutoff) {
+					continue
+				}
+				switch status {
+				case model.ImageLocationStatusPresent:
+					present := true
+					return &present, nil
+				case model.ImageLocationStatusPulling:
+					hasFreshPending = true
+				case model.ImageLocationStatusMissing, model.ImageLocationStatusFailed:
+					hasFreshNegative = true
+				}
+			}
+		}
+	}
+	if hasFreshPending {
+		return nil, nil
+	}
+	if hasFreshNegative {
+		present := false
+		return &present, nil
+	}
+	// No current physical report is unknown evidence, not proof that an image
+	// is missing.  This distinction keeps historical inventory gaps from
+	// turning healthy apps red while still failing closed on a fresh explicit
+	// missing/failed report.
+	return nil, nil
+}
+
 func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (managedAppStatusCacheEntry, error) {
 	client, err := s.managedAppStatusClient()
 	if err != nil {
@@ -636,13 +1048,32 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 	if confirmedClusterID != clusterID {
 		return managedAppStatusCacheEntry{}, fmt.Errorf("kubernetes cluster identity changed during managed app observation")
 	}
+	var evidence managedAppRuntimeEvidence
+	if s != nil && s.store != nil {
+		snapshot, snapshotErr := client.readRuntimeSnapshot(refreshCtx)
+		if snapshotErr != nil {
+			return managedAppStatusCacheEntry{}, snapshotErr
+		}
+		finalClusterID, finalErr := client.getClusterID(refreshCtx)
+		if finalErr != nil {
+			return managedAppStatusCacheEntry{}, finalErr
+		}
+		if finalClusterID != clusterID {
+			return managedAppStatusCacheEntry{}, fmt.Errorf("kubernetes cluster identity changed during runtime evidence observation")
+		}
+		evidence, err = s.buildManagedAppRuntimeEvidence(app, managed, found, snapshot)
+		if err != nil {
+			return managedAppStatusCacheEntry{}, err
+		}
+	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	entry := managedAppStatusCacheEntry{
 		managed:     managed,
 		found:       found,
 		ok:          true,
 		clusterID:   clusterID,
+		evidence:    evidence,
 		refreshedAt: now,
 		expiresAt:   now.Add(s.managedAppStatusCache.cacheTTL()),
 	}
@@ -705,16 +1136,78 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			return managedAppStatusListCacheEntry{}, fmt.Errorf("kubernetes cluster identity changed during managed app inventory observation")
 		}
 	}
+	evidenceByAppID := make(map[string]managedAppRuntimeEvidence)
+	if requireClusterIdentity && s != nil && s.store != nil {
+		snapshot, snapshotErr := client.readRuntimeSnapshot(refreshCtx)
+		if snapshotErr != nil {
+			return managedAppStatusListCacheEntry{}, snapshotErr
+		}
+		finalClusterID, finalErr := client.getClusterID(refreshCtx)
+		if finalErr != nil {
+			return managedAppStatusListCacheEntry{}, finalErr
+		}
+		if finalClusterID != clusterID {
+			return managedAppStatusListCacheEntry{}, fmt.Errorf("kubernetes cluster identity changed during runtime evidence observation")
+		}
+		var apps []model.App
+		if s != nil && s.store != nil {
+			apps, err = s.store.ListApps("", true)
+			if err != nil {
+				return managedAppStatusListCacheEntry{}, fmt.Errorf("list apps for runtime evidence: %w", err)
+			}
+		}
+		appsByID := make(map[string]model.App, len(apps))
+		for _, app := range apps {
+			appsByID[strings.TrimSpace(app.ID)] = app
+		}
+		for appID, managed := range items {
+			app, ok := appsByID[strings.TrimSpace(appID)]
+			if !ok {
+				continue
+			}
+			evidence, evidenceErr := s.buildManagedAppRuntimeEvidence(app, managed, true, snapshot)
+			if evidenceErr != nil {
+				return managedAppStatusListCacheEntry{}, evidenceErr
+			}
+			evidenceByAppID[appID] = evidence
+		}
+		// Complete absence is meaningful only for apps represented in the
+		// durable store. Their namespace/service/image evidence is still
+		// collected from the same successful snapshot.
+		for _, app := range apps {
+			appID := strings.TrimSpace(app.ID)
+			if appID == "" {
+				continue
+			}
+			if _, exists := evidenceByAppID[appID]; exists {
+				continue
+			}
+			evidence, evidenceErr := s.buildManagedAppRuntimeEvidence(app, runtime.ManagedAppObject{}, false, snapshot)
+			if evidenceErr != nil {
+				return managedAppStatusListCacheEntry{}, evidenceErr
+			}
+			evidenceByAppID[appID] = evidence
+		}
+	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	entry := managedAppStatusListCacheEntry{
 		items:       items,
+		evidence:    evidenceByAppID,
 		ok:          true,
 		clusterID:   clusterID,
 		refreshedAt: now,
 		expiresAt:   now.Add(s.managedAppStatusCache.cacheTTL()),
 	}
-	s.managedAppStatusCache.setList(entry)
+	// Only a cluster-identified inventory may populate the observed-status
+	// cache.  The backing-service inventory path intentionally predates the
+	// observed contract and may be used with a lightweight list-only client;
+	// allowing it to overwrite this cache would erase cluster identity and
+	// fresh runtime evidence, making Console/Edge report unknown or (worse)
+	// reuse an unrelated inventory as observed state.
+	if requireClusterIdentity {
+		s.managedAppStatusCache.setList(entry)
+	}
 	return entry, nil
 }
 

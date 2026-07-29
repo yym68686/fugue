@@ -805,6 +805,8 @@ func TestMaybeHandleAppProxyReturnsLiveFailureDetailsWhenReplicasAreUnavailable(
 	managed.Status.Phase = runtime.ManagedAppPhaseError
 	managed.Status.Message = "image pull backoff"
 	managed.Status.ReadyReplicas = 0
+	managed.Metadata.Generation = 1
+	managed.Status.ObservedGeneration = 1
 	now := time.Now()
 	server.managedAppStatusCache.setApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
 		managed:     managed,
