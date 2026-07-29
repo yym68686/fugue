@@ -367,7 +367,19 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.reconcileWorkspaceReplicationSource(ctx, client, app, ownerRef); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile workspace replication source: %w", err))
 	}
+	return s.syncManagedAppObservedStatus(ctx, client, namespace, managed, app, postgresPlacements, releaseKey, recoverStoredBaseline)
+}
 
+func (s *Service) syncManagedAppObservedStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	postgresPlacements map[string][]runtime.SchedulingConstraints,
+	releaseKey string,
+	recoverStoredBaseline bool,
+) error {
 	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read deployment status: %w", err))

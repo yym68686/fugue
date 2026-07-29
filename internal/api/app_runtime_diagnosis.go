@@ -183,22 +183,26 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		s.appendAppStrictDrainEvidence(r.Context(), clusterClient, logClient, app, namespace, pods, rawNamespaceEvents, &diagnosis)
 	}
 
-	podSummaries := summarizeAppDiagnosisPods(pods)
-	for _, summary := range podSummaries {
+	rootCausePods := activePods
+	if len(rootCausePods) == 0 {
+		rootCausePods = pods
+	}
+	podSummaries := summarizeAppDiagnosisPods(rootCausePods)
+	for _, summary := range summarizeAppDiagnosisPods(pods) {
 		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, summary)
 	}
 	crashLogEvidence := ""
 	if len(podSummaries) > 0 {
-		if pod := newestProblemPod(pods); pod != nil {
+		if pod := newestProblemPod(rootCausePods); pod != nil {
 			crashLogEvidence = readAppDiagnosisCrashEvidence(r.Context(), logClient, namespace, *pod)
 		}
 	}
-	processExitSummary := newestServiceProcessExitSummary(pods)
+	processExitSummary := newestServiceProcessExitSummary(rootCausePods)
 
 	evictedPod := newestEvictedPod(pods)
-	schedulingEvent := newestFailedSchedulingEventForPods(rawNamespaceEvents, pods)
+	schedulingEvent := newestFailedSchedulingEventForPods(rawNamespaceEvents, rootCausePods)
 	volumeAffinityConflict := schedulingEvent != nil && containsVolumeAffinityConflict(schedulingEvent.Message)
-	sameNodeMountEvent := newestSameNodeOnlineMountUnsupportedEventForPods(rawNamespaceEvents, pods)
+	sameNodeMountEvent := newestSameNodeOnlineMountUnsupportedEventForPods(rawNamespaceEvents, rootCausePods)
 	if schedulingEvent != nil {
 		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "scheduling: "+strings.TrimSpace(schedulingEvent.Message))
 	}
@@ -207,7 +211,14 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	}
 
 	var nodeSnapshot *clusterNodeSnapshot
-	if evictedPod != nil {
+	activeProblemPod := newestProblemPod(activePods)
+	if evictedPod != nil && volumeAffinityConflict {
+		diagnosis.ImplicatedNode = strings.TrimSpace(evictedPod.Spec.NodeName)
+		diagnosis.ImplicatedPod = strings.TrimSpace(evictedPod.Metadata.Name)
+	} else if activeProblemPod != nil {
+		diagnosis.ImplicatedNode = strings.TrimSpace(activeProblemPod.Spec.NodeName)
+		diagnosis.ImplicatedPod = strings.TrimSpace(activeProblemPod.Metadata.Name)
+	} else if evictedPod != nil {
 		diagnosis.ImplicatedNode = strings.TrimSpace(evictedPod.Spec.NodeName)
 		diagnosis.ImplicatedPod = strings.TrimSpace(evictedPod.Metadata.Name)
 	}
@@ -307,6 +318,17 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			"runtime pod is pending because Kubernetes could not schedule it",
 		)
 		diagnosis.Hint = buildAppDiagnosisHint(app, diagnosis.ImplicatedNode)
+	case len(activePods) > 0 && processExitSummary != "":
+		diagnosis.Category = "process-exited"
+		diagnosis.Summary = processExitSummary
+		diagnosis.Hint = fmt.Sprintf("Configure a startup command for %s that keeps the service process running, then redeploy.", strings.TrimSpace(app.Name))
+	case len(activePods) > 0 && len(podSummaries) > 0:
+		diagnosis.Category = "pod-failure"
+		diagnosis.Summary = podSummaries[0]
+		diagnosis.Hint = fmt.Sprintf("Inspect pod history with fugue app logs pods %s and runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
+		if crashLogEvidence != "" {
+			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, crashLogEvidence)
+		}
 	case evictedPod != nil && nodeSnapshot != nil && clusterNodeConditionIsTrue(nodeSnapshot.node, clusterNodeConditionDisk):
 		diagnosis.Category = "evicted-disk-pressure"
 		diagnosis.Summary = fmt.Sprintf(

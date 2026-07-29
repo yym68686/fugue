@@ -980,9 +980,11 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.waitForOptionalOperation(client, &response.Operation, opts.Wait); err != nil {
+			finalOperation, err := c.waitForAppRebuildOperation(client, app.ID, response.Operation, opts.Wait)
+			if err != nil {
 				return err
 			}
+			response.Operation = finalOperation
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
 					"app_id":    app.ID,
@@ -1008,6 +1010,40 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.ClearFiles, "clear-files", false, "Remove declarative app files before rebuilding")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
 	return cmd
+}
+
+func (c *CLI) waitForAppRebuildOperation(client *Client, appID string, operation model.Operation, wait bool) (model.Operation, error) {
+	if !wait {
+		return operation, nil
+	}
+	_, finalOperation, err := c.waitForSingleAppOperation(client, appID, operation, true)
+	if err != nil {
+		return operation, err
+	}
+	if finalOperation == nil {
+		return operation, nil
+	}
+	operation = *finalOperation
+	if !strings.EqualFold(strings.TrimSpace(operation.Type), model.OperationTypeImport) ||
+		!strings.EqualFold(strings.TrimSpace(operation.Status), model.OperationStatusCompleted) {
+		return operation, nil
+	}
+	deployID := queuedDeployOperationID(operation.ResultMessage)
+	if deployID == "" {
+		return operation, nil
+	}
+	deployOperation, err := client.GetOperation(deployID)
+	if err != nil {
+		return operation, err
+	}
+	_, finalDeployOperation, err := c.waitForSingleAppOperation(client, appID, deployOperation, true)
+	if err != nil {
+		return operation, err
+	}
+	if finalDeployOperation != nil {
+		operation = *finalDeployOperation
+	}
+	return operation, nil
 }
 
 func (c *CLI) newAppReleaseDeployCommand() *cobra.Command {

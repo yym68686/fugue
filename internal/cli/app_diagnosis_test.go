@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,28 @@ func TestDescribePodIssueReportsExpectedImageMismatchWhenNoContainerMatches(t *t
 	issue := describePodIssue(pod, "registry.pull.example/fugue-apps/demo:git-newcommit")
 	if issue == "" {
 		t.Fatal("expected image mismatch issue")
+	}
+}
+
+func TestDescribePodIssueAttributesImageMismatchToAppContainerNotDrainAgent(t *testing.T) {
+	t.Parallel()
+
+	pod := model.ClusterPod{
+		Name:  "demo-ready",
+		Phase: "Running",
+		Ready: true,
+		Containers: []model.ClusterPodContainer{
+			{Name: "fugue-drain-agent", Image: "ghcr.io/example/drain-agent:current", Ready: true, State: "running"},
+			{Name: "demo", Image: "registry.example/fugue-apps/demo:serving", Ready: true, State: "running"},
+		},
+	}
+
+	issue := describePodIssue(pod, "registry.example/fugue-apps/demo:desired")
+	if !strings.Contains(issue, "container demo") {
+		t.Fatalf("expected mismatch to identify the app container, got %q", issue)
+	}
+	if strings.Contains(issue, "fugue-drain-agent") {
+		t.Fatalf("expected drain agent to be excluded from app-image comparison, got %q", issue)
 	}
 }
 

@@ -1163,6 +1163,44 @@ func TestRunAppStorageSetBuildsPersistentStorageSpec(t *testing.T) {
 	}
 }
 
+func TestRunAppStorageShowJSONRedactsAppAndMountSecrets(t *testing.T) {
+	t.Parallel()
+
+	const secret = "storage-show-secret-value"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"deployed","current_replicas":1}}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = fmt.Fprintf(w, `{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"env":{"TOKEN":%q},"persistent_storage":{"mode":"movable_rwo","storage_size":"1Gi","mounts":[{"kind":"file","path":"/run/secret","content":%q}]}},"status":{"phase":"deployed","current_replicas":1}}}`, secret, secret)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--json",
+		"app", "storage", "show", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app storage show: %v", err)
+	}
+	if strings.Contains(stdout.String(), secret) {
+		t.Fatalf("storage JSON leaked secret: %s", stdout.String())
+	}
+	if got := strings.Count(stdout.String(), redactedSecretValue); got < 1 {
+		t.Fatalf("expected app env to be redacted, got %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), `"content"`) {
+		t.Fatalf("expected secret mount content to be omitted, got %s", stdout.String())
+	}
+}
+
 func TestRunAppDatabaseSwitchoverUsesDatabaseEndpoint(t *testing.T) {
 	t.Parallel()
 
@@ -3858,6 +3896,50 @@ func TestRunAppRebuildCanClearFiles(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
+	}
+}
+
+func TestRunAppBuildWaitFollowsLinkedDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"deployed","current_replicas":1}}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/rebuild":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","type":"import","status":"pending"},"build":{"source_type":"github-public","build_strategy":"dockerfile"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","type":"import","status":"completed","result_message":"import build completed; queued deploy operation op_deploy"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_deploy":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_deploy","app_id":"app_123","type":"deploy","status":"completed","result_message":"managed app ready"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"deployed","current_replicas":1,"last_operation_id":"op_deploy"}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--json",
+		"app", "build", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app build --wait: %v", err)
+	}
+	var payload struct {
+		Operation model.Operation `json:"operation"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode app build output: %v\n%s", err, stdout.String())
+	}
+	if payload.Operation.ID != "op_deploy" || payload.Operation.Status != model.OperationStatusCompleted {
+		t.Fatalf("expected --wait to return linked deploy terminal operation, got %+v", payload.Operation)
 	}
 }
 
