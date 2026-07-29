@@ -731,8 +731,8 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 		apiVersion, versionOK := artifact.Content["apiVersion"].(string)
 		kind, kindOK := artifact.Content["kind"].(string)
 		pass = versionOK && kindOK &&
-			strings.TrimSpace(apiVersion) == "image-plane.fugue.dev/v1" &&
-			strings.TrimSpace(kind) == "ImageReplicationPlan"
+			strings.TrimSpace(apiVersion) == model.ImagePlaneAPIVersionV1 &&
+			strings.TrimSpace(kind) == model.ImageReplicationPlanKind
 		message = "image replication plans must use the image-plane.fugue.dev/v1 ImageReplicationPlan envelope"
 	}
 	return model.PlatformArtifactValidationResult{

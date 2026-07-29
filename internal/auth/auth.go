@@ -99,6 +99,12 @@ func (a *Authenticator) RequireNodeUpdater(next http.Handler) http.Handler {
 
 func (a *Authenticator) RequirePlatformComponent(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Platform-component responses carry short-lived identity-bound state or
+		// acknowledgements. Apply no-store before authentication so even 401
+		// responses cannot be retained by an intermediary and replayed across a
+		// credential rotation boundary.
+		w.Header().Set("Cache-Control", "private, no-store, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
 		claims, err := a.authenticatePlatformComponentRequest(r, time.Now().UTC())
 		if err != nil {
 			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")

@@ -15,15 +15,15 @@ func TestImageReplicationPlanArtifactRequiresVersionedEnvelope(t *testing.T) {
 	}{
 		"v1 envelope": {
 			content: map[string]any{
-				"apiVersion": "image-plane.fugue.dev/v1",
-				"kind":       "ImageReplicationPlan",
+				"apiVersion": model.ImagePlaneAPIVersionV1,
+				"kind":       model.ImageReplicationPlanKind,
 			},
 			pass: true,
 		},
 		"additive v1 field": {
 			content: map[string]any{
-				"apiVersion": "image-plane.fugue.dev/v1",
-				"kind":       "ImageReplicationPlan",
+				"apiVersion": model.ImagePlaneAPIVersionV1,
+				"kind":       model.ImageReplicationPlanKind,
 				"metadata":   map[string]any{"source": "shadow"},
 			},
 			pass: true,

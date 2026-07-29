@@ -58,6 +58,8 @@ tags:
     description: Runtime agent control-plane endpoints.
   - name: Node Updater
     description: Host-level updater enrollment, heartbeat, and maintenance task endpoints.
+  - name: Image Plane
+    description: Node-bound image-cache desired-state and recovery endpoints.
 paths:
   /button.svg:
     get:
@@ -2256,6 +2258,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PlatformStateArtifactResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/image-plane/replication-plan:
+    get:
+      operationId: getImageReplicationPlanState
+      summary: Pull Node-Bound Image Replication Plan State
+      description: |-
+        Returns only the image_replication_plan state for the node and scope embedded in the verified
+        image-cache component credential. The release channel is fixed to shadow. Callers cannot select
+        another scope, node, artifact kind, or release channel. The optional long poll is bounded to 30 seconds.
+      tags: [Image Plane]
+      x-fugue-handler: handleGetImageReplicationPlanState
+      security:
+        - PlatformComponentBearerAuth: []
+      parameters:
+        - in: query
+          name: current_generation
+          required: false
+          schema:
+            type: string
+            maxLength: 256
+        - in: query
+          name: wait_seconds
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 30
+            default: 0
+      responses:
+        '200':
+          description: Node-bound shadow desired state and signed last-known-good recovery input.
+          headers:
+            Cache-Control:
+              description: Prevents shared or private caches from retaining component desired state.
+              schema:
+                type: string
+                example: private, no-store, max-age=0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicationPlanStateResponse"
+        '400':
+          $ref: "#/components/responses/ErrorResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '403':
+          $ref: "#/components/responses/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/platform-state/consumers/heartbeat:
@@ -27700,6 +27751,48 @@ components:
           type: string
         waited:
           type: boolean
+    ImageReplicationPlanStateResponse:
+      type: object
+      additionalProperties: false
+      required: [api_version, kind, component, node_id, scope_key, artifact_kind, release_channel, generation, waited, server_time]
+      properties:
+        api_version:
+          type: string
+          enum: [image-plane.fugue.dev/v1]
+        kind:
+          type: string
+          enum: [ImageReplicationPlanState]
+        component:
+          type: string
+          enum: [image-cache]
+        node_id:
+          type: string
+        scope_key:
+          type: string
+          pattern: '^node:.+$'
+        artifact_kind:
+          type: string
+          enum: [image_replication_plan]
+        release_channel:
+          type: string
+          enum: [shadow]
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        release:
+          $ref: "#/components/schemas/PlatformArtifactRelease"
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
+        lkg_artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        expected_consumer_set_id:
+          type: string
+        generation:
+          type: string
+        waited:
+          type: boolean
+        server_time:
+          type: string
+          format: date-time
     PlatformConsumerHeartbeatResponse:
       type: object
       additionalProperties: false

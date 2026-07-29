@@ -323,6 +323,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/edge/tls/ask", http.HandlerFunc(s.handleEdgeTLSAsk))
 	mux.Handle("GET /v1/image-locations", s.auth.RequireAPI(http.HandlerFunc(s.handleListImageLocations)))
 	mux.Handle("POST /v1/image-locations", s.auth.RequireAPI(http.HandlerFunc(s.handleReportImageLocation)))
+	mux.Handle("GET /v1/image-plane/replication-plan", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetImageReplicationPlanState)))
 	mux.Handle("GET /v1/image-replication-tasks", s.auth.RequireAPI(http.HandlerFunc(s.handleListImageReplicationTasks)))
 	mux.Handle("POST /v1/image-replication-tasks", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateImageReplicationTask)))
 	mux.Handle("GET /v1/images", s.auth.RequireAPI(http.HandlerFunc(s.handleListImages)))

@@ -69,6 +69,9 @@ func TestRequirePlatformComponentRejectsOtherBearerCredentials(t *testing.T) {
 		if recorder.Code != http.StatusUnauthorized {
 			t.Fatalf("token %q: expected status %d, got %d", token, http.StatusUnauthorized, recorder.Code)
 		}
+		if recorder.Header().Get("Cache-Control") != "private, no-store, max-age=0" || recorder.Header().Get("Pragma") != "no-cache" {
+			t.Fatalf("token %q: platform-component auth response is cacheable: headers=%v", token, recorder.Header())
+		}
 		if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
 			t.Fatalf("token %q: expected JSON error response, got content type %q", token, contentType)
 		}
