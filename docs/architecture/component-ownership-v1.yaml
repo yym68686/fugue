@@ -24,6 +24,7 @@ components:
       - cmd/fugue-component-plan
       - cmd/fugue-release-control
       - Dockerfile.release-control
+      - deploy/helm/fugue-release-control
       - docs/architecture
       - internal/componentmanifest
       - internal/platformcontrol

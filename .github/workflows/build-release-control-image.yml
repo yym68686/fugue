@@ -5,6 +5,7 @@ on:
     paths:
       - Dockerfile.release-control
       - cmd/fugue-release-control/**
+      - deploy/helm/fugue-release-control/**
       - internal/bundleauth/**
       - internal/componentmanifest/**
       - internal/compositecoordinator/**
@@ -20,6 +21,7 @@ on:
     paths:
       - Dockerfile.release-control
       - cmd/fugue-release-control/**
+      - deploy/helm/fugue-release-control/**
       - internal/bundleauth/**
       - internal/componentmanifest/**
       - internal/compositecoordinator/**
@@ -54,6 +56,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
       - name: Test the independent dependency closure
         run: |
           set -euo pipefail
@@ -61,6 +68,17 @@ jobs:
           deps="$(go list -deps ./cmd/fugue-release-control)"
           if grep -Eq '^(database/sql|fugue/internal/(api|controller|store)|k8s.io/|github.com/jackc/pgx)' <<<"${deps}"; then
             echo 'release-control dependency boundary widened' >&2
+            exit 1
+          fi
+
+      - name: Validate the deployment-disabled chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-release-control
+          go test ./deploy/helm/fugue-release-control
+          rendered="$(helm template release-control deploy/helm/fugue-release-control)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled release-control chart rendered Kubernetes resources' >&2
             exit 1
           fi
 

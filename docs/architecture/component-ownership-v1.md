@@ -114,9 +114,21 @@ image running as numeric user/group `65532:65532`. The path-scoped
 `build release-control image` workflow has only `contents: read`, uses a
 release-control-specific concurrency group, builds with `--load`, and probes
 the local disabled image. It has no registry login, package write permission,
-push, promotion, Helm, or deploy step. Thus Gate A has an independently tested
-container artifact boundary but still no published image, Kubernetes object,
-service account, or production enablement.
+push, promotion, Helm install/upgrade, or deploy step. Thus Gate A has an
+independently tested container artifact boundary but still no published image,
+installed Kubernetes object, service account, or production enablement.
+
+`deploy/helm/fugue-release-control` is a separate chart rather than another
+template in the legacy `fugue` release. It renders no Kubernetes resources by
+default. Explicit enablement renders exactly one digest-pinned, non-root
+Deployment with no Service, ServiceAccount, RBAC, or Kubernetes API token. The
+desired spec and least-privilege observer token remain externally owned,
+separate Secrets mounted read-only with non-root-readable group permissions.
+The chart rejects multiple replicas until release-control has an independent
+durable leader lease, and its liveness remains separate from observation
+readiness so an API outage affects only this lane. CI only lints and renders
+the chart; there is still no chart packaging, installation, image publication,
+release dispatch, or production mutation.
 
 The explicit enablement contract is file-based and has no token environment
 variable: `FUGUE_RELEASE_CONTROL_ENABLED=true`,

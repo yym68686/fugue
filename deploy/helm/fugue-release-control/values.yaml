@@ -1,0 +1,42 @@
+# Gate A is deliberately inert. Enabling this chart still authorizes only the
+# component-plan shadow observation loop; it cannot promote or deploy a release.
+enabled: false
+
+# Only one reconciler may run until release-control owns an independent durable
+# leader lease. The template rejects any value other than exactly one.
+replicaCount: 1
+
+image:
+  # Enabling the chart requires a fully qualified repository and an immutable
+  # lowercase sha256 digest. Mutable tags are intentionally unsupported.
+  repository: ""
+  digest: ""
+
+api:
+  # Fugue API root used by the least-privilege adapter. The adapter appends its
+  # versioned /v1 paths, so do not include /v1 here unless a proxy requires it.
+  baseURL: ""
+
+spec:
+  # This chart never creates the desired ComponentPlanSpec Secret.
+  existingSecret:
+    name: ""
+    key: component-plan.json
+
+token:
+  # This chart never creates the scoped observer credential Secret. Keep it
+  # separate from the spec Secret so desired state cannot carry credentials.
+  existingSecret:
+    name: ""
+    key: token
+
+runtime:
+  # Durations are intentionally restricted to bounded whole seconds so a bad
+  # value is rejected by Helm instead of creating a crash-looping Pod.
+  reconcileInterval: 30s
+  attemptTimeout: 45s
+  requestTimeout: 10s
+  shutdownTimeout: 10s
+  maxResponseBytes: "2097152"
+
+imagePullSecrets: []

@@ -51,9 +51,13 @@ func TestReleaseControlImageWorkflowIsPathScopedBuildOnly(t *testing.T) {
 	for _, required := range []string{
 		"Dockerfile.release-control",
 		"cmd/fugue-release-control/**",
+		"deploy/helm/fugue-release-control/**",
 		"internal/releasecontrol/**",
 		"scripts/test_release_control_image.sh",
+		"azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310",
 		"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+		"helm lint deploy/helm/fugue-release-control",
+		"helm template release-control deploy/helm/fugue-release-control",
 		"docker buildx build",
 		"--load",
 	} {
@@ -70,7 +74,11 @@ func TestReleaseControlImageWorkflowIsPathScopedBuildOnly(t *testing.T) {
 		"environment: production",
 		"workflow_dispatch",
 		"kubectl ",
-		"helm ",
+		"helm install",
+		"helm upgrade",
+		"helm uninstall",
+		"helm push",
+		"helm package",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("build-only workflow contains forbidden mutation %q", forbidden)

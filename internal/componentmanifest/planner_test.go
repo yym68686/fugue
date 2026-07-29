@@ -38,6 +38,7 @@ func TestPlanRepositoryReleaseControlOwnsMigrationPlanner(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	for _, changedPath := range []string{
 		"cmd/fugue-component-plan/main.go",
+		"deploy/helm/fugue-release-control/templates/deployment.yaml",
 		"docs/architecture/component-ownership-v1.yaml",
 		"internal/componentmanifest/artifact.go",
 	} {
