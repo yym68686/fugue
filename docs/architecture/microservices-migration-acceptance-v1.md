@@ -32,6 +32,9 @@ For one lane at a time:
 - A failed cell cannot write or restart objects in another cell.
 - Reconciliation is idempotent: replaying the same `(component, cell,
   generation)` intent produces no additional mutation.
+- Concurrent release-control workers replaying the same component-plan spec
+  converge on one shadow release ID, fencing token, lane version, message, and
+  status digest.
 - A lane-local rollback or retry does not cancel or supersede an unrelated
   lane's release.
 - Recovery is fail-closed when fencing, status handoff, evidence, or LKG is

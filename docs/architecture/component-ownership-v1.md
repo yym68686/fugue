@@ -66,6 +66,15 @@ go run ./cmd/fugue-component-plan \
 This only prints JSON. It does not submit the request or acquire a release
 fence.
 
+`internal/releasecontrol` is the first idempotent spec/status control-loop
+boundary. It accepts only a validated `component_release_plan` artifact whose
+ID, generation, and content hash match the supplied spec. Reconciliation uses
+the envelope idempotency key and the existing atomic lane fence to persist one
+shadow release status; replay returns the same release ID, fencing token, lane
+version, and status digest. The reconciler has no adapter or workflow dispatch
+capability and rejects any store result that claims a gray/full or bypassed
+release.
+
 The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination
 output includes the globally sorted lane/resource lock order and recovery lanes,
