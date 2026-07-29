@@ -2824,7 +2824,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "3d35c12775e7920f80ab629b983993629e979f201c70c0356a6dbadcc63be5ef")
+	assertWorkflowSourceDigest(t, data, "dc7feff8b1831daf2c8f82b5fba668ceb4551d58a18226ce70724f417f5bdf40")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2868,7 +2868,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
 		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "45c936e0acd042ba3f4e9a88249f49912b4825e52df413e2020d4a2224d1f8d2",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
-		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
+		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
 	})
 	workflowJobsNode := workflowMappingValue(t, workflowRootNode, "jobs")
@@ -3307,10 +3307,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 
 	deploy, ok := workflow.Jobs["deploy"]
-	if !ok || !containsWorkflowNeed(deploy.Needs, "release-baseline") || !containsWorkflowNeed(deploy.Needs, "release-gate") || !containsWorkflowNeed(deploy.Needs, "build") {
-		t.Fatal("control-plane deploy must wait for release-baseline, release-gate, and build")
+	if !ok || !containsWorkflowNeed(deploy.Needs, "release-input-guard") ||
+		!containsWorkflowNeed(deploy.Needs, "release-baseline") ||
+		!containsWorkflowNeed(deploy.Needs, "release-gate") || !containsWorkflowNeed(deploy.Needs, "build") {
+		t.Fatal("control-plane deploy must wait for release-input-guard, release-baseline, release-gate, and build")
 	}
-	const deployCondition = "${{ always() && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' }}"
+	const deployCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' }}"
 	if strings.TrimSpace(deploy.If) != deployCondition {
 		t.Fatalf("deploy condition must require every prerequisite success without bypass: got %q want %q", deploy.If, deployCondition)
 	}
@@ -4252,6 +4254,102 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 						t.Fatalf("validated successor statuses drifted: %+v", successor)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestControlPlaneFailureFreezeSettlementHarness(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	freeze := workflowStepByName(
+		t,
+		workflow.Jobs["freeze-release-lane-on-failure"],
+		"Disable release lane and cancel queued runs",
+	)
+	tests := []struct {
+		name         string
+		initialState string
+		mutate       string
+		putExit      string
+		wantPass     bool
+		wantWrites   string
+	}{
+		{name: "already disabled is settled without a rejected mutation", initialState: "disabled_manually", mutate: "false", putExit: "1", wantPass: true},
+		{name: "active lane is disabled", initialState: "active", mutate: "true", putExit: "0", wantPass: true, wantWrites: "PUT\n"},
+		{name: "lost disable response settles by readback", initialState: "active", mutate: "true", putExit: "23", wantPass: true, wantWrites: "PUT\n"},
+		{name: "unsettled disable fails closed", initialState: "active", mutate: "false", putExit: "23", wantPass: false, wantWrites: "PUT\nPUT\nPUT\nPUT\nPUT\n"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tempDir := t.TempDir()
+			mockBin := filepath.Join(tempDir, "bin")
+			if err := os.Mkdir(mockBin, 0o700); err != nil {
+				t.Fatalf("create mock bin: %v", err)
+			}
+			stateFile := filepath.Join(tempDir, "state")
+			mutationLog := filepath.Join(tempDir, "mutations")
+			if err := os.WriteFile(stateFile, []byte(test.initialState+"\n"), 0o600); err != nil {
+				t.Fatalf("write initial workflow state: %v", err)
+			}
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "sleep"), "#!/usr/bin/env bash\nexit 0\n")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "gh"), "#!/usr/bin/env bash\n"+
+				"set -euo pipefail\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/disable\"* ]]; then\n"+
+				"  printf 'PUT\\n' >>\"${MUTATION_LOG}\"\n"+
+				"  if [[ \"${MUTATE}\" == 'true' ]]; then printf 'disabled_manually\\n' >\"${STATE_FILE}\"; fi\n"+
+				"  exit \"${PUT_EXIT}\"\n"+
+				"fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/runs?status=\"* ]]; then exit 0; fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml\"* ]]; then cat \"${STATE_FILE}\"; exit 0; fi\n"+
+				"if [[ \"$*\" == *\"/actions/runs/\"*\"/cancel\"* ]]; then exit 0; fi\n"+
+				"exit 91\n")
+			command := exec.Command("bash", "-c", freeze.Run)
+			command.Env = append(os.Environ(),
+				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"STATE_FILE="+stateFile,
+				"MUTATION_LOG="+mutationLog,
+				"MUTATE="+test.mutate,
+				"PUT_EXIT="+test.putExit,
+				"CURRENT_RUN_ID=555",
+				"REPOSITORY=example/fugue",
+				"GH_TOKEN=test",
+			)
+			output, err := command.CombinedOutput()
+			if test.wantPass && err != nil {
+				t.Fatalf("failure-lane freeze settlement failed: %v output=%s", err, output)
+			}
+			if !test.wantPass && err == nil {
+				t.Fatalf("failure-lane freeze settlement unexpectedly passed: output=%s", output)
+			}
+			finalState, readErr := os.ReadFile(stateFile)
+			if readErr != nil {
+				t.Fatalf("read final workflow state: %v", readErr)
+			}
+			wantState := "disabled_manually"
+			if !test.wantPass {
+				wantState = test.initialState
+			}
+			if strings.TrimSpace(string(finalState)) != wantState {
+				t.Fatalf("final state = %q, want %q", finalState, wantState)
+			}
+			writes, readErr := os.ReadFile(mutationLog)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatalf("read mutation log: %v", readErr)
+			}
+			if string(writes) != test.wantWrites {
+				t.Fatalf("mutation calls = %q, want %q", writes, test.wantWrites)
 			}
 		})
 	}

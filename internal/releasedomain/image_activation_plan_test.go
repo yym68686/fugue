@@ -306,6 +306,7 @@ func TestBuildImageActivationReportPreservesAbsentNonImmutableTarget(t *testing.
 type md1OwnershipRule struct {
 	name   string
 	domain Domain
+	kind   string
 }
 
 func md1ActivationFixture(t *testing.T, baseRaw, targetRaw string, rules []md1OwnershipRule, artifacts []BuildArtifact) ImageActivationPlanInput {
@@ -364,13 +365,21 @@ func md1Ownership(rules []md1OwnershipRule) []byte {
 	}
 	result.WriteString("requiredBindings:\n  - releaseNamespace\nfileRules: []\nvalueRules: []\nobjectRules:\n")
 	for index, rule := range rules {
-		fmt.Fprintf(&result, "  - id: workload-%d\n    domain: %s\n    apiGroup: apps\n    version: v1\n    kind: Deployment\n    scope: Namespaced\n    namespace: ${releaseNamespace}\n    name: %s\n", index, rule.domain, rule.name)
+		kind := rule.kind
+		if kind == "" {
+			kind = "Deployment"
+		}
+		fmt.Fprintf(&result, "  - id: workload-%d\n    domain: %s\n    apiGroup: apps\n    version: v1\n    kind: %s\n    scope: Namespaced\n    namespace: ${releaseNamespace}\n    name: %s\n", index, rule.domain, kind, rule.name)
 	}
 	return []byte(result.String())
 }
 
 func md1Deployment(name, container, image string) string {
 	return fmt.Sprintf("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\n  namespace: fugue-system\nspec:\n  selector:\n    matchLabels:\n      app: %s\n  template:\n    metadata:\n      labels:\n        app: %s\n    spec:\n      containers:\n        - name: %s\n          image: %s\n", name, name, name, container, image)
+}
+
+func md1DaemonSet(name, container, image string) string {
+	return fmt.Sprintf("apiVersion: apps/v1\nkind: DaemonSet\nmetadata:\n  name: %s\n  namespace: fugue-system\nspec:\n  selector:\n    matchLabels:\n      app: %s\n  template:\n    metadata:\n      labels:\n        app: %s\n    spec:\n      containers:\n        - name: %s\n          image: %s\n", name, name, name, container, image)
 }
 
 func md1LabeledDeployment(name, container, component, image string) string {

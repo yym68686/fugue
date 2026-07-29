@@ -149,6 +149,307 @@ func TestActivationOperationalEvidenceUsesOnlyLiveRelativeActivations(t *testing
 	}
 }
 
+func TestActivationOperationalEvidenceAuthorizesExactDeferredImageCacheArtifact(t *testing.T) {
+	t.Parallel()
+
+	componentBase := strings.Repeat("6", 40)
+	changed, input, activationPlan, activationEvidence, rendered := operationalDeferredImageCacheFixture(t, componentBase)
+	build := func(
+		buildPlan BuildArtifactPlan,
+		plan ImageActivationPlan,
+		evidence ImageActivationEvidence,
+		rendered RenderedClassification,
+	) (OperationalDomainEvidence, error) {
+		return BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence(
+			changed, buildPlan, plan, evidence, rendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+	}
+
+	report, err := build(input.BuildPlan, activationPlan, activationEvidence, rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Policy != OperationalImageCacheConvergencePolicy ||
+		!report.AuthorizationEligible || report.Observation != OutcomeSingle ||
+		report.CandidateDomain != DomainImageCache ||
+		!equalDomains(report.ConsumerDomains, []Domain{DomainImageCache}) ||
+		!equalDomains(report.IntersectionDomains, []Domain{DomainImageCache}) || len(report.Issues) != 0 {
+		t.Fatalf("deferred image-cache report = %#v", report)
+	}
+	resolved, err := ActivateOperationalPlan(input.ReleasePlan, report)
+	if err != nil || resolved.Result != OutcomeSingle || resolved.SelectedDomain != DomainImageCache ||
+		!equalDomains(resolved.Domains, []Domain{DomainImageCache}) {
+		t.Fatalf("deferred image-cache activation = %#v err=%v", resolved, err)
+	}
+
+	tampered := report
+	tampered.ActivationWitness = append([]OperationalActivationWitness(nil), report.ActivationWitness...)
+	tamperedPlan := tampered.ActivationWitness[0].Plan
+	tamperedPlan.Activations = append([]ImageActivation(nil), tamperedPlan.Activations...)
+	tamperedPlan.Activations[0].Workload.Kind = "Deployment"
+	tamperedPlan.Digest = imageActivationPlanDigest(tamperedPlan)
+	tamperedEvidence := tampered.ActivationWitness[0].Evidence
+	tamperedEvidence.ResolvedImageActivationPlanDigest = tamperedPlan.Digest
+	tamperedEvidence.Digest = imageActivationEvidenceDigest(tamperedEvidence)
+	tampered.ActivationWitness[0].Plan = tamperedPlan
+	tampered.ActivationWitness[0].Evidence = tamperedEvidence
+	tampered.ImagePlanDigest = tamperedPlan.Digest
+	tampered.RenderedOnlyObservations = []RenderedOnlyOperationalObservation{
+		buildRenderedOnlyOperationalObservation(
+			tampered.ActivationWitness[0].BuildPlan,
+			tamperedPlan,
+			tamperedEvidence,
+			tampered.ActivationWitness[0].Rendered,
+			fixedOperationalBindings(),
+		),
+	}
+	tampered.Digest = operationalEvidenceDigest(tampered)
+	if err := VerifyOperationalDomainEvidence(tampered); err == nil ||
+		!strings.Contains(err.Error(), "authorized image-cache convergence witness is not exact") {
+		t.Fatalf("special policy accepted a drifted workload witness: %v", err)
+	}
+
+	driftedContext, err := NewClassificationContextEvidence(
+		"fugue-system",
+		map[string]string{
+			"imageCacheName":   "unbound-image-cache",
+			"releaseNamespace": "fugue-system",
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driftedDigests := input.ReleasePlan.Digests
+	driftedDigests.ClassificationContext = driftedContext
+	driftedConservative := BuildPlan(PlanInput{
+		Files: input.ReleasePlan.Files, Rendered: input.ReleasePlan.Rendered, Digests: driftedDigests,
+	})
+	driftedReport := report
+	driftedReport.PlanDigest = driftedConservative.PlanDigest
+	driftedReport.Digest = operationalEvidenceDigest(driftedReport)
+	if err := VerifyOperationalDomainEvidence(driftedReport); err != nil {
+		t.Fatalf("self-contained convergence report unexpectedly depends on external context: %v", err)
+	}
+	if _, err := ActivateOperationalPlan(driftedConservative, driftedReport); err == nil ||
+		!strings.Contains(err.Error(), "classification context mismatch") {
+		t.Fatalf("resolver accepted a workload outside the sealed imageCacheName binding: %v", err)
+	}
+
+	repeated, err := build(input.BuildPlan, activationPlan, activationEvidence, rendered)
+	if err != nil || !reflect.DeepEqual(repeated, report) {
+		t.Fatalf("prepare/apply report drifted\nfirst=%#v\nsecond=%#v\nerr=%v", report, repeated, err)
+	}
+	firstBytes, err := MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBytes, err := MarshalOperationalDomainEvidence(repeated)
+	if err != nil || !bytes.Equal(firstBytes, secondBytes) {
+		t.Fatalf("prepare/apply canonical bytes drifted: err=%v", err)
+	}
+	activation := report.ActivationWitness[0].Plan.Activations[0]
+	if activation.ForwardRenderedDigest == "" || activation.ReverseRenderedDigest == "" ||
+		activation.ForwardRenderedDigest == activation.ReverseRenderedDigest {
+		t.Fatalf("forward/reverse image-cache evidence is incomplete: %#v", activation)
+	}
+
+	t.Run("ordinary activation cannot claim the deferred component baseline", func(t *testing.T) {
+		t.Parallel()
+		report, err := BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+			changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.AuthorizationEligible || len(report.ConsumerDomains) != 0 ||
+			!containsOperationalIssue(report.Issues, "changed-package consumers do not cover every activated production domain") {
+			t.Fatalf("ordinary activation claimed convergence evidence: %#v", report)
+		}
+	})
+
+	t.Run("same release baseline remains rejected", func(t *testing.T) {
+		t.Parallel()
+		changed, input, plan, evidence, rendered := operationalDeferredImageCacheFixture(t, md0BaseCommit)
+		if report, err := BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence(
+			changed, input.BuildPlan, plan, evidence, rendered,
+			input.ReleasePlan.Digests.BaseManifest, input.ReleasePlan.Digests.TargetManifest,
+			digestBytesSHA256(input.TargetManifest), input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+		); err == nil {
+			t.Fatalf("same-baseline consumer gap emitted a convergence report: %#v", report)
+		}
+	})
+
+	t.Run("artifact digest drift fails closed", func(t *testing.T) {
+		t.Parallel()
+		drifted := input.BuildPlan
+		drifted.Artifacts = append([]BuildArtifact(nil), input.BuildPlan.Artifacts...)
+		drifted.Artifacts[0].ArtifactDigest = md0Digest("9")
+		drifted.Digest = buildArtifactPlanDigest(drifted)
+		if _, err := build(drifted, activationPlan, activationEvidence, rendered); err == nil {
+			t.Fatal("artifact digest drift unexpectedly authorized")
+		}
+	})
+
+	t.Run("activation domain drift fails closed", func(t *testing.T) {
+		t.Parallel()
+		drifted := activationPlan
+		drifted.Activations = append([]ImageActivation(nil), activationPlan.Activations...)
+		drifted.Activations[0].Domain = DomainControlPlane
+		drifted.Activations[0].Adapter, _ = fixedAdapterForDomain(DomainControlPlane)
+		drifted.Digest = imageActivationPlanDigest(drifted)
+		driftedEvidence := activationEvidence
+		driftedEvidence.ResolvedImageActivationPlanDigest = drifted.Digest
+		driftedEvidence.Digest = imageActivationEvidenceDigest(driftedEvidence)
+		report, err := build(input.BuildPlan, drifted, driftedEvidence, rendered)
+		if err == nil && report.AuthorizationEligible {
+			t.Fatalf("activation domain drift unexpectedly authorized: %#v", report)
+		}
+	})
+
+	t.Run("activation adapter drift fails closed", func(t *testing.T) {
+		t.Parallel()
+		drifted := activationPlan
+		drifted.Activations = append([]ImageActivation(nil), activationPlan.Activations...)
+		drifted.Activations[0].Adapter = "control_plane_release_adapter_control_plane"
+		drifted.Digest = imageActivationPlanDigest(drifted)
+		driftedEvidence := activationEvidence
+		driftedEvidence.ResolvedImageActivationPlanDigest = drifted.Digest
+		driftedEvidence.Digest = imageActivationEvidenceDigest(driftedEvidence)
+		if report, err := build(input.BuildPlan, drifted, driftedEvidence, rendered); err == nil && report.AuthorizationEligible {
+			t.Fatalf("activation adapter drift unexpectedly authorized: %#v", report)
+		}
+	})
+}
+
+func TestAuthorizedImageCacheConvergenceConsumerRequiresExactSingletonIdentity(t *testing.T) {
+	t.Parallel()
+
+	_, input, activationPlan, _, _ := operationalDeferredImageCacheFixture(t, strings.Repeat("6", 40))
+	context := input.ReleasePlan.Digests.ClassificationContext
+	assertDomains := func(
+		t *testing.T,
+		buildPlan BuildArtifactPlan,
+		activations []ImageActivation,
+		classificationContext ClassificationContextEvidence,
+		authorized bool,
+		want []Domain,
+	) {
+		t.Helper()
+		issues := make([]string, 0)
+		got := operationalConsumerDomainsFromActivations(
+			nil, buildPlan, activations, classificationContext, authorized, &issues,
+		)
+		if !equalDomains(got, want) || len(issues) != 0 {
+			t.Fatalf("consumer domains = %v issues=%v, want %v", got, issues, want)
+		}
+	}
+	assertDomains(t, input.BuildPlan, activationPlan.Activations, context, true, []Domain{DomainImageCache})
+
+	tests := []struct {
+		name       string
+		authorized bool
+		mutate     func(*BuildArtifactPlan, *[]ImageActivation, *ClassificationContextEvidence)
+	}{
+		{
+			name:       "ordinary dispatch",
+			authorized: false,
+		},
+		{
+			name:       "extra artifact",
+			authorized: true,
+			mutate: func(plan *BuildArtifactPlan, _ *[]ImageActivation, _ *ClassificationContextEvidence) {
+				plan.Artifacts = append(plan.Artifacts, BuildArtifact{Name: "controller"})
+			},
+		},
+		{
+			name:       "extra activation",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				*activations = append(*activations, (*activations)[0])
+			},
+		},
+		{
+			name:       "non image cache divergent artifact",
+			authorized: true,
+			mutate: func(plan *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				plan.Artifacts[0].Name = "controller"
+				(*activations)[0].ArtifactName = "controller"
+				(*activations)[0].Domain = DomainControlPlane
+				(*activations)[0].Adapter, _ = fixedAdapterForDomain(DomainControlPlane)
+			},
+		},
+		{
+			name:       "same component baseline",
+			authorized: true,
+			mutate: func(plan *BuildArtifactPlan, _ *[]ImageActivation, _ *ClassificationContextEvidence) {
+				plan.Artifacts[0].SourceBaseCommit = plan.BaseCommit
+			},
+		},
+		{
+			name:       "wrong workload api version",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				(*activations)[0].Workload.APIVersion = "extensions/v1beta1"
+			},
+		},
+		{
+			name:       "wrong workload kind",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				(*activations)[0].Workload.Kind = "Deployment"
+			},
+		},
+		{
+			name:       "wrong workload namespace",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				(*activations)[0].Workload.Namespace = "other-system"
+			},
+		},
+		{
+			name:       "wrong workload name with accepted suffix",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				(*activations)[0].Workload.Name = "unbound-image-cache"
+			},
+		},
+		{
+			name:       "wrong workload container",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, activations *[]ImageActivation, _ *ClassificationContextEvidence) {
+				(*activations)[0].Workload.Container = "sidecar"
+			},
+		},
+		{
+			name:       "missing image cache binding",
+			authorized: true,
+			mutate: func(_ *BuildArtifactPlan, _ *[]ImageActivation, context *ClassificationContextEvidence) {
+				context.Bindings = []ClassificationBinding{{Name: "releaseNamespace", Value: "fugue-system"}}
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			buildPlan := input.BuildPlan
+			buildPlan.Artifacts = append([]BuildArtifact(nil), input.BuildPlan.Artifacts...)
+			activations := append([]ImageActivation(nil), activationPlan.Activations...)
+			classificationContext := context
+			classificationContext.Bindings = append([]ClassificationBinding(nil), context.Bindings...)
+			if test.mutate != nil {
+				test.mutate(&buildPlan, &activations, &classificationContext)
+			}
+			assertDomains(t, buildPlan, activations, classificationContext, test.authorized, nil)
+		})
+	}
+}
+
 func TestResolveOperationalPlanAllowsExactBuiltOnlyZeroWithoutExecutionAuthorization(t *testing.T) {
 	base := md1Deployment("fugue-image-cache", "image-cache", "registry.example/image-cache:live")
 	input := md1ActivationFixture(
@@ -1040,6 +1341,83 @@ func operationalActivationV2Fixture(t *testing.T, includeEdge, unresolved bool) 
 		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
 		changes: []ChangedFile{{
 			Status: ChangeModified, Path: "internal/model/model.go", ConsumerDomains: domains,
+		}},
+	}
+	return changed, input, activationPlan, activationEvidence, rendered
+}
+
+func operationalDeferredImageCacheFixture(t *testing.T, componentBase string) (
+	ChangedFileEvidence,
+	ImageActivationPlanInput,
+	ImageActivationPlan,
+	ImageActivationEvidence,
+	RenderedClassification,
+) {
+	t.Helper()
+	digest := md0Digest("a")
+	base := md1DaemonSet(
+		"fugue-fugue-image-cache",
+		"image-cache",
+		"registry.example/image-cache:live",
+	)
+	target := md1DaemonSet(
+		"fugue-fugue-image-cache",
+		"image-cache",
+		"registry.example/image-cache@"+digest,
+	)
+	input := md1ActivationFixture(
+		t,
+		base,
+		target,
+		[]md1OwnershipRule{{
+			name: "fugue-fugue-image-cache", domain: DomainImageCache, kind: "DaemonSet",
+		}},
+		[]BuildArtifact{{
+			Name: "image_cache", SourceBaseCommit: componentBase, ArtifactDigest: digest,
+			ProvenanceDigest: md0Digest("1"), PublishedImageRef: "registry.example/image-cache@" + digest,
+		}},
+	)
+	context, err := NewClassificationContextEvidence(
+		"fugue-system",
+		map[string]string{
+			"imageCacheName":   "fugue-fugue-image-cache",
+			"releaseNamespace": "fugue-system",
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := input.ReleasePlan.Digests
+	digests.ClassificationContext = context
+	conservative := BuildPlan(PlanInput{
+		Files: FileClassification{Unknown: []Evidence{{
+			Source: "file", Subject: ".github/workflows/deploy-control-plane.yml",
+			Reason: "fixture keeps the release-wide classification conservative",
+		}}},
+		Rendered: input.ReleasePlan.Rendered,
+		Digests:  digests,
+	})
+	if conservative.Result != OutcomeUnknown {
+		t.Fatalf("deferred image-cache conservative result = %s, want unknown", conservative.Result)
+	}
+	input.ReleasePlan = conservative
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: conservative.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         conservative.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{
+			Status: ChangeModified, Path: ".github/workflows/deploy-control-plane.yml",
 		}},
 	}
 	return changed, input, activationPlan, activationEvidence, rendered

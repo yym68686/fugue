@@ -150,20 +150,21 @@ func parseOperationalImagePlanFlags(args []string) (operationalImagePlanOptions,
 }
 
 type operationalReportOptions struct {
-	changedEvidencePath         string
-	imagePlanPath               string
-	buildPlanPath               string
-	activationPlanPath          string
-	activationEvidencePath      string
-	ownershipPath               string
-	baseManifestPath            string
-	targetManifestPath          string
-	immutableTargetManifestPath string
-	planPath                    string
-	planDigest                  string
-	trustedBase                 string
-	trustedTarget               string
-	outputPath                  string
+	changedEvidencePath             string
+	imagePlanPath                   string
+	buildPlanPath                   string
+	activationPlanPath              string
+	activationEvidencePath          string
+	ownershipPath                   string
+	baseManifestPath                string
+	targetManifestPath              string
+	immutableTargetManifestPath     string
+	planPath                        string
+	planDigest                      string
+	trustedBase                     string
+	trustedTarget                   string
+	outputPath                      string
+	authorizedImageCacheConvergence bool
 }
 
 func runOperationalReport(args []string, _ io.Writer, stderr io.Writer) int {
@@ -308,7 +309,11 @@ func buildActivationOperationalReport(
 	activationRendered := releasedomain.ClassifyRendered(baseManifest, immutableTarget, spec, releasedomain.RenderedOptions{
 		DefaultNamespace: context.DefaultNamespace, Bindings: context.BindingMap(), IgnoreHelmTestHooks: false,
 	})
-	report, err := releasedomain.BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
+	buildReport := releasedomain.BuildOperationalDomainEvidenceFromRenderedOnlyActivation
+	if options.authorizedImageCacheConvergence {
+		buildReport = releasedomain.BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence
+	}
+	report, err := buildReport(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		digestOperationalInput(baseManifest), digestOperationalInput(targetManifest),
 		digestOperationalInput(immutableTarget), digestOperationalInput(ownership), plan,
@@ -336,20 +341,21 @@ func digestOperationalInput(data []byte) string {
 
 func parseOperationalReportFlags(args []string) (operationalReportOptions, error) {
 	allowed := map[string]struct{}{
-		"changed-evidence":          {},
-		"image-plan":                {},
-		"build-artifact-plan":       {},
-		"image-activation-plan":     {},
-		"image-activation-evidence": {},
-		"ownership":                 {},
-		"base-manifest":             {},
-		"target-manifest":           {},
-		"immutable-target-manifest": {},
-		"plan":                      {},
-		"plan-digest":               {},
-		"trusted-base":              {},
-		"trusted-target":            {},
-		"output":                    {},
+		"changed-evidence":                   {},
+		"image-plan":                         {},
+		"build-artifact-plan":                {},
+		"image-activation-plan":              {},
+		"image-activation-evidence":          {},
+		"ownership":                          {},
+		"base-manifest":                      {},
+		"target-manifest":                    {},
+		"immutable-target-manifest":          {},
+		"plan":                               {},
+		"plan-digest":                        {},
+		"trusted-base":                       {},
+		"trusted-target":                     {},
+		"output":                             {},
+		"authorized-image-cache-convergence": {},
 	}
 	seen := map[string]struct{}{}
 	for _, argument := range args {
@@ -389,6 +395,7 @@ func parseOperationalReportFlags(args []string) (operationalReportOptions, error
 	flags.StringVar(&options.trustedBase, "trusted-base", "", "trusted exact base commit")
 	flags.StringVar(&options.trustedTarget, "trusted-target", "", "trusted exact target commit")
 	flags.StringVar(&options.outputPath, "output", "", "private operational report path")
+	flags.BoolVar(&options.authorizedImageCacheConvergence, "authorized-image-cache-convergence", false, "source-run-authenticated image-cache convergence successor")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return operationalReportOptions{}, fmt.Errorf("invalid flags")
 	}
@@ -430,6 +437,9 @@ func parseOperationalReportFlags(args []string) (operationalReportOptions, error
 		}
 	} else if strings.TrimSpace(options.imagePlanPath) == "" || strings.TrimSpace(options.imagePlanPath) != options.imagePlanPath {
 		return operationalReportOptions{}, fmt.Errorf("--image-plan is required without surrounding whitespace")
+	}
+	if options.authorizedImageCacheConvergence && !activationMode {
+		return operationalReportOptions{}, fmt.Errorf("--authorized-image-cache-convergence requires activation evidence")
 	}
 	if options.outputPath == "-" {
 		return operationalReportOptions{}, fmt.Errorf("--output must be a file path")

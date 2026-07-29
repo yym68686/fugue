@@ -252,6 +252,40 @@ func TestOperationalReportRejectsDuplicateFlagsAndTrustedDrift(t *testing.T) {
 	}
 }
 
+func TestOperationalReportAuthorizedImageCacheConvergenceFlagRequiresActivationMode(t *testing.T) {
+	t.Parallel()
+
+	legacy := newOperationalCommandFixture(t).args()
+	legacy = append(legacy, "--authorized-image-cache-convergence")
+	if _, err := parseOperationalReportFlags(legacy); err == nil {
+		t.Fatal("legacy image-plan mode accepted the convergence authorization flag")
+	}
+
+	activation := []string{
+		"--changed-evidence", "changed.json",
+		"--build-artifact-plan", "build.json",
+		"--image-activation-plan", "activation.json",
+		"--image-activation-evidence", "activation-evidence.json",
+		"--ownership", "ownership.yaml",
+		"--base-manifest", "base.yaml",
+		"--target-manifest", "target.yaml",
+		"--immutable-target-manifest", "immutable.yaml",
+		"--plan", "plan.json",
+		"--plan-digest", "sha256:test",
+		"--trusted-base", strings.Repeat("a", 40),
+		"--trusted-target", strings.Repeat("b", 40),
+		"--output", "report.json",
+	}
+	ordinary, err := parseOperationalReportFlags(activation)
+	if err != nil || ordinary.authorizedImageCacheConvergence {
+		t.Fatalf("ordinary activation flags = %#v err=%v", ordinary, err)
+	}
+	authorized, err := parseOperationalReportFlags(append(activation, "--authorized-image-cache-convergence"))
+	if err != nil || !authorized.authorizedImageCacheConvergence {
+		t.Fatalf("authorized activation flags = %#v err=%v", authorized, err)
+	}
+}
+
 func TestOperationalReportRefusesInputOutputAlias(t *testing.T) {
 	fixture := newOperationalCommandFixture(t)
 	args := fixture.args()

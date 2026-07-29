@@ -24,6 +24,7 @@ const (
 	OperationalActivationEvidencePolicy     = "consumer-activation-render-adapter-intersection-v2"
 	OperationalActivationReportPolicy       = "consumer-activation-render-adapter-intersection-v3-report-only"
 	OperationalRenderedOnlyActivationPolicy = "consumer-activation-render-adapter-intersection-v4-rendered-only"
+	OperationalImageCacheConvergencePolicy  = "authorized-image-cache-convergence-v1"
 	OperationalRenderedOnlyPolicy           = "empty-build-activation-render-adapter-v1"
 	operationalRenderedOnlyMismatchIssue    = "image activation domains differ from immutable rendered-object domains"
 
@@ -355,7 +356,7 @@ func BuildOperationalDomainEvidenceFromActivation(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalActivationEvidencePolicy,
+		ownershipDigest, plan, OperationalActivationEvidencePolicy, false,
 	)
 }
 
@@ -378,7 +379,7 @@ func BuildOperationalDomainEvidenceFromActivationReportOnly(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalActivationReportPolicy,
+		ownershipDigest, plan, OperationalActivationReportPolicy, false,
 	)
 }
 
@@ -401,7 +402,37 @@ func BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalRenderedOnlyActivationPolicy,
+		ownershipDigest, plan, OperationalRenderedOnlyActivationPolicy, false,
+	)
+}
+
+// BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence is the
+// narrow staged-successor variant. Callers must first authenticate the source
+// run's convergence artifact; this constructor still requires the sealed
+// build and activation witnesses to prove one deferred image-cache transition.
+func BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence(
+	changed ChangedFileEvidence,
+	buildPlan BuildArtifactPlan,
+	activationPlan ImageActivationPlan,
+	activationEvidence ImageActivationEvidence,
+	activationRendered RenderedClassification,
+	baseManifestDigest string,
+	targetManifestDigest string,
+	immutableTargetManifestDigest string,
+	ownershipDigest string,
+	plan Plan,
+) (OperationalDomainEvidence, error) {
+	if !authorizedImageCacheConvergenceWitnessMatches(buildPlan, activationPlan.Activations) ||
+		!authorizedImageCacheConvergenceContextMatches(
+			activationPlan.Activations[0].Workload,
+			plan.Digests.ClassificationContext,
+		) {
+		return OperationalDomainEvidence{}, fmt.Errorf("authorized image-cache convergence witness is not exact")
+	}
+	return buildOperationalDomainEvidenceFromActivation(
+		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
+		ownershipDigest, plan, OperationalImageCacheConvergencePolicy, true,
 	)
 }
 
@@ -417,6 +448,7 @@ func buildOperationalDomainEvidenceFromActivation(
 	ownershipDigest string,
 	plan Plan,
 	policy string,
+	authorizedImageCacheConvergence bool,
 ) (OperationalDomainEvidence, error) {
 	if err := VerifyBuildArtifactPlan(buildPlan); err != nil {
 		return OperationalDomainEvidence{}, fmt.Errorf("operational activation build plan: %w", err)
@@ -475,7 +507,11 @@ func buildOperationalDomainEvidenceFromActivation(
 		issues = append(issues, "rendered-object plan integrity failed: "+evidence.Subject+": "+evidence.Reason)
 	}
 	activationDomains := operationalActivationDomains(activationPlan.Activations, &issues)
-	consumerDomains := operationalConsumerDomainsFromActivations(changed.Changes(), activationPlan.Activations, &issues)
+	consumerDomains := operationalConsumerDomainsFromActivations(
+		changed.Changes(), buildPlan, activationPlan.Activations,
+		plan.Digests.ClassificationContext,
+		authorizedImageCacheConvergence, &issues,
+	)
 	activationRendered.Domains = canonicalDomains(activationRendered.Domains)
 	activationRendered.Evidence = canonicalEvidence(activationRendered.Evidence)
 	// Unknown is optional on RenderedClassification. Preserve its canonical
@@ -529,7 +565,8 @@ func buildOperationalDomainEvidenceFromActivation(
 		ConservativeDomains: canonicalDomains(plan.Domains), ConservativeDomain: plan.SelectedDomain,
 		Observation: OutcomeUnknown, Issues: issues, ActivationWitness: []OperationalActivationWitness{witness},
 	}
-	if policy == OperationalActivationReportPolicy || policy == OperationalRenderedOnlyActivationPolicy {
+	if policy == OperationalActivationReportPolicy || policy == OperationalRenderedOnlyActivationPolicy ||
+		policy == OperationalImageCacheConvergencePolicy {
 		observation := buildRenderedOnlyOperationalObservation(
 			buildPlan, activationPlan, activationEvidence, activationRendered, bindings,
 		)
@@ -595,7 +632,8 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 	if report.APIVersion != OperationalEvidenceAPIVersion || report.Kind != OperationalEvidenceKind ||
 		(report.Policy != OperationalEvidencePolicy && report.Policy != OperationalActivationEvidencePolicy &&
 			report.Policy != OperationalActivationReportPolicy &&
-			report.Policy != OperationalRenderedOnlyActivationPolicy) {
+			report.Policy != OperationalRenderedOnlyActivationPolicy &&
+			report.Policy != OperationalImageCacheConvergencePolicy) {
 		return fmt.Errorf("operational domain evidence identity is unsupported")
 	}
 	if err := validateTrustedGitCommit(report.BaseCommit, "operational evidence base commit"); err != nil {
@@ -644,7 +682,8 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 		if err := VerifyOperationalImageRolloutPlan(embeddedImagePlan); err != nil {
 			return fmt.Errorf("operational evidence embedded image plan: %w", err)
 		}
-	case OperationalActivationEvidencePolicy, OperationalActivationReportPolicy, OperationalRenderedOnlyActivationPolicy:
+	case OperationalActivationEvidencePolicy, OperationalActivationReportPolicy,
+		OperationalRenderedOnlyActivationPolicy, OperationalImageCacheConvergencePolicy:
 		if len(report.ActivationWitness) != 1 {
 			return fmt.Errorf("operational activation evidence requires one exact witness")
 		}
@@ -669,6 +708,11 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 			if !reflect.DeepEqual(report.RenderedOnlyObservations[0], expected) {
 				return fmt.Errorf("v3 operational rendered-only observation mismatch")
 			}
+		}
+	}
+	if report.Policy == OperationalImageCacheConvergencePolicy {
+		if err := verifyAuthorizedImageCacheConvergenceReport(report); err != nil {
+			return err
 		}
 	}
 	if !reflect.DeepEqual(report.AdapterBindings, fixedOperationalBindings()) {
@@ -902,7 +946,8 @@ func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence)
 		return Plan{}, fmt.Errorf("operational activation single-domain evidence mismatch")
 	}
 	if report.Policy == OperationalActivationEvidencePolicy || report.Policy == OperationalActivationReportPolicy ||
-		report.Policy == OperationalRenderedOnlyActivationPolicy {
+		report.Policy == OperationalRenderedOnlyActivationPolicy ||
+		report.Policy == OperationalImageCacheConvergencePolicy {
 		witness := report.ActivationWitness[0]
 		if witness.BaseManifestDigest != conservative.Digests.BaseManifest ||
 			witness.TargetManifestDigest != conservative.Digests.TargetManifest ||
@@ -911,6 +956,13 @@ func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence)
 			witness.BuildPlan.ChangedFilesDigest != conservative.Digests.ChangedFiles {
 			return Plan{}, fmt.Errorf("operational activation immutable rendered witness mismatch")
 		}
+	}
+	if report.Policy == OperationalImageCacheConvergencePolicy &&
+		!authorizedImageCacheConvergenceContextMatches(
+			report.ActivationWitness[0].Plan.Activations[0].Workload,
+			conservative.Digests.ClassificationContext,
+		) {
+		return Plan{}, fmt.Errorf("authorized image-cache convergence classification context mismatch")
 	}
 	rebuiltConservative := BuildPlan(PlanInput{
 		Files: conservative.Files, Rendered: conservative.Rendered, Digests: conservative.Digests,
@@ -1094,7 +1146,14 @@ func operationalConsumerDomains(changes []ChangedFile, targets []OperationalImag
 	return domainsFromSet(set)
 }
 
-func operationalConsumerDomainsFromActivations(changes []ChangedFile, activations []ImageActivation, issues *[]string) []Domain {
+func operationalConsumerDomainsFromActivations(
+	changes []ChangedFile,
+	buildPlan BuildArtifactPlan,
+	activations []ImageActivation,
+	classificationContext ClassificationContextEvidence,
+	authorizedImageCacheConvergence bool,
+	issues *[]string,
+) []Domain {
 	activatedArtifacts := make(map[string]map[Domain]struct{})
 	for _, activation := range activations {
 		domains := activatedArtifacts[activation.ArtifactName]
@@ -1126,7 +1185,76 @@ func operationalConsumerDomainsFromActivations(changes []ChangedFile, activation
 			}
 		}
 	}
+	// A staged image-cache convergence successor activates an artifact whose
+	// component baseline deliberately predates the release-wide baseline. The
+	// release-wide changed-file witness therefore cannot contain the source
+	// delta that selected image_cache. Admit that one missing consumer only
+	// when the sealed build and activation witnesses prove the exact singleton
+	// image-cache transition. Ordinary same-baseline activations and every
+	// other artifact still require changed-package consumer evidence.
+	if authorizedImageCacheConvergence &&
+		authorizedImageCacheConvergenceWitnessMatches(buildPlan, activations) &&
+		authorizedImageCacheConvergenceContextMatches(activations[0].Workload, classificationContext) {
+		set[DomainImageCache] = struct{}{}
+	}
 	return domainsFromSet(set)
+}
+
+func authorizedImageCacheConvergenceWitnessMatches(buildPlan BuildArtifactPlan, activations []ImageActivation) bool {
+	if len(buildPlan.Artifacts) != 1 || len(activations) != 1 {
+		return false
+	}
+	artifact := buildPlan.Artifacts[0]
+	activation := activations[0]
+	expectedAdapter, adapterExists := fixedAdapterForDomain(DomainImageCache)
+	return artifact.Name == "image_cache" && artifact.SourceBaseCommit != buildPlan.BaseCommit &&
+		activation.ArtifactName == artifact.Name && activation.ArtifactDigest == artifact.ArtifactDigest &&
+		activation.Domain == DomainImageCache && adapterExists && activation.Adapter == expectedAdapter &&
+		activation.Workload.APIVersion == "apps/v1" && activation.Workload.Kind == "DaemonSet" &&
+		strings.TrimSpace(activation.Workload.Namespace) != "" &&
+		strings.TrimSpace(activation.Workload.Name) != "" &&
+		activation.Workload.Container == "image-cache"
+}
+
+func authorizedImageCacheConvergenceContextMatches(
+	workload ActivationWorkload,
+	context ClassificationContextEvidence,
+) bool {
+	bindings := context.BindingMap()
+	releaseNamespace := bindings["releaseNamespace"]
+	imageCacheName := bindings["imageCacheName"]
+	return strings.TrimSpace(releaseNamespace) != "" && releaseNamespace == context.DefaultNamespace &&
+		strings.TrimSpace(imageCacheName) != "" && workload.Namespace == releaseNamespace &&
+		workload.Name == imageCacheName
+}
+
+func verifyAuthorizedImageCacheConvergenceReport(report OperationalDomainEvidence) error {
+	if len(report.ActivationWitness) != 1 ||
+		!authorizedImageCacheConvergenceWitnessMatches(
+			report.ActivationWitness[0].BuildPlan,
+			report.ActivationWitness[0].Plan.Activations,
+		) {
+		return fmt.Errorf("authorized image-cache convergence witness is not exact")
+	}
+	if len(report.Issues) != 0 || report.Observation != OutcomeSingle ||
+		report.CandidateDomain != DomainImageCache || !report.AuthorizationEligible ||
+		!equalDomains(report.ImageRolloutDomains, []Domain{DomainImageCache}) ||
+		!equalDomains(report.RenderedDomains, []Domain{DomainImageCache}) ||
+		!equalDomains(report.AdapterDomains, []Domain{DomainImageCache}) ||
+		!equalDomains(report.IntersectionDomains, []Domain{DomainImageCache}) ||
+		!domainSetContains(report.ConsumerDomains, DomainImageCache) {
+		return fmt.Errorf("authorized image-cache convergence report does not prove one exact domain")
+	}
+	return nil
+}
+
+func domainSetContains(domains []Domain, wanted Domain) bool {
+	for _, domain := range domains {
+		if domain == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func operationalActivationDomains(activations []ImageActivation, issues *[]string) []Domain {

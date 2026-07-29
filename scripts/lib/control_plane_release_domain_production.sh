@@ -1502,7 +1502,7 @@ PY
   fi
   "${activation_plan_command[@]}" || return
 
-  "${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-report \
+  local -a operational_report_command=("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" operational-report \
     --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
     --build-artifact-plan "${activation_output}/build-artifact-plan.json" \
     --image-activation-plan "${activation_output}/image-activation-plan.json" \
@@ -1515,7 +1515,13 @@ PY
     --plan-digest "${plan_digest}" \
     --trusted-base "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" \
     --trusted-target "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" \
-    --output "${report_output}" || return
+    --output "${report_output}")
+  case "${FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE:-false}" in
+    false) ;;
+    true) operational_report_command+=(--authorized-image-cache-convergence) ;;
+    *) return 2 ;;
+  esac
+  "${operational_report_command[@]}" || return
 
   if [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" ]]; then
     control_plane_release_domain_compare_build_activation_reports \

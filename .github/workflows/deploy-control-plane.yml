@@ -518,10 +518,11 @@ jobs:
 
   deploy:
     needs:
+      - release-input-guard
       - release-baseline
       - release-gate
       - build
-    if: ${{ always() && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' }}
+    if: ${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' }}
     # The staged rollout needs room for backup/release coordination, bounded
     # rollback, and attribution upload. New budget env values are intentionally
     # harmless to the previous release script during the bootstrap deployment.
@@ -1865,14 +1866,19 @@ jobs:
 
           state=""
           for attempt in 1 2 3 4 5; do
-            if gh api --method PUT \
-              "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" \
-              >/dev/null 2>&1; then
-              state="$(gh api \
-                "repos/${REPOSITORY}/actions/workflows/${workflow_id}" \
-                --jq '.state' 2>/dev/null || true)"
-            fi
+            state="$(gh api \
+              "repos/${REPOSITORY}/actions/workflows/${workflow_id}" \
+              --jq '.state' 2>/dev/null || true)"
             [[ "${state}" == "disabled_manually" ]] && break
+            gh api --method PUT \
+              "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" \
+              >/dev/null 2>&1 || true
+            state="$(gh api \
+              "repos/${REPOSITORY}/actions/workflows/${workflow_id}" \
+              --jq '.state' 2>/dev/null || true)"
+            if [[ "${state}" == "disabled_manually" ]]; then
+              break
+            fi
             if (( attempt < 5 )); then
               echo "release lane disable is not confirmed; retrying attempt $((attempt + 1))/5" >&2
               sleep 2

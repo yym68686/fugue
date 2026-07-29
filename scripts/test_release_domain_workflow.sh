@@ -209,6 +209,16 @@ build_provenance = step(build, "Publish verified control-plane image provenance"
 end
 
 deploy = jobs.fetch("deploy")
+assert_equal(
+  needs(deploy),
+  ["release-input-guard", "release-baseline", "release-gate", "build"],
+  "deploy authorization dependencies",
+)
+assert_equal(
+  deploy.fetch("if"),
+  "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' }}",
+  "deploy authorization condition",
+)
 assert_equal(deploy["permissions"], {"actions" => "read", "contents" => "read"}, "deploy permissions")
 assert_equal(deploy["continue-on-error"], nil, "deploy continue-on-error")
 setup_go = step(deploy, "Setup Go")

@@ -1242,8 +1242,40 @@ case_operational_report_binds_build_target_before_dispatch() {
 	  "--image-activation-evidence"
 	assert_file_contains "${FAKE_LOG}" \
 	  "--immutable-target-manifest"
+	assert_file_not_contains "${FAKE_LOG}" \
+	  "--authorized-image-cache-convergence"
   assert_log_order "evidence:operational-report" "dispatch:verify:"
   assert_public_parent_and_cleanup
+}
+
+case_operational_report_convergence_flag_contract() {
+  setup_case
+  trap cleanup_case EXIT
+  FAKE_DOMAIN="image-cache"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="image_cache"
+  FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA="3333333333333333333333333333333333333333"
+  FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="ghcr.io/acme/fugue-image-cache"
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="true"
+  [[ "$(run_release_status)" == "0" ]] || fail_test "authorized convergence report release failed"
+  assert_log_count 1 "--authorized-image-cache-convergence"
+  assert_public_parent_and_cleanup
+}
+
+case_operational_report_invalid_convergence_mode_fails_closed() {
+  setup_case
+  trap cleanup_case EXIT
+  FAKE_DOMAIN="image-cache"
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS="image_cache"
+  FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_BASE_SHA="3333333333333333333333333333333333333333"
+  FUGUE_RELEASE_DOMAIN_IMAGE_CACHE_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="ghcr.io/acme/fugue-image-cache"
+  FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE="invalid"
+  [[ "$(run_release_status)" == "2" ]] || fail_test "invalid convergence mode did not fail closed"
+  assert_log_count 0 "--authorized-image-cache-convergence"
+  assert_log_count 0 "dispatch:authorize:"
+  [[ ! -e "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" ]] ||
+    fail_test "invalid convergence mode emitted public release evidence"
 }
 
 case_render_focus_serializes_activation_domains() {
@@ -1524,6 +1556,8 @@ run_case operational-apply-activation case_operational_apply_activates_complete_
 run_case operational-apply-zero case_operational_apply_activates_verified_zero
 run_case operational-apply-zero-unverified case_operational_apply_rejects_unverified_zero
 run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch
+run_case operational-report-convergence-flag case_operational_report_convergence_flag_contract
+run_case operational-report-invalid-convergence case_operational_report_invalid_convergence_mode_fails_closed
 run_case render-focus-serial case_render_focus_serializes_activation_domains
 run_case render-focus-invalid case_render_focus_rejects_ambiguous_targets
 for domain in node-local authoritative-dns control-plane image-cache backup; do
