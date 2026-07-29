@@ -59,6 +59,7 @@ type ChangePlan struct {
 	APIVersion               string            `json:"apiVersion"`
 	Kind                     string            `json:"kind"`
 	ManifestAPIVersion       string            `json:"manifestApiVersion"`
+	ManifestDigest           string            `json:"manifestDigest"`
 	MigrationPhase           string            `json:"migrationPhase"`
 	LegacyRelease            string            `json:"legacyRelease"`
 	ChangedPaths             []ChangedPath     `json:"changedPaths"`
@@ -106,6 +107,7 @@ func PlanChanges(manifest Manifest, changedPaths []string) (ChangePlan, error) {
 		APIVersion:         changePlanAPIVersion,
 		Kind:               changePlanKind,
 		ManifestAPIVersion: manifest.APIVersion,
+		ManifestDigest:     manifest.Digest(),
 		MigrationPhase:     manifest.MigrationPhase,
 		LegacyRelease:      manifest.LegacyRelease,
 		ChangedPaths:       make([]ChangedPath, 0, len(changedPaths)),
@@ -226,7 +228,168 @@ func PlanChanges(manifest Manifest, changedPaths []string) (ChangePlan, error) {
 	// authorization.
 	plan.RequiresLegacyRelease = plan.DispatchMode == DispatchModeLegacyShared || plan.DispatchMode == DispatchModeShadow
 	plan.PlanDigest = plan.Digest()
+	if err := plan.Validate(); err != nil {
+		return ChangePlan{}, fmt.Errorf("validate generated component change plan: %w", err)
+	}
 	return plan, nil
+}
+
+// Validate checks the complete persisted shape of a component change plan.
+// It does not require the source manifest, but it rejects malformed identities,
+// inconsistent fan-out, unsafe dispatch claims, and non-canonical ordering
+// even when a caller has recomputed the digest over those malformed fields.
+func (plan ChangePlan) Validate() error {
+	if plan.APIVersion != changePlanAPIVersion || plan.Kind != changePlanKind {
+		return fmt.Errorf("unsupported component change plan identity %q/%q", plan.APIVersion, plan.Kind)
+	}
+	if plan.ManifestAPIVersion != APIVersion {
+		return fmt.Errorf("component change plan manifestApiVersion must be %q", APIVersion)
+	}
+	if !canonicalSHA256Pattern.MatchString(plan.ManifestDigest) {
+		return fmt.Errorf("component change plan manifestDigest must be lowercase sha256")
+	}
+	if err := validateIdentifier(plan.MigrationPhase, "component change plan migration phase"); err != nil {
+		return err
+	}
+	if err := validateIdentifier(plan.LegacyRelease, "component change plan legacy release"); err != nil {
+		return err
+	}
+	if len(plan.ChangedPaths) == 0 || len(plan.ImpactedComponents) == 0 {
+		return fmt.Errorf("component change plan must contain changed paths and impacted components")
+	}
+
+	impacted := make(map[string]ComponentImpact, len(plan.ImpactedComponents))
+	lanes := make(map[string]string, len(plan.ImpactedComponents))
+	previousComponent := ""
+	hasTransitional := false
+	for index, component := range plan.ImpactedComponents {
+		if err := validateIdentifier(component.ID, "impacted component id"); err != nil {
+			return err
+		}
+		if index > 0 && component.ID <= previousComponent {
+			return fmt.Errorf("impacted components must be uniquely sorted by id")
+		}
+		previousComponent = component.ID
+		if err := validateIdentifier(component.ReleaseLane, "impacted component release lane"); err != nil {
+			return err
+		}
+		if owner, exists := lanes[component.ReleaseLane]; exists {
+			return fmt.Errorf("impacted components %q and %q share release lane %q", owner, component.ID, component.ReleaseLane)
+		}
+		lanes[component.ReleaseLane] = component.ID
+		if component.OwnershipMode != "transitional-shared" && component.OwnershipMode != "independent" {
+			return fmt.Errorf("impacted component %q has invalid ownership mode %q", component.ID, component.OwnershipMode)
+		}
+		hasTransitional = hasTransitional || component.OwnershipMode == "transitional-shared"
+		impacted[component.ID] = component
+	}
+
+	pathComponents := make(map[string]struct{}, len(impacted))
+	previousPath := ""
+	hasSharedPath := false
+	for index, changed := range plan.ChangedPaths {
+		normalized, err := normalizeChangedPath(changed.Path)
+		if err != nil {
+			return err
+		}
+		if normalized != changed.Path || (index > 0 && changed.Path <= previousPath) {
+			return fmt.Errorf("component change paths must be uniquely sorted and normalized")
+		}
+		previousPath = changed.Path
+		if len(changed.Components) == 0 {
+			return fmt.Errorf("component change path %q has no impacted components", changed.Path)
+		}
+		previous := ""
+		for componentIndex, componentID := range changed.Components {
+			if err := validateIdentifier(componentID, "changed path component"); err != nil {
+				return err
+			}
+			if componentIndex > 0 && componentID <= previous {
+				return fmt.Errorf("component change path %q components must be uniquely sorted", changed.Path)
+			}
+			previous = componentID
+			if _, exists := impacted[componentID]; !exists {
+				return fmt.Errorf("component change path %q references non-impacted component %q", changed.Path, componentID)
+			}
+			pathComponents[componentID] = struct{}{}
+		}
+		hasSharedPath = hasSharedPath || changed.Shared
+	}
+	if len(pathComponents) != len(impacted) {
+		return fmt.Errorf("every impacted component must be justified by a changed path")
+	}
+
+	previousValidation := ""
+	for index, componentID := range plan.ValidationOnlyComponents {
+		if err := validateIdentifier(componentID, "validation-only component"); err != nil {
+			return err
+		}
+		if index > 0 && componentID <= previousValidation {
+			return fmt.Errorf("validation-only components must be uniquely sorted")
+		}
+		previousValidation = componentID
+		if _, exists := impacted[componentID]; exists {
+			return fmt.Errorf("component %q cannot be both impacted and validation-only", componentID)
+		}
+	}
+
+	previousResource := ""
+	hasCoordinatedResource := false
+	for index, resource := range plan.SharedResources {
+		if err := validateIdentifier(resource.ID, "component plan shared resource id"); err != nil {
+			return err
+		}
+		if index > 0 && resource.ID <= previousResource {
+			return fmt.Errorf("component plan shared resources must be uniquely sorted by id")
+		}
+		previousResource = resource.ID
+		if err := validateIdentifier(resource.Owner, "component plan shared resource owner"); err != nil {
+			return err
+		}
+		if resource.ConflictMode != "exclusive" && resource.ConflictMode != "mediated" && resource.ConflictMode != "read-only" {
+			return fmt.Errorf("component plan shared resource %q has invalid conflict mode %q", resource.ID, resource.ConflictMode)
+		}
+		if err := validateSortedIdentifiers(resource.Participants, "shared resource participant", true); err != nil {
+			return fmt.Errorf("component plan shared resource %q: %w", resource.ID, err)
+		}
+		if !containsSorted(resource.Participants, resource.Owner) {
+			return fmt.Errorf("component plan shared resource %q participants omit owner %q", resource.ID, resource.Owner)
+		}
+		if err := validateSortedIdentifiers(resource.AffectedComponents, "affected component", true); err != nil {
+			return fmt.Errorf("component plan shared resource %q: %w", resource.ID, err)
+		}
+		for _, componentID := range resource.AffectedComponents {
+			if _, exists := impacted[componentID]; !exists || !containsSorted(resource.Participants, componentID) {
+				return fmt.Errorf("component plan shared resource %q has invalid affected component %q", resource.ID, componentID)
+			}
+		}
+		expectedCoordinator := resource.ConflictMode != "read-only" && len(resource.Participants) > 1
+		if resource.RequiresCoordinator != expectedCoordinator {
+			return fmt.Errorf("component plan shared resource %q coordinator requirement is inconsistent", resource.ID)
+		}
+		hasCoordinatedResource = hasCoordinatedResource || resource.RequiresCoordinator
+	}
+
+	expectedMode := DispatchModeIndependent
+	switch {
+	case hasSharedPath:
+		expectedMode = DispatchModeLegacyShared
+	case hasTransitional:
+		expectedMode = DispatchModeShadow
+	case hasCoordinatedResource:
+		expectedMode = DispatchModeCoordinated
+	}
+	if plan.DispatchMode != expectedMode {
+		return fmt.Errorf("component change plan dispatch mode %q is inconsistent; want %q", plan.DispatchMode, expectedMode)
+	}
+	expectedLegacy := expectedMode == DispatchModeLegacyShared || expectedMode == DispatchModeShadow
+	if plan.RequiresLegacyRelease != expectedLegacy {
+		return fmt.Errorf("component change plan legacy release requirement is inconsistent")
+	}
+	if !canonicalSHA256Pattern.MatchString(plan.PlanDigest) {
+		return fmt.Errorf("component change plan digest must be lowercase sha256")
+	}
+	return plan.VerifyDigest()
 }
 
 // VerifyDigest checks the immutable digest that binds a plan's complete
@@ -322,4 +485,26 @@ func intersectSorted(left, right []string) []string {
 		}
 	}
 	return sortedStringSet(result)
+}
+
+func validateSortedIdentifiers(values []string, label string, requireNonEmpty bool) error {
+	if requireNonEmpty && len(values) == 0 {
+		return fmt.Errorf("%s list must not be empty", label)
+	}
+	previous := ""
+	for index, value := range values {
+		if err := validateIdentifier(value, label); err != nil {
+			return err
+		}
+		if index > 0 && value <= previous {
+			return fmt.Errorf("%s values must be uniquely sorted", label)
+		}
+		previous = value
+	}
+	return nil
+}
+
+func containsSorted(values []string, target string) bool {
+	index := sort.SearchStrings(values, target)
+	return index < len(values) && values[index] == target
 }

@@ -8,6 +8,9 @@
 package componentmanifest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,8 +28,9 @@ const (
 )
 
 var (
-	identifierPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-	contractPattern   = regexp.MustCompile(`^[a-z][a-z0-9.-]*@v[1-9][0-9]*$`)
+	identifierPattern      = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	contractPattern        = regexp.MustCompile(`^[a-z][a-z0-9.-]*@v[1-9][0-9]*$`)
+	canonicalSHA256Pattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // Manifest is the root ownership and release-boundary document.
@@ -68,6 +72,18 @@ type SharedResource struct {
 	Owner        string   `yaml:"owner" json:"owner"`
 	ConflictMode string   `yaml:"conflictMode" json:"conflictMode"`
 	Consumers    []string `yaml:"consumers" json:"consumers"`
+}
+
+// Digest binds a plan or persisted observation to the exact validated
+// ownership manifest. Slice order is retained deliberately: the digest names
+// the reviewed document, not merely an equivalent set of fields.
+func (manifest Manifest) Digest() string {
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		panic(fmt.Sprintf("encode component manifest: %v", err))
+	}
+	digest := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 // Load parses exactly one strict YAML document and validates it.

@@ -115,6 +115,42 @@ func TestPlanDigestIsDeterministicAndTamperEvident(t *testing.T) {
 	}
 }
 
+func TestChangePlanValidateRejectsRehashedMalformedShape(t *testing.T) {
+	for name, mutate := range map[string]func(*ChangePlan){
+		"invalid component": func(plan *ChangePlan) {
+			plan.ImpactedComponents[0].ID = "../worker"
+			plan.ChangedPaths[0].Components[0] = "../worker"
+		},
+		"unsorted paths": func(plan *ChangePlan) {
+			plan.ChangedPaths = append(plan.ChangedPaths, plan.ChangedPaths[0])
+		},
+		"unjustified component": func(plan *ChangePlan) {
+			plan.ImpactedComponents = append(plan.ImpactedComponents, ComponentImpact{
+				ID: "zombie", ReleaseLane: "zombie", OwnershipMode: "independent",
+			})
+		},
+		"unsafe dispatch": func(plan *ChangePlan) {
+			plan.DispatchMode = DispatchModeLegacyShared
+			plan.RequiresLegacyRelease = true
+		},
+		"invalid manifest digest": func(plan *ChangePlan) {
+			plan.ManifestDigest = "sha256:invalid"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan, err := PlanChanges(minimalIndependentManifest(), []string{"cmd/worker/main.go"})
+			if err != nil {
+				t.Fatalf("PlanChanges() error = %v", err)
+			}
+			mutate(&plan)
+			plan.PlanDigest = plan.Digest()
+			if err := plan.Validate(); err == nil {
+				t.Fatal("Validate() accepted a malformed rehashed plan")
+			}
+		})
+	}
+}
+
 func loadRepositoryManifest(t *testing.T) Manifest {
 	t.Helper()
 	manifestPath := filepath.Join("..", "..", "docs", "architecture", "component-ownership-v1.yaml")
