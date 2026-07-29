@@ -224,6 +224,10 @@ spec:
               value: {{ .Values.api.shutdownDrainDelay | quote }}
             - name: FUGUE_API_SHUTDOWN_TIMEOUT
               value: {{ .Values.api.shutdownTimeout | quote }}
+            - name: FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED
+              value: {{ .Values.automations.shadowLoop.enabled | quote }}
+            - name: FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL
+              value: {{ .Values.automations.shadowLoop.interval | quote }}
             - name: FUGUE_OBSERVABILITY_ENABLED
               value: {{ .Values.observability.enabled | quote }}
             - name: FUGUE_OBSERVABILITY_RETENTION

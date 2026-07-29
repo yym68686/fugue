@@ -177,6 +177,32 @@ func TestAPIFromEnvReadsSafeZeroDowntimePublicFlag(t *testing.T) {
 	}
 }
 
+func TestAPIFromEnvReadsAutomationShadowLoopConfiguration(t *testing.T) {
+	t.Setenv("FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED", "")
+	t.Setenv("FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL", "")
+	defaults := APIFromEnv()
+	if !defaults.AutomationShadowLoopEnabled ||
+		defaults.AutomationShadowLoopInterval != 30*time.Second {
+		t.Fatalf(
+			"unexpected automation shadow-loop defaults: enabled=%t interval=%s",
+			defaults.AutomationShadowLoopEnabled,
+			defaults.AutomationShadowLoopInterval,
+		)
+	}
+
+	t.Setenv("FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED", "false")
+	t.Setenv("FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL", "7s")
+	configured := APIFromEnv()
+	if configured.AutomationShadowLoopEnabled ||
+		configured.AutomationShadowLoopInterval != 7*time.Second {
+		t.Fatalf(
+			"unexpected automation shadow-loop configuration: enabled=%t interval=%s",
+			configured.AutomationShadowLoopEnabled,
+			configured.AutomationShadowLoopInterval,
+		)
+	}
+}
+
 func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	t.Setenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", "http://telemetry-agent.fugue-system.svc.cluster.local:7834")
 

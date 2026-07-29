@@ -77,6 +77,53 @@ func TestManagedPostgresInPlaceResizeGatesDefaultClosed(t *testing.T) {
 	}
 }
 
+func TestAutomationShadowLoopConfigurationIsScopedToAPI(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"automations.shadowLoop.enabled=false",
+		"--set-string",
+		"automations.shadowLoop.interval=7s",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	api := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if api == "" {
+		t.Fatalf("rendered manifest missing API deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"name: FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED\n              value: \"false\"",
+		"name: FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL\n              value: \"7s\"",
+	} {
+		if !strings.Contains(api, want) {
+			t.Fatalf("API automation shadow-loop configuration missing %q:\n%s", want, api)
+		}
+	}
+	controller := manifestDocumentForKindAndName(
+		manifest,
+		"Deployment",
+		"fugue-fugue-controller",
+	)
+	if strings.Contains(controller, "FUGUE_AUTOMATION_SHADOW_LOOP_") {
+		t.Fatalf("automation shadow-loop configuration leaked into controller:\n%s", controller)
+	}
+}
+
 func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

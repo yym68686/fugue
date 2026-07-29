@@ -69,6 +69,8 @@ type APIConfig struct {
 	ImportWorkDir                    string
 	ShutdownDrainDelay               time.Duration
 	ShutdownTimeout                  time.Duration
+	AutomationShadowLoopEnabled      bool
+	AutomationShadowLoopInterval     time.Duration
 	Observability                    observability.Config
 }
 
@@ -365,6 +367,8 @@ func APIFromEnv() APIConfig {
 		ImportWorkDir:                    getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		ShutdownDrainDelay:               getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
 		ShutdownTimeout:                  getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
+		AutomationShadowLoopEnabled:      getenvBool("FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED", true),
+		AutomationShadowLoopInterval:     getenvDuration("FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL", 30*time.Second),
 		Observability:                    ObservabilityFromEnv(),
 	}
 	if cfg.RegistryPullBase == "" {

@@ -118,6 +118,47 @@ func TestEvaluatePolicyDisabledAndInsufficientEvidenceDoNotCreateIntent(t *testi
 	}
 }
 
+func TestEvaluatePolicyAcceptsTrustedControlLoopNoDataAndRejectsTrustConfusion(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 29, 1, 0, 0, 0, time.UTC)
+	controlLoop := evaluationFixture(now)
+	controlLoop.Evidence.CollectedBy = model.AutomationIntentSourceControlLoop
+	controlLoop.Evidence.Trusted = true
+	controlLoop.Evidence.RequestOutcomes = nil
+	result, err := EvaluatePolicy(controlLoop)
+	if err != nil {
+		t.Fatalf("evaluate trusted empty control-loop evidence: %v", err)
+	}
+	if result.Decision.Matched ||
+		result.Decision.WouldAction ||
+		result.Decision.MatchingSamples != 0 ||
+		!reflect.DeepEqual(result.Decision.ReasonCodes, []string{
+			"trigger.minimum_failure_domains",
+			"trigger.minimum_samples",
+		}) {
+		t.Fatalf("empty trusted evidence did not fail closed: %+v", result.Decision)
+	}
+
+	untrustedControlLoop := controlLoop
+	untrustedControlLoop.Evidence.Trusted = false
+	if _, err := EvaluatePolicy(untrustedControlLoop); !errors.Is(err, ErrInvalidEvaluation) {
+		t.Fatalf("untrusted control-loop evidence was accepted: %v", err)
+	}
+
+	trustedReplay := evaluationFixture(now)
+	trustedReplay.Evidence.Trusted = true
+	if _, err := EvaluatePolicy(trustedReplay); !errors.Is(err, ErrInvalidEvaluation) {
+		t.Fatalf("trusted admin replay evidence was accepted: %v", err)
+	}
+
+	emptyReplay := evaluationFixture(now)
+	emptyReplay.Evidence.RequestOutcomes = nil
+	if _, err := EvaluatePolicy(emptyReplay); !errors.Is(err, ErrInvalidEvaluation) {
+		t.Fatalf("empty admin replay evidence was accepted: %v", err)
+	}
+}
+
 func TestEvaluationEvidenceHashIsOrderAndAggregationStable(t *testing.T) {
 	t.Parallel()
 

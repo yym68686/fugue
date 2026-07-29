@@ -27,6 +27,48 @@ generation must reuse the idempotency key.
 The initial user-facing policy modes are `disabled` and `shadow`. Shadow mode
 may emit a `would_action` decision but must not mutate an application.
 
+## Shadow control loop
+
+The API starts an observe-only control loop when
+`FUGUE_AUTOMATION_SHADOW_LOOP_ENABLED=true`, observability is enabled, and a
+ClickHouse analytics exporter is configured. One API replica holds the
+PostgreSQL advisory lock named `automation-shadow-control-loop`; the other API
+replicas remain followers and retry leadership without evaluating policies.
+`FUGUE_AUTOMATION_SHADOW_LOOP_INTERVAL` defaults to `30s`, while a policy with
+a smaller valid window lowers the leader's polling interval for that process.
+
+The leader evaluates only completed windows, with a five-second ingestion
+settling delay. It reads the typed `request_facts` table with a bounded query,
+deduplicates facts by request or trace identity, and prefers application-side
+facts over edge-side facts so one request is not counted at both layers. A
+disabled, deleting, deleted, or zero-replica application is skipped without a
+telemetry query. A query or evaluation failure for one policy does not block
+other policies. Large policy inventories are processed in deterministic,
+rotating bounded batches so a later-sorted policy cannot be permanently
+starved.
+
+A match appends a trusted `control_loop` intent and a system audit event. The
+intent remains `observed`, has `production_mutation_allowed=false`, and cannot
+create an operation or restart. Replaying a completed window after API
+failover reuses the deterministic intent idempotency key and does not append a
+second creation audit.
+
+Inspect these API metrics before promoting any later execution mode:
+
+- `fugue_automation_shadow_loop_active`
+- `fugue_automation_shadow_loop_leader`
+- `fugue_automation_shadow_loop_runs_total`
+- `fugue_automation_shadow_loop_errors_total`
+- `fugue_automation_shadow_loop_evaluations_total`
+- `fugue_automation_shadow_loop_matches_total`
+- `fugue_automation_shadow_loop_intents_created_total`
+- `fugue_automation_shadow_loop_intents_reused_total`
+- `fugue_automation_shadow_loop_policy_limit_deferred_total`
+- `fugue_automation_shadow_loop_last_success_timestamp_seconds`
+
+`enabled=1` with `active=0` means the analytics dependency is unavailable or
+not configured; no policy evaluation is attempted in that state.
+
 ## Recovery and rollback
 
 After a restart, verify request outcomes and readiness against the same

@@ -381,7 +381,14 @@ func normalizeEvaluationEvidence(
 	evidence.AppReadinessObservedAt = evidence.AppReadinessObservedAt.UTC()
 	now = now.UTC()
 	switch evidence.CollectedBy {
-	case model.AutomationIntentSourceAdminReplay, model.AutomationIntentSourceControlLoop:
+	case model.AutomationIntentSourceAdminReplay:
+		if evidence.Trusted {
+			return model.AutomationEvaluationEvidence{}, invalidEvaluation("admin replay evidence cannot be trusted")
+		}
+	case model.AutomationIntentSourceControlLoop:
+		if !evidence.Trusted {
+			return model.AutomationEvaluationEvidence{}, invalidEvaluation("control-loop evidence must be trusted")
+		}
 	default:
 		return model.AutomationEvaluationEvidence{}, invalidEvaluation("unsupported evidence collector %q", evidence.CollectedBy)
 	}
@@ -401,8 +408,12 @@ func normalizeEvaluationEvidence(
 		evidence.AppReadinessObservedAt.IsZero() {
 		return model.AutomationEvaluationEvidence{}, invalidEvaluation("app revision and readiness evidence are required")
 	}
-	if len(evidence.RequestOutcomes) == 0 || len(evidence.RequestOutcomes) > maxAutomationOutcomeAggregates {
-		return model.AutomationEvaluationEvidence{}, invalidEvaluation("request outcomes require between 1 and %d aggregates", maxAutomationOutcomeAggregates)
+	if len(evidence.RequestOutcomes) > maxAutomationOutcomeAggregates {
+		return model.AutomationEvaluationEvidence{}, invalidEvaluation("request outcomes accept at most %d aggregates", maxAutomationOutcomeAggregates)
+	}
+	if len(evidence.RequestOutcomes) == 0 &&
+		evidence.CollectedBy != model.AutomationIntentSourceControlLoop {
+		return model.AutomationEvaluationEvidence{}, invalidEvaluation("replayed request outcomes require at least one aggregate")
 	}
 
 	type outcomeKey struct {

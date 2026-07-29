@@ -9,6 +9,11 @@
 configSecret:
   existingSecretName: fugue-production-config
 
+automations:
+  shadowLoop:
+    enabled: true
+    interval: 30s
+
 api:
   replicaCount: 3
   databaseURL: postgres://fugue:replace-me@postgres-ha.example.internal:5432/fugue?sslmode=require

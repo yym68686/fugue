@@ -83,6 +83,9 @@ type Server struct {
 	heartbeatAuditKeyring            bundleauth.Keyring
 	bundleValidFor                   time.Duration
 	observabilityConfig              observability.Config
+	automationShadowLoopConfig       AutomationShadowLoopConfig
+	automationShadowLoop             automationShadowLoopRuntime
+	automationRequestOutcomeQuery    automationRequestOutcomeQueryFunc
 	importer                         *sourceimport.Importer
 	resolveRemoteImageDigest         func(context.Context, string) (string, error)
 	inspectBuilderPlacement          builderPlacementInspector
@@ -216,6 +219,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		heartbeatAuditKeyring:            cloneBundleAuthKeyring(cfg.HeartbeatAuditKeyring),
 		bundleValidFor:                   cfg.BundleValidFor,
 		observabilityConfig:              cfg.Observability.Normalize(),
+		automationShadowLoopConfig:       normalizeAutomationShadowLoopConfig(cfg.AutomationShadowLoop),
 		importer:                         sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		resolveRemoteImageDigest:         sourceimport.ResolveRemoteImageDigest,
 		inspectBuilderPlacement:          sourceimport.InspectBuilderPlacementForProfile,
@@ -332,6 +336,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
 	s.writeBackupMetrics(w)
 	s.writeRobustnessMetrics(w)
+	s.writeAutomationShadowLoopMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)
 	s.writeEdgeDNSArtifactMetrics(w)
 	s.writeHostedDNSMetrics(w)

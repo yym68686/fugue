@@ -67,6 +67,7 @@ type ServerConfig struct {
 	HeartbeatAuditKeyring            bundleauth.Keyring
 	BundleValidFor                   time.Duration
 	ImportWorkDir                    string
+	AutomationShadowLoop             AutomationShadowLoopConfig
 	Observability                    observability.Config
 }
 

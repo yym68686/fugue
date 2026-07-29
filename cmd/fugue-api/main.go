@@ -86,7 +86,11 @@ func main() {
 		HeartbeatAuditKeyring:            platformConsumerHeartbeatAuditKeyringFromEnv(),
 		BundleValidFor:                   cfg.BundleValidFor,
 		ImportWorkDir:                    cfg.ImportWorkDir,
-		Observability:                    cfg.Observability,
+		AutomationShadowLoop: api.AutomationShadowLoopConfig{
+			Enabled:  cfg.AutomationShadowLoopEnabled,
+			Interval: cfg.AutomationShadowLoopInterval,
+		},
+		Observability: cfg.Observability,
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -95,6 +99,7 @@ func main() {
 	go server.StartBackgroundEdgeDNSArtifacts(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 	go server.StartBackgroundBackups(ctx)
+	go server.StartBackgroundAutomationShadowLoop(ctx)
 
 	var metricsServer *http.Server
 	if cfg.MetricsBindAddr != "" {

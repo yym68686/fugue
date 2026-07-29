@@ -22,6 +22,11 @@ platformComponentIdentity:
   previousSigningKeyID: ""
   revokedKeyIDs: ""
 
+automations:
+  shadowLoop:
+    enabled: true
+    interval: 30s
+
 observability:
   enabled: false
   retention: 24h
