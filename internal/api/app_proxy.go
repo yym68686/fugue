@@ -107,7 +107,8 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		RequestID:  identity.RequestID,
 		EdgeReqID:  identity.EdgeRequestID,
 	}
-	if app.Spec.Replicas == 0 {
+	routeStatus, _ := edgeRouteStatus(app, appProxyRuntimeID(app), true)
+	if routeStatus == model.EdgeRouteStatusDisabled {
 		observed.StatusCode = http.StatusServiceUnavailable
 		observed.Duration = time.Since(startedAt)
 		observed.RouteState = "disabled"
@@ -115,7 +116,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		http.Error(w, "app is disabled", http.StatusServiceUnavailable)
 		return true
 	}
-	if app.Status.CurrentReplicas == 0 {
+	if routeStatus != model.EdgeRouteStatusActive {
 		observed.StatusCode = http.StatusServiceUnavailable
 		observed.Duration = time.Since(startedAt)
 		observed.RouteState = "unavailable"

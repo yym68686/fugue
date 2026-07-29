@@ -74,6 +74,172 @@ func TestOverlayManagedAppStatusesUsesKubernetesObservedState(t *testing.T) {
 	}
 }
 
+func TestOverlayManagedAppStatusesPublishesAuthoritativeAbsenceAndKeepsStoredState(t *testing.T) {
+	app := model.App{
+		ID:       "app_missing",
+		TenantID: "tenant_demo",
+		Name:     "missing",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
+		Status:   model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	server := newManagedAppTestServer(t, map[string]any{"items": []map[string]any{}})
+	defer server.Close()
+	apiServer := &Server{
+		log: log.New(io.Discard, "", 0),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+
+	updated := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
+	if updated.Status.Phase != "unavailable" || updated.Status.CurrentReplicas != 0 {
+		t.Fatalf("authoritative missing object must be unavailable/zero, got %+v", updated.Status)
+	}
+	if updated.StoredStatus == nil || updated.StoredStatus.Phase != "deployed" || updated.StoredStatus.CurrentReplicas != 1 {
+		t.Fatalf("stored state was not preserved separately: %+v", updated.StoredStatus)
+	}
+	if updated.ObservedStatus == nil || !updated.ObservedStatus.Fresh || updated.ObservedStatus.ClusterID != "cluster-test-uid" {
+		t.Fatalf("missing observation lacks complete evidence: %+v", updated.ObservedStatus)
+	}
+	if updated.ObservedStatus.RuntimeObjectPresent == nil || *updated.ObservedStatus.RuntimeObjectPresent {
+		t.Fatalf("missing observation did not record runtime_object_present=false: %+v", updated.ObservedStatus)
+	}
+}
+
+func TestOverlayManagedAppStatusesReportsUnknownOnKubernetesQueryFailure(t *testing.T) {
+	app := model.App{
+		ID:       "app_unknown",
+		TenantID: "tenant_demo",
+		Name:     "unknown",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
+		Status:   model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
+		http.Error(w, "kubernetes unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	apiServer := &Server{
+		log: log.New(io.Discard, "", 0),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+
+	updated := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
+	if updated.Status.Phase != "unknown" || updated.Status.CurrentReplicas != 0 {
+		t.Fatalf("query failure must be unknown/zero projection, got %+v", updated.Status)
+	}
+	if updated.ObservedStatus == nil || updated.ObservedStatus.Fresh || updated.ObservedStatus.RuntimeObjectPresent != nil {
+		t.Fatalf("query failure was treated as absence: %+v", updated.ObservedStatus)
+	}
+	if updated.StoredStatus == nil || updated.StoredStatus.Phase != "deployed" {
+		t.Fatalf("query failure lost durable state: %+v", updated.StoredStatus)
+	}
+}
+
+func TestOverlayManagedAppStatusesFollowsCompleteKubernetesPagination(t *testing.T) {
+	app := model.App{
+		ID:       "app_page_two",
+		TenantID: "tenant_demo",
+		Name:     "page-two",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
+		Status:   model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	other := app
+	other.ID = "app_page_one"
+	other.Name = "page-one"
+	firstMap := runtime.BuildManagedAppObject(other, runtime.SchedulingConstraints{})
+	secondMap := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	for _, raw := range []map[string]any{firstMap, secondMap} {
+		metadata, _ := raw["metadata"].(map[string]any)
+		metadata["generation"] = float64(1)
+		raw["status"] = map[string]any{
+			"phase":              runtime.ManagedAppPhaseReady,
+			"desiredReplicas":    1,
+			"readyReplicas":      1,
+			"observedGeneration": 1,
+		}
+	}
+	var listCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/apis/"+runtime.ManagedAppAPIGroup+"/v1alpha1/"+runtime.ManagedAppPlural) {
+			http.NotFound(w, r)
+			return
+		}
+		listCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("continue") == "page-two" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{secondMap}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":    []map[string]any{firstMap},
+			"metadata": map[string]any{"continue": "page-two"},
+		})
+	}))
+	defer server.Close()
+	apiServer := &Server{
+		log: log.New(io.Discard, "", 0),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+
+	updated := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
+	if updated.ObservedStatus == nil || !updated.ObservedStatus.Fresh || updated.Status.Phase != "deployed" {
+		t.Fatalf("object on final list page was not observed as deployed: %+v", updated)
+	}
+	if got := listCalls.Load(); got != 2 {
+		t.Fatalf("expected complete pagination before absence decision, got %d list calls", got)
+	}
+}
+
+func TestOverlayManagedAppStatusesReportsUnknownWhenClusterChangesDuringObservation(t *testing.T) {
+	app := model.App{
+		ID:       "app_cluster_change",
+		TenantID: "tenant_demo",
+		Name:     "cluster-change",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
+		Status:   model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	var identityCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/namespaces/kube-system" {
+			identityCalls.Add(1)
+			uid := "cluster-a"
+			if identityCalls.Load() > 1 {
+				uid = "cluster-b"
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"uid": uid}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
+	}))
+	defer server.Close()
+	apiServer := &Server{
+		log: log.New(io.Discard, "", 0),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+
+	updated := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
+	if updated.ObservedStatus == nil || updated.ObservedStatus.Phase != "unknown" || updated.ObservedStatus.Fresh {
+		t.Fatalf("cluster identity change must invalidate the observation, got %+v", updated.ObservedStatus)
+	}
+	if updated.ObservedStatus.RuntimeObjectPresent != nil {
+		t.Fatalf("cluster identity change must not claim object absence: %+v", updated.ObservedStatus)
+	}
+}
+
 func TestOverlayManagedAppStatusUsesSingleObjectLookup(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
@@ -197,6 +363,7 @@ func TestOverlayManagedAppStatusesUsesTTLCache(t *testing.T) {
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
 		Name:     "demo",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
 		Status: model.AppStatus{
 			Phase: "deployed",
 		},
@@ -211,6 +378,9 @@ func TestOverlayManagedAppStatusesUsesTTLCache(t *testing.T) {
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -249,6 +419,7 @@ func TestFetchManagedAppStatusesClosesIdleKubeConnections(t *testing.T) {
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
 		Name:     "demo",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
 		Status: model.AppStatus{
 			Phase: "deployed",
 		},
@@ -295,6 +466,7 @@ func TestOverlayManagedAppStatusFallsBackToStaleCacheOnRefreshError(t *testing.T
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
 		Name:     "demo",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
 		Status: model.AppStatus{
 			Phase: "deployed",
 		},
@@ -339,11 +511,11 @@ func TestOverlayManagedAppStatusFallsBackToStaleCacheOnRefreshError(t *testing.T
 	}
 
 	stale := apiServer.overlayManagedAppStatus(context.Background(), app)
-	if stale.Status.Phase != "failed" {
-		t.Fatalf("expected stale cached phase to be reused, got %q", stale.Status.Phase)
+	if stale.Status.Phase != "unknown" || stale.ObservedStatus == nil || stale.ObservedStatus.Fresh {
+		t.Fatalf("expected failed refresh to make the live status unknown, got %+v", stale)
 	}
-	if stale.Status.LastMessage != "startup failed" {
-		t.Fatalf("expected stale cached message to be reused, got %q", stale.Status.LastMessage)
+	if stale.ObservedStatus.Reason != runtime.AppObservationReasonObservationStale {
+		t.Fatalf("expected stale observation reason, got %+v", stale.ObservedStatus)
 	}
 }
 
@@ -354,6 +526,7 @@ func TestOverlayManagedAppStatusUsesSingleflight(t *testing.T) {
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
 		Name:     "demo",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
 		Status: model.AppStatus{
 			Phase: "deployed",
 		},
@@ -368,6 +541,9 @@ func TestOverlayManagedAppStatusUsesSingleflight(t *testing.T) {
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
 		calls.Add(1)
 		time.Sleep(150 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
@@ -417,6 +593,7 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
 		Name:     "demo",
+		Spec:     model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
 		Status: model.AppStatus{
 			Phase:            "deployed",
 			CurrentReplicas:  1,
@@ -433,6 +610,9 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
 		calls.Add(1)
 		if want := "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/" + runtime.ManagedAppPlural; r.URL.Path != want {
 			t.Fatalf("expected background refresh to list managed apps at %s, got %s", want, r.URL.Path)
@@ -462,8 +642,8 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 	if elapsed := time.Since(startedAt); elapsed > 75*time.Millisecond {
 		t.Fatalf("expected hot-path read to return immediately, took %s", elapsed)
 	}
-	if first.Status.LastMessage != "" {
-		t.Fatalf("expected first hot-path read to use store state, got %q", first.Status.LastMessage)
+	if first.Status.Phase != "unknown" || first.ObservedStatus == nil || first.ObservedStatus.Fresh {
+		t.Fatalf("expected first hot-path read to report unknown live state, got %+v", first)
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -499,9 +679,9 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 	t.Parallel()
 
 	apps := []model.App{
-		{ID: "app_demo_1", TenantID: "tenant_demo", Name: "demo-1", Status: model.AppStatus{Phase: "deployed"}},
-		{ID: "app_demo_2", TenantID: "tenant_demo", Name: "demo-2", Status: model.AppStatus{Phase: "deployed"}},
-		{ID: "app_demo_3", TenantID: "tenant_demo", Name: "demo-3", Status: model.AppStatus{Phase: "deployed"}},
+		{ID: "app_demo_1", TenantID: "tenant_demo", Name: "demo-1", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1}, Status: model.AppStatus{Phase: "deployed"}},
+		{ID: "app_demo_2", TenantID: "tenant_demo", Name: "demo-2", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1}, Status: model.AppStatus{Phase: "deployed"}},
+		{ID: "app_demo_3", TenantID: "tenant_demo", Name: "demo-3", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1}, Status: model.AppStatus{Phase: "deployed"}},
 	}
 	var managedItems []map[string]any
 	for i, app := range apps {
@@ -519,6 +699,8 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case writeManagedAppClusterIdentity(w, r):
+			return
 		case r.URL.Path == "/apis/"+runtime.ManagedAppAPIGroup+"/v1alpha1/"+runtime.ManagedAppPlural:
 			listCalls.Add(1)
 			time.Sleep(150 * time.Millisecond)
@@ -546,8 +728,8 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 
 	for _, app := range apps {
 		first := apiServer.overlayManagedAppStatusCached(app)
-		if first.Status.LastMessage != "" {
-			t.Fatalf("expected first hot-path read to use store state, got %q", first.Status.LastMessage)
+		if first.Status.Phase != "unknown" || first.ObservedStatus == nil || first.ObservedStatus.Fresh {
+			t.Fatalf("expected first hot-path read to report unknown live state, got %+v", first)
 		}
 	}
 
@@ -619,10 +801,13 @@ func TestOverlayManagedAppStatusesForEdgeRoutesKeepsVerifiedErrorServingAndMarks
 	}
 
 	apiServer := &Server{managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second)}
+	now := time.Now()
 	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:     map[string]runtime.ManagedAppObject{present.ID: managed},
-		ok:        true,
-		expiresAt: time.Now().Add(time.Minute),
+		items:       map[string]runtime.ManagedAppObject{present.ID: managed},
+		ok:          true,
+		clusterID:   "cluster-test-uid",
+		refreshedAt: now,
+		expiresAt:   now.Add(time.Minute),
 	})
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {
@@ -667,25 +852,29 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRetainsStoreStateUntilGenerationO
 		ReadyReplicas:      0,
 		ObservedGeneration: 1,
 	}
-	runtimes := map[string]model.Runtime{
-		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
-	}
-
-	updated := overlayAppsWithManagedStatusesForEdgeRoutes(
-		[]model.App{app},
-		map[string]runtime.ManagedAppObject{app.ID: managed},
-		runtimes,
-	)
-	if updated[0].Status.CurrentReplicas != 1 || updated[0].Status.Phase != "deployed" {
-		t.Fatalf("unobserved generation must retain durable route state, got %+v", updated[0].Status)
+	updated := []model.App{runtime.ApplyAppObservedStatus(app, runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
+		ManagedApp:     managed,
+		Found:          true,
+		Complete:       true,
+		Fresh:          true,
+		ObservedAt:     time.Now().UTC(),
+		ClusterID:      "cluster-test-uid",
+		EvidenceSource: runtime.AppObservationSourceKubernetesAPI,
+	}))}
+	if updated[0].Status.CurrentReplicas != 0 || updated[0].Status.Phase != "unknown" {
+		t.Fatalf("unobserved generation must be unknown, got %+v", updated[0].Status)
 	}
 
 	managed.Status.ObservedGeneration = managed.Metadata.Generation
-	updated = overlayAppsWithManagedStatusesForEdgeRoutes(
-		[]model.App{app},
-		map[string]runtime.ManagedAppObject{app.ID: managed},
-		runtimes,
-	)
+	updated = []model.App{runtime.ApplyAppObservedStatus(app, runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
+		ManagedApp:     managed,
+		Found:          true,
+		Complete:       true,
+		Fresh:          true,
+		ObservedAt:     time.Now().UTC(),
+		ClusterID:      "cluster-test-uid",
+		EvidenceSource: runtime.AppObservationSourceKubernetesAPI,
+	}))}
 	if updated[0].Status.CurrentReplicas != 0 || updated[0].Status.Phase != "failed" {
 		t.Fatalf("observed generation must publish authoritative managed status, got %+v", updated[0].Status)
 	}
@@ -749,9 +938,23 @@ func newManagedAppTestServer(t *testing.T, payload any) *httptest.Server {
 	t.Helper()
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeManagedAppClusterIdentity(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
 			t.Fatalf("encode payload: %v", err)
 		}
 	}))
+}
+
+func writeManagedAppClusterIdentity(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/api/v1/namespaces/kube-system" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"metadata": map[string]any{"uid": "cluster-test-uid"},
+	})
+	return true
 }

@@ -476,11 +476,27 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 		return model.EdgeRouteStatusRuntimeMissing, "app has no runtime id"
 	case !runtimeFound:
 		return model.EdgeRouteStatusRuntimeMissing, "runtime not found"
-	case app.Status.CurrentReplicas == 0:
-		return model.EdgeRouteStatusUnavailable, appRouteUnavailableMessage(app)
 	case appUsesKnownNonHTTPRouteProtocol(app):
 		return model.EdgeRouteStatusUnavailable, "app source exposes a non-HTTP service protocol"
 	default:
+		if observed := app.ObservedStatus; observed != nil {
+			switch observed.Phase {
+			case "unavailable":
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
+			case "unknown":
+				if app.StoredStatus != nil && app.StoredStatus.CurrentReplicas > 0 {
+					return model.EdgeRouteStatusActive, "live runtime observation unknown; serving last-known-good"
+				}
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "live runtime observation is unknown")
+			}
+			if observed.ReadyReplicas != nil && *observed.ReadyReplicas == 0 {
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
+			}
+			return model.EdgeRouteStatusActive, ""
+		}
+		if app.Status.CurrentReplicas == 0 {
+			return model.EdgeRouteStatusUnavailable, appRouteUnavailableMessage(app)
+		}
 		return model.EdgeRouteStatusActive, ""
 	}
 }

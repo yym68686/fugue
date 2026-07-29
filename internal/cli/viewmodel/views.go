@@ -53,22 +53,30 @@ type OperationTimelineStep struct {
 }
 
 type AppHealthView struct {
-	State           State                 `json:"state"`
-	ID              string                `json:"id,omitempty"`
-	TenantID        string                `json:"tenant_id,omitempty"`
-	ProjectID       string                `json:"project_id,omitempty"`
-	Name            string                `json:"name,omitempty"`
-	Phase           string                `json:"phase,omitempty"`
-	Tone            Tone                  `json:"tone"`
-	DesiredReplicas int                   `json:"desired_replicas"`
-	CurrentReplicas int                   `json:"current_replicas"`
-	RuntimeID       string                `json:"runtime_id,omitempty"`
-	URL             string                `json:"url,omitempty"`
-	LastMessage     string                `json:"last_message,omitempty"`
-	LastOperationID string                `json:"last_operation_id,omitempty"`
-	Route           RoutePathView         `json:"route"`
-	Operations      OperationTimelineView `json:"operations"`
-	ResourceUsage   *model.ResourceUsage  `json:"resource_usage,omitempty"`
+	State              State                 `json:"state"`
+	ID                 string                `json:"id,omitempty"`
+	TenantID           string                `json:"tenant_id,omitempty"`
+	ProjectID          string                `json:"project_id,omitempty"`
+	Name               string                `json:"name,omitempty"`
+	Phase              string                `json:"phase,omitempty"`
+	Tone               Tone                  `json:"tone"`
+	DesiredReplicas    int                   `json:"desired_replicas"`
+	CurrentReplicas    int                   `json:"current_replicas"`
+	RuntimeID          string                `json:"runtime_id,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	LastMessage        string                `json:"last_message,omitempty"`
+	LastOperationID    string                `json:"last_operation_id,omitempty"`
+	ObservedAt         *time.Time            `json:"observed_at,omitempty"`
+	ClusterID          string                `json:"cluster_id,omitempty"`
+	Generation         int64                 `json:"generation,omitempty"`
+	ObservedGeneration int64                 `json:"observed_generation,omitempty"`
+	Fresh              bool                  `json:"fresh"`
+	EvidenceSource     string                `json:"evidence_source,omitempty"`
+	ObservationReason  string                `json:"observation_reason,omitempty"`
+	EndpointReady      *bool                 `json:"endpoint_ready,omitempty"`
+	Route              RoutePathView         `json:"route"`
+	Operations         OperationTimelineView `json:"operations"`
+	ResourceUsage      *model.ResourceUsage  `json:"resource_usage,omitempty"`
 }
 
 type ServiceStageView struct {
@@ -201,23 +209,58 @@ func NewOperationTimeline(operations []model.Operation) OperationTimelineView {
 }
 
 func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthView {
+	phase := strings.TrimSpace(app.Status.Phase)
+	currentReplicas := app.Status.CurrentReplicas
+	runtimeID := firstNonEmpty(strings.TrimSpace(app.Status.CurrentRuntimeID), strings.TrimSpace(app.Spec.RuntimeID))
+	observedAt := (*time.Time)(nil)
+	clusterID := ""
+	generation := int64(0)
+	observedGeneration := int64(0)
+	fresh := false
+	evidenceSource := ""
+	observationReason := ""
+	var endpointReady *bool
+	if observed := app.ObservedStatus; observed != nil {
+		phase = strings.TrimSpace(observed.Phase)
+		if observed.ReadyReplicas != nil {
+			currentReplicas = *observed.ReadyReplicas
+		}
+		runtimeID = firstNonEmpty(strings.TrimSpace(observed.RuntimeID), runtimeID)
+		value := observed.ObservedAt
+		observedAt = &value
+		clusterID = strings.TrimSpace(observed.ClusterID)
+		generation = observed.Generation
+		observedGeneration = observed.ObservedGeneration
+		fresh = observed.Fresh
+		evidenceSource = strings.TrimSpace(observed.EvidenceSource)
+		observationReason = strings.TrimSpace(observed.Reason)
+		endpointReady = observed.EndpointReady
+	}
 	return AppHealthView{
-		State:           ReadyState(),
-		ID:              strings.TrimSpace(app.ID),
-		TenantID:        strings.TrimSpace(app.TenantID),
-		ProjectID:       strings.TrimSpace(app.ProjectID),
-		Name:            strings.TrimSpace(app.Name),
-		Phase:           strings.TrimSpace(app.Status.Phase),
-		Tone:            ToneForAppPhase(app.Status.Phase),
-		DesiredReplicas: app.Spec.Replicas,
-		CurrentReplicas: app.Status.CurrentReplicas,
-		RuntimeID:       firstNonEmpty(strings.TrimSpace(app.Status.CurrentRuntimeID), strings.TrimSpace(app.Spec.RuntimeID)),
-		URL:             routeURL(app),
-		LastMessage:     strings.TrimSpace(app.Status.LastMessage),
-		LastOperationID: strings.TrimSpace(app.Status.LastOperationID),
-		Route:           NewRoutePathFromApp(app),
-		Operations:      NewOperationTimeline(activeOperations),
-		ResourceUsage:   app.CurrentResourceUsage,
+		State:              ReadyState(),
+		ID:                 strings.TrimSpace(app.ID),
+		TenantID:           strings.TrimSpace(app.TenantID),
+		ProjectID:          strings.TrimSpace(app.ProjectID),
+		Name:               strings.TrimSpace(app.Name),
+		Phase:              phase,
+		Tone:               ToneForAppPhase(phase),
+		DesiredReplicas:    app.Spec.Replicas,
+		CurrentReplicas:    currentReplicas,
+		RuntimeID:          runtimeID,
+		URL:                routeURL(app),
+		LastMessage:        strings.TrimSpace(app.Status.LastMessage),
+		LastOperationID:    strings.TrimSpace(app.Status.LastOperationID),
+		ObservedAt:         observedAt,
+		ClusterID:          clusterID,
+		Generation:         generation,
+		ObservedGeneration: observedGeneration,
+		Fresh:              fresh,
+		EvidenceSource:     evidenceSource,
+		ObservationReason:  observationReason,
+		EndpointReady:      endpointReady,
+		Route:              NewRoutePathFromApp(app),
+		Operations:         NewOperationTimeline(activeOperations),
+		ResourceUsage:      app.CurrentResourceUsage,
 	}
 }
 
@@ -304,11 +347,11 @@ func NewActionPlan(action, target, scope, apiCall, operationType string, destruc
 
 func ToneForAppPhase(phase string) Tone {
 	switch strings.ToLower(strings.TrimSpace(phase)) {
-	case "ready", "live", "running", "healthy", "active":
+	case "ready", "live", "running", "healthy", "active", "deployed":
 		return TonePositive
-	case "pending", "deploying", "building", "starting", "updating":
+	case "pending", "deploying", "building", "starting", "updating", "deleting", "unknown":
 		return ToneWarning
-	case "failed", "error", "degraded", "crashloop", "crash-loop":
+	case "failed", "error", "degraded", "crashloop", "crash-loop", "unavailable":
 		return ToneDanger
 	case "":
 		return ToneMuted

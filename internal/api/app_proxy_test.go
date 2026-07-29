@@ -810,6 +810,7 @@ func TestMaybeHandleAppProxyReturnsLiveFailureDetailsWhenReplicasAreUnavailable(
 		managed:     managed,
 		found:       true,
 		ok:          true,
+		clusterID:   "cluster-test-uid",
 		refreshedAt: now,
 		expiresAt:   now.Add(time.Minute),
 	})

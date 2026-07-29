@@ -410,7 +410,7 @@ func (s *Server) managedAppInventory(ctx context.Context, requireFresh bool) (ma
 	if !requireFresh && ok && !expired {
 		return cached.items, nil
 	}
-	fresh, err := s.refreshManagedAppStatuses(ctx)
+	fresh, err := s.refreshManagedAppInventory(ctx)
 	if err != nil {
 		if !requireFresh && ok {
 			return cached.items, nil
