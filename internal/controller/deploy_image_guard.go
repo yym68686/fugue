@@ -110,6 +110,37 @@ func (s *Service) ensureManagedDeployImageReady(ctx context.Context, app model.A
 	return s.ensureDeployableImage(ctx, model.Operation{}, app, scheduling)
 }
 
+// ensureManagedReconcileDeployImageReady protects a new rollout without
+// invalidating an already-serving release when inventory metadata is late.
+// A fully observed Deployment that matches the desired image and release key
+// is direct evidence that the image is running on the target. Requiring a
+// separate cache heartbeat for that no-op reconcile can turn an inventory
+// outage into a control-plane induced application outage.
+func (s *Service) ensureManagedReconcileDeployImageReady(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	app model.App,
+	scheduling runtimepkg.SchedulingConstraints,
+) error {
+	if client != nil {
+		deployment, found, err := client.getDeployment(ctx, namespace, runtimepkg.RuntimeAppResourceName(app))
+		if err != nil {
+			return fmt.Errorf("read current deployment before managed image check: %w", err)
+		}
+		if found &&
+			deploymentTargetsExpectedRollout(
+				deployment,
+				s.expectedManagedAppReleaseKey(app, scheduling),
+				strings.TrimSpace(app.Spec.Image),
+			) &&
+			managedDeploymentStatusReady(deployment, app.Spec.Replicas) {
+			return nil
+		}
+	}
+	return s.ensureManagedDeployImageReady(ctx, app, scheduling)
+}
+
 func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, target deployImageTarget, refs ...string) (bool, error) {
 	refs = compactImageRefs(refs)
 	if len(refs) == 0 {
