@@ -963,6 +963,79 @@ func TestCopyImageForcesLocalOnlyOnSourceAndDestination(t *testing.T) {
 	}
 }
 
+func TestLocalOnlyRoundTripperRejectsCrossHostRedirect(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(imageCacheLocalOnlyHeader) != "1" {
+			t.Errorf("redirected request local-only header = %q, want 1", r.Header.Get(imageCacheLocalOnlyHeader))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(imageCacheLocalOnlyHeader) != "1" {
+			t.Errorf("initial request local-only header = %q, want 1", r.Header.Get(imageCacheLocalOnlyHeader))
+		}
+		http.Redirect(w, r, upstream.URL+"/v2/fugue-apps/demo/blobs/sha256:test", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirect.Close)
+
+	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	resp, err := client.Get(redirect.URL + "/v2/fugue-apps/demo/blobs/sha256:test")
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "local-only registry request redirected") {
+		t.Fatalf("cross-host redirect error = %v, want local-only redirect rejection", err)
+	}
+}
+
+func TestLocalOnlyRoundTripperAllowsSameHostRedirect(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+			return
+		}
+		if r.URL.Path != "/final" || r.Header.Get(imageCacheLocalOnlyHeader) != "1" {
+			t.Fatalf("same-host redirected request path=%q local-only=%q", r.URL.Path, r.Header.Get(imageCacheLocalOnlyHeader))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	resp, err := client.Get(server.URL + "/start")
+	if err != nil {
+		t.Fatalf("same-host redirect: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("same-host redirect status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func TestLocalOnlyRoundTripperRejectsInvalidRedirectLocation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "://invalid host")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	resp, err := client.Get(server.URL + "/start")
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "local-only registry redirect has invalid location") {
+		t.Fatalf("invalid redirect error = %v, want invalid-location rejection", err)
+	}
+}
+
 func TestManifestMissMarksPeerMissingWithoutRecursiveProxy(t *testing.T) {
 	t.Parallel()
 

@@ -3094,6 +3094,9 @@ func (t localOnlyRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	if req == nil {
 		return nil, errors.New("nil registry request")
 	}
+	if req.URL == nil || req.URL.Scheme == "" || req.URL.Host == "" {
+		return nil, errors.New("registry request URL is incomplete")
+	}
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
@@ -3104,7 +3107,31 @@ func (t localOnlyRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		clone.Header = make(http.Header)
 	}
 	clone.Header.Set(imageCacheLocalOnlyHeader, "1")
-	return base.RoundTrip(clone)
+	resp, err := base.RoundTrip(clone)
+	if err != nil || resp == nil || !isHTTPRedirect(resp.StatusCode) {
+		return resp, err
+	}
+	location, locationErr := resp.Location()
+	if locationErr != nil {
+		resp.Body.Close()
+		return nil, fmt.Errorf("local-only registry redirect has invalid location: %w", locationErr)
+	}
+	if location.IsAbs() &&
+		(location.Scheme != clone.URL.Scheme || !strings.EqualFold(location.Host, clone.URL.Host)) {
+		resp.Body.Close()
+		return nil, fmt.Errorf("local-only registry request redirected from %s://%s to %s://%s", clone.URL.Scheme, clone.URL.Host, location.Scheme, location.Host)
+	}
+	return resp, nil
+}
+
+func isHTTPRedirect(status int) bool {
+	switch status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, target string) error {
