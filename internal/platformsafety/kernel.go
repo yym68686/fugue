@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/bundleauth"
+	"fugue/internal/componentmanifest"
 	"fugue/internal/model"
 )
 
@@ -285,6 +286,13 @@ func evaluateArtifactPublication(
 			Message:   "gray release requires one bounded canary scope",
 		})
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindComponentReleasePlan &&
+		channel != model.PlatformArtifactReleaseChannelShadow {
+		violations = append(violations, Violation{
+			Invariant: InvariantShadowNoProductionImpact,
+			Message:   "component release plans are observation-only and may be published only to shadow",
+		})
+	}
 	return Decision{Pass: len(violations) == 0, Violations: violations}
 }
 
@@ -311,6 +319,20 @@ func EvaluateArtifactIntegrity(artifact model.PlatformArtifact, keyring bundleau
 			Invariant: InvariantArtifactSignature,
 			Message:   "artifact provenance signature must be present and trusted: " + err.Error(),
 		})
+	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindComponentReleasePlan {
+		if err := componentmanifest.ValidateArtifactBinding(
+			artifact.Content,
+			artifact.Scope.ScopeType,
+			artifact.Scope.Key,
+			artifact.ScopeKey,
+			artifact.Generation,
+		); err != nil {
+			violations = append(violations, Violation{
+				Invariant: InvariantArtifactSchema,
+				Message:   "component release plan binding is invalid: " + err.Error(),
+			})
+		}
 	}
 	return Decision{Pass: len(violations) == 0, Violations: violations}
 }

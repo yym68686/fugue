@@ -34,6 +34,26 @@ func TestPlanRepositoryImageChangeIsShadowOnly(t *testing.T) {
 	}
 }
 
+func TestPlanRepositoryReleaseControlOwnsMigrationPlanner(t *testing.T) {
+	manifest := loadRepositoryManifest(t)
+	for _, changedPath := range []string{
+		"cmd/fugue-component-plan/main.go",
+		"docs/architecture/component-ownership-v1.yaml",
+		"internal/componentmanifest/artifact.go",
+	} {
+		plan, err := PlanChanges(manifest, []string{changedPath})
+		if err != nil {
+			t.Fatalf("PlanChanges(%q) error = %v", changedPath, err)
+		}
+		if got, want := impactIDs(plan.ImpactedComponents), []string{"release-control"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) impacted components = %v, want %v", changedPath, got, want)
+		}
+		if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
+			t.Fatalf("PlanChanges(%q) = mode %q legacy=%v", changedPath, plan.DispatchMode, plan.RequiresLegacyRelease)
+		}
+	}
+}
+
 func TestPlanRepositorySharedChangeFailsSafeToLegacy(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	plan, err := PlanChanges(manifest, []string{"internal/model/model.go"})
@@ -72,14 +92,14 @@ func TestPlanFoundationSliceIsCoveredAndFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanChanges() error = %v", err)
 	}
-	if plan.DispatchMode != DispatchModeLegacyShared || !plan.RequiresLegacyRelease {
+	if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
 		t.Fatalf("foundation plan = mode %q legacy=%v", plan.DispatchMode, plan.RequiresLegacyRelease)
 	}
 	if len(plan.ChangedPaths) != len(paths) {
 		t.Fatalf("changed paths = %d, want %d", len(plan.ChangedPaths), len(paths))
 	}
-	if len(plan.ImpactedComponents) != len(manifest.Components) {
-		t.Fatalf("impacted components = %d, want %d", len(plan.ImpactedComponents), len(manifest.Components))
+	if got, want := impactIDs(plan.ImpactedComponents), []string{"release-control"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("impacted components = %v, want %v", got, want)
 	}
 	coordination, err := BuildShadowCoordinationPlan(plan)
 	if err != nil {

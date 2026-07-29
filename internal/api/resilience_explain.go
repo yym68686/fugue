@@ -709,6 +709,7 @@ func platformArtifactKindList() []string {
 		model.PlatformArtifactKindRuntimeContinuityPlan,
 		model.PlatformArtifactKindNodeGuardianPolicy,
 		model.PlatformArtifactKindReleaseGuardPolicy,
+		model.PlatformArtifactKindComponentReleasePlan,
 		model.PlatformArtifactKindEdgeRankingPolicy,
 		model.PlatformArtifactKindTrafficSafetyPolicy,
 		model.PlatformArtifactKindSubsystemFailureContracts,

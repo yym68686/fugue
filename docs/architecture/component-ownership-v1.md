@@ -56,3 +56,12 @@ The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination
 output includes the globally sorted lane/resource lock order and recovery lanes,
 but is hard-coded as observation-only and cannot authorize production mutation.
+
+Validated observations are persisted as `component_release_plan` entries in the
+existing platform artifact ledger. Their scope key is derived from the exact
+base and target Git commits, so unrelated comparisons have independent shadow
+release lanes. The envelope, manifest, change plan, coordination plan, scope,
+and generation are verified together. This artifact kind is hard-limited to the
+`shadow` channel by the platform safety kernel; neither a soft override nor
+kernel break-glass can promote it to gray or full while the migration remains at
+Gate A.

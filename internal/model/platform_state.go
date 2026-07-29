@@ -16,6 +16,7 @@ const (
 	PlatformArtifactKindRuntimeContinuityPlan     = "runtime_continuity_plan"
 	PlatformArtifactKindNodeGuardianPolicy        = "node_guardian_policy"
 	PlatformArtifactKindReleaseGuardPolicy        = "release_guard_policy"
+	PlatformArtifactKindComponentReleasePlan      = "component_release_plan"
 	PlatformArtifactKindEdgeRankingPolicy         = "edge_ranking_policy"
 	PlatformArtifactKindTrafficSafetyPolicy       = "traffic_safety_policy"
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"

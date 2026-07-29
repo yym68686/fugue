@@ -30,6 +30,7 @@ var validPlatformArtifactKinds = map[string]struct{}{
 	model.PlatformArtifactKindRuntimeContinuityPlan:     {},
 	model.PlatformArtifactKindNodeGuardianPolicy:        {},
 	model.PlatformArtifactKindReleaseGuardPolicy:        {},
+	model.PlatformArtifactKindComponentReleasePlan:      {},
 	model.PlatformArtifactKindEdgeRankingPolicy:         {},
 	model.PlatformArtifactKindTrafficSafetyPolicy:       {},
 	model.PlatformArtifactKindSubsystemFailureContracts: {},

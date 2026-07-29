@@ -33,6 +33,71 @@ func TestShadowArtifactEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestShadowArtifactIdentityIsGitBoundAndLaneLocal(t *testing.T) {
+	manifest, changePlan, coordinationPlan := testShadowPlans(t)
+	first, err := BuildShadowArtifactEnvelope(manifest, changePlan, coordinationPlan, testBaseCommit, testTargetCommit)
+	if err != nil {
+		t.Fatalf("BuildShadowArtifactEnvelope() error = %v", err)
+	}
+	identity, err := first.ArtifactIdentity()
+	if err != nil {
+		t.Fatalf("ArtifactIdentity() error = %v", err)
+	}
+	if got, want := identity.ScopeType, ShadowArtifactScopeType; got != want {
+		t.Fatalf("scope type = %q, want %q", got, want)
+	}
+	if got, want := identity.ScopeKey, ShadowArtifactScopeType+":"+testBaseCommit+".."+testTargetCommit; got != want {
+		t.Fatalf("scope key = %q, want %q", got, want)
+	}
+	if got, want := identity.Generation, "git-"+testTargetCommit; got != want {
+		t.Fatalf("generation = %q, want %q", got, want)
+	}
+
+	content, err := first.Content()
+	if err != nil {
+		t.Fatalf("Content() error = %v", err)
+	}
+	if err := ValidateArtifactBinding(content, identity.ScopeType, identity.ScopeKey, identity.ScopeKey, identity.Generation); err != nil {
+		t.Fatalf("ValidateArtifactBinding() error = %v", err)
+	}
+	tests := map[string]struct {
+		scopeType      string
+		scopeObjectKey string
+		scopeKey       string
+		generation     string
+	}{
+		"scope type":       {scopeType: "global", scopeObjectKey: identity.ScopeKey, scopeKey: identity.ScopeKey, generation: identity.Generation},
+		"scope object key": {scopeType: identity.ScopeType, scopeObjectKey: ShadowArtifactScopeType + ":other", scopeKey: identity.ScopeKey, generation: identity.Generation},
+		"scope key":        {scopeType: identity.ScopeType, scopeObjectKey: identity.ScopeKey, scopeKey: ShadowArtifactScopeType + ":other", generation: identity.Generation},
+		"generation":       {scopeType: identity.ScopeType, scopeObjectKey: identity.ScopeKey, scopeKey: identity.ScopeKey, generation: "git-3333333333333333333333333333333333333333"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateArtifactBinding(content, test.scopeType, test.scopeObjectKey, test.scopeKey, test.generation); err == nil {
+				t.Fatal("ValidateArtifactBinding() unexpectedly succeeded")
+			}
+		})
+	}
+
+	second, err := BuildShadowArtifactEnvelope(
+		manifest,
+		changePlan,
+		coordinationPlan,
+		"3333333333333333333333333333333333333333",
+		testTargetCommit,
+	)
+	if err != nil {
+		t.Fatalf("second BuildShadowArtifactEnvelope() error = %v", err)
+	}
+	secondIdentity, err := second.ArtifactIdentity()
+	if err != nil {
+		t.Fatalf("second ArtifactIdentity() error = %v", err)
+	}
+	if secondIdentity.ScopeKey == identity.ScopeKey {
+		t.Fatal("different exact Git comparisons shared one platform release lane")
+	}
+}
+
 func TestShadowArtifactEnvelopeRejectsUnsafeOrUnboundContent(t *testing.T) {
 	for name, mutate := range map[string]func(*ShadowArtifactEnvelope){
 		"invalid base": func(envelope *ShadowArtifactEnvelope) {
