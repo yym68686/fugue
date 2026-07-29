@@ -601,6 +601,7 @@ func TestNodeRepairTaskGuardsUnsafeExecutionAndWritesAudit(t *testing.T) {
 			"tasks",
 			model.NodeUpdateTaskTypeRepairManagedIPTables,
 			model.NodeUpdateTaskTypeRestartStatelessNodeService,
+			model.NodeUpdateTaskTypeReconcileHostZRAM,
 		},
 	)
 	if err != nil {
@@ -635,6 +636,17 @@ func TestNodeRepairTaskGuardsUnsafeExecutionAndWritesAudit(t *testing.T) {
 	claimRestart := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+unsafeRestart.ID+"/claim", updaterToken, nil)
 	if claimRestart.Code != http.StatusConflict || !strings.Contains(claimRestart.Body.String(), "allowlist") {
 		t.Fatalf("expected unsafe restart refusal, code=%d body=%s", claimRestart.Code, claimRestart.Body.String())
+	}
+
+	unsafeZRAM, err := s.CreateNodeUpdateTask(requester, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeReconcileHostZRAM, map[string]string{
+		"allow_restart": "false",
+	})
+	if err != nil {
+		t.Fatalf("create unsafe host zram task: %v", err)
+	}
+	claimZRAM := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+unsafeZRAM.ID+"/claim", updaterToken, nil)
+	if claimZRAM.Code != http.StatusConflict || !strings.Contains(claimZRAM.Body.String(), "allow_restart=true") {
+		t.Fatalf("expected unsafe host zram refusal, code=%d body=%s", claimZRAM.Code, claimZRAM.Body.String())
 	}
 
 	safePayload := map[string]string{
@@ -926,6 +938,13 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`reload-lkg-bundle`,
 		`restart-stateless-node-service`,
 		`run-deep-health`,
+		`reconcile-host-zram`,
+		`reconcile_host_zram_task`,
+		`allow_restart=true`,
+		`fugue_k3s_config_ensure_fail_swap_on_false`,
+		`host-only zram active`,
+		`checks.append(check("host_zram", "resource"`,
+		`Fugue-managed host zram active at its planned size`,
 		`record_node_guardian_wal "deep_health_heartbeat"`,
 		`write_file_hash_sidecar`,
 		`verify_file_hash_sidecar`,

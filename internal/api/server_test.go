@@ -1023,6 +1023,15 @@ func TestJoinClusterInstallScriptSupportsResourceCaps(t *testing.T) {
 		`resource_limit_memory=${FUGUE_EFFECTIVE_LIMIT_MEMORY:-}`,
 		`resource_limit_disk=${FUGUE_EFFECTIVE_LIMIT_DISK:-}`,
 		`kubelet_system_reserved=${FUGUE_KUBELET_SYSTEM_RESERVED:-}`,
+		`fugue_host_zram_plan`,
+		`fugue_host_zram_stage`,
+		`fugue_host_zram_activate`,
+		`FUGUE_HOST_ZRAM_PERCENT="${FUGUE_HOST_ZRAM_PERCENT:-25}"`,
+		`FUGUE_HOST_ZRAM_MIN_NODE_BYTES="${FUGUE_HOST_ZRAM_MIN_NODE_BYTES:-4294967296}"`,
+		`FUGUE_HOST_ZRAM_MAX_BYTES="${FUGUE_HOST_ZRAM_MAX_BYTES:-4294967296}"`,
+		`printf '  - "fail-swap-on=false"\n'`,
+		`host_zram_state=${FUGUE_HOST_ZRAM_STATE:-unknown}`,
+		`Kubernetes Pods remain NoSwap`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

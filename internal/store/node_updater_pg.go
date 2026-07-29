@@ -292,7 +292,13 @@ func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID,
 		model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeReportImageCache,
 		model.NodeUpdateTaskTypeReportLocalPV,
-		model.NodeUpdateTaskTypeDecommissionLocalPV:
+		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeRefreshDesiredState,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeRunDeepHealth,
+		model.NodeUpdateTaskTypeReconcileHostZRAM:
 	default:
 		return model.NodeUpdateTask{}, false, nil
 	}

@@ -4764,12 +4764,13 @@ func TestRunAdminNodeUpdaterTaskCreateTargetsRuntime(t *testing.T) {
 		"--runtime", "runtime-b",
 		"--type", "diagnose-node",
 		"--payload", "reason=manual",
+		"--allow-restart",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run node-updater task create: %v", err)
 	}
 
-	if gotBody.RuntimeID != "runtime_b" || gotBody.Type != model.NodeUpdateTaskTypeDiagnoseNode || gotBody.Payload["reason"] != "manual" {
+	if gotBody.RuntimeID != "runtime_b" || gotBody.Type != model.NodeUpdateTaskTypeDiagnoseNode || gotBody.Payload["reason"] != "manual" || gotBody.Payload["allow_restart"] != "true" {
 		t.Fatalf("unexpected node update task request %+v", gotBody)
 	}
 	for _, want := range []string{"task=task_123", "runtime=runtime_b", "type=diagnose-node", "status=pending"} {

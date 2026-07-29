@@ -766,11 +766,11 @@ func (s *Server) publicInstallAPIBaseURL(r *http.Request) string {
 }
 
 func (s *Server) joinClusterInstallScript(apiBase string) string {
-	return fmt.Sprintf(`#!/usr/bin/env bash
+	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
 FUGUE_API_BASE=${FUGUE_API_BASE:-%s}
-FUGUE_JOIN_SCRIPT_VERSION="${FUGUE_JOIN_SCRIPT_VERSION:-v1}"
+FUGUE_JOIN_SCRIPT_VERSION="${FUGUE_JOIN_SCRIPT_VERSION:-v2}"
 FUGUE_K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
 FUGUE_K3S_VERSION="${FUGUE_K3S_VERSION:-}"
 FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
@@ -802,6 +802,8 @@ require_cmd() {
 log_step() {
   printf '[fugue] %%s\n' "$*" >&2
 }
+
+__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__
 
 detect_package_manager() {
   if command -v apt-get >/dev/null 2>&1; then
@@ -878,6 +880,12 @@ package_for_command() {
     df)
       printf 'coreutils'
       ;;
+    modprobe)
+      printf 'kmod'
+      ;;
+    mkswap|swapon|swapoff)
+      printf 'util-linux'
+      ;;
   esac
 }
 
@@ -944,7 +952,7 @@ ensure_commands_installed() {
 }
 
 ensure_join_prerequisites() {
-  ensure_commands_installed curl ip awk df cmp
+  ensure_commands_installed curl ip awk df cmp modprobe mkswap swapon swapoff
 }
 
 format_duration() {
@@ -2709,7 +2717,7 @@ install_fugue_node_updater() {
   log_step "Installing Fugue node updater..."
   mkdir -p /etc/fugue /var/lib/fugue-node-updater
   local updater_version="v6"
-  local updater_capabilities="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
+  local updater_capabilities="heartbeat,tasks,refresh-join-config,rejoin-k3s-node,safe-k3s-node-rejoin,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,reconcile-host-zram,time-sync"
   updater_tmp="$(mktemp)"
   curl -fsSL --retry 3 --retry-delay 2 "${FUGUE_API_BASE}/install/node-updater.sh" -o "${updater_tmp}"
   cp "${updater_tmp}" /usr/local/bin/fugue-node-updater
@@ -2870,7 +2878,15 @@ fi
 
 join_env="$(mktemp)"
 cleanup() {
+  local exit_code=$?
+  trap - EXIT
   rm -f "${join_env}"
+  if [ "${FUGUE_HOST_ZRAM_STAGED:-false}" = "true" ]; then
+    if ! fugue_host_zram_rollback; then
+      log_step "Host memory safety rollback was incomplete: ${FUGUE_HOST_ZRAM_REASON}."
+    fi
+  fi
+  exit "${exit_code}"
 }
 trap cleanup EXIT
 
@@ -2906,6 +2922,11 @@ if [ -n "${mesh_provider}" ]; then
 fi
 
 configure_resource_limits
+if fugue_host_zram_plan; then
+  log_step "Host memory safety plan: ${FUGUE_HOST_ZRAM_SIZE_BYTES} bytes of host-only zram; Kubernetes Pods remain NoSwap."
+else
+  log_step "Host memory safety skipped: ${FUGUE_HOST_ZRAM_REASON}."
+fi
 configure_k3s_api_load_balancer
 
 log_step "Preparing k3s agent configuration..."
@@ -2923,9 +2944,14 @@ k3s_config_tmp="$(mktemp)"
   fi
   csv_to_yaml_list node-label "${FUGUE_JOIN_NODE_LABELS:-}"
   csv_to_yaml_list node-taint "${FUGUE_JOIN_NODE_TAINTS:-}"
-  if [ -n "${FUGUE_KUBELET_SYSTEM_RESERVED:-}" ]; then
+  if [ -n "${FUGUE_KUBELET_SYSTEM_RESERVED:-}" ] || [ "${FUGUE_HOST_ZRAM_ELIGIBLE}" = "true" ]; then
     printf 'kubelet-arg:\n'
-    printf '  - "%%s"\n' "${FUGUE_KUBELET_SYSTEM_RESERVED}"
+    if [ -n "${FUGUE_KUBELET_SYSTEM_RESERVED:-}" ]; then
+      printf '  - "%%s"\n' "${FUGUE_KUBELET_SYSTEM_RESERVED}"
+    fi
+    if [ "${FUGUE_HOST_ZRAM_ELIGIBLE}" = "true" ]; then
+      printf '  - "fail-swap-on=false"\n'
+    fi
   fi
 } >"${k3s_config_tmp}"
 
@@ -2961,6 +2987,16 @@ elif remove_file_if_present /etc/rancher/k3s/registries.yaml; then
   k3s_config_changed=1
 fi
 
+host_zram_staged=0
+if [ "${FUGUE_HOST_ZRAM_ELIGIBLE}" = "true" ]; then
+  if fugue_host_zram_stage; then
+    host_zram_staged=1
+    log_step "Staged Fugue host-only zram service."
+  else
+    log_step "Host memory safety staging failed and was rolled back: ${FUGUE_HOST_ZRAM_REASON}."
+  fi
+fi
+
 k3s_installed_now=0
 if ! command -v k3s >/dev/null 2>&1; then
   run_with_heartbeat "Downloading and installing k3s agent binaries" "2-10 min on a fresh node" install_k3s_agent_binaries
@@ -2994,6 +3030,14 @@ fi
 
 restart_k3s_agent_if_needed "${k3s_restart_needed}"
 
+if [ "${host_zram_staged}" -eq 1 ]; then
+  if fugue_host_zram_activate; then
+    log_step "Host memory safety active: ${FUGUE_HOST_ZRAM_SIZE_BYTES} bytes of compressed swap for host processes."
+  else
+    log_step "Host memory safety activation failed and was rolled back: ${FUGUE_HOST_ZRAM_REASON}."
+  fi
+fi
+
 if ! reconcile_cni_bridge_mtu; then
   log_step "CNI bridge MTU is already aligned or not ready yet."
 fi
@@ -3024,6 +3068,10 @@ resource_limit_cpu=${FUGUE_EFFECTIVE_LIMIT_CPU:-}
 resource_limit_memory=${FUGUE_EFFECTIVE_LIMIT_MEMORY:-}
 resource_limit_disk=${FUGUE_EFFECTIVE_LIMIT_DISK:-}
 kubelet_system_reserved=${FUGUE_KUBELET_SYSTEM_RESERVED:-}
+host_zram_state=${FUGUE_HOST_ZRAM_STATE:-unknown}
+host_zram_reason=${FUGUE_HOST_ZRAM_REASON:-}
+host_zram_size_bytes=${FUGUE_HOST_ZRAM_SIZE_BYTES:-0}
 EOF
 `, strconv.Quote(apiBase))
+	return strings.ReplaceAll(script, "__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary())
 }

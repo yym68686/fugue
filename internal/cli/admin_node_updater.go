@@ -296,6 +296,7 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 		Payload                []string
 		DryRun                 bool
 		AllowDelete            bool
+		AllowRestart           bool
 		ExpectedLVCount        int
 		ExpectedPVCount        int
 		ExpectedImageSizeBytes int64
@@ -321,6 +322,9 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 			}
 			if flagChanged(cmd, "allow-delete") {
 				payload["allow_delete"] = fmt.Sprintf("%t", opts.AllowDelete)
+			}
+			if flagChanged(cmd, "allow-restart") {
+				payload["allow_restart"] = fmt.Sprintf("%t", opts.AllowRestart)
 			}
 			if flagChanged(cmd, "expected-lv-count") {
 				payload["expected_lv_count"] = fmt.Sprintf("%d", opts.ExpectedLVCount)
@@ -373,6 +377,7 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 	cmd.Flags().StringArrayVar(&opts.Payload, "payload", nil, "Task payload as KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", true, "Set dry_run task payload")
 	cmd.Flags().BoolVar(&opts.AllowDelete, "allow-delete", false, "Set allow_delete task payload")
+	cmd.Flags().BoolVar(&opts.AllowRestart, "allow-restart", false, "Authorize a guarded service restart when the task requires one")
 	cmd.Flags().IntVar(&opts.ExpectedLVCount, "expected-lv-count", 0, "Expected LocalPV LV count for decommission preflight")
 	cmd.Flags().IntVar(&opts.ExpectedPVCount, "expected-bound-pv-count", 0, "Expected bound LocalPV PV count for decommission preflight")
 	cmd.Flags().Int64Var(&opts.ExpectedImageSizeBytes, "expected-image-size-bytes", 0, "Expected LocalPV backing file size in bytes")
@@ -402,6 +407,7 @@ func nodeUpdateTaskTypes() []string {
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
 		model.NodeUpdateTaskTypeRunDeepHealth,
+		model.NodeUpdateTaskTypeReconcileHostZRAM,
 	}
 }
 
@@ -629,7 +635,8 @@ func nodeUpdateTaskIsRepairHistory(task model.NodeUpdateTask) bool {
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeRunDeepHealth:
+		model.NodeUpdateTaskTypeRunDeepHealth,
+		model.NodeUpdateTaskTypeReconcileHostZRAM:
 		return true
 	default:
 		return false
