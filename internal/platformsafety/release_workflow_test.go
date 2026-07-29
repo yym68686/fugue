@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -57,9 +58,9 @@ type releaseWorkflowDispatchTrigger struct {
 }
 
 type releaseWorkflowDispatchInput struct {
-	Required bool       `yaml:"required"`
-	Type     string     `yaml:"type"`
-	Default  *yaml.Node `yaml:"default"`
+	Required bool   `yaml:"required"`
+	Type     string `yaml:"type"`
+	Default  any    `yaml:"default"`
 }
 
 type releaseWorkflowJob struct {
@@ -2823,7 +2824,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "9e95927e66536678321bffab7bf8eb56fa06297960e8f5feb45bc3d234e31f66")
+	assertWorkflowSourceDigest(t, data, "5511df384f7a249aa66836d66d265f00c036bf7dc35254a06264d10cd0aeb76f")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2833,7 +2834,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read operational-domain guarded deploy action: %v", err)
 	}
-	assertWorkflowSourceDigest(t, actionData, "bb52d445d98b0f5e6d10a42b2bfabb4c22a30f88e28ab0bf38177c4c8c151057")
+	assertWorkflowSourceDigest(t, actionData, "b9c982fac6dbec36707e52c5467a70291b7402f8a3409cdd8c2611d1a52b7944")
 	var operationalAction compositeReleaseAction
 	if err := yaml.Unmarshal(actionData, &operationalAction); err != nil {
 		t.Fatalf("parse operational-domain guarded deploy action: %v", err)
@@ -2841,7 +2842,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                         "36817d224982821ad3eb81a44fd42dd50bfa479915e48b339010fae5e19ae1a5",
+		"release-input-guard/Guard exact main commit authorization":                         "b6cd345bc149e79594801c98c85b3236380afb9d5be29f6eeae3275dc4b85db2",
 		"release-baseline/Resolve release-domain baseline":                                  "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
@@ -2863,17 +2864,19 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
+		"continue-release-convergence/Dispatch exact release convergence successor":         "7482b8f8b487c69e3e427d965d11fe839da8c218db77ff41b76b935c157852ca",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
 		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "45c936e0acd042ba3f4e9a88249f49912b4825e52df413e2020d4a2224d1f8d2",
-		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "647f2abd75678bcf08439bbb465cc0fc976c2d6c8949f82bcd3a045fbfbd7022",
+		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
 	})
 	workflowJobsNode := workflowMappingValue(t, workflowRootNode, "jobs")
 	assertWorkflowJobNodeContracts(t, workflowJobsNode, map[string]workflowJobNodeContract{
 		"release-input-guard": {
-			Keys: []string{"runs-on", "steps"},
+			Keys: []string{"runs-on", "permissions", "steps"},
 			StepKeys: [][]string{
+				{"name", "if", "uses", "with"},
 				{"name", "env", "run"},
 			},
 		},
@@ -2911,7 +2914,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			},
 		},
 		"deploy": {
-			Keys: []string{"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"},
+			Keys: []string{"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "outputs", "steps"},
 			StepKeys: [][]string{
 				{"name", "if", "run"},
 				{"name", "uses", "with"},
@@ -2925,9 +2928,16 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "if", "env", "run"},
 				{"name", "id", "if", "env", "run"},
 				{"name", "if", "env", "run"},
-				{"name", "if", "env", "uses"},
+				{"name", "id", "if", "env", "uses"},
 				{"name", "if", "run"},
 				{"name", "if", "uses", "with"},
+			},
+		},
+		"continue-release-convergence": {
+			Keys: []string{"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "id", "env", "run"},
+				{"name", "uses", "with"},
 			},
 		},
 		"record-release-baseline": {
@@ -2957,8 +2967,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if workflow.On.WorkflowDispatch == nil {
 		t.Fatal("control-plane workflow must support workflow_dispatch")
 	}
-	if len(workflow.On.WorkflowDispatch.Inputs) != 1 {
-		t.Fatalf("workflow_dispatch must expose only expected_sha: %+v", workflow.On.WorkflowDispatch.Inputs)
+	if len(workflow.On.WorkflowDispatch.Inputs) != 3 {
+		t.Fatalf("workflow_dispatch input inventory drifted: %+v", workflow.On.WorkflowDispatch.Inputs)
 	}
 	expectedSHAInput, ok := workflow.On.WorkflowDispatch.Inputs["expected_sha"]
 	if !ok {
@@ -2971,6 +2981,28 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if !expectedSHA.Required || expectedSHA.Type != "string" || expectedSHA.Default != nil {
 		t.Fatalf("expected_sha must be a required string without a default: %+v", expectedSHA)
 	}
+	imageCacheInput, ok := workflow.On.WorkflowDispatch.Inputs["image_cache_convergence"]
+	if !ok {
+		t.Fatal("workflow_dispatch must define image_cache_convergence")
+	}
+	var imageCache releaseWorkflowDispatchInput
+	if err := imageCacheInput.Decode(&imageCache); err != nil {
+		t.Fatalf("decode image_cache_convergence input: %v", err)
+	}
+	if !imageCache.Required || imageCache.Type != "boolean" || imageCache.Default != false {
+		t.Fatalf("image_cache_convergence must be a required false-default boolean: %+v", imageCache)
+	}
+	convergenceSourceInput, ok := workflow.On.WorkflowDispatch.Inputs["convergence_source_run_id"]
+	if !ok {
+		t.Fatal("workflow_dispatch must define convergence_source_run_id")
+	}
+	var convergenceSource releaseWorkflowDispatchInput
+	if err := convergenceSourceInput.Decode(&convergenceSource); err != nil {
+		t.Fatalf("decode convergence_source_run_id input: %v", err)
+	}
+	if convergenceSource.Required || convergenceSource.Type != "string" || convergenceSource.Default != "" {
+		t.Fatalf("convergence_source_run_id must be an optional empty-default string: %+v", convergenceSource)
+	}
 	workflowSource := string(data)
 	if strings.Contains(workflowSource, "existing_image_tag") || len(workflow.On.Push.Paths) != 0 {
 		t.Fatal("control-plane release must be dispatch-only without an image bypass")
@@ -2980,20 +3012,49 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if !ok {
 		t.Fatal("control-plane workflow must define release-input-guard")
 	}
+	if got, want := inputGuard.Permissions, map[string]string{"actions": "read", "contents": "read"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("release input guard permissions drifted: got %v want %v", got, want)
+	}
+	downloadAuthorization := workflowStepByName(t, inputGuard, "Download convergence successor authorization")
+	if downloadAuthorization.If != "${{ inputs.image_cache_convergence }}" ||
+		downloadAuthorization.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" {
+		t.Fatalf("convergence authorization download boundary drifted: %+v", downloadAuthorization)
+	}
+	wantAuthorizationWith := map[string]string{
+		"name":         "fugue-release-convergence-successor-${{ inputs.convergence_source_run_id }}-1",
+		"path":         "${{ runner.temp }}/fugue-release-convergence-authorization",
+		"github-token": "${{ github.token }}",
+		"repository":   "${{ github.repository }}",
+		"run-id":       "${{ inputs.convergence_source_run_id }}",
+	}
+	if !reflect.DeepEqual(downloadAuthorization.With, wantAuthorizationWith) {
+		t.Fatalf("convergence authorization download inputs drifted: got %v want %v", downloadAuthorization.With, wantAuthorizationWith)
+	}
 	guard := workflowStepByName(t, inputGuard, "Guard exact main commit authorization")
 	for key, want := range map[string]string{
-		"EXPECTED_SHA":   "${{ inputs.expected_sha }}",
-		"ACTUAL_SHA":     "${{ github.sha }}",
-		"EVENT_NAME":     "${{ github.event_name }}",
-		"EVENT_REF":      "${{ github.ref }}",
-		"EVENT_REF_NAME": "${{ github.ref_name }}",
-		"EVENT_REF_TYPE": "${{ github.ref_type }}",
+		"EXPECTED_SHA":                   "${{ inputs.expected_sha }}",
+		"ACTUAL_SHA":                     "${{ github.sha }}",
+		"IMAGE_CACHE_CONVERGENCE":        "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
+		"CONVERGENCE_SOURCE_RUN_ID":      "${{ inputs.convergence_source_run_id }}",
+		"CONVERGENCE_AUTHORIZATION_FILE": "${{ runner.temp }}/fugue-release-convergence-authorization/successor.json",
+		"GH_TOKEN":                       "${{ github.token }}",
+		"REPOSITORY":                     "${{ github.repository }}",
+		"EVENT_NAME":                     "${{ github.event_name }}",
+		"EVENT_REF":                      "${{ github.ref }}",
+		"EVENT_REF_NAME":                 "${{ github.ref_name }}",
+		"EVENT_REF_TYPE":                 "${{ github.ref_type }}",
 	} {
 		if got := guard.Env[key]; got != want {
 			t.Fatalf("release input guard env %s drifted: got %q want %q", key, got, want)
 		}
 	}
-	for _, required := range []string{"refs/heads/main", "^[0-9a-f]{40}$", `"${EXPECTED_SHA}" == "${ACTUAL_SHA}"`} {
+	for _, required := range []string{
+		"refs/heads/main", "^[0-9a-f]{40}$", `"${EXPECTED_SHA}" == "${ACTUAL_SHA}"`,
+		`[[ -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]`, "actions/runs/${CONVERGENCE_SOURCE_RUN_ID}",
+		`"${source_status}" == 'completed' && "${source_conclusion}" == 'success'`,
+		`"pending_activation_artifacts": ["image_cache"]`, `"successor_run_id": successor_run_id`,
+		"if raw != canonical:",
+	} {
 		if !strings.Contains(guard.Run, required) {
 			t.Fatalf("release input guard must contain %q", required)
 		}
@@ -3235,6 +3296,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := deploy.Permissions, map[string]string{"actions": "read", "contents": "read"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("deploy permissions drifted: got %v want %v", got, want)
 	}
+	wantDeployOutputs := map[string]string{
+		"image_activation_convergence": "${{ needs.release-baseline.outputs.is_genesis == 'true' && 'complete' || steps.guarded_deploy.outputs.image-activation-convergence }}",
+		"pending_activation_artifacts": "${{ steps.guarded_deploy.outputs.pending-activation-artifacts }}",
+	}
+	if !reflect.DeepEqual(deploy.Outputs, wantDeployOutputs) {
+		t.Fatalf("deploy convergence outputs drifted: got %v want %v", deploy.Outputs, wantDeployOutputs)
+	}
 	if deploy.ContinueOnError {
 		t.Fatal("deploy job must fail closed")
 	}
@@ -3433,6 +3501,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 
 	upgrade := workflowStepByName(t, deploy, "Upgrade Fugue control plane through uploaded operational evidence")
+	if got, want := upgrade.ID, "guarded_deploy"; got != want {
+		t.Fatalf("guarded deploy step id drifted: got %q want %q", got, want)
+	}
 	if strings.TrimSpace(upgrade.If) != nonGenesisCondition {
 		t.Fatalf("control-plane upgrade must be unreachable from the genesis evidence path: %q", upgrade.If)
 	}
@@ -3474,6 +3545,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR":     "${{ runner.temp }}/fugue-release-domain-public/build-activation-evidence",
 		"FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST": "${{ needs.build.outputs.verified_image_artifacts_digest }}",
 		"FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS":                   "${{ needs.build.outputs.image_targets }}",
+		"FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE":                "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
 		"FUGUE_RELEASE_DOMAIN_API_IMAGE_BASE_SHA":              "${{ needs.release-baseline.outputs.api_image_baseline_ref }}",
 		"FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST":                "${{ needs.build.outputs.api_image_digest }}",
 		"FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_BASE_SHA":       "${{ needs.release-baseline.outputs.controller_image_baseline_ref }}",
@@ -3500,6 +3572,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"Upload operational-domain report-only evidence",
 		"Upload build-vs-activation report-only evidence",
 		"Apply exact authorized control-plane release",
+		"Verify image activation convergence",
 	}
 	gotActionSteps := make([]string, 0, len(operationalAction.Runs.Steps))
 	for _, step := range operationalAction.Runs.Steps {
@@ -3580,6 +3653,21 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := strings.TrimSpace(apply.Run), "./scripts/upgrade_fugue_control_plane.sh"; got != want {
 		t.Fatalf("operational apply entrypoint drifted: got %q want %q", got, want)
 	}
+	convergenceStep := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Verify image activation convergence")
+	if got, want := convergenceStep.ID, "image-activation-convergence"; got != want {
+		t.Fatalf("image activation convergence step id drifted: got %q want %q", got, want)
+	}
+	for _, required := range []string{
+		"image-activation-convergence",
+		`--build-artifact-plan "${evidence_dir}/build-artifact-plan.json"`,
+		`--image-activation-plan "${evidence_dir}/image-activation-plan.json"`,
+		`--image-activation-evidence "${evidence_dir}/image-activation-evidence.json"`,
+		"complete)", "pending)", `printf 'status=%s\n'`, `printf 'pending_artifacts=%s\n'`,
+	} {
+		if !strings.Contains(convergenceStep.Run, required) {
+			t.Fatalf("image activation convergence step must contain %q", required)
+		}
+	}
 
 	publicUpload := workflowStepByName(t, deploy, "Upload release-domain public evidence")
 	if got, want := publicUpload.If, "always()"; got != want {
@@ -3598,6 +3686,72 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if got := publicUpload.With[key]; got != want {
 			t.Fatalf("public evidence upload %s drifted: got %q want %q", key, got, want)
 		}
+	}
+
+	continuation, ok := workflow.Jobs["continue-release-convergence"]
+	if !ok {
+		t.Fatal("control-plane workflow must define release convergence continuation")
+	}
+	wantContinuationNeeds := workflowNeeds{"release-input-guard", "release-baseline", "release-gate", "build", "deploy"}
+	if !reflect.DeepEqual(continuation.Needs, wantContinuationNeeds) {
+		t.Fatalf("release convergence continuation dependencies drifted: got %v want %v", continuation.Needs, wantContinuationNeeds)
+	}
+	const continuationCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'pending' }}"
+	if continuation.If != continuationCondition {
+		t.Fatalf("release convergence continuation condition drifted: got %q want %q", continuation.If, continuationCondition)
+	}
+	var continuationRunner string
+	if err := continuation.RunsOn.Decode(&continuationRunner); err != nil {
+		t.Fatalf("decode release convergence runner: %v", err)
+	}
+	if continuationRunner != "ubuntu-latest" || continuation.TimeoutMinutes != 10 || continuation.Environment != "production" ||
+		!reflect.DeepEqual(continuation.Permissions, map[string]string{"actions": "write", "contents": "read"}) {
+		t.Fatalf("release convergence continuation boundary drifted: runner=%q job=%+v", continuationRunner, continuation)
+	}
+	successor := workflowStepByName(t, continuation, "Dispatch exact release convergence successor")
+	if successor.ID != "convergence_successor" {
+		t.Fatalf("release convergence successor id drifted: %+v", successor)
+	}
+	for key, want := range map[string]string{
+		"EXPECTED_SHA":                 "${{ inputs.expected_sha }}",
+		"PENDING_ACTIVATION_ARTIFACTS": "${{ needs.deploy.outputs.pending_activation_artifacts }}",
+		"GH_TOKEN":                     "${{ github.token }}",
+		"REPOSITORY":                   "${{ github.repository }}",
+	} {
+		if got := successor.Env[key]; got != want {
+			t.Fatalf("release convergence successor env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{
+		`"${EXPECTED_SHA}" == "${GITHUB_SHA}"`,
+		`"${PENDING_ACTIVATION_ARTIFACTS}" == 'image_cache'`,
+		`"${state}" == 'active'`,
+		`"${main_head}" == "${EXPECTED_SHA}"`,
+		`[[ -z "${before}" ]] || exit 1`,
+		"actions/workflows/${workflow_id}/dispatches",
+		`-f "inputs[expected_sha]=${main_head}"`,
+		`-f 'inputs[image_cache_convergence]=true'`,
+		`-f "inputs[convergence_source_run_id]=${GITHUB_RUN_ID}"`,
+		"successor_number > GITHUB_RUN_NUMBER",
+		`"${successor_sha}" == "${main_head}"`,
+		`"baseline_advanced": False`,
+		`"workflow_dispatch_attempted": True`,
+	} {
+		if !strings.Contains(successor.Run, required) {
+			t.Fatalf("release convergence successor must contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{"/enable", "/disable", "/cancel", "git push", "updateRefs", "helm ", "kubectl "} {
+		if strings.Contains(successor.Run, forbidden) {
+			t.Fatalf("release convergence successor contains out-of-scope capability %q", forbidden)
+		}
+	}
+	continuationUpload := workflowStepByName(t, continuation, "Upload release convergence successor evidence")
+	if continuationUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		continuationUpload.With["path"] != "${{ runner.temp }}/fugue-release-convergence-successor/successor.json" ||
+		continuationUpload.With["if-no-files-found"] != "error" || continuationUpload.With["retention-days"] != "90" ||
+		continuationUpload.With["include-hidden-files"] != "false" || continuationUpload.With["overwrite"] != "false" {
+		t.Fatalf("release convergence successor upload drifted: %+v", continuationUpload)
 	}
 
 	recordBaseline, ok := workflow.Jobs["record-release-baseline"]
@@ -3623,7 +3777,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	assertWorkflowMappingKeys(t, recordStepsNode.Content[0], "name", "uses", "with")
 	assertWorkflowMappingKeys(t, recordStepsNode.Content[1], "name", "env", "run")
-	const recordBaselineCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' }}"
+	const recordBaselineCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}"
 	if recordBaseline.If != recordBaselineCondition {
 		t.Fatalf("record-release-baseline success condition drifted: got %q want %q", recordBaseline.If, recordBaselineCondition)
 	}
@@ -3725,7 +3879,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if len(successRearm.Needs) != len(wantSuccessNeeds) {
 		t.Fatalf("successful lane rearm has unexpected dependencies: %v", successRearm.Needs)
 	}
-	const successRearmCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.record-release-baseline.result == 'success' }}"
+	const successRearmCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' && needs.record-release-baseline.result == 'success' }}"
 	if successRearm.If != successRearmCondition {
 		t.Fatalf("successful lane rearm condition drifted: got %q want %q", successRearm.If, successRearmCondition)
 	}
@@ -3807,15 +3961,15 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if !ok {
 		t.Fatal("control-plane workflow must define the automatic release-lane freeze finalizer")
 	}
-	for _, required := range []string{"release-input-guard", "release-baseline", "release-gate", "build", "deploy", "record-release-baseline", "rearm-release-lane-on-success"} {
+	for _, required := range []string{"release-input-guard", "release-baseline", "release-gate", "build", "deploy", "continue-release-convergence", "record-release-baseline", "rearm-release-lane-on-success"} {
 		if !containsWorkflowNeed(freeze.Needs, required) {
 			t.Fatalf("release-lane freeze finalizer must wait for %s", required)
 		}
 	}
-	if len(freeze.Needs) != 7 {
+	if len(freeze.Needs) != 8 {
 		t.Fatalf("release-lane freeze finalizer has unexpected dependencies: %v", freeze.Needs)
 	}
-	const freezeCondition = "${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || needs.record-release-baseline.result != 'success' || needs.rearm-release-lane-on-success.result != 'success') }}"
+	const freezeCondition = "${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (needs.record-release-baseline.result != 'success' || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}"
 	if freeze.If != freezeCondition {
 		t.Fatalf("release-lane freeze condition drifted: got %q want %q", freeze.If, freezeCondition)
 	}
@@ -3832,20 +3986,23 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("workflow default permissions must be contents:read only: got %v want %v", got, want)
 	}
 	for jobName, job := range workflow.Jobs {
-		if jobName != "freeze-release-lane-on-failure" && jobName != "rearm-release-lane-on-success" && job.Permissions["actions"] == "write" {
+		if jobName != "freeze-release-lane-on-failure" && jobName != "rearm-release-lane-on-success" &&
+			jobName != "continue-release-convergence" && job.Permissions["actions"] == "write" {
 			t.Fatalf("job %s must not receive actions:write", jobName)
 		}
 	}
 
 	freezeRecord := workflowStepByName(t, freeze, "Record release lane freeze evidence")
 	for key, want := range map[string]string{
-		"RELEASE_INPUT_GUARD_RESULT":     "${{ needs.release-input-guard.result }}",
-		"RELEASE_BASELINE_RESULT":        "${{ needs.release-baseline.result }}",
-		"RELEASE_GATE_RESULT":            "${{ needs.release-gate.result }}",
-		"BUILD_RESULT":                   "${{ needs.build.result }}",
-		"DEPLOY_RESULT":                  "${{ needs.deploy.result }}",
-		"RECORD_RELEASE_BASELINE_RESULT": "${{ needs.record-release-baseline.result }}",
-		"REARM_RELEASE_LANE_RESULT":      "${{ needs.rearm-release-lane-on-success.result }}",
+		"RELEASE_INPUT_GUARD_RESULT":          "${{ needs.release-input-guard.result }}",
+		"RELEASE_BASELINE_RESULT":             "${{ needs.release-baseline.result }}",
+		"RELEASE_GATE_RESULT":                 "${{ needs.release-gate.result }}",
+		"BUILD_RESULT":                        "${{ needs.build.result }}",
+		"DEPLOY_RESULT":                       "${{ needs.deploy.result }}",
+		"IMAGE_ACTIVATION_CONVERGENCE":        "${{ needs.deploy.outputs.image_activation_convergence }}",
+		"CONTINUE_RELEASE_CONVERGENCE_RESULT": "${{ needs.continue-release-convergence.result }}",
+		"RECORD_RELEASE_BASELINE_RESULT":      "${{ needs.record-release-baseline.result }}",
+		"REARM_RELEASE_LANE_RESULT":           "${{ needs.rearm-release-lane-on-success.result }}",
 	} {
 		if got := freezeRecord.Env[key]; got != want {
 			t.Fatalf("release-lane freeze evidence env %s drifted: got %q want %q", key, got, want)
@@ -4065,6 +4222,259 @@ func TestControlPlaneSuccessfulReleaseLaneRearmSettlementHarness(t *testing.T) {
 						t.Fatalf("validated successor statuses drifted: %+v", successor)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestControlPlaneReleaseConvergenceSuccessorHarness(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	successor := workflowStepByName(t, workflow.Jobs["continue-release-convergence"], "Dispatch exact release convergence successor")
+	const (
+		expectedSHA = "1111111111111111111111111111111111111111"
+		driftedSHA  = "2222222222222222222222222222222222222222"
+	)
+	tests := []struct {
+		name               string
+		workflowState      string
+		preexisting        bool
+		mainSHA            string
+		successorSHA       string
+		driftAfterDispatch bool
+		wantPass           bool
+		wantDispatches     string
+	}{
+		{name: "dispatches one exact successor", workflowState: "active", successorSHA: expectedSHA, wantPass: true, wantDispatches: "POST\n"},
+		{name: "disabled lane fails before dispatch", workflowState: "disabled_manually", successorSHA: expectedSHA},
+		{name: "advanced main fails before dispatch", workflowState: "active", mainSHA: driftedSHA, successorSHA: expectedSHA},
+		{name: "preexisting successor fails before dispatch", workflowState: "active", preexisting: true, successorSHA: expectedSHA},
+		{name: "wrong successor SHA fails closed", workflowState: "active", successorSHA: driftedSHA, wantDispatches: "POST\n"},
+		{name: "main drift after dispatch fails closed", workflowState: "active", successorSHA: expectedSHA, driftAfterDispatch: true, wantDispatches: "POST\n"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tempDir := t.TempDir()
+			mockBin := filepath.Join(tempDir, "bin")
+			if err := os.Mkdir(mockBin, 0o700); err != nil {
+				t.Fatalf("create mock bin: %v", err)
+			}
+			dispatchedFile := filepath.Join(tempDir, "dispatched")
+			mutationLog := filepath.Join(tempDir, "mutations")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "timeout"), "#!/usr/bin/env bash\nset -euo pipefail\nshift 2\nexec \"$@\"\n")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "sleep"), "#!/usr/bin/env bash\nexit 0\n")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "gh"), "#!/usr/bin/env bash\n"+
+				"set -euo pipefail\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/dispatches\"* ]]; then\n"+
+				"  printf 'POST\\n' >>\"${MUTATION_LOG}\"\n"+
+				"  : >\"${DISPATCHED_FILE}\"\n"+
+				"  exit 0\n"+
+				"fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml/runs?status=\"* ]]; then\n"+
+				"  if [[ \"$*\" == *\"status=queued&\"* && ( \"${PREEXISTING}\" == 'true' || -f \"${DISPATCHED_FILE}\" ) ]]; then\n"+
+				"    printf '999\\t11\\t1\\tworkflow_dispatch\\tmain\\t%s\\tqueued\\t.github/workflows/deploy-control-plane.yml\\n' \"${SUCCESSOR_SHA}\"\n"+
+				"  fi\n"+
+				"  exit 0\n"+
+				"fi\n"+
+				"if [[ \"$*\" == *\"git/ref/heads/main\"* ]]; then\n"+
+				"  if [[ \"${DRIFT_AFTER_DISPATCH}\" == 'true' && -f \"${DISPATCHED_FILE}\" ]]; then printf '%s\\n' \"${DRIFTED_SHA}\"; else printf '%s\\n' \"${MAIN_SHA}\"; fi\n"+
+				"  exit 0\n"+
+				"fi\n"+
+				"if [[ \"$*\" == *\"actions/workflows/deploy-control-plane.yml\"* ]]; then printf '%s\\n' \"${WORKFLOW_STATE}\"; exit 0; fi\n"+
+				"exit 91\n")
+			mainSHA := test.mainSHA
+			if mainSHA == "" {
+				mainSHA = expectedSHA
+			}
+			command := exec.Command("bash", "-c", successor.Run)
+			command.Env = append(os.Environ(),
+				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"EXPECTED_SHA="+expectedSHA,
+				"PENDING_ACTIVATION_ARTIFACTS=image_cache",
+				"REPOSITORY=example/fugue",
+				"GH_TOKEN=test",
+				"WORKFLOW_STATE="+test.workflowState,
+				"MAIN_SHA="+mainSHA,
+				"SUCCESSOR_SHA="+test.successorSHA,
+				"DRIFTED_SHA="+driftedSHA,
+				"PREEXISTING="+strconv.FormatBool(test.preexisting),
+				"DRIFT_AFTER_DISPATCH="+strconv.FormatBool(test.driftAfterDispatch),
+				"DISPATCHED_FILE="+dispatchedFile,
+				"MUTATION_LOG="+mutationLog,
+				"GITHUB_EVENT_NAME=workflow_dispatch",
+				"GITHUB_REF=refs/heads/main",
+				"GITHUB_RUN_ID=555",
+				"GITHUB_RUN_NUMBER=10",
+				"GITHUB_RUN_ATTEMPT=1",
+				"GITHUB_SHA="+expectedSHA,
+				"GITHUB_WORKFLOW=deploy-control-plane",
+				"GITHUB_REPOSITORY=example/fugue",
+				"GITHUB_OUTPUT="+filepath.Join(tempDir, "outputs"),
+				"RUNNER_TEMP="+tempDir,
+			)
+			output, runErr := command.CombinedOutput()
+			if test.wantPass && runErr != nil {
+				t.Fatalf("release convergence successor failed: %v output=%s", runErr, output)
+			}
+			if !test.wantPass && runErr == nil {
+				t.Fatalf("release convergence successor unexpectedly passed: output=%s", output)
+			}
+			writes, readErr := os.ReadFile(mutationLog)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatalf("read mutation log: %v", readErr)
+			}
+			if string(writes) != test.wantDispatches {
+				t.Fatalf("dispatch calls = %q, want %q", writes, test.wantDispatches)
+			}
+			if test.wantPass {
+				evidenceData, readErr := os.ReadFile(filepath.Join(tempDir, "fugue-release-convergence-successor", "successor.json"))
+				if readErr != nil {
+					t.Fatalf("read convergence successor evidence: %v", readErr)
+				}
+				var evidence map[string]any
+				if err := json.Unmarshal(evidenceData, &evidence); err != nil {
+					t.Fatalf("decode convergence successor evidence: %v", err)
+				}
+				if evidence["baseline_advanced"] != false || evidence["workflow_dispatch_attempted"] != true ||
+					evidence["successor_target_sha"] != expectedSHA {
+					t.Fatalf("convergence successor evidence drifted: %+v", evidence)
+				}
+			}
+		})
+	}
+}
+
+func TestControlPlaneReleaseConvergenceAuthorizationHarness(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	guard := workflowStepByName(t, workflow.Jobs["release-input-guard"], "Guard exact main commit authorization")
+	const (
+		expectedSHA  = "1111111111111111111111111111111111111111"
+		sourceRunID  = "555"
+		successorRun = "777"
+		successorNum = 11
+		sourceRunNum = 10
+	)
+	tests := []struct {
+		name             string
+		convergence      string
+		sourceID         string
+		sourceConclusion string
+		wrongSuccessor   bool
+		noncanonical     bool
+		wantPass         bool
+	}{
+		{name: "ordinary dispatch needs no successor proof", convergence: "false", wantPass: true},
+		{name: "ordinary dispatch rejects a source run", convergence: "false", sourceID: sourceRunID},
+		{name: "verified successor authorization passes", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", wantPass: true},
+		{name: "proof bound to another successor fails", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", wrongSuccessor: true},
+		{name: "failed source run is rejected", convergence: "true", sourceID: sourceRunID, sourceConclusion: "failure"},
+		{name: "noncanonical proof is rejected", convergence: "true", sourceID: sourceRunID, sourceConclusion: "success", noncanonical: true},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tempDir := t.TempDir()
+			mockBin := filepath.Join(tempDir, "bin")
+			if err := os.Mkdir(mockBin, 0o700); err != nil {
+				t.Fatalf("create mock bin: %v", err)
+			}
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "timeout"), "#!/usr/bin/env bash\nset -euo pipefail\nshift 2\nexec \"$@\"\n")
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "gh"), "#!/usr/bin/env bash\n"+
+				"set -euo pipefail\n"+
+				"if [[ \"$*\" == *\"actions/runs/${SOURCE_RUN_ID}\"* ]]; then\n"+
+				"  printf '%s\\t%s\\t1\\tworkflow_dispatch\\tmain\\t%s\\tcompleted\\t%s\\t.github/workflows/deploy-control-plane.yml\\n' \"${SOURCE_RUN_ID}\" \"${SOURCE_RUN_NUMBER}\" \"${EXPECTED_SHA}\" \"${SOURCE_CONCLUSION}\"\n"+
+				"  exit 0\n"+
+				"fi\n"+
+				"exit 91\n")
+
+			proofPath := filepath.Join(tempDir, "authorization", "successor.json")
+			if test.convergence == "true" {
+				if err := os.MkdirAll(filepath.Dir(proofPath), 0o700); err != nil {
+					t.Fatalf("create proof directory: %v", err)
+				}
+				boundSuccessor := successorRun
+				if test.wrongSuccessor {
+					boundSuccessor = "778"
+				}
+				proof := map[string]any{
+					"schema_version":               1,
+					"workflow":                     "deploy-control-plane",
+					"repository":                   "example/fugue",
+					"source_run_id":                sourceRunID,
+					"source_run_attempt":           1,
+					"source_head_sha":              expectedSHA,
+					"pending_activation_artifacts": []string{"image_cache"},
+					"successor_run_id":             boundSuccessor,
+					"successor_run_number":         successorNum,
+					"successor_status":             "queued",
+					"successor_target_sha":         expectedSHA,
+					"baseline_advanced":            false,
+					"cluster_mutation_attempted":   false,
+					"workflow_dispatch_attempted":  true,
+					"recorded_at":                  "2026-07-29T04:00:00+00:00",
+				}
+				encoded, err := json.Marshal(proof)
+				if err != nil {
+					t.Fatalf("marshal proof: %v", err)
+				}
+				if test.noncanonical {
+					encoded = append([]byte(" "), encoded...)
+				}
+				encoded = append(encoded, '\n')
+				if err := os.WriteFile(proofPath, encoded, 0o600); err != nil {
+					t.Fatalf("write proof: %v", err)
+				}
+			}
+
+			command := exec.Command("bash", "-c", guard.Run)
+			command.Env = append(os.Environ(),
+				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"EXPECTED_SHA="+expectedSHA,
+				"ACTUAL_SHA="+expectedSHA,
+				"IMAGE_CACHE_CONVERGENCE="+test.convergence,
+				"CONVERGENCE_SOURCE_RUN_ID="+test.sourceID,
+				"CONVERGENCE_AUTHORIZATION_FILE="+proofPath,
+				"GH_TOKEN=test",
+				"REPOSITORY=example/fugue",
+				"EVENT_NAME=workflow_dispatch",
+				"EVENT_REF=refs/heads/main",
+				"EVENT_REF_NAME=main",
+				"EVENT_REF_TYPE=branch",
+				"GITHUB_RUN_ID="+successorRun,
+				"GITHUB_RUN_NUMBER="+strconv.Itoa(successorNum),
+				"GITHUB_RUN_ATTEMPT=1",
+				"SOURCE_RUN_ID="+sourceRunID,
+				"SOURCE_RUN_NUMBER="+strconv.Itoa(sourceRunNum),
+				"SOURCE_CONCLUSION="+test.sourceConclusion,
+			)
+			output, runErr := command.CombinedOutput()
+			if test.wantPass && runErr != nil {
+				t.Fatalf("release convergence authorization failed: %v output=%s", runErr, output)
+			}
+			if !test.wantPass && runErr == nil {
+				t.Fatalf("release convergence authorization unexpectedly passed: output=%s", output)
 			}
 		})
 	}

@@ -1,6 +1,14 @@
 name: Operational-domain guarded control-plane deploy
 description: Uploads report-only operational-domain and build-vs-activation evidence before the atomic adapter may mutate production.
 
+outputs:
+  image-activation-convergence:
+    description: complete only when no mandatory image-cache build remains build-only
+    value: ${{ steps.image-activation-convergence.outputs.status }}
+  pending-activation-artifacts:
+    description: canonical comma-separated mandatory image-cache built-only artifacts
+    value: ${{ steps.image-activation-convergence.outputs.pending_artifacts }}
+
 runs:
   using: composite
   steps:
@@ -45,3 +53,30 @@ runs:
         FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST: ${{ steps.image-activation-report-upload.outputs.artifact-digest }}
         FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL: ${{ steps.image-activation-report-upload.outputs.artifact-url }}
       run: ./scripts/upgrade_fugue_control_plane.sh
+
+    - name: Verify image activation convergence
+      id: image-activation-convergence
+      shell: bash
+      run: |
+        set -euo pipefail
+        readonly evidence_dir="${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
+        result="$("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" image-activation-convergence \
+          --build-artifact-plan "${evidence_dir}/build-artifact-plan.json" \
+          --image-activation-plan "${evidence_dir}/image-activation-plan.json" \
+          --image-activation-evidence "${evidence_dir}/image-activation-evidence.json")" || exit 1
+        IFS=$'\t' read -r status pending extra <<<"${result}" || exit 1
+        [[ -z "${extra:-}" ]] || exit 1
+        case "${status}" in
+          complete)
+            [[ "${pending}" == '-' ]] || exit 1
+            pending=''
+            ;;
+          pending)
+            [[ "${pending}" =~ ^[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*$ ]] || exit 1
+            ;;
+          *) exit 1 ;;
+        esac
+        {
+          printf 'status=%s\n' "${status}"
+          printf 'pending_artifacts=%s\n' "${pending}"
+        } >>"${GITHUB_OUTPUT}"
