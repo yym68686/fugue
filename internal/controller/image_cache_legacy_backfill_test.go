@@ -56,6 +56,7 @@ func TestReconcileLegacyDistributedImageMetadataBackfillsCurrentPhysicalImage(t 
 		MediaType:         "application/vnd.oci.image.manifest.v1+json",
 		ManifestSizeBytes: 100,
 		TotalBlobBytes:    500,
+		ReferencedBlobs:   []string{"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
 		LastSeenAt:        now,
 		Present:           true,
 	}}); err != nil {
@@ -219,8 +220,11 @@ func TestReconcileLegacyDistributedImageMetadataRepairsLostImageFromFreshPhysica
 		Digest:         digest,
 		MediaType:      "application/vnd.oci.image.manifest.v1+json",
 		TotalBlobBytes: 700,
-		LastSeenAt:     now,
-		Present:        true,
+		ReferencedBlobs: []string{
+			"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		},
+		LastSeenAt: now,
+		Present:    true,
 	}}); err != nil {
 		t.Fatalf("upsert fresh cache inventory: %v", err)
 	}
@@ -296,6 +300,32 @@ func TestReconcileLegacyDistributedImageMetadataRepairsLostImageFromFreshPhysica
 	if len(locations) != 1 || locations[0].ClusterNodeName != "worker-1" ||
 		locations[0].LastSeenAt == nil || !locations[0].LastSeenAt.Equal(now) {
 		t.Fatalf("repair must materialize fresh digest-bound location evidence: %+v", locations)
+	}
+}
+
+func TestLegacyDistributedImageManifestForRefsRejectsDigestOnlyEvidence(t *testing.T) {
+	t.Parallel()
+
+	digest := "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	ref := "registry.push.example/fugue-apps/incomplete:current"
+	manifest := model.ImageCacheManifest{
+		ImageRef:       ref,
+		Repo:           "fugue-apps/incomplete",
+		Target:         "current",
+		Digest:         digest,
+		TotalBlobBytes: 100,
+		Present:        true,
+	}
+	if group, ok := legacyDistributedImageManifestForRefs([]string{ref}, []model.ImageCacheManifest{manifest}); ok {
+		t.Fatalf("digest-only evidence must not become distributed image authority: %+v", group)
+	}
+
+	manifest.ReferencedBlobs = []string{
+		"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	}
+	group, ok := legacyDistributedImageManifestForRefs([]string{ref}, []model.ImageCacheManifest{manifest})
+	if !ok || group.digest != digest || len(group.manifests) != 1 {
+		t.Fatalf("complete manifest graph should remain eligible for repair: ok=%t group=%+v", ok, group)
 	}
 }
 
