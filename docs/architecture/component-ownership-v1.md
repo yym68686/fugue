@@ -106,8 +106,17 @@ or temporary API failure makes only this process unready; the last successful
 status remains visible as local last-known-good evidence and the next attempt
 can recover without a restart. `/healthz`, `/readyz`, and `/v1/status` expose
 credential-free state, and no inbound endpoint accepts a plan or release
-command. There is still no image, Helm object, service account, or production
-enablement for this process in Gate A.
+command.
+
+`Dockerfile.release-control` copies only the process's declared local package
+dependency closure into its build stage and produces a CA-enabled `scratch`
+image running as numeric user/group `65532:65532`. The path-scoped
+`build release-control image` workflow has only `contents: read`, uses a
+release-control-specific concurrency group, builds with `--load`, and probes
+the local disabled image. It has no registry login, package write permission,
+push, promotion, Helm, or deploy step. Thus Gate A has an independently tested
+container artifact boundary but still no published image, Kubernetes object,
+service account, or production enablement.
 
 The explicit enablement contract is file-based and has no token environment
 variable: `FUGUE_RELEASE_CONTROL_ENABLED=true`,
