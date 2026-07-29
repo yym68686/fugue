@@ -283,6 +283,14 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Logger.Printf("zombie build job cleanup error: %v", err)
 	}
 
+	// The deploy-image guard relies on distributed image metadata. Legacy
+	// applications may only have fresh physical image-cache inventory until the
+	// metadata backfill runs, so it must complete before operation workers or
+	// the initial ManagedApp reconciliation can evaluate deployability.
+	if err := s.reconcileLegacyDistributedImageMetadata(ctx); err != nil {
+		return fmt.Errorf("backfill distributed image metadata before managed app reconciliation: %w", err)
+	}
+
 	foregroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
 	foregroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)
 	backgroundImports := s.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, s.Config.GitHubSyncImportWorkers)
