@@ -730,12 +730,12 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 			message = err.Error()
 		}
 	case model.PlatformArtifactKindImageReplicationPlan:
-		apiVersion, versionOK := artifact.Content["apiVersion"].(string)
-		kind, kindOK := artifact.Content["kind"].(string)
-		pass = versionOK && kindOK &&
-			strings.TrimSpace(apiVersion) == model.ImagePlaneAPIVersionV1 &&
-			strings.TrimSpace(kind) == model.ImageReplicationPlanKind
-		message = "image replication plans must use the image-plane.fugue.dev/v1 ImageReplicationPlan envelope"
+		err := platformsafety.ValidateImageReplicationPlanBinding(artifact)
+		pass = err == nil
+		message = "image replication plans must use the v1 envelope and match their exact node scope"
+		if err != nil {
+			message = err.Error()
+		}
 	}
 	return model.PlatformArtifactValidationResult{
 		Name:     "invariant." + artifact.ArtifactKind,

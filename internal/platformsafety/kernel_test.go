@@ -121,8 +121,14 @@ func TestImageReplicationPlanStartsShadowOnly(t *testing.T) {
 	artifact := testSignedPlatformArtifact(t, map[string]any{
 		"apiVersion": "image-plane.fugue.dev/v1",
 		"kind":       "ImageReplicationPlan",
+		"spec": map[string]any{
+			"nodeID": "worker-a",
+			"images": []any{},
+		},
 	})
 	artifact.ArtifactKind = model.PlatformArtifactKindImageReplicationPlan
+	artifact.Scope = model.PlatformArtifactScope{ScopeType: "node", Key: "node:worker-a", NodeID: "worker-a"}
+	artifact.ScopeKey = "node:worker-a"
 	artifact, err := SignPlatformArtifact(artifact, testPlatformSafetyKeyring())
 	if err != nil {
 		t.Fatalf("sign image replication plan: %v", err)
@@ -159,6 +165,29 @@ func TestImageReplicationPlanStartsShadowOnly(t *testing.T) {
 			decisionHasBypassedInvariant(decision, InvariantShadowNoProductionImpact) {
 			t.Fatalf("image replication plan escaped shadow through %s: %+v", test.channel, decision)
 		}
+	}
+}
+
+func TestImageReplicationPlanIntegrityRejectsCrossNodePayload(t *testing.T) {
+	artifact := testSignedPlatformArtifact(t, map[string]any{
+		"apiVersion": model.ImagePlaneAPIVersionV1,
+		"kind":       model.ImageReplicationPlanKind,
+		"spec": map[string]any{
+			"nodeID": "worker-b",
+			"images": []any{},
+		},
+	})
+	artifact.ArtifactKind = model.PlatformArtifactKindImageReplicationPlan
+	artifact.Scope = model.PlatformArtifactScope{ScopeType: "node", Key: "node:worker-a", NodeID: "worker-a"}
+	artifact.ScopeKey = "node:worker-a"
+	artifact.ContentHash = artifactContentHash(artifact.Content)
+	artifact, err := SignPlatformArtifact(artifact, testPlatformSafetyKeyring())
+	if err != nil {
+		t.Fatalf("sign cross-node image plan: %v", err)
+	}
+	decision := EvaluateArtifactIntegrity(artifact, testPlatformSafetyKeyring())
+	if decision.Pass || !decisionHasInvariant(decision, InvariantArtifactSchema) {
+		t.Fatalf("signed cross-node image replication plan passed integrity: %+v", decision)
 	}
 }
 
