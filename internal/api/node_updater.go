@@ -395,16 +395,17 @@ func nodeUpdaterPolicyAllowsEdge(labels map[string]string, nodePolicy *model.Clu
 }
 
 func (s *Server) nodeUpdaterByPrincipal(principal model.Principal) (model.NodeUpdater, error) {
-	updaters, err := s.store.ListNodeUpdaters(principal.TenantID, principal.IsPlatformAdmin())
+	if principal.ActorType != model.ActorTypeNodeUpdater || strings.TrimSpace(principal.ActorID) == "" {
+		return model.NodeUpdater{}, store.ErrNotFound
+	}
+	updater, err := s.store.GetNodeUpdater(principal.ActorID)
 	if err != nil {
 		return model.NodeUpdater{}, err
 	}
-	for _, updater := range updaters {
-		if strings.EqualFold(strings.TrimSpace(updater.ID), strings.TrimSpace(principal.ActorID)) {
-			return updater, nil
-		}
+	if strings.TrimSpace(updater.TenantID) != strings.TrimSpace(principal.TenantID) {
+		return model.NodeUpdater{}, store.ErrNotFound
 	}
-	return model.NodeUpdater{}, store.ErrNotFound
+	return updater, nil
 }
 
 func (s *Server) handleListNodeUpdaters(w http.ResponseWriter, r *http.Request) {

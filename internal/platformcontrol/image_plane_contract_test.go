@@ -42,7 +42,7 @@ func TestImageCachePlatformIdentityIsNodeAndArtifactBound(t *testing.T) {
 	now := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
 	keyring := DerivePlatformComponentIdentityKeyring("image-plane-signing-key", "image-plane-v1", "", "", nil)
 	claims := PlatformComponentIdentityClaims{
-		CredentialID:  "image-cache-credential-worker-a",
+		CredentialID:  "image-cache:worker-a",
 		Component:     model.PlatformConsumerComponentImageCache,
 		NodeID:        "worker-a",
 		ScopeKey:      "node:worker-a",
@@ -82,7 +82,7 @@ func TestImageCachePlatformIdentityRejectsBroadOrCrossNodeClaims(t *testing.T) {
 	now := time.Date(2026, 7, 30, 1, 0, 0, 0, time.UTC)
 	keyring := DerivePlatformComponentIdentityKeyring("image-plane-signing-key", "image-plane-v1", "", "", nil)
 	base := PlatformComponentIdentityClaims{
-		CredentialID:  "image-cache-credential-worker-a",
+		CredentialID:  "image-cache:worker-a",
 		Component:     model.PlatformConsumerComponentImageCache,
 		NodeID:        "worker-a",
 		ScopeKey:      "node:worker-a",
@@ -97,6 +97,9 @@ func TestImageCachePlatformIdentityRejectsBroadOrCrossNodeClaims(t *testing.T) {
 		},
 		"extra artifact capability": func(claims *PlatformComponentIdentityClaims) {
 			claims.ArtifactKinds = append(claims.ArtifactKinds, model.PlatformArtifactKindNodeDesiredState)
+		},
+		"credential id drift": func(claims *PlatformComponentIdentityClaims) {
+			claims.CredentialID = "image-cache:worker-b"
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

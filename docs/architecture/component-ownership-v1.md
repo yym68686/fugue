@@ -163,7 +163,14 @@ The declared LKG location is lane-local
 plan must preserve already cached images while holding new replication. During
 this migration phase the safety kernel permits this artifact only in `shadow`;
 gray/full publication remains non-bypassable until the independent consumer,
-credential issuer, chart, and rollback evidence are installed.
+chart, and rollback evidence are installed. The control plane now exposes the
+fixed-purpose `POST /v1/node-updater/image-cache/identity` bridge: it accepts
+only an authenticated active node updater, derives the node and scope from
+server-owned enrollment state, and issues a five-minute credential with exactly
+the `image-cache:<node>` identity and `image_replication_plan` capability. The
+response is versioned, marked `no-store`, locally self-verified before return,
+and contains a renewal boundary; signer absence fails closed with retry guidance.
+No caller-provided node, scope, component, or artifact capability is accepted.
 
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a

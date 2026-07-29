@@ -605,10 +605,12 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
 	}
 	if claims.Component == model.PlatformConsumerComponentImageCache {
+		claims.NodeID = strings.ToLower(claims.NodeID)
 		expectedScope := "node:" + strings.ToLower(claims.NodeID)
 		if claims.ScopeKey != expectedScope ||
 			len(claims.ArtifactKinds) != 1 ||
-			claims.ArtifactKinds[0] != model.PlatformArtifactKindImageReplicationPlan {
+			claims.ArtifactKinds[0] != model.PlatformArtifactKindImageReplicationPlan ||
+			claims.CredentialID != claims.Component+":"+claims.NodeID {
 			return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
 		}
 	}

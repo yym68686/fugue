@@ -342,6 +342,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/node-updater/desired-state", s.auth.RequireNodeUpdater(http.HandlerFunc(s.handleGetNodeUpdaterDesiredState)))
 	mux.Handle("POST /v1/node-updater/enroll", http.HandlerFunc(s.handleNodeUpdaterEnroll))
 	mux.Handle("POST /v1/node-updater/heartbeat", s.auth.RequireNodeUpdater(http.HandlerFunc(s.handleNodeUpdaterHeartbeat)))
+	mux.Handle("POST /v1/node-updater/image-cache/identity", s.auth.RequireNodeUpdater(http.HandlerFunc(s.handleIssueNodeUpdaterImageCacheIdentity)))
 	mux.Handle("POST /v1/node-updater/image-cache/inventory", s.auth.RequireNodeUpdater(http.HandlerFunc(s.handleNodeUpdaterReportImageCacheInventory)))
 	mux.Handle("GET /v1/node-updater/image-locations", s.auth.RequireNodeUpdater(http.HandlerFunc(s.handleNodeUpdaterListImageLocations)))
 	mux.Handle("POST /v1/node-updater/image-locations", s.auth.RequireNodeUpdater(http.HandlerFunc(s.handleNodeUpdaterReportImageLocation)))

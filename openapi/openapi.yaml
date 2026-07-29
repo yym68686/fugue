@@ -8327,6 +8327,45 @@ paths:
                 $ref: "#/components/schemas/NodeUpdaterDesiredStateResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/image-cache/identity:
+    post:
+      operationId: issueNodeUpdaterImageCacheIdentity
+      summary: Issue Image Cache Platform Identity
+      description: Issues a short-lived image-cache identity bound to the authenticated node updater's server-side cluster node identity and the image_replication_plan artifact kind.
+      tags: [Node Updater]
+      x-fugue-handler: handleIssueNodeUpdaterImageCacheIdentity
+      security:
+        - NodeUpdaterBearerAuth: []
+      responses:
+        '201':
+          description: A newly issued node-bound image-cache credential. This response must not be cached.
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                enum: [no-store]
+            Pragma:
+              required: true
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformComponentCredentialResponse"
+        '503':
+          description: The dedicated platform-component identity signer is unavailable.
+          headers:
+            Retry-After:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/image-locations:
     get:
       operationId: nodeUpdaterImageLocations
@@ -20648,6 +20687,54 @@ components:
           $ref: "#/components/schemas/NodeUpdater"
         deep_health:
           $ref: "#/components/schemas/NodeDeepHealthResult"
+    PlatformComponentCredential:
+      type: object
+      additionalProperties: false
+      required: [api_version, kind, credential_id, token, token_id, component, node_id, scope_key, artifact_kinds, issued_at, expires_at, renew_after]
+      properties:
+        api_version:
+          type: string
+          enum: [platform-component-identity.fugue.dev/v1]
+        kind:
+          type: string
+          enum: [PlatformComponentCredential]
+        credential_id:
+          type: string
+        token:
+          type: string
+          description: Short-lived bearer credential. This value must not be logged, persisted, or shared with another node.
+        token_id:
+          type: string
+        component:
+          type: string
+          enum: [image-cache]
+        node_id:
+          type: string
+        scope_key:
+          type: string
+        artifact_kinds:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: string
+            enum: [image_replication_plan]
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        renew_after:
+          type: string
+          format: date-time
+    PlatformComponentCredentialResponse:
+      type: object
+      additionalProperties: false
+      required: [credential]
+      properties:
+        credential:
+          $ref: "#/components/schemas/PlatformComponentCredential"
     NodeDeepHealthCheck:
       type: object
       additionalProperties: false
