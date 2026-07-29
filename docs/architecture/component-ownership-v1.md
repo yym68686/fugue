@@ -35,3 +35,11 @@ move one lane at a time from `transitional-shared` to `independent` after
 contract, LKG, rollback, and production health evidence are present. The
 required evidence is defined in
 [`microservices-migration-acceptance-v1.md`](microservices-migration-acceptance-v1.md).
+
+`componentmanifest.PlanChanges` is the shadow planner for that future release
+integration. It emits a digest-bound plan with direct impacted components,
+downstream validation-only consumers, and every affected shared-resource edge.
+It returns `legacy-shared` for shared source paths and `shadow-only` for a
+component that is still transitional; neither result authorizes a production
+mutation. Only a later plan with `independent` (or an explicitly coordinated)
+mode may be handed to a release coordinator.
