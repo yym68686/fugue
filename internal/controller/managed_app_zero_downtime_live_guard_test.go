@@ -98,6 +98,41 @@ func TestManagedAppLiveGuardAllowsTerminalUnavailableStatelessRecovery(t *testin
 	}
 }
 
+func TestManagedAppLiveGuardAllowsTerminalUnavailableAuxiliaryTemplateRecoveryWithoutOnlineIntent(t *testing.T) {
+	app := managedAppLiveGuardTestApp(nil)
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:         runtime.ManagedAppPhaseError,
+		ReadyReplicas: 0,
+		Conditions: []runtime.ManagedAppCondition{{
+			Type:   "ZeroDowntimeBlocked",
+			Status: "True",
+		}},
+	}
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(app), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected rendered deployment")
+	}
+	managedAppLiveGuardMarkTerminalUnavailable(&live)
+	for index := range live.Spec.Template.Spec.InitContainers {
+		if live.Spec.Template.Spec.InitContainers[index].Name == "fugue-drain-agent" {
+			live.Spec.Template.Spec.InitContainers[index].Image = "ghcr.io/acme/fugue-drain-agent:previous"
+		}
+	}
+	client := managedAppLiveGuardClient(t, managed, live, true, false, nil)
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, app, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("a terminally unavailable stateless workload must accept auxiliary template repair: %v", err)
+	}
+	if prepared.Spec.RolloutIntent != "" {
+		t.Fatalf("unavailable recovery must not invent an online rollout intent, got %q", prepared.Spec.RolloutIntent)
+	}
+}
+
 func TestManagedAppLiveGuardUnavailableRecoveryRemainsFailClosedWithoutProof(t *testing.T) {
 	localStorage := &model.AppPersistentStorageSpec{
 		Mode:             model.AppPersistentStorageModeMovableRWO,

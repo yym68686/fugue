@@ -496,13 +496,14 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		!liveDeploymentStrategyMatchesDesired(deployment, desiredDeployment) ||
 		auxiliaryTemplateChanged ||
 		desiredReplicas != liveReplicas
+	unavailableRecovery := false
 	if desiredReplicas > 0 && workloadChange {
 		readyEndpoint, err := liveManagedAppHasReadyEndpoint(ctx, client, namespace, current)
 		if err != nil {
 			return model.App{}, err
 		}
 		deploymentReady := managedDeploymentStatusReady(deployment, liveReplicas)
-		unavailableRecovery := managedAppAllowsUnavailableRecovery(
+		unavailableRecovery = managedAppAllowsUnavailableRecovery(
 			deployment,
 			current.Spec,
 			desired.Spec,
@@ -526,17 +527,19 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		}
 	}
 
-	if err := s.refuseNonZeroDowntimeRolloutWithSchedulingAndTemplateEvidence(
-		ctx,
-		op,
-		current,
-		desired,
-		managed.Spec.Scheduling,
-		desiredScheduling,
-		liveKey,
-		auxiliaryTemplateChanged,
-	); err != nil {
-		return model.App{}, err
+	if !unavailableRecovery {
+		if err := s.refuseNonZeroDowntimeRolloutWithSchedulingAndTemplateEvidence(
+			ctx,
+			op,
+			current,
+			desired,
+			managed.Spec.Scheduling,
+			desiredScheduling,
+			liveKey,
+			auxiliaryTemplateChanged,
+		); err != nil {
+			return model.App{}, err
+		}
 	}
 	decision := s.zeroDowntimeRolloutGuardDecisionWithSchedulingAndTemplateEvidence(
 		op,
