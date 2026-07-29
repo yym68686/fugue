@@ -27,6 +27,8 @@ func defaultControlPlaneRequiredGrants() []string {
 		"fugue_automation_policies:insert",
 		"fugue_automation_policies:update",
 		"fugue_automation_policies:delete",
+		"fugue_automation_action_intents:select",
+		"fugue_automation_action_intents:insert",
 		"fugue_store_promotions:insert",
 		"fugue_store_promotions:update",
 	}

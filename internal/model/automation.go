@@ -16,6 +16,10 @@ const (
 	AutomationTriggerSyntheticProbe = "synthetic_probe"
 	AutomationTriggerEvent          = "event"
 	AutomationTriggerSchedule       = "schedule"
+
+	AutomationIntentSourceAdminReplay = "admin_replay"
+	AutomationIntentSourceControlLoop = "control_loop"
+	AutomationIntentStatusObserved    = "observed"
 )
 
 // AutomationScope identifies the resource boundary within which an automation
@@ -110,6 +114,103 @@ type AutomationPolicyListResponse struct {
 
 type AutomationPolicyResponse struct {
 	Policy AutomationPolicy `json:"policy"`
+}
+
+// AutomationRequestOutcomeAggregate is a bounded, already-aggregated view of
+// request outcomes. The control loop will eventually populate it from a
+// trusted observability adapter; the initial replay API accepts the same typed
+// shape so evaluation remains deterministic and cannot execute arbitrary
+// expressions.
+type AutomationRequestOutcomeAggregate struct {
+	StatusCode    int    `json:"status_code"`
+	Count         int64  `json:"count"`
+	FailureDomain string `json:"failure_domain,omitempty"`
+}
+
+// AutomationEvaluationEvidence is the immutable evidence snapshot captured
+// alongside an observe-only intent. App revision and readiness are populated
+// by the control plane from its app store; callers only provide the bounded
+// request-outcome aggregates.
+type AutomationEvaluationEvidence struct {
+	CollectedBy            string                              `json:"collected_by"`
+	Trusted                bool                                `json:"trusted"`
+	WindowStartedAt        time.Time                           `json:"window_started_at"`
+	WindowEndedAt          time.Time                           `json:"window_ended_at"`
+	RequestOutcomes        []AutomationRequestOutcomeAggregate `json:"request_outcomes"`
+	AppRevision            string                              `json:"app_revision"`
+	AppReadiness           string                              `json:"app_readiness"`
+	AppReadinessObservedAt time.Time                           `json:"app_readiness_observed_at"`
+}
+
+// AutomationEvaluationDecision is the pure trigger result. In this initial
+// atom production mutation is unconditionally false; later execution atoms
+// may consume only explicitly eligible intent records after a separate safety
+// evaluation.
+type AutomationEvaluationDecision struct {
+	PolicyID                  string          `json:"policy_id"`
+	PolicyGeneration          int64           `json:"policy_generation"`
+	RuleID                    string          `json:"rule_id"`
+	Scope                     AutomationScope `json:"scope"`
+	Mode                      string          `json:"mode"`
+	Matched                   bool            `json:"matched"`
+	WouldAction               bool            `json:"would_action"`
+	ProductionMutationAllowed bool            `json:"production_mutation_allowed"`
+	MatchingSamples           int64           `json:"matching_samples"`
+	FailureDomains            []string        `json:"failure_domains"`
+	EvidenceHash              string          `json:"evidence_hash"`
+	ReasonCodes               []string        `json:"reason_codes"`
+	EvaluatedAt               time.Time       `json:"evaluated_at"`
+}
+
+// AutomationActionIntent is append-only. The initial status is deliberately
+// observe-only and production_mutation_allowed is permanently false. Keeping
+// the policy rule and evidence snapshots here makes a later executor
+// auditable even if the source policy is edited or deleted.
+type AutomationActionIntent struct {
+	ID                        string                       `json:"id"`
+	TenantID                  string                       `json:"tenant_id"`
+	ProjectID                 string                       `json:"project_id"`
+	PolicyID                  string                       `json:"policy_id"`
+	PolicyGeneration          int64                        `json:"policy_generation"`
+	RuleID                    string                       `json:"rule_id"`
+	Scope                     AutomationScope              `json:"scope"`
+	Mode                      string                       `json:"mode"`
+	Source                    string                       `json:"source"`
+	Status                    string                       `json:"status"`
+	RuleSnapshot              AutomationRule               `json:"rule_snapshot"`
+	Evidence                  AutomationEvaluationEvidence `json:"evidence"`
+	Decision                  AutomationEvaluationDecision `json:"decision"`
+	EvidenceHash              string                       `json:"evidence_hash"`
+	IdempotencyKey            string                       `json:"idempotency_key"`
+	RollbackTarget            string                       `json:"rollback_target"`
+	ProductionMutationAllowed bool                         `json:"production_mutation_allowed"`
+	ExpiresAt                 time.Time                    `json:"expires_at"`
+	CreatedAt                 time.Time                    `json:"created_at"`
+	UpdatedAt                 time.Time                    `json:"updated_at"`
+}
+
+type AutomationActionIntentListResponse struct {
+	Intents     []AutomationActionIntent `json:"intents"`
+	GeneratedAt time.Time                `json:"generated_at"`
+}
+
+type AutomationActionIntentResponse struct {
+	Intent AutomationActionIntent `json:"intent"`
+}
+
+type EvaluateAutomationPolicyRequest struct {
+	PolicyID           string                              `json:"policy_id"`
+	ExpectedGeneration int64                               `json:"expected_generation"`
+	RuleID             string                              `json:"rule_id"`
+	WindowStartedAt    time.Time                           `json:"window_started_at"`
+	WindowEndedAt      time.Time                           `json:"window_ended_at"`
+	RequestOutcomes    []AutomationRequestOutcomeAggregate `json:"request_outcomes"`
+}
+
+type AutomationEvaluationResponse struct {
+	Decision      AutomationEvaluationDecision `json:"decision"`
+	Intent        *AutomationActionIntent      `json:"intent,omitempty"`
+	IntentCreated bool                         `json:"intent_created"`
 }
 
 // AutomationTriggerInput excludes server-owned invariant bindings. The API

@@ -209,4 +209,88 @@ func TestAutomationPolicyContracts(t *testing.T) {
 	if _, ok := doc.Components.Schemas["AutomationRequestMetricSelector"]; !ok {
 		t.Fatal("missing typed automation request metric selector schema")
 	}
+
+	replay := doc.Paths.Find("/v1/admin/automation-evaluations")
+	if replay == nil || replay.Post == nil {
+		t.Fatal("missing POST /v1/admin/automation-evaluations operation")
+	}
+	if replay.Post.OperationID != "evaluateAutomationPolicyReplay" ||
+		replay.Post.Extensions["x-fugue-handler"] != "handleEvaluateAutomationPolicyReplay" {
+		t.Fatalf(
+			"unexpected automation replay operation: id=%q handler=%v",
+			replay.Post.OperationID,
+			replay.Post.Extensions["x-fugue-handler"],
+		)
+	}
+	if replay.Post.RequestBody == nil || replay.Post.RequestBody.Value == nil ||
+		!replay.Post.RequestBody.Value.Required ||
+		replay.Post.RequestBody.Value.Content.Get("application/json") == nil ||
+		replay.Post.RequestBody.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/EvaluateAutomationPolicyRequest" {
+		t.Fatal("automation replay must require EvaluateAutomationPolicyRequest")
+	}
+	replayResponse := replay.Post.Responses.Value("200")
+	if replayResponse == nil || replayResponse.Value == nil ||
+		replayResponse.Value.Content.Get("application/json") == nil ||
+		replayResponse.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/AutomationEvaluationResponse" {
+		t.Fatal("automation replay must return AutomationEvaluationResponse")
+	}
+
+	intentList := doc.Paths.Find("/v1/automation-intents")
+	if intentList == nil || intentList.Get == nil {
+		t.Fatal("missing GET /v1/automation-intents operation")
+	}
+	if intentList.Post != nil || intentList.Put != nil || intentList.Patch != nil || intentList.Delete != nil {
+		t.Fatal("automation intent collection must be read-only")
+	}
+	if intentList.Get.OperationID != "listAutomationActionIntents" ||
+		intentList.Get.Extensions["x-fugue-handler"] != "handleListAutomationActionIntents" {
+		t.Fatalf(
+			"unexpected automation intent list operation: id=%q handler=%v",
+			intentList.Get.OperationID,
+			intentList.Get.Extensions["x-fugue-handler"],
+		)
+	}
+	intentListResponse := intentList.Get.Responses.Value("200")
+	if intentListResponse == nil || intentListResponse.Value == nil ||
+		intentListResponse.Value.Content.Get("application/json") == nil ||
+		intentListResponse.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/AutomationActionIntentListResponse" {
+		t.Fatal("automation intent list must return AutomationActionIntentListResponse")
+	}
+
+	intentItem := doc.Paths.Find("/v1/automation-intents/{intent_id}")
+	if intentItem == nil || intentItem.Get == nil {
+		t.Fatal("missing GET /v1/automation-intents/{intent_id} operation")
+	}
+	if intentItem.Post != nil || intentItem.Put != nil || intentItem.Patch != nil || intentItem.Delete != nil {
+		t.Fatal("automation intent item must be append-only and read-only")
+	}
+	if intentItem.Get.OperationID != "getAutomationActionIntent" ||
+		intentItem.Get.Extensions["x-fugue-handler"] != "handleGetAutomationActionIntent" {
+		t.Fatalf(
+			"unexpected automation intent show operation: id=%q handler=%v",
+			intentItem.Get.OperationID,
+			intentItem.Get.Extensions["x-fugue-handler"],
+		)
+	}
+	intentID := intentItem.Get.Parameters.GetByInAndName("path", "intent_id")
+	if intentID == nil || !intentID.Required {
+		t.Fatal("automation intent_id path parameter must be required")
+	}
+	intentResponse := intentItem.Get.Responses.Value("200")
+	if intentResponse == nil || intentResponse.Value == nil ||
+		intentResponse.Value.Content.Get("application/json") == nil ||
+		intentResponse.Value.Content.Get("application/json").Schema.Ref != "#/components/schemas/AutomationActionIntentResponse" {
+		t.Fatal("automation intent show must return AutomationActionIntentResponse")
+	}
+
+	intentSchema := doc.Components.Schemas["AutomationActionIntent"]
+	if intentSchema == nil || intentSchema.Value == nil {
+		t.Fatal("missing AutomationActionIntent schema")
+	}
+	for _, property := range []string{"mode", "status", "production_mutation_allowed"} {
+		schema := intentSchema.Value.Properties[property]
+		if schema == nil || schema.Value == nil || len(schema.Value.Enum) != 1 {
+			t.Fatalf("automation intent %s must have a single observe-only enum", property)
+		}
+	}
 }

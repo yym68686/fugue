@@ -319,6 +319,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.ReleaseSteps = deleteReleaseStepsByTenant(state.ReleaseSteps, id)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByTenant(state.AppTrafficPolicies, id)
 		state.AutomationPolicies = deleteAutomationPoliciesByTenant(state.AutomationPolicies, id)
+		state.AutomationActionIntents = deleteAutomationActionIntentsByTenant(state.AutomationActionIntents, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
 		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByTenant(state.AppDatabaseAccessGrants, id)
 		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)

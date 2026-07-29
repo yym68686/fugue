@@ -3310,6 +3310,7 @@ type State struct {
 	CompositeRuntimeLane       *compositeRuntimeLane       `json:"composite_runtime_lane,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	AutomationPolicies         []AutomationPolicy          `json:"automation_policies,omitempty"`
+	AutomationActionIntents    []AutomationActionIntent    `json:"automation_action_intents,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	AppDatabaseImportJobs      []AppDatabaseImportJob      `json:"app_database_import_jobs,omitempty"`

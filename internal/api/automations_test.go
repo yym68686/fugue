@@ -367,6 +367,8 @@ func TestUserAutomationPolicyAuthorizationIsolationAndInputBoundary(t *testing.T
 type automationAPIFixture struct {
 	store interface {
 		ListAuditEvents(string, bool, int) ([]model.AuditEvent, error)
+		GetApp(string) (model.App, error)
+		ListOperations(string, bool) ([]model.Operation, error)
 	}
 	server           *Server
 	app              model.App

@@ -1200,6 +1200,33 @@ paths:
                 $ref: "#/components/schemas/AutomationPolicyResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/automation-evaluations:
+    post:
+      operationId: evaluateAutomationPolicyReplay
+      summary: Evaluate Automation Policy Replay
+      description: |
+        Evaluate an administrator-supplied request-outcome window against the
+        current policy generation. Any resulting intent is permanently
+        observe-only and can never be consumed by a production action worker.
+      tags: [Automations]
+      x-fugue-handler: handleEvaluateAutomationPolicyReplay
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvaluateAutomationPolicyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationEvaluationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/automations:
     get:
       operationId: listUserAutomationPolicies
@@ -1329,6 +1356,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeleteAutomationPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/automation-intents:
+    get:
+      operationId: listAutomationActionIntents
+      summary: List Automation Action Intents
+      description: List append-only observe-only action intents visible to the credential.
+      tags: [Automations]
+      x-fugue-handler: handleListAutomationActionIntents
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          description: Platform-admin-only tenant filter.
+          schema:
+            type: string
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: policy_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: source
+          required: false
+          schema:
+            type: string
+            enum: [admin_replay, control_loop]
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [observed]
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationActionIntentListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/automation-intents/{intent_id}:
+    get:
+      operationId: getAutomationActionIntent
+      summary: Get Automation Action Intent
+      tags: [Automations]
+      x-fugue-handler: handleGetAutomationActionIntent
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: intent_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationActionIntentResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/action-contracts:
@@ -25484,6 +25594,256 @@ components:
           type: boolean
         policy:
           $ref: "#/components/schemas/AutomationPolicy"
+    AutomationRequestOutcomeAggregate:
+      type: object
+      additionalProperties: false
+      required: [status_code, count]
+      properties:
+        status_code:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+        count:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1000000000
+        failure_domain:
+          type: string
+          maxLength: 200
+    EvaluateAutomationPolicyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          policy_id,
+          expected_generation,
+          rule_id,
+          window_started_at,
+          window_ended_at,
+          request_outcomes,
+        ]
+      properties:
+        policy_id:
+          type: string
+        expected_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        rule_id:
+          type: string
+        window_started_at:
+          type: string
+          format: date-time
+        window_ended_at:
+          type: string
+          format: date-time
+        request_outcomes:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/AutomationRequestOutcomeAggregate"
+    AutomationEvaluationEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          collected_by,
+          trusted,
+          window_started_at,
+          window_ended_at,
+          request_outcomes,
+          app_revision,
+          app_readiness,
+          app_readiness_observed_at,
+        ]
+      properties:
+        collected_by:
+          type: string
+          enum: [admin_replay, control_loop]
+        trusted:
+          type: boolean
+        window_started_at:
+          type: string
+          format: date-time
+        window_ended_at:
+          type: string
+          format: date-time
+        request_outcomes:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/AutomationRequestOutcomeAggregate"
+        app_revision:
+          type: string
+        app_readiness:
+          type: string
+        app_readiness_observed_at:
+          type: string
+          format: date-time
+    AutomationEvaluationDecision:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          policy_id,
+          policy_generation,
+          rule_id,
+          scope,
+          mode,
+          matched,
+          would_action,
+          production_mutation_allowed,
+          matching_samples,
+          failure_domains,
+          evidence_hash,
+          reason_codes,
+          evaluated_at,
+        ]
+      properties:
+        policy_id:
+          type: string
+        policy_generation:
+          type: integer
+          format: int64
+        rule_id:
+          type: string
+        scope:
+          $ref: "#/components/schemas/AutomationScope"
+        mode:
+          type: string
+          enum: [disabled, shadow]
+        matched:
+          type: boolean
+        would_action:
+          type: boolean
+        production_mutation_allowed:
+          type: boolean
+          enum: [false]
+        matching_samples:
+          type: integer
+          format: int64
+        failure_domains:
+          type: array
+          items:
+            type: string
+        evidence_hash:
+          type: string
+        reason_codes:
+          type: array
+          items:
+            type: string
+        evaluated_at:
+          type: string
+          format: date-time
+    AutomationActionIntent:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          tenant_id,
+          project_id,
+          policy_id,
+          policy_generation,
+          rule_id,
+          scope,
+          mode,
+          source,
+          status,
+          rule_snapshot,
+          evidence,
+          decision,
+          evidence_hash,
+          idempotency_key,
+          rollback_target,
+          production_mutation_allowed,
+          expires_at,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        policy_id:
+          type: string
+        policy_generation:
+          type: integer
+          format: int64
+        rule_id:
+          type: string
+        scope:
+          $ref: "#/components/schemas/AutomationScope"
+        mode:
+          type: string
+          enum: [shadow]
+        source:
+          type: string
+          enum: [admin_replay, control_loop]
+        status:
+          type: string
+          enum: [observed]
+        rule_snapshot:
+          $ref: "#/components/schemas/AutomationRule"
+        evidence:
+          $ref: "#/components/schemas/AutomationEvaluationEvidence"
+        decision:
+          $ref: "#/components/schemas/AutomationEvaluationDecision"
+        evidence_hash:
+          type: string
+        idempotency_key:
+          type: string
+        rollback_target:
+          type: string
+        production_mutation_allowed:
+          type: boolean
+          enum: [false]
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AutomationActionIntentListResponse:
+      type: object
+      additionalProperties: false
+      required: [intents, generated_at]
+      properties:
+        intents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationActionIntent"
+        generated_at:
+          type: string
+          format: date-time
+    AutomationActionIntentResponse:
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent:
+          $ref: "#/components/schemas/AutomationActionIntent"
+    AutomationEvaluationResponse:
+      type: object
+      additionalProperties: false
+      required: [decision, intent_created]
+      properties:
+        decision:
+          $ref: "#/components/schemas/AutomationEvaluationDecision"
+        intent:
+          $ref: "#/components/schemas/AutomationActionIntent"
+        intent_created:
+          type: boolean
     AutomaticActionContract:
       type: object
       additionalProperties: false
