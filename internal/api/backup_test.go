@@ -42,8 +42,13 @@ func TestAppBackupStatusReportsDisabledByDefault(t *testing.T) {
 		Image:     "ghcr.io/example/app:latest",
 		RuntimeID: runtime.ID,
 		Replicas:  1,
+		Env: map[string]string{
+			"API_KEY":     "must-not-leak-api-key",
+			"DB_PASSWORD": "must-not-leak-db-password",
+		},
 		Postgres: &model.AppPostgresSpec{
 			Database: "appdb",
+			Password: "must-not-leak-postgres-password",
 		},
 		Workspace: &model.AppWorkspaceSpec{MountPath: "/workspace"},
 	})
@@ -61,10 +66,44 @@ func TestAppBackupStatusReportsDisabledByDefault(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 	var response struct {
+		App      model.App             `json:"app"`
 		Policies []model.BackupPolicy  `json:"policies"`
 		Posture  []model.BackupPosture `json:"posture"`
 	}
 	mustDecodeJSON(t, recorder, &response)
+	for key, value := range response.App.Spec.Env {
+		if value != apiRedactedSecretValue {
+			t.Fatalf("expected app backup status env %s to be redacted, got %q", key, value)
+		}
+	}
+	// Managed PostgreSQL is persisted as an owned backing service rather than
+	// inline in App.Spec.Postgres.  Assert the redaction at the representation
+	// returned by the API, while still accepting inline PostgreSQL for legacy
+	// apps.
+	if response.App.Spec.Postgres != nil {
+		if response.App.Spec.Postgres.Password != apiRedactedSecretValue {
+			t.Fatalf("expected app backup status inline postgres password to be redacted, got %+v", response.App.Spec.Postgres)
+		}
+	} else {
+		foundPostgres := false
+		for _, service := range response.App.BackingServices {
+			if service.Spec.Postgres == nil {
+				continue
+			}
+			foundPostgres = true
+			if service.Spec.Postgres.Password != apiRedactedSecretValue {
+				t.Fatalf("expected app backup status backing-service postgres password to be redacted, got %+v", service.Spec.Postgres)
+			}
+		}
+		if !foundPostgres {
+			t.Fatalf("expected app backup status to include the managed postgres backing service")
+		}
+	}
+	for _, leaked := range []string{"must-not-leak-api-key", "must-not-leak-db-password", "must-not-leak-postgres-password"} {
+		if strings.Contains(recorder.Body.String(), leaked) {
+			t.Fatalf("app backup status leaked %q: %s", leaked, recorder.Body.String())
+		}
+	}
 	if len(response.Policies) != 0 {
 		t.Fatalf("expected no app backup policies by default, got %+v", response.Policies)
 	}

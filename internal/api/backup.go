@@ -990,7 +990,11 @@ func (s *Server) handleGetAppBackupStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"app":       sanitizeAppForAPI(app),
+		// Backup status is diagnostic output. Unlike the regular app view, it
+		// must never return raw application configuration values because the
+		// CLI promises to redact diagnostic output by default and JSON output is
+		// commonly persisted in logs or evidence files.
+		"app":       redactAppForDebugBundle(app),
 		"policies":  policies,
 		"artifacts": artifacts,
 		"posture":   s.appBackupPosture(app, policies, artifacts),
