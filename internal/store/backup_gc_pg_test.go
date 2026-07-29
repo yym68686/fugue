@@ -55,6 +55,57 @@ func TestPGBackupArtifactPhysicalCleanupIsRestoreSafeAndDurable(t *testing.T) {
 	}
 }
 
+func TestPGFailedBackupRunObjectCleanupIsDurableAndArtifactSafe(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	stateStore := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	cutoff := time.Date(2026, time.July, 29, 8, 0, 0, 0, time.UTC)
+
+	mock.ExpectQuery(`(?s)FROM fugue_backup_runs WHERE status IN \('failed', 'canceled'\).*COALESCE\(finished_at, updated_at\) <= \$1.*orphan_cleanup_at IS NULL.*NOT EXISTS \(.*fugue_backup_artifacts.*ORDER BY orphan_cleanup_attempted_at ASC NULLS FIRST`).
+		WithArgs(cutoff, 20).
+		WillReturnRows(sqlmock.NewRows(strings.Split(backupRunReturningColumns(), ", ")))
+	runs, err := stateStore.ListFailedBackupRunObjectCleanupCandidates(BackupRunObjectCleanupFilter{Before: cutoff, Limit: 20})
+	if err != nil {
+		t.Fatalf("list failed-run cleanup candidates: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("unexpected failed-run cleanup candidates: %#v", runs)
+	}
+
+	mock.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM fugue_backup_artifacts WHERE run_id = \$1\)`).
+		WithArgs("run-no-artifact").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	exists, err := stateStore.BackupArtifactExistsForRun("run-no-artifact")
+	if err != nil || exists {
+		t.Fatalf("artifact existence check = %t, %v", exists, err)
+	}
+
+	completedAt := cutoff.Add(time.Minute)
+	mock.ExpectExec(`UPDATE fugue_backup_runs SET orphan_cleanup_at = COALESCE\(orphan_cleanup_at, \$2\),.*NOT EXISTS \(.*fugue_backup_artifacts`).
+		WithArgs("run-no-artifact", completedAt).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := stateStore.MarkBackupRunObjectsCleaned("run-no-artifact", completedAt); err != nil {
+		t.Fatalf("mark failed-run cleanup: %v", err)
+	}
+
+	failureAt := completedAt.Add(time.Minute)
+	mock.ExpectExec(`UPDATE fugue_backup_runs SET orphan_cleanup_attempted_at = \$2,.*orphan_cleanup_error = \$3.*NOT EXISTS \(.*fugue_backup_artifacts`).
+		WithArgs("run-failed-cleanup", failureAt, "access denied").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := stateStore.RecordBackupRunObjectCleanupFailure("run-failed-cleanup", failureAt, "access denied"); err != nil {
+		t.Fatalf("record failed-run cleanup failure: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
 func TestPGBackupArtifactRestoreMutationInterlockUsesArtifactRowLock(t *testing.T) {
 	t.Parallel()
 

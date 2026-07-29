@@ -42,6 +42,11 @@ const (
 	backupArtifactGCLimit    = 20
 	backupArtifactGCLockName = "fugue-backup-artifact-physical-gc-v1"
 	backupArtifactGCTimeout  = 45 * time.Second
+	backupFailedRunGCGrace   = time.Hour
+	backupFailedRunGCLimit   = 100
+	backupFailedRunGCLock    = "fugue-backup-failed-run-object-gc-v1"
+	backupFailedRunGCTimeout = 45 * time.Second
+	backupUploadCleanupTTL   = 45 * time.Second
 
 	managedPostgresSuspendedBackupMessage = "managed_postgres_suspended: resume before backup"
 )
@@ -110,6 +115,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 	defer ticker.Stop()
 	s.enqueueDueBackups(ctx)
 	go s.sweepDeletedBackupArtifacts(ctx)
+	go s.sweepFailedBackupRunObjects(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -117,6 +123,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 		case <-ticker.C:
 			s.enqueueDueBackups(ctx)
 			go s.sweepDeletedBackupArtifacts(ctx)
+			go s.sweepFailedBackupRunObjects(ctx)
 		}
 	}
 }
@@ -172,6 +179,278 @@ func (s *Server) sweepDeletedBackupArtifacts(parent context.Context) {
 	}
 	if !acquired {
 		return
+	}
+}
+
+// sweepFailedBackupRunObjects is the durable backstop for uploads that were
+// completed (or may have been completed) before a backup run failed. A run is
+// eligible only after its terminal grace period and only when no artifact row
+// exists for it. The latter predicate is repeated by the store's completion
+// CAS, so an ambiguous artifact commit cannot be followed by object deletion.
+func (s *Server) sweepFailedBackupRunObjects(parent context.Context) {
+	if s == nil || s.store == nil {
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, backupFailedRunGCTimeout)
+	defer cancel()
+	acquired, err := s.store.WithAdvisoryLock(ctx, backupFailedRunGCLock, func() error {
+		runs, err := s.store.ListFailedBackupRunObjectCleanupCandidates(store.BackupRunObjectCleanupFilter{
+			Before: time.Now().UTC().Add(-backupFailedRunGCGrace),
+			Limit:  backupFailedRunGCLimit,
+		})
+		if err != nil {
+			return err
+		}
+		if len(runs) == 0 {
+			return nil
+		}
+		byBackend := map[string][]model.BackupRun{}
+		for _, run := range runs {
+			byBackend[run.BackendID] = append(byBackend[run.BackendID], run)
+		}
+		cleanedRuns := 0
+		cleanedObjects := 0
+		var cleanedBytes int64
+		for backendID, backendRuns := range byBackend {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if strings.TrimSpace(backendID) == "" {
+				for _, run := range backendRuns {
+					_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "backup run has no backend")
+				}
+				continue
+			}
+			backend, err := s.store.GetBackupBackendForUse(backendID, "", true)
+			if err != nil {
+				for _, run := range backendRuns {
+					_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "resolve backup backend failed")
+				}
+				continue
+			}
+			objectBackend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(backend))
+			if err != nil {
+				for _, run := range backendRuns {
+					_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "open backup backend failed")
+				}
+				continue
+			}
+			objects, err := objectBackend.listObjects(ctx, "")
+			if err != nil {
+				for _, run := range backendRuns {
+					_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "list backup objects failed")
+				}
+				continue
+			}
+			for _, run := range backendRuns {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				keys, bytes, matchErr := backupFailedRunObjectKeys(run, objectBackend, objects)
+				if matchErr != nil {
+					if recordErr := s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), matchErr.Error()); recordErr != nil && s.log != nil && !errors.Is(recordErr, store.ErrConflict) {
+						s.log.Printf("failed backup run %s cleanup marker failed: %v", run.ID, recordErr)
+					}
+					continue
+				}
+				exists, existsErr := s.store.BackupArtifactExistsForRun(run.ID)
+				if existsErr != nil {
+					_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "check backup artifact reference failed")
+					continue
+				}
+				if exists {
+					continue
+				}
+				if len(keys) > 0 {
+					if err := objectBackend.deleteLogicalObjects(ctx, keys); err != nil {
+						if recordErr := s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), err.Error()); recordErr != nil && s.log != nil && !errors.Is(recordErr, store.ErrConflict) {
+							s.log.Printf("failed backup run %s cleanup marker failed: %v", run.ID, recordErr)
+						}
+						continue
+					}
+				}
+				if err := s.store.MarkBackupRunObjectsCleaned(run.ID, time.Now().UTC()); err != nil {
+					if s.log != nil && !errors.Is(err, store.ErrConflict) {
+						s.log.Printf("failed backup run %s cleanup completion marker failed: %v", run.ID, err)
+					}
+					continue
+				}
+				cleanedRuns++
+				cleanedObjects += len(keys)
+				cleanedBytes += bytes
+			}
+		}
+		if cleanedRuns > 0 && s.log != nil {
+			s.log.Printf("failed backup run object cleanup completed runs=%d objects=%d bytes=%d", cleanedRuns, cleanedObjects, cleanedBytes)
+		}
+		return nil
+	})
+	if err != nil && s.log != nil && !errors.Is(err, context.Canceled) {
+		s.log.Printf("failed backup run object cleanup sweep failed: %v", err)
+	}
+	if !acquired {
+		return
+	}
+}
+
+func backupFailedRunObjectKeys(run model.BackupRun, backend *dataObjectBackend, objects []dataObjectInfo) ([]string, int64, error) {
+	if backend == nil {
+		return nil, 0, fmt.Errorf("backup backend is not configured")
+	}
+	keys := make([]string, 0, 2)
+	var bytes int64
+	for _, object := range objects {
+		logicalKey, ok := backend.logicalObjectKey(object.Key)
+		if !ok || !pathHasSegment(logicalKey, run.ID) {
+			continue
+		}
+		if !backupFailedRunObjectKeyAllowed(run, logicalKey) {
+			return nil, 0, fmt.Errorf("backup run has an object with an unexpected key shape")
+		}
+		keys = append(keys, logicalKey)
+		bytes += object.Size
+	}
+	return keys, bytes, nil
+}
+
+func backupFailedRunObjectKeyAllowed(run model.BackupRun, key string) bool {
+	canonicalKey := strings.Trim(strings.TrimSpace(key), "/")
+	if key != canonicalKey || key == "" || strings.ContainsRune(key, '\x00') || path.Clean(key) != key {
+		return false
+	}
+	parts := strings.Split(key, "/")
+	runID := strings.TrimSpace(run.ID)
+	if run.ID != runID || !backupObjectPathSegmentAllowed(runID) {
+		return false
+	}
+	allowedFilename := func(value string, names ...string) bool {
+		for _, name := range names {
+			if value == name {
+				return true
+			}
+		}
+		return false
+	}
+	target := model.NormalizeBackupTarget(run.Target)
+	switch model.NormalizeBackupTargetType(target.Type) {
+	case model.BackupTargetControlPlaneDatabase:
+		return len(parts) == 7 && parts[0] == "control-plane" && parts[5] == runID && allowedFilename(parts[6], "control-plane.dump", "manifest.json") && numericPathPart(parts[1], 4) && numericPathPart(parts[2], 2) && numericPathPart(parts[3], 2) && numericPathPart(parts[4], 2)
+	case model.BackupTargetAppDatabase:
+		tenantID := firstNonEmptyString(run.TenantID, target.TenantID)
+		projectID := firstNonEmptyString(run.ProjectID, target.ProjectID)
+		appID := firstNonEmptyString(run.AppID, target.AppID)
+		if !backupObjectPathSegmentAllowed(tenantID) || !backupObjectPathSegmentAllowed(projectID) || !backupObjectPathSegmentAllowed(appID) {
+			return false
+		}
+		base := path.Join("apps", tenantID, projectID, appID, runID)
+		return key == path.Join(base, "database.dump") || key == path.Join(base, "manifest.json")
+	case model.BackupTargetPersistentStorage:
+		tenantID := firstNonEmptyString(run.TenantID, target.TenantID)
+		projectID := firstNonEmptyString(run.ProjectID, target.ProjectID)
+		appID := firstNonEmptyString(run.AppID, target.AppID)
+		if !backupObjectPathSegmentAllowed(tenantID) || !backupObjectPathSegmentAllowed(projectID) || !backupObjectPathSegmentAllowed(appID) {
+			return false
+		}
+		base := path.Join("apps", tenantID, projectID, appID, runID, "persistent-storage")
+		return key == path.Join(base, "persistent-storage.tar.gz") || key == path.Join(base, "manifest.json")
+	case model.BackupTargetDataWorkspace:
+		workspaceID := firstNonEmptyString(target.WorkspaceID, target.Name)
+		tenantID := firstNonEmptyString(run.TenantID, target.TenantID)
+		projectID := firstNonEmptyString(run.ProjectID, target.ProjectID)
+		if !backupObjectPathSegmentAllowed(tenantID) || !backupObjectPathSegmentAllowed(projectID) || !backupObjectPathSegmentAllowed(workspaceID) {
+			return false
+		}
+		base := path.Join("data-workspaces", tenantID, projectID, workspaceID, runID)
+		return key == path.Join(base, "manifest.json")
+	case model.BackupTargetRegistry:
+		base := path.Join("platform", "registry", runID)
+		return key == path.Join(base, "registry.tar.gz") || key == path.Join(base, "manifest.json")
+	default:
+		return false
+	}
+}
+
+func backupObjectPathSegmentAllowed(value string) bool {
+	return value != "" && value == strings.TrimSpace(value) && value != "." && value != ".." && !strings.Contains(value, "/") && !strings.ContainsRune(value, '\x00')
+}
+
+func numericPathPart(value string, width int) bool {
+	if len(value) != width {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+type backupObjectUploadTransaction struct {
+	server    *Server
+	run       model.BackupRun
+	backend   *dataObjectBackend
+	keys      []string
+	committed bool
+}
+
+func newBackupObjectUploadTransaction(server *Server, run model.BackupRun, backend *dataObjectBackend) *backupObjectUploadTransaction {
+	return &backupObjectUploadTransaction{server: server, run: run, backend: backend}
+}
+
+func (tx *backupObjectUploadTransaction) putObject(ctx context.Context, key string, body io.Reader, size int64) error {
+	if tx == nil || tx.backend == nil {
+		return fmt.Errorf("backup object backend is not configured")
+	}
+	key = strings.Trim(strings.TrimSpace(key), "/")
+	if !backupFailedRunObjectKeyAllowed(tx.run, key) {
+		return fmt.Errorf("backup upload object key is not scoped to its run")
+	}
+	tx.keys = append(tx.keys, key)
+	return tx.backend.putObject(ctx, key, body, size)
+}
+
+func (tx *backupObjectUploadTransaction) commit() {
+	if tx != nil {
+		tx.committed = true
+	}
+}
+
+func (tx *backupObjectUploadTransaction) cleanupOnError(ctx context.Context, retErr *error) {
+	if tx == nil || tx.committed || retErr == nil || *retErr == nil || len(tx.keys) == 0 {
+		return
+	}
+	for _, key := range tx.keys {
+		if !backupFailedRunObjectKeyAllowed(tx.run, key) {
+			*retErr = errors.Join(*retErr, fmt.Errorf("backup cleanup refused an unsafe object key"))
+			return
+		}
+	}
+	if tx.server != nil && tx.server.store != nil {
+		exists, err := tx.server.store.BackupArtifactExistsForRun(tx.run.ID)
+		if err != nil {
+			*retErr = errors.Join(*retErr, fmt.Errorf("check backup artifact before cleanup: %w", err))
+			return
+		}
+		if exists {
+			return
+		}
+	}
+	cleanupParent := contextWithoutCancel(ctx)
+	cleanupCtx, cancel := context.WithTimeout(cleanupParent, backupUploadCleanupTTL)
+	defer cancel()
+	if err := tx.backend.deleteLogicalObjects(cleanupCtx, tx.keys); err != nil {
+		if tx.server != nil && tx.server.log != nil {
+			tx.server.log.Printf("backup run %s uploaded-object cleanup failed: %v", tx.run.ID, err)
+		}
+		*retErr = errors.Join(*retErr, fmt.Errorf("cleanup uploaded backup objects: %w", err))
+		return
+	}
+	if tx.server != nil && tx.server.log != nil {
+		tx.server.log.Printf("backup run %s uploaded-object cleanup completed objects=%d", tx.run.ID, len(tx.keys))
 	}
 }
 
@@ -2240,7 +2519,7 @@ func (s *Server) rebindAppDatabaseBackupTarget(run model.BackupRun) (model.Backu
 	return run, nil
 }
 
-func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.BackupRun) (artifacts []model.BackupArtifact, retErr error) {
 	if strings.TrimSpace(run.BackendID) == "" {
 		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
 	}
@@ -2282,11 +2561,13 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	baseKey := path.Join("control-plane", time.Now().UTC().Format("2006/01/02/15"), run.ID)
 	dumpKey := baseKey + "/control-plane.dump"
 	manifestKey := baseKey + "/manifest.json"
+	upload := newBackupObjectUploadTransaction(s, run, objectBackend)
+	defer upload.cleanupOnError(ctx, &retErr)
 	file, err := os.Open(dumpPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, dumpKey, file, size); err != nil {
+	if err := upload.putObject(ctx, dumpKey, file, size); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("upload control-plane dump: %w", err)
 	}
@@ -2332,7 +2613,7 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+	if err := upload.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload control-plane manifest: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -2361,10 +2642,11 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	if err != nil {
 		return nil, err
 	}
+	upload.commit()
 	return []model.BackupArtifact{artifact}, nil
 }
 
-func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) (artifacts []model.BackupArtifact, retErr error) {
 	if strings.TrimSpace(run.BackendID) == "" {
 		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
 	}
@@ -2449,11 +2731,18 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	baseKey := path.Join("apps", app.TenantID, app.ProjectID, app.ID, run.ID)
 	dumpKey := baseKey + "/database.dump"
 	manifestKey := baseKey + "/manifest.json"
+	uploadRun := run
+	uploadRun.TenantID = app.TenantID
+	uploadRun.ProjectID = app.ProjectID
+	uploadRun.AppID = app.ID
+	uploadRun.Target = target
+	upload := newBackupObjectUploadTransaction(s, uploadRun, objectBackend)
+	defer upload.cleanupOnError(ctx, &retErr)
 	file, err := os.Open(dumpPath)
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, dumpKey, file, size); err != nil {
+	if err := upload.putObject(ctx, dumpKey, file, size); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("upload app database dump: %w", err)
 	}
@@ -2492,7 +2781,7 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+	if err := upload.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload app database manifest: %w", err)
 	}
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
@@ -2518,10 +2807,11 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	if err != nil {
 		return nil, err
 	}
+	upload.commit()
 	return []model.BackupArtifact{artifact}, nil
 }
 
-func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.BackupRun) (artifacts []model.BackupArtifact, retErr error) {
 	if strings.TrimSpace(run.BackendID) == "" {
 		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
 	}
@@ -2577,11 +2867,18 @@ func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.Backu
 	baseKey := path.Join("apps", app.TenantID, app.ProjectID, app.ID, run.ID, "persistent-storage")
 	archiveKey := baseKey + "/persistent-storage.tar.gz"
 	manifestKey := baseKey + "/manifest.json"
+	uploadRun := run
+	uploadRun.TenantID = app.TenantID
+	uploadRun.ProjectID = app.ProjectID
+	uploadRun.AppID = app.ID
+	uploadRun.Target = target
+	upload := newBackupObjectUploadTransaction(s, uploadRun, objectBackend)
+	defer upload.cleanupOnError(ctx, &retErr)
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, archiveKey, file, size); err != nil {
+	if err := upload.putObject(ctx, archiveKey, file, size); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("upload persistent storage archive: %w", err)
 	}
@@ -2628,7 +2925,7 @@ func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.Backu
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+	if err := upload.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload persistent storage manifest: %w", err)
 	}
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
@@ -2654,10 +2951,11 @@ func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.Backu
 	if err != nil {
 		return nil, err
 	}
+	upload.commit()
 	return []model.BackupArtifact{artifact}, nil
 }
 
-func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun) (artifacts []model.BackupArtifact, retErr error) {
 	if strings.TrimSpace(run.BackendID) == "" {
 		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
 	}
@@ -2686,6 +2984,12 @@ func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun
 	target.Name = workspace.Name
 	baseKey := path.Join("data-workspaces", workspace.TenantID, workspace.ProjectID, workspace.ID, run.ID)
 	manifestKey := baseKey + "/manifest.json"
+	uploadRun := run
+	uploadRun.TenantID = workspace.TenantID
+	uploadRun.ProjectID = workspace.ProjectID
+	uploadRun.Target = target
+	upload := newBackupObjectUploadTransaction(s, uploadRun, objectBackend)
+	defer upload.cleanupOnError(ctx, &retErr)
 	manifest := model.NormalizeBackupManifest(model.BackupManifest{
 		RunID:             run.ID,
 		PolicyID:          run.PolicyID,
@@ -2719,7 +3023,7 @@ func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+	if err := upload.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload data workspace backup manifest: %w", err)
 	}
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
@@ -2746,10 +3050,11 @@ func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun
 	if err != nil {
 		return nil, err
 	}
+	upload.commit()
 	return []model.BackupArtifact{artifact}, nil
 }
 
-func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) (artifacts []model.BackupArtifact, retErr error) {
 	if strings.TrimSpace(run.BackendID) == "" {
 		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
 	}
@@ -2762,6 +3067,10 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 	target.Type = model.BackupTargetRegistry
 	target.Component = firstNonEmptyString(target.Component, "registry")
 	baseKey := path.Join("platform", "registry", run.ID)
+	uploadRun := run
+	uploadRun.Target = target
+	upload := newBackupObjectUploadTransaction(s, uploadRun, objectBackend)
+	defer upload.cleanupOnError(ctx, &retErr)
 	if s.registryIsExternalized() {
 		manifestKey := baseKey + "/manifest.json"
 		manifest := model.NormalizeBackupManifest(model.BackupManifest{
@@ -2788,7 +3097,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 		sum := sha256.Sum256(manifestBytes)
 		sha256sum := hex.EncodeToString(sum[:])
 		manifest.SHA256 = sha256sum
-		if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+		if err := upload.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 			return nil, fmt.Errorf("upload registry reference manifest: %w", err)
 		}
 		artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
@@ -2810,6 +3119,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 		if err != nil {
 			return nil, err
 		}
+		upload.commit()
 		return []model.BackupArtifact{artifact}, nil
 	}
 	sourceRoot := strings.TrimSpace(os.Getenv("FUGUE_BACKUP_REGISTRY_ROOT"))
@@ -2839,7 +3149,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, archiveKey, file, size); err != nil {
+	if err := upload.putObject(ctx, archiveKey, file, size); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("upload registry archive: %w", err)
 	}
@@ -2873,7 +3183,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 	if err != nil {
 		return nil, err
 	}
-	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+	if err := upload.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload registry manifest: %w", err)
 	}
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
@@ -2896,6 +3206,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 	if err != nil {
 		return nil, err
 	}
+	upload.commit()
 	return []model.BackupArtifact{artifact}, nil
 }
 

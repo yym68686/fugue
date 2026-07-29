@@ -187,6 +187,29 @@ func TestDeleteLogicalObjectsAppliesPrefixExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestLogicalObjectKeyRequiresExactBackendPrefix(t *testing.T) {
+	t.Parallel()
+
+	backend := &dataObjectBackend{backend: model.DataBackend{Prefix: "backup-root"}}
+	if got, ok := backend.logicalObjectKey("backup-root/apps/tenant/run/database.dump"); !ok || got != "apps/tenant/run/database.dump" {
+		t.Fatalf("expected exact logical key, got %q ok=%t", got, ok)
+	}
+	for _, key := range []string{
+		"backup-root",
+		"/backup-root/apps/tenant/run/database.dump",
+		" backup-root/apps/tenant/run/database.dump",
+		"backup-root/apps/tenant/run/database.dump ",
+		"backup-rooted/apps/tenant/run/database.dump",
+		"other/apps/tenant/run/database.dump",
+		"backup-root/../other/object",
+		"backup-root/apps/tenant/run/database.dump\x00suffix",
+	} {
+		if got, ok := backend.logicalObjectKey(key); ok || got != "" {
+			t.Fatalf("expected physical key %q to be rejected, got %q ok=%t", key, got, ok)
+		}
+	}
+}
+
 func TestDeleteObjectsReportsPerObjectS3Errors(t *testing.T) {
 	t.Parallel()
 

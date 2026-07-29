@@ -102,6 +102,15 @@ type BackupArtifactCleanupFilter struct {
 	Limit  int
 }
 
+// BackupRunObjectCleanupFilter describes terminal backup runs whose upload
+// objects may be orphaned because no artifact was committed. The API layer
+// performs the object-store listing/deletion; the store owns the durable CAS
+// markers and excludes runs that have any artifact row.
+type BackupRunObjectCleanupFilter struct {
+	Before time.Time
+	Limit  int
+}
+
 type BackupRunUpdate struct {
 	Status        *string
 	LeaseOwner    *string
@@ -1579,6 +1588,181 @@ func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin boo
 	return deleted, err
 }
 
+// BackupArtifactExistsForRun is the commit-ambiguity guard for failed upload
+// cleanup. Object deletion must fail closed whenever an artifact row exists,
+// regardless of the artifact's current status.
+func (s *Store) BackupArtifactExistsForRun(runID string) (bool, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgBackupArtifactExistsForRun(runID)
+	}
+	exists := false
+	err := s.withLockedState(false, func(state *model.State) error {
+		exists = backupRunHasArtifact(state, runID)
+		return nil
+	})
+	return exists, err
+}
+
+// ListFailedBackupRunObjectCleanupCandidates returns terminal failed/canceled
+// runs that are past the grace period, have no artifact, and have not already
+// completed orphan cleanup. The absence-of-artifact predicate is repeated by
+// the completion CAS so a late/ambiguous artifact commit cannot be deleted.
+func (s *Store) ListFailedBackupRunObjectCleanupCandidates(filter BackupRunObjectCleanupFilter) ([]model.BackupRun, error) {
+	if filter.Before.IsZero() {
+		return nil, ErrInvalidInput
+	}
+	filter.Before = filter.Before.UTC()
+	if filter.Limit <= 0 {
+		filter.Limit = defaultBackupRunHistoryLimit
+	}
+	if s.usingDatabase() {
+		return s.pgListFailedBackupRunObjectCleanupCandidates(filter)
+	}
+
+	s.backupRunObjectCleanupMu.Lock()
+	cleaned := make(map[string]struct{}, len(s.backupRunObjectCleanup))
+	for id := range s.backupRunObjectCleanup {
+		cleaned[id] = struct{}{}
+	}
+	attempted := make(map[string]time.Time, len(s.backupRunObjectCleanupAttempts))
+	for id, attemptedAt := range s.backupRunObjectCleanupAttempts {
+		attempted[id] = attemptedAt
+	}
+	s.backupRunObjectCleanupMu.Unlock()
+
+	runs := []model.BackupRun{}
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, run := range state.BackupRuns {
+			run = model.NormalizeBackupRun(run)
+			if _, ok := cleaned[run.ID]; ok {
+				continue
+			}
+			if run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled {
+				continue
+			}
+			terminalAt := run.UpdatedAt
+			if run.FinishedAt != nil {
+				terminalAt = run.FinishedAt.UTC()
+			}
+			if terminalAt.IsZero() || terminalAt.After(filter.Before) || backupRunHasArtifact(state, run.ID) {
+				continue
+			}
+			runs = append(runs, run)
+		}
+		sort.Slice(runs, func(i, j int) bool {
+			iAttempted, iOK := attempted[runs[i].ID]
+			jAttempted, jOK := attempted[runs[j].ID]
+			if iOK != jOK {
+				return !iOK
+			}
+			if iOK && !iAttempted.Equal(jAttempted) {
+				return iAttempted.Before(jAttempted)
+			}
+			iTerminal := runs[i].UpdatedAt
+			if runs[i].FinishedAt != nil {
+				iTerminal = runs[i].FinishedAt.UTC()
+			}
+			jTerminal := runs[j].UpdatedAt
+			if runs[j].FinishedAt != nil {
+				jTerminal = runs[j].FinishedAt.UTC()
+			}
+			if !iTerminal.Equal(jTerminal) {
+				return iTerminal.Before(jTerminal)
+			}
+			return runs[i].ID < runs[j].ID
+		})
+		if len(runs) > filter.Limit {
+			runs = runs[:filter.Limit]
+		}
+		return nil
+	})
+	return runs, err
+}
+
+func (s *Store) MarkBackupRunObjectsCleaned(runID string, cleanedAt time.Time) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return ErrInvalidInput
+	}
+	if cleanedAt.IsZero() {
+		cleanedAt = time.Now().UTC()
+	} else {
+		cleanedAt = cleanedAt.UTC()
+	}
+	if s.usingDatabase() {
+		return s.pgMarkBackupRunObjectsCleaned(runID, cleanedAt)
+	}
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findBackupRun(state, runID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		run := model.NormalizeBackupRun(state.BackupRuns[index])
+		if (run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled) || backupRunHasArtifact(state, runID) {
+			return ErrConflict
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.backupRunObjectCleanupMu.Lock()
+	if s.backupRunObjectCleanup == nil {
+		s.backupRunObjectCleanup = map[string]time.Time{}
+	}
+	if s.backupRunObjectCleanupAttempts == nil {
+		s.backupRunObjectCleanupAttempts = map[string]time.Time{}
+	}
+	s.backupRunObjectCleanup[runID] = cleanedAt
+	s.backupRunObjectCleanupAttempts[runID] = cleanedAt
+	s.backupRunObjectCleanupMu.Unlock()
+	return nil
+}
+
+func (s *Store) RecordBackupRunObjectCleanupFailure(runID string, attemptedAt time.Time, message string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return ErrInvalidInput
+	}
+	if attemptedAt.IsZero() {
+		attemptedAt = time.Now().UTC()
+	} else {
+		attemptedAt = attemptedAt.UTC()
+	}
+	message = strings.TrimSpace(message)
+	if runes := []rune(message); len(runes) > 2000 {
+		message = string(runes[:2000])
+	}
+	if s.usingDatabase() {
+		return s.pgRecordBackupRunObjectCleanupFailure(runID, attemptedAt, message)
+	}
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findBackupRun(state, runID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		run := model.NormalizeBackupRun(state.BackupRuns[index])
+		if (run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled) || backupRunHasArtifact(state, runID) {
+			return ErrConflict
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.backupRunObjectCleanupMu.Lock()
+	if s.backupRunObjectCleanupAttempts == nil {
+		s.backupRunObjectCleanupAttempts = map[string]time.Time{}
+	}
+	s.backupRunObjectCleanupAttempts[runID] = attemptedAt
+	s.backupRunObjectCleanupMu.Unlock()
+	return nil
+}
+
 // ListBackupArtifactCleanupCandidates returns only terminal artifacts that are
 // past the deletion grace period, are not protected, have not already had
 // their physical objects removed, and are not referenced by an in-flight
@@ -1726,6 +1910,15 @@ func backupArtifactHasInFlightRestore(state *model.State, artifactID string) boo
 	for _, run := range state.BackupRestoreRuns {
 		run = model.NormalizeBackupRestoreRun(run)
 		if run.ArtifactID == artifactID && !backupRestoreStatusTerminal(run.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func backupRunHasArtifact(state *model.State, runID string) bool {
+	for _, artifact := range state.BackupArtifacts {
+		if strings.TrimSpace(artifact.RunID) == runID {
 			return true
 		}
 	}
@@ -4331,6 +4524,100 @@ RETURNING `+backupArtifactReturningColumns(), id, now))
 		return model.BackupArtifact{}, err
 	}
 	return artifact, nil
+}
+
+func (s *Store) pgBackupArtifactExistsForRun(runID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_backup_artifacts WHERE run_id = $1)`, runID).Scan(&exists); err != nil {
+		return false, mapDBErr(err)
+	}
+	return exists, nil
+}
+
+func (s *Store) pgListFailedBackupRunObjectCleanupCandidates(filter BackupRunObjectCleanupFilter) ([]model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, backupRunSelectSQL()+`
+ WHERE status IN ('failed', 'canceled')
+   AND COALESCE(finished_at, updated_at) <= $1
+   AND orphan_cleanup_at IS NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM fugue_backup_artifacts a
+       WHERE a.run_id = fugue_backup_runs.id
+   )
+ ORDER BY orphan_cleanup_attempted_at ASC NULLS FIRST,
+          COALESCE(finished_at, updated_at) ASC,
+          id ASC
+ LIMIT $2`, filter.Before, filter.Limit)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	runs := []model.BackupRun{}
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, mapDBErr(rows.Err())
+}
+
+func (s *Store) pgMarkBackupRunObjectsCleaned(runID string, cleanedAt time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE fugue_backup_runs
+SET orphan_cleanup_at = COALESCE(orphan_cleanup_at, $2),
+    orphan_cleanup_attempted_at = $2,
+    orphan_cleanup_error = ''
+WHERE id = $1
+  AND status IN ('failed', 'canceled')
+  AND NOT EXISTS (
+      SELECT 1 FROM fugue_backup_artifacts a
+      WHERE a.run_id = fugue_backup_runs.id
+  )`, runID, cleanedAt)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) pgRecordBackupRunObjectCleanupFailure(runID string, attemptedAt time.Time, message string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE fugue_backup_runs
+SET orphan_cleanup_attempted_at = $2,
+    orphan_cleanup_error = $3
+WHERE id = $1
+  AND orphan_cleanup_at IS NULL
+  AND status IN ('failed', 'canceled')
+  AND NOT EXISTS (
+      SELECT 1 FROM fugue_backup_artifacts a
+      WHERE a.run_id = fugue_backup_runs.id
+  )`, runID, attemptedAt, message)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (s *Store) pgListBackupArtifactCleanupCandidates(filter BackupArtifactCleanupFilter) ([]model.BackupArtifact, error) {
