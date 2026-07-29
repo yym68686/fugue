@@ -591,7 +591,7 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 	}
 }
 
-func TestOverlayManagedAppStatusesForEdgeRoutesMarksMissingManagedAppUnavailable(t *testing.T) {
+func TestOverlayManagedAppStatusesForEdgeRoutesKeepsVerifiedErrorServingAndMarksMissingUnavailable(t *testing.T) {
 	t.Parallel()
 
 	present := model.App{
@@ -613,7 +613,8 @@ func TestOverlayManagedAppStatusesForEdgeRoutesMarksMissingManagedAppUnavailable
 		t.Fatalf("build managed app: %v", err)
 	}
 	managed.Status = runtime.ManagedAppStatus{
-		Phase:         runtime.ManagedAppPhaseReady,
+		Phase:         runtime.ManagedAppPhaseError,
+		Message:       "deploy image preflight failed",
 		ReadyReplicas: 1,
 	}
 
@@ -631,8 +632,11 @@ func TestOverlayManagedAppStatusesForEdgeRoutesMarksMissingManagedAppUnavailable
 	}
 
 	updated := apiServer.overlayManagedAppStatusesForEdgeRoutesCached([]model.App{present, missing}, runtimes)
-	if updated[0].Status.CurrentReplicas != 1 {
-		t.Fatalf("expected present managed app to remain ready, got %+v", updated[0].Status)
+	if updated[0].Status.CurrentReplicas != 1 || updated[0].Status.Phase != "failed" {
+		t.Fatalf("expected verified serving replicas and the operator-visible error to coexist, got %+v", updated[0].Status)
+	}
+	if routeStatus, reason := edgeRouteStatus(updated[0], model.DefaultManagedRuntimeID, true); routeStatus != model.EdgeRouteStatusActive || reason != "" {
+		t.Fatalf("expected verified serving error status to retain an active edge route, got status=%q reason=%q", routeStatus, reason)
 	}
 	if updated[1].Status.CurrentReplicas != 0 || updated[1].Status.Phase != "unavailable" || !strings.Contains(updated[1].Status.LastMessage, "not found") {
 		t.Fatalf("expected missing managed app to become unavailable for edge publication, got %+v", updated[1].Status)
