@@ -1559,6 +1559,16 @@ func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin boo
 		if artifact.Protected {
 			return ErrConflict
 		}
+		if artifact.Status == model.BackupArtifactStatusDeleted || artifact.Status == model.BackupArtifactStatusExpired {
+			deleted = artifact
+			return nil
+		}
+		if backupArtifactHasInFlightRestore(state, artifact.ID) {
+			return ErrConflict
+		}
+		if artifact.Status != model.BackupArtifactStatusActive {
+			return ErrConflict
+		}
 		now := time.Now().UTC()
 		artifact.Status = model.BackupArtifactStatusDeleted
 		artifact.DeletedAt = &now
@@ -1746,6 +1756,9 @@ func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.Bac
 			return ErrNotFound
 		}
 		artifact := model.NormalizeBackupArtifact(state.BackupArtifacts[artifactIndex])
+		if artifact.Status != model.BackupArtifactStatusActive {
+			return ErrConflict
+		}
 		now := time.Now().UTC()
 		if plan.ID == "" {
 			plan.ID = model.NewID("backup_restore_plan")
@@ -2001,7 +2014,7 @@ func applyBackupRetentionInState(state *model.State, policyID string) {
 	var candidates []int
 	for idx, artifact := range state.BackupArtifacts {
 		artifact = model.NormalizeBackupArtifact(artifact)
-		if artifact.PolicyID != policyID || artifact.Status != model.BackupArtifactStatusActive || artifact.Protected {
+		if artifact.PolicyID != policyID || artifact.Status != model.BackupArtifactStatusActive || artifact.Protected || backupArtifactHasInFlightRestore(state, artifact.ID) {
 			continue
 		}
 		candidates = append(candidates, idx)
@@ -4257,17 +4270,65 @@ func (s *Store) pgGetBackupArtifact(id string, tenantID string, platformAdmin bo
 func (s *Store) pgMarkBackupArtifactDeleted(id, tenantID string, platformAdmin bool) (model.BackupArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	now := time.Now().UTC()
-	query := `UPDATE fugue_backup_artifacts SET status = 'deleted', deleted_at = $2 WHERE id = $1 AND protected = FALSE`
-	args := []any{id, now}
-	if !platformAdmin {
-		query += ` AND tenant_id = $3`
-		args = append(args, tenantID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BackupArtifact{}, err
 	}
-	query += ` RETURNING ` + backupArtifactReturningColumns()
-	artifact, err := scanBackupArtifact(s.db.QueryRowContext(ctx, query, args...))
+	defer tx.Rollback()
+
+	query := backupArtifactSelectSQL() + ` WHERE id = $1`
+	args := []any{id}
+	if !platformAdmin {
+		args = append(args, tenantID)
+		query += ` AND tenant_id = $2`
+	}
+	query += ` FOR UPDATE`
+	artifact, err := scanBackupArtifact(tx.QueryRowContext(ctx, query, args...))
 	if err != nil {
 		return model.BackupArtifact{}, mapDBErr(err)
+	}
+	if artifact.Protected {
+		return model.BackupArtifact{}, ErrConflict
+	}
+	if artifact.Status == model.BackupArtifactStatusDeleted || artifact.Status == model.BackupArtifactStatusExpired {
+		if err := tx.Commit(); err != nil {
+			return model.BackupArtifact{}, err
+		}
+		return artifact, nil
+	}
+	if artifact.Status != model.BackupArtifactStatusActive {
+		return model.BackupArtifact{}, ErrConflict
+	}
+
+	var restoreInFlight bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1 FROM fugue_backup_restore_plans p
+	WHERE p.artifact_id = $1 AND p.status NOT IN ('succeeded', 'failed', 'canceled')
+	UNION ALL
+	SELECT 1 FROM fugue_backup_restore_runs rr
+	WHERE rr.artifact_id = $1 AND rr.status NOT IN ('succeeded', 'failed', 'canceled')
+)`, id).Scan(&restoreInFlight); err != nil {
+		return model.BackupArtifact{}, mapDBErr(err)
+	}
+	if restoreInFlight {
+		return model.BackupArtifact{}, ErrConflict
+	}
+
+	now := time.Now().UTC()
+	artifact, err = scanBackupArtifact(tx.QueryRowContext(ctx, `
+UPDATE fugue_backup_artifacts
+SET status = 'deleted', deleted_at = $2
+WHERE id = $1 AND status = 'active' AND protected = FALSE
+RETURNING `+backupArtifactReturningColumns(), id, now))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return model.BackupArtifact{}, ErrConflict
+		}
+		return model.BackupArtifact{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.BackupArtifact{}, err
 	}
 	return artifact, nil
 }
@@ -4376,9 +4437,22 @@ func (s *Store) pgApplyBackupRetention(policyID string) error {
 
 func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
 	plan.ArtifactID = strings.TrimSpace(plan.ArtifactID)
-	artifact, err := s.pgGetBackupArtifact(plan.ArtifactID, "", true)
+	if plan.ArtifactID == "" {
+		return model.BackupRestorePlan{}, ErrInvalidInput
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.BackupRestorePlan{}, err
+	}
+	defer tx.Rollback()
+	artifact, err := scanBackupArtifact(tx.QueryRowContext(ctx, backupArtifactSelectSQL()+` WHERE id = $1 FOR UPDATE`, plan.ArtifactID))
+	if err != nil {
+		return model.BackupRestorePlan{}, mapDBErr(err)
+	}
+	if artifact.Status != model.BackupArtifactStatusActive {
+		return model.BackupRestorePlan{}, ErrConflict
 	}
 	now := time.Now().UTC()
 	if plan.ID == "" {
@@ -4416,12 +4490,17 @@ func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.B
 	if err != nil {
 		return model.BackupRestorePlan{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return scanBackupRestorePlan(s.db.QueryRowContext(ctx, `
+	created, err := scanBackupRestorePlan(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_backup_restore_plans (id, tenant_id, project_id, app_id, artifact_id, target_type, target_json, mode, status, warnings_json, phases_json, created_by_type, created_by_id, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING `+backupRestorePlanReturningColumns(), plan.ID, nullIfEmpty(plan.TenantID), nullIfEmpty(plan.ProjectID), nullIfEmpty(plan.AppID), plan.ArtifactID, plan.Target.Type, targetJSON, plan.Mode, plan.Status, warningsJSON, phasesJSON, plan.CreatedByType, plan.CreatedByID, plan.CreatedAt, plan.UpdatedAt))
+	if err != nil {
+		return model.BackupRestorePlan{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.BackupRestorePlan{}, err
+	}
+	return created, nil
 }
 
 func (s *Store) pgListBackupRestorePlans(tenantID string, platformAdmin bool, limit int) ([]model.BackupRestorePlan, error) {
