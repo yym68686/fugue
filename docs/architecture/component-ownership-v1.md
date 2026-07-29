@@ -43,3 +43,13 @@ It returns `legacy-shared` for shared source paths and `shadow-only` for a
 component that is still transitional; neither result authorizes a production
 mutation. Only a later plan with `independent` (or an explicitly coordinated)
 mode may be handed to a release coordinator.
+
+The input-boundary CLI is deliberately read-only. For example:
+
+```console
+go run ./cmd/fugue-component-plan \
+  --path cmd/fugue-image-cache/main.go
+```
+
+The caller must obtain the paths from trusted revision evidence; the command
+does not run `git diff`, read live state, or dispatch a workflow.
