@@ -12,6 +12,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/componentmanifest"
 	"fugue/internal/model"
+	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
 
@@ -23,11 +24,11 @@ func TestReconcileComponentPlanPersistsIdempotentLaneLocalShadowStatus(t *testin
 		ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation,
 	}
 	principal := testReleaseControlPrincipal()
-	first, err := ReconcileComponentPlan(context.Background(), stateStore, spec, principal)
+	first, err := ReconcileComponentPlan(context.Background(), testComponentPlanStore{stateStore}, spec, principal)
 	if err != nil {
 		t.Fatalf("first reconcile: %v", err)
 	}
-	second, err := ReconcileComponentPlan(context.Background(), stateStore, spec, principal)
+	second, err := ReconcileComponentPlan(context.Background(), testComponentPlanStore{stateStore}, spec, principal)
 	if err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestReconcileComponentPlanConvergesConcurrentWorkersToOneRelease(t *testing
 		go func() {
 			defer group.Done()
 			<-start
-			status, err := ReconcileComponentPlan(context.Background(), stateStore, spec, testReleaseControlPrincipal())
+			status, err := ReconcileComponentPlan(context.Background(), testComponentPlanStore{stateStore}, spec, testReleaseControlPrincipal())
 			statuses <- status
 			errors <- err
 		}()
@@ -145,7 +146,7 @@ func TestReconcileComponentPlanFailsClosedBeforePublishing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			spec := valid
 			test.mutate(&spec)
-			if _, err := ReconcileComponentPlan(context.Background(), stateStore, spec, test.principal); err == nil {
+			if _, err := ReconcileComponentPlan(context.Background(), testComponentPlanStore{stateStore}, spec, test.principal); err == nil {
 				t.Fatal("reconcile unexpectedly succeeded")
 			}
 		})
@@ -167,7 +168,7 @@ func TestReconcileComponentPlanRejectsCanceledContextAndCorruptStoreOutput(t *te
 	spec := ComponentPlanSpec{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := ReconcileComponentPlan(ctx, stateStore, spec, testReleaseControlPrincipal()); err == nil {
+	if _, err := ReconcileComponentPlan(ctx, testComponentPlanStore{stateStore}, spec, testReleaseControlPrincipal()); err == nil {
 		t.Fatal("canceled reconcile unexpectedly succeeded")
 	}
 
@@ -187,7 +188,7 @@ func TestVerifyComponentPlanStatusDetectsMutation(t *testing.T) {
 	stateStore, artifact := testValidatedComponentPlanArtifact(t)
 	status, err := ReconcileComponentPlan(
 		context.Background(),
-		stateStore,
+		testComponentPlanStore{stateStore},
 		ComponentPlanSpec{ArtifactID: artifact.ID, ContentHash: artifact.ContentHash, Generation: artifact.Generation},
 		testReleaseControlPrincipal(),
 	)
@@ -212,17 +213,100 @@ func TestVerifyComponentPlanStatusDetectsMutation(t *testing.T) {
 	}
 }
 
+func TestVerifyShadowReleaseResultRejectsCrossBoundaryDrift(t *testing.T) {
+	t.Parallel()
+
+	_, artifact := testValidatedComponentPlanArtifact(t)
+	envelope, err := componentmanifest.DecodeShadowArtifactContent(artifact.Content)
+	if err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	principal := testReleaseControlPrincipal()
+	release := model.PlatformArtifactRelease{
+		ID:             "artifactrel_1_abcdef",
+		ArtifactID:     artifact.ID,
+		ArtifactKind:   artifact.ArtifactKind,
+		Scope:          artifact.Scope,
+		ScopeKey:       artifact.ScopeKey,
+		Generation:     artifact.Generation,
+		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+		Status:         model.PlatformArtifactReleaseStatusActive,
+		LaneKey: platformsafety.ReleaseLaneKey(
+			model.PlatformArtifactKindComponentReleasePlan,
+			artifact.ScopeKey,
+			model.PlatformArtifactReleaseChannelShadow,
+		),
+		FencingToken:        1,
+		Version:             1,
+		IdempotencyKey:      envelope.CoordinationPlan.IdempotencyKey,
+		CandidateGeneration: artifact.Generation,
+		Reason:              componentPlanReleaseReason,
+		ReleasedByType:      principal.ActorType,
+		ReleasedByID:        principal.ActorID,
+	}
+	message := model.PlatformReleaseMessage{
+		ID:             "artifactmsg_1_abcdef",
+		ReleaseID:      release.ID,
+		ArtifactID:     artifact.ID,
+		ArtifactKind:   artifact.ArtifactKind,
+		Scope:          artifact.Scope,
+		ScopeKey:       artifact.ScopeKey,
+		Generation:     artifact.Generation,
+		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+		MessageType:    model.PlatformReleaseMessageTypeRelease,
+	}
+	if err := verifyShadowReleaseResult(artifact, artifact, release, message, envelope, principal); err != nil {
+		t.Fatalf("valid result rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*model.PlatformArtifact, *model.PlatformArtifactRelease, *model.PlatformReleaseMessage){
+		"artifact metadata": func(returned *model.PlatformArtifact, _ *model.PlatformArtifactRelease, _ *model.PlatformReleaseMessage) {
+			returned.Metadata = map[string]string{"drift": "true"}
+		},
+		"release scope": func(_ *model.PlatformArtifact, returned *model.PlatformArtifactRelease, _ *model.PlatformReleaseMessage) {
+			returned.Scope.Region = "other"
+		},
+		"candidate generation": func(_ *model.PlatformArtifact, returned *model.PlatformArtifactRelease, _ *model.PlatformReleaseMessage) {
+			returned.CandidateGeneration = "git-3333333333333333333333333333333333333333"
+		},
+		"message scope": func(_ *model.PlatformArtifact, _ *model.PlatformArtifactRelease, returned *model.PlatformReleaseMessage) {
+			returned.Scope.Region = "other"
+		},
+		"message identity": func(_ *model.PlatformArtifact, _ *model.PlatformArtifactRelease, returned *model.PlatformReleaseMessage) {
+			returned.ID = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			returnedArtifact := artifact
+			returnedRelease := release
+			returnedMessage := message
+			mutate(&returnedArtifact, &returnedRelease, &returnedMessage)
+			if err := verifyShadowReleaseResult(
+				artifact,
+				returnedArtifact,
+				returnedRelease,
+				returnedMessage,
+				envelope,
+				principal,
+			); err == nil {
+				t.Fatal("cross-boundary drift unexpectedly passed")
+			}
+		})
+	}
+}
+
 type corruptComponentPlanStore struct {
 	artifact model.PlatformArtifact
 	request  model.PlatformArtifactReleaseRequest
 	calls    int
 }
 
-func (fake *corruptComponentPlanStore) GetPlatformArtifact(string) (model.PlatformArtifact, error) {
+func (fake *corruptComponentPlanStore) GetPlatformArtifact(context.Context, string) (model.PlatformArtifact, error) {
 	return fake.artifact, nil
 }
 
 func (fake *corruptComponentPlanStore) ReleasePlatformArtifact(
+	_ context.Context,
 	_ string,
 	req model.PlatformArtifactReleaseRequest,
 	_ model.Principal,
@@ -249,6 +333,32 @@ func (fake *corruptComponentPlanStore) ReleasePlatformArtifact(
 		ReleaseChannel: release.ReleaseChannel, MessageType: model.PlatformReleaseMessageTypeRelease,
 	}
 	return fake.artifact, release, message, nil, nil
+}
+
+type testComponentPlanStore struct {
+	stateStore *store.Store
+}
+
+func (adapter testComponentPlanStore) GetPlatformArtifact(
+	ctx context.Context,
+	id string,
+) (model.PlatformArtifact, error) {
+	if err := ctx.Err(); err != nil {
+		return model.PlatformArtifact{}, err
+	}
+	return adapter.stateStore.GetPlatformArtifact(id)
+}
+
+func (adapter testComponentPlanStore) ReleasePlatformArtifact(
+	ctx context.Context,
+	id string,
+	req model.PlatformArtifactReleaseRequest,
+	principal model.Principal,
+) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	return adapter.stateStore.ReleasePlatformArtifact(id, req, principal)
 }
 
 func testValidatedComponentPlanArtifact(t *testing.T) (*store.Store, model.PlatformArtifact) {
@@ -329,5 +439,5 @@ func testReleaseControlPrincipal() model.Principal {
 	}
 }
 
-var _ ComponentPlanStore = (*store.Store)(nil)
+var _ ComponentPlanStore = testComponentPlanStore{}
 var _ ComponentPlanStore = (*corruptComponentPlanStore)(nil)

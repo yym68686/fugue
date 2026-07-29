@@ -71,9 +71,26 @@ boundary. It accepts only a validated `component_release_plan` artifact whose
 ID, generation, and content hash match the supplied spec. Reconciliation uses
 the envelope idempotency key and the existing atomic lane fence to persist one
 shadow release status; replay returns the same release ID, fencing token, lane
-version, and status digest. The reconciler has no adapter or workflow dispatch
-capability and rejects any store result that claims a gray/full or bypassed
-release.
+version, and status digest. It rejects any store result that claims a gray/full
+or bypassed release.
+
+The first cross-component adapter is `component-plan-api.fugue.dev/v1`.
+`internal/releasecontrol.HTTPComponentPlanStore` reads the authenticated
+principal and immutable artifact, then writes the shadow observation through
+the existing `/v1` HTTP API. It has no PostgreSQL or Kubernetes capability.
+Every request is context-cancellable and bounded, redirects are disabled,
+credentials are redacted from transport/remote errors, and the adapter rejects
+gray/full, canary, override, force-publish, break-glass, reason drift, and
+idempotency drift before opening a network connection. Required response
+semantics are strict while unknown additive response fields remain compatible
+within v1.
+
+This is still a Gate A adapter rather than a deployable production identity:
+the existing artifact release endpoint requires a platform administrator. A
+future deployment must first receive a dedicated least-privilege
+`component-plan.read`/`component-plan.observe` credential and server-side auth
+path. Until that exists, no release-control Pod may mount a broad administrator
+credential.
 
 The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination

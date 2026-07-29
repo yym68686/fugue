@@ -24,6 +24,10 @@ For one lane at a time:
 - an unchanged lane produces byte-for-byte identical artifact digests;
 - the lane owns its write path for spec/status/data, and all cross-lane access
   is through a versioned contract or a mediated adapter;
+- a deployed component uses a dedicated least-privilege identity for that
+  contract and neither imports another component's concrete store nor receives
+  its database credential;
+- the current and previous compatible API clients pass contract tests;
 - the lane persists a last-known-good reference and can roll back without
   rewriting another lane's state.
 
