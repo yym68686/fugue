@@ -133,12 +133,15 @@ release dispatch, or production mutation.
 The `image-plane` now also has a build-only artifact lane. Its image Dockerfile
 copies only `cmd/fugue-image-cache` and the currently proven local dependency
 `internal/imagecacheusage`, with both multi-architecture base images pinned by
-digest. A component-specific push/PR workflow compiles and probes that image
-under `image-plane-image-${ref}` concurrency with read-only repository
+digest. A component-specific main-push/PR workflow compiles and probes that
+image under `image-plane-image-${ref}` concurrency with read-only repository
 permission and no registry login, package write, push, Helm, kubectl, or
 production environment. This is an independent compilation boundary only: the
 live image-cache DaemonSet remains owned by the legacy `fugue` Helm release, so
 the new lane cannot publish or replace it yet.
+Feature-branch pushes are intentionally covered by the PR event only, avoiding
+duplicate push and PR builds for the same revision; direct `main` changes retain
+the push check.
 The image-plane process now also owns a bounded lifecycle boundary: SIGTERM or
 SIGINT stops discovery of new background hydrate/report work, drains active HTTP
 requests and cache-owned jobs under one 25-second deadline, and exits non-zero
