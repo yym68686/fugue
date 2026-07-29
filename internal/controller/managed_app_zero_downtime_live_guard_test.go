@@ -63,6 +63,111 @@ func TestManagedAppLiveGuardAllowsReadyStrategyOnlyUpgradeFromRecreate(t *testin
 	}
 }
 
+func TestManagedAppLiveGuardAllowsTerminalUnavailableStatelessRecovery(t *testing.T) {
+	current := managedAppLiveGuardTestApp(nil)
+	desired := current
+	desired.Spec.Image = "registry.example/live-guard:v2"
+	managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:         runtime.ManagedAppPhaseError,
+		ReadyReplicas: 0,
+		Conditions: []runtime.ManagedAppCondition{{
+			Type:   "ZeroDowntimeBlocked",
+			Status: "True",
+		}},
+	}
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(current), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected rendered deployment")
+	}
+	managedAppLiveGuardMarkTerminalUnavailable(&live)
+	client := managedAppLiveGuardClient(t, managed, live, true, false, nil)
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("a terminally unavailable stateless workload must accept its repair: %v", err)
+	}
+	if prepared.Spec.Image != desired.Spec.Image {
+		t.Fatalf("expected repaired image %q, got %q", desired.Spec.Image, prepared.Spec.Image)
+	}
+	if prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected a validated image rollout, got intent %q", prepared.Spec.RolloutIntent)
+	}
+}
+
+func TestManagedAppLiveGuardUnavailableRecoveryRemainsFailClosedWithoutProof(t *testing.T) {
+	localStorage := &model.AppPersistentStorageSpec{
+		Mode:             model.AppPersistentStorageModeMovableRWO,
+		StorageClassName: model.AppStorageClassFugueLocalRWO,
+		Mounts: []model.AppPersistentStorageMount{
+			{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+		},
+	}
+	tests := []struct {
+		name          string
+		storage       *model.AppPersistentStorageSpec
+		readyEndpoint bool
+		mutate        func(*kubeDeployment)
+	}{
+		{
+			name: "rollout has not reached a terminal failure",
+			mutate: func(deployment *kubeDeployment) {
+				deployment.Status.Conditions = nil
+			},
+		},
+		{
+			name: "deployment generation has not been observed",
+			mutate: func(deployment *kubeDeployment) {
+				deployment.Metadata.Generation++
+			},
+		},
+		{
+			name: "deployment still has a ready replica",
+			mutate: func(deployment *kubeDeployment) {
+				deployment.Status.ReadyReplicas = 1
+			},
+		},
+		{
+			name:          "service still has a ready endpoint",
+			readyEndpoint: true,
+		},
+		{
+			name:    "workload has local single-writer storage",
+			storage: localStorage,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := managedAppLiveGuardTestApp(tt.storage)
+			desired := current
+			desired.Spec.Image = "registry.example/live-guard:v2"
+			managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+			managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseError}
+			svc := &Service{Renderer: runtime.Renderer{}}
+			live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(current), runtime.SchedulingConstraints{})
+			if !found {
+				t.Fatal("expected rendered deployment")
+			}
+			managedAppLiveGuardMarkTerminalUnavailable(&live)
+			if tt.mutate != nil {
+				tt.mutate(&live)
+			}
+			client := managedAppLiveGuardClient(t, managed, live, true, tt.readyEndpoint, nil)
+
+			_, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+				context.Background(), client, managed.Metadata.Namespace, managed, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
+			)
+			if err == nil || !strings.Contains(err.Error(), "live deployment is not fully ready") {
+				t.Fatalf("unproven or unsafe unavailable replacement must fail closed, got %v", err)
+			}
+		})
+	}
+}
+
 func TestManagedAppLiveGuardRefusesUnknownReleaseIdentity(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
@@ -427,6 +532,22 @@ func managedAppLiveGuardMarkReady(deployment *kubeDeployment, replicas int) {
 	deployment.Status.UpdatedReplicas = replicas
 	deployment.Status.ReadyReplicas = replicas
 	deployment.Status.AvailableReplicas = replicas
+}
+
+func managedAppLiveGuardMarkTerminalUnavailable(deployment *kubeDeployment) {
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 2
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 0
+	deployment.Status.AvailableReplicas = 0
+	deployment.Status.UnavailableReplicas = 2
+	deployment.Status.Conditions = []runtime.ManagedAppCondition{{
+		Type:    "Progressing",
+		Status:  "False",
+		Reason:  "ProgressDeadlineExceeded",
+		Message: "ReplicaSet has timed out progressing",
+	}}
 }
 
 func managedAppLiveGuardClient(
