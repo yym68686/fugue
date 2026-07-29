@@ -258,7 +258,8 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 		model.NodeUpdateTaskTypeRefreshDesiredState,
 		model.NodeUpdateTaskTypeReloadLKGBundle,
 		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeRunDeepHealth:
+		model.NodeUpdateTaskTypeRunDeepHealth,
+		model.NodeUpdateTaskTypeReconcileHostZRAM:
 	default:
 		return model.NodeUpdateTask{}, false
 	}
@@ -660,6 +661,8 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeRestartStatelessNodeService
 	case model.NodeUpdateTaskTypeRunDeepHealth:
 		return model.NodeUpdateTaskTypeRunDeepHealth
+	case model.NodeUpdateTaskTypeReconcileHostZRAM:
+		return model.NodeUpdateTaskTypeReconcileHostZRAM
 	default:
 		return ""
 	}
