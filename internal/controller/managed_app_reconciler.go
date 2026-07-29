@@ -19,6 +19,7 @@ import (
 const (
 	managedPostgresExistingServiceInitGracePeriod = 15 * time.Minute
 	managedAppOrphanWorkloadZeroConditionType     = "OrphanWorkloadZero"
+	managedAppDeployImageBlockedConditionType     = "DeployImageBlocked"
 )
 
 func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) error {
@@ -308,7 +309,10 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	if err := s.ensureManagedDeployImageReady(ctx, app, managed.Spec.Scheduling); err != nil {
-		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+		if managedAppDeployImageBlockedStatusCurrent(managed.Status, err) {
+			return nil
+		}
+		return patchManagedAppDeployImageBlockedStatus(ctx, client, namespace, managed, app, err)
 	}
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
@@ -1047,6 +1051,60 @@ func managedAppZeroDowntimeBlockedStatusCurrent(status runtime.ManagedAppStatus,
 	}
 	for _, condition := range status.Conditions {
 		if strings.EqualFold(strings.TrimSpace(condition.Type), "ZeroDowntimeBlocked") &&
+			strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+			return true
+		}
+	}
+	return false
+}
+
+func patchManagedAppDeployImageBlockedStatus(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+	cause error,
+) error {
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseError
+	status.Message = strings.TrimSpace(cause.Error())
+	// Image readiness is a pre-apply guard: none of the serving child objects
+	// have changed when it fails. Preserve the last observed serving state so
+	// the API proxy keeps routing to the known-good release while the image is
+	// repaired or its distributed metadata is reconciled.
+	status.ReadyReplicas = managed.Status.ReadyReplicas
+	status.CurrentReleaseKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
+	status.CurrentReleaseStartedAt = strings.TrimSpace(managed.Status.CurrentReleaseStartedAt)
+	status.CurrentReleaseReadyAt = strings.TrimSpace(managed.Status.CurrentReleaseReadyAt)
+	status.PendingReleaseKey = strings.TrimSpace(managed.Status.PendingReleaseKey)
+	status.PendingReleaseStartedAt = strings.TrimSpace(managed.Status.PendingReleaseStartedAt)
+	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), managed.Status.BackingServices...)
+	status.Conditions = make([]runtime.ManagedAppCondition, 0, len(managed.Status.Conditions)+1)
+	for _, condition := range managed.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), managedAppDeployImageBlockedConditionType) {
+			continue
+		}
+		status.Conditions = append(status.Conditions, condition)
+	}
+	status.Conditions = append(status.Conditions, runtime.ManagedAppCondition{
+		Type:    managedAppDeployImageBlockedConditionType,
+		Status:  "True",
+		Reason:  "PreflightFailed",
+		Message: status.Message,
+	})
+	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
+		return fmt.Errorf("%w (also failed to patch deploy-image blocked status: %v)", cause, err)
+	}
+	return cause
+}
+
+func managedAppDeployImageBlockedStatusCurrent(status runtime.ManagedAppStatus, cause error) bool {
+	if !strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseError) || cause == nil || strings.TrimSpace(status.Message) != strings.TrimSpace(cause.Error()) {
+		return false
+	}
+	for _, condition := range status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), managedAppDeployImageBlockedConditionType) &&
 			strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
 			return true
 		}
