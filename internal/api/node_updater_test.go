@@ -1128,7 +1128,7 @@ refresh_image_cache_platform_identity
 [ -f "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" ]
 printf '%s' "${VALID_CREDENTIAL_JSON}" >"${runtime_root}/expected.json"
 cmp -s "${runtime_root}/expected.json" "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}"
-mode="$(stat -f '%Lp' "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" 2>/dev/null || stat -c '%a' "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}")"
+mode="$(stat -c '%a' "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" 2>/dev/null || stat -f '%Lp' "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}")"
 [ "${mode}" = "640" ] || { echo "credential mode=${mode}, want 640" >&2; exit 1; }
 cp "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" "${runtime_root}/valid.snapshot"
 
