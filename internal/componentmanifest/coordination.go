@@ -46,10 +46,7 @@ type ShadowCoordinationPlan struct {
 // deadlock-safe, observation-only coordination record.  It does not acquire a
 // Lease, persist state, dispatch a workflow, or authorize mutation.
 func BuildShadowCoordinationPlan(changePlan ChangePlan) (ShadowCoordinationPlan, error) {
-	if changePlan.APIVersion != changePlanAPIVersion || changePlan.Kind != changePlanKind {
-		return ShadowCoordinationPlan{}, fmt.Errorf("unsupported component change plan identity %q/%q", changePlan.APIVersion, changePlan.Kind)
-	}
-	if err := changePlan.VerifyDigest(); err != nil {
+	if err := changePlan.Validate(); err != nil {
 		return ShadowCoordinationPlan{}, err
 	}
 
