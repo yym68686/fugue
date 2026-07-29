@@ -187,8 +187,8 @@ func (s *HTTPComponentPlanStore) ReleasePlatformArtifact(
 	if !componentPlanArtifactIDRE.MatchString(id) {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, fmt.Errorf("%w: artifact ID is invalid", ErrComponentPlanAPI)
 	}
-	if !principal.IsPlatformAdmin() || strings.TrimSpace(principal.ActorType) == "" || strings.TrimSpace(principal.ActorID) == "" {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, fmt.Errorf("%w: platform admin identity is required", ErrComponentPlanAPI)
+	if !componentPlanPrincipalAuthorized(principal) || strings.TrimSpace(principal.ActorType) == "" || strings.TrimSpace(principal.ActorID) == "" {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, fmt.Errorf("%w: component plan observer identity is required", ErrComponentPlanAPI)
 	}
 	if req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
 		req.CanaryRuleRef != "" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil ||
@@ -214,7 +214,7 @@ func (s *HTTPComponentPlanStore) ReleasePlatformArtifact(
 
 // ResolvePrincipal obtains the API-authenticated identity used by the
 // reconciler. It makes a rolling deployment fail closed when a token is
-// accidentally mounted with a non-admin or mismatched identity.
+// accidentally mounted with an overprivileged or mismatched identity.
 func (s *HTTPComponentPlanStore) ResolvePrincipal(ctx context.Context) (model.Principal, error) {
 	if s == nil {
 		return model.Principal{}, fmt.Errorf("%w: store is nil", ErrComponentPlanAPI)
@@ -247,8 +247,8 @@ func (s *HTTPComponentPlanStore) ResolvePrincipal(ctx context.Context) (model.Pr
 		AppID:     strings.TrimSpace(response.Principal.AppID),
 		Scopes:    scopes,
 	}
-	if !principal.IsPlatformAdmin() || response.Principal.PlatformAdmin != principal.IsPlatformAdmin() {
-		return model.Principal{}, fmt.Errorf("%w: API auth context is not a platform admin", ErrComponentPlanAPI)
+	if response.Principal.PlatformAdmin != principal.IsPlatformAdmin() || !componentPlanPrincipalAuthorized(principal) {
+		return model.Principal{}, fmt.Errorf("%w: API auth context is not an authorized component plan observer", ErrComponentPlanAPI)
 	}
 	return principal, nil
 }

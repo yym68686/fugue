@@ -28,7 +28,11 @@ func TestHTTPComponentPlanStoreReconcilesThroughVersionedAPI(t *testing.T) {
 	principal := model.Principal{
 		ActorType: model.ActorTypeAPIKey,
 		ActorID:   "release-control-key",
-		Scopes:    map[string]struct{}{"platform.admin": {}},
+		Scopes: map[string]struct{}{
+			"artifact.read":                         {},
+			"artifact.release_shadow":               {},
+			model.PlatformComponentPlanObserveScope: {},
+		},
 	}
 	release := model.PlatformArtifactRelease{
 		ID:             "artifactrel_1_abcdef",
@@ -82,7 +86,10 @@ func TestHTTPComponentPlanStoreReconcilesThroughVersionedAPI(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"principal": map[string]any{
 					"actor_type": principal.ActorType, "actor_id": principal.ActorID,
-					"scopes": []string{"platform.admin"}, "platform_admin": true,
+					"scopes": []string{
+						"artifact.read", "artifact.release_shadow", model.PlatformComponentPlanObserveScope,
+					},
+					"platform_admin": false,
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/prefix/v1/admin/artifacts/"+artifact.ID:
@@ -390,6 +397,28 @@ func TestHTTPComponentPlanStoreRejectsMismatchedAuthContext(t *testing.T) {
 	}
 	if _, err := apiStore.ResolvePrincipal(context.Background()); !errors.Is(err, ErrComponentPlanAPI) {
 		t.Fatalf("auth context error = %v", err)
+	}
+}
+
+func TestHTTPComponentPlanStoreRejectsBroadAdminAuthContext(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"principal": map[string]any{
+				"actor_type": "api-key", "actor_id": "broad-admin",
+				"scopes": []string{"platform.admin"}, "platform_admin": true,
+			},
+		})
+	}))
+	defer server.Close()
+	apiStore, err := NewHTTPComponentPlanStore(HTTPComponentPlanStoreConfig{BaseURL: server.URL, BearerToken: "token"})
+	if err != nil {
+		t.Fatalf("new HTTP store: %v", err)
+	}
+	if _, err := apiStore.ResolvePrincipal(context.Background()); !errors.Is(err, ErrComponentPlanAPI) {
+		t.Fatalf("broad admin auth context error = %v", err)
 	}
 }
 

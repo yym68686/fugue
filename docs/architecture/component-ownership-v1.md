@@ -85,11 +85,14 @@ idempotency drift before opening a network connection. Required response
 semantics are strict while unknown additive response fields remain compatible
 within v1.
 
-This is still a Gate A adapter rather than a deployable production identity:
-the existing artifact release endpoint requires a platform administrator. A
-future deployment must first receive a dedicated least-privilege
-`component-plan.read`/`component-plan.observe` credential and server-side auth
-path. Until that exists, no release-control Pod may mount a broad administrator
+The API now supports a dedicated least-privilege observer identity. A
+release-control credential must explicitly hold only `artifact.read`,
+`artifact.release_shadow`, and `component_plan.observe`; the server binds that
+exception to one validated `component_release_plan`, its envelope-derived
+idempotency key, the fixed observation reason, and the shadow channel. The
+credential cannot release other artifact kinds or request gray/full, canary,
+override, force-publish, or break-glass behavior. A future release-control Pod
+must use this scoped identity and must not mount a platform administrator
 credential.
 
 The caller must obtain the paths from trusted revision evidence; the command

@@ -142,6 +142,49 @@ func TestReconcileComponentPlanFailsClosedBeforePublishing(t *testing.T) {
 			mutate:    func(*ComponentPlanSpec) {},
 			principal: model.Principal{ActorType: model.ActorTypeSystem, ActorID: "unprivileged"},
 		},
+		"broad platform admin": {
+			mutate: func(*ComponentPlanSpec) {},
+			principal: model.Principal{
+				ActorType: model.ActorTypeAPIKey,
+				ActorID:   "broad-admin",
+				Scopes:    map[string]struct{}{"platform.admin": {}},
+			},
+		},
+		"observer missing read": {
+			mutate: func(*ComponentPlanSpec) {},
+			principal: model.Principal{
+				ActorType: model.ActorTypeAPIKey,
+				ActorID:   "incomplete-observer",
+				Scopes: map[string]struct{}{
+					"artifact.release_shadow":               {},
+					model.PlatformComponentPlanObserveScope: {},
+				},
+			},
+		},
+		"observer missing release": {
+			mutate: func(*ComponentPlanSpec) {},
+			principal: model.Principal{
+				ActorType: model.ActorTypeAPIKey,
+				ActorID:   "incomplete-observer",
+				Scopes: map[string]struct{}{
+					"artifact.read":                         {},
+					model.PlatformComponentPlanObserveScope: {},
+				},
+			},
+		},
+		"observer with extra scope": {
+			mutate: func(*ComponentPlanSpec) {},
+			principal: model.Principal{
+				ActorType: model.ActorTypeAPIKey,
+				ActorID:   "overprivileged-observer",
+				Scopes: map[string]struct{}{
+					"artifact.read":                         {},
+					"artifact.release_shadow":               {},
+					model.PlatformComponentPlanObserveScope: {},
+					"app.read":                              {},
+				},
+			},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := valid
@@ -433,9 +476,13 @@ func testValidatedComponentPlanArtifact(t *testing.T) (*store.Store, model.Platf
 
 func testReleaseControlPrincipal() model.Principal {
 	return model.Principal{
-		ActorType: model.ActorTypeSystem,
+		ActorType: model.ActorTypeAPIKey,
 		ActorID:   "release-control-shadow",
-		Scopes:    map[string]struct{}{"platform.admin": {}},
+		Scopes: map[string]struct{}{
+			"artifact.read":                         {},
+			"artifact.release_shadow":               {},
+			model.PlatformComponentPlanObserveScope: {},
+		},
 	}
 }
 

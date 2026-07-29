@@ -14,7 +14,29 @@ import (
 func TestComponentReleasePlanArtifactAPIIsDurableAndShadowOnly(t *testing.T) {
 	t.Parallel()
 
-	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	stateStore, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	observerKey, observerSecret, err := stateStore.CreateAPIKey(app.TenantID, "release-control-observer", []string{
+		"artifact.read",
+		"artifact.release_shadow",
+		model.PlatformComponentPlanObserveScope,
+	})
+	if err != nil {
+		t.Fatalf("create release-control observer key: %v", err)
+	}
+	_, missingReadSecret, err := stateStore.CreateAPIKey(app.TenantID, "release-control-missing-read", []string{
+		"artifact.release_shadow",
+		model.PlatformComponentPlanObserveScope,
+	})
+	if err != nil {
+		t.Fatalf("create observer key without read scope: %v", err)
+	}
+	_, missingObserveSecret, err := stateStore.CreateAPIKey(app.TenantID, "release-control-missing-observe", []string{
+		"artifact.read",
+		"artifact.release_shadow",
+	})
+	if err != nil {
+		t.Fatalf("create observer key without observe scope: %v", err)
+	}
 	envelope, identity := testComponentReleasePlanEnvelope(t)
 	content, err := envelope.Content()
 	if err != nil {
@@ -41,6 +63,10 @@ func TestComponentReleasePlanArtifactAPIIsDurableAndShadowOnly(t *testing.T) {
 		created.Artifact.ArtifactKind != model.PlatformArtifactKindComponentReleasePlan {
 		t.Fatalf("created component release plan identity drifted: %+v", created.Artifact)
 	}
+	read := performJSONRequest(t, server, http.MethodGet, "/v1/admin/artifacts/"+created.Artifact.ID, observerSecret, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("scoped observer could not read component plan: status=%d body=%s", read.Code, read.Body.String())
+	}
 
 	validate := performJSONRequest(
 		t,
@@ -64,11 +90,11 @@ func TestComponentReleasePlanArtifactAPIIsDurableAndShadowOnly(t *testing.T) {
 		server,
 		http.MethodPost,
 		"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
-		platformAdminKey,
+		observerSecret,
 		model.PlatformArtifactReleaseRequest{
 			ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
-			Reason:         "record exact migration observation",
-			IdempotencyKey: "component-plan-shadow-1",
+			Reason:         model.PlatformComponentPlanObservationReason,
+			IdempotencyKey: envelope.CoordinationPlan.IdempotencyKey,
 		},
 	)
 	if release.Code != http.StatusOK {
@@ -77,12 +103,69 @@ func TestComponentReleasePlanArtifactAPIIsDurableAndShadowOnly(t *testing.T) {
 	var released model.PlatformArtifactReleaseResponse
 	mustDecodeJSON(t, release, &released)
 	if released.Release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
+		released.Release.ReleasedByType != model.ActorTypeAPIKey ||
+		released.Release.ReleasedByID != observerKey.ID ||
 		released.Release.LaneKey != platformsafety.ReleaseLaneKey(
 			model.PlatformArtifactKindComponentReleasePlan,
 			identity.ScopeKey,
 			model.PlatformArtifactReleaseChannelShadow,
 		) {
 		t.Fatalf("component plan used an unexpected shadow lane: %+v", released.Release)
+	}
+	for name, secret := range map[string]string{
+		"missing read":    missingReadSecret,
+		"missing observe": missingObserveSecret,
+	} {
+		t.Run(name, func(t *testing.T) {
+			blocked := performJSONRequest(
+				t,
+				server,
+				http.MethodPost,
+				"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
+				secret,
+				model.PlatformArtifactReleaseRequest{
+					ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+					Reason:         model.PlatformComponentPlanObservationReason,
+					IdempotencyKey: envelope.CoordinationPlan.IdempotencyKey,
+				},
+			)
+			if blocked.Code != http.StatusForbidden {
+				t.Fatalf("incomplete observer was authorized: status=%d body=%s", blocked.Code, blocked.Body.String())
+			}
+		})
+	}
+
+	for name, request := range map[string]model.PlatformArtifactReleaseRequest{
+		"reason drift": {
+			ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+			Reason:         "different",
+			IdempotencyKey: envelope.CoordinationPlan.IdempotencyKey,
+		},
+		"idempotency drift": {
+			ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+			Reason:         model.PlatformComponentPlanObservationReason,
+			IdempotencyKey: "component-shadow/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		"override": {
+			ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+			Reason:         model.PlatformComponentPlanObservationReason,
+			IdempotencyKey: envelope.CoordinationPlan.IdempotencyKey,
+			SoftOverride:   true,
+		},
+	} {
+		t.Run("scoped "+name, func(t *testing.T) {
+			blocked := performJSONRequest(
+				t,
+				server,
+				http.MethodPost,
+				"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
+				observerSecret,
+				request,
+			)
+			if blocked.Code != http.StatusForbidden {
+				t.Fatalf("scoped observer escaped exact request: status=%d body=%s", blocked.Code, blocked.Body.String())
+			}
+		})
 	}
 
 	for _, request := range []model.PlatformArtifactReleaseRequest{
@@ -141,6 +224,101 @@ func TestComponentReleasePlanArtifactAPIRejectsFalseLedgerIdentity(t *testing.T)
 	mustDecodeJSON(t, validate, &validation)
 	if validation.Pass || validation.Artifact.Status != model.PlatformArtifactStatusRejected {
 		t.Fatalf("false component release plan identity was accepted: %+v", validation)
+	}
+}
+
+func TestComponentPlanObservationAuthorizationIsExact(t *testing.T) {
+	t.Parallel()
+
+	envelope, _ := testComponentReleasePlanEnvelope(t)
+	content, err := envelope.Content()
+	if err != nil {
+		t.Fatalf("encode component plan: %v", err)
+	}
+	principal := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "observer-key",
+		Scopes: map[string]struct{}{
+			"artifact.read":                         {},
+			"artifact.release_shadow":               {},
+			model.PlatformComponentPlanObserveScope: {},
+		},
+	}
+	artifact := model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindComponentReleasePlan,
+		Status:       model.PlatformArtifactStatusValidated,
+		Content:      content,
+	}
+	request := model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+		Reason:         model.PlatformComponentPlanObservationReason,
+		IdempotencyKey: envelope.CoordinationPlan.IdempotencyKey,
+	}
+	if !componentPlanObservationAuthorized(principal, artifact, request) {
+		t.Fatal("exact least-privilege observation was rejected")
+	}
+
+	for name, mutate := range map[string]func(*model.Principal, *model.PlatformArtifact, *model.PlatformArtifactReleaseRequest){
+		"missing observe scope": func(principal *model.Principal, _ *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			principal.Scopes = map[string]struct{}{"artifact.read": {}, "artifact.release_shadow": {}}
+		},
+		"missing read scope": func(principal *model.Principal, _ *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			principal.Scopes = map[string]struct{}{
+				"artifact.release_shadow": {}, model.PlatformComponentPlanObserveScope: {},
+			}
+		},
+		"missing release scope": func(principal *model.Principal, _ *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			principal.Scopes = map[string]struct{}{"artifact.read": {}, model.PlatformComponentPlanObserveScope: {}}
+		},
+		"additional scope": func(principal *model.Principal, _ *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			principal.Scopes = map[string]struct{}{
+				"artifact.read": {}, "artifact.release_shadow": {},
+				model.PlatformComponentPlanObserveScope: {}, "app.read": {},
+			}
+		},
+		"wrong actor type": func(principal *model.Principal, _ *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			principal.ActorType = model.ActorTypeSystem
+		},
+		"wrong kind": func(_ *model.Principal, artifact *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			artifact.ArtifactKind = model.PlatformArtifactKindEdgeRouteBundle
+		},
+		"unvalidated artifact": func(_ *model.Principal, artifact *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			artifact.Status = model.PlatformArtifactStatusDraft
+		},
+		"full channel": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.ReleaseChannel = model.PlatformArtifactReleaseChannelFull
+		},
+		"canary": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.CanaryRuleRef = "node:other"
+		},
+		"soft override": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.SoftOverride = true
+		},
+		"force publish": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.ForcePublish = true
+		},
+		"break glass": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.KernelBreakGlass = &model.PlatformKernelBreakGlassRequest{}
+		},
+		"reason drift": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.Reason = "different"
+		},
+		"idempotency drift": func(_ *model.Principal, _ *model.PlatformArtifact, request *model.PlatformArtifactReleaseRequest) {
+			request.IdempotencyKey = "different"
+		},
+		"malformed envelope": func(_ *model.Principal, artifact *model.PlatformArtifact, _ *model.PlatformArtifactReleaseRequest) {
+			artifact.Content = map[string]any{"observationOnly": true}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidatePrincipal := principal
+			candidateArtifact := artifact
+			candidateRequest := request
+			mutate(&candidatePrincipal, &candidateArtifact, &candidateRequest)
+			if componentPlanObservationAuthorized(candidatePrincipal, candidateArtifact, candidateRequest) {
+				t.Fatal("unsafe observation authorization passed")
+			}
+		})
 	}
 }
 

@@ -22,6 +22,8 @@ const (
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"
 	PlatformArtifactKindGatePolicyRegistry        = "gate_policy_registry"
 	PlatformArtifactKindAutomaticActionContracts  = "automatic_action_contracts"
+	PlatformComponentPlanObserveScope             = "component_plan.observe"
+	PlatformComponentPlanObservationReason        = "release-control component plan shadow observation"
 
 	PlatformArtifactStatusDraft     = "draft"
 	PlatformArtifactStatusValidated = "validated"
