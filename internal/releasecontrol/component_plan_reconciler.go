@@ -24,7 +24,7 @@ const (
 	ComponentPlanStatusKind       = "ComponentPlanStatus"
 	ComponentPlanStatusPolicy     = "artifact-ledger-shadow-v1"
 	ComponentPlanStateObserved    = "observed"
-	componentPlanReleaseReason    = "release-control component plan shadow observation"
+	componentPlanReleaseReason    = model.PlatformComponentPlanObservationReason
 )
 
 var (
@@ -95,10 +95,10 @@ func ReconcileComponentPlan(
 	if err := ctx.Err(); err != nil {
 		return ComponentPlanStatus{}, fmt.Errorf("%w: context is canceled", ErrComponentPlanReconcile)
 	}
-	if !principal.IsPlatformAdmin() ||
+	if !componentPlanPrincipalAuthorized(principal) ||
 		strings.TrimSpace(principal.ActorType) == "" ||
 		strings.TrimSpace(principal.ActorID) == "" {
-		return ComponentPlanStatus{}, fmt.Errorf("%w: platform release-control identity is required", ErrComponentPlanReconcile)
+		return ComponentPlanStatus{}, fmt.Errorf("%w: authorized release-control observer identity is required", ErrComponentPlanReconcile)
 	}
 	if strings.TrimSpace(spec.ArtifactID) == "" ||
 		!componentPlanDigestPattern.MatchString(spec.ContentHash) ||
@@ -175,6 +175,14 @@ func ReconcileComponentPlan(
 		return ComponentPlanStatus{}, fmt.Errorf("%w: build status: %v", ErrComponentPlanReconcile, err)
 	}
 	return status, nil
+}
+
+func componentPlanPrincipalAuthorized(principal model.Principal) bool {
+	return principal.ActorType == model.ActorTypeAPIKey &&
+		len(principal.Scopes) == 3 &&
+		principal.HasExplicitScope(model.PlatformComponentPlanObserveScope) &&
+		principal.HasExplicitScope("artifact.read") &&
+		principal.HasExplicitScope("artifact.release_shadow")
 }
 
 func verifyShadowReleaseResult(

@@ -2125,6 +2125,13 @@ paths:
     post:
       operationId: releasePlatformArtifact
       summary: Release Platform Artifact
+      description: >-
+        Platform administrators may use the normal artifact release policy. A
+        non-admin API key is accepted only for an exact observation-only
+        component_release_plan request when it holds exactly artifact.read,
+        artifact.release_shadow, and component_plan.observe; the artifact kind,
+        validated envelope, shadow channel, reason, and envelope-derived
+        idempotency key are bound server-side.
       tags: [Admin]
       x-fugue-handler: handleReleasePlatformArtifact
       security:
