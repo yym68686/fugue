@@ -16158,11 +16158,40 @@ components:
           type: string
         last_message:
           type: string
+        last_failed_operation:
+          $ref: "#/components/schemas/AppOperationFailure"
         updated_at:
           type: string
           format: date-time
         source_sync:
           $ref: "#/components/schemas/AppSourceSyncStatus"
+    AppOperationFailure:
+      type: object
+      additionalProperties: false
+      required: [id, type, created_at, updated_at]
+      description: Redacted durable summary of the most recent failed operation. It is diagnostic history, never runtime evidence.
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        error_message:
+          type: string
+        result_message:
+          type: string
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
     AppObservedStatus:
       type: object
       additionalProperties: false
@@ -16186,8 +16215,20 @@ components:
           type: boolean
         service_present:
           type: boolean
+        endpoint_present:
+          type: boolean
         endpoint_ready:
           type: boolean
+        physical_replicas:
+          type: integer
+          format: int32
+        physical_desired_replicas:
+          type: integer
+          format: int32
+        image_present:
+          type: boolean
+        image_ref:
+          type: string
         fresh:
           type: boolean
         observed_at:
@@ -16204,10 +16245,18 @@ components:
           format: int64
         evidence_source:
           type: string
+        evidence_sources:
+          type: array
+          items:
+            type: string
         reason:
           type: string
         message:
           type: string
+        invariant_violations:
+          type: array
+          items:
+            type: string
     AppSpec:
       type: object
       additionalProperties: false

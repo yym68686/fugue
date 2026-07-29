@@ -87,6 +87,52 @@ func TestViewModelsNormalStateAndFieldMapping(t *testing.T) {
 	}
 }
 
+func TestAppHealthGreenRequiresCompleteFreshRuntimeEvidence(t *testing.T) {
+	t.Parallel()
+
+	ready := 1
+	present := true
+	app := model.App{
+		ID:     "app_green_guard",
+		Name:   "green-guard",
+		Spec:   model.AppSpec{Image: "nginx:1.27", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+		ObservedStatus: &model.AppObservedStatus{
+			Phase:                "deployed",
+			DesiredReplicas:      1,
+			ReadyReplicas:        &ready,
+			RuntimeObjectPresent: &present,
+			NamespacePresent:     &present,
+			ServicePresent:       &present,
+			EndpointPresent:      &present,
+			EndpointReady:        &present,
+			PhysicalReplicas:     &ready,
+			ImagePresent:         &present,
+			Fresh:                true,
+			ObservedAt:           time.Now().UTC(),
+			ClusterID:            "cluster-uid",
+			Generation:           3,
+			ObservedGeneration:   3,
+			EvidenceSource:       "kubernetes_api",
+			Reason:               "managed_app_ready",
+		},
+	}
+	if health := NewAppHealth(app, nil); health.Tone != TonePositive {
+		t.Fatalf("complete fresh evidence should be green, got %+v", health)
+	}
+
+	missing := false
+	app.ObservedStatus.EndpointPresent = &missing
+	if health := NewAppHealth(app, nil); health.Tone == TonePositive {
+		t.Fatalf("missing endpoint must not be green, got %+v", health)
+	}
+	app.ObservedStatus.EndpointPresent = &present
+	app.ObservedStatus.Fresh = false
+	if health := NewAppHealth(app, nil); health.Tone == TonePositive {
+		t.Fatalf("stale evidence must not be green, got %+v", health)
+	}
+}
+
 func TestViewModelsEmptyErrorAndPermissionStates(t *testing.T) {
 	t.Parallel()
 

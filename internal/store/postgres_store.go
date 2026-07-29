@@ -3010,8 +3010,61 @@ FOR UPDATE
 	}
 	rows.Close()
 
+	latestFailures := make(map[string]*model.AppOperationFailure)
+	failureRows, err := tx.QueryContext(ctx, `
+SELECT DISTINCT ON (app_id)
+	id, app_id, type, error_message, result_message,
+	requested_by_type, requested_by_id, created_at, updated_at, completed_at
+FROM fugue_operations
+WHERE status = $1 AND BTRIM(app_id) <> ''
+ORDER BY app_id, updated_at DESC, created_at DESC, id DESC
+`, model.OperationStatusFailed)
+	if err != nil {
+		return fmt.Errorf("list failed operations for app status repair: %w", err)
+	}
+	for failureRows.Next() {
+		var (
+			op          model.Operation
+			completedAt sql.NullTime
+		)
+		op.Status = model.OperationStatusFailed
+		if err := failureRows.Scan(
+			&op.ID,
+			&op.AppID,
+			&op.Type,
+			&op.ErrorMessage,
+			&op.ResultMessage,
+			&op.RequestedByType,
+			&op.RequestedByID,
+			&op.CreatedAt,
+			&op.UpdatedAt,
+			&completedAt,
+		); err != nil {
+			failureRows.Close()
+			return fmt.Errorf("scan failed operation for app status repair: %w", err)
+		}
+		if completedAt.Valid {
+			value := completedAt.Time.UTC()
+			op.CompletedAt = &value
+		}
+		latestFailures[strings.TrimSpace(op.AppID)] = model.AppOperationFailureFromOperation(op)
+	}
+	if err := failureRows.Err(); err != nil {
+		failureRows.Close()
+		return fmt.Errorf("iterate failed operations for app status repair: %w", err)
+	}
+	if err := failureRows.Close(); err != nil {
+		return fmt.Errorf("close failed operations for app status repair: %w", err)
+	}
+
 	for _, app := range apps {
-		if !repairFailedAppPhase(&app) {
+		changed := repairFailedAppPhase(&app)
+		failure := latestFailures[strings.TrimSpace(app.ID)]
+		if !appOperationFailureEqual(app.Status.LastFailedOperation, failure) {
+			app.Status.LastFailedOperation = failure
+			changed = true
+		}
+		if !changed {
 			continue
 		}
 		if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
@@ -6146,6 +6199,7 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 	app.Status.Phase = failedPhaseForApp(*app)
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
+	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 }
