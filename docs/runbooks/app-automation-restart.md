@@ -49,9 +49,22 @@ starved.
 
 A match appends a trusted `control_loop` intent and a system audit event. The
 intent remains `observed`, has `production_mutation_allowed=false`, and cannot
-create an operation or restart. Replaying a completed window after API
-failover reuses the deterministic intent idempotency key and does not append a
-second creation audit.
+create an operation or restart. The loop also appends exactly one durable
+action-dispatch/WAL record for that intent. In the current atom the record is
+observe-only: it is `held` while the gate is `shadow` or disabled, and no
+executor claims it. Replaying a completed window after API failover reuses the
+deterministic intent and dispatch records and does not append a second
+creation audit.
+
+Inspect the read-only dispatch inventory with
+`GET /v1/automation-dispatches` or
+`GET /v1/automation-dispatches/{dispatch_id}`. The list supports
+`tenant_id` (platform admin only), `project_id`, `policy_id`, `app_id`,
+`status`, and `limit` filters. Dispatch records include the immutable intent
+identity, source revision, rollback target, safety decision, WAL hash, status,
+and monotonic per-application fencing token. The token and record version are
+the stale-writer boundary for the future executor; they do not authorize a
+mutation by themselves.
 
 Inspect these API metrics before promoting any later execution mode:
 
@@ -63,6 +76,8 @@ Inspect these API metrics before promoting any later execution mode:
 - `fugue_automation_shadow_loop_matches_total`
 - `fugue_automation_shadow_loop_intents_created_total`
 - `fugue_automation_shadow_loop_intents_reused_total`
+- `fugue_automation_shadow_loop_dispatches_created_total`
+- `fugue_automation_shadow_loop_dispatches_reused_total`
 - `fugue_automation_shadow_loop_policy_limit_deferred_total`
 - `fugue_automation_shadow_loop_last_success_timestamp_seconds`
 
@@ -77,8 +92,10 @@ changes unexpectedly, or a restart loop is detected:
 
 1. activate `FUGUE_AUTOMATION_APP_RESTART_KILL_SWITCH`;
 2. hold further restart intents for the application;
-3. reconcile the captured desired application revision;
-4. preserve the action WAL, evidence, fencing token, and audit trail for
+3. leave dispatch records held; do not manually edit status, fencing tokens,
+   or WAL hashes;
+4. reconcile the captured desired application revision;
+5. preserve the action WAL, evidence, fencing token, and audit trail for
    diagnosis;
-5. require an operator to clear the hold after readiness and representative
+6. require an operator to clear the hold after readiness and representative
    request probes pass.

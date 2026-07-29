@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func TestAutomationReplayCreatesOnlyAppendOnlyObserveIntent(t *testing.T) {
@@ -88,6 +90,12 @@ func TestAutomationReplayCreatesOnlyAppendOnlyObserveIntent(t *testing.T) {
 		intent.IdempotencyKey == "" ||
 		intent.RollbackTarget == "" {
 		t.Fatalf("observe-only boundary was not preserved: %+v", intent)
+	}
+	if _, _, err := fixture.server.prepareAutomationActionDispatch(intent, "admin_replay"); err == nil {
+		t.Fatal("untrusted admin replay prepared an action dispatch")
+	}
+	if _, err := fixture.server.store.GetAutomationActionDispatchByIntent(intent.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("admin replay dispatch lookup error=%v, want not found", err)
 	}
 
 	repeated := performJSONRequest(

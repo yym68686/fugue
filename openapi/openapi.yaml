@@ -1441,6 +1441,84 @@ paths:
                 $ref: "#/components/schemas/AutomationActionIntentResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/automation-dispatches:
+    get:
+      operationId: listAutomationActionDispatches
+      summary: List Automation Action Dispatches
+      description: List read-only durable action dispatch records visible to the credential.
+      tags: [Automations]
+      x-fugue-handler: handleListAutomationActionDispatches
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          description: Platform-admin-only tenant filter.
+          schema:
+            type: string
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: policy_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [held, ready, claimed, executing, succeeded, failed, rolled_back, expired, cancelled]
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationActionDispatchListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/automation-dispatches/{dispatch_id}:
+    get:
+      operationId: getAutomationActionDispatch
+      summary: Get Automation Action Dispatch
+      description: Get one read-only durable action dispatch record.
+      tags: [Automations]
+      x-fugue-handler: handleGetAutomationActionDispatch
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: dispatch_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationActionDispatchResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/action-contracts:
     get:
       operationId: listAutomaticActionContracts
@@ -25833,6 +25911,128 @@ components:
       properties:
         intent:
           $ref: "#/components/schemas/AutomationActionIntent"
+    AutomationActionDispatch:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          intent_id,
+          tenant_id,
+          project_id,
+          policy_id,
+          policy_generation,
+          rule_id,
+          scope,
+          action_type,
+          contract_id,
+          trigger_invariant,
+          subject,
+          source_generation,
+          rollback_target,
+          idempotency_key,
+          wal_hash,
+          safety_decision,
+          status,
+          fencing_token,
+          version,
+          expires_at,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id:
+          type: string
+        intent_id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        policy_id:
+          type: string
+        policy_generation:
+          type: integer
+          format: int64
+        rule_id:
+          type: string
+        scope:
+          $ref: "#/components/schemas/AutomationScope"
+        action_type:
+          type: string
+        contract_id:
+          type: string
+        trigger_invariant:
+          type: string
+        subject:
+          type: string
+        source_generation:
+          type: string
+        rollback_target:
+          type: string
+        idempotency_key:
+          type: string
+        wal_hash:
+          type: string
+        safety_decision:
+          $ref: "#/components/schemas/ActionSafetyDecision"
+        status:
+          type: string
+          enum: [held, ready, claimed, executing, succeeded, failed, rolled_back, expired, cancelled]
+        fencing_token:
+          type: integer
+          format: int64
+        version:
+          type: integer
+          format: int64
+        expires_at:
+          type: string
+          format: date-time
+        lease_owner:
+          type: string
+        lease_expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        cooldown_until:
+          type: string
+          format: date-time
+          nullable: true
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+    AutomationActionDispatchListResponse:
+      type: object
+      additionalProperties: false
+      required: [dispatches, generated_at]
+      properties:
+        dispatches:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationActionDispatch"
+        generated_at:
+          type: string
+          format: date-time
+    AutomationActionDispatchResponse:
+      type: object
+      additionalProperties: false
+      required: [dispatch]
+      properties:
+        dispatch:
+          $ref: "#/components/schemas/AutomationActionDispatch"
     AutomationEvaluationResponse:
       type: object
       additionalProperties: false

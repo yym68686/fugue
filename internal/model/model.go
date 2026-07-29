@@ -3312,6 +3312,8 @@ type State struct {
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	AutomationPolicies         []AutomationPolicy          `json:"automation_policies,omitempty"`
 	AutomationActionIntents    []AutomationActionIntent    `json:"automation_action_intents,omitempty"`
+	AutomationActionDispatches []AutomationActionDispatch  `json:"automation_action_dispatches,omitempty"`
+	AutomationActionFencing    []AutomationActionFencing   `json:"automation_action_fencing,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	AppDatabaseImportJobs      []AppDatabaseImportJob      `json:"app_database_import_jobs,omitempty"`

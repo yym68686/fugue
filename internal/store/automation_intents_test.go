@@ -177,6 +177,12 @@ func TestAutomationActionIntentPermissionAndSchemaBoundaryIsAppendOnly(t *testin
 	for _, required := range []string{
 		"fugue_automation_action_intents:select",
 		"fugue_automation_action_intents:insert",
+		"fugue_automation_action_dispatches:select",
+		"fugue_automation_action_dispatches:insert",
+		"fugue_automation_action_dispatches:update",
+		"fugue_automation_action_fencing:select",
+		"fugue_automation_action_fencing:insert",
+		"fugue_automation_action_fencing:update",
 	} {
 		if !strings.Contains(grants, required) {
 			t.Fatalf("default permission audit is missing %q", required)
@@ -185,6 +191,8 @@ func TestAutomationActionIntentPermissionAndSchemaBoundaryIsAppendOnly(t *testin
 	for _, forbidden := range []string{
 		"fugue_automation_action_intents:update",
 		"fugue_automation_action_intents:delete",
+		"fugue_automation_action_dispatches:delete",
+		"fugue_automation_action_fencing:delete",
 	} {
 		if strings.Contains(grants, forbidden) {
 			t.Fatalf("append-only intent table unexpectedly requires %q", forbidden)
@@ -204,6 +212,15 @@ func TestAutomationActionIntentPermissionAndSchemaBoundaryIsAppendOnly(t *testin
 		"idx_fugue_automation_intents_project_created",
 		"idx_fugue_automation_intents_policy_created",
 		"idx_fugue_automation_intents_app_created",
+		"CREATE TABLE IF NOT EXISTS fugue_automation_action_fencing",
+		"CREATE TABLE IF NOT EXISTS fugue_automation_action_dispatches",
+		"intent_id TEXT NOT NULL UNIQUE REFERENCES fugue_automation_action_intents(id) ON DELETE CASCADE",
+		"wal_hash TEXT NOT NULL CHECK (wal_hash ~ '^sha256:[0-9a-f]{64}$')",
+		"status TEXT NOT NULL CHECK (status IN ('held', 'ready', 'claimed', 'executing', 'succeeded', 'failed', 'rolled_back', 'expired', 'cancelled'))",
+		"fencing_token BIGINT NOT NULL CHECK (fencing_token > 0)",
+		"CHECK (status NOT IN ('claimed', 'executing') OR (btrim(lease_owner) <> '' AND lease_expires_at IS NOT NULL))",
+		"idx_fugue_automation_dispatches_subject_status",
+		"idx_fugue_automation_dispatches_status_updated",
 	} {
 		if !strings.Contains(schema, required) {
 			t.Fatalf("postgres schema is missing append-only automation intent boundary %q", required)

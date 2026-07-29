@@ -93,6 +93,8 @@ func TestAutomationShadowLoopCreatesOneTrustedIntentAcrossLeaderReplay(t *testin
 		first.Matches != 1 ||
 		first.IntentsCreated != 1 ||
 		first.IntentsReused != 0 ||
+		first.DispatchesCreated != 1 ||
+		first.DispatchesReused != 0 ||
 		first.Errors != 0 {
 		t.Fatalf("unexpected first run summary: %+v", first)
 	}
@@ -121,6 +123,8 @@ func TestAutomationShadowLoopCreatesOneTrustedIntentAcrossLeaderReplay(t *testin
 		failover.Matches != 1 ||
 		failover.IntentsCreated != 0 ||
 		failover.IntentsReused != 1 ||
+		failover.DispatchesCreated != 0 ||
+		failover.DispatchesReused != 1 ||
 		queryCount != 2 {
 		t.Fatalf("leader replay was not idempotent: summary=%+v queries=%d", failover, queryCount)
 	}
@@ -170,6 +174,16 @@ func TestAutomationShadowLoopCreatesOneTrustedIntentAcrossLeaderReplay(t *testin
 	if controlLoopAudits != 1 {
 		t.Fatalf("control-loop audit count=%d, want 1", controlLoopAudits)
 	}
+	dispatch, err := fixture.server.store.GetAutomationActionDispatchByIntent(intent.ID)
+	if err != nil {
+		t.Fatalf("get action dispatch: %v", err)
+	}
+	if dispatch.Status != model.AutomationActionDispatchStatusHeld ||
+		dispatch.FencingToken != 1 ||
+		dispatch.SafetyDecision.ProductionMutationAllowed ||
+		dispatch.SafetyDecision.EffectiveMode == model.GatePolicyModeEnforced {
+		t.Fatalf("shadow action dispatch crossed safety boundary: %+v", dispatch)
+	}
 
 	operationsAfter, err := fixture.store.ListOperations(
 		fixture.app.TenantID,
@@ -192,6 +206,8 @@ func TestAutomationShadowLoopCreatesOneTrustedIntentAcrossLeaderReplay(t *testin
 		"fugue_automation_shadow_loop_evaluations_total 1.000000",
 		"fugue_automation_shadow_loop_matches_total 1.000000",
 		"fugue_automation_shadow_loop_intents_created_total 1.000000",
+		"fugue_automation_shadow_loop_dispatches_created_total 1.000000",
+		"fugue_automation_shadow_loop_dispatches_reused_total 0.000000",
 	} {
 		if !strings.Contains(metrics.String(), expected) {
 			t.Fatalf("metrics missing %q:\n%s", expected, metrics.String())

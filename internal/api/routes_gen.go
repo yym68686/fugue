@@ -183,6 +183,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("PATCH /v1/apps/{id}/traffic", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppTrafficPolicy)))
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))
 	mux.Handle("GET /v1/auth/context", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAuthContext)))
+	mux.Handle("GET /v1/automation-dispatches", s.auth.RequireAPI(http.HandlerFunc(s.handleListAutomationActionDispatches)))
+	mux.Handle("GET /v1/automation-dispatches/{dispatch_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAutomationActionDispatch)))
 	mux.Handle("GET /v1/automation-intents", s.auth.RequireAPI(http.HandlerFunc(s.handleListAutomationActionIntents)))
 	mux.Handle("GET /v1/automation-intents/{intent_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAutomationActionIntent)))
 	mux.Handle("GET /v1/automations", s.auth.RequireAPI(http.HandlerFunc(s.handleListUserAutomationPolicies)))

@@ -33,8 +33,8 @@ const (
 	maxAutomationShadowOutcomeAggregates = 256
 )
 
-// AutomationShadowLoopConfig controls only the observe-only evaluation loop.
-// It cannot authorize an application mutation.
+// AutomationShadowLoopConfig controls only observe-only evaluation and durable
+// dispatch preparation. It cannot authorize an application mutation.
 type AutomationShadowLoopConfig struct {
 	Enabled  bool
 	Interval time.Duration
@@ -66,6 +66,8 @@ type automationShadowLoopRuntime struct {
 	matchCount                  int64
 	intentCreatedCount          int64
 	intentReusedCount           int64
+	dispatchCreatedCount        int64
+	dispatchReusedCount         int64
 	ineligiblePolicyCount       int64
 	policyLimitDeferredCount    int64
 	catchupWindowSkippedCount   int64
@@ -82,6 +84,8 @@ type automationShadowLoopRunSummary struct {
 	Matches                int
 	IntentsCreated         int
 	IntentsReused          int
+	DispatchesCreated      int
+	DispatchesReused       int
 	CatchupWindowsSkipped  int
 	EvaluationLimitSkipped int
 	Errors                 int
@@ -129,7 +133,8 @@ func (s *Server) automationShadowLoopActive() bool {
 
 // StartBackgroundAutomationShadowLoop elects one API replica with a
 // PostgreSQL advisory lock and keeps that lock for the leader lifetime. The
-// loop only creates observe-only intents; it has no execution path.
+// loop creates observe-only intents and inert durable dispatch records; it has
+// no execution path.
 func (s *Server) StartBackgroundAutomationShadowLoop(ctx context.Context) {
 	if s == nil || s.store == nil || !s.automationShadowLoopActive() {
 		return
@@ -188,7 +193,7 @@ func (s *Server) runAutomationShadowLoopLeader(ctx context.Context) {
 		s.recordAutomationShadowLoopRun(started, time.Since(started), summary, err)
 		if err != nil && s.log != nil {
 			s.log.Printf(
-				"automation shadow loop completed with errors: policies=%d shadow_policies=%d selected=%d deferred=%d evaluations=%d matches=%d intents_created=%d duration=%s err=%v",
+				"automation shadow loop completed with errors: policies=%d shadow_policies=%d selected=%d deferred=%d evaluations=%d matches=%d intents_created=%d dispatches_created=%d duration=%s err=%v",
 				summary.PoliciesScanned,
 				summary.ShadowPolicies,
 				summary.PoliciesSelected,
@@ -196,12 +201,13 @@ func (s *Server) runAutomationShadowLoopLeader(ctx context.Context) {
 				summary.Evaluations,
 				summary.Matches,
 				summary.IntentsCreated,
+				summary.DispatchesCreated,
 				time.Since(started),
 				err,
 			)
 		} else if s.log != nil {
 			s.log.Printf(
-				"automation shadow loop complete: policies=%d shadow_policies=%d selected=%d deferred=%d evaluations=%d matches=%d intents_created=%d intents_reused=%d duration=%s",
+				"automation shadow loop complete: policies=%d shadow_policies=%d selected=%d deferred=%d evaluations=%d matches=%d intents_created=%d intents_reused=%d dispatches_created=%d dispatches_reused=%d duration=%s",
 				summary.PoliciesScanned,
 				summary.ShadowPolicies,
 				summary.PoliciesSelected,
@@ -210,6 +216,8 @@ func (s *Server) runAutomationShadowLoopLeader(ctx context.Context) {
 				summary.Matches,
 				summary.IntentsCreated,
 				summary.IntentsReused,
+				summary.DispatchesCreated,
+				summary.DispatchesReused,
 				time.Since(started),
 			)
 		}
@@ -440,6 +448,24 @@ func (s *Server) runAutomationShadowLoopOnce(
 						)
 					} else {
 						summary.IntentsReused++
+					}
+					_, dispatchCreated, err := s.prepareAutomationActionDispatch(
+						stored,
+						observationLayer,
+					)
+					if err != nil {
+						errorsSeen.add(fmt.Errorf(
+							"policy %s rule %s prepare action dispatch: %w",
+							policy.ID,
+							rule.ID,
+							err,
+						))
+						break
+					}
+					if dispatchCreated {
+						summary.DispatchesCreated++
+					} else {
+						summary.DispatchesReused++
 					}
 				}
 				cursor[cursorKey] = windowEnd
@@ -820,6 +846,8 @@ func (s *Server) recordAutomationShadowLoopRun(
 	s.automationShadowLoop.matchCount += int64(summary.Matches)
 	s.automationShadowLoop.intentCreatedCount += int64(summary.IntentsCreated)
 	s.automationShadowLoop.intentReusedCount += int64(summary.IntentsReused)
+	s.automationShadowLoop.dispatchCreatedCount += int64(summary.DispatchesCreated)
+	s.automationShadowLoop.dispatchReusedCount += int64(summary.DispatchesReused)
 	s.automationShadowLoop.ineligiblePolicyCount += int64(summary.IneligiblePolicies)
 	s.automationShadowLoop.policyLimitDeferredCount += int64(summary.PolicyLimitDeferred)
 	s.automationShadowLoop.catchupWindowSkippedCount += int64(summary.CatchupWindowsSkipped)
@@ -849,6 +877,8 @@ func (s *Server) writeAutomationShadowLoopMetrics(w io.Writer) {
 	matchCount := s.automationShadowLoop.matchCount
 	intentCreatedCount := s.automationShadowLoop.intentCreatedCount
 	intentReusedCount := s.automationShadowLoop.intentReusedCount
+	dispatchCreatedCount := s.automationShadowLoop.dispatchCreatedCount
+	dispatchReusedCount := s.automationShadowLoop.dispatchReusedCount
 	ineligiblePolicyCount := s.automationShadowLoop.ineligiblePolicyCount
 	policyLimitDeferredCount := s.automationShadowLoop.policyLimitDeferredCount
 	catchupWindowSkippedCount := s.automationShadowLoop.catchupWindowSkippedCount
@@ -866,6 +896,8 @@ func (s *Server) writeAutomationShadowLoopMetrics(w io.Writer) {
 	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_matches_total", "Total trusted policy-window matches.", nil, float64(matchCount))
 	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_intents_created_total", "Total append-only observe intents created by the control loop.", nil, float64(intentCreatedCount))
 	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_intents_reused_total", "Total idempotent observe intents reused by the control loop.", nil, float64(intentReusedCount))
+	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_dispatches_created_total", "Total durable action WAL entries created by the control loop.", nil, float64(dispatchCreatedCount))
+	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_dispatches_reused_total", "Total durable action WAL entries reused by the control loop.", nil, float64(dispatchReusedCount))
 	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_ineligible_policies_total", "Total disabled-app policy windows skipped without querying telemetry.", nil, float64(ineligiblePolicyCount))
 	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_policy_limit_deferred_total", "Total shadow policies deferred to a later rotating batch by the per-run inventory bound.", nil, float64(policyLimitDeferredCount))
 	observability.WriteCounterMetric(w, "fugue_automation_shadow_loop_catchup_windows_skipped_total", "Total old shadow windows skipped by the bounded catch-up policy.", nil, float64(catchupWindowSkippedCount))
