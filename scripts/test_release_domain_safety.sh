@@ -13197,6 +13197,254 @@ done
   run_with_wall_timeout 2 nested_wall_success || fail "nested wall guard must preserve successful inner status"
 )
 
+(
+  race_gate_dir="$(mktemp -d)"
+  race_clock_file="$(mktemp)"
+  race_status_reads=0
+  race_completion_called=false
+  trap 'rm -rf "${race_gate_dir}" "${race_clock_file}"' EXIT
+  printf '0\n' >"${race_clock_file}"
+  printf '2000\n' >"${race_gate_dir}/deadline-millis"
+  CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID=""
+
+  release_monotonic_millis() {
+    local calls=0
+    calls="$(<"${race_clock_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${race_clock_file}"
+    if (( calls == 1 )); then
+      printf '1000\n'
+    else
+      printf '1600\n'
+    fi
+  }
+  prepare_release_command_in_dedicated_group() {
+    printf -v "$1" '%s' '424242'
+    printf -v "$2" '%s' '424242'
+    printf -v "$3" '%s' "${race_gate_dir}"
+  }
+  release_prepared_release_command() { return 0; }
+  read_completed_release_command_status() {
+    race_status_reads=$((race_status_reads + 1))
+    if (( race_status_reads == 1 )); then
+      return 1
+    fi
+    printf -v "$2" '%s' '0'
+  }
+  complete_release_command_group() {
+    race_completion_called=true
+    [[ "$1" == '424242' && "$2" == '424242' && "$3" == "${race_gate_dir}" && "$4" == '0' ]]
+  }
+  abort_prepared_release_command() { fail "deadline-race success must not abort the prepared command"; }
+  terminate_and_cleanup_release_command() { fail "deadline-race success must not terminate the completed command"; }
+  ps() { printf 'S\n'; }
+
+  run_with_wall_timeout 1 true || fail "wall guard must re-read a completion published at the cleanup-reserve boundary"
+  assert_eq "${race_status_reads}" "2" "wall guard deadline-race status reads"
+  [[ "${race_completion_called}" == "true" ]] || fail "wall guard deadline-race completion was not reaped"
+)
+
+(
+  handoff_gate_dir="$(mktemp -d)"
+  handoff_clock_file="$(mktemp)"
+  handoff_status_reads=0
+  handoff_completion_called=false
+  trap 'rm -rf "${handoff_gate_dir}" "${handoff_clock_file}"' EXIT
+  printf '0\n' >"${handoff_clock_file}"
+  printf '2000\n' >"${handoff_gate_dir}/deadline-millis"
+  CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID=""
+
+  release_monotonic_millis() {
+    local calls=0
+    calls="$(<"${handoff_clock_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${handoff_clock_file}"
+    if (( calls == 1 )); then
+      printf '1000\n'
+    else
+      printf '1600\n'
+    fi
+  }
+  prepare_release_command_in_dedicated_group() {
+    printf -v "$1" '%s' '434343'
+    printf -v "$2" '%s' '434343'
+    printf -v "$3" '%s' "${handoff_gate_dir}"
+  }
+  release_prepared_release_command() { return 0; }
+  read_completed_release_command_status() {
+    handoff_status_reads=$((handoff_status_reads + 1))
+    if (( handoff_status_reads < 3 )); then
+      return 1
+    fi
+    printf -v "$2" '%s' '0'
+  }
+  release_process_group_live_member_count() { printf '0\n'; }
+  release_command_leader_identity_state() { printf -v "$3" '%s' 'live'; }
+  complete_release_command_group() {
+    handoff_completion_called=true
+    [[ "$1" == '434343' && "$2" == '434343' && "$3" == "${handoff_gate_dir}" && "$4" == '0' ]]
+  }
+  abort_prepared_release_command() { fail "completed handoff must not abort the prepared command"; }
+  terminate_and_cleanup_release_command() { fail "completed handoff must not terminate the completed command"; }
+  ps() { printf 'S\n'; }
+
+  run_with_wall_timeout 1 true || fail "wall guard must wait for a proven completed command's authenticated status"
+  assert_eq "${handoff_status_reads}" "3" "wall guard completed-handoff status reads"
+  [[ "${handoff_completion_called}" == "true" ]] || fail "wall guard completed handoff was not reaped"
+)
+
+(
+  active_gate_dir="$(mktemp -d)"
+  active_clock_file="$(mktemp)"
+  active_termination_called=false
+  trap 'rm -rf "${active_gate_dir}" "${active_clock_file}"' EXIT
+  printf '0\n' >"${active_clock_file}"
+  printf '2000\n' >"${active_gate_dir}/deadline-millis"
+  CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID=""
+
+  release_monotonic_millis() {
+    local calls=0
+    calls="$(<"${active_clock_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${active_clock_file}"
+    if (( calls == 1 )); then
+      printf '1000\n'
+    else
+      printf '1600\n'
+    fi
+  }
+  prepare_release_command_in_dedicated_group() {
+    printf -v "$1" '%s' '444444'
+    printf -v "$2" '%s' '444444'
+    printf -v "$3" '%s' "${active_gate_dir}"
+  }
+  release_prepared_release_command() { return 0; }
+  read_completed_release_command_status() { return 1; }
+  release_process_group_live_member_count() { printf '1\n'; }
+  terminate_and_cleanup_release_command() {
+    active_termination_called=true
+    [[ "$1" == '444444' && "$2" == '444444' && "$3" == "${active_gate_dir}" ]]
+  }
+  abort_prepared_release_command() { fail "active cleanup-reserve command must use bounded termination"; }
+  ps() { printf 'S\n'; }
+
+  active_status=0
+  if run_with_wall_timeout 1 true; then
+    fail "wall guard must not extend an active command into its cleanup reserve"
+  else
+    active_status=$?
+  fi
+  assert_eq "${active_status}" "124" "active cleanup-reserve status"
+  [[ "${active_termination_called}" == "true" ]] || fail "active cleanup-reserve command was not terminated"
+)
+
+(
+  missing_gate_dir="$(mktemp -d)"
+  missing_clock_file="$(mktemp)"
+  missing_status_reads=0
+  missing_termination_called=false
+  trap 'rm -rf "${missing_gate_dir}" "${missing_clock_file}"' EXIT
+  printf '0\n' >"${missing_clock_file}"
+  printf '2000\n' >"${missing_gate_dir}/deadline-millis"
+  CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID=""
+
+  release_monotonic_millis() {
+    local calls=0
+    calls="$(<"${missing_clock_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${missing_clock_file}"
+    case "${calls}" in
+      1) printf '1000\n' ;;
+      2) printf '1600\n' ;;
+      3) printf '1900\n' ;;
+      *) printf '2000\n' ;;
+    esac
+  }
+  prepare_release_command_in_dedicated_group() {
+    printf -v "$1" '%s' '454545'
+    printf -v "$2" '%s' '454545'
+    printf -v "$3" '%s' "${missing_gate_dir}"
+  }
+  release_prepared_release_command() { return 0; }
+  read_completed_release_command_status() {
+    missing_status_reads=$((missing_status_reads + 1))
+    return 1
+  }
+  release_process_group_live_member_count() { printf '0\n'; }
+  release_command_leader_identity_state() { printf -v "$3" '%s' 'live'; }
+  terminate_and_cleanup_release_command() {
+    missing_termination_called=true
+    [[ "$1" == '454545' && "$2" == '454545' && "$3" == "${missing_gate_dir}" ]]
+  }
+  abort_prepared_release_command() { fail "missing handoff status must use bounded termination"; }
+  ps() { printf 'S\n'; }
+  sleep() { :; }
+
+  missing_status=0
+  if run_with_wall_timeout 1 true; then
+    fail "wall guard must fail closed when a proven completed command never publishes status"
+  else
+    missing_status=$?
+  fi
+  assert_eq "${missing_status}" "124" "missing completed-handoff status"
+  assert_eq "${missing_status_reads}" "6" "missing completed-handoff status reads"
+  [[ "${missing_termination_called}" == "true" ]] || fail "missing completed handoff was not terminated"
+)
+
+(
+  guarded_gate_dir="$(mktemp -d)"
+  guarded_clock_file="$(mktemp)"
+  guarded_status_reads=0
+  guarded_completion_called=false
+  trap 'rm -rf "${guarded_gate_dir}" "${guarded_clock_file}"' EXIT
+  printf '0\n' >"${guarded_clock_file}"
+  printf '2000\n' >"${guarded_gate_dir}/deadline-millis"
+  CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=false
+
+  control_plane_release_recovery_active() { return 1; }
+  require_control_plane_backup_coordination_or_abort() { return 0; }
+  require_control_plane_backup_coordination_lease() { return 0; }
+  release_monotonic_millis() {
+    local calls=0
+    calls="$(<"${guarded_clock_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${guarded_clock_file}"
+    if (( calls == 1 )); then
+      printf '1000\n'
+    else
+      printf '1600\n'
+    fi
+  }
+  prepare_release_command_in_dedicated_group() {
+    printf -v "$1" '%s' '464646'
+    printf -v "$2" '%s' '464646'
+    printf -v "$3" '%s' "${guarded_gate_dir}"
+  }
+  release_prepared_release_command() { return 0; }
+  read_completed_release_command_status() {
+    guarded_status_reads=$((guarded_status_reads + 1))
+    if (( guarded_status_reads < 3 )); then
+      return 1
+    fi
+    printf -v "$2" '%s' '0'
+  }
+  release_process_group_live_member_count() { printf '0\n'; }
+  release_command_leader_identity_state() { printf -v "$3" '%s' 'live'; }
+  complete_release_command_group() {
+    guarded_completion_called=true
+    [[ "$1" == '464646' && "$2" == '464646' && "$3" == "${guarded_gate_dir}" && "$4" == '0' ]]
+  }
+  abort_prepared_release_command() { fail "guarded completed handoff must not abort"; }
+  terminate_and_cleanup_release_command() { fail "guarded completed handoff must not terminate"; }
+  ps() { printf 'S\n'; }
+
+  run_with_control_plane_backup_coordination_guard 1 "guarded completion handoff" true ||
+    fail "guarded wall runner must accept a proven completed command's authenticated status"
+  assert_eq "${guarded_status_reads}" "3" "guarded completed-handoff status reads"
+  [[ "${guarded_completion_called}" == "true" ]] || fail "guarded completed handoff was not reaped"
+)
+
 for nested_timeout_mode in inner outer; do
   (
     nested_child_file="$(mktemp)"

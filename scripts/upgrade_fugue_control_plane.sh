@@ -1156,6 +1156,84 @@ release_process_group_live_member_count() {
     '
 }
 
+read_release_command_status_at_cleanup_boundary() {
+  local pid="$1"
+  local pgid="$2"
+  local gate_dir="$3"
+  local absolute_deadline_millis="$4"
+  local output_status_var="$5"
+  local resolved_status=""
+  local status_read_result=0
+  local live_member_count=""
+  local member_count_result=0
+  local identity_state="unknown"
+  local now_millis=""
+
+  [[ "${pid}" =~ ^[1-9][0-9]*$ && "${pgid}" == "${pid}" &&
+    "${absolute_deadline_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
+
+  # First close the ordinary read-to-deadline-check race without any wait.
+  # A complete authenticated status always wins over the cleanup threshold.
+  if read_completed_release_command_status "${gate_dir}" resolved_status; then
+    printf -v "${output_status_var}" '%s' "${resolved_status}"
+    return 0
+  else
+    status_read_result=$?
+    (( status_read_result == 1 )) || return 126
+  fi
+
+  # Do not extend an executing command into the cleanup reserve. If no
+  # non-leader member remains in the proven process group, however, the
+  # requested command and all of its descendants are already gone. Only the
+  # supervisor can remain, so it is safe to give its authenticated status
+  # publication the rest of the caller's absolute deadline.
+  if live_member_count="$(release_process_group_live_member_count "${pid}" "${pgid}")"; then
+    member_count_result=0
+  else
+    member_count_result=$?
+  fi
+  # The supervisor may publish while the process-group snapshot is read.
+  # Accept that authenticated result before interpreting the snapshot.
+  if read_completed_release_command_status "${gate_dir}" resolved_status; then
+    printf -v "${output_status_var}" '%s' "${resolved_status}"
+    return 0
+  else
+    status_read_result=$?
+    (( status_read_result == 1 )) || return 126
+  fi
+  if (( member_count_result != 0 )) || [[ ! "${live_member_count}" =~ ^[0-9]+$ ]]; then
+    return 126
+  fi
+  (( live_member_count == 0 )) || return 1
+
+  while true; do
+    if read_completed_release_command_status "${gate_dir}" resolved_status; then
+      printf -v "${output_status_var}" '%s' "${resolved_status}"
+      return 0
+    else
+      status_read_result=$?
+      (( status_read_result == 1 )) || return 126
+    fi
+
+    release_command_leader_identity_state "${pid}" "${pgid}" identity_state
+    [[ "${identity_state}" == "live" ]] || return 126
+    now_millis="$(release_monotonic_millis)" || return 126
+    [[ "${now_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
+    if (( now_millis >= absolute_deadline_millis )); then
+      # Close the final read-to-clock race before reporting the missing status.
+      if read_completed_release_command_status "${gate_dir}" resolved_status; then
+        printf -v "${output_status_var}" '%s' "${resolved_status}"
+        return 0
+      else
+        status_read_result=$?
+        (( status_read_result == 1 )) || return 126
+      fi
+      return 1
+    fi
+    sleep 0.01
+  done
+}
+
 complete_release_command_group() {
   local pid="$1"
   local pgid="$2"
@@ -1307,6 +1385,22 @@ run_with_wall_timeout() {
     effective_deadline_millis="$(tr -d '[:space:]' <"${gate_dir}/deadline-millis" 2>/dev/null || true)"
     if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ || ! "${effective_deadline_millis}" =~ ^[1-9][0-9]*$ ]] ||
       (( now_millis >= effective_deadline_millis - 500 )); then
+      status_read_result=0
+      if read_release_command_status_at_cleanup_boundary \
+        "${pid}" "${pgid}" "${gate_dir}" "${effective_deadline_millis}" command_status; then
+        if complete_release_command_group "${pid}" "${pgid}" "${gate_dir}" "${command_status}"; then
+          return 0
+        else
+          status=$?
+          return "${status}"
+        fi
+      else
+        status_read_result=$?
+        if (( status_read_result != 1 )); then
+          abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+          return 126
+        fi
+      fi
       terminate_and_cleanup_release_command "${pid}" "${pgid}" "${gate_dir}" || return 126
       return 124
     fi
@@ -1531,6 +1625,31 @@ run_with_control_plane_backup_coordination_guard() {
     effective_deadline_millis="$(tr -d '[:space:]' <"${gate_dir}/deadline-millis" 2>/dev/null || true)"
     if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ || ! "${effective_deadline_millis}" =~ ^[1-9][0-9]*$ ]] ||
       (( now_millis >= effective_deadline_millis - 500 )); then
+      status_read_result=0
+      if read_release_command_status_at_cleanup_boundary \
+        "${pid}" "${pgid}" "${gate_dir}" "${effective_deadline_millis}" command_status; then
+        if complete_release_command_group "${pid}" "${pgid}" "${gate_dir}" "${command_status}"; then
+          status=0
+        else
+          status=$?
+        fi
+        if ! control_plane_release_recovery_active &&
+          [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]] &&
+          ! require_control_plane_backup_coordination_lease "${phase} completion"; then
+          write_control_plane_backup_coordination_health lost "guarded-completion:${phase}" || true
+          if control_plane_backup_coordination_parent_context; then
+            handle_control_plane_backup_coordination_abort true
+          fi
+          return 125
+        fi
+        return "${status}"
+      else
+        status_read_result=$?
+        if (( status_read_result != 1 )); then
+          abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+          return 126
+        fi
+      fi
       log_stderr "${phase} exceeded its ${timeout_seconds}s outer wall timeout"
       terminate_and_cleanup_release_command "${pid}" "${pgid}" "${gate_dir}" || return 126
       return 124
