@@ -639,6 +639,54 @@ func TestOverlayManagedAppStatusesForEdgeRoutesMarksMissingManagedAppUnavailable
 	}
 }
 
+func TestOverlayManagedAppStatusesForEdgeRoutesRetainsStoreStateUntilGenerationObserved(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			RuntimeID: model.DefaultManagedRuntimeID,
+			Replicas:  1,
+		},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Metadata.Generation = 2
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:              runtime.ManagedAppPhaseError,
+		Message:            "transient controller status",
+		ReadyReplicas:      0,
+		ObservedGeneration: 1,
+	}
+	runtimes := map[string]model.Runtime{
+		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
+	}
+
+	updated := overlayAppsWithManagedStatusesForEdgeRoutes(
+		[]model.App{app},
+		map[string]runtime.ManagedAppObject{app.ID: managed},
+		runtimes,
+	)
+	if updated[0].Status.CurrentReplicas != 1 || updated[0].Status.Phase != "deployed" {
+		t.Fatalf("unobserved generation must retain durable route state, got %+v", updated[0].Status)
+	}
+
+	managed.Status.ObservedGeneration = managed.Metadata.Generation
+	updated = overlayAppsWithManagedStatusesForEdgeRoutes(
+		[]model.App{app},
+		map[string]runtime.ManagedAppObject{app.ID: managed},
+		runtimes,
+	)
+	if updated[0].Status.CurrentReplicas != 0 || updated[0].Status.Phase != "failed" {
+		t.Fatalf("observed generation must publish authoritative managed status, got %+v", updated[0].Status)
+	}
+}
+
 func TestOverlayManagedAppStatusCachedBacksOffAfterBackgroundListError(t *testing.T) {
 	t.Parallel()
 

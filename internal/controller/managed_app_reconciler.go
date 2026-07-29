@@ -308,7 +308,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := validateManagedAppDeployableImage(app); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	if err := s.ensureManagedDeployImageReady(ctx, app, managed.Spec.Scheduling); err != nil {
+	if err := s.ensureManagedReconcileDeployImageReady(ctx, client, namespace, app, managed.Spec.Scheduling); err != nil {
 		if managedAppDeployImageBlockedStatusCurrent(managed.Status, err) {
 			return nil
 		}

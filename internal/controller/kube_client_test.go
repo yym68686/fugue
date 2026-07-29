@@ -138,6 +138,93 @@ func TestPatchManagedAppStatusIncludesZeroReplicaCounts(t *testing.T) {
 	}
 }
 
+func TestManagedAppNoopApplyAndSpecReplaceAreSkipped(t *testing.T) {
+	t.Parallel()
+
+	object := map[string]any{
+		"apiVersion": runtime.ManagedAppAPIVersion,
+		"kind":       runtime.ManagedAppKind,
+		"metadata": map[string]any{
+			"name":      "app-demo",
+			"namespace": "tenant-demo",
+		},
+		"spec": map[string]any{
+			"appID":    "app_demo",
+			"tenantID": "tenant_demo",
+			"name":     "demo",
+			"appSpec": map[string]any{
+				"image":    "registry.example/demo:current",
+				"replicas": float64(1),
+			},
+		},
+	}
+	var getCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("no-op managed app write must be skipped, got %s %s", r.Method, r.URL.Path)
+		}
+		getCount++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(object)
+	}))
+	defer server.Close()
+
+	client := &kubeClient{client: server.Client(), baseURL: server.URL, namespace: "tenant-demo"}
+	if err := client.applyObjects(context.Background(), []map[string]any{object}); err != nil {
+		t.Fatalf("apply managed app: %v", err)
+	}
+	if err := client.replaceObjectSpec(context.Background(), object); err != nil {
+		t.Fatalf("replace managed app spec: %v", err)
+	}
+	if getCount != 2 {
+		t.Fatalf("expected two read-before-write checks, got %d", getCount)
+	}
+}
+
+func TestCloudNativePGWriteHoldDoesNotSkipManagedAppSpecChange(t *testing.T) {
+	t.Parallel()
+
+	desired := map[string]any{
+		"apiVersion": runtime.ManagedAppAPIVersion,
+		"kind":       runtime.ManagedAppKind,
+		"metadata":   map[string]any{"name": "app-demo", "namespace": "tenant-demo"},
+		"spec": map[string]any{
+			"appID":    "app_demo",
+			"tenantID": "tenant_demo",
+			"name":     "demo",
+			"appSpec":  map[string]any{"replicas": float64(0)},
+		},
+	}
+	current := map[string]any{
+		"apiVersion": runtime.ManagedAppAPIVersion,
+		"kind":       runtime.ManagedAppKind,
+		"metadata":   map[string]any{"name": "app-demo", "namespace": "tenant-demo"},
+		"spec": map[string]any{
+			"appID":    "app_demo",
+			"tenantID": "tenant_demo",
+			"name":     "demo",
+			"appSpec":  map[string]any{"replicas": float64(1)},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(current)
+	}))
+	defer server.Close()
+	client := &kubeClient{client: server.Client(), baseURL: server.URL, namespace: "tenant-demo"}
+
+	_, skip, err := client.shouldSkipApply(
+		withSkipExistingCloudNativePGWrites(context.Background()),
+		managedAppAPIPath("tenant-demo", "app-demo"),
+		desired,
+	)
+	if err != nil {
+		t.Fatalf("check managed app write: %v", err)
+	}
+	if skip {
+		t.Fatal("CloudNativePG write hold must not suppress a ManagedApp spec change")
+	}
+}
+
 func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
 	t.Parallel()
 

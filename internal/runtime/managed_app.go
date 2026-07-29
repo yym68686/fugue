@@ -258,6 +258,13 @@ func AppFromManagedApp(managed ManagedAppObject) model.App {
 func OverlayAppStatusFromManagedApp(app model.App, managed ManagedAppObject) model.App {
 	out := app
 	status := managed.Status
+	// Kubernetes publishes a new spec generation before the controller has
+	// observed it. Until then, status describes the previous generation and
+	// must not overwrite the durable last-known state used by API and Edge
+	// routing consumers.
+	if managed.Metadata.Generation > 0 && status.ObservedGeneration < managed.Metadata.Generation {
+		return out
+	}
 	if strings.TrimSpace(status.Phase) == "" &&
 		status.ReadyReplicas == 0 &&
 		strings.TrimSpace(status.Message) == "" &&

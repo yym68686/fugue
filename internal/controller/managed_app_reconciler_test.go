@@ -3124,6 +3124,16 @@ func TestReconcileManagedAppObjectScalesDownUnrecoverableFailedSnapshot(t *testi
 				t.Fatalf("marshal deployment: %v", err)
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(data))), Header: make(http.Header)}, nil
+		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
+			current := any(managed)
+			if recordedDisabledManagedApp != nil {
+				current = recordedDisabledManagedApp
+			}
+			data, err := json.Marshal(current)
+			if err != nil {
+				t.Fatalf("marshal managed app: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(data))), Header: make(http.Header)}, nil
 		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
 		case req.Method == http.MethodPatch && req.URL.Path == deploymentAPIPath(namespace, deploymentName):
