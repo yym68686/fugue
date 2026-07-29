@@ -497,12 +497,21 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		auxiliaryTemplateChanged ||
 		desiredReplicas != liveReplicas
 	if desiredReplicas > 0 && workloadChange {
-		if !managedDeploymentStatusReady(deployment, liveReplicas) {
+		readyEndpoint, err := liveManagedAppHasReadyEndpoint(ctx, client, namespace, current)
+		if err != nil {
+			return model.App{}, err
+		}
+		deploymentReady := managedDeploymentStatusReady(deployment, liveReplicas)
+		unavailableRecovery := managedAppAllowsUnavailableRecovery(
+			deployment,
+			current.Spec,
+			desired.Spec,
+			readyEndpoint,
+		)
+		if !deploymentReady && !unavailableRecovery {
 			return model.App{}, fmt.Errorf("live deployment is not fully ready before an online replacement")
 		}
-		if ready, err := liveManagedAppHasReadyEndpoint(ctx, client, namespace, current); err != nil {
-			return model.App{}, err
-		} else if !ready {
+		if !readyEndpoint && !unavailableRecovery {
 			return model.App{}, fmt.Errorf("live service has no ready endpoint before an online replacement")
 		}
 	}
@@ -555,6 +564,29 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		}
 	}
 	return desired, nil
+}
+
+// managedAppAllowsUnavailableRecovery breaks a deadlock where a terminally
+// failed stateless Deployment cannot accept the image or configuration change
+// that would repair it because the online rollout guard first requires the old
+// release to be healthy. Live Kubernetes evidence remains authoritative: the
+// Deployment must be fully observed, have no ready or available replicas, have
+// no ready Service endpoint, and report a failed rollout condition. Workloads
+// whose current or desired state cannot mount concurrently remain fail-closed.
+func managedAppAllowsUnavailableRecovery(
+	deployment kubeDeployment,
+	current, desired model.AppSpec,
+	readyEndpoint bool,
+) bool {
+	if readyEndpoint ||
+		deployment.Status.ObservedGeneration < deployment.Metadata.Generation ||
+		deployment.Status.ReadyReplicas > 0 ||
+		deployment.Status.AvailableReplicas > 0 ||
+		!hasDeploymentFailureCondition(deployment.Status.Conditions) {
+		return false
+	}
+	return controllerAppSupportsConcurrentStorage(current) &&
+		controllerAppSupportsConcurrentStorage(desired)
 }
 
 func liveDeploymentStrategyMatchesDesired(live kubeDeployment, desired map[string]any) bool {
