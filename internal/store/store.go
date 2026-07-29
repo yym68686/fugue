@@ -40,6 +40,14 @@ type Store struct {
 	edgeDNSBundleArtifactMu sync.Mutex
 	edgeDNSBundleArtifacts  map[string]EdgeDNSBundleArtifact
 
+	// backupArtifactPhysicalCleanup tracks successful object deletion for the
+	// file-backed store. PostgreSQL persists this marker in the artifact row;
+	// keeping the marker out of the public model preserves the existing API
+	// contract while making the in-memory implementation idempotent as well.
+	backupArtifactPhysicalCleanupMu sync.Mutex
+	backupArtifactPhysicalCleanup   map[string]time.Time
+	backupArtifactPhysicalAttempts  map[string]time.Time
+
 	platformArtifactKeyringMu sync.RWMutex
 	platformArtifactKeyring   bundleauth.Keyring
 }
