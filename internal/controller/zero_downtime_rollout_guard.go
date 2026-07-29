@@ -143,7 +143,7 @@ func (s *Service) prepareManagedAppRolloutFromStatus(
 	current.Status.CurrentReplicas = managed.Status.ReadyReplicas
 	current.Status.CurrentRuntimeID = current.Spec.RuntimeID
 	current.Status.Phase = "deployed"
-	desired.Spec.RolloutIntent = managedRolloutIntentForDesiredState(current, desired, managed.Spec.Scheduling, desiredScheduling)
+	desired.Spec.RolloutIntent = s.managedRolloutIntentForDesiredState(current, desired, managed.Spec.Scheduling, desiredScheduling)
 	opType := strings.TrimSpace(operationType)
 	if opType == "" {
 		opType = inferredManagedReconcileOperationType(current, desired)
@@ -192,6 +192,196 @@ func managedRolloutIntentForDesiredState(
 		return ""
 	}
 	return strings.TrimSpace(current.Spec.RolloutIntent)
+}
+
+// managedRolloutIntentForDesiredState extends the ordinary AppSpec classifier
+// with deployment-level evidence for managed PostgreSQL state. Older
+// ManagedApp snapshots can contain mixed-case PostgreSQL service names even
+// after the durable store has been repaired. Canonicalizing that generated
+// hostname changes the app container environment and therefore needs an
+// explicit online rollout intent. Database placement fields, on the other
+// hand, do not change the app Deployment; while a database transition is in
+// progress, retain an already validated intent when the rendered workload is
+// otherwise identical.
+func (s *Service) managedRolloutIntentForDesiredState(
+	current, desired model.App,
+	currentScheduling, desiredScheduling runtime.SchedulingConstraints,
+) string {
+	if intent := managedRolloutIntentForDesiredState(current, desired, currentScheduling, desiredScheduling); intent != "" {
+		return intent
+	}
+	if s == nil || !appSupportsOnlineRolloutIntent(desired) ||
+		!managedSchedulingConstraintsEqual(currentScheduling, desiredScheduling) {
+		return ""
+	}
+
+	currentWithoutIntent := managedAppWithoutRolloutIntent(current)
+	desiredWithoutIntent := managedAppWithoutRolloutIntent(desired)
+	canonicalCurrent, currentChanged := normalizeManagedPostgresDeploymentNames(currentWithoutIntent)
+	canonicalDesired, desiredChanged := normalizeManagedPostgresDeploymentNames(desiredWithoutIntent)
+	if !managedAppNonPostgresWorkloadInputsEqual(canonicalCurrent, canonicalDesired) {
+		return ""
+	}
+
+	canonicalCurrentKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(canonicalCurrent), currentScheduling))
+	canonicalDesiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(canonicalDesired), desiredScheduling))
+	if canonicalCurrentKey == "" || canonicalCurrentKey != canonicalDesiredKey {
+		return ""
+	}
+
+	currentKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(currentWithoutIntent), currentScheduling))
+	desiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desiredWithoutIntent), desiredScheduling))
+	if currentChanged && !desiredChanged && currentKey != desiredKey {
+		return model.AppRolloutIntentOnlineEnvironmentUpdate
+	}
+	if appHasOnlineRolloutIntent(current) && currentKey == desiredKey {
+		return strings.TrimSpace(current.Spec.RolloutIntent)
+	}
+	return ""
+}
+
+func managedAppWithoutRolloutIntent(app model.App) model.App {
+	out := app
+	if spec := cloneControllerAppSpec(&app.Spec); spec != nil {
+		spec.RolloutIntent = ""
+		out.Spec = *spec
+	}
+	return out
+}
+
+func managedAppNonPostgresWorkloadInputsEqual(current, desired model.App) bool {
+	if !reflect.DeepEqual(comparableManagedAppDeploymentSpec(current.Spec), comparableManagedAppDeploymentSpec(desired.Spec)) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppOriginSource(current), model.AppOriginSource(desired)) ||
+		!reflect.DeepEqual(model.AppBuildSource(current), model.AppBuildSource(desired)) {
+		return false
+	}
+	if !reflect.DeepEqual(current.Route, desired.Route) ||
+		!reflect.DeepEqual(comparableManagedAppServiceBindings(current.Bindings), comparableManagedAppServiceBindings(desired.Bindings)) {
+		return false
+	}
+	return reflect.DeepEqual(
+		managedBackingServiceDeploymentInputs(current.BackingServices),
+		managedBackingServiceDeploymentInputs(desired.BackingServices),
+	)
+}
+
+func comparableManagedAppDeploymentSpec(spec model.AppSpec) model.AppSpec {
+	normalized := comparableRestartSpec(spec)
+	if normalized.Postgres != nil {
+		normalized.Postgres = managedPostgresDeploymentConnectionInput(normalized.Postgres)
+	}
+	return normalized
+}
+
+type managedBackingServiceDeploymentInput struct {
+	ID          string
+	TenantID    string
+	ProjectID   string
+	OwnerAppID  string
+	Name        string
+	Type        string
+	Provisioner string
+	Postgres    *model.AppPostgresSpec
+}
+
+func managedBackingServiceDeploymentInputs(services []model.BackingService) []managedBackingServiceDeploymentInput {
+	if len(services) == 0 {
+		return nil
+	}
+	out := make([]managedBackingServiceDeploymentInput, len(services))
+	for index, service := range services {
+		out[index] = managedBackingServiceDeploymentInput{
+			ID:          strings.TrimSpace(service.ID),
+			TenantID:    strings.TrimSpace(service.TenantID),
+			ProjectID:   strings.TrimSpace(service.ProjectID),
+			OwnerAppID:  strings.TrimSpace(service.OwnerAppID),
+			Name:        strings.TrimSpace(service.Name),
+			Type:        strings.TrimSpace(service.Type),
+			Provisioner: strings.TrimSpace(service.Provisioner),
+			Postgres:    managedPostgresDeploymentConnectionInput(service.Spec.Postgres),
+		}
+	}
+	return out
+}
+
+func managedPostgresDeploymentConnectionInput(postgres *model.AppPostgresSpec) *model.AppPostgresSpec {
+	if postgres == nil {
+		return nil
+	}
+	return &model.AppPostgresSpec{
+		Database:    strings.TrimSpace(postgres.Database),
+		User:        strings.TrimSpace(postgres.User),
+		Password:    postgres.Password,
+		ServiceName: strings.TrimSpace(postgres.ServiceName),
+	}
+}
+
+func normalizeManagedPostgresDeploymentNames(app model.App) (model.App, bool) {
+	out := app
+	out.BackingServices = cloneControllerBackingServices(app.BackingServices)
+	out.Bindings = cloneControllerServiceBindings(app.Bindings)
+	changed := false
+
+	if out.Spec.Postgres != nil {
+		postgres := *model.CloneAppPostgresSpec(out.Spec.Postgres)
+		canonical := model.NormalizePostgresServiceName(postgres.ServiceName, "")
+		if canonical != "" && canonical != postgres.ServiceName {
+			postgres.ServiceName = canonical
+			out.Spec.Postgres = &postgres
+			changed = true
+		}
+	}
+
+	type postgresName struct {
+		oldName string
+		newName string
+	}
+	serviceNames := make(map[string]postgresName)
+	for index := range out.BackingServices {
+		service := &out.BackingServices[index]
+		if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) ||
+			!strings.EqualFold(strings.TrimSpace(service.Provisioner), model.BackingServiceProvisionerManaged) ||
+			service.Spec.Postgres == nil {
+			continue
+		}
+		postgres := *model.CloneAppPostgresSpec(service.Spec.Postgres)
+		oldName := strings.TrimSpace(postgres.ServiceName)
+		if oldName == "" {
+			continue
+		}
+		newName := model.NormalizePostgresServiceName(oldName, "")
+		serviceNames[strings.TrimSpace(service.ID)] = postgresName{oldName: oldName, newName: newName}
+		if newName != postgres.ServiceName {
+			postgres.ServiceName = newName
+			service.Spec.Postgres = &postgres
+			changed = true
+		}
+	}
+
+	for index := range out.Bindings {
+		binding := &out.Bindings[index]
+		names, ok := serviceNames[strings.TrimSpace(binding.ServiceID)]
+		if !ok || len(binding.Env) == 0 {
+			continue
+		}
+		host := strings.TrimSpace(binding.Env["DB_HOST"])
+		nextHost := ""
+		switch {
+		case strings.EqualFold(host, names.oldName):
+			nextHost = names.newName
+		case strings.EqualFold(host, names.oldName+"-rw"):
+			nextHost = model.PostgresRWServiceName(names.newName)
+		default:
+			continue
+		}
+		if nextHost != "" && nextHost != binding.Env["DB_HOST"] {
+			binding.Env["DB_HOST"] = nextHost
+			changed = true
+		}
+	}
+	return out, changed
 }
 
 func managedAppDesiredStateEqualExceptReplicasAndRolloutIntent(current, desired model.App) bool {
@@ -274,7 +464,7 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	current.Status.CurrentRuntimeID = current.Spec.RuntimeID
 	current.Status.Phase = "deployed"
 	desired.Status = current.Status
-	desired.Spec.RolloutIntent = managedRolloutIntentForDesiredState(current, desired, managed.Spec.Scheduling, desiredScheduling)
+	desired.Spec.RolloutIntent = s.managedRolloutIntentForDesiredState(current, desired, managed.Spec.Scheduling, desiredScheduling)
 	opType := strings.TrimSpace(operationType)
 	if opType == "" {
 		opType = inferredManagedReconcileOperationType(current, desired)

@@ -176,6 +176,148 @@ func TestManagedRolloutIntentPreservationRequiresUnchangedDesiredStateAndSchedul
 	}
 }
 
+func TestManagedRolloutIntentAllowsCanonicalPostgresServiceNameRepair(t *testing.T) {
+	current, desired := managedPostgresCanonicalizationRolloutApps()
+	svc := &Service{Renderer: runtime.Renderer{}}
+
+	intent := svc.managedRolloutIntentForDesiredState(
+		current,
+		desired,
+		runtime.SchedulingConstraints{},
+		runtime.SchedulingConstraints{},
+	)
+	if intent != model.AppRolloutIntentOnlineEnvironmentUpdate {
+		t.Fatalf("expected MecGod -> mecgod to use an online environment rollout, got %q", intent)
+	}
+
+	desired.Spec.RolloutIntent = intent
+	op := model.Operation{Type: model.OperationTypeDeploy, DesiredSpec: &desired.Spec}
+	decision := svc.zeroDowntimeRolloutGuardDecision(op, current, desired, runtime.SchedulingConstraints{})
+	if decision.Refused {
+		t.Fatalf("canonical managed postgres hostname repair must pass the zero-downtime guard: %+v", decision)
+	}
+}
+
+func TestManagedAppLiveGuardAllowsDatabaseLocalizeToRepairCanonicalPostgresName(t *testing.T) {
+	current, desired := managedPostgresCanonicalizationRolloutApps()
+	managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1}
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(current), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected a live deployment fixture")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(),
+		client,
+		managed.Metadata.Namespace,
+		managed,
+		desired,
+		model.OperationTypeDatabaseLocalize,
+		runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("database localize must repair the generated hostname through a validated online rollout: %v", err)
+	}
+	if prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineEnvironmentUpdate {
+		t.Fatalf("expected online environment rollout intent, got %q", prepared.Spec.RolloutIntent)
+	}
+}
+
+func TestManagedRolloutIntentPreservesValidatedIntentAcrossPostgresPlacementOnlyState(t *testing.T) {
+	_, current := managedPostgresCanonicalizationRolloutApps()
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineEnvironmentUpdate
+	desired := current
+	desired.Spec = *cloneControllerAppSpec(&current.Spec)
+	desired.Spec.RolloutIntent = ""
+	desired.BackingServices = cloneControllerBackingServices(current.BackingServices)
+	desired.Bindings = cloneControllerServiceBindings(current.Bindings)
+	desiredPostgres := desired.BackingServices[0].Spec.Postgres
+	desiredPostgres.Instances = 1
+	desiredPostgres.PrimaryPlacementPendingRebalance = false
+	desiredPostgres.SynchronousReplicas = 0
+
+	intent := (&Service{Renderer: runtime.Renderer{}}).managedRolloutIntentForDesiredState(
+		current,
+		desired,
+		runtime.SchedulingConstraints{},
+		runtime.SchedulingConstraints{},
+	)
+	if intent != current.Spec.RolloutIntent {
+		t.Fatalf("expected placement-only finalization to preserve %q, got %q", current.Spec.RolloutIntent, intent)
+	}
+}
+
+func TestManagedRolloutIntentDoesNotHidePostgresCredentialChangeBehindCanonicalization(t *testing.T) {
+	current, desired := managedPostgresCanonicalizationRolloutApps()
+	desired.BackingServices[0].Spec.Postgres.Password = "rotated-secret"
+	desired.Bindings[0].Env["DB_PASSWORD"] = "rotated-secret"
+
+	intent := (&Service{Renderer: runtime.Renderer{}}).managedRolloutIntentForDesiredState(
+		current,
+		desired,
+		runtime.SchedulingConstraints{},
+		runtime.SchedulingConstraints{},
+	)
+	if intent != "" {
+		t.Fatalf("a credential change must remain fail-closed, got rollout intent %q", intent)
+	}
+}
+
+func managedPostgresCanonicalizationRolloutApps() (model.App, model.App) {
+	current := managedAppLiveGuardTestApp(nil)
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineImageUpdate
+	current.BackingServices = []model.BackingService{{
+		ID:          "service-postgres",
+		TenantID:    current.TenantID,
+		ProjectID:   current.ProjectID,
+		OwnerAppID:  current.ID,
+		Name:        "mecgod",
+		Type:        model.BackingServiceTypePostgres,
+		Provisioner: model.BackingServiceProvisionerManaged,
+		Status:      model.BackingServiceStatusActive,
+		Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+			Database:    "mecgod",
+			User:        "mecgod",
+			Password:    "stable-secret",
+			ServiceName: "MecGod",
+			RuntimeID:   "runtime_managed_shared",
+			StorageSize: "1Gi",
+			Instances:   1,
+		}},
+	}}
+	current.Bindings = []model.ServiceBinding{{
+		ID:        "binding-postgres",
+		TenantID:  current.TenantID,
+		AppID:     current.ID,
+		ServiceID: "service-postgres",
+		Env: map[string]string{
+			"DB_HOST":     "MecGod-rw",
+			"DB_NAME":     "mecgod",
+			"DB_USER":     "mecgod",
+			"DB_PASSWORD": "stable-secret",
+			"DB_PORT":     "5432",
+			"DB_TYPE":     "postgres",
+		},
+	}}
+
+	desired := current
+	desired.Spec = *cloneControllerAppSpec(&current.Spec)
+	desired.Spec.RolloutIntent = ""
+	desired.BackingServices = cloneControllerBackingServices(current.BackingServices)
+	desired.Bindings = cloneControllerServiceBindings(current.Bindings)
+	desiredPostgres := desired.BackingServices[0].Spec.Postgres
+	desiredPostgres.ServiceName = "mecgod"
+	desiredPostgres.PrimaryNodeName = "v2202605354515455529"
+	desiredPostgres.PrimaryPlacementPendingRebalance = true
+	desiredPostgres.Instances = 2
+	desired.Bindings[0].Env["DB_HOST"] = "mecgod-rw"
+	return current, desired
+}
+
 func TestApplyManagedAppDesiredStateDoesNotWriteBeforeLiveIdentityProof(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
