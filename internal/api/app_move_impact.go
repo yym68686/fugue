@@ -26,8 +26,9 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 		impact.Pass = false
 		return impact
 	}
-	if _, err := s.store.GetRuntime(targetRuntimeID); err != nil {
-		impact.Checks = append(impact.Checks, model.StoreInvariantCheck{Name: "target_runtime", Pass: false, Message: err.Error()})
+	targetRuntime, runtimeErr := s.store.GetRuntime(targetRuntimeID)
+	if runtimeErr != nil {
+		impact.Checks = append(impact.Checks, model.StoreInvariantCheck{Name: "target_runtime", Pass: false, Message: runtimeErr.Error()})
 		impact.Blockers = append(impact.Blockers, "target runtime is not available")
 		impact.Pass = false
 	} else {
@@ -88,23 +89,42 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 	}
 	database := store.OwnedManagedPostgresSpec(app)
 	if database != nil {
+		if runtimeErr == nil && targetRuntime.Type != model.RuntimeTypeManagedOwned && targetRuntime.Type != model.RuntimeTypeManagedShared {
+			appendCheck("managed_postgres_target_runtime", false, "invalid input: managed Postgres requires a managed target runtime")
+		}
 		databaseRuntimeID := strings.TrimSpace(database.RuntimeID)
 		if databaseRuntimeID == "" {
 			databaseRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 		}
 		requiresLocalization := databaseRuntimeID != "" && targetRuntimeID != "" && databaseRuntimeID != targetRuntimeID
+		databaseEvidence := s.managedPostgresMoveEvidence(app, requiresLocalization)
 		impact.Databases = append(impact.Databases, model.AppMoveDatabaseImpact{
 			ServiceName:          strings.TrimSpace(database.ServiceName),
 			CurrentRuntimeID:     databaseRuntimeID,
 			TargetRuntimeID:      targetRuntimeID,
-			BackupStatus:         "required",
-			RestoreStatus:        "required",
-			GrantVerification:    "required",
+			BackupStatus:         databaseEvidence.backupStatus,
+			RestoreStatus:        databaseEvidence.restoreStatus,
+			GrantVerification:    databaseEvidence.grantVerification,
 			RequiresLocalization: requiresLocalization,
 		})
-		appendCheck("managed_postgres_backup", true, "managed Postgres backup status must be green before switch")
-		appendCheck("managed_postgres_restore", true, "managed Postgres restore status must be verified after restore")
-		appendCheck("managed_postgres_grants", true, "owner/grant verification required after restore")
+		if requiresLocalization {
+			// App migration does not move an app-owned database.  The database
+			// localization operation is a real prerequisite and must converge
+			// before the app operation is accepted; previously these checks were
+			// hard-coded true and let the app race the database switchover.
+			appendCheck("managed_postgres_localization", false, "managed Postgres must be localized to the target runtime before app move")
+		} else {
+			appendCheck("managed_postgres_localization", true, "managed Postgres is already on the target runtime")
+		}
+		appendCheck("managed_postgres_backup", managedPostgresEvidenceCheckPass(databaseEvidence.backupStatus, databaseEvidence.backupReady, requiresLocalization), fmt.Sprintf("managed Postgres backup evidence: %s", databaseEvidence.backupStatus))
+		appendCheck("managed_postgres_restore", managedPostgresEvidenceCheckPass(databaseEvidence.restoreStatus, databaseEvidence.restoreReady, requiresLocalization), fmt.Sprintf("managed Postgres restore evidence: %s", databaseEvidence.restoreStatus))
+		appendCheck("managed_postgres_grants", managedPostgresEvidenceCheckPass(databaseEvidence.grantVerification, databaseEvidence.grantsReady, requiresLocalization), fmt.Sprintf("managed Postgres grant evidence: %s", databaseEvidence.grantVerification))
+	}
+	imageReady, imageMessage, imageErr := s.appMoveImageBlobEvidence(app)
+	if imageErr != nil {
+		appendCheck("image_blob_integrity", false, imageErr.Error())
+	} else {
+		appendCheck("image_blob_integrity", imageReady, imageMessage)
 	}
 	if app.Route != nil && strings.TrimSpace(app.Route.Hostname) != "" {
 		hostname := normalizeExternalAppDomain(app.Route.Hostname)
@@ -142,4 +162,21 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 		impact.Blockers = append(impact.Blockers, fmt.Sprintf("app %s cannot move to %s", app.ID, targetRuntimeID))
 	}
 	return impact
+}
+
+// The app-move API does not itself execute a backup/restore.  App-owned CNPG
+// databases use the explicit localization operation instead.  We therefore
+// only block on an *active* backup policy with missing evidence (or an
+// unavailable ledger); a tenant with no backup policy is not accidentally
+// blocked from the supported replication-based localization path.
+func managedPostgresEvidenceCheckPass(status string, ready, requiresLocalization bool) bool {
+	if !requiresLocalization || ready {
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "", "not_required", "not_configured", "disabled", "pending":
+		return true
+	default:
+		return false
+	}
 }

@@ -70,6 +70,7 @@ type projectMoveResult struct {
 	TargetRuntimeID string                      `json:"target_runtime_id"`
 	DryRun          bool                        `json:"dry_run,omitempty"`
 	Apps            []model.App                 `json:"apps,omitempty"`
+	AppImpacts      []model.AppMoveImpact       `json:"app_impacts,omitempty"`
 	Services        []model.BackingService      `json:"services,omitempty"`
 	UpdatedServices []model.BackingService      `json:"updated_services,omitempty"`
 	Operations      []model.Operation           `json:"operations,omitempty"`
@@ -138,6 +139,12 @@ fugue project move argus --to v2202605354515455529 --dry-run
 
 			candidates, skipped := planProjectMove(projectApps, targetRuntimeID)
 			serviceCandidates, skippedServices := planProjectMoveServices(projectServices, targetRuntimeID)
+			serviceCandidates, skippedServices = applyProjectMoveDependencies(
+				candidates,
+				skipped,
+				serviceCandidates,
+				skippedServices,
+			)
 			if (hasBlockedProjectMoveApps(skipped) || hasBlockedProjectMoveServices(skippedServices)) && !opts.SkipBlocked && !opts.DryRun {
 				return projectMoveBlockedError(project.Name, skipped, skippedServices)
 			}
@@ -156,16 +163,128 @@ fugue project move argus --to v2202605354515455529 --dry-run
 				SkippedServices: skippedServices,
 			}
 			if opts.DryRun {
+				impacts, impactSkipped, err := c.preflightProjectMoveApps(client, candidates, targetRuntimeID)
+				if err != nil {
+					return err
+				}
+				result.AppImpacts = impacts
+				result.Skipped = append(result.Skipped, impactSkipped...)
 				return c.renderProjectMoveResult(result)
 			}
-			if !opts.Wait && len(serviceCandidates) > 0 && len(candidates) > 0 {
+			hasOwnedDatabaseDependency := false
+			for _, service := range serviceCandidates {
+				if strings.TrimSpace(service.OwnerAppID) != "" {
+					hasOwnedDatabaseDependency = true
+					break
+				}
+			}
+			if !opts.Wait && ((len(serviceCandidates) > 0 && len(candidates) > 0) || hasOwnedDatabaseDependency) {
 				return fmt.Errorf("project move must wait for backing service switchovers before queueing app moves; rerun without --wait=false or move services and apps separately")
 			}
 
+			// Run the same server-side app preflight used by `app move` before
+			// mutating any project resource. A database-localization blocker is a
+			// dependency edge, not a terminal app blocker: it is executed below and
+			// the app is preflighted again after the dependency converges.
+			initialImpacts, impactSkipped, err := c.preflightProjectMoveApps(client, candidates, targetRuntimeID)
+			if err != nil {
+				return err
+			}
+			result.AppImpacts = initialImpacts
+			result.Skipped = append(result.Skipped, impactSkipped...)
+			hardImpactSkipped := make([]projectMoveSkippedApp, 0, len(impactSkipped))
+			for _, item := range impactSkipped {
+				if !appMoveSkippedForDatabaseDependency(item, initialImpacts) {
+					hardImpactSkipped = append(hardImpactSkipped, item)
+				}
+			}
+			if len(hardImpactSkipped) > 0 {
+				if !opts.SkipBlocked {
+					return projectMoveBlockedError(project.Name, hardImpactSkipped, skippedServices)
+				}
+				candidates = removeSkippedProjectMoveApps(candidates, hardImpactSkipped)
+			}
+			serviceCandidates, skippedServices = applyProjectMoveDependencies(candidates, skipped, serviceCandidates, skippedServices)
+
+			localizedApps := make(map[string]struct{})
+			for _, service := range serviceCandidates {
+				ownerID := strings.TrimSpace(service.OwnerAppID)
+				if ownerID == "" || !projectMoveAppNeedsDatabaseLocalization(ownerID, initialImpacts) {
+					continue
+				}
+				localized, err := client.LocalizeAppDatabase(ownerID, "", targetRuntimeID)
+				if err != nil {
+					return fmt.Errorf("localize app-owned database %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
+				}
+				localizedApps[ownerID] = struct{}{}
+				if opts.Wait {
+					finalOps, err := c.waitForOperations(client, []model.Operation{localized.Operation})
+					if err != nil {
+						return err
+					}
+					if len(finalOps) > 0 {
+						operations := append([]model.Operation(nil), result.Operations...)
+						result.Operations = append(operations, finalOps[0])
+					}
+				} else {
+					result.Operations = append(result.Operations, localized.Operation)
+				}
+			}
+
+			if len(localizedApps) > 0 {
+				refreshed := make([]model.App, 0, len(candidates))
+				for _, candidate := range candidates {
+					latest, err := client.GetApp(candidate.ID)
+					if err != nil {
+						return fmt.Errorf("refresh app %s after database localization: %w", formatDisplayName(candidate.Name, candidate.ID, c.showIDs()), err)
+					}
+					refreshed = append(refreshed, latest)
+				}
+				candidates = refreshed
+				finalImpacts, finalSkipped, err := c.preflightProjectMoveApps(client, candidates, targetRuntimeID)
+				if err != nil {
+					return err
+				}
+				result.AppImpacts = append(result.AppImpacts, finalImpacts...)
+				if len(finalSkipped) > 0 {
+					if !opts.SkipBlocked {
+						return projectMoveBlockedError(project.Name, finalSkipped, skippedServices)
+					}
+					candidates = removeSkippedProjectMoveApps(candidates, finalSkipped)
+					result.Skipped = append(result.Skipped, finalSkipped...)
+				}
+			}
+			serviceCandidates, skippedServices = applyProjectMoveDependencies(candidates, result.Skipped, serviceCandidates, skippedServices)
+
 			updatedServices := make([]model.BackingService, 0, len(serviceCandidates))
-			operations := make([]model.Operation, 0, len(serviceCandidates)+len(candidates))
+			operations := append([]model.Operation(nil), result.Operations...)
 			serviceOperations := make([]model.Operation, 0, len(serviceCandidates))
 			for _, service := range serviceCandidates {
+				// App-owned databases are dependencies of their App migration,
+				// not independent backing-service migrations. They are localized
+				// in the owning App's namespace below, then the App operation is
+				// queued only after that operation has converged.
+				if strings.TrimSpace(service.OwnerAppID) != "" {
+					if _, alreadyLocalized := localizedApps[strings.TrimSpace(service.OwnerAppID)]; alreadyLocalized {
+						continue
+					}
+					localized, err := client.LocalizeAppDatabase(service.OwnerAppID, "", targetRuntimeID)
+					if err != nil {
+						return fmt.Errorf("localize app-owned database %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
+					}
+					if opts.Wait {
+						finalOps, err := c.waitForOperations(client, []model.Operation{localized.Operation})
+						if err != nil {
+							return err
+						}
+						if len(finalOps) > 0 {
+							operations = append(operations, finalOps[0])
+						}
+					} else {
+						operations = append(operations, localized.Operation)
+					}
+					continue
+				}
 				response, err := client.MigrateBackingService(service.ID, targetRuntimeID)
 				if err != nil {
 					return fmt.Errorf("move service %s: %w", formatDisplayName(service.Name, service.ID, c.showIDs()), err)
@@ -202,6 +321,9 @@ fugue project move argus --to v2202605354515455529 --dry-run
 			}
 			operations = append(operations, appOperations...)
 			result.UpdatedServices = updatedServices
+			result.Apps = candidates
+			result.Services = serviceCandidates
+			result.SkippedServices = skippedServices
 			result.Operations = operations
 			return c.renderProjectMoveResult(result)
 		},
@@ -242,12 +364,137 @@ func filterProjectMoveServices(services []model.BackingService, tenantID, projec
 			strings.TrimSpace(service.ProjectID) != strings.TrimSpace(projectID) {
 			continue
 		}
-		if strings.TrimSpace(service.OwnerAppID) != "" {
-			continue
-		}
 		out = append(out, service)
 	}
 	return out
+}
+
+// applyProjectMoveDependencies keeps App-owned databases in the project move
+// plan while preventing an orphaned database operation when its owning App is
+// blocked. An App that is already on the target runtime is still considered a
+// valid dependency: its database may be on a different runtime and must be
+// localized before the project move is complete.
+func applyProjectMoveDependencies(
+	apps []model.App,
+	skippedApps []projectMoveSkippedApp,
+	services []model.BackingService,
+	skippedServices []projectMoveSkippedService,
+) ([]model.BackingService, []projectMoveSkippedService) {
+	appState := make(map[string]string, len(apps)+len(skippedApps))
+	for _, app := range apps {
+		appState[strings.TrimSpace(app.ID)] = "candidate"
+	}
+	for _, skipped := range skippedApps {
+		id := strings.TrimSpace(skipped.App.ID)
+		if id == "" {
+			continue
+		}
+		// A server preflight may report a database-localization dependency for
+		// an app that remains an active candidate.  Candidate membership wins
+		// until a non-dependency blocker explicitly removes the app.
+		if appState[id] == "candidate" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(skipped.Reason), "blocked by ") {
+			appState[id] = "blocked"
+		} else {
+			appState[id] = "already-current"
+		}
+	}
+
+	filtered := make([]model.BackingService, 0, len(services))
+	for _, service := range services {
+		owner := strings.TrimSpace(service.OwnerAppID)
+		if owner == "" {
+			filtered = append(filtered, service)
+			continue
+		}
+		switch appState[owner] {
+		case "candidate", "already-current":
+			filtered = append(filtered, service)
+		case "blocked":
+			skippedServices = append(skippedServices, projectMoveSkippedService{
+				Service: service,
+				Reason:  "blocked by owning app migration",
+			})
+		default:
+			skippedServices = append(skippedServices, projectMoveSkippedService{
+				Service: service,
+				Reason:  "blocked by missing owning app",
+			})
+		}
+	}
+	return filtered, skippedServices
+}
+
+// preflightProjectMoveApps calls the server-side app-move dry-run for every
+// candidate. A project dry-run that only replays the CLI's local filters is not
+// authoritative: it misses image/cache, storage, runtime-reservation, and
+// database checks performed by the API.
+func (c *CLI) preflightProjectMoveApps(
+	client *Client,
+	apps []model.App,
+	targetRuntimeID string,
+) ([]model.AppMoveImpact, []projectMoveSkippedApp, error) {
+	impacts := make([]model.AppMoveImpact, 0, len(apps))
+	skipped := make([]projectMoveSkippedApp, 0)
+	for _, app := range apps {
+		response, err := client.MigrateAppDryRun(app.ID, targetRuntimeID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("preflight app %s: %w", formatDisplayName(app.Name, app.ID, c.showIDs()), err)
+		}
+		impact := response.Impact
+		impacts = append(impacts, impact)
+		if impact.Pass {
+			continue
+		}
+		reason := strings.TrimSpace(strings.Join(impact.Blockers, "; "))
+		if reason == "" {
+			reason = "server-side app move preflight failed"
+		}
+		skipped = append(skipped, projectMoveSkippedApp{App: app, Reason: "blocked by " + reason})
+	}
+	return impacts, skipped, nil
+}
+
+func projectMoveAppNeedsDatabaseLocalization(appID string, impacts []model.AppMoveImpact) bool {
+	appID = strings.TrimSpace(appID)
+	for _, impact := range impacts {
+		if strings.TrimSpace(impact.AppID) != appID {
+			continue
+		}
+		for _, database := range impact.Databases {
+			if database.RequiresLocalization {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// appMoveSkippedForDatabaseDependency distinguishes the expected two-phase
+// app-owned database move from an unrelated app blocker.  A project move may
+// execute the former dependency and retry the app preflight; it must never
+// silently turn an image, storage, or reservation failure into a retry.
+func appMoveSkippedForDatabaseDependency(item projectMoveSkippedApp, impacts []model.AppMoveImpact) bool {
+	appID := strings.TrimSpace(item.App.ID)
+	var impact *model.AppMoveImpact
+	for index := range impacts {
+		if strings.TrimSpace(impacts[index].AppID) == appID {
+			impact = &impacts[index]
+			break
+		}
+	}
+	if impact == nil || !projectMoveAppNeedsDatabaseLocalization(appID, impacts) {
+		return false
+	}
+	for _, blocker := range impact.Blockers {
+		if strings.Contains(strings.ToLower(blocker), "managed postgres must be localized") {
+			continue
+		}
+		return false
+	}
+	return len(impact.Blockers) > 0
 }
 
 func planProjectMoveServices(services []model.BackingService, targetRuntimeID string) ([]model.BackingService, []projectMoveSkippedService) {
@@ -398,6 +645,7 @@ func (c *CLI) renderProjectMoveResult(result projectMoveResult) error {
 		kvPair{Key: "target_runtime_id", Value: result.TargetRuntimeID},
 		kvPair{Key: "dry_run", Value: fmt.Sprintf("%t", result.DryRun)},
 		kvPair{Key: "candidate_apps", Value: fmt.Sprintf("%d", len(result.Apps))},
+		kvPair{Key: "app_preflights", Value: fmt.Sprintf("%d", len(result.AppImpacts))},
 		kvPair{Key: "candidate_services", Value: fmt.Sprintf("%d", len(result.Services))},
 		kvPair{Key: "updated_services", Value: fmt.Sprintf("%d", len(result.UpdatedServices))},
 		kvPair{Key: "queued_operations", Value: fmt.Sprintf("%d", len(result.Operations))},
