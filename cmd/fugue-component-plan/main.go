@@ -43,6 +43,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("fugue-component-plan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	manifestPath := flags.String("manifest", "docs/architecture/component-ownership-v1.yaml", "component ownership manifest")
+	coordination := flags.Bool("coordination", false, "emit the observation-only coordination plan")
 	var changedPaths stringList
 	flags.Var(&changedPaths, "path", "repository-relative changed path (repeat for each path)")
 	if err := flags.Parse(args); err != nil {
@@ -67,7 +68,15 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(plan, "", "  ")
+	var output any = plan
+	if *coordination {
+		coordinationPlan, coordinationErr := componentmanifest.BuildShadowCoordinationPlan(plan)
+		if coordinationErr != nil {
+			return coordinationErr
+		}
+		output = coordinationPlan
+	}
+	encoded, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode component change plan: %w", err)
 	}

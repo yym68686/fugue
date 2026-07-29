@@ -48,8 +48,11 @@ The input-boundary CLI is deliberately read-only. For example:
 
 ```console
 go run ./cmd/fugue-component-plan \
+  --coordination \
   --path cmd/fugue-image-cache/main.go
 ```
 
 The caller must obtain the paths from trusted revision evidence; the command
-does not run `git diff`, read live state, or dispatch a workflow.
+does not run `git diff`, read live state, or dispatch a workflow. Coordination
+output includes the globally sorted lane/resource lock order and recovery lanes,
+but is hard-coded as observation-only and cannot authorize production mutation.

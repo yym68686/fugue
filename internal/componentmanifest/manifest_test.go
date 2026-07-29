@@ -111,6 +111,7 @@ components:
 		"unknown coordinator": strings.Replace(base, "coordinator: release-control\n    ownedState: [image-inventory]", "coordinator: missing\n    ownedState: [image-inventory]", 1),
 		"bad contract":        strings.Replace(base, "image-availability@v1", "image-availability", 1),
 		"overlapping source":  strings.Replace(base, "sourceRoots: [cmd/fugue-image-cache]", "sourceRoots: [internal/platformcontrol/subpackage]", 1),
+		"unsafe legacy key":   strings.Replace(base, "legacyRelease: fugue", "legacyRelease: ../fugue", 1),
 		"duplicate dependency": strings.Replace(
 			base,
 			"dependencies: []\n    failureBoundary: image-plane",
