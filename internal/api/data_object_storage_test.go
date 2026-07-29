@@ -157,6 +157,52 @@ func TestDataMultipartPartSizeForObjectKeepsPartCountWithinS3Limit(t *testing.T)
 	}
 }
 
+func TestDeleteLogicalObjectsAppliesPrefixExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	var requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !hasQueryKey(r, "delete") {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`))
+	}))
+	defer server.Close()
+	backend := newTestDataObjectBackend(t, server.URL)
+	backend.backend.Prefix = "backup-root"
+
+	if err := backend.deleteLogicalObjects(context.Background(), []string{"apps/tenant/run/database.dump"}); err != nil {
+		t.Fatalf("delete logical object: %v", err)
+	}
+	if !strings.Contains(requestBody, "<Key>backup-root/apps/tenant/run/database.dump</Key>") {
+		t.Fatalf("delete request did not apply backend prefix exactly once: %s", requestBody)
+	}
+}
+
+func TestDeleteObjectsReportsPerObjectS3Errors(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Error><Key>backup-root/object</Key><Code>AccessDenied</Code><Message>denied</Message></Error></DeleteResult>`))
+	}))
+	defer server.Close()
+	backend := newTestDataObjectBackend(t, server.URL)
+
+	err := backend.deleteObjects(context.Background(), []string{"backup-root/object"})
+	if err == nil || !strings.Contains(err.Error(), "AccessDenied") {
+		t.Fatalf("per-object delete error was not surfaced: %v", err)
+	}
+}
+
 type fakeS3MultipartServer struct {
 	*httptest.Server
 	t             *testing.T
