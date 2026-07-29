@@ -4780,6 +4780,41 @@ func TestRunAdminNodeUpdaterTaskCreateTargetsRuntime(t *testing.T) {
 	}
 }
 
+func TestRunAdminNodeUpdaterTaskCreateAllowRestartWithoutPayload(t *testing.T) {
+	t.Parallel()
+
+	var gotBody nodeUpdateTaskCreateRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/node-update-tasks" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode node update task body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"task":{"id":"task_zram","node_updater_id":"updater_123","cluster_node_name":"node-a","type":"reconcile-host-zram","status":"pending","payload":{"allow_restart":"true"},"created_at":"2026-07-29T00:00:00Z","updated_at":"2026-07-29T00:00:00Z"}}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "node-updater", "task", "create",
+		"--cluster-node", "node-a",
+		"--type", "reconcile-host-zram",
+		"--allow-restart",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run node-updater task create: %v", err)
+	}
+
+	if gotBody.ClusterNodeName != "node-a" || gotBody.Type != model.NodeUpdateTaskTypeReconcileHostZRAM || gotBody.Payload["allow_restart"] != "true" {
+		t.Fatalf("unexpected node update task request %+v", gotBody)
+	}
+}
+
 func TestRunAdminDiscoveryBundleShow(t *testing.T) {
 	t.Parallel()
 

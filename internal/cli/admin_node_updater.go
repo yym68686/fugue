@@ -317,6 +317,14 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if payload == nil && (flagChanged(cmd, "dry-run") ||
+				flagChanged(cmd, "allow-delete") ||
+				flagChanged(cmd, "allow-restart") ||
+				flagChanged(cmd, "expected-lv-count") ||
+				flagChanged(cmd, "expected-bound-pv-count") ||
+				flagChanged(cmd, "expected-image-size-bytes")) {
+				payload = make(map[string]string)
+			}
 			if flagChanged(cmd, "dry-run") {
 				payload["dry_run"] = fmt.Sprintf("%t", opts.DryRun)
 			}
