@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -36,6 +37,10 @@ type destinationImageCacheVerifyFunc func(
 	string,
 	string,
 ) (destinationImageCacheVerification, error)
+
+func imageCacheManagementTokenFromEnv() string {
+	return strings.TrimSpace(os.Getenv("FUGUE_BOOTSTRAP_ADMIN_KEY"))
+}
 
 func newDestinationImageCacheVerifier(managementToken string) destinationImageCacheVerifyFunc {
 	managementToken = strings.TrimSpace(managementToken)

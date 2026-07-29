@@ -125,7 +125,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		builderRegistryPushBase:        strings.TrimSpace(cfg.BuilderRegistryPushBase),
 		resolveManagedImageDigestRef:   sourceimport.ResolveRemoteImageDigestRef,
 		resolveRemoteImageDigest:       sourceimport.ResolveRemoteImageDigest,
-		verifyDestinationImageCache:    newDestinationImageCacheVerifier(cfg.BootstrapAdminKey),
+		verifyDestinationImageCache:    newDestinationImageCacheVerifier(imageCacheManagementTokenFromEnv()),
 		releaseGateMetricsQuerier:      controllerReleaseGateMetricsQuerier(cfg),
 		safeRolloutDrainMetricsQuerier: controllerSafeRolloutDrainMetricsQuerier(cfg),
 		latestGitHubCommit:             sourceimport.LatestGitHubCommit,

@@ -83,6 +83,25 @@ func TestDestinationImageCacheVerifierRejectsMissingManagementCredential(t *test
 	}
 }
 
+func TestImageCacheManagementTokenFromEnvFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "unset equivalent", value: "", want: ""},
+		{name: "blank", value: "   ", want: ""},
+		{name: "configured", value: " image-cache-management-secret ", want: "image-cache-management-secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("FUGUE_BOOTSTRAP_ADMIN_KEY", test.value)
+			if got := imageCacheManagementTokenFromEnv(); got != test.want {
+				t.Fatalf("image-cache management token = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDestinationImageCacheVerifierRejectsAbsoluteCrossHostRedirect(t *testing.T) {
 	t.Parallel()
 	testDestinationImageCacheVerifierRejectsCrossHostRedirect(t, false)

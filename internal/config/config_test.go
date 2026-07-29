@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"testing"
 	"time"
 )
@@ -210,28 +209,6 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	cfg := ControllerFromEnv()
 	if cfg.AppObservabilityEndpoint != "http://telemetry-agent.fugue-system.svc.cluster.local:7834" {
 		t.Fatalf("expected app observability endpoint from env, got %q", cfg.AppObservabilityEndpoint)
-	}
-}
-
-func TestControllerFromEnvReadsImageCacheManagementCredential(t *testing.T) {
-	t.Setenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "image-cache-management-secret")
-
-	cfg := ControllerFromEnv()
-	if cfg.BootstrapAdminKey != "image-cache-management-secret" {
-		t.Fatalf("expected controller image-cache management credential from env, got %q", cfg.BootstrapAdminKey)
-	}
-}
-
-func TestControllerFromEnvLeavesMissingImageCacheManagementCredentialEmpty(t *testing.T) {
-	for _, value := range []string{"", "   "} {
-		t.Run(fmt.Sprintf("value_%q", value), func(t *testing.T) {
-			t.Setenv("FUGUE_BOOTSTRAP_ADMIN_KEY", value)
-
-			cfg := ControllerFromEnv()
-			if cfg.BootstrapAdminKey != "" {
-				t.Fatalf("expected missing image-cache management credential to fail closed, got %q", cfg.BootstrapAdminKey)
-			}
-		})
 	}
 }
 
