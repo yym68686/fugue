@@ -3351,6 +3351,23 @@ image_cache_source_changed_between_refs() {
 		go.sum
 }
 
+image_cache_source_changed_in_release_files() {
+	local file=""
+	while IFS= read -r file; do
+		file="$(trim_field "${file}")"
+		[[ -n "${file}" ]] || continue
+		case "${file}" in
+			cmd/fugue-image-cache/*)
+				[[ "${file}" != *_test.go ]] && return 0
+				;;
+			Dockerfile.image-cache|go.mod|go.sum)
+				return 0
+			;;
+		esac
+	done < <(release_changed_files)
+	return 1
+}
+
 source_changed_between_refs() {
 	local old_ref="$1"
 	local new_ref="$2"
@@ -3425,15 +3442,33 @@ public_data_plane_dns_source_changed_between_refs() {
 
 node_local_build_plane_image_rollout_allowed() {
   local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
-  local live_image_ref live_tag target_tag
+  local live_image_ref live_tag target_tag target_ref source_status
 
   target_tag="$(trim_field "${FUGUE_IMAGE_CACHE_IMAGE_TAG:-}")"
   [[ -n "${target_tag}" ]] || return 1
+  target_ref="$(release_diff_new_ref)" || return 1
+  [[ "${target_tag}" == "${target_ref}" ]] || return 1
   live_image_ref="$(trim_field "$(live_daemonset_container_image "${image_cache_ds}" "image-cache")")"
   [[ -n "${live_image_ref}" ]] || return 1
   live_tag="$(image_ref_tag "${live_image_ref}")"
   [[ -n "${live_tag}" ]] || return 1
-  image_cache_source_changed_between_refs "${live_tag}" "${target_tag}"
+  if image_cache_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+    return 0
+  else
+    source_status=$?
+  fi
+  if [[ "${source_status}" == "2" ]] && image_cache_source_changed_in_release_files; then
+    # A live image tag is normally a Git commit, but old tags can outlive the
+    # repository's reachable object set.  The release baseline/build plan has
+    # already attributed the changed source files and built the target image;
+    # refusing the rollout here would silently preserve the vulnerable live
+    # image forever.  Fall back only for an unavailable old ref, only when the
+    # target tag is the exact release SHA, and only when a production source
+    # file (not a test) changed.
+    log "live image-cache source ref ${live_tag} is unavailable; using explicit release-file attribution to allow rollout to ${target_tag}"
+    return 0
+  fi
+  return 1
 }
 
 skip_singleton_rollout_wait_for_node_local_override() {

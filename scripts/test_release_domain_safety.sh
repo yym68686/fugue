@@ -11598,6 +11598,7 @@ fi
 restore_temp_release_env
 FUGUE_RELEASE_FULLNAME=fugue-fugue
 FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
+FUGUE_RELEASE_AFTER_SHA="${IMAGE_CACHE_REF}"
 live_daemonset_container_image() {
   printf 'ghcr.io/acme/fugue-image-cache:%s' "${SCRIPT_REF}"
 }
@@ -11605,6 +11606,22 @@ node_local_build_plane_image_rollout_allowed || fail "live image-cache tag behin
 FUGUE_IMAGE_CACHE_IMAGE_TAG="${SCRIPT_REF}"
 if node_local_build_plane_image_rollout_allowed; then
   fail "matching live and target image-cache tags must not roll image-cache"
+fi
+
+# A live image tag can point at a commit that has aged out of the runner's
+# reachable object set.  An explicitly attributed production source change for
+# the exact release SHA must still allow the already-built image to roll out;
+# otherwise the release silently preserves the vulnerable live image forever.
+FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
+FUGUE_RELEASE_AFTER_SHA="${IMAGE_CACHE_REF}"
+FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go'
+live_daemonset_container_image() {
+  printf 'ghcr.io/acme/fugue-image-cache:missing-live-ref'
+}
+node_local_build_plane_image_rollout_allowed || fail "explicit image-cache source attribution must allow rollout when the live ref is unavailable"
+FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main_test.go'
+if node_local_build_plane_image_rollout_allowed; then
+  fail "image-cache test-only changes must not allow a fallback rollout"
 fi
 REPO_ROOT="${ORIGINAL_REPO_ROOT}"
 
