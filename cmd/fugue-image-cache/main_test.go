@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -21,6 +23,173 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/registry"
 )
+
+func TestRunImageCacheHTTPServerShutsDownAndDrainsBackgroundWork(t *testing.T) {
+	lifecycle, cancel := context.WithCancel(context.Background())
+	cache := &imageCache{lifecycle: lifecycle}
+	backgroundStarted := make(chan struct{})
+	backgroundStopped := make(chan struct{})
+	if !cache.startBackground(func(ctx context.Context) {
+		close(backgroundStarted)
+		<-ctx.Done()
+		close(backgroundStopped)
+	}) {
+		t.Fatal("expected background task to start")
+	}
+	<-backgroundStarted
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+	result := make(chan error, 1)
+	go func() {
+		result <- runImageCacheHTTPServer(lifecycle, server, listener, time.Second, cache.waitForBackground)
+	}()
+
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatalf("GET image cache test server: %v", err)
+	}
+	_ = response.Body.Close()
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("runImageCacheHTTPServer() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("image cache server did not shut down")
+	}
+	select {
+	case <-backgroundStopped:
+	case <-time.After(time.Second):
+		t.Fatal("image cache background work was not canceled and drained")
+	}
+	if cache.startBackground(func(context.Context) {}) {
+		t.Fatal("canceled image cache accepted new background work")
+	}
+}
+
+func TestRunImageCacheHTTPServerDrainsActiveRequest(t *testing.T) {
+	lifecycle, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	var started sync.Once
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		started.Do(func() { close(requestStarted) })
+		<-releaseRequest
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	result := make(chan error, 1)
+	go func() {
+		result <- runImageCacheHTTPServer(lifecycle, server, listener, time.Second, nil)
+	}()
+	requestResult := make(chan error, 1)
+	go func() {
+		response, requestErr := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + listener.Addr().String())
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestResult <- requestErr
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active request did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		t.Fatalf("server returned before active request drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseRequest)
+	if err := <-requestResult; err != nil {
+		t.Fatalf("active request failed during graceful shutdown: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("graceful active-request shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not finish after active request drained")
+	}
+}
+
+func TestRunImageCacheHTTPServerFailsClosedOnShutdownTimeout(t *testing.T) {
+	lifecycle, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+	})}
+	result := make(chan error, 1)
+	go func() {
+		result <- runImageCacheHTTPServer(lifecycle, server, listener, 50*time.Millisecond, nil)
+	}()
+	go func() {
+		response, _ := (&http.Client{Timeout: time.Second}).Get("http://" + listener.Addr().String())
+		if response != nil {
+			_ = response.Body.Close()
+		}
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocking request did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "HTTP shutdown") || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown timeout error = %v, want fail-closed deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not enforce its shutdown deadline")
+	}
+	close(releaseRequest)
+}
+
+func TestRunImageCacheHTTPServerRejectsInvalidBoundary(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	server := &http.Server{}
+	for name, run := range map[string]func() error{
+		"nil context":  func() error { return runImageCacheHTTPServer(nil, server, listener, time.Second, nil) },
+		"nil server":   func() error { return runImageCacheHTTPServer(context.Background(), nil, listener, time.Second, nil) },
+		"nil listener": func() error { return runImageCacheHTTPServer(context.Background(), server, nil, time.Second, nil) },
+		"zero timeout": func() error { return runImageCacheHTTPServer(context.Background(), server, listener, 0, nil) },
+		"negative timeout": func() error {
+			return runImageCacheHTTPServer(context.Background(), server, listener, -time.Second, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); err == nil {
+				t.Fatal("runImageCacheHTTPServer() unexpectedly succeeded")
+			}
+		})
+	}
+}
 
 func TestFilesystemUsageFromStatfsCountsReservedBlocksAsUnavailable(t *testing.T) {
 	t.Parallel()
@@ -40,6 +209,49 @@ func TestFilesystemUsageFromStatfsCountsReservedBlocksAsUnavailable(t *testing.T
 	}
 	if total != used+free {
 		t.Fatalf("filesystem usage is inconsistent: total=%d used=%d free=%d", total, used, free)
+	}
+}
+
+func TestHydrateInheritsImagePlaneLifecycle(t *testing.T) {
+	lifecycle, cancel := context.WithCancel(context.Background())
+	copyStarted := make(chan struct{})
+	cache := &imageCache{
+		lifecycle:      lifecycle,
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		upstreamBase:   "upstream.example.com:5000",
+		cacheEndpoint:  "http://127.0.0.1:5000",
+		hydrateTimeout: time.Minute,
+		hydrateSlots:   newSemaphore(1),
+		copyJobs:       1,
+		copyImageFn: func(ctx context.Context, _, _ string) error {
+			close(copyStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- cache.hydrate(context.Background(), "library/nginx", "latest")
+	}()
+	select {
+	case <-copyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("hydrate copy did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("hydrate error = %v, want lifecycle cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hydrate ignored image-plane lifecycle cancellation")
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
+	defer drainCancel()
+	if err := cache.waitForBackground(drainCtx); err != nil {
+		t.Fatalf("drain canceled hydrate: %v", err)
 	}
 }
 
@@ -880,7 +1092,7 @@ func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 	if err := cache.replayManifest(persistedManifest{Repo: "fugue-apps/demo", Target: "image-incomplete", ContentType: "application/vnd.oci.image.manifest.v1+json", Body: manifest}); err != nil {
 		t.Fatalf("replay manifest: %v", err)
 	}
-	inventory, err := cache.managementManifestInventory()
+	inventory, err := cache.managementManifestInventory(context.Background())
 	if err != nil {
 		t.Fatalf("incomplete inventory: %v", err)
 	}
@@ -890,7 +1102,7 @@ func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 
 	writeTestImageCacheBlob(t, storeDir, []byte("{}"))
 	writeTestImageCacheBlob(t, storeDir, []byte("x"))
-	inventory, err = cache.managementManifestInventory()
+	inventory, err = cache.managementManifestInventory(context.Background())
 	if err != nil {
 		t.Fatalf("complete inventory: %v", err)
 	}
@@ -904,6 +1116,15 @@ func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 		if digest, _ := entry["digest"].(string); digest != manifestBodyDigest(manifest) {
 			t.Fatalf("canonical digest = %q, want %q", digest, manifestBodyDigest(manifest))
 		}
+	}
+}
+
+func TestManagementManifestInventoryHonorsCanceledRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cache := &imageCache{manifestDir: t.TempDir()}
+	if _, err := cache.managementManifestInventory(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("managementManifestInventory() error = %v, want request cancellation", err)
 	}
 }
 
@@ -933,7 +1154,7 @@ func TestManagementManifestInventoryRejectsMissingChildBlob(t *testing.T) {
 	if err := cache.persistManifest("fugue-apps/demo", "image-index", "application/vnd.docker.distribution.manifest.list.v2+json", parent); err != nil {
 		t.Fatalf("persist parent journal: %v", err)
 	}
-	inventory, err := cache.managementManifestInventory()
+	inventory, err := cache.managementManifestInventory(context.Background())
 	if err != nil {
 		t.Fatalf("missing child blob inventory: %v", err)
 	}
@@ -1350,7 +1571,7 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 			t.Fatalf("head %s status after restart = %d, want %d; body=%q", target, headRec.Code, http.StatusOK, headRec.Body.String())
 		}
 	}
-	inventory, err := restarted.managementManifestInventory()
+	inventory, err := restarted.managementManifestInventory(context.Background())
 	if err != nil {
 		t.Fatalf("management manifest inventory: %v", err)
 	}
@@ -1388,7 +1609,7 @@ func TestManagementManifestInventoryExcludesPersistedIndexThatFailedReplay(t *te
 	if cache.localManifestAvailable("fugue-apps/demo", "image-index") {
 		t.Fatal("index with a missing child must not be locally servable")
 	}
-	inventory, err := cache.managementManifestInventory()
+	inventory, err := cache.managementManifestInventory(context.Background())
 	if err != nil {
 		t.Fatalf("management manifest inventory: %v", err)
 	}

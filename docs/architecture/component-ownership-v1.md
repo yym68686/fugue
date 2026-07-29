@@ -139,6 +139,13 @@ permission and no registry login, package write, push, Helm, kubectl, or
 production environment. This is an independent compilation boundary only: the
 live image-cache DaemonSet remains owned by the legacy `fugue` Helm release, so
 the new lane cannot publish or replace it yet.
+The image-plane process now also owns a bounded lifecycle boundary: SIGTERM or
+SIGINT stops discovery of new background hydrate/report work, drains active HTTP
+requests and cache-owned jobs under one 25-second deadline, and exits non-zero
+if that handoff cannot complete. Its probe runs with a read-only root and an
+external writable store and verifies the same graceful-stop contract. Request-
+scoped image-graph checks inherit cancellation instead of creating an
+uncancelable process-wide operation.
 
 The explicit enablement contract is file-based and has no token environment
 variable: `FUGUE_RELEASE_CONTROL_ENABLED=true`,

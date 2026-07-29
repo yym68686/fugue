@@ -55,3 +55,11 @@ if [[ ! -d "${store_dir}/registry" ]]; then
   printf 'image-plane container did not initialize its external store\n' >&2
   exit 1
 fi
+
+docker stop --time 5 "${container}" >/dev/null
+exit_code="$(docker inspect --format '{{.State.ExitCode}}' "${container}")"
+if [[ "${exit_code}" != "0" ]]; then
+  docker logs "${container}" >&2 || true
+  printf 'image-plane container did not complete graceful shutdown: exit=%s\n' "${exit_code}" >&2
+  exit 1
+fi

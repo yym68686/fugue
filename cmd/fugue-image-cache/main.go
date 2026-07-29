@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -43,6 +44,7 @@ const (
 	defaultImageCacheLowWatermarkPercent  = 45
 	defaultImageCacheMinFreeBytes         = int64(50 * 1024 * 1024 * 1024)
 	defaultImageCacheMaxDeleteBytesPerRun = int64(10 * 1024 * 1024 * 1024)
+	defaultImageCacheShutdownTimeout      = 25 * time.Second
 	imageCacheUploadDirName               = "_uploads"
 )
 
@@ -73,6 +75,8 @@ type imageCache struct {
 	sourceMu        sync.RWMutex
 	sourceByTarget  map[string]sourceCacheEntry
 	sourceTTL       time.Duration
+	lifecycle       context.Context
+	background      sync.WaitGroup
 }
 
 type imageCacheDiskLimit struct {
@@ -133,6 +137,9 @@ type imageCacheBlobUploadState struct {
 }
 
 func main() {
+	lifecycle, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	listenAddr := env("FUGUE_IMAGE_CACHE_LISTEN_ADDR", ":5000")
 	storeDir := env("FUGUE_IMAGE_CACHE_STORE_DIR", "/var/lib/fugue/image-cache/registry")
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
@@ -148,7 +155,7 @@ func main() {
 	}
 	clusterNode := env("FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME", os.Getenv("NODE_NAME"))
 	if clusterNode == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(lifecycle, 5*time.Second)
 		discovered, err := discoverKubernetesPodNodeName(ctx)
 		cancel()
 		if err != nil {
@@ -185,6 +192,7 @@ func main() {
 			MinFreeBytes:         envBytes("FUGUE_IMAGE_CACHE_MIN_FREE_BYTES", defaultImageCacheMinFreeBytes),
 			MaxDeleteBytesPerRun: envBytes("FUGUE_IMAGE_CACHE_MAX_DELETE_BYTES_PER_RUN", defaultImageCacheMaxDeleteBytesPerRun),
 		},
+		lifecycle: lifecycle,
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
 		log.Print("control-plane API credentials are not configured; cache will serve local registry storage only")
@@ -195,15 +203,94 @@ func main() {
 	if err := cache.loadPersistedManifests(); err != nil {
 		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
-	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d disk_limit_enabled=%t high_watermark=%.2f low_watermark=%.2f min_free_bytes=%d max_delete_bytes_per_run=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs, cache.diskLimit.Enabled, cache.diskLimit.HighWatermarkPercent, cache.diskLimit.LowWatermarkPercent, cache.diskLimit.MinFreeBytes, cache.diskLimit.MaxDeleteBytesPerRun)
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           cache,
 		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
 	}
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		log.Fatalf("listen on %s: %v", listenAddr, err)
 	}
+	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d disk_limit_enabled=%t high_watermark=%.2f low_watermark=%.2f min_free_bytes=%d max_delete_bytes_per_run=%d", listener.Addr().String(), filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs, cache.diskLimit.Enabled, cache.diskLimit.HighWatermarkPercent, cache.diskLimit.LowWatermarkPercent, cache.diskLimit.MinFreeBytes, cache.diskLimit.MaxDeleteBytesPerRun)
+	if err := runImageCacheHTTPServer(
+		lifecycle,
+		server,
+		listener,
+		defaultImageCacheShutdownTimeout,
+		cache.waitForBackground,
+	); err != nil {
+		log.Fatalf("serve image cache: %v", err)
+	}
+}
+
+// runImageCacheHTTPServer owns the component's network and shutdown boundary.
+// It stops accepting requests on cancellation, drains in-flight HTTP work and
+// then waits for cache-owned hydrate/report jobs under the same deadline. A
+// timeout force-closes the listener and returns an error instead of claiming a
+// clean lane-local handoff.
+func runImageCacheHTTPServer(
+	ctx context.Context,
+	server *http.Server,
+	listener net.Listener,
+	shutdownTimeout time.Duration,
+	drain func(context.Context) error,
+) error {
+	if ctx == nil {
+		return errors.New("image cache server context is nil")
+	}
+	if server == nil {
+		return errors.New("image cache HTTP server is nil")
+	}
+	if listener == nil {
+		return errors.New("image cache listener is nil")
+	}
+	if shutdownTimeout <= 0 {
+		return errors.New("image cache shutdown timeout must be positive")
+	}
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveDone:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("HTTP server stopped unexpectedly: %w", err)
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		_ = server.Close()
+	}
+	drainErr := error(nil)
+	if drain != nil {
+		drainErr = drain(shutdownCtx)
+		if drainErr != nil {
+			_ = server.Close()
+		}
+	}
+	serveErr := <-serveDone
+
+	var failures []error
+	if shutdownErr != nil {
+		failures = append(failures, fmt.Errorf("HTTP shutdown: %w", shutdownErr))
+	}
+	if drainErr != nil {
+		failures = append(failures, fmt.Errorf("background drain: %w", drainErr))
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		failures = append(failures, fmt.Errorf("HTTP server shutdown: %w", serveErr))
+	}
+	return errors.Join(failures...)
 }
 
 func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -331,8 +418,8 @@ func (c *imageCache) authorizeManagement(r *http.Request) bool {
 	return false
 }
 
-func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Request) {
-	manifests, err := c.managementManifestInventory()
+func (c *imageCache) handleManagementInventory(w http.ResponseWriter, r *http.Request) {
+	manifests, err := c.managementManifestInventory(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1290,7 +1377,13 @@ func blobEntry(record imageCacheBlobRecord) imageCacheBlobEntry {
 	return imageCacheBlobEntry{Digest: record.Digest, SizeBytes: record.SizeBytes, ModifiedAt: modifiedAt}
 }
 
-func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
+func (c *imageCache) managementManifestInventory(ctx context.Context) ([]map[string]any, error) {
+	if ctx == nil {
+		return nil, errors.New("management inventory context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	records, err := c.managementManifestRecords()
 	if err != nil {
 		return nil, err
@@ -1307,8 +1400,11 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 		// while a config/layer or child manifest has disappeared, so a manifest
 		// HEAD is not an availability proof. Walk the complete local graph and
 		// omit incomplete records from the inventory snapshot.
-		graph, err := c.checkLocalImageGraph(context.Background(), record.Repo, record.Target, false)
+		graph, err := c.checkLocalImageGraph(ctx, record.Repo, record.Target, false)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			continue
 		}
 		entry := manifestEntry(record, blobByDigest)
@@ -2596,6 +2692,49 @@ func (w *statusRecordingWriter) statusCode() int {
 	return w.status
 }
 
+func (c *imageCache) backgroundContext() context.Context {
+	if c != nil && c.lifecycle != nil {
+		return c.lifecycle
+	}
+	return context.Background()
+}
+
+func (c *imageCache) startBackground(work func(context.Context)) bool {
+	if c == nil || work == nil {
+		return false
+	}
+	ctx := c.backgroundContext()
+	if ctx.Err() != nil {
+		return false
+	}
+	c.background.Add(1)
+	go func() {
+		defer c.background.Done()
+		work(ctx)
+	}()
+	return true
+}
+
+func (c *imageCache) waitForBackground(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("background drain context is nil")
+	}
+	done := make(chan struct{})
+	go func() {
+		c.background.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (c *imageCache) reportRegistryWrite(r *http.Request, status int, manifestBody []byte) {
 	if r == nil || r.URL == nil || status < 200 || status >= 300 {
 		return
@@ -2612,8 +2751,8 @@ func (c *imageCache) reportRegistryWrite(r *http.Request, status int, manifestBo
 	if digest == "" {
 		digest = bodyDigest
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	c.startBackground(func(lifecycle context.Context) {
+		ctx, cancel := context.WithTimeout(lifecycle, 15*time.Second)
 		defer cancel()
 		if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
 			log.Printf("report pushed image location ref=%s failed: %v", logicalRef, err)
@@ -2625,7 +2764,7 @@ func (c *imageCache) reportRegistryWrite(r *http.Request, status int, manifestBo
 		if err := c.report(ctx, digestRef, digest, "present", ""); err != nil {
 			log.Printf("report pushed image location ref=%s failed: %v", digestRef, err)
 		}
-	}()
+	})
 }
 
 type registryTargetKind string
@@ -2673,8 +2812,8 @@ func (c *imageCache) joinHydrate(key, repo, target string) *hydrateCall {
 		waiters: 1,
 	}
 	c.hydrateCalls[key] = call
-	go func() {
-		err := c.hydrateOnce(context.Background(), repo, target)
+	if !c.startBackground(func(lifecycle context.Context) {
+		err := c.hydrateOnce(lifecycle, repo, target)
 
 		c.hydrateMu.Lock()
 		call.err = err
@@ -2683,7 +2822,11 @@ func (c *imageCache) joinHydrate(key, repo, target string) *hydrateCall {
 		}
 		c.hydrateMu.Unlock()
 		close(call.done)
-	}()
+	}) {
+		delete(c.hydrateCalls, key)
+		call.err = context.Canceled
+		close(call.done)
+	}
 	return call
 }
 
@@ -3611,7 +3754,7 @@ func (c *imageCache) proxyManifestFromRemote(w http.ResponseWriter, r *http.Requ
 			return true
 		}
 		if result.missing && source.location.CacheEndpoint != "" {
-			reportCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			reportCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			if err := c.reportLocation(reportCtx, source.location, logicalRef, digest, "missing", fmt.Sprintf("proxy status=%d", result.status)); err != nil {
 				log.Printf("report stale peer image location ref=%s endpoint=%s failed: %v", logicalRef, source.location.CacheEndpoint, err)
 			}
