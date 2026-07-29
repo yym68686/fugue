@@ -1998,6 +1998,11 @@ func backupRetryDelay(retryCount int) time.Duration {
 }
 
 func (s *Server) runBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+	var err error
+	run, err = s.rebindAppDatabaseBackupTarget(run)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(run.TenantID) != "" {
 		if err := s.validateTenantBackupTarget(run.TenantID, run.ProjectID, run.AppID, run.Target); err != nil {
 			return nil, errBackupTargetNotAuthorized
@@ -2020,6 +2025,57 @@ func (s *Server) runBackup(ctx context.Context, run model.BackupRun) ([]model.Ba
 	default:
 		return nil, fmt.Errorf("unsupported_target: %s", run.Target.Type)
 	}
+}
+
+// rebindAppDatabaseBackupTarget treats the runtime placement of an app-owned
+// database as volatile execution state, not as part of the policy's stable
+// authorization identity. Policies and queued retries can outlive a database
+// switchover, so resolve the current managed Postgres placement before the
+// normal tenant/runtime authorization checks and before producing artifacts.
+func (s *Server) rebindAppDatabaseBackupTarget(run model.BackupRun) (model.BackupRun, error) {
+	target := model.NormalizeBackupTarget(run.Target)
+	if target.Type != model.BackupTargetAppDatabase {
+		return run, nil
+	}
+	appID := firstNonEmptyString(run.AppID, target.AppID)
+	if appID == "" {
+		return run, nil
+	}
+	app, err := s.store.GetApp(appID)
+	if err != nil {
+		return run, err
+	}
+	if run.TenantID != "" && strings.TrimSpace(run.TenantID) != strings.TrimSpace(app.TenantID) {
+		return run, errBackupTargetNotAuthorized
+	}
+	if run.ProjectID != "" && strings.TrimSpace(run.ProjectID) != strings.TrimSpace(app.ProjectID) {
+		return run, errBackupTargetNotAuthorized
+	}
+	if run.AppID != "" && strings.TrimSpace(run.AppID) != strings.TrimSpace(app.ID) {
+		return run, errBackupTargetNotAuthorized
+	}
+	if target.TenantID != "" && target.TenantID != app.TenantID {
+		return run, errBackupTargetNotAuthorized
+	}
+	if target.ProjectID != "" && target.ProjectID != app.ProjectID {
+		return run, errBackupTargetNotAuthorized
+	}
+	if target.AppID != "" && target.AppID != app.ID {
+		return run, errBackupTargetNotAuthorized
+	}
+	postgres := store.OwnedManagedPostgresSpec(app)
+	if postgres == nil {
+		return run, nil
+	}
+	target.TenantID = app.TenantID
+	target.ProjectID = app.ProjectID
+	target.AppID = app.ID
+	target.Name = firstNonEmptyString(target.Name, app.Name)
+	target.RuntimeID = firstNonEmptyString(postgres.RuntimeID, app.Spec.RuntimeID)
+	target.ServiceName = firstNonEmptyString(postgres.ServiceName, target.ServiceName)
+	target.Database = firstNonEmptyString(postgres.Database, target.Database)
+	run.Target = model.NormalizeBackupTarget(target)
+	return run, nil
 }
 
 func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
@@ -2165,11 +2221,11 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	if postgres == nil {
 		return nil, fmt.Errorf("managed_postgres_missing: app has no Fugue-managed PostgreSQL database")
 	}
-	serviceName := firstNonEmptyString(run.Target.ServiceName, postgres.ServiceName)
-	database := firstNonEmptyString(run.Target.Database, postgres.Database)
+	serviceName := firstNonEmptyString(postgres.ServiceName, run.Target.ServiceName)
+	database := firstNonEmptyString(postgres.Database, run.Target.Database)
 	user := strings.TrimSpace(postgres.User)
 	password := strings.TrimSpace(postgres.Password)
-	runtimeID := firstNonEmptyString(run.Target.RuntimeID, postgres.RuntimeID, app.Spec.RuntimeID)
+	runtimeID := firstNonEmptyString(postgres.RuntimeID, app.Spec.RuntimeID, run.Target.RuntimeID)
 	if serviceName == "" || database == "" || user == "" || password == "" {
 		return nil, fmt.Errorf("managed_postgres_incomplete: service, database, user, and password are required")
 	}

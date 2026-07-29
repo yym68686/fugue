@@ -347,6 +347,34 @@ func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T)
 	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
 		t.Fatalf("expected visible app runtime unrelated to the database target to be unauthorized, got %v", err)
 	}
+	if rebound, err := server.rebindAppDatabaseBackupTarget(model.BackupRun{
+		TenantID:  appTenant.ID,
+		ProjectID: project.ID,
+		AppID:     app.ID,
+		Target:    target,
+	}); err != nil {
+		t.Fatalf("rebind stale app database backup target: %v", err)
+	} else if rebound.Target.RuntimeID != databaseRuntime.ID || rebound.Target.ServiceName != target.ServiceName || rebound.Target.Database != target.Database {
+		t.Fatalf("expected stale policy target to follow the current managed database placement, got %+v", rebound.Target)
+	}
+	if _, err := server.runBackup(context.Background(), model.BackupRun{
+		TenantID:  appTenant.ID,
+		ProjectID: project.ID,
+		AppID:     app.ID,
+		Target:    target,
+	}); err == nil || errors.Is(err, errBackupTargetNotAuthorized) || !strings.Contains(err.Error(), "backup_backend_missing") {
+		t.Fatalf("expected stale runtime to be rebound before worker authorization, got %v", err)
+	}
+	crossTenantTarget := target
+	crossTenantTarget.TenantID = runtimeOwner.ID
+	if _, err := server.rebindAppDatabaseBackupTarget(model.BackupRun{
+		TenantID:  appTenant.ID,
+		ProjectID: project.ID,
+		AppID:     app.ID,
+		Target:    crossTenantTarget,
+	}); !errors.Is(err, errBackupTargetNotAuthorized) {
+		t.Fatalf("expected rebinding to preserve tenant isolation, got %v", err)
+	}
 
 	target.RuntimeID = unrelatedRuntime.ID
 	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
