@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -59,26 +58,6 @@ func TestCalculateAppObservedStatusRequiresClusterIdentityForAuthoritativeAbsenc
 	}
 }
 
-func TestCalculateAppObservedStatusTreatsStaleAbsenceAsUnknown(t *testing.T) {
-	status := CalculateAppObservedStatus(model.App{
-		Spec:   model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
-		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
-	}, AppRuntimeObservation{
-		Complete:     true,
-		Fresh:        false,
-		Found:        false,
-		ObservedAt:   time.Now().UTC(),
-		ClusterID:    "cluster-uid",
-		ErrorMessage: "refresh timed out",
-	})
-	if status.Phase != "unknown" || status.Fresh || status.RuntimeObjectPresent != nil || status.ReadyReplicas != nil {
-		t.Fatalf("stale absence must not be published as unavailable: %+v", status)
-	}
-	if status.Reason != AppObservationReasonObservationStale {
-		t.Fatalf("unexpected stale reason: %+v", status)
-	}
-}
-
 func TestCalculateAppObservedStatusRequiresCurrentGeneration(t *testing.T) {
 	app := model.App{Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1}}
 	managed := ManagedAppObject{
@@ -101,21 +80,6 @@ func TestCalculateAppObservedStatusRequiresCurrentGeneration(t *testing.T) {
 		t.Fatalf("unobserved generation must not be deployed: %+v", status)
 	}
 
-	managed.Metadata.Generation = 0
-	managed.Status.ObservedGeneration = 0
-	status = CalculateAppObservedStatus(app, AppRuntimeObservation{
-		ManagedApp: managed,
-		Found:      true,
-		Complete:   true,
-		Fresh:      true,
-		ObservedAt: time.Now(),
-		ClusterID:  "cluster-uid",
-	})
-	if status.Phase != "unknown" || status.Fresh || status.Reason != AppObservationReasonGenerationNotObserved {
-		t.Fatalf("missing generation evidence must not be deployed: %+v", status)
-	}
-
-	managed.Metadata.Generation = 4
 	managed.Status.ObservedGeneration = managed.Metadata.Generation
 	status = CalculateAppObservedStatus(app, AppRuntimeObservation{
 		ManagedApp: managed,
@@ -148,70 +112,5 @@ func TestApplyAppObservedStatusPreservesStoredStateAndClearsUnknownReplicaClaim(
 		t.Fatalf("legacy projection reused stale runtime state: %+v", updated.Status)
 	}
 }
-
-func TestCalculateAppObservedStatusFailsClosedOnRuntimeInvariants(t *testing.T) {
-	app := model.App{
-		Spec:   model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1, Ports: []int{8080}},
-		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
-	}
-	base := func() AppRuntimeObservation {
-		return AppRuntimeObservation{
-			ManagedApp: ManagedAppObject{
-				Metadata: ManagedAppMeta{Generation: 7},
-				Status: ManagedAppStatus{
-					Phase:              ManagedAppPhaseReady,
-					DesiredReplicas:    1,
-					ReadyReplicas:      1,
-					ObservedGeneration: 7,
-				},
-			},
-			Found:                   true,
-			Complete:                true,
-			Fresh:                   true,
-			ObservedAt:              time.Now().UTC(),
-			ClusterID:               "cluster-uid",
-			NamespacePresent:        boolPointer(true),
-			ServicePresent:          boolPointer(true),
-			EndpointPresent:         boolPointer(true),
-			EndpointReady:           boolPointer(true),
-			PhysicalReplicas:        intPointer(1),
-			PhysicalDesiredReplicas: intPointer(1),
-			ImagePresent:            boolPointer(true),
-		}
-	}
-	tests := []struct {
-		name      string
-		violation string
-		mutate    func(*AppRuntimeObservation)
-	}{
-		{name: "namespace missing", violation: "namespace_missing", mutate: func(in *AppRuntimeObservation) { in.NamespacePresent = boolPointer(false) }},
-		{name: "service missing", violation: "service_missing", mutate: func(in *AppRuntimeObservation) { in.ServicePresent = boolPointer(false) }},
-		{name: "endpoint missing", violation: "endpoint_missing", mutate: func(in *AppRuntimeObservation) { in.EndpointPresent = boolPointer(false) }},
-		{name: "endpoint unready", violation: "endpoint_unready", mutate: func(in *AppRuntimeObservation) { in.EndpointReady = boolPointer(false) }},
-		{name: "image missing", violation: "image_missing", mutate: func(in *AppRuntimeObservation) { in.ImagePresent = boolPointer(false) }},
-		{name: "physical replicas zero", violation: "physical_replicas_zero", mutate: func(in *AppRuntimeObservation) { in.PhysicalReplicas = intPointer(0) }},
-		{name: "desired replicas unready", violation: "desired_replicas_unready", mutate: func(in *AppRuntimeObservation) {
-			in.ManagedApp.Status.ReadyReplicas = 0
-			in.PhysicalReplicas = nil
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			evidence := base()
-			test.mutate(&evidence)
-			status := CalculateAppObservedStatus(app, evidence)
-			if status.Phase != "unavailable" {
-				t.Fatalf("invariant %s must fail a ready state closed, got %+v", test.violation, status)
-			}
-			if !slices.Contains(status.InvariantViolations, test.violation) {
-				t.Fatalf("missing invariant %s in %+v", test.violation, status.InvariantViolations)
-			}
-		})
-	}
-}
-
-func boolPointer(value bool) *bool { return &value }
-
-func intPointer(value int) *int { return &value }
 
 const runtimeManagedAppReadyForObservedStatusTest = ManagedAppPhaseReady

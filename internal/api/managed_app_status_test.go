@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,12 +37,10 @@ func TestOverlayManagedAppStatusesUsesKubernetesObservedState(t *testing.T) {
 	}
 
 	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
-	managed["metadata"].(map[string]any)["generation"] = float64(1)
 	managed["status"] = map[string]any{
-		"phase":              runtime.ManagedAppPhaseProgressing,
-		"readyReplicas":      1,
-		"observedGeneration": 1,
-		"message":            "rollout in progress",
+		"phase":         runtime.ManagedAppPhaseProgressing,
+		"readyReplicas": 1,
+		"message":       "rollout in progress",
 	}
 
 	server := newManagedAppTestServer(t, map[string]any{
@@ -74,265 +71,6 @@ func TestOverlayManagedAppStatusesUsesKubernetesObservedState(t *testing.T) {
 	}
 	if apps[0].Status.LastMessage != "rollout in progress" {
 		t.Fatalf("unexpected last message: %q", apps[0].Status.LastMessage)
-	}
-}
-
-func TestOverlayManagedAppStatusesPublishesCompleteRuntimeEvidence(t *testing.T) {
-	t.Parallel()
-
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	tenant, err := stateStore.CreateTenant("runtime evidence")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	project, err := stateStore.CreateProject(tenant.ID, "web", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "nginx:1.27",
-		Ports:     []int{8080},
-		Replicas:  1,
-		RuntimeID: model.DefaultManagedRuntimeID,
-	})
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
-	metadata := managed["metadata"].(map[string]any)
-	metadata["generation"] = float64(3)
-	managed["status"] = map[string]any{
-		"phase":              runtime.ManagedAppPhaseReady,
-		"desiredReplicas":    1,
-		"readyReplicas":      1,
-		"observedGeneration": 3,
-		"message":            "ready",
-	}
-	namespace := runtime.NamespaceForTenant(app.TenantID)
-	deploymentName := runtime.RuntimeAppResourceName(app)
-	serviceName := runtime.RuntimeAppServiceName(app)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if writeManagedAppClusterIdentity(w, r) {
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/" + runtime.ManagedAppPlural:
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{managed}})
-		case "/api/v1/namespaces":
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": namespace}}}})
-		case "/apis/apps/v1/deployments":
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
-				"metadata": map[string]any{"name": deploymentName, "namespace": namespace, "generation": 4},
-				"spec": map[string]any{
-					"replicas": 1,
-					"template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"name": "demo", "image": app.Spec.Image}}}},
-				},
-				"status": map[string]any{"replicas": 1, "readyReplicas": 1, "availableReplicas": 1, "observedGeneration": 4},
-			}}})
-		case "/api/v1/services":
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"metadata": map[string]any{"name": serviceName, "namespace": namespace}}}})
-		case "/api/v1/endpoints":
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
-				"metadata": map[string]any{"name": serviceName, "namespace": namespace},
-				"subsets":  []map[string]any{{"addresses": []map[string]any{{"ip": "10.0.0.1"}}}},
-			}}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	apiServer := &Server{
-		store: stateStore,
-		log:   log.New(io.Discard, "", 0),
-		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
-			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
-		},
-	}
-	observed := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
-	if observed.Status.Phase != "deployed" || observed.ObservedStatus == nil || !observed.ObservedStatus.Fresh {
-		t.Fatalf("expected fresh deployed observation, got %#v", observed)
-	}
-	status := observed.ObservedStatus
-	for label, value := range map[string]*bool{
-		"namespace": status.NamespacePresent,
-		"service":   status.ServicePresent,
-		"endpoint":  status.EndpointPresent,
-		"ready":     status.EndpointReady,
-		"image":     status.ImagePresent,
-	} {
-		if value != nil && !*value {
-			t.Fatalf("expected %s evidence to be present, status=%#v", label, status)
-		}
-	}
-	if status.PhysicalReplicas == nil || *status.PhysicalReplicas != 1 || status.Generation != 3 || status.ObservedGeneration != 3 {
-		t.Fatalf("missing physical/generation evidence: %#v", status)
-	}
-}
-
-func TestOverlayManagedAppStatusesTreatsChildQueryFailureAsUnknown(t *testing.T) {
-	t.Parallel()
-
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	app := model.App{ID: "app_child_failure", TenantID: "tenant_demo", Name: "child-failure", Spec: model.AppSpec{Image: "nginx:1.27", Ports: []int{80}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1}}
-	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
-	managed["status"] = map[string]any{"phase": runtime.ManagedAppPhaseReady, "readyReplicas": 1, "desiredReplicas": 1, "observedGeneration": 1}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if writeManagedAppClusterIdentity(w, r) {
-			return
-		}
-		if r.URL.Path == "/api/v1/namespaces" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/apis/"+runtime.ManagedAppAPIGroup+"/v1alpha1/"+runtime.ManagedAppPlural) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{managed}})
-			return
-		}
-		http.Error(w, "kubernetes child query failed", http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
-	apiServer := &Server{store: stateStore, log: log.New(io.Discard, "", 0), newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
-		return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
-	}}
-	updated := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
-	if updated.ObservedStatus == nil || updated.ObservedStatus.Phase != "unknown" || updated.ObservedStatus.Fresh || updated.ObservedStatus.RuntimeObjectPresent != nil {
-		t.Fatalf("child query failure must be unknown without absence claims: %#v", updated.ObservedStatus)
-	}
-}
-
-func TestCurrentManagedImagePresenceRequiresFreshExplicitEvidence(t *testing.T) {
-	t.Parallel()
-
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	app := model.App{ID: "app_image_evidence", TenantID: "tenant_demo"}
-	imageRef := "registry.fugue.internal:5000/fugue-apps/demo@sha256:" + strings.Repeat("a", 64)
-	apiServer := &Server{store: stateStore}
-
-	present, err := apiServer.currentManagedImagePresence(app, imageRef)
-	if err != nil {
-		t.Fatalf("read empty image evidence: %v", err)
-	}
-	if present != nil {
-		t.Fatalf("absence of a report must remain unknown, got %v", *present)
-	}
-
-	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
-		TenantID: app.TenantID,
-		AppID:    app.ID,
-		ImageRef: imageRef,
-		Status:   model.ImageLocationStatusMissing,
-	}); err != nil {
-		t.Fatalf("record missing image: %v", err)
-	}
-	present, err = apiServer.currentManagedImagePresence(app, imageRef)
-	if err != nil {
-		t.Fatalf("read missing image evidence: %v", err)
-	}
-	if present == nil || *present {
-		t.Fatalf("fresh explicit missing report must be false, got %v", present)
-	}
-
-	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
-		TenantID: app.TenantID,
-		AppID:    app.ID,
-		ImageRef: imageRef,
-		Status:   model.ImageLocationStatusPresent,
-	}); err != nil {
-		t.Fatalf("record present image: %v", err)
-	}
-	present, err = apiServer.currentManagedImagePresence(app, imageRef)
-	if err != nil {
-		t.Fatalf("read present image evidence: %v", err)
-	}
-	if present == nil || !*present {
-		t.Fatalf("fresh present report must be true, got %v", present)
-	}
-}
-
-func TestManagedAppRuntimeEvidenceRejectsUnobservedDeploymentGeneration(t *testing.T) {
-	t.Parallel()
-
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	app := model.App{
-		ID:       "app_generation_guard",
-		TenantID: "tenant_demo",
-		Name:     "generation-guard",
-		Spec: model.AppSpec{
-			Image:     "registry.fugue.internal:5000/fugue-apps/generation-guard:latest",
-			Replicas:  1,
-			RuntimeID: model.DefaultManagedRuntimeID,
-		},
-		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
-	}
-	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
-	if err != nil {
-		t.Fatalf("build managed app: %v", err)
-	}
-	managed.Metadata.Generation = 3
-	managed.Status = runtime.ManagedAppStatus{
-		Phase:              runtime.ManagedAppPhaseReady,
-		DesiredReplicas:    1,
-		ReadyReplicas:      1,
-		ObservedGeneration: 3,
-	}
-	var deployment kubeDeploymentRuntimeEvidence
-	if err := decodeKubeObject(map[string]any{
-		"metadata": map[string]any{
-			"namespace":  runtime.NamespaceForTenant(app.TenantID),
-			"name":       runtime.RuntimeAppResourceName(app),
-			"generation": 9,
-		},
-		"spec": map[string]any{
-			"replicas": 1,
-			"template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"name": app.Name, "image": app.Spec.Image}}}},
-		},
-		"status": map[string]any{"readyReplicas": 1, "availableReplicas": 1, "observedGeneration": 8},
-	}, &deployment); err != nil {
-		t.Fatalf("decode deployment: %v", err)
-	}
-	namespace := runtime.NamespaceForTenant(app.TenantID)
-	evidence, err := (&Server{store: stateStore}).buildManagedAppRuntimeEvidence(app, managed, true, managedAppKubeSnapshot{
-		namespaces:  map[string]struct{}{namespace: {}},
-		deployments: map[string]kubeDeploymentRuntimeEvidence{kubeNamespacedKey(namespace, runtime.RuntimeAppResourceName(app)): deployment},
-		services:    map[string]struct{}{},
-		endpoints:   map[string]kubeEndpointRuntimeEvidence{},
-	})
-	if err != nil {
-		t.Fatalf("build evidence: %v", err)
-	}
-	if !slices.Contains(evidence.invariantViolations, "deployment_generation_unobserved") {
-		t.Fatalf("missing deployment generation invariant: %+v", evidence.invariantViolations)
-	}
-	status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
-		ManagedApp:              managed,
-		Found:                   true,
-		Complete:                true,
-		Fresh:                   true,
-		ObservedAt:              time.Now().UTC(),
-		ClusterID:               "cluster-test-uid",
-		NamespacePresent:        evidence.namespacePresent,
-		PhysicalReplicas:        evidence.physicalReplicas,
-		PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
-		ImagePresent:            evidence.imagePresent,
-		InvariantViolations:     evidence.invariantViolations,
-	})
-	if status.Phase != "unavailable" {
-		t.Fatalf("unobserved deployment generation must fail closed, got %+v", status)
 	}
 }
 
@@ -519,12 +257,10 @@ func TestOverlayManagedAppStatusUsesSingleObjectLookup(t *testing.T) {
 	}
 
 	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
-	managed["metadata"].(map[string]any)["generation"] = float64(1)
 	managed["status"] = map[string]any{
-		"phase":              runtime.ManagedAppPhaseReady,
-		"readyReplicas":      1,
-		"observedGeneration": 1,
-		"message":            "deployment ready",
+		"phase":         runtime.ManagedAppPhaseReady,
+		"readyReplicas": 1,
+		"message":       "deployment ready",
 	}
 
 	server := newManagedAppTestServer(t, managed)
@@ -585,7 +321,6 @@ func TestLoadConsoleAppsUsesManagedAppOverlay(t *testing.T) {
 		"message":       "startup failed",
 		"readyReplicas": 0,
 	}
-	setManagedAppTestObservedGeneration(managed, 1)
 
 	server := newManagedAppTestServer(t, map[string]any{
 		"items": []map[string]any{managed},
@@ -640,7 +375,6 @@ func TestOverlayManagedAppStatusesUsesTTLCache(t *testing.T) {
 		"message":       "cached failure",
 		"readyReplicas": 0,
 	}
-	setManagedAppTestObservedGeneration(managed, 1)
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -744,7 +478,6 @@ func TestOverlayManagedAppStatusFallsBackToStaleCacheOnRefreshError(t *testing.T
 		"message":       "startup failed",
 		"readyReplicas": 0,
 	}
-	setManagedAppTestObservedGeneration(managed, 1)
 
 	server := newManagedAppTestServer(t, managed)
 	defer server.Close()
@@ -805,7 +538,6 @@ func TestOverlayManagedAppStatusUsesSingleflight(t *testing.T) {
 		"message":       "deployment ready",
 		"readyReplicas": 1,
 	}
-	setManagedAppTestObservedGeneration(managed, 1)
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -875,7 +607,6 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 		"message":       "background refresh",
 		"readyReplicas": 0,
 	}
-	setManagedAppTestObservedGeneration(managed, 1)
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -960,7 +691,6 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 			"message":       "ready " + app.ID,
 			"readyReplicas": i + 1,
 		}
-		setManagedAppTestObservedGeneration(managed, 1)
 		managedItems = append(managedItems, managed)
 	}
 
@@ -1065,12 +795,10 @@ func TestOverlayManagedAppStatusesForEdgeRoutesKeepsVerifiedErrorServingAndMarks
 		t.Fatalf("build managed app: %v", err)
 	}
 	managed.Status = runtime.ManagedAppStatus{
-		Phase:              runtime.ManagedAppPhaseError,
-		Message:            "deploy image preflight failed",
-		ReadyReplicas:      1,
-		ObservedGeneration: 1,
+		Phase:         runtime.ManagedAppPhaseError,
+		Message:       "deploy image preflight failed",
+		ReadyReplicas: 1,
 	}
-	managed.Metadata.Generation = 1
 
 	apiServer := &Server{managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second)}
 	now := time.Now()
@@ -1229,19 +957,4 @@ func writeManagedAppClusterIdentity(w http.ResponseWriter, r *http.Request) bool
 		"metadata": map[string]any{"uid": "cluster-test-uid"},
 	})
 	return true
-}
-
-func setManagedAppTestObservedGeneration(managed map[string]any, generation int64) {
-	metadata, _ := managed["metadata"].(map[string]any)
-	if metadata == nil {
-		metadata = map[string]any{}
-		managed["metadata"] = metadata
-	}
-	metadata["generation"] = generation
-	status, _ := managed["status"].(map[string]any)
-	if status == nil {
-		status = map[string]any{}
-		managed["status"] = status
-	}
-	status["observedGeneration"] = generation
 }

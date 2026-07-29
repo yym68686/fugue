@@ -205,12 +205,6 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 	if err != nil {
 		return nil, err
 	}
-	runtimes, _ := s.store.ListRuntimes("", true)
-	runtimeByID := make(map[string]model.Runtime, len(runtimes)+1)
-	for _, runtimeObj := range runtimes {
-		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
-	}
-	runtimeByID[model.DefaultManagedRuntimeID] = model.Runtime{ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared}
 	updaterByRuntime := map[string]model.NodeUpdater{}
 	for _, updater := range updaters {
 		if runtimeID := strings.TrimSpace(updater.RuntimeID); runtimeID != "" {
@@ -252,29 +246,6 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			status.Evidence["generation"] = fmt.Sprintf("%d", observed.Generation)
 			status.Evidence["observed_generation"] = fmt.Sprintf("%d", observed.ObservedGeneration)
 			status.Evidence["fresh"] = fmt.Sprintf("%t", observed.Fresh)
-			status.Evidence["evidence_sources"] = strings.Join(observed.EvidenceSources, ",")
-			status.Evidence["image_ref"] = observed.ImageRef
-			if observed.NamespacePresent != nil {
-				status.Evidence["namespace_present"] = fmt.Sprintf("%t", *observed.NamespacePresent)
-			}
-			if observed.ServicePresent != nil {
-				status.Evidence["service_present"] = fmt.Sprintf("%t", *observed.ServicePresent)
-			}
-			if observed.EndpointPresent != nil {
-				status.Evidence["endpoint_present"] = fmt.Sprintf("%t", *observed.EndpointPresent)
-			}
-			if observed.EndpointReady != nil {
-				status.Evidence["endpoint_ready"] = fmt.Sprintf("%t", *observed.EndpointReady)
-			}
-			if observed.ImagePresent != nil {
-				status.Evidence["image_present"] = fmt.Sprintf("%t", *observed.ImagePresent)
-			}
-			if observed.PhysicalReplicas != nil {
-				status.Evidence["physical_replicas"] = fmt.Sprintf("%d", *observed.PhysicalReplicas)
-			}
-			if observed.PhysicalDesired != nil {
-				status.Evidence["physical_desired_replicas"] = fmt.Sprintf("%d", *observed.PhysicalDesired)
-			}
 			if observed.ReadyReplicas != nil {
 				ready = *observed.ReadyReplicas
 				status.ReadyReplicas = ready
@@ -286,41 +257,6 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			}
 			if observed.RuntimeObjectPresent != nil && !*observed.RuntimeObjectPresent {
 				status.Blockers = append(status.Blockers, "managed app runtime object not found")
-			}
-			if observed.NamespacePresent != nil && !*observed.NamespacePresent {
-				status.Blockers = append(status.Blockers, "namespace missing")
-			}
-			if observed.ServicePresent != nil && !*observed.ServicePresent {
-				status.Blockers = append(status.Blockers, "service missing")
-			}
-			if observed.EndpointPresent != nil && !*observed.EndpointPresent {
-				status.Blockers = append(status.Blockers, "endpoint missing")
-			}
-			if observed.EndpointReady != nil && !*observed.EndpointReady {
-				status.Blockers = append(status.Blockers, "endpoint not ready")
-			}
-			if observed.ImagePresent != nil && !*observed.ImagePresent {
-				status.Blockers = append(status.Blockers, "current image missing")
-			}
-			if observed.PhysicalReplicas != nil && *observed.PhysicalReplicas == 0 && desired > 0 {
-				status.Blockers = append(status.Blockers, "physical replicas are zero")
-			}
-			for _, violation := range observed.InvariantViolations {
-				status.Blockers = append(status.Blockers, "invariant: "+violation)
-			}
-			if app.StoredStatus != nil && strings.EqualFold(strings.TrimSpace(app.StoredStatus.Phase), "deployed") && observed.Phase != "deployed" {
-				status.Blockers = append(status.Blockers, "stored status deployed without current runtime proof")
-			}
-			if app.Route != nil || model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
-				_, runtimeFound := runtimeByID[runtimeID]
-				routeStatus, routeReason := edgeRouteStatus(app, runtimeID, runtimeFound)
-				status.Evidence["route_status"] = routeStatus
-				if strings.TrimSpace(routeReason) != "" {
-					status.Evidence["route_status_reason"] = routeReason
-				}
-				if observed.Phase == "deployed" && routeStatus != model.EdgeRouteStatusActive {
-					status.Blockers = append(status.Blockers, "observed deployed but route is unavailable: "+firstNonEmpty(routeReason, routeStatus))
-				}
 			}
 		}
 		if app.Route != nil {

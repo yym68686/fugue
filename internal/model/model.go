@@ -2228,55 +2228,15 @@ func CloneAppSourceSyncStatus(in *AppSourceSyncStatus) *AppSourceSyncStatus {
 }
 
 type AppStatus struct {
-	Phase                   string     `json:"phase"`
-	CurrentRuntimeID        string     `json:"current_runtime_id,omitempty"`
-	CurrentReplicas         int        `json:"current_replicas"`
-	CurrentReleaseStartedAt *time.Time `json:"current_release_started_at,omitempty"`
-	CurrentReleaseReadyAt   *time.Time `json:"current_release_ready_at,omitempty"`
-	LastOperationID         string     `json:"last_operation_id,omitempty"`
-	LastMessage             string     `json:"last_message,omitempty"`
-	// LastFailedOperation is durable operator-facing history. It is never used
-	// as evidence that the current runtime is serving; consumers must use
-	// ObservedStatus for that decision.
-	LastFailedOperation *AppOperationFailure `json:"last_failed_operation,omitempty"`
-	UpdatedAt           time.Time            `json:"updated_at"`
-	SourceSync          *AppSourceSyncStatus `json:"source_sync,omitempty"`
-}
-
-// AppOperationFailure is the redacted, stable summary of the most recent
-// failed operation for an app. It intentionally excludes desired specs,
-// sources, and other potentially sensitive operation payloads.
-type AppOperationFailure struct {
-	ID              string     `json:"id"`
-	Type            string     `json:"type"`
-	ErrorMessage    string     `json:"error_message,omitempty"`
-	ResultMessage   string     `json:"result_message,omitempty"`
-	RequestedByType string     `json:"requested_by_type,omitempty"`
-	RequestedByID   string     `json:"requested_by_id,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-}
-
-func AppOperationFailureFromOperation(op Operation) *AppOperationFailure {
-	if op.Status != OperationStatusFailed || strings.TrimSpace(op.ID) == "" {
-		return nil
-	}
-	out := &AppOperationFailure{
-		ID:              strings.TrimSpace(op.ID),
-		Type:            strings.TrimSpace(op.Type),
-		ErrorMessage:    strings.TrimSpace(op.ErrorMessage),
-		ResultMessage:   strings.TrimSpace(op.ResultMessage),
-		RequestedByType: strings.TrimSpace(op.RequestedByType),
-		RequestedByID:   strings.TrimSpace(op.RequestedByID),
-		CreatedAt:       op.CreatedAt,
-		UpdatedAt:       op.UpdatedAt,
-	}
-	if op.CompletedAt != nil {
-		completedAt := op.CompletedAt.UTC()
-		out.CompletedAt = &completedAt
-	}
-	return out
+	Phase                   string               `json:"phase"`
+	CurrentRuntimeID        string               `json:"current_runtime_id,omitempty"`
+	CurrentReplicas         int                  `json:"current_replicas"`
+	CurrentReleaseStartedAt *time.Time           `json:"current_release_started_at,omitempty"`
+	CurrentReleaseReadyAt   *time.Time           `json:"current_release_ready_at,omitempty"`
+	LastOperationID         string               `json:"last_operation_id,omitempty"`
+	LastMessage             string               `json:"last_message,omitempty"`
+	UpdatedAt               time.Time            `json:"updated_at"`
+	SourceSync              *AppSourceSyncStatus `json:"source_sync,omitempty"`
 }
 
 // AppObservedStatus is a point-in-time runtime observation. It is deliberately
@@ -2292,22 +2252,15 @@ type AppObservedStatus struct {
 	RuntimeObjectPresent *bool     `json:"runtime_object_present,omitempty"`
 	NamespacePresent     *bool     `json:"namespace_present,omitempty"`
 	ServicePresent       *bool     `json:"service_present,omitempty"`
-	EndpointPresent      *bool     `json:"endpoint_present,omitempty"`
 	EndpointReady        *bool     `json:"endpoint_ready,omitempty"`
-	PhysicalReplicas     *int      `json:"physical_replicas,omitempty"`
-	PhysicalDesired      *int      `json:"physical_desired_replicas,omitempty"`
-	ImagePresent         *bool     `json:"image_present,omitempty"`
-	ImageRef             string    `json:"image_ref,omitempty"`
 	Fresh                bool      `json:"fresh"`
 	ObservedAt           time.Time `json:"observed_at"`
 	ClusterID            string    `json:"cluster_id,omitempty"`
 	Generation           int64     `json:"generation,omitempty"`
 	ObservedGeneration   int64     `json:"observed_generation,omitempty"`
 	EvidenceSource       string    `json:"evidence_source"`
-	EvidenceSources      []string  `json:"evidence_sources,omitempty"`
 	Reason               string    `json:"reason"`
 	Message              string    `json:"message,omitempty"`
-	InvariantViolations  []string  `json:"invariant_violations,omitempty"`
 }
 
 type App struct {

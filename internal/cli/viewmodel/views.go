@@ -53,38 +53,30 @@ type OperationTimelineStep struct {
 }
 
 type AppHealthView struct {
-	State               State                      `json:"state"`
-	ID                  string                     `json:"id,omitempty"`
-	TenantID            string                     `json:"tenant_id,omitempty"`
-	ProjectID           string                     `json:"project_id,omitempty"`
-	Name                string                     `json:"name,omitempty"`
-	Phase               string                     `json:"phase,omitempty"`
-	Tone                Tone                       `json:"tone"`
-	DesiredReplicas     int                        `json:"desired_replicas"`
-	CurrentReplicas     int                        `json:"current_replicas"`
-	RuntimeID           string                     `json:"runtime_id,omitempty"`
-	URL                 string                     `json:"url,omitempty"`
-	LastMessage         string                     `json:"last_message,omitempty"`
-	LastOperationID     string                     `json:"last_operation_id,omitempty"`
-	ObservedAt          *time.Time                 `json:"observed_at,omitempty"`
-	ClusterID           string                     `json:"cluster_id,omitempty"`
-	Generation          int64                      `json:"generation,omitempty"`
-	ObservedGeneration  int64                      `json:"observed_generation,omitempty"`
-	Fresh               bool                       `json:"fresh"`
-	EvidenceSource      string                     `json:"evidence_source,omitempty"`
-	ObservationReason   string                     `json:"observation_reason,omitempty"`
-	EvidenceSources     []string                   `json:"evidence_sources,omitempty"`
-	NamespacePresent    *bool                      `json:"namespace_present,omitempty"`
-	ServicePresent      *bool                      `json:"service_present,omitempty"`
-	EndpointPresent     *bool                      `json:"endpoint_present,omitempty"`
-	EndpointReady       *bool                      `json:"endpoint_ready,omitempty"`
-	PhysicalReplicas    *int                       `json:"physical_replicas,omitempty"`
-	ImagePresent        *bool                      `json:"image_present,omitempty"`
-	InvariantViolations []string                   `json:"invariant_violations,omitempty"`
-	LastFailedOperation *model.AppOperationFailure `json:"last_failed_operation,omitempty"`
-	Route               RoutePathView              `json:"route"`
-	Operations          OperationTimelineView      `json:"operations"`
-	ResourceUsage       *model.ResourceUsage       `json:"resource_usage,omitempty"`
+	State              State                 `json:"state"`
+	ID                 string                `json:"id,omitempty"`
+	TenantID           string                `json:"tenant_id,omitempty"`
+	ProjectID          string                `json:"project_id,omitempty"`
+	Name               string                `json:"name,omitempty"`
+	Phase              string                `json:"phase,omitempty"`
+	Tone               Tone                  `json:"tone"`
+	DesiredReplicas    int                   `json:"desired_replicas"`
+	CurrentReplicas    int                   `json:"current_replicas"`
+	RuntimeID          string                `json:"runtime_id,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	LastMessage        string                `json:"last_message,omitempty"`
+	LastOperationID    string                `json:"last_operation_id,omitempty"`
+	ObservedAt         *time.Time            `json:"observed_at,omitempty"`
+	ClusterID          string                `json:"cluster_id,omitempty"`
+	Generation         int64                 `json:"generation,omitempty"`
+	ObservedGeneration int64                 `json:"observed_generation,omitempty"`
+	Fresh              bool                  `json:"fresh"`
+	EvidenceSource     string                `json:"evidence_source,omitempty"`
+	ObservationReason  string                `json:"observation_reason,omitempty"`
+	EndpointReady      *bool                 `json:"endpoint_ready,omitempty"`
+	Route              RoutePathView         `json:"route"`
+	Operations         OperationTimelineView `json:"operations"`
+	ResourceUsage      *model.ResourceUsage  `json:"resource_usage,omitempty"`
 }
 
 type ServiceStageView struct {
@@ -228,13 +220,6 @@ func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthVi
 	evidenceSource := ""
 	observationReason := ""
 	var endpointReady *bool
-	var namespacePresent *bool
-	var servicePresent *bool
-	var endpointPresent *bool
-	var physicalReplicas *int
-	var imagePresent *bool
-	var evidenceSources []string
-	var invariantViolations []string
 	if observed := app.ObservedStatus; observed != nil {
 		phase = strings.TrimSpace(observed.Phase)
 		if observed.ReadyReplicas != nil {
@@ -249,107 +234,34 @@ func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthVi
 		fresh = observed.Fresh
 		evidenceSource = strings.TrimSpace(observed.EvidenceSource)
 		observationReason = strings.TrimSpace(observed.Reason)
-		endpointReady = cloneBool(observed.EndpointReady)
-		namespacePresent = cloneBool(observed.NamespacePresent)
-		servicePresent = cloneBool(observed.ServicePresent)
-		endpointPresent = cloneBool(observed.EndpointPresent)
-		physicalReplicas = cloneInt(observed.PhysicalReplicas)
-		imagePresent = cloneBool(observed.ImagePresent)
-		evidenceSources = append([]string(nil), observed.EvidenceSources...)
-		invariantViolations = append([]string(nil), observed.InvariantViolations...)
-	}
-	tone := ToneForAppPhase(phase)
-	if observed := app.ObservedStatus; observed != nil && tone == TonePositive && !appObservedGreenEligible(app, observed) {
-		tone = ToneWarning
+		endpointReady = observed.EndpointReady
 	}
 	return AppHealthView{
-		State:               ReadyState(),
-		ID:                  strings.TrimSpace(app.ID),
-		TenantID:            strings.TrimSpace(app.TenantID),
-		ProjectID:           strings.TrimSpace(app.ProjectID),
-		Name:                strings.TrimSpace(app.Name),
-		Phase:               phase,
-		Tone:                tone,
-		DesiredReplicas:     app.Spec.Replicas,
-		CurrentReplicas:     currentReplicas,
-		RuntimeID:           runtimeID,
-		URL:                 routeURL(app),
-		LastMessage:         strings.TrimSpace(app.Status.LastMessage),
-		LastOperationID:     strings.TrimSpace(app.Status.LastOperationID),
-		ObservedAt:          observedAt,
-		ClusterID:           clusterID,
-		Generation:          generation,
-		ObservedGeneration:  observedGeneration,
-		Fresh:               fresh,
-		EvidenceSource:      evidenceSource,
-		ObservationReason:   observationReason,
-		EvidenceSources:     evidenceSources,
-		NamespacePresent:    namespacePresent,
-		ServicePresent:      servicePresent,
-		EndpointPresent:     endpointPresent,
-		EndpointReady:       endpointReady,
-		PhysicalReplicas:    physicalReplicas,
-		ImagePresent:        imagePresent,
-		InvariantViolations: invariantViolations,
-		LastFailedOperation: cloneAppOperationFailure(app.Status.LastFailedOperation),
-		Route:               NewRoutePathFromApp(app),
-		Operations:          NewOperationTimeline(activeOperations),
-		ResourceUsage:       app.CurrentResourceUsage,
+		State:              ReadyState(),
+		ID:                 strings.TrimSpace(app.ID),
+		TenantID:           strings.TrimSpace(app.TenantID),
+		ProjectID:          strings.TrimSpace(app.ProjectID),
+		Name:               strings.TrimSpace(app.Name),
+		Phase:              phase,
+		Tone:               ToneForAppPhase(phase),
+		DesiredReplicas:    app.Spec.Replicas,
+		CurrentReplicas:    currentReplicas,
+		RuntimeID:          runtimeID,
+		URL:                routeURL(app),
+		LastMessage:        strings.TrimSpace(app.Status.LastMessage),
+		LastOperationID:    strings.TrimSpace(app.Status.LastOperationID),
+		ObservedAt:         observedAt,
+		ClusterID:          clusterID,
+		Generation:         generation,
+		ObservedGeneration: observedGeneration,
+		Fresh:              fresh,
+		EvidenceSource:     evidenceSource,
+		ObservationReason:  observationReason,
+		EndpointReady:      endpointReady,
+		Route:              NewRoutePathFromApp(app),
+		Operations:         NewOperationTimeline(activeOperations),
+		ResourceUsage:      app.CurrentResourceUsage,
 	}
-}
-
-func appObservedGreenEligible(app model.App, observed *model.AppObservedStatus) bool {
-	if observed == nil || !observed.Fresh || observed.Phase != "deployed" || observed.ReadyReplicas == nil {
-		return false
-	}
-	if app.Spec.Replicas > 0 {
-		if *observed.ReadyReplicas < app.Spec.Replicas ||
-			observed.RuntimeObjectPresent == nil || !*observed.RuntimeObjectPresent ||
-			observed.NamespacePresent == nil || !*observed.NamespacePresent ||
-			observed.PhysicalReplicas == nil || *observed.PhysicalReplicas < app.Spec.Replicas {
-			return false
-		}
-	}
-	if model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
-		if observed.ServicePresent == nil || !*observed.ServicePresent {
-			return false
-		}
-		if observed.EndpointPresent == nil || !*observed.EndpointPresent || observed.EndpointReady == nil || !*observed.EndpointReady {
-			return false
-		}
-	}
-	if strings.TrimSpace(app.Spec.Image) != "" && (observed.ImagePresent == nil || !*observed.ImagePresent) {
-		return false
-	}
-	return len(observed.InvariantViolations) == 0
-}
-
-func cloneBool(in *bool) *bool {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	return &out
-}
-
-func cloneInt(in *int) *int {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	return &out
-}
-
-func cloneAppOperationFailure(in *model.AppOperationFailure) *model.AppOperationFailure {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	if in.CompletedAt != nil {
-		completedAt := in.CompletedAt.UTC()
-		out.CompletedAt = &completedAt
-	}
-	return &out
 }
 
 func NewProjectWorkbench(project model.Project, apps []model.App, services []model.BackingService, operations []model.Operation) ProjectWorkbenchView {
