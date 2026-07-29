@@ -852,6 +852,15 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
 				return nil
 			}
+			if errors.Is(err, errManagedPostgresResizeUnsettled) {
+				// A Pod /resize request may already be committed even when its
+				// response or later verification failed. Keep the operation Running
+				// so database mutation interlocks remain held. Recovery or explicit
+				// cancellation must prove the terminal state; never fall back to a
+				// Pod restart or mark the mutation failed automatically.
+				s.Logger.Printf("operation %s retained active after unsettled managed postgres resize: %v", op.ID, err)
+				return nil
+			}
 			if errors.Is(err, errRegistryGCRunning) {
 				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued while registry garbage collection is running"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
 					s.Logger.Printf("operation %s requeue during registry GC failed: %v", op.ID, requeueErr)
@@ -905,6 +914,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
 	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
 		return s.executeManagedDatabaseLifecycleOperation(ctx, op, app)
+	case model.OperationTypeDatabaseResize:
+		return s.executeManagedDatabaseResizeOperation(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)
