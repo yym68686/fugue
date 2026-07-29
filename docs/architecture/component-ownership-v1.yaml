@@ -1,0 +1,160 @@
+apiVersion: component.fugue.dev/v1
+kind: ComponentOwnershipManifest
+migrationPhase: foundation
+legacyRelease: fugue
+
+# These paths are intentionally shared during the migration.  They are not
+# evidence that the target components may write each other's state.
+sharedSourceRoots:
+  - go.mod
+  - go.sum
+  - internal/model
+  - internal/config
+  - internal/store/postgres.go
+  - openapi/openapi.yaml
+  - deploy/helm/fugue
+
+components:
+  - id: release-control
+    description: Durable release intents, evidence, lane leases, and recovery state.
+    runtimeKinds: [deployment, coordinator]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - internal/platformcontrol
+      - scripts/upgrade_fugue_control_plane.sh
+      - .github/workflows/deploy-control-plane.yml
+    artifactKinds: [release-control]
+    releaseLane: release-control
+    coordinator: release-control
+    ownedState: [release-intent, release-ledger, lane-lease, release-evidence]
+    contracts: [release-intent@v1, release-evidence@v1]
+    dependencies: []
+    failureBoundary: release-control
+    lkgPolicy: required
+
+  - id: control-plane
+    description: Public API, operation controller, and control-plane telemetry.
+    runtimeKinds: [deployment]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-api
+      - cmd/fugue-controller
+      - cmd/fugue-telemetry-agent
+      - internal/releaseflow
+    artifactKinds: [api, controller, telemetry]
+    releaseLane: control-plane
+    coordinator: release-control
+    ownedState: [app-spec, runtime-spec, operation-state, app-status]
+    contracts: [public-http@v1, runtime-control@v1, image-availability@v1]
+    dependencies: [image-plane, node-platform]
+    failureBoundary: control-plane
+    lkgPolicy: required
+
+  - id: image-plane
+    description: OCI graph integrity, image inventory, replication, and cache agents.
+    runtimeKinds: [deployment, daemonset]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-image-cache
+      - internal/releaseimageconsumer
+    artifactKinds: [image-cache]
+    releaseLane: image-plane
+    coordinator: release-control
+    ownedState: [image-inventory, image-replica-status, image-gc-state]
+    contracts: [image-availability@v1, image-evidence@v1]
+    dependencies: []
+    failureBoundary: image-plane
+    lkgPolicy: required
+
+  - id: backup-storage
+    description: Backup policy, R2 object lifecycle, usage reconciliation, and restore checkpoints.
+    runtimeKinds: [deployment, cronjob]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - internal/api/backup.go
+      - internal/store/backup.go
+    artifactKinds: [backup-worker]
+    releaseLane: backup
+    coordinator: release-control
+    ownedState: [backup-policy, backup-run, backup-artifact, restore-checkpoint]
+    contracts: [backup@v1]
+    dependencies: [control-plane]
+    failureBoundary: backup-storage
+    lkgPolicy: required
+
+  - id: node-platform
+    description: Node enrollment, updater tasks, host memory safety, and node-local storage.
+    runtimeKinds: [daemonset, binary]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-agent
+      - internal/api/node_updater.go
+      - internal/store/node_updater.go
+    artifactKinds: [node-agent, node-updater]
+    releaseLane: node-platform
+    coordinator: release-control
+    ownedState: [node-policy, node-task, node-heartbeat]
+    contracts: [node-platform@v1]
+    dependencies: []
+    failureBoundary: node-platform
+    lkgPolicy: required
+
+  - id: edge-dns
+    description: Edge workers, frontends, authoritative DNS, and route bundles.
+    runtimeKinds: [deployment, daemonset]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-edge
+      - cmd/fugue-edge-front
+      - cmd/fugue-dns
+      - internal/edgefront
+    artifactKinds: [edge, dns]
+    releaseLane: edge-dns
+    coordinator: release-control
+    ownedState: [route-desired, edge-health, dns-bundle]
+    contracts: [edge-route@v1, dns-answer@v1]
+    dependencies: [control-plane, image-plane]
+    failureBoundary: edge-dns
+    lkgPolicy: required
+
+  - id: operator-cli
+    description: Versioned operator CLI and generated client surface.
+    runtimeKinds: [binary]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue
+      - internal/cli
+    artifactKinds: [operator-cli]
+    releaseLane: cli
+    coordinator: release-control
+    ownedState: []
+    contracts: [public-http@v1]
+    dependencies: [control-plane]
+    failureBoundary: operator-cli
+    lkgPolicy: not-applicable
+
+sharedResources:
+  - id: legacy-fugue-helm-release
+    owner: release-control
+    conflictMode: exclusive
+    consumers: [control-plane, image-plane, backup-storage, node-platform, edge-dns]
+  - id: control-plane-postgres
+    owner: control-plane
+    conflictMode: exclusive
+    consumers: [backup-storage]
+  - id: registry
+    owner: image-plane
+    conflictMode: mediated
+    consumers: [control-plane, edge-dns]
+  - id: r2-backup-bucket
+    owner: backup-storage
+    conflictMode: mediated
+    consumers: []
+  - id: node-host
+    owner: node-platform
+    conflictMode: exclusive
+    consumers: []
+  - id: authoritative-dns
+    owner: edge-dns
+    conflictMode: exclusive
+    consumers: []
