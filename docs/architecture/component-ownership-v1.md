@@ -765,6 +765,32 @@ This package has no Kubernetes types/client, filesystem, network, datastore,
 signer, process, RBAC, chart, or deployment capability; observation recovery
 and a fixed-purpose writer remain later, separately reviewed atoms.
 
+`internal/backupmaterializer/secretreader` adds the default-off, GET-only
+`backup-materializer-secret-reader@v1` Kubernetes observation boundary. An
+enabled reader is pinned to one HTTPS API origin and the deterministic Secret
+name for one exact backup cell. Construction performs no I/O. Each observation
+rereads an injected Kubernetes-API audience credential, uses one bounded
+deadline and response limit, refuses redirects and content encoding, sends no
+body or query, and requests only
+`/api/v1/namespaces/fugue-system/secrets/<cell-secret>`.
+
+A 404 becomes absent only when a bounded JSON `v1/Status` proves `NotFound`
+for the exact Secret resource and name. A 200 response canonically decodes
+base64 data and passes Kubernetes-neutral UID, opaque resourceVersion,
+metadata, lifecycle, ownership, and private data evidence into the pure
+restart-recovery classifier. Forward-compatible unknown read-only fields are
+ignored, while ambiguous `stringData`, noncanonical data, wrong type/kind/API,
+or lifecycle drift can produce only foreign/malformed blocking observations.
+Remote bodies and the Kubernetes bearer never enter returned errors or
+diagnostics.
+
+The reader has an HTTP GET capability but no Kubernetes library/client-go,
+discovery, watch, list, filesystem, datastore, signer, process, or mutation
+surface. It defines no POST, PUT, PATCH, DELETE, create-if-absent, CAS writer,
+ServiceAccount, RBAC, workload, chart, or environment wiring. Credential and
+CA projection plus any writer remain separate later atoms, so the production
+topology and current Secret state are unchanged.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
