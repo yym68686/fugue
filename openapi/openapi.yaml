@@ -10708,6 +10708,11 @@ components:
       scheme: bearer
       bearerFormat: fugue_pc_v1
       description: Short-lived, server-bound identity for Fugue platform components; tenant API keys are not accepted.
+    BackupObserverBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: fugue_bo_v1
+      description: Short-lived identity bound to one exact backup run, ownership cell, and desired-spec digest; all other Fugue credentials are rejected.
     EdgeToken:
       type: apiKey
       in: query

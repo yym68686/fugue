@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/backupidentity"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
@@ -25,6 +26,7 @@ type Authenticator struct {
 	BootstrapAdminKey                string
 	WorkloadIdentitySigningKey       string
 	PlatformComponentIdentityKeyring platformcontrol.PlatformComponentIdentityKeyring
+	BackupObserverIdentityKeyring    backupidentity.Keyring
 }
 
 func New(store *store.Store, bootstrapAdminKey string) *Authenticator {

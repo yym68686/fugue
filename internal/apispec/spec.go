@@ -10,6 +10,7 @@ const (
 	AuthRuntime           AuthKind = "runtime"
 	AuthNodeUpdater       AuthKind = "node-updater"
 	AuthPlatformComponent AuthKind = "platform-component"
+	AuthBackupObserver    AuthKind = "backup-observer"
 )
 
 type Route struct {

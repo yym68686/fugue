@@ -65,9 +65,11 @@ func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 	for _, changedPath := range []string{
 		".github/workflows/validate-backup-release-candidate.yml",
 		".github/workflows/validate-backup-observation-store.yml",
+		".github/workflows/validate-backup-observer-identity.yml",
 		"cmd/fugue-backup-release-plan/main.go",
 		"deploy/helm/fugue-backup-observer/templates/deployment.yaml",
 		"internal/backupadapter/legacy.go",
+		"internal/backupidentity/identity.go",
 		"internal/backuprelease/candidate.go",
 		"internal/store/backup_observation.go",
 	} {
@@ -92,18 +94,20 @@ func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 
 func TestPlanRepositorySharedChangeFailsSafeToLegacy(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
-	plan, err := PlanChanges(manifest, []string{"internal/model/model.go"})
-	if err != nil {
-		t.Fatalf("PlanChanges() error = %v", err)
-	}
-	if plan.DispatchMode != DispatchModeLegacyShared || !plan.RequiresLegacyRelease {
-		t.Fatalf("shared plan = mode %q legacy=%v", plan.DispatchMode, plan.RequiresLegacyRelease)
-	}
-	if len(plan.ImpactedComponents) != len(manifest.Components) {
-		t.Fatalf("impacted components = %d, want %d", len(plan.ImpactedComponents), len(manifest.Components))
-	}
-	if len(plan.ChangedPaths) != 1 || !plan.ChangedPaths[0].Shared {
-		t.Fatalf("unexpected changed-path evidence: %+v", plan.ChangedPaths)
+	for _, changedPath := range []string{"internal/model/model.go", "internal/auth/auth.go", "cmd/fugue-openapi-gen/main.go"} {
+		plan, err := PlanChanges(manifest, []string{changedPath})
+		if err != nil {
+			t.Fatalf("PlanChanges(%q) error = %v", changedPath, err)
+		}
+		if plan.DispatchMode != DispatchModeLegacyShared || !plan.RequiresLegacyRelease {
+			t.Fatalf("PlanChanges(%q) shared plan = mode %q legacy=%v", changedPath, plan.DispatchMode, plan.RequiresLegacyRelease)
+		}
+		if len(plan.ImpactedComponents) != len(manifest.Components) {
+			t.Fatalf("PlanChanges(%q) impacted components = %d, want %d", changedPath, len(plan.ImpactedComponents), len(manifest.Components))
+		}
+		if len(plan.ChangedPaths) != 1 || !plan.ChangedPaths[0].Shared {
+			t.Fatalf("PlanChanges(%q) changed-path evidence: %+v", changedPath, plan.ChangedPaths)
+		}
 	}
 }
 

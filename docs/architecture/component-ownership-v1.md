@@ -437,6 +437,23 @@ health-test timestamps, or display metadata, and it cannot mutate the store.
 coverage, repeated race tests, and vet under a separate `contents: read`
 concurrency lane with no publication or deployment capability.
 
+`internal/backupidentity` establishes a separate
+`backup-observer-identity@v1` authority domain before any observation route is
+made reachable. A `fugue_bo_v1` token is short-lived, rotation/revocation aware,
+and bound to one exact run, tenant, backup cell, spec digest, and fixed read
+permission. Its signing material is domain-separated and is never accepted as
+a tenant, workload, runtime, node-updater, or platform-component credential.
+The authentication middleware is permanently GET-only and applies private
+no-store headers even to rejected requests. `fugue-api` reads only dedicated
+`FUGUE_BACKUP_OBSERVER_IDENTITY_*` configuration; an absent, weak, partial, or
+revoked keyring disables issuance and verification. This atom intentionally
+adds no observation route and the legacy Helm chart neither creates nor mounts
+these keys, so production behavior remains unchanged and fail-closed.
+`validate-backup-observer-identity.yml` validates the package, middleware,
+OpenAPI auth generator, environment wiring, rotation, revocation, expiry, race,
+and dependency boundaries with read-only permissions and no publish/deploy
+step.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while
