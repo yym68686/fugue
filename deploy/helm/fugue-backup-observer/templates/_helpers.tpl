@@ -22,7 +22,7 @@ fugue.io/backup-cell-id: {{ include "fugue-backup-observer.cellID" . }}
 app.kubernetes.io/part-of: fugue
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
-fugue.io/release-lane: backup-storage
+fugue.io/release-lane: backup
 fugue.io/ownership-mode: shadow
 fugue.io/production-mutation: forbidden
 {{- end -}}

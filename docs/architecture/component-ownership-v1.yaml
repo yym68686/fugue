@@ -95,6 +95,7 @@ components:
       - Dockerfile.backup-observer
       - .github/workflows/build-backup-observer-image.yml
       - cmd/fugue-backup-observer
+      - deploy/helm/fugue-backup-observer
       - internal/api/backup.go
       - internal/backupcontrol
       - internal/backupobserver

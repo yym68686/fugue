@@ -60,6 +60,15 @@ func TestEnabledBackupObserverChartRendersOneCellScopedHardenedDeployment(t *tes
 		deployment.Annotations["fugue.io/production-mutation"] != "forbidden" {
 		t.Fatalf("deployment annotations drifted: %#v", deployment.Annotations)
 	}
+	for key, value := range map[string]string{
+		"fugue.io/release-lane":        "backup",
+		"fugue.io/ownership-mode":      "shadow",
+		"fugue.io/production-mutation": "forbidden",
+	} {
+		if deployment.Labels[key] != value || deployment.Spec.Template.Labels[key] != value {
+			t.Fatalf("deployment label %s is not bound to %q: object=%#v pod=%#v", key, value, deployment.Labels, deployment.Spec.Template.Labels)
+		}
+	}
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 ||
 		deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType ||
 		deployment.Spec.RevisionHistoryLimit == nil || *deployment.Spec.RevisionHistoryLimit != 2 {
