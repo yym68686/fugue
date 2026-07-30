@@ -33,6 +33,10 @@ on:
         required: false
         type: string
         default: ''
+      edge_image_digest:
+        description: Exact immutable sha256 digest for the edge image. Required before any public data-plane release.
+        required: true
+        type: string
       smoke_urls:
         description: Comma-separated HTTPS URLs covering at least two distinct hostnames.
         required: true
@@ -93,5 +97,6 @@ jobs:
           FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM: ${{ inputs.confirm_front_restart && 'true' || 'false' }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ steps.meta.outputs.edge_image_repository }}
           FUGUE_EDGE_IMAGE_TAG: ${{ inputs.edge_image_tag || github.sha }}
+          FUGUE_EDGE_IMAGE_DIGEST: ${{ inputs.edge_image_digest }}
           FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS: ${{ inputs.smoke_urls }}
         run: ./scripts/release_fugue_public_data_plane.sh

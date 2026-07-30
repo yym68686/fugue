@@ -2860,6 +2860,7 @@ authoritative_dns_dig_resolve_binary() {
   : >"${E5C_RESOLVE_MARKER:?}"
   return 99
 }
+verify_requested_edge_image_pullable() { :; }
 detect_kubectl() { :; }
 validate_representative_smoke_configuration() { :; }
 run_dns_ondelete_release() { : >"${E5C_DNS_RELEASE_MARKER:?}"; }
@@ -3895,6 +3896,52 @@ SH
     [[ ! -s "${mutation_log}" ]] || fail "malformed image identity must fail before any kubectl or Helm mutation"
   )
 
+  (
+    export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+    # shellcheck source=scripts/release_fugue_public_data_plane.sh
+    source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+    verifier_args="$(mktemp)"
+    trap 'rm -f "${verifier_args}"' EXIT
+    export FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge
+    export FUGUE_EDGE_IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    export FUGUE_EDGE_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    python3() { printf '%s\n' "$*" >"${verifier_args}"; }
+    verify_requested_edge_image_pullable >/dev/null
+    grep -Fq -- '--image ghcr.io/acme/fugue-edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "${verifier_args}" ||
+      fail "public data-plane preflight must verify the exact immutable image"
+    grep -Fq -- '--expected-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "${verifier_args}" ||
+      fail "public data-plane preflight must bind the OCI revision to the exact source SHA"
+    grep -Fq -- '--platform linux/amd64' "${verifier_args}" ||
+      fail "public data-plane preflight must verify the deployment platform"
+  )
+
+  if (
+    export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+    # shellcheck source=scripts/release_fugue_public_data_plane.sh
+    source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+    export FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge
+    export FUGUE_EDGE_IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    unset FUGUE_EDGE_IMAGE_DIGEST
+    verify_requested_edge_image_pullable
+  ) >/dev/null 2>&1; then
+    fail "public data-plane preflight must reject a tag-only target"
+  fi
+  if (
+    export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+    # shellcheck source=scripts/release_fugue_public_data_plane.sh
+    source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+    export FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge
+    export FUGUE_EDGE_IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    export FUGUE_EDGE_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    python3() { return 73; }
+    verify_requested_edge_image_pullable
+  ) >/dev/null 2>&1; then
+    fail "public data-plane preflight must reject an unverified immutable target"
+  fi
+
   printf '[test_release_domain_safety] public edge digest plumbing regressions ok\n'
 }
 
@@ -4016,6 +4063,10 @@ if transaction.index("if ! run_smoke_urls") > transaction.index("FUGUE_PUBLIC_DA
     raise SystemExit("blue-green transaction must pass final public smoke before publishing active slots")
 
 main_start = source.index("\nmain() {")
+image_preflight = source.index("  verify_requested_edge_image_pullable", main_start)
+kubectl_detection = source.index("  detect_kubectl", main_start)
+if image_preflight > kubectl_detection:
+    raise SystemExit("public data-plane immutable image verification must precede Kubernetes access and mutation")
 blue_start = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "blue-green" ]]', main_start)
 blue_end = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "front-ondelete" ]]', blue_start)
 blue_branch = source[blue_start:blue_end]
