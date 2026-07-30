@@ -485,6 +485,33 @@ validate_requested_edge_image_identity() {
   export FUGUE_EDGE_IMAGE_DIGEST
 }
 
+verify_requested_edge_image_pullable() {
+  local repository="$(trim_field "${FUGUE_EDGE_IMAGE_REPOSITORY:-}")"
+  local source_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
+  local digest="$(trim_field "${FUGUE_EDGE_IMAGE_DIGEST:-}")"
+  local verifier="${REPO_ROOT}/scripts/verify_registry_image.py"
+  local platform="${FUGUE_PUBLIC_DATA_PLANE_IMAGE_PLATFORM:-linux/amd64}"
+  local timeout_seconds="${FUGUE_PUBLIC_DATA_PLANE_IMAGE_VERIFY_TIMEOUT_SECONDS:-90}"
+
+  [[ "${source_tag}" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "public data-plane release requires FUGUE_EDGE_IMAGE_TAG to be one exact lowercase 40-character source revision"
+  valid_lowercase_sha256_digest "${digest}" ||
+    fail "public data-plane release requires a non-empty immutable FUGUE_EDGE_IMAGE_DIGEST"
+  release_image_ref_valid_repository "${repository}" ||
+    fail "public data-plane release requires a canonical FUGUE_EDGE_IMAGE_REPOSITORY"
+  command_exists python3 || fail "public data-plane image verification requires python3"
+  [[ -f "${verifier}" && -r "${verifier}" ]] ||
+    fail "public data-plane image verifier is unavailable"
+  if ! python3 "${verifier}" \
+    --image "${repository}@${digest}" \
+    --platform "${platform}" \
+    --expected-revision "${source_tag}" \
+    --timeout-seconds "${timeout_seconds}" >/dev/null; then
+    fail "public data-plane target image is not pullable with the exact digest, platform, and OCI revision"
+  fi
+  log "verified immutable public data-plane image before mutation: repository=${repository} digest=${digest} revision=${source_tag} platform=${platform}"
+}
+
 patch_daemonset_ondelete() {
   local daemonset_name="$1"
   log "setting ${daemonset_name} updateStrategy=OnDelete before template patch"
@@ -6039,6 +6066,9 @@ main() {
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID:-pdp-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:-local}}"
   FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT="${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT:-a}"
   FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE="${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE:-/var/lib/fugue/edge-blue-green/active-slot}"
+  if [[ "${FUGUE_EDGE_IMAGE_DIGEST+x}" != x && -n "$(trim_field "${FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST:-}")" ]]; then
+    FUGUE_EDGE_IMAGE_DIGEST="${FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST}"
+  fi
   unset FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING
   validate_requested_edge_image_identity
   FUGUE_EDGE_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_RESOURCES_JSON "${FUGUE_EDGE_RESOURCES_JSON:-${default_edge_resources}}")"
@@ -6070,6 +6100,7 @@ main() {
 
   command_exists python3 || fail "python3 is required"
   command_exists curl || fail "curl is required"
+  verify_requested_edge_image_pullable
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" || "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-manifest-ondelete" ]]; then
     if authoritative_dns_dig_state_present; then
       authoritative_dns_dig_require_attested || fail "inherited authoritative DNS DiG attestation is missing or drifted before public data-plane mutation"

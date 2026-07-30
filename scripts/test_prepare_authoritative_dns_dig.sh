@@ -269,6 +269,10 @@ if deploy.count(prepare) != 1:
     raise SystemExit("control-plane deploy workflow must invoke the shared DiG prerequisite exactly once")
 if public.count(prepare) != 1:
     raise SystemExit("public data-plane workflow must invoke the shared DiG prerequisite exactly once")
+if "edge_image_digest:" not in public or "required: true" not in public.split("edge_image_digest:", 1)[1].split("smoke_urls:", 1)[0]:
+    raise SystemExit("public data-plane workflow must require an immutable edge image digest")
+if "FUGUE_EDGE_IMAGE_DIGEST: ${{ inputs.edge_image_digest }}" not in public:
+    raise SystemExit("public data-plane workflow must pass the immutable edge image digest to the release script")
 if deploy.count(guarded_deploy) != 1:
     raise SystemExit("control-plane deploy workflow must invoke the guarded deploy action exactly once")
 if deploy.index(prepare) > deploy.index(guarded_deploy):
