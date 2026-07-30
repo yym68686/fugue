@@ -1486,6 +1486,131 @@ func TestOverlayManagedAppStatusesForEdgeRoutesKeepsVerifiedErrorServingAndMarks
 	}
 }
 
+func TestOverlayManagedAppStatusesForEdgeRoutesKeepsRecentExpiredObservationActive(t *testing.T) {
+	t.Parallel()
+
+	failedOperation := &model.AppOperationFailure{ID: "op_failed", Type: "deploy"}
+	app := model.App{
+		ID:       "app_recent_observation",
+		TenantID: "tenant_demo",
+		Name:     "recent-observation",
+		Route:    &model.AppRoute{Hostname: "recent-observation.example", PathPrefix: "/", ServicePort: 8000},
+		Spec: model.AppSpec{
+			Image:     "registry.example/recent-observation:v1",
+			Ports:     []int{8000},
+			RuntimeID: model.DefaultManagedRuntimeID,
+			Replicas:  1,
+		},
+		Status: model.AppStatus{
+			Phase:               "unknown",
+			CurrentReplicas:     1,
+			LastOperationID:     failedOperation.ID,
+			LastFailedOperation: failedOperation,
+		},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Metadata.Generation = 1
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:              runtime.ManagedAppPhaseReady,
+		ReadyReplicas:      1,
+		ObservedGeneration: 1,
+	}
+	present := true
+	replicas := 1
+	now := time.Now().UTC()
+	apiServer := &Server{
+		log:                   log.New(io.Discard, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Second, time.Second),
+	}
+	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
+		items:     map[string]runtime.ManagedAppObject{app.ID: managed},
+		ok:        true,
+		clusterID: "cluster-test-uid",
+		evidence: map[string]managedAppRuntimeEvidence{
+			app.ID: {
+				namespacePresent:        &present,
+				servicePresent:          &present,
+				endpointPresent:         &present,
+				endpointReady:           &present,
+				physicalReplicas:        &replicas,
+				physicalDesiredReplicas: &replicas,
+				imagePresent:            &present,
+				imageRef:                app.Spec.Image,
+			},
+		},
+		refreshedAt: now.Add(-2 * time.Second),
+		expiresAt:   now.Add(-time.Second),
+	})
+	runtimes := map[string]model.Runtime{
+		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
+	}
+
+	updated := apiServer.overlayManagedAppStatusesForEdgeRoutesCached([]model.App{app}, runtimes)[0]
+	if updated.ObservedStatus == nil || !updated.ObservedStatus.Fresh || updated.ObservedStatus.Phase != "deployed" {
+		t.Fatalf("recent successful observation became stale during cache refresh: %+v", updated.ObservedStatus)
+	}
+	if status, reason := edgeRouteStatus(updated, model.DefaultManagedRuntimeID, true); status != model.EdgeRouteStatusActive || reason != "" {
+		t.Fatalf("recent successful observation must keep route active during refresh, got status=%q reason=%q", status, reason)
+	}
+}
+
+func TestOverlayManagedAppStatusesForEdgeRoutesRejectsAgedExpiredObservation(t *testing.T) {
+	t.Parallel()
+
+	failedOperation := &model.AppOperationFailure{ID: "op_failed", Type: "deploy"}
+	app := model.App{
+		ID:       "app_aged_observation",
+		TenantID: "tenant_demo",
+		Name:     "aged-observation",
+		Spec: model.AppSpec{
+			RuntimeID: model.DefaultManagedRuntimeID,
+			Replicas:  1,
+		},
+		Status: model.AppStatus{
+			Phase:               "unknown",
+			CurrentReplicas:     1,
+			LastOperationID:     failedOperation.ID,
+			LastFailedOperation: failedOperation,
+		},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Metadata.Generation = 1
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:              runtime.ManagedAppPhaseReady,
+		ReadyReplicas:      1,
+		ObservedGeneration: 1,
+	}
+	now := time.Now().UTC()
+	apiServer := &Server{
+		log:                   log.New(io.Discard, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Second, time.Second),
+	}
+	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
+		items:       map[string]runtime.ManagedAppObject{app.ID: managed},
+		ok:          true,
+		clusterID:   "cluster-test-uid",
+		refreshedAt: now.Add(-defaultAppObservedStatusMaxAge - time.Second),
+		expiresAt:   now.Add(-defaultAppObservedStatusMaxAge),
+	})
+	runtimes := map[string]model.Runtime{
+		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
+	}
+
+	updated := apiServer.overlayManagedAppStatusesForEdgeRoutesCached([]model.App{app}, runtimes)[0]
+	if updated.ObservedStatus == nil || updated.ObservedStatus.Fresh || updated.ObservedStatus.Reason != runtime.AppObservationReasonObservationStale {
+		t.Fatalf("aged observation must be stale: %+v", updated.ObservedStatus)
+	}
+	if status, reason := edgeRouteStatus(updated, model.DefaultManagedRuntimeID, true); status != model.EdgeRouteStatusUnavailable || !strings.Contains(reason, "stale") {
+		t.Fatalf("aged observation after a current failed operation must fail closed, got status=%q reason=%q", status, reason)
+	}
+}
+
 func TestOverlayManagedAppStatusesForEdgeRoutesRetainsStoreStateUntilGenerationObserved(t *testing.T) {
 	t.Parallel()
 

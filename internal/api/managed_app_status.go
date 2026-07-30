@@ -37,7 +37,14 @@ var (
 )
 
 func appObservedStatusFresh(observed *model.AppObservedStatus, now time.Time) bool {
-	if observed == nil || !observed.Fresh || observed.ObservedAt.IsZero() {
+	if observed == nil || !observed.Fresh {
+		return false
+	}
+	return appObservationTimestampFresh(observed.ObservedAt, now)
+}
+
+func appObservationTimestampFresh(observedAt, now time.Time) bool {
+	if observedAt.IsZero() {
 		return false
 	}
 	if now.IsZero() {
@@ -45,7 +52,7 @@ func appObservedStatusFresh(observed *model.AppObservedStatus, now time.Time) bo
 	} else {
 		now = now.UTC()
 	}
-	observedAt := observed.ObservedAt.UTC()
+	observedAt = observedAt.UTC()
 	return !observedAt.After(now.Add(30*time.Second)) && now.Sub(observedAt) <= defaultAppObservedStatusMaxAge
 }
 
@@ -894,7 +901,12 @@ func (s *Server) overlayManagedAppStatusesForEdgeRoutesCached(apps []model.App, 
 		if expired {
 			s.refreshManagedAppStatusesAsync()
 		}
-		return s.applyManagedAppListObservation(apps, cached, runtimeByID, !expired, "")
+		// Cache expiry schedules a refresh; it does not invalidate a successful
+		// runtime observation that is still inside the publication freshness SLA.
+		// Marking that short refresh window stale makes edge routes flap on every
+		// cache cycle even though the underlying evidence has not aged out.
+		fresh := appObservationTimestampFresh(cached.refreshedAt, time.Now().UTC())
+		return s.applyManagedAppListObservation(apps, cached, runtimeByID, fresh, "")
 	}
 	s.refreshManagedAppStatusesAsync()
 	return s.applyUnknownManagedAppObservation(apps, runtimeByID, "live runtime observation is pending")
