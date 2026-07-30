@@ -1891,6 +1891,9 @@ control_plane_release_domain_apply_authoritative_dns() {
 control_plane_release_domain_apply_control_plane() {
   CONTROL_PLANE_RELEASE_DOMAIN_APPLY_COMMAND_ENTERED="true"
   control_plane_release_domain_acquire_lease_and_fence || return
+  require_control_plane_backup_coordination_or_abort \
+    "pre-deploy robustness baseline" || return
+  capture_pre_deploy_robustness_baseline || return
   control_plane_release_domain_with_private_tmp \
     run_control_plane_rollback_image_preflight || return
   control_plane_release_domain_execute_sealed_helm_upgrade || return
@@ -2279,6 +2282,8 @@ control_plane_release_domain_validate_dependencies() {
     node_local_dns_active_filesystem_pressure_policy authoritative_dns_dig_preflight \
     validate_control_plane_release_job_budget validate_node_local_dns_release_budget_pre_mutation \
     run_control_plane_rollback_image_preflight \
+    require_control_plane_backup_coordination_or_abort \
+    capture_pre_deploy_robustness_baseline \
     terminate_active_control_plane_release_command \
     mark_control_plane_release_command_termination_unproven \
     mark_control_plane_release_committed_lease_unsafe \

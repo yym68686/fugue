@@ -547,6 +547,13 @@ arm_control_plane_release_recovery_fence() {
   CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
   CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="armed-pre-helm"
 }
+require_control_plane_backup_coordination_or_abort() {
+  fake_log "lease:require:$*"
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]
+}
+capture_pre_deploy_robustness_baseline() {
+  fake_log "robustness:baseline"
+}
 release_control_plane_backup_coordination_lease() {
   fake_log "lease:release"
   if [[ "${FAKE_SIGNAL_POSTCOMMIT:-false}" == "true" &&
@@ -924,11 +931,15 @@ case_domain_success() {
       assert_log_count 1 "preflight:control-plane:observe"
       assert_log_count 1 "rollback-image:preflight"
       assert_log_count 1 "lease:acquire"
+      assert_log_count 1 "lease:require:pre-deploy robustness baseline"
+      assert_log_count 1 "robustness:baseline"
       assert_log_count 1 "lease:release"
       assert_log_count 1 "control-plane:smoke"
       assert_log_count 0 "dns:apply"
       assert_log_order "lease:acquire" "lease:fence:"
-      assert_log_order "lease:fence:" "rollback-image:preflight"
+      assert_log_order "lease:fence:" "lease:require:pre-deploy robustness baseline"
+      assert_log_order "lease:require:pre-deploy robustness baseline" "robustness:baseline"
+      assert_log_order "robustness:baseline" "rollback-image:preflight"
       assert_log_order "rollback-image:preflight" "helm-upgrade:control-plane"
       ;;
     image-cache)
@@ -949,6 +960,8 @@ case_domain_success() {
   esac
   if [[ "${domain}" != "control-plane" ]]; then
     assert_log_count 0 "rollback-image:preflight"
+    assert_log_count 0 "lease:require:pre-deploy robustness baseline"
+    assert_log_count 0 "robustness:baseline"
   fi
   assert_file_contains "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}.trace" '"phase":"transaction","state":"succeeded"'
   assert_file_contains "${FAKE_LOG}" "controlPlanePostgresName=custom-control-plane-postgres"
@@ -1050,11 +1063,15 @@ case_rollback_image_preflight_failure() {
   [[ "$(run_release_status)" == "1" ]] || fail_test "rollback image preflight failure status is wrong"
   assert_log_count 1 "lease:acquire"
   assert_log_count 1 "lease:fence:"
+  assert_log_count 1 "lease:require:pre-deploy robustness baseline"
+  assert_log_count 1 "robustness:baseline"
   assert_log_count 1 "rollback-image:preflight"
   assert_log_count 0 "helm-upgrade:"
   assert_log_count 0 "helm-rollback:"
   assert_log_count 1 "lease:release"
-  assert_log_order "lease:fence:" "rollback-image:preflight"
+  assert_log_order "lease:fence:" "lease:require:pre-deploy robustness baseline"
+  assert_log_order "lease:require:pre-deploy robustness baseline" "robustness:baseline"
+  assert_log_order "robustness:baseline" "rollback-image:preflight"
   assert_file_contains "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}" "--rollback-completed=true"
   assert_public_parent_and_cleanup
 }

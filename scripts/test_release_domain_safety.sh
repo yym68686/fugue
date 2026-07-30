@@ -4035,6 +4035,30 @@ dns_prepare = body(
 )
 if dns_prepare.index("control_plane_release_domain_prepare_common") > dns_prepare.index("prepare_dns_manifest_transaction"):
     raise SystemExit("authoritative DNS snapshot must follow the common read-only Prepare gates")
+control_plane_apply = body(
+    production,
+    "control_plane_release_domain_apply_control_plane",
+    "control_plane_release_domain_apply_image_cache",
+)
+control_plane_apply_calls = (
+    "control_plane_release_domain_acquire_lease_and_fence",
+    "require_control_plane_backup_coordination_or_abort",
+    "capture_pre_deploy_robustness_baseline",
+    "run_control_plane_rollback_image_preflight",
+    "control_plane_release_domain_execute_sealed_helm_upgrade",
+)
+if any(control_plane_apply.count(name) != 1 for name in control_plane_apply_calls):
+    raise SystemExit("control-plane Apply must execute each fenced pre-Helm gate exactly once")
+if [control_plane_apply.index(name) for name in control_plane_apply_calls] != sorted(
+    control_plane_apply.index(name) for name in control_plane_apply_calls
+):
+    raise SystemExit("control-plane Apply must capture robustness after its Lease fence and before Helm")
+for adapter, next_adapter in (
+    ("control_plane_release_domain_apply_backup", "control_plane_release_domain_verify_selected_target"),
+    ("control_plane_release_adapter_control_plane_prepare", "control_plane_release_adapter_control_plane_apply"),
+):
+    if "capture_pre_deploy_robustness_baseline" in body(production, adapter, next_adapter):
+        raise SystemExit(f"{adapter} must not capture the control-plane robustness baseline")
 dns_apply = body(
     production,
     "control_plane_release_domain_apply_authoritative_dns",
