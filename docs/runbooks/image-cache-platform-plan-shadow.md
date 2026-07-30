@@ -127,6 +127,35 @@ go test ./deploy/helm/fugue-image-plane
 test -z "$(helm template image-plane-shadow deploy/helm/fugue-image-plane)"
 ```
 
+## Build a non-executable cell candidate
+
+The candidate planner is an offline integrity check, not a deploy command. It
+first exposes the deterministic digest for the exact chart directory:
+
+```console
+go run ./cmd/fugue-image-plane-release-plan \
+  --digest-chart \
+  --chart "$PWD/deploy/helm/fugue-image-plane"
+```
+
+After a trusted caller assembles a v1 request with that digest, an exact
+release-control `ComponentPlanStatus`, and the matching Helm render, the same
+command emits canonical candidate JSON:
+
+```console
+go run ./cmd/fugue-image-plane-release-plan \
+  --request /absolute/private/candidate-request.json \
+  --manifest /absolute/private/rendered-image-plane.yaml \
+  --chart "$PWD/deploy/helm/fugue-image-plane"
+```
+
+The command rejects symlinks, relative/aliased paths, unknown request fields,
+chart drift, extra Kubernetes objects, namespace/cell/image/fence drift, broad
+credentials, unsafe mounts, network-visible listeners, and non-loopback
+probes. A successful result still says `executionAllowed=false` and
+`productionMutationAllowed=false`; it must never be passed to Helm or kubectl
+as authorization.
+
 Do not run `helm install`, `helm upgrade`, label a production node, publish an
 image, or dispatch a release until the unique release coordinator explicitly
 unfreezes and authorizes that exact digest and node. A later authorized rollback

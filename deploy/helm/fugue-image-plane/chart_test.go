@@ -48,6 +48,9 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 	if err := json.Unmarshal(encoded, &daemonSet); err != nil {
 		t.Fatalf("decode rendered DaemonSet: %v", err)
 	}
+	if daemonSet.Namespace != "default" {
+		t.Fatalf("shadow DaemonSet namespace=%q, want exact Helm release namespace", daemonSet.Namespace)
+	}
 	if daemonSet.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType ||
 		daemonSet.Spec.RevisionHistoryLimit == nil || *daemonSet.Spec.RevisionHistoryLimit != 2 {
 		t.Fatalf("shadow DaemonSet rollout boundary drifted: %+v", daemonSet.Spec)

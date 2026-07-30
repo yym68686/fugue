@@ -246,6 +246,25 @@ background jobs because those sources and dependencies are absent from its
 compilation. It exposes only credential-free health and observation readiness.
 Both are probed only over Pod loopback from inside the container.
 
+`image-plane-release.fugue.dev/v1` is the non-executable handoff from artifact
+validation to a future live preflight. The read-only
+`fugue-image-plane-release-plan` command consumes an exact component-plan
+envelope, the versioned `ComponentPlanStatus` observation, a source commit,
+digest-pinned agent, deterministic chart digest, explicit cell/release
+identity, and one Helm-rendered manifest. It independently verifies the v1
+status JSON and digest instead of importing release-control's implementation.
+The render must contain exactly one namespace-bound, `OnDelete` DaemonSet with
+the expected immutable cell selector, loopback probes, non-root security,
+fixed isolated host paths, no service account, no ports, and no broad
+credential. The resulting candidate binds all inputs, the observed fence, a
+cell-local lock key, rollback policy, and idempotency key under one digest.
+`executionAllowed` and `productionMutationAllowed` are permanently false; the
+active production freeze is an explicit blocker. The command has no concrete
+store, release-control, Kubernetes client, registry, Helm execution, or process
+execution dependency and only reads bounded, non-symlink inputs. Its
+deterministic chart digest covers every relative file path and byte in the
+chart directory.
+
 The workload mounts a dedicated host state directory at
 `/var/lib/fugue/image-cache` inside the container but never mounts the legacy
 serving cache directory. The host paths must be separate canonical directories;

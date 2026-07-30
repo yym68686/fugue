@@ -81,6 +81,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ include "fugue-image-plane.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     {{- include "fugue-image-plane.labels" . | nindent 4 }}
 spec:
