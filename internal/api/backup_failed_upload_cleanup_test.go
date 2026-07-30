@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -386,6 +387,73 @@ func TestSweepFailedBackupRunObjectsDeletesOnlyExactUnreferencedRunObjects(t *te
 	}
 	if len(candidates) != 0 {
 		t.Fatalf("expected durable cleanup marker to suppress retry, got %+v", candidates)
+	}
+}
+
+func TestSweepFailedBackupRunObjectsCompletesProvenBackendMissingRun(t *testing.T) {
+	finishedAt := time.Now().UTC().Add(-2 * time.Hour)
+	legacyRun := model.BackupRun{
+		ID:            "backup_run_backend_missing",
+		Target:        model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		Status:        model.BackupRunStatusFailed,
+		ErrorCode:     "backup_backend_missing",
+		ErrorMessage:  "backup_backend_missing: backup backend is not configured",
+		FinishedAt:    &finishedAt,
+		BytesWritten:  0,
+		ArtifactCount: 0,
+	}
+	stateBytes, err := json.Marshal(model.State{BackupRuns: []model.BackupRun{legacyRun}})
+	if err != nil {
+		t.Fatalf("marshal legacy backup state: %v", err)
+	}
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	if err := os.WriteFile(storePath, stateBytes, 0o600); err != nil {
+		t.Fatalf("write legacy backup state: %v", err)
+	}
+	stateStore := store.New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := &Server{store: stateStore}
+	server.sweepFailedBackupRunObjects(context.Background())
+	candidates, err := stateStore.ListFailedBackupRunObjectCleanupCandidates(store.BackupRunObjectCleanupFilter{
+		Before: time.Now().UTC(),
+		Limit:  10,
+	})
+	if err != nil {
+		t.Fatalf("list cleanup candidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("proven backend-missing run remained a cleanup candidate: %+v", candidates)
+	}
+}
+
+func TestBackupFailedRunProvesNoObjectUploadFailsClosed(t *testing.T) {
+	t.Parallel()
+	base := model.BackupRun{
+		Status:    model.BackupRunStatusFailed,
+		ErrorCode: "backup_backend_missing",
+	}
+	if !backupFailedRunProvesNoObjectUpload(base) {
+		t.Fatal("expected exact backend-missing terminal run to prove no upload")
+	}
+	tests := []struct {
+		name string
+		run  model.BackupRun
+	}{
+		{name: "pending", run: func() model.BackupRun { run := base; run.Status = model.BackupRunStatusPending; return run }()},
+		{name: "different error", run: func() model.BackupRun { run := base; run.ErrorCode = "backup_failed"; return run }()},
+		{name: "backend present", run: func() model.BackupRun { run := base; run.BackendID = "backend-1"; return run }()},
+		{name: "bytes recorded", run: func() model.BackupRun { run := base; run.BytesWritten = 1; return run }()},
+		{name: "artifact recorded", run: func() model.BackupRun { run := base; run.ArtifactCount = 1; return run }()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if backupFailedRunProvesNoObjectUpload(test.run) {
+				t.Fatalf("inconsistent run was accepted: %+v", test.run)
+			}
+		})
 	}
 }
 
