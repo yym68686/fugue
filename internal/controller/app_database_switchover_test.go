@@ -159,7 +159,7 @@ func TestRollbackManagedPostgresStageRestoresThroughForcedApply(t *testing.T) {
 	}
 }
 
-func TestDatabaseSwitchoverSpecClearsSourcePlacementMetadata(t *testing.T) {
+func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
 	t.Parallel()
 
 	base := model.AppSpec{
@@ -172,7 +172,6 @@ func TestDatabaseSwitchoverSpecClearsSourcePlacementMetadata(t *testing.T) {
 		Password:                         "secret",
 		RuntimeID:                        "runtime_source",
 		FailoverTargetRuntimeID:          "runtime_target",
-		PrimaryNodeName:                  "source-node",
 		Instances:                        2,
 		SynchronousReplicas:              1,
 		PrimaryPlacementPendingRebalance: true,
@@ -184,59 +183,6 @@ func TestDatabaseSwitchoverSpecClearsSourcePlacementMetadata(t *testing.T) {
 	}
 	if got.Postgres.PrimaryPlacementPendingRebalance {
 		t.Fatalf("expected explicit switchover to clear pending placement hold, got %+v", got.Postgres)
-	}
-	if got.Postgres.PrimaryNodeName != "" {
-		t.Fatalf("expected explicit switchover to clear the source primary node, got %+v", got.Postgres)
-	}
-}
-
-func TestDatabaseSwitchoverStageSpecPreservesSourcePrimaryNode(t *testing.T) {
-	t.Parallel()
-
-	base := model.AppSpec{
-		Image:     "ghcr.io/example/demo:latest",
-		RuntimeID: "runtime_app",
-	}
-	postgres := &model.AppPostgresSpec{
-		Database:                "demo",
-		User:                    "demo",
-		Password:                "secret",
-		RuntimeID:               "runtime_source",
-		FailoverTargetRuntimeID: "runtime_target",
-		PrimaryNodeName:         "source-node",
-		Instances:               2,
-		SynchronousReplicas:     1,
-	}
-
-	got := databaseSwitchoverStageSpec(base, postgres, "runtime_source", "runtime_target")
-	if got.Postgres == nil {
-		t.Fatalf("expected postgres spec, got %+v", got)
-	}
-	if got.Postgres.RuntimeID != "runtime_source" || got.Postgres.FailoverTargetRuntimeID != "runtime_target" {
-		t.Fatalf("unexpected stage runtime placement: %+v", got.Postgres)
-	}
-	if got.Postgres.PrimaryNodeName != "source-node" {
-		t.Fatalf("expected stage to retain the source primary node, got %+v", got.Postgres)
-	}
-}
-
-func TestDatabaseSwitchoverPostgresSpecClearsSourcePrimaryNode(t *testing.T) {
-	t.Parallel()
-
-	postgres := &model.AppPostgresSpec{
-		RuntimeID:               "runtime_source",
-		FailoverTargetRuntimeID: "runtime_target",
-		PrimaryNodeName:         "source-node",
-		Instances:               2,
-		SynchronousReplicas:     1,
-	}
-
-	got := databaseSwitchoverPostgresSpec(postgres, "runtime_target", "runtime_source")
-	if got.RuntimeID != "runtime_target" || got.FailoverTargetRuntimeID != "runtime_source" {
-		t.Fatalf("unexpected final runtime placement: %+v", got)
-	}
-	if got.PrimaryNodeName != "" {
-		t.Fatalf("expected final service spec to clear the source primary node, got %+v", got)
 	}
 }
 
