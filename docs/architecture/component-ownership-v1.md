@@ -791,6 +791,32 @@ ServiceAccount, RBAC, workload, chart, or environment wiring. Credential and
 CA projection plus any writer remain separate later atoms, so the production
 topology and current Secret state are unchanged.
 
+`internal/backupmaterializer/secretreader/projected` adds the default-off
+`backup-materializer-secret-reader-projection@v1` in-cluster bootstrap for
+that read boundary. An enabled instance accepts only one absolute,
+non-writable projection root containing `token` and `ca.crt` as restricted
+regular files or through Kubernetes' exact `<name> -> ..data/<name>` atomic
+writer topology. The in-root generation must remain a real directory across
+each bounded read. The JWT is never world-readable; CA input is a strict,
+bounded CA-only PEM bundle.
+
+Every Secret observation rereads both inputs, builds a fresh TLS 1.2+ direct
+transport pinned to the configured HTTPS authority, and closes the connection
+after the response. Environment proxies, compression, redirects, cookies,
+keep-alive, cached CA pools, and cached credentials are excluded. The
+transport admits only the exact GET-only Secret path already sealed for its
+cell, five fixed request headers, no body, query, trailer, transfer encoding,
+host override, or alternate path. Invalid or racing rotations fail only that
+observation; restoring one complete valid generation recovers without
+reconstructing the reader.
+
+The projection package adds filesystem and TLS capability only around the
+already isolated reader. It imports no Kubernetes SDK/client-go, discovery,
+watch, list, datastore, API server, signer, desired-input client, Secret
+writer, process, RBAC, ServiceAccount, workload, chart, or deployment code.
+No production composition, token projection, or permission grant constructs
+it yet, so the live Kubernetes API and Secret remain untouched.
+
 `internal/backupmaterializer/reconciler` composes those two read boundaries
 with the pure CAS/LKG policy as the default-off
 `backup-materializer-reconciler@v1` single-cell, single-cycle shadow control

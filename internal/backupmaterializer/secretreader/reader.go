@@ -24,7 +24,8 @@ import (
 )
 
 const (
-	APIVersion = "backup-materializer-secret-reader.fugue.dev/v1"
+	APIVersion       = "backup-materializer-secret-reader.fugue.dev/v1"
+	RequestUserAgent = "fugue-backup-materializer-secret-reader/1"
 
 	DefaultRequestTimeout = 5 * time.Second
 	MaximumRequestTimeout = 30 * time.Second
@@ -176,6 +177,7 @@ func (reader *Reader) Observe(ctx context.Context) (reconcile.Observation, error
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("Authorization", "Bearer "+credential)
 	request.Header.Set("Cache-Control", "no-store")
+	request.Header.Set("User-Agent", RequestUserAgent)
 	response, err := reader.client.Do(request)
 	if err != nil {
 		if response != nil && response.Body != nil {

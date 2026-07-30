@@ -37,7 +37,8 @@ func TestReaderGetsOnlyExactSecretAndRecoversRotatingObservation(t *testing.T) {
 		if request.Method != http.MethodGet || request.URL.Path != secretPathPrefix+materialization.SecretNamespace+"/secrets/"+fixture.plan.SecretName ||
 			request.URL.RawQuery != "" || request.Header.Get("Authorization") != "Bearer "+wantToken ||
 			request.Header.Get("Accept") != "application/json" || request.Header.Get("Accept-Encoding") != "identity" ||
-			request.Header.Get("Cache-Control") != "no-store" || request.ContentLength != 0 {
+			request.Header.Get("Cache-Control") != "no-store" || request.Header.Get("User-Agent") != RequestUserAgent ||
+			request.ContentLength != 0 {
 			t.Errorf("request widened: method=%q url=%q headers=%v length=%d", request.Method, request.URL.String(), request.Header, request.ContentLength)
 			http.Error(w, "request drift", http.StatusBadRequest)
 			return
