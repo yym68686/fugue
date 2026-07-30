@@ -3,14 +3,21 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
+)
+
+const (
+	managedAppEvictedPodRetention  = 24 * time.Hour
+	managedAppEvictedPodBatchLimit = 8
 )
 
 func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, operationID string) error {
@@ -688,6 +695,132 @@ func (s *Service) cleanupStrandedManagedPostgresPods(ctx context.Context, client
 		return nil
 	}
 	return s.cleanupStrandedPodsBySelector(ctx, client, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName), "managed postgres")
+}
+
+// cleanupRetainedManagedAppEvictedPods removes only old, kubelet-evicted pods
+// belonging to a controller-owned ReplicaSet for an otherwise-ready app. The
+// controller deliberately keeps recent or ambiguous terminal pods so rollout
+// diagnostics remain available, and every delete is guarded by the observed
+// pod UID.
+func (s *Service) cleanupRetainedManagedAppEvictedPods(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	app model.App,
+	pods []kubePod,
+) error {
+	if client == nil || len(pods) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	if s != nil && s.now != nil {
+		now = s.now().UTC()
+	}
+	cutoff := now.Add(-managedAppEvictedPodRetention)
+	type candidate struct {
+		pod        kubePod
+		terminalAt time.Time
+	}
+	candidates := make([]candidate, 0, len(pods))
+	for _, pod := range pods {
+		terminalAt, ok := managedAppEvictedPodTerminalAt(pod)
+		if !ok || terminalAt.After(cutoff) || !managedAppPodBelongsToApp(pod, app) || !managedAppPodControllerOwned(pod) {
+			continue
+		}
+		if strings.TrimSpace(pod.ObservedUID) == "" || strings.TrimSpace(pod.Metadata.Name) == "" {
+			continue
+		}
+		candidates = append(candidates, candidate{pod: pod, terminalAt: terminalAt})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].terminalAt.Equal(candidates[j].terminalAt) {
+			return candidates[i].pod.Metadata.Name < candidates[j].pod.Metadata.Name
+		}
+		return candidates[i].terminalAt.Before(candidates[j].terminalAt)
+	})
+	if len(candidates) > managedAppEvictedPodBatchLimit {
+		candidates = candidates[:managedAppEvictedPodBatchLimit]
+	}
+	var errs []error
+	for _, item := range candidates {
+		pod := item.pod
+		err := client.deletePodWithUID(ctx, namespace, pod.Metadata.Name, pod.ObservedUID)
+		if errors.Is(err, errKubeConflict) {
+			// The pod changed between LIST and DELETE. Treat this as a
+			// successful fail-closed skip; the next reconcile can re-evaluate it.
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("delete evicted pod %s/%s: %w", namespace, pod.Metadata.Name, err))
+			continue
+		}
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf("deleted retained evicted managed app pod %s/%s (terminal_at=%s)", namespace, pod.Metadata.Name, item.terminalAt.UTC().Format(time.RFC3339))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func managedAppPodBelongsToApp(pod kubePod, app model.App) bool {
+	labels := pod.Metadata.Labels
+	if labels[runtime.FugueLabelManagedBy] != runtime.FugueLabelManagedByValue {
+		return false
+	}
+	if appID := strings.TrimSpace(app.ID); appID == "" || labels[runtime.FugueLabelAppID] != appID {
+		return false
+	}
+	if tenantID := strings.TrimSpace(app.TenantID); tenantID == "" || labels[runtime.FugueLabelTenantID] != tenantID {
+		return false
+	}
+	if name := strings.TrimSpace(runtime.RuntimeResourceName(app.Name)); name == "" || labels[runtime.FugueLabelName] != name {
+		return false
+	}
+	return true
+}
+
+func managedAppPodControllerOwned(pod kubePod) bool {
+	for _, owner := range pod.ObservedOwnerReferences {
+		if owner.Controller &&
+			strings.TrimSpace(owner.APIVersion) == "apps/v1" &&
+			strings.TrimSpace(owner.Kind) == "ReplicaSet" &&
+			strings.TrimSpace(owner.Name) != "" &&
+			strings.TrimSpace(owner.UID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func managedAppEvictedPodTerminalAt(pod kubePod) (time.Time, bool) {
+	if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Failed") ||
+		!strings.EqualFold(strings.TrimSpace(pod.Status.Reason), "Evicted") ||
+		strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
+		return time.Time{}, false
+	}
+	var latest time.Time
+	for _, condition := range pod.Status.Conditions {
+		if !strings.EqualFold(strings.TrimSpace(condition.Type), "DisruptionTarget") ||
+			!strings.EqualFold(strings.TrimSpace(condition.Status), "True") ||
+			condition.LastTransitionTime.IsZero() {
+			continue
+		}
+		if condition.LastTransitionTime.After(latest) {
+			latest = condition.LastTransitionTime
+		}
+	}
+	if !latest.IsZero() {
+		return latest.UTC(), true
+	}
+	// Older kubelets can reject a pod under DiskPressure before emitting the
+	// DisruptionTarget condition. In that narrow shape, startTime is effectively
+	// the terminal timestamp because it is within a few seconds of creation.
+	startDelay := pod.ObservedStartTime.Sub(pod.Metadata.CreationTimestamp)
+	if pod.ObservedStartTime.IsZero() || pod.Metadata.CreationTimestamp.IsZero() ||
+		startDelay < 0 || startDelay > 10*time.Second ||
+		!strings.Contains(strings.ToLower(strings.TrimSpace(pod.Status.Message)), "diskpressure") {
+		return time.Time{}, false
+	}
+	return pod.ObservedStartTime.UTC(), true
 }
 
 func (s *Service) cleanupStrandedPodsBySelector(ctx context.Context, client *kubeClient, namespace, selector, resourceLabel string) error {

@@ -1368,6 +1368,32 @@ func (c *kubeClient) forceDeletePod(ctx context.Context, namespace, name string)
 	return normalizeDeleteNotFound(err)
 }
 
+// deletePodWithUID removes a terminal pod only if the object still has the
+// identity observed by the caller. This prevents a stale list result from
+// deleting a newly-created pod that reused the old name.
+func (c *kubeClient) deletePodWithUID(ctx context.Context, namespace, name, uid string) error {
+	name = strings.TrimSpace(name)
+	uid = strings.TrimSpace(uid)
+	if name == "" || uid == "" {
+		return fmt.Errorf("delete pod requires name and UID")
+	}
+	body := map[string]any{
+		"apiVersion":         "v1",
+		"kind":               "DeleteOptions",
+		"gracePeriodSeconds": 0,
+		"propagationPolicy":  "Background",
+		"preconditions": map[string]any{
+			"uid": uid,
+		},
+	}
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods/" + url.PathEscape(name)
+	status, err := c.doRequest(ctx, http.MethodDelete, apiPath, "application/json", body, nil)
+	if status == http.StatusConflict {
+		return errKubeConflict
+	}
+	return normalizeDeleteNotFound(err)
+}
+
 func (c *kubeClient) patchVolSyncReplicationSourceTrigger(ctx context.Context, namespace, name, manual string) error {
 	body := map[string]any{
 		"spec": map[string]any{

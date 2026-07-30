@@ -2020,6 +2020,154 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 	}
 }
 
+func TestCleanupRetainedManagedAppEvictedPodsDeletesOnlyProvenOldReplicaSetPods(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "Demo App"}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+
+	old := retainedEvictedPodFixture(app, "old", "uid-old", now.Add(-48*time.Hour))
+	rejected := retainedEvictedPodFixture(app, "rejected", "uid-rejected", time.Time{})
+	rejected.Metadata.CreationTimestamp = now.Add(-72 * time.Hour)
+	rejected.ObservedStartTime = rejected.Metadata.CreationTimestamp.Add(time.Second)
+	rejected.Status.Message = "Pod was rejected: The node had condition: [DiskPressure]."
+
+	recent := retainedEvictedPodFixture(app, "recent", "uid-recent", now.Add(-2*time.Hour))
+	nonEvicted := retainedEvictedPodFixture(app, "non-evicted", "uid-non-evicted", now.Add(-48*time.Hour))
+	nonEvicted.Status.Reason = "Error"
+	wrongOwner := retainedEvictedPodFixture(app, "wrong-owner", "uid-wrong-owner", now.Add(-48*time.Hour))
+	wrongOwner.ObservedOwnerReferences[0].Kind = "Job"
+	wrongApp := retainedEvictedPodFixture(app, "wrong-app", "uid-wrong-app", now.Add(-48*time.Hour))
+	wrongApp.Metadata.Labels[runtime.FugueLabelAppID] = "app_other"
+	missingUID := retainedEvictedPodFixture(app, "missing-uid", "", now.Add(-48*time.Hour))
+	terminating := retainedEvictedPodFixture(app, "terminating", "uid-terminating", now.Add(-48*time.Hour))
+	terminating.Metadata.DeletionTimestamp = now.Add(-time.Hour).Format(time.RFC3339)
+	missingTerminalProof := retainedEvictedPodFixture(app, "missing-terminal-proof", "uid-missing-terminal", time.Time{})
+	missingTerminalProof.Metadata.CreationTimestamp = now.Add(-72 * time.Hour)
+	missingTerminalProof.ObservedStartTime = missingTerminalProof.Metadata.CreationTimestamp.Add(-time.Second)
+	missingTerminalProof.Status.Message = "Pod was rejected: The node had condition: [DiskPressure]."
+
+	wantUID := map[string]string{
+		"old":      "uid-old",
+		"rejected": "uid-rejected",
+	}
+	deleted := make(map[string]bool)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || !strings.HasPrefix(r.URL.Path, "/api/v1/namespaces/"+namespace+"/pods/") {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/"+namespace+"/pods/")
+		uid, ok := wantUID[name]
+		if !ok {
+			t.Fatalf("unexpected pod delete %q", name)
+		}
+		var options struct {
+			APIVersion         string `json:"apiVersion"`
+			Kind               string `json:"kind"`
+			GracePeriodSeconds int64  `json:"gracePeriodSeconds"`
+			PropagationPolicy  string `json:"propagationPolicy"`
+			Preconditions      struct {
+				UID string `json:"uid"`
+			} `json:"preconditions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+			t.Fatalf("decode delete options: %v", err)
+		}
+		if options.APIVersion != "v1" || options.Kind != "DeleteOptions" || options.GracePeriodSeconds != 0 || options.PropagationPolicy != "Background" {
+			t.Fatalf("unexpected delete options: %+v", options)
+		}
+		if options.Preconditions.UID != uid {
+			t.Fatalf("expected UID precondition %q for %s, got %q", uid, name, options.Preconditions.UID)
+		}
+		deleted[name] = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "test", namespace: namespace}
+	service := &Service{now: func() time.Time { return now }, Logger: log.New(io.Discard, "", 0)}
+	pods := []kubePod{old, rejected, recent, nonEvicted, wrongOwner, wrongApp, missingUID, terminating, missingTerminalProof}
+	if err := service.cleanupRetainedManagedAppEvictedPods(context.Background(), client, namespace, app, pods); err != nil {
+		t.Fatalf("cleanup retained evicted pods: %v", err)
+	}
+	if len(deleted) != len(wantUID) || !deleted["old"] || !deleted["rejected"] {
+		t.Fatalf("expected only proven old evicted pods to be deleted, got %+v", deleted)
+	}
+}
+
+func TestCleanupRetainedManagedAppEvictedPodsBoundsBatchAndSkipsUIDConflict(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo"}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	pods := make([]kubePod, 0, managedAppEvictedPodBatchLimit+2)
+	for i := 0; i < managedAppEvictedPodBatchLimit+2; i++ {
+		name := fmt.Sprintf("pod-%02d", i)
+		pods = append(pods, retainedEvictedPodFixture(app, name, "uid-"+name, now.Add(-time.Duration(72-i)*time.Hour)))
+	}
+
+	deleted := make([]string, 0, managedAppEvictedPodBatchLimit)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/api/v1/namespaces/"+namespace+"/pods/")
+		deleted = append(deleted, name)
+		if name == "pod-03" {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"UID precondition failed"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "test", namespace: namespace}
+	service := &Service{now: func() time.Time { return now }, Logger: log.New(io.Discard, "", 0)}
+	if err := service.cleanupRetainedManagedAppEvictedPods(context.Background(), client, namespace, app, pods); err != nil {
+		t.Fatalf("expected UID conflict to fail closed without blocking the batch, got %v", err)
+	}
+	if len(deleted) != managedAppEvictedPodBatchLimit {
+		t.Fatalf("expected bounded batch of %d deletes, got %d: %+v", managedAppEvictedPodBatchLimit, len(deleted), deleted)
+	}
+	for i, name := range deleted {
+		want := fmt.Sprintf("pod-%02d", i)
+		if name != want {
+			t.Fatalf("expected oldest pods first; delete %d=%q, want %q", i, name, want)
+		}
+	}
+}
+
+func retainedEvictedPodFixture(app model.App, name, uid string, terminalAt time.Time) kubePod {
+	pod := kubePod{}
+	pod.Metadata.Name = name
+	pod.ObservedUID = uid
+	pod.Metadata.CreationTimestamp = terminalAt.Add(-time.Hour)
+	pod.Metadata.Labels = map[string]string{
+		runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue,
+		runtime.FugueLabelName:      runtime.RuntimeResourceName(app.Name),
+		runtime.FugueLabelAppID:     app.ID,
+		runtime.FugueLabelTenantID:  app.TenantID,
+	}
+	pod.ObservedOwnerReferences = []kubePodOwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "demo-rs",
+		UID:        "rs-uid",
+		Controller: true,
+	}}
+	pod.Status.Phase = "Failed"
+	pod.Status.Reason = "Evicted"
+	if !terminalAt.IsZero() {
+		pod.Status.Conditions = []kubePodCondition{{
+			Type:               "DisruptionTarget",
+			Status:             "True",
+			Reason:             "TerminationByKubelet",
+			LastTransitionTime: terminalAt,
+		}}
+	}
+	return pod
+}
+
 func readyKubeDeployment(name string, replicas int) kubeDeployment {
 	deployment := kubeDeployment{}
 	deployment.Metadata.Name = name
