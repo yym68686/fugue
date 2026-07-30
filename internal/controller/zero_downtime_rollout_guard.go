@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
@@ -454,6 +455,22 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	if !liveWorkload {
 		return desired, nil
 	}
+	liveKey := strings.TrimSpace(deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey])
+	if liveKey == "" {
+		return model.App{}, fmt.Errorf("live deployment has no %s identity annotation", runtime.FugueAnnotationReleaseKey)
+	}
+
+	currentKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), managed.Spec.Scheduling))
+	desiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
+	if liveKey != currentKey && liveKey != desiredKey {
+		recovered, ok, err := s.recoverManagedAppPendingDeploySnapshot(ctx, managed, current, liveKey)
+		if err != nil {
+			return model.App{}, err
+		}
+		if ok {
+			current = recovered
+		}
+	}
 	if current.Spec.Replicas <= 0 {
 		current.Spec.Replicas = liveReplicas
 	}
@@ -472,12 +489,8 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	opType = managedRolloutGuardOperationType(opType)
 	op := model.Operation{Type: opType, DesiredSpec: &desired.Spec}
 
-	currentKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), managed.Spec.Scheduling))
-	desiredKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
-	liveKey := strings.TrimSpace(deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey])
-	if liveKey == "" {
-		return model.App{}, fmt.Errorf("live deployment has no %s identity annotation", runtime.FugueAnnotationReleaseKey)
-	}
+	currentKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(current), managed.Spec.Scheduling))
+	desiredKey = strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(desired), desiredScheduling))
 	if liveKey != currentKey && liveKey != desiredKey {
 		return model.App{}, fmt.Errorf("live deployment release key %q matches neither current snapshot %q nor desired snapshot %q", liveKey, currentKey, desiredKey)
 	}
@@ -567,6 +580,99 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 		}
 	}
 	return desired, nil
+}
+
+// recoverManagedAppPendingDeploySnapshot closes the narrow crash window where
+// a deploy applied and became Ready, but the operation failed before its
+// desired snapshot was committed to the store. The ManagedApp status retains
+// the controller-authored pending release identity while background reconcile
+// restores the older durable spec. A later deploy must use the actual serving
+// snapshot as its zero-downtime baseline instead of treating that proven
+// half-commit as arbitrary live drift.
+//
+// Recovery is deliberately operation-only and fail-closed. The pending key
+// must match the live Deployment, belong to a completed failed deploy that
+// predates the active deploy, fall inside that operation's time interval, and
+// be reproduced exactly from the operation's full desired spec/source state.
+// Background reconciliation and unverifiable/manual identities never enter
+// this path.
+func (s *Service) recoverManagedAppPendingDeploySnapshot(
+	ctx context.Context,
+	managed runtime.ManagedAppObject,
+	current model.App,
+	liveKey string,
+) (model.App, bool, error) {
+	liveKey = strings.TrimSpace(liveKey)
+	pendingKey := strings.TrimSpace(managed.Status.PendingReleaseKey)
+	pendingStartedAt := parseManagedAppStatusTimestamp(managed.Status.PendingReleaseStartedAt)
+	apply := managedAppApplySourceFromContext(ctx)
+	if liveKey == "" || pendingKey != liveKey || pendingStartedAt == nil ||
+		managed.Status.ObservedGeneration < managed.Metadata.Generation ||
+		apply.Source != managedAppApplySourceOperation || apply.OperationID == "" ||
+		s == nil || s.Store == nil {
+		return model.App{}, false, nil
+	}
+
+	active, err := s.Store.GetOperation(apply.OperationID)
+	if err != nil {
+		return model.App{}, false, fmt.Errorf("read active deploy while recovering pending live release: %w", err)
+	}
+	if active.Type != model.OperationTypeDeploy || active.Status != model.OperationStatusRunning ||
+		active.AppID != current.ID || active.TenantID != current.TenantID {
+		return model.App{}, false, nil
+	}
+
+	operations, err := s.Store.ListOperationsByApp(current.TenantID, true, current.ID)
+	if err != nil {
+		return model.App{}, false, fmt.Errorf("list deploy history while recovering pending live release: %w", err)
+	}
+
+	var recovered model.App
+	var recoveredAt time.Time
+	for _, candidate := range operations {
+		if candidate.ID == active.ID || candidate.Type != model.OperationTypeDeploy ||
+			candidate.Status != model.OperationStatusFailed || candidate.DesiredSpec == nil ||
+			candidate.CompletedAt == nil || !candidate.CompletedAt.Before(active.CreatedAt) {
+			continue
+		}
+		attemptStartedAt := candidate.CreatedAt
+		if candidate.StartedAt != nil {
+			attemptStartedAt = *candidate.StartedAt
+		}
+		if pendingStartedAt.Before(attemptStartedAt) || pendingStartedAt.After(*candidate.CompletedAt) {
+			continue
+		}
+
+		snapshot := current
+		snapshot.Spec = *cloneControllerAppSpec(candidate.DesiredSpec)
+		buildSource := model.AppBuildSource(snapshot)
+		if candidate.DesiredSource != nil {
+			buildSource = model.CloneAppSource(candidate.DesiredSource)
+		}
+		originSource := model.AppOriginSource(snapshot)
+		if candidate.DesiredOriginSource != nil {
+			originSource = model.CloneAppSource(candidate.DesiredOriginSource)
+		}
+		model.SetAppSourceState(&snapshot, originSource, buildSource)
+		if normalized, changed := s.normalizeManagedAppRuntimeImageRefs(snapshot); changed {
+			snapshot = normalized
+		}
+		snapshot = s.appWithResolvedLaunchOverride(ctx, snapshot)
+		snapshot.Spec.RolloutIntent = rolloutIntentForManagedOperation(candidate, current, snapshot)
+		snapshot = s.Renderer.PrepareApp(snapshot)
+		candidateKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(snapshot, managed.Spec.Scheduling))
+		if candidateKey != liveKey {
+			continue
+		}
+		if recovered.ID == "" || candidate.CompletedAt.After(recoveredAt) {
+			recovered = snapshot
+			recoveredAt = *candidate.CompletedAt
+		}
+	}
+	if recovered.ID == "" {
+		return model.App{}, false, nil
+	}
+	return recovered, true, nil
 }
 
 // managedAppAllowsUnavailableRecovery breaks a deadlock where a terminally

@@ -6,11 +6,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 func TestManagedAppLiveGuardAllowsInitialDeploymentOnlyWhenDeploymentIsAbsent(t *testing.T) {
@@ -206,7 +209,14 @@ func TestManagedAppLiveGuardUnavailableRecoveryRemainsFailClosedWithoutProof(t *
 func TestManagedAppLiveGuardRefusesUnknownReleaseIdentity(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
-	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1}
+	managed.Metadata.Generation = 2
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:                   runtime.ManagedAppPhaseReady,
+		ReadyReplicas:           1,
+		ObservedGeneration:      2,
+		PendingReleaseKey:       "unknown-live-release",
+		PendingReleaseStartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
 	svc := &Service{Renderer: runtime.Renderer{}}
 	live, _ := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(app), runtime.SchedulingConstraints{})
 	managedAppLiveGuardMarkReady(&live, 1)
@@ -217,7 +227,139 @@ func TestManagedAppLiveGuardRefusesUnknownReleaseIdentity(t *testing.T) {
 		context.Background(), client, managed.Metadata.Namespace, managed, app, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "matches neither current snapshot") {
-		t.Fatalf("an unproven live identity must fail closed, got %v", err)
+		t.Fatalf("a pending identity without operation-history proof must fail closed, got %v", err)
+	}
+}
+
+func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Pending release recovery")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	source := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "registry.example/live-guard:latest",
+		ResolvedImageRef: "registry.example/live-guard:v1",
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(
+		tenant.ID,
+		project.ID,
+		"live-guard",
+		"",
+		model.AppSpec{
+			Image:     "registry.example/live-guard:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_managed_shared",
+			Env:       map[string]string{"MODE": "old"},
+		},
+		source,
+	)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	failedSpec := *cloneControllerAppSpec(&app.Spec)
+	failedSpec.Image = "registry.example/live-guard:v2"
+	failedSpec.RestartToken = "restart_failed_attempt"
+	failedSource := source
+	failedSource.ResolvedImageRef = "registry.example/live-guard:v2"
+	failedDeploy, err := stateStore.CreateOperation(model.Operation{
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		AppID:               app.ID,
+		DesiredSpec:         &failedSpec,
+		DesiredSource:       &failedSource,
+		DesiredOriginSource: &failedSource,
+	})
+	if err != nil {
+		t.Fatalf("create failed deploy: %v", err)
+	}
+	failedDeploy, claimed, err := stateStore.TryClaimPendingOperation(failedDeploy.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim failed deploy: claimed=%v err=%v", claimed, err)
+	}
+	failedDeploy, err = stateStore.FailOperation(failedDeploy.ID, "status publish failed after rollout became ready")
+	if err != nil {
+		t.Fatalf("fail prior deploy: %v", err)
+	}
+	if failedDeploy.CompletedAt == nil {
+		t.Fatal("failed deploy must have a completion timestamp")
+	}
+
+	svc := &Service{Store: stateStore, Renderer: runtime.Renderer{}}
+	pendingApp := app
+	pendingApp.Spec = failedSpec
+	model.SetAppSourceState(&pendingApp, &failedSource, &failedSource)
+	pendingApp.Spec.RolloutIntent = rolloutIntentForManagedOperation(failedDeploy, app, pendingApp)
+	pendingApp = svc.Renderer.PrepareApp(pendingApp)
+	pendingKey := svc.Renderer.ManagedAppReleaseKey(pendingApp, runtime.SchedulingConstraints{})
+	if strings.TrimSpace(pendingKey) == "" {
+		t.Fatal("expected pending release key")
+	}
+
+	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})
+	managed.Metadata.Generation = 2
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:                   runtime.ManagedAppPhaseError,
+		ReadyReplicas:           1,
+		ObservedGeneration:      2,
+		PendingReleaseKey:       pendingKey,
+		PendingReleaseStartedAt: failedDeploy.CompletedAt.UTC().Format(time.RFC3339Nano),
+	}
+	live, found := svc.expectedManagedAppDeployment(pendingApp, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected pending deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+
+	nextSpec := *cloneControllerAppSpec(&failedSpec)
+	nextSpec.RestartToken = "restart_next_attempt"
+	activeDeploy, err := stateStore.CreateOperation(model.Operation{
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		AppID:               app.ID,
+		DesiredSpec:         &nextSpec,
+		DesiredSource:       &failedSource,
+		DesiredOriginSource: &failedSource,
+	})
+	if err != nil {
+		t.Fatalf("create active deploy: %v", err)
+	}
+	activeDeploy, claimed, err = stateStore.TryClaimPendingOperation(activeDeploy.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim active deploy: claimed=%v err=%v", claimed, err)
+	}
+	desired := app
+	desired.Spec = nextSpec
+	model.SetAppSourceState(&desired, &failedSource, &failedSource)
+	ctx := withManagedAppApplySource(context.Background(), managedAppApplySourceOperation, activeDeploy.ID)
+	prepared, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		ctx,
+		client,
+		managed.Metadata.Namespace,
+		managed,
+		desired,
+		model.OperationTypeDeploy,
+		runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("controller-authored ready pending release must be a recoverable baseline: %v", err)
+	}
+	if prepared.Spec.Image != nextSpec.Image || prepared.Spec.RestartToken != nextSpec.RestartToken {
+		t.Fatalf("unexpected prepared desired spec: %+v", prepared.Spec)
+	}
+	if prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected pending image to become the current baseline for a restart-only retry, got %q", prepared.Spec.RolloutIntent)
 	}
 }
 
