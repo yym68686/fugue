@@ -49,6 +49,7 @@ func TestBuildCandidateBindsCellArtifactsManifestAndLocks(t *testing.T) {
 	if first.CellID != "app-database-0123456789abcdef" || first.CellLockKey != "lane/backup/cell/app-database-0123456789abcdef" ||
 		first.PlanLaneLockKey != "lane/backup" || first.ReleaseName != testReleaseName || first.WorkloadName != "fugue-backup-observer-app-database-0123456789abcdef" ||
 		first.ImageDigest != testImageDigest || first.ChartDigest != testChartDigest || first.ReleaseNamespace != "fugue-system" ||
+		first.LKGClaimName != "fugue-backup-observer-app-database-0123456789abcdef-lkg" ||
 		first.BackupSpecContract != backuprelease.BackupSpecContractV1 || first.BackupStatusContract != backuprelease.BackupStatusContractV1 ||
 		first.ObserverStatusContract != backuprelease.BackupObserverStatusContractV2 || !first.ObservationOnly || first.ExecutionAllowed ||
 		first.ProductionMutationAllowed || !first.RollbackRequired || !first.LastKnownGoodRequired {
@@ -98,6 +99,10 @@ func TestCandidateRejectsRequestBindingDrift(t *testing.T) {
 		{name: "credential API", mutate: func(r *backuprelease.CandidateRequest) { r.APIBaseURL = "https://user@api.example.test" }},
 		{name: "spec key traversal", mutate: func(r *backuprelease.CandidateRequest) { r.SpecConfigMapKey = "../spec" }},
 		{name: "token key path", mutate: func(r *backuprelease.CandidateRequest) { r.TokenSecretKey = "token/path" }},
+		{name: "missing LKG claim", mutate: func(r *backuprelease.CandidateRequest) { r.LKGClaimName = "" }},
+		{name: "cross-cell LKG claim", mutate: func(r *backuprelease.CandidateRequest) {
+			r.LKGClaimName = "fugue-backup-observer-registry-0123456789abcdef-lkg"
+		}},
 		{name: "request timeout", mutate: func(r *backuprelease.CandidateRequest) { r.RequestTimeout = "20s" }},
 		{name: "status fence", mutate: func(r *backuprelease.CandidateRequest) { r.ComponentPlanStatus.FencingToken++ }},
 		{name: "status contract", mutate: func(r *backuprelease.CandidateRequest) { r.ComponentPlanStatus.Kind = "Other" }},
@@ -124,6 +129,10 @@ func TestCandidateRejectsRenderedBoundaryDrift(t *testing.T) {
 		{name: "namespace", mutate: func(deployment *appsv1.Deployment) { deployment.Namespace = "other" }},
 		{name: "name", mutate: func(deployment *appsv1.Deployment) { deployment.Name = "other" }},
 		{name: "cell annotation", mutate: func(deployment *appsv1.Deployment) { deployment.Annotations["fugue.io/backup-cell-key"] = "other" }},
+		{name: "LKG annotation", mutate: func(deployment *appsv1.Deployment) { deployment.Annotations["fugue.io/backup-lkg-claim"] = "other" }},
+		{name: "Pod LKG annotation", mutate: func(deployment *appsv1.Deployment) {
+			deployment.Spec.Template.Annotations["fugue.io/backup-lkg-claim"] = "other"
+		}},
 		{name: "cell label", mutate: func(deployment *appsv1.Deployment) { deployment.Labels["fugue.io/backup-cell-id"] = "other" }},
 		{name: "selector widening", mutate: func(deployment *appsv1.Deployment) { deployment.Spec.Selector.MatchLabels["extra"] = "value" }},
 		{name: "replicas", mutate: func(deployment *appsv1.Deployment) { replicas := int32(2); deployment.Spec.Replicas = &replicas }},
@@ -150,6 +159,21 @@ func TestCandidateRejectsRenderedBoundaryDrift(t *testing.T) {
 		}},
 		{name: "broad secret mode", mutate: func(deployment *appsv1.Deployment) {
 			*deployment.Spec.Template.Spec.Volumes[1].Secret.DefaultMode = 0o444
+		}},
+		{name: "cross-cell LKG volume", mutate: func(deployment *appsv1.Deployment) {
+			deployment.Spec.Template.Spec.Volumes[2].PersistentVolumeClaim.ClaimName = "fugue-backup-observer-registry-0123456789abcdef-lkg"
+		}},
+		{name: "read-only LKG volume", mutate: func(deployment *appsv1.Deployment) {
+			deployment.Spec.Template.Spec.Volumes[2].PersistentVolumeClaim.ReadOnly = true
+		}},
+		{name: "read-only LKG mount", mutate: func(deployment *appsv1.Deployment) {
+			deployment.Spec.Template.Spec.Containers[0].VolumeMounts[2].ReadOnly = true
+		}},
+		{name: "LKG subPath", mutate: func(deployment *appsv1.Deployment) {
+			deployment.Spec.Template.Spec.Containers[0].VolumeMounts[2].SubPath = "lkg.json"
+		}},
+		{name: "mixed LKG volume source", mutate: func(deployment *appsv1.Deployment) {
+			deployment.Spec.Template.Spec.Volumes[2].EmptyDir = &corev1.EmptyDirVolumeSource{}
 		}},
 		{name: "privileged", mutate: func(deployment *appsv1.Deployment) {
 			value := true
@@ -211,6 +235,7 @@ func TestVerifyCandidateRejectsRecomputedUnsafeState(t *testing.T) {
 		{name: "cell lock", mutate: func(candidate *backuprelease.Candidate) { candidate.CellLockKey = "lane/control-plane" }},
 		{name: "resource lock", mutate: func(candidate *backuprelease.Candidate) { candidate.SharedResourceLockKeys[0] = "resource/other" }},
 		{name: "contract", mutate: func(candidate *backuprelease.Candidate) { candidate.BackupSpecContract = "backup/v2" }},
+		{name: "LKG claim", mutate: func(candidate *backuprelease.Candidate) { candidate.LKGClaimName = "fugue-backup-observer-other-lkg" }},
 		{name: "status fence", mutate: func(candidate *backuprelease.Candidate) { candidate.ComponentPlanStatus.FencingToken++ }},
 		{name: "blocker", mutate: func(candidate *backuprelease.Candidate) {
 			candidate.Blockers = []string{"candidate is observation-only and cannot authorize a cluster mutation"}
@@ -319,6 +344,7 @@ func validCandidateRequest(t *testing.T) backuprelease.CandidateRequest {
 		SpecConfigMapKey:      "desired.json",
 		TokenSecretName:       "backup-app-database-token",
 		TokenSecretKey:        "observer-token",
+		LKGClaimName:          "fugue-backup-observer-app-database-0123456789abcdef-lkg",
 		ReconcileInterval:     "30s",
 		AttemptTimeout:        "20s",
 		RequestTimeout:        "10s",
@@ -346,6 +372,7 @@ func validRenderedManifest(t *testing.T, request backuprelease.CandidateRequest)
 		"--set-string", "spec.existingConfigMap.key="+request.SpecConfigMapKey,
 		"--set-string", "token.existingSecret.name="+request.TokenSecretName,
 		"--set-string", "token.existingSecret.key="+request.TokenSecretKey,
+		"--set-string", "lkg.existingClaim.name="+request.LKGClaimName,
 	)
 	manifest, err := command.CombinedOutput()
 	if err != nil {

@@ -391,11 +391,10 @@ or digest drift, cross-cell state, broad modes, world-writable parents,
 symlinks, and topology races fail closed. A remote success is not reported
 Ready when durable publication fails; v2 status reports `persist-failed`
 until a later atomic publication succeeds. The file contains no token, physical
-backend configuration, object location, or raw remote error. This atom adds
-the recovery mechanism and environment contract only: the existing chart does
-not yet mount a writable state volume or set the variable, so its behavior and
-production reachability remain unchanged until a separately reviewed chart
-and release-candidate atom.
+backend configuration, object location, or raw remote error. The recovery core
+landed before its workload wiring; the current chart/candidate revision below
+now binds an external cell-local volume, while default-off rendering and the
+production freeze still keep it unreachable.
 
 Because local status now reports the explicit `lkgState` generation source,
 its wire version advances to `backup-observer.fugue.dev/v2`; the sealed backup
@@ -406,7 +405,14 @@ does not require a compatibility overlap or production rollout.
 The observer artifact now also has an independent Helm lane at
 `deploy/helm/fugue-backup-observer`. It is default-off and renders exactly one
 cell-scoped Deployment only when explicitly enabled with a dedicated immutable
-image digest, canonical cell key, and externally owned ConfigMap/Secret. The
+image digest, canonical cell key, externally owned ConfigMap/Secret, and an
+externally owned cell-dedicated LKG PVC. The PVC name must be exactly
+`fugue-backup-observer-<cell-id>-lkg`; the chart neither creates nor deletes
+it, so a workload rollback or uninstall cannot erase recovery state or select
+another cell's claim. The observer mounts only that directory read-write while
+spec and token remain separate read-only projections. Chart/app version 0.2.0
+and exact Deployment/Pod annotations make the breaking storage contract and
+claim identity visible to later live preflight. The
 chart creates no Service, ServiceAccount, RBAC, hostPath, or container port;
 the binary remains loopback-only and probes run through its fixed executable.
 The ConfigMap and Secret are mounted as whole read-only volumes (never
@@ -415,9 +421,11 @@ The lane is build/lint/render-only; it does not publish an image, install a
 release, or authorize production mutation.
 
 `internal/backuprelease` seals one enabled cell render into the versioned
-`backup-release.fugue.dev/v1` candidate contract. The candidate binds the
+`backup-release.fugue.dev/v2` candidate contract. v2 is a deliberate breaking
+revision because the new cell-local claim is a required digest-bound input;
+no v1 candidate has been deployed. The candidate binds the
 source commit, dedicated image digest, future deterministic chart digest,
-canonical cell and workload names, external ConfigMap/Secret references,
+canonical cell and workload names, external ConfigMap/Secret/PVC references,
 bounded runtime values, backup spec/status contract versions, and the exact
 observed release-control fence. It independently revalidates that the source
 plan impacts only `backup-storage`, retains the transitional `lane/backup`,
@@ -427,7 +435,9 @@ VolumeSource union, probe, scheduling, resource, and security structures are
 verified before producing a digest. The resulting record permanently carries
 `observationOnly=true`, `executionAllowed=false`, and
 `productionMutationAllowed=false`; recalculating its digest cannot turn it
-into a deploy authorization.
+into a deploy authorization. The candidate also keeps an explicit blocker
+until a later live preflight proves the claim is Bound, single-writer,
+cell-owned, and unused by another workload.
 
 `cmd/fugue-backup-release-plan` is the candidate lane's only compiler-facing
 entrypoint. It accepts three canonical local inputs (request JSON, rendered

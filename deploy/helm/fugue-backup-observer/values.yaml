@@ -35,6 +35,12 @@ token:
     name: ""
     key: token
 
+lkg:
+  # The chart never creates or deletes recovery storage. A separately owned,
+  # cell-dedicated PVC must survive workload rollback and chart uninstall.
+  existingClaim:
+    name: ""
+
 runtime:
   reconcileInterval: 30s
   attemptTimeout: 20s

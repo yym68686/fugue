@@ -57,8 +57,12 @@ func TestEnabledBackupObserverChartRendersOneCellScopedHardenedDeployment(t *tes
 		t.Fatalf("cell-scoped identity = %s/%s, want fugue-system/%s", deployment.Namespace, deployment.Name, wantName)
 	}
 	if deployment.Annotations["fugue.io/backup-cell-key"] != testCell ||
+		deployment.Annotations["fugue.io/backup-lkg-claim"] != "fugue-backup-observer-app-database-0123456789abcdef-lkg" ||
 		deployment.Annotations["fugue.io/production-mutation"] != "forbidden" {
 		t.Fatalf("deployment annotations drifted: %#v", deployment.Annotations)
+	}
+	if deployment.Spec.Template.Annotations["fugue.io/backup-lkg-claim"] != "fugue-backup-observer-app-database-0123456789abcdef-lkg" {
+		t.Fatalf("Pod template is not bound to the cell-local LKG claim: %#v", deployment.Spec.Template.Annotations)
 	}
 	for key, value := range map[string]string{
 		"fugue.io/release-lane":        "backup",
@@ -120,6 +124,7 @@ func TestEnabledBackupObserverChartRendersOneCellScopedHardenedDeployment(t *tes
 		"FUGUE_BACKUP_OBSERVER_CELL_KEY":           testCell,
 		"FUGUE_BACKUP_OBSERVER_SPEC_FILE":          "/run/fugue/backup-observer/spec/spec.json",
 		"FUGUE_BACKUP_OBSERVER_TOKEN_FILE":         "/run/fugue/backup-observer/token/token",
+		"FUGUE_BACKUP_OBSERVER_LKG_FILE":           "/var/lib/fugue-backup-observer/lkg.json",
 		"FUGUE_BACKUP_OBSERVER_API_BASE_URL":       "https://api.fugue-system.svc.cluster.local:8443",
 		"FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL": "30s",
 		"FUGUE_BACKUP_OBSERVER_ATTEMPT_TIMEOUT":    "20s",
@@ -141,15 +146,25 @@ func TestEnabledBackupObserverChartRendersOneCellScopedHardenedDeployment(t *tes
 	assertExecProbe(t, "liveness", container.LivenessProbe, "health")
 	assertExecProbe(t, "readiness", container.ReadinessProbe, "ready")
 
-	if len(pod.Volumes) != 2 || len(container.VolumeMounts) != 2 {
-		t.Fatalf("expected exactly two external projected volumes: volumes=%+v mounts=%+v", pod.Volumes, container.VolumeMounts)
+	if len(pod.Volumes) != 3 || len(container.VolumeMounts) != 3 {
+		t.Fatalf("expected two projected inputs and one cell-local LKG volume: volumes=%+v mounts=%+v", pod.Volumes, container.VolumeMounts)
 	}
 	assertConfigMapVolume(t, pod.Volumes[0], "desired-spec", "backup-app-database-spec", "desired.json", "spec.json")
 	assertSecretVolume(t, pod.Volumes[1], "observer-token", "backup-app-database-token", "observer-token", "token")
+	assertPersistentVolumeClaim(t, pod.Volumes[2], "observer-lkg", "fugue-backup-observer-app-database-0123456789abcdef-lkg")
+	wantMounts := map[string]corev1.VolumeMount{
+		"desired-spec":   {Name: "desired-spec", MountPath: "/run/fugue/backup-observer/spec", ReadOnly: true},
+		"observer-token": {Name: "observer-token", MountPath: "/run/fugue/backup-observer/token", ReadOnly: true},
+		"observer-lkg":   {Name: "observer-lkg", MountPath: "/var/lib/fugue-backup-observer"},
+	}
 	for _, mount := range container.VolumeMounts {
-		if !mount.ReadOnly || mount.SubPath != "" || mount.SubPathExpr != "" {
-			t.Fatalf("projected mount must be read-only and cannot use subPath: %+v", mount)
+		if want, ok := wantMounts[mount.Name]; !ok || !reflect.DeepEqual(mount, want) {
+			t.Fatalf("volume mount escaped its exact input/recovery boundary: %+v", mount)
 		}
+		delete(wantMounts, mount.Name)
+	}
+	if len(wantMounts) != 0 {
+		t.Fatalf("missing volume mounts: %+v", wantMounts)
 	}
 	if pod.InitContainers != nil || pod.EphemeralContainers != nil {
 		t.Fatalf("chart must render one process container only: init=%+v ephemeral=%+v", pod.InitContainers, pod.EphemeralContainers)
@@ -178,7 +193,11 @@ func TestCanonicalBackupCellKindsRenderDistinctDNSNames(t *testing.T) {
 	names := make(map[string]bool)
 	for _, kind := range []string{"control-plane-db", "app-database", "persistent-storage", "data-workspace", "registry", "platform-component"} {
 		cell := "backup/" + kind + "/0123456789abcdef"
-		args := append(validEnabledArgs(), "--set-string", "cell.key="+cell)
+		claim := "fugue-backup-observer-" + kind + "-0123456789abcdef-lkg"
+		if len(claim) > 63 {
+			t.Fatalf("canonical %s LKG claim exceeds DNS label limit: %q", kind, claim)
+		}
+		args := append(validEnabledArgs(), "--set-string", "cell.key="+cell, "--set-string", "lkg.existingClaim.name="+claim)
 		output, err := renderChart(t, args...)
 		if err != nil {
 			t.Fatalf("render canonical %s cell: %v\n%s", kind, err, output)
@@ -222,6 +241,8 @@ func TestEnabledBackupObserverChartRejectsUnsafeValues(t *testing.T) {
 		{name: "invalid spec key", args: []string{"--set-string", "spec.existingConfigMap.key=../spec"}, want: "canonical ConfigMap/Secret key"},
 		{name: "invalid token Secret", args: []string{"--set-string", "token.existingSecret.name=Token"}, want: "canonical lowercase DNS label"},
 		{name: "invalid token key", args: []string{"--set-string", "token.existingSecret.key=token/path"}, want: "canonical ConfigMap/Secret key"},
+		{name: "missing LKG claim", args: []string{"--set-string", "lkg.existingClaim.name="}, want: "lkg.existingClaim.name"},
+		{name: "cross-cell LKG claim", args: []string{"--set-string", "lkg.existingClaim.name=fugue-backup-observer-registry-0123456789abcdef-lkg"}, want: "must be exactly"},
 		{name: "fractional interval", args: []string{"--set-string", "runtime.reconcileInterval=500ms"}, want: "positive whole-second duration"},
 		{name: "long interval", args: []string{"--set-string", "runtime.reconcileInterval=601s"}, want: "between 1s and 600s"},
 		{name: "request not below attempt", args: []string{"--set-string", "runtime.requestTimeout=20s"}, want: "less than runtime.attemptTimeout"},
@@ -254,6 +275,7 @@ func validEnabledArgs() []string {
 		"--set-string", "spec.existingConfigMap.key=desired.json",
 		"--set-string", "token.existingSecret.name=backup-app-database-token",
 		"--set-string", "token.existingSecret.key=observer-token",
+		"--set-string", "lkg.existingClaim.name=fugue-backup-observer-app-database-0123456789abcdef-lkg",
 	}
 }
 
@@ -325,6 +347,14 @@ func assertSecretVolume(t *testing.T, volume corev1.Volume, volumeName, secretNa
 		secret.DefaultMode == nil || *secret.DefaultMode != 0o440 || len(secret.Items) != 1 ||
 		secret.Items[0].Key != key || secret.Items[0].Path != path {
 		t.Fatalf("unsafe external Secret volume: %+v", volume)
+	}
+}
+
+func assertPersistentVolumeClaim(t *testing.T, volume corev1.Volume, volumeName, claimName string) {
+	t.Helper()
+	claim := volume.PersistentVolumeClaim
+	if volume.Name != volumeName || claim == nil || claim.ClaimName != claimName || claim.ReadOnly {
+		t.Fatalf("unsafe cell-local LKG volume: %+v", volume)
 	}
 }
 

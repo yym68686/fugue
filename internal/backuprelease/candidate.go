@@ -31,13 +31,13 @@ import (
 )
 
 const (
-	CandidateRequestAPIVersion      = "backup-release.fugue.dev/v1"
+	CandidateRequestAPIVersion      = "backup-release.fugue.dev/v2"
 	CandidateRequestKind            = "BackupObserverShadowCandidateRequest"
-	CandidateAPIVersion             = "backup-release.fugue.dev/v1"
+	CandidateAPIVersion             = "backup-release.fugue.dev/v2"
 	CandidateKind                   = "BackupObserverShadowCandidate"
-	CandidatePolicy                 = "backup-cell-observation-only-v1"
+	CandidatePolicy                 = "backup-cell-observation-only-v2"
 	CandidateReleaseChannel         = "shadow"
-	CandidateRollbackMode           = "helm-revision-recreate-lkg-preserve-v1"
+	CandidateRollbackMode           = "external-pvc-recreate-lkg-preserve-v2"
 	CandidateRecoveryLane           = "backup"
 	BackupSpecContractV1            = "backup-control.fugue.dev/v1/BackupRunSpec"
 	BackupStatusContractV1          = "backup-control.fugue.dev/v1/BackupRunStatus"
@@ -101,6 +101,7 @@ type CandidateRequest struct {
 	SpecConfigMapKey      string                                   `json:"specConfigMapKey"`
 	TokenSecretName       string                                   `json:"tokenSecretName"`
 	TokenSecretKey        string                                   `json:"tokenSecretKey"`
+	LKGClaimName          string                                   `json:"lkgClaimName"`
 	ReconcileInterval     string                                   `json:"reconcileInterval"`
 	AttemptTimeout        string                                   `json:"attemptTimeout"`
 	RequestTimeout        string                                   `json:"requestTimeout"`
@@ -112,7 +113,7 @@ type CandidateRequest struct {
 
 // Candidate is a digest-bound handoff for a later separately reviewed live
 // preflight. Its execution and production mutation flags are permanently false
-// in v1, even when every artifact binding is valid.
+// in v2, even when every artifact binding is valid.
 type Candidate struct {
 	APIVersion                string                `json:"apiVersion"`
 	Kind                      string                `json:"kind"`
@@ -132,6 +133,7 @@ type Candidate struct {
 	SpecConfigMapKey          string                `json:"specConfigMapKey"`
 	TokenSecretName           string                `json:"tokenSecretName"`
 	TokenSecretKey            string                `json:"tokenSecretKey"`
+	LKGClaimName              string                `json:"lkgClaimName"`
 	ReconcileInterval         string                `json:"reconcileInterval"`
 	AttemptTimeout            string                `json:"attemptTimeout"`
 	RequestTimeout            string                `json:"requestTimeout"`
@@ -181,6 +183,7 @@ func BuildCandidate(request CandidateRequest, renderedManifest []byte) (Candidat
 	blockers := append([]string(nil), request.ComponentPlanEnvelope.CoordinationPlan.Blockers...)
 	blockers = append(blockers,
 		"candidate is observation-only and cannot authorize a cluster mutation",
+		"cell-local LKG claim must pass live ownership, access-mode, and exclusivity preflight",
 		"production release freeze must be cleared by the unique coordinator",
 	)
 	blockers = uniqueSorted(blockers)
@@ -203,6 +206,7 @@ func BuildCandidate(request CandidateRequest, renderedManifest []byte) (Candidat
 		SpecConfigMapKey:          request.SpecConfigMapKey,
 		TokenSecretName:           request.TokenSecretName,
 		TokenSecretKey:            request.TokenSecretKey,
+		LKGClaimName:              request.LKGClaimName,
 		ReconcileInterval:         request.ReconcileInterval,
 		AttemptTimeout:            request.AttemptTimeout,
 		RequestTimeout:            request.RequestTimeout,
@@ -279,6 +283,9 @@ func ValidateCandidateRequest(request CandidateRequest) error {
 	}
 	if err := validateObjectKey(request.TokenSecretKey, "tokenSecretKey"); err != nil {
 		return fmt.Errorf("%w: %v", ErrCandidate, err)
+	}
+	if err := validateObjectName(request.LKGClaimName, "lkgClaimName"); err != nil || request.LKGClaimName != expectedLKGClaimName(request.CellKey) {
+		return fmt.Errorf("%w: lkgClaimName must be the exact cell-local recovery claim", ErrCandidate)
 	}
 	reconcileSeconds, err := validateDuration(request.ReconcileInterval, 1, 600)
 	if err != nil {
@@ -388,6 +395,7 @@ func VerifyCandidate(candidate Candidate) error {
 	cellID := cellIDFromKey(candidate.CellKey)
 	if candidate.CellID != cellID || candidate.ReleaseName != "backup-"+cellID || candidate.ReleaseNamespace != "fugue-system" ||
 		candidate.WorkloadName != "fugue-backup-observer-"+cellID || candidate.FailureBoundary != candidate.CellKey ||
+		candidate.LKGClaimName != expectedLKGClaimName(candidate.CellKey) ||
 		candidate.PlanLaneLockKey != "lane/backup" ||
 		candidate.CellLockKey != "lane/backup/cell/"+cellID ||
 		candidate.IdempotencyKey != "backup-observer-shadow/"+cellID+"/"+strings.TrimPrefix(candidate.ManifestDigest, "sha256:") ||
@@ -396,6 +404,7 @@ func VerifyCandidate(candidate Candidate) error {
 	}
 	if validateImageRepository(candidate.ImageRepository) != nil || validateAPIBaseURL(candidate.APIBaseURL) != nil ||
 		validateObjectName(candidate.SpecConfigMapName, "spec") != nil || validateObjectName(candidate.TokenSecretName, "token") != nil ||
+		validateObjectName(candidate.LKGClaimName, "lkg") != nil ||
 		validateObjectKey(candidate.SpecConfigMapKey, "spec") != nil || validateObjectKey(candidate.TokenSecretKey, "token") != nil {
 		return ErrCandidate
 	}
@@ -423,6 +432,7 @@ func VerifyCandidate(candidate Candidate) error {
 	}
 	if len(candidate.Blockers) == 0 || !sort.StringsAreSorted(candidate.Blockers) || hasDuplicate(candidate.Blockers) ||
 		!containsString(candidate.Blockers, "candidate is observation-only and cannot authorize a cluster mutation") ||
+		!containsString(candidate.Blockers, "cell-local LKG claim must pass live ownership, access-mode, and exclusivity preflight") ||
 		!containsString(candidate.Blockers, "production release freeze must be cleared by the unique coordinator") ||
 		candidate.Digest != DigestCandidate(candidate) {
 		return ErrCandidate
@@ -478,6 +488,7 @@ func validateRenderedManifest(request CandidateRequest, manifest []byte) (string
 		len(deployment.OwnerReferences) != 0 || len(deployment.Finalizers) != 0 ||
 		!reflect.DeepEqual(deployment.Status, appsv1.DeploymentStatus{}) ||
 		deployment.Annotations["fugue.io/backup-cell-key"] != request.CellKey ||
+		deployment.Annotations["fugue.io/backup-lkg-claim"] != request.LKGClaimName ||
 		deployment.Annotations["fugue.io/production-mutation"] != "forbidden" {
 		return "", "", fmt.Errorf("%w: rendered Deployment identity is unsafe or unbound", ErrCandidate)
 	}
@@ -511,12 +522,13 @@ func validateRenderedManifest(request CandidateRequest, manifest []byte) (string
 	pod := deployment.Spec.Template.Spec
 	shutdownSeconds, _ := validateDuration(request.ShutdownTimeout, 1, 60)
 	if deployment.Spec.Template.Annotations["fugue.io/backup-cell-key"] != request.CellKey ||
+		deployment.Spec.Template.Annotations["fugue.io/backup-lkg-claim"] != request.LKGClaimName ||
 		deployment.Spec.Template.Annotations["fugue.io/production-mutation"] != "forbidden" ||
 		pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken || pod.ServiceAccountName != "" ||
 		pod.EnableServiceLinks == nil || *pod.EnableServiceLinks || pod.HostNetwork || pod.HostPID || pod.HostIPC ||
 		pod.DNSPolicy != corev1.DNSClusterFirst || pod.RestartPolicy != corev1.RestartPolicyAlways ||
 		pod.TerminationGracePeriodSeconds == nil || *pod.TerminationGracePeriodSeconds != int64(shutdownSeconds+5) ||
-		len(pod.InitContainers) != 0 || len(pod.EphemeralContainers) != 0 || len(pod.Containers) != 1 || len(pod.Volumes) != 2 ||
+		len(pod.InitContainers) != 0 || len(pod.EphemeralContainers) != 0 || len(pod.Containers) != 1 || len(pod.Volumes) != 3 ||
 		len(pod.ImagePullSecrets) != 0 || len(pod.NodeSelector) != 0 || len(pod.Tolerations) != 0 || pod.Affinity != nil ||
 		len(pod.TopologySpreadConstraints) != 0 || pod.PriorityClassName != "" {
 		return "", "", fmt.Errorf("%w: rendered Pod identity, network, or scheduling boundary drifted", ErrCandidate)
@@ -543,6 +555,7 @@ func validateEnvironment(request CandidateRequest, environment []corev1.EnvVar) 
 		"FUGUE_BACKUP_OBSERVER_CELL_KEY":           request.CellKey,
 		"FUGUE_BACKUP_OBSERVER_SPEC_FILE":          "/run/fugue/backup-observer/spec/spec.json",
 		"FUGUE_BACKUP_OBSERVER_TOKEN_FILE":         "/run/fugue/backup-observer/token/token",
+		"FUGUE_BACKUP_OBSERVER_LKG_FILE":           "/var/lib/fugue-backup-observer/lkg.json",
 		"FUGUE_BACKUP_OBSERVER_API_BASE_URL":       request.APIBaseURL,
 		"FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL": request.ReconcileInterval,
 		"FUGUE_BACKUP_OBSERVER_ATTEMPT_TIMEOUT":    request.AttemptTimeout,
@@ -564,11 +577,12 @@ func validateEnvironment(request CandidateRequest, environment []corev1.EnvVar) 
 }
 
 func validateVolumeBoundary(request CandidateRequest, volumes []corev1.Volume, mounts []corev1.VolumeMount) bool {
-	if len(volumes) != 2 || len(mounts) != 2 {
+	if len(volumes) != 3 || len(mounts) != 3 {
 		return false
 	}
 	seenSpec := false
 	seenToken := false
+	seenLKG := false
 	for _, volume := range volumes {
 		switch volume.Name {
 		case "desired-spec":
@@ -597,22 +611,32 @@ func validateVolumeBoundary(request CandidateRequest, volumes []corev1.Volume, m
 				return false
 			}
 			seenToken = true
+		case "observer-lkg":
+			want := corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: request.LKGClaimName,
+				ReadOnly:  false,
+			}}
+			if seenLKG || !reflect.DeepEqual(volume.VolumeSource, want) {
+				return false
+			}
+			seenLKG = true
 		default:
 			return false
 		}
 	}
-	wantMounts := map[string]string{
-		"desired-spec":   "/run/fugue/backup-observer/spec",
-		"observer-token": "/run/fugue/backup-observer/token",
+	wantMounts := map[string]corev1.VolumeMount{
+		"desired-spec":   {Name: "desired-spec", MountPath: "/run/fugue/backup-observer/spec", ReadOnly: true},
+		"observer-token": {Name: "observer-token", MountPath: "/run/fugue/backup-observer/token", ReadOnly: true},
+		"observer-lkg":   {Name: "observer-lkg", MountPath: "/var/lib/fugue-backup-observer"},
 	}
 	for _, mount := range mounts {
-		wantPath, exists := wantMounts[mount.Name]
-		if !exists || !reflect.DeepEqual(mount, corev1.VolumeMount{Name: mount.Name, MountPath: wantPath, ReadOnly: true}) {
+		want, exists := wantMounts[mount.Name]
+		if !exists || !reflect.DeepEqual(mount, want) {
 			return false
 		}
 		delete(wantMounts, mount.Name)
 	}
-	return seenSpec && seenToken && len(wantMounts) == 0
+	return seenSpec && seenToken && seenLKG && len(wantMounts) == 0
 }
 
 func validateSecurityBoundary(pod corev1.PodSpec, container corev1.Container) bool {
@@ -745,6 +769,10 @@ func componentPlanContentHash(envelope componentmanifest.ShadowArtifactEnvelope)
 
 func cellIDFromKey(cellKey string) string {
 	return strings.ReplaceAll(strings.TrimPrefix(cellKey, "backup/"), "/", "-")
+}
+
+func expectedLKGClaimName(cellKey string) string {
+	return "fugue-backup-observer-" + cellIDFromKey(cellKey) + "-lkg"
 }
 
 func expectedCoordinationScopes() []componentmanifest.CoordinationScope {

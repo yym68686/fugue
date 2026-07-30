@@ -33,6 +33,11 @@
 {{- $specMapKey := include "fugue-backup-observer.validateKey" (list "spec.existingConfigMap.key" .Values.spec.existingConfigMap.key) -}}
 {{- $tokenSecretName := include "fugue-backup-observer.validateName" (list "token.existingSecret.name" .Values.token.existingSecret.name) -}}
 {{- $tokenSecretKey := include "fugue-backup-observer.validateKey" (list "token.existingSecret.key" .Values.token.existingSecret.key) -}}
+{{- $lkgClaimName := include "fugue-backup-observer.validateName" (list "lkg.existingClaim.name" .Values.lkg.existingClaim.name) -}}
+{{- $expectedLKGClaimName := printf "%s-lkg" (include "fugue-backup-observer.fullname" .) -}}
+{{- if ne $lkgClaimName $expectedLKGClaimName -}}
+{{- fail (printf "lkg.existingClaim.name must be exactly %s for this backup cell" $expectedLKGClaimName) -}}
+{{- end -}}
 {{- $reconcileInterval := include "fugue-backup-observer.validateDuration" (list "runtime.reconcileInterval" .Values.runtime.reconcileInterval 1 600) -}}
 {{- $attemptTimeout := include "fugue-backup-observer.validateDuration" (list "runtime.attemptTimeout" .Values.runtime.attemptTimeout 1 60) -}}
 {{- $requestTimeout := include "fugue-backup-observer.validateDuration" (list "runtime.requestTimeout" .Values.runtime.requestTimeout 1 30) -}}
@@ -57,6 +62,7 @@ metadata:
     {{- include "fugue-backup-observer.labels" . | nindent 4 }}
   annotations:
     fugue.io/backup-cell-key: {{ $cellKey | quote }}
+    fugue.io/backup-lkg-claim: {{ $lkgClaimName | quote }}
     fugue.io/production-mutation: "forbidden"
 spec:
   replicas: 1
@@ -72,6 +78,7 @@ spec:
         {{- include "fugue-backup-observer.labels" . | nindent 8 }}
       annotations:
         fugue.io/backup-cell-key: {{ $cellKey | quote }}
+        fugue.io/backup-lkg-claim: {{ $lkgClaimName | quote }}
         fugue.io/production-mutation: "forbidden"
     spec:
       automountServiceAccountToken: false
@@ -119,6 +126,8 @@ spec:
               value: "/run/fugue/backup-observer/spec/spec.json"
             - name: FUGUE_BACKUP_OBSERVER_TOKEN_FILE
               value: "/run/fugue/backup-observer/token/token"
+            - name: FUGUE_BACKUP_OBSERVER_LKG_FILE
+              value: "/var/lib/fugue-backup-observer/lkg.json"
             - name: FUGUE_BACKUP_OBSERVER_API_BASE_URL
               value: {{ $apiBaseURL | quote }}
             - name: FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL
@@ -138,6 +147,8 @@ spec:
             - name: observer-token
               mountPath: /run/fugue/backup-observer/token
               readOnly: true
+            - name: observer-lkg
+              mountPath: /var/lib/fugue-backup-observer
           startupProbe:
             exec:
               command: ["/usr/local/bin/fugue-backup-observer", "probe", "health"]
@@ -182,4 +193,8 @@ spec:
             items:
               - key: {{ $tokenSecretKey | quote }}
                 path: token
+        - name: observer-lkg
+          persistentVolumeClaim:
+            claimName: {{ $lkgClaimName | quote }}
+            readOnly: false
 {{- end -}}

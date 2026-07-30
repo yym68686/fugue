@@ -44,7 +44,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	flags := flag.NewFlagSet("fugue-backup-release-plan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	requestPath := flags.String("request", "", "absolute path to the v1 candidate request JSON")
+	requestPath := flags.String("request", "", "absolute path to the v2 candidate request JSON")
 	manifestPath := flags.String("manifest", "", "absolute path to the exact Helm-rendered manifest")
 	chartPath := flags.String("chart", "", "absolute path to the exact backup observer chart directory")
 	digestChartOnly := flags.Bool("digest-chart", false, "print the deterministic chart digest and perform no candidate planning")

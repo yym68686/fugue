@@ -321,6 +321,7 @@ func validCLIRequest(t *testing.T, chartDigest string) backuprelease.CandidateRe
 		SpecConfigMapKey:      "desired.json",
 		TokenSecretName:       "backup-app-database-token",
 		TokenSecretKey:        "observer-token",
+		LKGClaimName:          "fugue-backup-observer-app-database-0123456789abcdef-lkg",
 		ReconcileInterval:     "30s",
 		AttemptTimeout:        "20s",
 		RequestTimeout:        "10s",
@@ -348,6 +349,7 @@ func renderCLIManifest(t *testing.T, request backuprelease.CandidateRequest) []b
 		"--set-string", "spec.existingConfigMap.key="+request.SpecConfigMapKey,
 		"--set-string", "token.existingSecret.name="+request.TokenSecretName,
 		"--set-string", "token.existingSecret.key="+request.TokenSecretKey,
+		"--set-string", "lkg.existingClaim.name="+request.LKGClaimName,
 	)
 	manifest, err := command.CombinedOutput()
 	if err != nil {
