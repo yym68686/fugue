@@ -79,7 +79,9 @@ publish, replicate, prune, or serve registry traffic:
   `/fugue-image-plane-agent` so the legacy cache image cannot be selected;
 - replacement is `OnDelete`, so a chart update cannot automatically fan out;
 - scheduling is restricted to the exact opt-in label
-  `fugue.io/image-plane-shadow=true`;
+  `fugue.io/image-plane-shadow=true` and the exact cell label
+  `fugue.io/image-plane-cell=<cell.id>`; `cell.id` is required, DNS-label
+  bounded, and embedded in the immutable workload selector;
 - the health listener is Pod-loopback-only, with no declared container port,
   Service, host port, or host network;
 - the dedicated image entrypoint runs only the platform-plan agent. Its build

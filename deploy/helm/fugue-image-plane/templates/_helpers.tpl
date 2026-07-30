@@ -14,6 +14,7 @@
 app.kubernetes.io/name: {{ include "fugue-image-plane.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: image-plane-shadow
+fugue.io/cell-id: {{ .Values.cell.id | quote }}
 {{- end -}}
 
 {{- define "fugue-image-plane.labels" -}}

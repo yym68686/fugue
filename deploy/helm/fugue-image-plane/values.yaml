@@ -16,6 +16,12 @@ api:
   # redirects, credentials in the URL, queries, and fragments.
   baseURL: ""
 
+cell:
+  # Every independently released shadow instance is pinned to one explicit
+  # cell. The matching node-platform label is
+  # fugue.io/image-plane-cell=<id>; an empty or malformed ID fails rendering.
+  id: ""
+
 runtime:
   # The process listens only on Pod loopback; exec probes inspect it from
   # inside the container, and the chart creates no network-visible port.
@@ -43,8 +49,9 @@ updateStrategy:
   # Automatic Pod replacement is forbidden during shadow evidence gathering.
   type: OnDelete
 
-# A chart enablement is bounded to explicitly opted-in nodes. The template
-# requires this exact label/value and rejects an empty or broader selector.
+# A chart enablement is bounded to explicitly opted-in nodes in the selected
+# cell. The template requires this exact shared opt-in and derives the cell
+# selector from cell.id; arbitrary selector widening remains forbidden.
 nodeSelector:
   fugue.io/image-plane-shadow: "true"
 

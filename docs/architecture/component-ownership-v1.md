@@ -230,8 +230,12 @@ boundary. The chart renders zero objects by default and is validated in the
 image-plane-only build lane; that lane still has read-only repository
 permission and cannot publish an image, package a chart, dispatch a release, or
 touch a cluster. Explicit rendering requires an immutable image digest, HTTPS
-API root, `OnDelete` replacement, and the exact opt-in node selector
-`fugue.io/image-plane-shadow=true`. It produces one observation-only DaemonSet
+API root, `OnDelete` replacement, an explicit lowercase `cell.id`, and the
+two-part node selector `fugue.io/image-plane-shadow=true` plus
+`fugue.io/image-plane-cell=<cell.id>`. The cell ID is also part of the immutable
+DaemonSet selector and Pod ownership labels, so one Helm release cannot widen
+from its selected canary/recovery cell without creating a different workload.
+It produces one observation-only DaemonSet
 with no Service, ports, host network, service-account token, RBAC, init
 container, or broad credential. Its explicit `platform-plan-shadow` process
 mode remains as a compatibility path, but the chart rejects the legacy

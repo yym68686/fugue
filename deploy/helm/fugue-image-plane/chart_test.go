@@ -56,6 +56,7 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 		"fugue.io/release-lane":        "image-plane",
 		"fugue.io/ownership-mode":      "shadow",
 		"fugue.io/production-mutation": "forbidden",
+		"fugue.io/cell-id":             "canary-a",
 	} {
 		if got := daemonSet.Labels[key]; got != want || daemonSet.Spec.Template.Labels[key] != want {
 			t.Fatalf("shadow label %s drifted: metadata=%q pod=%q", key, got, daemonSet.Spec.Template.Labels[key])
@@ -69,7 +70,10 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 		len(pod.InitContainers) != 0 {
 		t.Fatalf("shadow Pod identity/network/lifecycle boundary drifted: %+v", pod)
 	}
-	if !reflect.DeepEqual(pod.NodeSelector, map[string]string{"fugue.io/image-plane-shadow": "true"}) {
+	if !reflect.DeepEqual(pod.NodeSelector, map[string]string{
+		"fugue.io/image-plane-shadow": "true",
+		"fugue.io/image-plane-cell":   "canary-a",
+	}) {
 		t.Fatalf("shadow Pod escaped its opt-in node selector: %+v", pod.NodeSelector)
 	}
 	if pod.SecurityContext == nil || pod.SecurityContext.RunAsNonRoot == nil || !*pod.SecurityContext.RunAsNonRoot ||
@@ -178,11 +182,15 @@ func TestEnabledImagePlaneChartRejectsUnsafeOrUnboundedValues(t *testing.T) {
 		{name: "uppercase digest", args: []string{"--set-string", "image.digest=sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, want: "exact lowercase sha256"},
 		{name: "plaintext API", args: []string{"--set-string", "api.baseURL=http://api.example.test"}, want: "absolute HTTPS"},
 		{name: "API credentials", args: []string{"--set-string", "api.baseURL=https://user@api.example.test"}, want: "without credentials"},
+		{name: "missing cell", args: []string{"--set-string", "cell.id="}, want: "cell.id is required"},
+		{name: "uppercase cell", args: []string{"--set-string", "cell.id=Canary-a"}, want: "lowercase DNS label"},
+		{name: "dotted cell", args: []string{"--set-string", "cell.id=canary.a"}, want: "lowercase DNS label"},
+		{name: "overlong cell", args: []string{"--set-string", "cell.id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, want: "at most 63"},
 		{name: "rolling update", args: []string{"--set-string", "updateStrategy.type=RollingUpdate"}, want: "exactly OnDelete"},
 		{name: "priority preemption", args: []string{"--set-string", "priorityClassName=system-node-critical"}, want: "priorityClassName is forbidden"},
-		{name: "empty selector", args: []string{"--set", "nodeSelector={}"}, want: "nodeSelector must contain only"},
-		{name: "wrong selector", args: []string{"--set-string", "nodeSelector.fugue\\.io/image-plane-shadow=false"}, want: "nodeSelector must contain only"},
-		{name: "broad selector", args: []string{"--set-string", "nodeSelector.extra=value"}, want: "nodeSelector must contain only"},
+		{name: "empty selector", args: []string{"--set", "nodeSelector={}"}, want: "nodeSelector may contain only"},
+		{name: "wrong selector", args: []string{"--set-string", "nodeSelector.fugue\\.io/image-plane-shadow=false"}, want: "nodeSelector may contain only"},
+		{name: "broad selector", args: []string{"--set-string", "nodeSelector.extra=value"}, want: "nodeSelector may contain only"},
 		{name: "relative credential path", args: []string{"--set-string", "credential.hostPath=run/fugue/image-cache"}, want: "absolute canonical host path"},
 		{name: "credential traversal", args: []string{"--set-string", "credential.hostPath=/run/fugue/../secrets"}, want: "absolute canonical host path"},
 		{name: "alternate credential path", args: []string{"--set-string", "credential.hostPath=/run/fugue/image-plane"}, want: "must remain exactly /run/fugue/image-cache"},
@@ -221,6 +229,7 @@ func validImagePlaneArgs() []string {
 		"--set-string", "image.repository=registry.example.test/fugue/fugue-image-plane-agent",
 		"--set-string", "image.digest=" + imagePlaneTestDigest,
 		"--set-string", "api.baseURL=https://api.fugue-system.svc.cluster.local:8443",
+		"--set-string", "cell.id=canary-a",
 	}
 }
 
