@@ -63,10 +63,7 @@ type Service struct {
 	walMu         sync.Mutex
 	walFilterLast map[string]time.Time
 
-	zoneMu       sync.RWMutex
 	zoneServices map[string]*Service
-	staticZones  map[string]struct{}
-	zoneCancels  map[string]context.CancelFunc
 }
 
 type Status struct {
@@ -217,14 +214,6 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 		},
 	}
 	service.zoneServices = service.newZoneServices(cfg)
-	if service.zoneServices == nil {
-		service.zoneServices = map[string]*Service{}
-	}
-	service.staticZones = make(map[string]struct{}, len(service.zoneServices))
-	for zone := range service.zoneServices {
-		service.staticZones[zone] = struct{}{}
-	}
-	service.zoneCancels = map[string]context.CancelFunc{}
 	return service
 }
 
@@ -254,8 +243,6 @@ func (s *Service) newZoneServices(cfg config.DNSConfig) map[string]*Service {
 }
 
 func (s *Service) childZoneServices() []*Service {
-	s.zoneMu.RLock()
-	defer s.zoneMu.RUnlock()
 	if len(s.zoneServices) == 0 {
 		return nil
 	}
@@ -269,132 +256,6 @@ func (s *Service) childZoneServices() []*Service {
 		children = append(children, s.zoneServices[zone])
 	}
 	return children
-}
-
-func (s *Service) newZoneService(zone string) *Service {
-	zone = normalizeName(zone)
-	if zone == "" || zone == normalizeName(s.Config.Zone) {
-		return nil
-	}
-	childCfg := s.Config
-	childCfg.Zone = zone
-	childCfg.ExtraZones = nil
-	childCfg.PhysicalNodeID = firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID)
-	childCfg.DNSNodeID = dnsZoneScopedNodeID(s.Config.DNSNodeID, zone)
-	childCfg.CachePath = dnsZoneCachePath(s.Config.CachePath, zone)
-	return NewService(childCfg, s.Logger)
-}
-
-func (s *Service) reconcileHostedZoneServices(ctx context.Context, startLoops bool) {
-	bundle := s.currentBundle()
-	if bundle == nil {
-		return
-	}
-
-	desired := make(map[string]struct{}, len(bundle.HostedZones))
-	primaryZone := normalizeName(s.Config.Zone)
-	for _, zone := range bundle.HostedZones {
-		zone = normalizeName(zone)
-		if zone == "" || zone == primaryZone {
-			continue
-		}
-		desired[zone] = struct{}{}
-	}
-
-	var stopped []context.CancelFunc
-	s.zoneMu.Lock()
-	for zone := range s.zoneServices {
-		if _, static := s.staticZones[zone]; static {
-			continue
-		}
-		if _, keep := desired[zone]; keep {
-			continue
-		}
-		delete(s.zoneServices, zone)
-		if cancel := s.zoneCancels[zone]; cancel != nil {
-			stopped = append(stopped, cancel)
-		}
-		delete(s.zoneCancels, zone)
-	}
-	s.zoneMu.Unlock()
-	for _, cancel := range stopped {
-		cancel()
-	}
-
-	zones := make([]string, 0, len(desired))
-	for zone := range desired {
-		zones = append(zones, zone)
-	}
-	sort.Strings(zones)
-	for _, zone := range zones {
-		s.zoneMu.RLock()
-		_, exists := s.zoneServices[zone]
-		s.zoneMu.RUnlock()
-		if exists {
-			continue
-		}
-
-		child := s.newZoneService(zone)
-		if child == nil {
-			continue
-		}
-		if err := child.LoadCache(); err != nil {
-			child.Logger.Printf("dns bundle cache unavailable; zone=%s error=%v", zone, err)
-		}
-		if err := child.SyncOnce(ctx); err != nil {
-			child.Logger.Printf("dns bundle initial sync failed; zone=%s error=%v", zone, err)
-		}
-
-		s.zoneMu.Lock()
-		if _, exists := s.zoneServices[zone]; exists {
-			s.zoneMu.Unlock()
-			continue
-		}
-		s.zoneServices[zone] = child
-		s.zoneMu.Unlock()
-		if startLoops {
-			s.startZoneServiceLoops(ctx, child)
-		}
-		if s.Logger != nil {
-			s.Logger.Printf("dns hosted zone loaded dynamically; zone=%s dns_node_id=%s", zone, child.Config.DNSNodeID)
-		}
-	}
-}
-
-func (s *Service) startZoneServiceLoops(ctx context.Context, child *Service) {
-	if child == nil {
-		return
-	}
-	zone := normalizeName(child.Config.Zone)
-	if zone == "" {
-		return
-	}
-	childCtx, cancel := context.WithCancel(ctx)
-	s.zoneMu.Lock()
-	if s.zoneServices[zone] != child || s.zoneCancels[zone] != nil {
-		s.zoneMu.Unlock()
-		cancel()
-		return
-	}
-	s.zoneCancels[zone] = cancel
-	s.zoneMu.Unlock()
-	child.startEdgeHealthProbeLoop(childCtx)
-	child.startHeartbeatLoop(childCtx)
-}
-
-func (s *Service) stopZoneServiceLoops() {
-	s.zoneMu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(s.zoneCancels))
-	for zone, cancel := range s.zoneCancels {
-		if cancel != nil {
-			cancels = append(cancels, cancel)
-		}
-		delete(s.zoneCancels, zone)
-	}
-	s.zoneMu.Unlock()
-	for _, cancel := range cancels {
-		cancel()
-	}
 }
 
 func (s *Service) configuredZones() []string {
@@ -494,7 +355,6 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.LoadCache(); err != nil {
 		s.Logger.Printf("dns bundle cache unavailable: %v", err)
 	}
-	s.reconcileHostedZoneServices(ctx, false)
 	for _, child := range s.childZoneServices() {
 		if err := child.LoadCache(); err != nil {
 			child.Logger.Printf("dns bundle cache unavailable; zone=%s error=%v", normalizeName(child.Config.Zone), err)
@@ -525,16 +385,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.Logger.Printf("fugue-dns shadow started; api=%s dns_node_id=%s edge_group_id=%s zones=%s answer_ips=%s cache=%s listen=%s udp=%s tcp=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.DNSNodeID, s.Config.EdgeGroupID, strings.Join(s.configuredZones(), ","), strings.Join(s.Config.AnswerIPs, ","), s.Config.CachePath, s.Config.ListenAddr, s.Config.UDPAddr, s.Config.TCPAddr, s.syncInterval())
 	_ = s.SyncOnce(ctx)
-	s.reconcileHostedZoneServices(ctx, false)
 	for _, child := range s.childZoneServices() {
 		_ = child.SyncOnce(ctx)
 	}
 	s.startEdgeHealthProbeLoop(ctx)
 	for _, child := range s.childZoneServices() {
-		s.startZoneServiceLoops(ctx, child)
+		child.startEdgeHealthProbeLoop(ctx)
 	}
 	s.startHeartbeatLoop(ctx)
-	defer s.stopZoneServiceLoops()
+	for _, child := range s.childZoneServices() {
+		child.startHeartbeatLoop(ctx)
+	}
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -544,7 +405,6 @@ func (s *Service) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			_ = s.SyncOnce(ctx)
-			s.reconcileHostedZoneServices(ctx, true)
 			for _, child := range s.childZoneServices() {
 				_ = child.SyncOnce(ctx)
 			}
@@ -823,8 +683,6 @@ func (s *Service) serviceForQuestionName(name string) *Service {
 		bestZone = zone
 		best = s
 	}
-	s.zoneMu.RLock()
-	defer s.zoneMu.RUnlock()
 	for zone, child := range s.zoneServices {
 		zone = normalizeName(zone)
 		if !nameWithinZone(name, zone) {
@@ -926,7 +784,6 @@ func (s *Service) currentBundle() *model.EdgeDNSBundle {
 		return nil
 	}
 	bundle := *s.bundle
-	bundle.HostedZones = append([]string(nil), s.bundle.HostedZones...)
 	bundle.Records = append([]model.EdgeDNSRecord(nil), s.bundle.Records...)
 	return &bundle
 }
@@ -946,7 +803,6 @@ func (s *Service) currentETag() string {
 func (s *Service) setBundle(bundle model.EdgeDNSBundle, etag string, stale bool, lastError string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	bundle.HostedZones = append([]string(nil), bundle.HostedZones...)
 	bundle.Records = append([]model.EdgeDNSRecord(nil), bundle.Records...)
 	s.bundle = &bundle
 	s.etag = strings.TrimSpace(etag)

@@ -400,57 +400,6 @@ func TestEdgeDNSBundlePublishesHostedZoneRecords(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundlePublishesDynamicHostedZoneInventory(t *testing.T) {
-	t.Parallel()
-
-	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
-	putZone := func(name, status string) {
-		t.Helper()
-		now := time.Now().UTC()
-		if _, err := storeState.PutHostedZone(model.HostedZone{
-			TenantID:            app.TenantID,
-			ZoneName:            name,
-			Status:              status,
-			DelegationStatus:    model.HostedZoneDelegationStatusPending,
-			ExpectedNameservers: []string{"ns1.dns.fugue.pro", "ns2.dns.fugue.pro"},
-			CreatedAt:           now,
-			UpdatedAt:           now,
-		}); err != nil {
-			t.Fatalf("put hosted DNS zone %s: %v", name, err)
-		}
-	}
-	putZone("pending.example", model.HostedZoneStatusPendingDelegation)
-	putZone("active.example", model.HostedZoneStatusActive)
-	putZone("degraded.example", model.HostedZoneStatusDegraded)
-	putZone("suspended.example", model.HostedZoneStatusSuspended)
-
-	fetchBundle := func() model.EdgeDNSBundle {
-		t.Helper()
-		recorder := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&answer_ip=203.0.113.10", nil)
-		server.Handler().ServeHTTP(recorder, req)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
-		}
-		var bundle model.EdgeDNSBundle
-		mustDecodeJSON(t, recorder, &bundle)
-		return bundle
-	}
-
-	first := fetchBundle()
-	if got, want := strings.Join(first.HostedZones, ","), "active.example,degraded.example,pending.example"; got != want {
-		t.Fatalf("unexpected publishable hosted zone inventory: got %q want %q", got, want)
-	}
-	putZone("later.example", model.HostedZoneStatusActive)
-	second := fetchBundle()
-	if first.Version == second.Version {
-		t.Fatalf("expected hosted zone inventory change to update bundle version %q", first.Version)
-	}
-	if got, want := strings.Join(second.HostedZones, ","), "active.example,degraded.example,later.example,pending.example"; got != want {
-		t.Fatalf("unexpected updated hosted zone inventory: got %q want %q", got, want)
-	}
-}
-
 func TestEdgeDNSBundlePublishesHostedFlattenedRecords(t *testing.T) {
 	t.Parallel()
 
