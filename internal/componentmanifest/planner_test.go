@@ -64,10 +64,12 @@ func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	for _, changedPath := range []string{
 		".github/workflows/validate-backup-release-candidate.yml",
+		".github/workflows/validate-backup-observation-store.yml",
 		"cmd/fugue-backup-release-plan/main.go",
 		"deploy/helm/fugue-backup-observer/templates/deployment.yaml",
 		"internal/backupadapter/legacy.go",
 		"internal/backuprelease/candidate.go",
+		"internal/store/backup_observation.go",
 	} {
 		plan, err := PlanChanges(manifest, []string{changedPath})
 		if err != nil {

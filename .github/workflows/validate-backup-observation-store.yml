@@ -1,0 +1,57 @@
+name: validate backup observation store
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - internal/store/backup_observation.go
+      - internal/store/backup_observation_test.go
+      - internal/backupadapter/**
+      - internal/backupcontrol/**
+      - internal/componentmanifest/backup_observation_store_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-observation-store.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - internal/store/backup_observation.go
+      - internal/store/backup_observation_test.go
+      - internal/backupadapter/**
+      - internal/backupcontrol/**
+      - internal/componentmanifest/backup_observation_store_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-observation-store.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-observation-store-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup observation store (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify read-only backend observation boundary
+        run: |
+          set -euo pipefail
+          go test ./internal/store -run 'Test(GetBackupBackendObservation|PGGetBackupBackendObservation)' -count=1
+          go test -race ./internal/store -run 'Test(GetBackupBackendObservation|PGGetBackupBackendObservation)' -count=3
+          go test ./internal/componentmanifest -run TestBackupObservationStoreWorkflowIsReadOnly -count=1
+          go vet ./internal/store

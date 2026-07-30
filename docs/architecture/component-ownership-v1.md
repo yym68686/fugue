@@ -427,6 +427,16 @@ error detail are canonicalized or irreversibly digested before crossing the
 boundary, while volatile app placement and backend health probes cannot churn
 the ownership cell or backend generation.
 
+`internal/store/backup_observation.go` is the legacy data-owner read boundary
+for that seam. Its one snapshot query/locked read computes the final backend
+generation inside the data owner and returns only backend/tenant identity plus
+that irreversible digest. It does not expose bucket/endpoint configuration,
+access-key identifiers, ciphertext, encryption key IDs, secret record IDs,
+health-test timestamps, or display metadata, and it cannot mutate the store.
+`validate-backup-observation-store.yml` runs JSON-store and SQL-mock
+coverage, repeated race tests, and vet under a separate `contents: read`
+concurrency lane with no publication or deployment capability.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

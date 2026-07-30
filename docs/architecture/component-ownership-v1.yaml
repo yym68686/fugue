@@ -95,6 +95,7 @@ components:
       - Dockerfile.backup-observer
       - .github/workflows/build-backup-observer-image.yml
       - .github/workflows/validate-backup-release-candidate.yml
+      - .github/workflows/validate-backup-observation-store.yml
       - cmd/fugue-backup-observer
       - cmd/fugue-backup-release-plan
       - deploy/helm/fugue-backup-observer
@@ -104,6 +105,8 @@ components:
       - internal/backupobserver
       - internal/backuprelease
       - internal/store/backup.go
+      - internal/store/backup_observation.go
+      - internal/store/backup_observation_test.go
       - scripts/test_backup_observer_image.sh
     artifactKinds: [backup-worker, backup-observer, backup-run-observation, backup-release-candidate]
     releaseLane: backup
