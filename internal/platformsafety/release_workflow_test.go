@@ -2604,6 +2604,9 @@ if [[ "${arguments}" == *'--method POST'*'/git/blobs'* ]]; then
   exit 0
 fi
 if [[ "${arguments}" == *'/git/blobs/'* ]]; then
+  object_read_count="$(grep -c '/git/blobs/' "${LOG_FILE}")"
+  if [[ "${MODE}" == 'blob_readback_transient' && "${object_read_count}" -lt 3 ]]; then exit 7; fi
+  if [[ "${MODE}" == 'blob_readback_unavailable' ]]; then exit 7; fi
   if [[ "${MODE}" == 'blob_readback_drift' ]]; then
     printf '%s\n' '{"sha":"drift","encoding":"base64","content":""}'
     exit 0
@@ -2620,6 +2623,9 @@ if [[ "${arguments}" == *'--method POST'*'/git/trees'* ]]; then
   exit 0
 fi
 if [[ "${arguments}" == *'/git/trees/'* ]]; then
+  object_read_count="$(grep -c '/git/trees/' "${LOG_FILE}")"
+  if [[ "${MODE}" == 'tree_readback_transient' && "${object_read_count}" -lt 3 ]]; then exit 7; fi
+  if [[ "${MODE}" == 'tree_readback_unavailable' ]]; then exit 7; fi
   printf '{"sha":"%s","truncated":false,"tree":[{"path":"fugue-runtime-baseline.json","mode":"100644","type":"blob","sha":"%s"}]}\n' \
     "${EXPECTED_TREE_SHA}" "${EXPECTED_BLOB_SHA}"
   exit 0
@@ -2630,12 +2636,15 @@ if [[ "${arguments}" == *'--method POST'*'/git/commits'* ]]; then
   exit 0
 fi
 if [[ "${arguments}" == *'/git/commits/'* ]]; then
+  object_read_count="$(grep -c '/git/commits/' "${LOG_FILE}")"
+  if [[ "${MODE}" == 'commit_readback_transient' && "${object_read_count}" -lt 3 ]]; then exit 7; fi
+  if [[ "${MODE}" == 'commit_readback_unavailable' ]]; then exit 7; fi
   cat "${EXPECTED_COMMIT_RESPONSE_FILE}"
   exit 0
 fi
 if [[ "${arguments}" == *'updateRefs('* ]]; then
   case "${MODE}" in
-    success|committed_exit7|committed_wrong_echo|readback_transient|readback_unavailable|readback_target_exit7|blob_post_exit7|tree_post_exit7|commit_post_exit7)
+    success|committed_exit7|committed_wrong_echo|readback_transient|readback_unavailable|readback_target_exit7|blob_post_exit7|tree_post_exit7|commit_post_exit7|blob_readback_transient|tree_readback_transient|commit_readback_transient)
       git --git-dir="${ORIGIN_DIR}" update-ref "${BASELINE_REF}" "${TARGET_CARRIER_SHA}" "${BASE_REF_OBJECT}"
       ;;
     failed_no_update|success_no_update) ;;
@@ -2688,6 +2697,9 @@ exit 0
 		blobPosts     int
 		treePosts     int
 		commitPosts   int
+		blobReads     int
+		treeReads     int
+		commitReads   int
 		mutationCalls int
 		readbackCalls string
 		refObject     string
@@ -2741,6 +2753,9 @@ exit 0
 			blobPosts:     strings.Count(string(log), "--method POST repos/fugue-test/repository/git/blobs"),
 			treePosts:     strings.Count(string(log), "--method POST repos/fugue-test/repository/git/trees"),
 			commitPosts:   strings.Count(string(log), "--method POST repos/fugue-test/repository/git/commits"),
+			blobReads:     strings.Count(string(log), "/git/blobs/"),
+			treeReads:     strings.Count(string(log), "/git/trees/"),
+			commitReads:   strings.Count(string(log), "/git/commits/"),
 			mutationCalls: strings.Count(string(log), "updateRefs("),
 			readbackCalls: readbackCalls,
 			refObject:     runGit(root, "", "--git-dir="+origin, "rev-parse", "--verify", baselineRef),
@@ -2754,23 +2769,28 @@ exit 0
 		mode              string
 		wantResponseExact string
 		wantReadbacks     string
+		wantObjectReads   [3]int
 	}{
-		{mode: "success", wantResponseExact: "true", wantReadbacks: "2"},
-		{mode: "committed_exit7", wantResponseExact: "false", wantReadbacks: "2"},
-		{mode: "committed_wrong_echo", wantResponseExact: "false", wantReadbacks: "2"},
-		{mode: "readback_transient", wantResponseExact: "true", wantReadbacks: "3"},
-		{mode: "blob_post_exit7", wantResponseExact: "true", wantReadbacks: "2"},
-		{mode: "tree_post_exit7", wantResponseExact: "true", wantReadbacks: "2"},
-		{mode: "commit_post_exit7", wantResponseExact: "true", wantReadbacks: "2"},
+		{mode: "success", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "committed_exit7", wantResponseExact: "false", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "committed_wrong_echo", wantResponseExact: "false", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "readback_transient", wantResponseExact: "true", wantReadbacks: "3", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "blob_post_exit7", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "tree_post_exit7", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "commit_post_exit7", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 1}},
+		{mode: "blob_readback_transient", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{3, 1, 1}},
+		{mode: "tree_readback_transient", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{1, 3, 1}},
+		{mode: "commit_readback_transient", wantResponseExact: "true", wantReadbacks: "2", wantObjectReads: [3]int{1, 1, 3}},
 	}
 	for _, test := range positive {
 		t.Run(test.mode, func(t *testing.T) {
 			got := runWriter(t, test.mode)
 			settled := fmt.Sprintf("response_exact=%s", test.wantResponseExact)
 			if got.err != nil || got.blobPosts != 1 || got.treePosts != 1 || got.commitPosts != 1 ||
+				[3]int{got.blobReads, got.treeReads, got.commitReads} != test.wantObjectReads ||
 				got.mutationCalls != 1 || got.readbackCalls != test.wantReadbacks || got.refObject != targetCarrier ||
 				!strings.Contains(string(got.output), settled) {
-				t.Fatalf("recorder failed carrier settlement: mode=%s err=%v posts=%d/%d/%d mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
+				t.Fatalf("recorder failed carrier settlement: mode=%s err=%v posts=%d/%d/%d object_reads=%d/%d/%d mutations=%d ref_readbacks=%q ref=%s output=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.blobReads, got.treeReads, got.commitReads, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
 			}
 		})
 	}
@@ -2799,18 +2819,23 @@ exit 0
 		wantBlobPosts   int
 		wantTreePosts   int
 		wantCommitPosts int
+		wantObjectReads [3]int
 		wantReadbacks   string
 	}{
-		{mode: "blob_readback_drift", wantBlobPosts: 1},
-		{mode: "pre_cas_ref_drift", wantBlobPosts: 1, wantTreePosts: 1, wantCommitPosts: 1, wantReadbacks: "1"},
+		{mode: "blob_readback_drift", wantBlobPosts: 1, wantObjectReads: [3]int{1, 0, 0}},
+		{mode: "blob_readback_unavailable", wantBlobPosts: 1, wantObjectReads: [3]int{15, 0, 0}},
+		{mode: "tree_readback_unavailable", wantBlobPosts: 1, wantTreePosts: 1, wantObjectReads: [3]int{1, 15, 0}},
+		{mode: "commit_readback_unavailable", wantBlobPosts: 1, wantTreePosts: 1, wantCommitPosts: 1, wantObjectReads: [3]int{1, 1, 15}},
+		{mode: "pre_cas_ref_drift", wantBlobPosts: 1, wantTreePosts: 1, wantCommitPosts: 1, wantObjectReads: [3]int{1, 1, 1}, wantReadbacks: "1"},
 	}
 	for _, test := range preCASNegative {
 		t.Run(test.mode, func(t *testing.T) {
 			got := runWriter(t, test.mode)
 			if got.err == nil || got.blobPosts != test.wantBlobPosts || got.treePosts != test.wantTreePosts ||
+				[3]int{got.blobReads, got.treeReads, got.commitReads} != test.wantObjectReads ||
 				got.commitPosts != test.wantCommitPosts || got.mutationCalls != 0 || got.readbackCalls != test.wantReadbacks ||
 				got.refObject != baseCarrier || strings.Contains(string(got.output), "baseline carrier CAS settled") {
-				t.Fatalf("recorder crossed CAS boundary after pre-CAS failure: mode=%s err=%v posts=%d/%d/%d mutations=%d readbacks=%q ref=%s output=%q log=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.mutationCalls, got.readbackCalls, got.refObject, got.output, got.log)
+				t.Fatalf("recorder crossed CAS boundary after pre-CAS failure: mode=%s err=%v posts=%d/%d/%d object_reads=%d/%d/%d mutations=%d ref_readbacks=%q ref=%s output=%q log=%q", test.mode, got.err, got.blobPosts, got.treePosts, got.commitPosts, got.blobReads, got.treeReads, got.commitReads, got.mutationCalls, got.readbackCalls, got.refObject, got.output, got.log)
 			}
 		})
 	}
@@ -2824,7 +2849,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "dc7feff8b1831daf2c8f82b5fba668ceb4551d58a18226ce70724f417f5bdf40")
+	assertWorkflowSourceDigest(t, data, "f1ff610527bcc8adfc12788c7eb53e6962c232149e2dee87d0608d2844b5bbd0")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2865,7 +2890,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"continue-release-convergence/Dispatch exact release convergence successor":         "a8ba4e462a71905c05bf5b6a59a35c2a72fcb8e05beee06ed2d98787706a5396",
-		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "54ed82f5027c66a622a0033be71b7d1b9182de690e431a3572bb48201123d7af",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "d4716fb493de8e16106084a64e77fc32e695b0b471e5d70d33586c8900bdb0f6",
 		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "45c936e0acd042ba3f4e9a88249f49912b4825e52df413e2020d4a2224d1f8d2",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
@@ -3852,6 +3877,10 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		`readonly metadata_path='fugue-runtime-baseline.json'`,
 		`"previous_baseline_object_sha": sys.argv[1]`,
 		`"runtime_sha": sys.argv[2]`,
+		`bounded_git_object_readback() {`,
+		`for attempt in $(seq 1 15)`,
+		`"${attempt}" == '15' ]] || sleep 2`,
+		`carrier %s readback did not settle after 15 attempts`,
 		`blob_sha="$(git hash-object -w --stdin`,
 		`"repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}"`,
 		`tree_sha="$(git mktree`,
@@ -3881,9 +3910,10 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("release baseline advancement must contain %q", required)
 		}
 	}
-	if strings.Count(advanceBaseline.Run, "gh api") != 10 ||
+	if strings.Count(advanceBaseline.Run, "gh api") != 8 ||
 		strings.Count(advanceBaseline.Run, "gh api graphql") != 2 ||
 		strings.Count(advanceBaseline.Run, "--method POST") != 3 ||
+		strings.Count(advanceBaseline.Run, "bounded_git_object_readback") != 4 ||
 		strings.Count(advanceBaseline.Run, "updateRefs(") != 1 ||
 		strings.Count(advanceBaseline.Run, "-F 'force=false'") != 1 {
 		t.Fatalf("release baseline writer API inventory drifted:\n%s", advanceBaseline.Run)

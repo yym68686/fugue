@@ -1398,6 +1398,26 @@ jobs:
           object_tmp="$(mktemp -d)"
           trap 'rm -rf "${object_tmp}"' EXIT
 
+          bounded_git_object_readback() {
+            local api_path="${1:?Git object API path is required}"
+            local output_path="${2:?Git object readback path is required}"
+            local object_kind="${3:?Git object kind is required}"
+            local attempt=''
+            rm -f "${output_path}" "${output_path}.tmp"
+            for attempt in $(seq 1 15); do
+              if timeout --kill-after=2s 10s gh api "${api_path}" >"${output_path}.tmp"; then
+                [[ -s "${output_path}.tmp" ]]
+                mv "${output_path}.tmp" "${output_path}"
+                printf 'carrier %s readback settled on attempt %s\n' "${object_kind}" "${attempt}" >&2
+                return 0
+              fi
+              rm -f "${output_path}.tmp"
+              [[ "${attempt}" == '15' ]] || sleep 2
+            done
+            printf 'carrier %s readback did not settle after 15 attempts\n' "${object_kind}" >&2
+            return 1
+          }
+
           python3 - "${EXPECTED_BASE_REF_OBJECT}" "${TARGET_SHA}" \
             "${object_tmp}/metadata.json" "${object_tmp}/blob-request.json" <<'PY'
           import json, pathlib, sys
@@ -1419,9 +1439,9 @@ jobs:
           timeout --kill-after=2s 10s gh api --method POST \
             "repos/${GITHUB_REPOSITORY}/git/blobs" \
             --input "${object_tmp}/blob-request.json" >"${object_tmp}/blob-response.json" || blob_status=$?
-          timeout --kill-after=2s 10s gh api \
+          bounded_git_object_readback \
             "repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}" \
-            >"${object_tmp}/blob-readback.json"
+            "${object_tmp}/blob-readback.json" blob
           python3 - "${object_tmp}/metadata.json" "${object_tmp}/blob-readback.json" "${blob_sha}" <<'PY'
           import base64, pathlib, json, sys
           expected = pathlib.Path(sys.argv[1]).read_bytes()
@@ -1444,9 +1464,9 @@ jobs:
           timeout --kill-after=2s 10s gh api --method POST \
             "repos/${GITHUB_REPOSITORY}/git/trees" \
             --input "${object_tmp}/tree-request.json" >"${object_tmp}/tree-response.json" || tree_status=$?
-          timeout --kill-after=2s 10s gh api \
+          bounded_git_object_readback \
             "repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}" \
-            >"${object_tmp}/tree-readback.json"
+            "${object_tmp}/tree-readback.json" tree
           python3 - "${object_tmp}/tree-readback.json" "${tree_sha}" "${metadata_path}" "${blob_sha}" <<'PY'
           import json, sys
           response = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -1488,9 +1508,9 @@ jobs:
           timeout --kill-after=2s 10s gh api --method POST \
             "repos/${GITHUB_REPOSITORY}/git/commits" \
             --input "${object_tmp}/commit-request.json" >"${object_tmp}/commit-response.json" || commit_status=$?
-          timeout --kill-after=2s 10s gh api \
+          bounded_git_object_readback \
             "repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}" \
-            >"${object_tmp}/commit-readback.json"
+            "${object_tmp}/commit-readback.json" commit
           python3 - "${object_tmp}/commit-request.json" "${object_tmp}/commit-readback.json" \
             "${carrier_sha}" "${tree_sha}" "${EXPECTED_BASE_REF_OBJECT}" <<'PY'
           import json, sys

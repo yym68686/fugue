@@ -187,7 +187,8 @@ a future successful deploy. The disabled workflow revalidates the exact
 baseline ref object separately from its represented runtime, writes one
 canonical content-addressed carrier for the deployed target, and attempts one
 `force: false` expected-OID CAS to that carrier. Every object POST and the ref
-mutation is settled by bounded exact readback; a response echo is diagnostic
+mutation is settled by bounded exact readback, including temporary object-store
+visibility lag; a response echo is diagnostic
 only. Object scratch state is removed before the ref mutation and there is no
 fallible operation after successful settlement. Because the deploy workflow
 remains manually disabled in this checkpoint, compatibility, fail-closed
