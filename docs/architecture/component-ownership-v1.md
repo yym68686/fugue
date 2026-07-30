@@ -362,10 +362,10 @@ probed with a read-only root to prove disabled liveness, unready observation
 state, no published port, no credential-shaped logs, and clean SIGTERM exit.
 The path-scoped `backup-observer-image-${ref}` workflow has only
 `contents: read`, builds with `--load`, and owns no registry login, artifact
-upload, package write, dispatch, Helm, Kubernetes, production environment, or
-deploy step. It is therefore an independent compilation and CI cancellation
-boundary, not a published or installed backup service. The legacy API remains
-the only running backup owner.
+upload, package write, dispatch, Helm install/upgrade/package/push, Kubernetes,
+production environment, or deploy step. It is therefore an independent
+compilation and CI cancellation boundary, not a published or installed backup
+service. The legacy API remains the only running backup owner.
 
 The observer input reader supports credential/spec rotation without weakening
 its path boundary. It accepts either a stable regular file or exactly the
@@ -377,6 +377,17 @@ therefore fails that attempt and is reread cleanly on the next loop; it cannot
 mix a spec or token across generations. This allows ordinary projected
 Secret/ConfigMap updates and avoids `subPath`, whose file would otherwise stay
 pinned to the old generation.
+
+The observer artifact now also has an independent Helm lane at
+`deploy/helm/fugue-backup-observer`. It is default-off and renders exactly one
+cell-scoped Deployment only when explicitly enabled with a dedicated immutable
+image digest, canonical cell key, and externally owned ConfigMap/Secret. The
+chart creates no Service, ServiceAccount, RBAC, hostPath, or container port;
+the binary remains loopback-only and probes run through its fixed executable.
+The ConfigMap and Secret are mounted as whole read-only volumes (never
+`subPath`) so the atomic-writer rotation contract above remains effective.
+The lane is build/lint/render-only; it does not publish an image, install a
+release, or authorize production mutation.
 
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a

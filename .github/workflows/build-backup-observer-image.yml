@@ -9,6 +9,7 @@ on:
       - cmd/fugue-backup-observer/**
       - internal/backupcontrol/**
       - internal/backupobserver/**
+      - deploy/helm/fugue-backup-observer/**
       - scripts/test_backup_observer_image.sh
       - .github/workflows/build-backup-observer-image.yml
       - go.mod
@@ -19,6 +20,7 @@ on:
       - cmd/fugue-backup-observer/**
       - internal/backupcontrol/**
       - internal/backupobserver/**
+      - deploy/helm/fugue-backup-observer/**
       - scripts/test_backup_observer_image.sh
       - .github/workflows/build-backup-observer-image.yml
       - go.mod
@@ -46,6 +48,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
       - name: Test the independent dependency closure
         run: |
           set -euo pipefail
@@ -65,6 +72,17 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
               go build -trimpath -buildvcs=false -o "/tmp/fugue-backup-observer-${arch}" ./cmd/fugue-backup-observer
           done
+
+      - name: Validate the deployment-disabled chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-backup-observer
+          go test ./deploy/helm/fugue-backup-observer
+          rendered="$(helm template backup-observer deploy/helm/fugue-backup-observer)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled backup-observer chart rendered Kubernetes resources' >&2
+            exit 1
+          fi
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
