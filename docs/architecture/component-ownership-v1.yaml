@@ -106,6 +106,7 @@ components:
       - .github/workflows/validate-backup-input-bundle.yml
       - .github/workflows/validate-backup-materializer-identity.yml
       - .github/workflows/validate-backup-materializer-review.yml
+      - .github/workflows/validate-backup-materializer-secret-dry-run.yml
       - cmd/fugue-backup-materializer
       - cmd/fugue-backup-observer
       - cmd/fugue-backup-release-plan
@@ -133,7 +134,7 @@ components:
     releaseLane: backup
     coordinator: release-control
     ownedState: [backup-policy, backup-run, backup-run-spec, backup-observer-input-bundle, backup-materializer-cell-status, backup-run-observation-lkg, backup-artifact, restore-checkpoint]
-    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-materializer-agent@v1, backup-materializer-identity@v1, backup-materializer-http-auth@v1, backup-materializer-client@v1, backup-materializer-client-projection@v1, backup-materializer-composition@v1, backup-materializer-input-api@v1, backup-materializer-input-route@v1, backup-materializer-legacy-source@v1, backup-materializer-local-issuer@v1, backup-materializer-reconciler@v1, backup-materializer-secret-plan@v1, backup-materializer-secret-reader@v1, backup-materializer-secret-reader-projection@v1, backup-materializer-secret-reconcile@v1, backup-materializer-store-source@v1, backup-materializer-token-review@v1, backup-materializer-workload@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
+    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-materializer-agent@v1, backup-materializer-identity@v1, backup-materializer-http-auth@v1, backup-materializer-client@v1, backup-materializer-client-projection@v1, backup-materializer-composition@v1, backup-materializer-input-api@v1, backup-materializer-input-route@v1, backup-materializer-legacy-source@v1, backup-materializer-local-issuer@v1, backup-materializer-reconciler@v1, backup-materializer-secret-dry-run@v1, backup-materializer-secret-plan@v1, backup-materializer-secret-reader@v1, backup-materializer-secret-reader-projection@v1, backup-materializer-secret-reconcile@v1, backup-materializer-store-source@v1, backup-materializer-token-review@v1, backup-materializer-workload@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
     dependencies: [control-plane]
     failureBoundary: backup-storage
     lkgPolicy: required

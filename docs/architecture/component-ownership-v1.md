@@ -930,6 +930,31 @@ workflow dispatch, Kubernetes command, Helm install/upgrade/package/push,
 environment, release, or production capability. No chart was installed and no
 image was published by this atom.
 
+`internal/backupmaterializer/secretwriter` adds the separately validated,
+default-off `backup-materializer-secret-dry-run@v1` network boundary. It
+accepts only a fresh, valid create-if-absent or UID/resourceVersion-CAS
+replacement decision bound to the exact configured cell and sealed desired
+plan. It serializes exactly one Opaque Secret with the two owned data keys,
+owned metadata, no owner, no finalizer, and `immutable=false`.
+
+The adapter can issue only `POST` to that cell's Secret collection or `PUT` to
+that exact Secret. Every URL contains the fixed `dryRun=All`, strict field
+validation, and fixed field manager query. Redirects, retries, cookies, patch,
+delete, list, watch, arbitrary paths, and live-write mode are absent. It
+validates the API response's exact cell, metadata bindings and data bytes, but
+does not treat UID, resourceVersion or other generated dry-run fields as
+durable evidence. The returned digest-bound receipt contains no Secret data or
+bearer and permanently reports `persisted=false`, `executionAllowed=false`,
+and `productionMutationAllowed=false`.
+
+This follows [Kubernetes server-side dry-run semantics](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run):
+admission, validation and conflict checks run, but the storage stage is
+skipped. Kubernetes deliberately authorizes dry-run exactly like a real
+mutation, so this atom does **not** add create/update RBAC to the cell chart and
+does not wire the adapter into the process, image, projected credential, or
+control loop. Its dedicated read-only validation lane has no build, upload,
+dispatch, Helm, Kubernetes, release, or production capability.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
