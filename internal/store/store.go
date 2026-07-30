@@ -5124,6 +5124,7 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	app.Status.Phase = failedPhaseForApp(*app)
 	app.Status.LastOperationID = op.ID
 	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
+	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 }

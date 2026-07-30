@@ -480,6 +480,27 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 		return model.EdgeRouteStatusUnavailable, "app source exposes a non-HTTP service protocol"
 	default:
 		if observed := app.ObservedStatus; observed != nil {
+			if observed.RuntimeObjectPresent != nil && !*observed.RuntimeObjectPresent {
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "managed app runtime object not found")
+			}
+			if observed.NamespacePresent != nil && !*observed.NamespacePresent {
+				return model.EdgeRouteStatusUnavailable, "app namespace is unavailable"
+			}
+			if observed.ServicePresent != nil && !*observed.ServicePresent {
+				return model.EdgeRouteStatusUnavailable, "app service is unavailable"
+			}
+			if observed.EndpointPresent != nil && !*observed.EndpointPresent {
+				return model.EdgeRouteStatusUnavailable, "app endpoint is unavailable"
+			}
+			if observed.EndpointReady != nil && !*observed.EndpointReady {
+				return model.EdgeRouteStatusUnavailable, "app endpoint has no ready addresses"
+			}
+			if observed.PhysicalReplicas != nil && *observed.PhysicalReplicas == 0 {
+				return model.EdgeRouteStatusUnavailable, "app has no physical ready replicas"
+			}
+			if observed.ImagePresent != nil && !*observed.ImagePresent {
+				return model.EdgeRouteStatusUnavailable, "current app image is unavailable"
+			}
 			switch observed.Phase {
 			case "unavailable":
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
