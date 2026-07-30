@@ -62,21 +62,26 @@ func TestPlanRepositoryReleaseControlOwnsMigrationPlanner(t *testing.T) {
 
 func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
-	plan, err := PlanChanges(manifest, []string{"deploy/helm/fugue-backup-observer/templates/deployment.yaml"})
-	if err != nil {
-		t.Fatalf("PlanChanges() error = %v", err)
-	}
-	if got, want := impactIDs(plan.ImpactedComponents), []string{"backup-storage"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("impacted components = %v, want %v", got, want)
-	}
-	if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
-		t.Fatalf("backup observer chart plan = mode %q legacy=%v, want shadow/legacy", plan.DispatchMode, plan.RequiresLegacyRelease)
-	}
-	if got, want := resourceIDs(plan.SharedResources), []string{"control-plane-postgres", "legacy-fugue-helm-release", "r2-backup-bucket"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("shared resources = %v, want %v", got, want)
-	}
-	if err := plan.VerifyDigest(); err != nil {
-		t.Fatalf("backup observer chart plan digest: %v", err)
+	for _, changedPath := range []string{
+		"deploy/helm/fugue-backup-observer/templates/deployment.yaml",
+		"internal/backuprelease/candidate.go",
+	} {
+		plan, err := PlanChanges(manifest, []string{changedPath})
+		if err != nil {
+			t.Fatalf("PlanChanges(%q) error = %v", changedPath, err)
+		}
+		if got, want := impactIDs(plan.ImpactedComponents), []string{"backup-storage"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) impacted components = %v, want %v", changedPath, got, want)
+		}
+		if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
+			t.Fatalf("PlanChanges(%q) = mode %q legacy=%v, want shadow/legacy", changedPath, plan.DispatchMode, plan.RequiresLegacyRelease)
+		}
+		if got, want := resourceIDs(plan.SharedResources), []string{"control-plane-postgres", "legacy-fugue-helm-release", "r2-backup-bucket"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) shared resources = %v, want %v", changedPath, got, want)
+		}
+		if err := plan.VerifyDigest(); err != nil {
+			t.Fatalf("PlanChanges(%q) digest: %v", changedPath, err)
+		}
 	}
 }
 

@@ -389,6 +389,21 @@ The ConfigMap and Secret are mounted as whole read-only volumes (never
 The lane is build/lint/render-only; it does not publish an image, install a
 release, or authorize production mutation.
 
+`internal/backuprelease` seals one enabled cell render into the versioned
+`backup-release.fugue.dev/v1` candidate contract. The candidate binds the
+source commit, dedicated image digest, future deterministic chart digest,
+canonical cell and workload names, external ConfigMap/Secret references,
+bounded runtime values, backup spec/status contract versions, and the exact
+observed release-control fence. It independently revalidates that the source
+plan impacts only `backup-storage`, retains the transitional `lane/backup`,
+legacy-release, legacy Helm resource, and control-plane Postgres coordination
+scopes, and requires cell-local LKG rollback. Exact rendered Deployment,
+VolumeSource union, probe, scheduling, resource, and security structures are
+verified before producing a digest. The resulting record permanently carries
+`observationOnly=true`, `executionAllowed=false`, and
+`productionMutationAllowed=false`; recalculating its digest cannot turn it
+into a deploy authorization.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while
