@@ -772,6 +772,7 @@ type EdgeDNSBundle struct {
 	DNSNodeID          string            `json:"dns_node_id,omitempty"`
 	EdgeGroupID        string            `json:"edge_group_id,omitempty"`
 	Zone               string            `json:"zone"`
+	HostedZones        []string          `json:"hosted_zones,omitempty"`
 	Records            []EdgeDNSRecord   `json:"records"`
 }
 

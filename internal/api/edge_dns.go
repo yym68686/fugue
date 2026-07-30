@@ -192,6 +192,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	hostedZones, err := s.store.ListHostedZones("", true)
+	if err != nil {
+		return model.EdgeDNSBundle{}, err
+	}
+	hostedZoneNames := edgeDNSPublishableHostedZoneNames(hostedZones)
 	var hostedZone model.HostedZone
 	hostedRecords := []model.DNSRecord{}
 	hostedZone, err = s.store.GetHostedZoneByName(options.Zone)
@@ -503,6 +508,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		DNSNodeID:   options.DNSNodeID,
 		EdgeGroupID: options.EdgeGroupID,
 		Zone:        options.Zone,
+		HostedZones: hostedZoneNames,
 		Records:     records,
 	}
 	bundle.Version = edgeDNSBundleVersion(bundle)
@@ -3261,8 +3267,9 @@ type edgeDNSRecordVersionMaterial struct {
 }
 
 type edgeDNSBundleVersionMaterial struct {
-	Zone    string                         `json:"zone"`
-	Records []edgeDNSRecordVersionMaterial `json:"records"`
+	Zone        string                         `json:"zone"`
+	HostedZones []string                       `json:"hosted_zones,omitempty"`
+	Records     []edgeDNSRecordVersionMaterial `json:"records"`
 }
 
 func edgeDNSBundleVersion(bundle model.EdgeDNSBundle) string {
@@ -3271,12 +3278,37 @@ func edgeDNSBundleVersion(bundle model.EdgeDNSBundle) string {
 		records[index] = edgeDNSRecordVersionMaterialFromRecord(record)
 	}
 	material := edgeDNSBundleVersionMaterial{
-		Zone:    normalizeExternalAppDomain(bundle.Zone),
-		Records: records,
+		Zone:        normalizeExternalAppDomain(bundle.Zone),
+		HostedZones: append([]string(nil), bundle.HostedZones...),
+		Records:     records,
 	}
 	payload, _ := json.Marshal(material)
 	sum := sha256.Sum256(payload)
 	return edgeDNSBundleVersionPrefix + hex.EncodeToString(sum[:])[:16]
+}
+
+func edgeDNSPublishableHostedZoneNames(zones []model.HostedZone) []string {
+	seen := make(map[string]struct{}, len(zones))
+	out := make([]string, 0, len(zones))
+	for _, zone := range zones {
+		status := model.NormalizeHostedZoneStatus(zone.Status)
+		switch status {
+		case model.HostedZoneStatusPendingDelegation, model.HostedZoneStatusActive, model.HostedZoneStatusDegraded:
+		default:
+			continue
+		}
+		name := normalizeExternalAppDomain(zone.ZoneName)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func edgeDNSRecordGeneration(record model.EdgeDNSRecord) string {
