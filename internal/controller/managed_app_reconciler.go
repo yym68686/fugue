@@ -285,7 +285,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", desiredScheduling)
 		if guardErr != nil {
 			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
-				return nil
+				return s.reconcileCurrentManagedAppZeroDowntimeBlock(ctx, client, namespace, app)
 			}
 			return patchManagedAppZeroDowntimeBlockedStatus(ctx, client, namespace, managed, app, guardErr)
 		}
@@ -314,7 +314,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		preparedApp, guardErr := s.prepareManagedAppReconcileRolloutWithEvidence(ctx, client, namespace, managed, app, "", managed.Spec.Scheduling)
 		if guardErr != nil {
 			if managedAppZeroDowntimeBlockedStatusCurrent(managed.Status, guardErr) {
-				return nil
+				return s.reconcileCurrentManagedAppZeroDowntimeBlock(ctx, client, namespace, app)
 			}
 			return patchManagedAppZeroDowntimeBlockedStatus(ctx, client, namespace, managed, app, guardErr)
 		}
@@ -1095,6 +1095,44 @@ func managedAppZeroDowntimeBlockedStatusCurrent(status runtime.ManagedAppStatus,
 		}
 	}
 	return false
+}
+
+// reconcileCurrentManagedAppZeroDowntimeBlock keeps the durable blocked status
+// unchanged while still allowing bounded housekeeping for the last known-good
+// workload. The blocked-status fast path otherwise returns before the normal
+// observed-status reconciliation and can retain old Evicted pods forever.
+//
+// A fresh, complete Deployment readiness proof is required on every call. A
+// missing, stale, or unhealthy Deployment fails closed without listing or
+// deleting pods; the shared cleanup then re-checks exact Fugue identity,
+// ReplicaSet controller ownership, terminal age, and the observed pod UID.
+func (s *Service) reconcileCurrentManagedAppZeroDowntimeBlock(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	app model.App,
+) error {
+	deployment, found, err := client.getDeployment(ctx, namespace, runtime.RuntimeAppResourceName(app))
+	if err != nil {
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf("skip retained evicted pod cleanup behind current zero-downtime block for %s/%s: read deployment: %v", namespace, runtime.RuntimeAppResourceName(app), err)
+		}
+		return nil
+	}
+	if !found || !managedDeploymentStatusReady(deployment, app.Spec.Replicas) {
+		return nil
+	}
+	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
+	if err != nil {
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf("skip retained evicted pod cleanup behind current zero-downtime block for %s/%s: list pods: %v", namespace, runtime.RuntimeAppResourceName(app), err)
+		}
+		return nil
+	}
+	if err := s.cleanupRetainedManagedAppEvictedPods(ctx, client, namespace, app, pods); err != nil && s != nil && s.Logger != nil {
+		s.Logger.Printf("cleanup retained evicted managed app pods behind current zero-downtime block for %s/%s failed: %v", namespace, runtime.RuntimeAppResourceName(app), err)
+	}
+	return nil
 }
 
 func patchManagedAppDeployImageBlockedStatus(
