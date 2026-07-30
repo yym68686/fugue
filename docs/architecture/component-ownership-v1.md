@@ -446,13 +446,31 @@ a tenant, workload, runtime, node-updater, or platform-component credential.
 The authentication middleware is permanently GET-only and applies private
 no-store headers even to rejected requests. `fugue-api` reads only dedicated
 `FUGUE_BACKUP_OBSERVER_IDENTITY_*` configuration; an absent, weak, partial, or
-revoked keyring disables issuance and verification. This atom intentionally
-adds no observation route and the legacy Helm chart neither creates nor mounts
-these keys, so production behavior remains unchanged and fail-closed.
+revoked keyring disables issuance and verification. The legacy Helm chart
+still neither creates nor mounts these keys, so the new private route remains
+unreachable in production until a later identity-materializer and shadow
+rollout atom.
 `validate-backup-observer-identity.yml` validates the package, middleware,
 OpenAPI auth generator, environment wiring, rotation, revocation, expiry, race,
 and dependency boundaries with read-only permissions and no publish/deploy
 step.
+
+`GET /v1/backup-control/runs/{run}/observation` is the first private bridge
+over that identity boundary. It accepts only the dedicated observer bearer
+credential and one canonically encoded `spec_digest` query value, then binds
+the token, path, tenant, cell, and digest to the current legacy run and current
+redacted backend generation. It reads at most two active artifact records to
+detect ambiguity and delegates all spec/status construction to the pure
+adapter. The handler acquires no audit writer, lease, worker, or object-storage
+client; its success schema exposes no physical backend configuration, secret,
+object location, or raw legacy error. Backup backend credential or
+configuration rotation changes the spec digest so an old token/query pair
+fails closed instead of observing the new generation. Tests prove
+byte-for-byte store immutability, exercise the real
+observer HTTP client against the route, and lock the strict OpenAPI schema
+against additional fields. `validate-backup-observation-api.yml` validates
+this boundary in its own read-only concurrency lane and has no build,
+publication, dispatch, Helm, or Kubernetes capability.
 
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a

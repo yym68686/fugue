@@ -203,6 +203,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/backing-services/{id}/move-project", s.auth.RequireAPI(http.HandlerFunc(s.handleMoveBackingServiceProject)))
 	mux.Handle("POST /v1/backing-services/{id}/resume", s.auth.RequireAPI(http.HandlerFunc(s.handleResumeBackingService)))
 	mux.Handle("POST /v1/backing-services/{id}/suspend", s.auth.RequireAPI(http.HandlerFunc(s.handleSuspendBackingService)))
+	mux.Handle("GET /v1/backup-control/runs/{run}/observation", s.auth.RequireBackupObserver(http.HandlerFunc(s.handleGetBackupRunObservation)))
 	mux.Handle("GET /v1/backups/artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackupArtifacts)))
 	mux.Handle("GET /v1/backups/artifacts/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackupArtifact)))
 	mux.Handle("DELETE /v1/backups/artifacts/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteBackupArtifact)))

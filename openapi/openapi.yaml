@@ -9276,6 +9276,95 @@ paths:
                 $ref: "#/components/schemas/BackupPolicyResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backup-control/runs/{run}/observation:
+    get:
+      operationId: getBackupRunObservation
+      summary: Read One Backup Run Observation
+      description: >-
+        Private observation-only compatibility bridge for one isolated backup
+        cell. The dedicated short-lived credential, path run, ownership cell,
+        and required desired-spec digest must all agree with the current
+        legacy snapshot. This operation cannot schedule, claim, execute,
+        delete, restore, or otherwise mutate a backup.
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupRunObservation
+      security:
+        - BackupObserverBearerAuth: []
+      parameters:
+        - in: path
+          name: run
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        - in: query
+          name: spec_digest
+          required: true
+          schema:
+            type: string
+            pattern: '^sha256:[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: Exact current observation bound to the requested spec digest.
+          headers:
+            Cache-Control:
+              description: Private no-store policy required by the observer client.
+              schema:
+                type: string
+                pattern: '(^|.*,\\s*)private(\\s*,.*|$)'
+            Pragma:
+              description: Legacy intermediary cache prevention.
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRunObservationStatus"
+        '400':
+          description: The path or exact spec_digest query precondition is malformed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '401':
+          description: The dedicated backup observer identity is missing, invalid, expired, or unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '403':
+          description: The identity is not bound to the requested run, cell, or spec digest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '404':
+          description: The exact identity-owned run is not visible.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '409':
+          description: The legacy snapshot is inconsistent, unrepresentable, or no longer matches the requested spec digest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: A bounded read of the observation source is unavailable.
+          headers:
+            Retry-After:
+              description: Seconds the observer should wait before retrying the bounded read.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backups/runs:
     get:
       operationId: listBackupRuns
@@ -11330,6 +11419,104 @@ components:
         finished_at:
           type: string
           format: date-time
+    BackupRunObservationArtifactRef:
+      type: object
+      additionalProperties: false
+      required: [artifactId, runId, kind, contentDigest, manifestDigest, backendGeneration]
+      properties:
+        artifactId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        runId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        kind:
+          type: string
+          enum: [control-plane-pg-dump, app-pg-dump, file-archive, data-snapshot, registry-archive]
+        contentDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        manifestDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        backendGeneration:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    BackupRunObservationStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - apiVersion
+        - kind
+        - policy
+        - runId
+        - specDigest
+        - cellKey
+        - observedState
+        - observedAttempt
+        - observedFence
+        - observedAt
+        - validUntil
+        - observationOnly
+        - productionWriteAllowed
+        - digest
+      properties:
+        apiVersion:
+          type: string
+          enum: [backup-control.fugue.dev/v1]
+        kind:
+          type: string
+          enum: [BackupRunStatus]
+        policy:
+          type: string
+          enum: [shadow-spec-status-lkg-v1]
+        runId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        specDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        cellKey:
+          type: string
+          pattern: '^backup/(control-plane-db|app-database|persistent-storage|data-workspace|registry|platform-component)/[0-9a-f]{16}$'
+        observedState:
+          type: string
+          enum: [pending, running, succeeded, failed, canceled, blocked]
+        observedAttempt:
+          type: integer
+          minimum: 0
+          maximum: 10
+        observedFence:
+          type: integer
+          format: int64
+          minimum: 0
+        observedWorkerId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        observedErrorCode:
+          type: string
+          maxLength: 96
+          pattern: '^[a-z0-9]+([_-][a-z0-9]+)*$'
+        observedErrorDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        lastKnownGood:
+          $ref: "#/components/schemas/BackupRunObservationArtifactRef"
+        observedAt:
+          type: string
+          format: date-time
+        validUntil:
+          type: string
+          format: date-time
+        observationOnly:
+          type: boolean
+          enum: [true]
+        productionWriteAllowed:
+          type: boolean
+          enum: [false]
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
     BackupRunRequest:
       type: object
       additionalProperties: false

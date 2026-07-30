@@ -100,10 +100,13 @@ components:
       - .github/workflows/validate-backup-release-candidate.yml
       - .github/workflows/validate-backup-observation-store.yml
       - .github/workflows/validate-backup-observer-identity.yml
+      - .github/workflows/validate-backup-observation-api.yml
       - cmd/fugue-backup-observer
       - cmd/fugue-backup-release-plan
       - deploy/helm/fugue-backup-observer
       - internal/api/backup.go
+      - internal/api/backup_observation.go
+      - internal/api/backup_observation_test.go
       - internal/backupadapter
       - internal/backupcontrol
       - internal/backupidentity
