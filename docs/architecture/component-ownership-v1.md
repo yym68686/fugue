@@ -511,6 +511,29 @@ or workload. The current default-off chart continues to consume its existing
 external ConfigMap/Secret until a later reviewed atom moves both keys into one
 bundle-derived Secret projection; production behavior is therefore unchanged.
 
+`internal/backupmaterializeridentity` defines the corresponding caller side as
+`backup-materializer-identity@v1` without creating another Fugue bearer-key
+domain. A future materializer must present a short-lived Kubernetes projected
+ServiceAccount JWT for the one fixed audience
+`fugue-backup-materializer.fugue.dev`. The pure policy asks a pluggable reviewer
+for exactly that audience and accepts only the exact
+`fugue-system/fugue-backup-materializer-<cell-id>` username, the three normal
+ServiceAccount groups, canonical ServiceAccount UID, credential-document JTI,
+and bound Pod name/UID extras. Missing Pod binding rejects legacy
+Secret-backed ServiceAccount tokens; another cell's account or another
+workload's Pod cannot cross the boundary.
+Malformed/oversized/non-JWT credentials are rejected before external review,
+while reviewer outages remain distinct from invalid credentials for bounded
+fail-closed retry handling. The resulting request-context claims contain no
+bearer token and round-trip all six canonical backup cell kinds within the DNS
+label limit.
+
+This identity atom is standard-library-only and has its own read-only
+`backup-materializer-identity-${ref}` validation lane. It deliberately adds no
+TokenReview client, OpenAPI security scheme, middleware, RBAC, ServiceAccount,
+projected token, or running materializer yet; those remain separately reviewed
+default-off atoms.
+
 `GET /v1/backup-control/runs/{run}/observation` is the first private bridge
 over that identity boundary. It accepts only the dedicated observer bearer
 credential and one canonically encoded `spec_digest` query value, then binds

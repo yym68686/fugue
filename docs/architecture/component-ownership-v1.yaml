@@ -102,6 +102,7 @@ components:
       - .github/workflows/validate-backup-observer-identity.yml
       - .github/workflows/validate-backup-observation-api.yml
       - .github/workflows/validate-backup-input-bundle.yml
+      - .github/workflows/validate-backup-materializer-identity.yml
       - cmd/fugue-backup-observer
       - cmd/fugue-backup-release-plan
       - deploy/helm/fugue-backup-observer
@@ -112,6 +113,7 @@ components:
       - internal/backupcontrol
       - internal/backupidentity
       - internal/backupmaterializer
+      - internal/backupmaterializeridentity
       - internal/backupobserver
       - internal/backuprelease
       - internal/store/backup.go
@@ -122,7 +124,7 @@ components:
     releaseLane: backup
     coordinator: release-control
     ownedState: [backup-policy, backup-run, backup-run-spec, backup-observer-input-bundle, backup-run-observation-lkg, backup-artifact, restore-checkpoint]
-    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
+    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-materializer-identity@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
     dependencies: [control-plane]
     failureBoundary: backup-storage
     lkgPolicy: required
