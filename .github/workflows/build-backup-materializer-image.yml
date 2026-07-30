@@ -15,6 +15,7 @@ on:
       - internal/backupmaterializer/reconcile/**
       - internal/backupmaterializer/reconciler/**
       - internal/backupmaterializer/secretreader/**
+      - deploy/helm/fugue-backup-materializer/**
       - scripts/test_backup_materializer_image.sh
       - .github/workflows/build-backup-materializer-image.yml
       - go.mod
@@ -31,6 +32,7 @@ on:
       - internal/backupmaterializer/reconcile/**
       - internal/backupmaterializer/reconciler/**
       - internal/backupmaterializer/secretreader/**
+      - deploy/helm/fugue-backup-materializer/**
       - scripts/test_backup_materializer_image.sh
       - .github/workflows/build-backup-materializer-image.yml
       - go.mod
@@ -57,6 +59,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
 
       - name: Test the independent read-only dependency closure
         run: |
@@ -92,6 +99,17 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
               go build -trimpath -buildvcs=false -o "/tmp/fugue-backup-materializer-${arch}" ./cmd/fugue-backup-materializer
           done
+
+      - name: Validate the deployment-disabled cell chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-backup-materializer
+          go test ./deploy/helm/fugue-backup-materializer
+          rendered="$(helm template backup-materializer deploy/helm/fugue-backup-materializer)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled backup-materializer chart rendered Kubernetes resources' >&2
+            exit 1
+          fi
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0

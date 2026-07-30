@@ -893,10 +893,42 @@ network. The black-box probe runs the default-disabled image with a read-only
 root, no Linux capabilities, no-new-privileges, no published or declared port,
 and deliberately invalid private projection settings. It must become live but
 remain unready, omit capability-shaped data from logs, lack `/bin/sh`, and
-exit cleanly on SIGTERM. The workflow has no login, push, artifact upload,
-dispatch, Helm, Kubernetes, environment, or production capability. There is
-still no ServiceAccount, RBAC, projected volume, Pod, chart, Secret write path,
-published image, or production enablement.
+exit cleanly on SIGTERM. At that image-only atom, the workflow had no login,
+push, artifact upload, dispatch, Helm, Kubernetes, environment, or production
+capability, and there was still no ServiceAccount, RBAC, projected volume,
+Pod, chart, Secret write path, published image, or production enablement.
+
+`deploy/helm/fugue-backup-materializer` adds the default-off
+`backup-materializer-workload@v1` shadow boundary for exactly one backup cell
+and run. Disabled values render no objects. Enabling is valid only in
+`fugue-system` and renders one deterministic ServiceAccount, one Role, one
+RoleBinding, and one singleton `Recreate` Deployment; the resource identity is
+derived from the canonical cell and does not depend on the Helm release name.
+
+The dedicated ServiceAccount and Pod both disable the default token mount. Two
+separate projected volumes each rotate their own ten-minute, Pod-bound token
+and CA bundle. The desired-input token has the exact
+`fugue-backup-materializer.fugue.dev` audience and trusts only an externally
+owned input-API CA ConfigMap. The Kubernetes reader token deliberately omits an
+audience so the TokenRequest receives the API Server's configured default
+audience rather than a guessed cluster identifier; it trusts only the
+namespace's `kube-root-ca.crt` projection. Neither identity projection is
+available at the other adapter's path.
+
+The Role grants exactly `get` on the deterministic cell-local observer-input
+Secret through `resourceNames`; it has no list, watch, create, update, patch,
+delete, status, lease, ConfigMap, cluster, or non-resource permission. The
+scratch container remains non-root, read-only, capability-free, loopback-only,
+resource-bounded, and exposes no Service or port. Its status can report create
+or CAS candidates, but the binary still has no writer and every object is
+marked `production-mutation=forbidden`.
+
+The materializer's existing build-only lane now validates this chart and its
+rejection tests along with the binary and image. It still only loads an image
+inside the ephemeral runner and has no registry login, package upload,
+workflow dispatch, Kubernetes command, Helm install/upgrade/package/push,
+environment, release, or production capability. No chart was installed and no
+image was published by this atom.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

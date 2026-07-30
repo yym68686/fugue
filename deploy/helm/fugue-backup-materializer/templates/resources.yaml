@@ -1,0 +1,291 @@
+{{- if not (kindIs "bool" .Values.enabled) -}}
+{{- fail "enabled must be exactly a boolean" -}}
+{{- end -}}
+{{- if .Values.enabled -}}
+{{- if ne .Release.Namespace "fugue-system" -}}
+{{- fail "enabled backup-materializer must be installed only in namespace fugue-system" -}}
+{{- end -}}
+{{- if ne (toString .Values.replicaCount) "1" -}}
+{{- fail "replicaCount must be exactly 1 for one materializer per backup cell" -}}
+{{- end -}}
+{{- $repository := trim (required "image.repository is required when backup-materializer is enabled" .Values.image.repository) -}}
+{{- if or (ne $repository (toString .Values.image.repository)) (contains "@" $repository) (contains "://" $repository) (not (regexMatch "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$" $repository)) -}}
+{{- fail "image.repository must be a fully qualified lowercase OCI repository without a tag or digest" -}}
+{{- end -}}
+{{- if not (hasSuffix "/fugue-backup-materializer" $repository) -}}
+{{- fail "image.repository must select the dedicated fugue-backup-materializer artifact" -}}
+{{- end -}}
+{{- $digest := trim (required "image.digest is required when backup-materializer is enabled" .Values.image.digest) -}}
+{{- if or (ne $digest (toString .Values.image.digest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" $digest)) -}}
+{{- fail "image.digest must be an exact lowercase sha256 digest" -}}
+{{- end -}}
+{{- $cellKey := trim (required "cell.key is required when backup-materializer is enabled" .Values.cell.key) -}}
+{{- if or (ne $cellKey (toString .Values.cell.key)) (not (regexMatch "^backup/(control-plane-db|app-database|persistent-storage|data-workspace|registry|platform-component)/[0-9a-f]{16}$" $cellKey)) -}}
+{{- fail "cell.key must be the canonical backup/<kind>/<16 lowercase hex> key" -}}
+{{- end -}}
+{{- $runID := trim (required "cell.runID is required when backup-materializer is enabled" .Values.cell.runID) -}}
+{{- if or (ne $runID (toString .Values.cell.runID)) (not (regexMatch "^[a-z0-9][a-z0-9._:-]{0,127}$" $runID)) -}}
+{{- fail "cell.runID must be a canonical backup run identifier" -}}
+{{- end -}}
+{{- $apiBaseURL := trim (required "inputAPI.baseURL is required when backup-materializer is enabled" .Values.inputAPI.baseURL) -}}
+{{- if or (ne $apiBaseURL (toString .Values.inputAPI.baseURL)) (not (regexMatch "^https://[a-z0-9.-]+(:[0-9]{1,5})?$" $apiBaseURL)) -}}
+{{- fail "inputAPI.baseURL must be a canonical lowercase absolute HTTPS authority without credentials, path, query, or fragment" -}}
+{{- end -}}
+{{- $apiAuthority := trimPrefix "https://" $apiBaseURL -}}
+{{- $apiPort := trimPrefix ":" (regexFind ":[0-9]+$" $apiAuthority) -}}
+{{- if and (ne $apiPort "") (or (lt (int $apiPort) 1) (gt (int $apiPort) 65535)) -}}
+{{- fail "inputAPI.baseURL port must be between 1 and 65535" -}}
+{{- end -}}
+{{- $apiHost := regexReplaceAll ":[0-9]+$" $apiAuthority "" -}}
+{{- if gt (len $apiHost) 253 -}}
+{{- fail "inputAPI.baseURL host must be a canonical DNS name of at most 253 characters" -}}
+{{- end -}}
+{{- range $label := splitList "." $apiHost -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $label) -}}
+{{- fail "inputAPI.baseURL host must contain only canonical lowercase DNS labels" -}}
+{{- end -}}
+{{- end -}}
+{{- $inputCAConfigMap := include "fugue-backup-materializer.validateName" (list "inputAPI.ca.existingConfigMap.name" .Values.inputAPI.ca.existingConfigMap.name) -}}
+{{- $inputCAKey := include "fugue-backup-materializer.validateKey" (list "inputAPI.ca.existingConfigMap.key" .Values.inputAPI.ca.existingConfigMap.key) -}}
+{{- $reconcileInterval := include "fugue-backup-materializer.validateDuration" (list "runtime.reconcileInterval" .Values.runtime.reconcileInterval 1 600) -}}
+{{- $attemptTimeout := include "fugue-backup-materializer.validateDuration" (list "runtime.attemptTimeout" .Values.runtime.attemptTimeout 1 60) -}}
+{{- $inputRequestTimeout := include "fugue-backup-materializer.validateDuration" (list "runtime.inputRequestTimeout" .Values.runtime.inputRequestTimeout 1 30) -}}
+{{- $inputHandshakeTimeout := include "fugue-backup-materializer.validateDuration" (list "runtime.inputHandshakeTimeout" .Values.runtime.inputHandshakeTimeout 1 15) -}}
+{{- if gt (int (trimSuffix "s" $inputHandshakeTimeout)) (int (trimSuffix "s" $inputRequestTimeout)) -}}
+{{- fail "runtime.inputHandshakeTimeout must not exceed runtime.inputRequestTimeout" -}}
+{{- end -}}
+{{- $secretRequestTimeout := include "fugue-backup-materializer.validateDuration" (list "runtime.secretRequestTimeout" .Values.runtime.secretRequestTimeout 1 30) -}}
+{{- $secretHandshakeTimeout := include "fugue-backup-materializer.validateDuration" (list "runtime.secretHandshakeTimeout" .Values.runtime.secretHandshakeTimeout 1 15) -}}
+{{- if gt (int (trimSuffix "s" $secretHandshakeTimeout)) (int (trimSuffix "s" $secretRequestTimeout)) -}}
+{{- fail "runtime.secretHandshakeTimeout must not exceed runtime.secretRequestTimeout" -}}
+{{- end -}}
+{{- if or (gt (int (trimSuffix "s" $inputRequestTimeout)) (int (trimSuffix "s" $attemptTimeout))) (gt (int (trimSuffix "s" $secretRequestTimeout)) (int (trimSuffix "s" $attemptTimeout))) -}}
+{{- fail "materializer request timeouts must not exceed runtime.attemptTimeout" -}}
+{{- end -}}
+{{- $shutdownTimeout := include "fugue-backup-materializer.validateDuration" (list "runtime.shutdownTimeout" .Values.runtime.shutdownTimeout 1 60) -}}
+{{- $inputMaxResponseBytes := include "fugue-backup-materializer.validateInteger" (list "runtime.inputMaxResponseBytes" .Values.runtime.inputMaxResponseBytes 1024 65536) -}}
+{{- $secretMaxResponseBytes := include "fugue-backup-materializer.validateInteger" (list "runtime.secretMaxResponseBytes" .Values.runtime.secretMaxResponseBytes 4096 262144) -}}
+{{- $terminationGracePeriodSeconds := add (int (trimSuffix "s" $shutdownTimeout)) 5 -}}
+{{- $name := include "fugue-backup-materializer.fullname" . -}}
+{{- $secretName := include "fugue-backup-materializer.secretName" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "fugue-backup-materializer.labels" . | nindent 4 }}
+  annotations:
+    fugue.io/backup-cell-key: {{ $cellKey | quote }}
+    fugue.io/production-mutation: "forbidden"
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "fugue-backup-materializer.labels" . | nindent 4 }}
+  annotations:
+    fugue.io/backup-cell-key: {{ $cellKey | quote }}
+    fugue.io/backup-secret-name: {{ $secretName | quote }}
+    fugue.io/production-mutation: "forbidden"
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $secretName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "fugue-backup-materializer.labels" . | nindent 4 }}
+  annotations:
+    fugue.io/backup-cell-key: {{ $cellKey | quote }}
+    fugue.io/backup-secret-name: {{ $secretName | quote }}
+    fugue.io/production-mutation: "forbidden"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "fugue-backup-materializer.labels" . | nindent 4 }}
+  annotations:
+    fugue.io/backup-cell-key: {{ $cellKey | quote }}
+    fugue.io/backup-run-id: {{ $runID | quote }}
+    fugue.io/backup-secret-name: {{ $secretName | quote }}
+    fugue.io/input-token-audience: "fugue-backup-materializer.fugue.dev"
+    fugue.io/kubernetes-token-audience: "cluster-default"
+    fugue.io/production-mutation: "forbidden"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fugue-backup-materializer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue-backup-materializer.labels" . | nindent 8 }}
+      annotations:
+        fugue.io/backup-cell-key: {{ $cellKey | quote }}
+        fugue.io/backup-run-id: {{ $runID | quote }}
+        fugue.io/backup-secret-name: {{ $secretName | quote }}
+        fugue.io/input-token-audience: "fugue-backup-materializer.fugue.dev"
+        fugue.io/kubernetes-token-audience: "cluster-default"
+        fugue.io/production-mutation: "forbidden"
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      terminationGracePeriodSeconds: {{ $terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backup-materializer
+          image: {{ printf "%s@%s" $repository $digest | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: FUGUE_BACKUP_MATERIALIZER_ENABLED
+              value: "true"
+            - name: FUGUE_BACKUP_MATERIALIZER_BIND_ADDR
+              value: "127.0.0.1:8093"
+            - name: FUGUE_BACKUP_MATERIALIZER_CELL_KEY
+              value: {{ $cellKey | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_RUN_ID
+              value: {{ $runID | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_INPUT_API_BASE_URL
+              value: {{ $apiBaseURL | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_INPUT_PROJECTION_ROOT
+              value: "/run/fugue/backup-materializer/input-api"
+            - name: FUGUE_BACKUP_MATERIALIZER_KUBERNETES_API_URL
+              value: "https://kubernetes.default.svc"
+            - name: FUGUE_BACKUP_MATERIALIZER_KUBERNETES_PROJECTION_ROOT
+              value: "/run/fugue/backup-materializer/kubernetes-api"
+            - name: FUGUE_BACKUP_MATERIALIZER_RECONCILE_INTERVAL
+              value: {{ $reconcileInterval | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_ATTEMPT_TIMEOUT
+              value: {{ $attemptTimeout | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_INPUT_REQUEST_TIMEOUT
+              value: {{ $inputRequestTimeout | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_INPUT_HANDSHAKE_TIMEOUT
+              value: {{ $inputHandshakeTimeout | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_SECRET_REQUEST_TIMEOUT
+              value: {{ $secretRequestTimeout | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_SECRET_HANDSHAKE_TIMEOUT
+              value: {{ $secretHandshakeTimeout | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_SHUTDOWN_TIMEOUT
+              value: {{ $shutdownTimeout | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_INPUT_MAX_RESPONSE_BYTES
+              value: {{ $inputMaxResponseBytes | quote }}
+            - name: FUGUE_BACKUP_MATERIALIZER_SECRET_MAX_RESPONSE_BYTES
+              value: {{ $secretMaxResponseBytes | quote }}
+          volumeMounts:
+            - name: input-api-identity
+              mountPath: /run/fugue/backup-materializer/input-api
+              readOnly: true
+            - name: kubernetes-api-identity
+              mountPath: /run/fugue/backup-materializer/kubernetes-api
+              readOnly: true
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/fugue-backup-materializer", "probe", "health"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/fugue-backup-materializer", "probe", "health"]
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/fugue-backup-materializer", "probe", "ready"]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 128Mi
+      volumes:
+        - name: input-api-identity
+          projected:
+            defaultMode: 288
+            sources:
+              - serviceAccountToken:
+                  audience: fugue-backup-materializer.fugue.dev
+                  expirationSeconds: 600
+                  path: token
+              - configMap:
+                  name: {{ $inputCAConfigMap | quote }}
+                  optional: false
+                  items:
+                    - key: {{ $inputCAKey | quote }}
+                      path: ca.crt
+                      mode: 288
+        - name: kubernetes-api-identity
+          projected:
+            defaultMode: 288
+            sources:
+              # Omitting audience deliberately requests the API Server's own
+              # configured default audience instead of guessing a cluster-
+              # specific identifier.
+              - serviceAccountToken:
+                  expirationSeconds: 600
+                  path: token
+              - configMap:
+                  name: kube-root-ca.crt
+                  optional: false
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+                      mode: 288
+{{- end -}}
