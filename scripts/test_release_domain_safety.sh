@@ -3414,13 +3414,14 @@ PY
   render_e4_daemonset() {
     python3 - "${fixture_mode}" <<'PY'
 import json
+import os
 import sys
 
 mode = sys.argv[1]
 udp_host_ip = "203.0.113.10"
 tcp_host_ip = "203.0.113.11" if mode == "transport-address-mismatch" else udp_host_ip
 udp_host_port = 5302 if mode == "daemonset-port-drift" else 5300
-print(json.dumps({
+daemonset = {
     "apiVersion": "apps/v1",
     "kind": "DaemonSet",
     "metadata": {"name": "dns-us", "namespace": "fugue-system", "uid": "ds-uid", "generation": 4},
@@ -3446,13 +3447,17 @@ print(json.dumps({
         "numberUnavailable": 0,
         "numberMisscheduled": 0,
     },
-}, separators=(",", ":")))
+}
+if mode == "oversized-documents":
+    daemonset["metadata"]["managedFields"] = [{"manager": "x" * (os.sysconf("SC_ARG_MAX") + 65536)}]
+print(json.dumps(daemonset, separators=(",", ":")))
 PY
   }
 
   render_e4_node() {
     python3 - "${fixture_mode}" <<'PY'
 import json
+import os
 import sys
 
 mode = sys.argv[1]
@@ -3472,6 +3477,8 @@ node = {
     "spec": {"podCIDR": "10.42.1.0/24"},
     "status": {"addresses": addresses},
 }
+if mode == "oversized-documents":
+    node["metadata"]["managedFields"] = [{"manager": "x" * (os.sysconf("SC_ARG_MAX") + 65536)}]
 print(json.dumps(node, separators=(",", ":")))
 PY
   }
@@ -3554,6 +3561,11 @@ PY
       fail "authoritative target enumeration must reject ${fixture_mode}"
     fi
   done
+  fixture_mode=oversized-documents
+  oversized_target_row="$(authoritative_dns_targets_for_daemonset dns-us)" ||
+    fail "authoritative target enumeration must not pass Kubernetes documents through process argv"
+  [[ "${oversized_target_row}" == "${target_row}" ]] ||
+    fail "oversized Kubernetes metadata must not alter the authoritative target identity"
   fixture_mode=valid
 
   actual_publication="$(authoritative_dns_publication_snapshot_for_pod \

@@ -1335,23 +1335,28 @@ for container in matches:
 '
 }
 
-authoritative_dns_targets_for_daemonset() {
+authoritative_dns_targets_for_daemonset() (
+  set -euo pipefail
   local daemonset_name="$1"
-  local daemonset_document
-  local nodes_document
   local selector
+  local work_dir
 
-  daemonset_document="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json)" || return $?
-  nodes_document="$(kubectl_cmd get nodes -o json)" || return $?
-  selector="$(daemonset_selector "${daemonset_name}")" || return $?
+  umask 077
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/fugue-authoritative-targets.XXXXXX")"
+  trap 'rm -rf "${work_dir}"' EXIT
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json >"${work_dir}/daemonset.json"
+  kubectl_cmd get nodes -o json >"${work_dir}/nodes.json"
+  selector="$(daemonset_selector "${daemonset_name}")"
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json | python3 -c '
 import hashlib
 import ipaddress
 import json
 import sys
 
-daemonset = json.loads(sys.argv[1])
-nodes_document = json.loads(sys.argv[2])
+with open(sys.argv[1], encoding="utf-8") as handle:
+    daemonset = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    nodes_document = json.load(handle)
 requested_name = sys.argv[3]
 expected_namespace = sys.argv[4]
 daemonset_metadata = daemonset.get("metadata") or {}
@@ -1602,8 +1607,8 @@ if len(rows) != desired:
     )
 for row in sorted(rows):
     print("\t".join(row))
-' "${daemonset_document}" "${nodes_document}" "${daemonset_name}" "${FUGUE_NAMESPACE}"
-}
+' "${work_dir}/daemonset.json" "${work_dir}/nodes.json" "${daemonset_name}" "${FUGUE_NAMESPACE}"
+)
 
 authoritative_dns_signing_keyring_for_pod() (
   set -euo pipefail
