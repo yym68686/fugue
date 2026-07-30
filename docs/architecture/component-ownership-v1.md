@@ -666,8 +666,35 @@ within its bounded delivery-age window and before its renewal boundary. Remote
 bodies and both credentials are excluded
 from errors. Its production dependency closure contains no filesystem,
 Kubernetes API, store, model, signer, Secret, process, or mutation capability;
-credential projection, TLS-root rotation, a durable Secret writer, and
-process wiring remain separate later atoms.
+credential projection and TLS-root rotation remain in the narrower adapter
+below, while a durable Secret writer and process wiring remain separate later
+atoms.
+
+`internal/backupmaterializer/client/projected` defines the default-off
+`backup-materializer-client-projection@v1` capability adapter. Disabled
+construction does not inspect or retain any URL, path, cell, run, timeout, or
+clock. Enabled construction accepts only one absolute non-symlink projection
+root containing `token` and `ca.crt` as restricted regular files or through
+Kubernetes' exact `<name> -> ..data/<name>` topology. The in-root generation
+must remain a real non-writable directory across each bounded read; kubelet's
+canonical `0755` generation mode is accepted, while the workload token is
+limited to `0400`, `0440`, `0600`, or `0640` and is never world-readable.
+
+Every fetch rereads the JWT and a strict bounded CA-only PEM bundle, builds a
+new TLS 1.2+ transport pinned to the configured HTTPS authority, disables
+environment proxies, compression, redirects, keep-alive, and idle connection
+reuse, and bounds dialing, handshaking, response headers, the whole request,
+and the response body. Invalid or racing token/CA generations fail that fetch
+with fixed secret-free outcomes; restoring a complete valid generation
+recovers without reconstructing the client. Construction validates the
+initial projection but performs no network request.
+
+The adapter's local production closure is only `backupcontrol`, the keyless
+bundle contract, the isolated client, and this projected package. It has no
+TokenReview/reviewer, Kubernetes types or client, signer, datastore, API
+server, Secret writer, process execution, RBAC, chart, or deployment
+capability. Its rotating transport deliberately never caches a connection or
+CA pool across fetches.
 
 `internal/backupmaterializer/materialization` defines the non-executable
 `backup-materializer-secret-plan@v1` desired-data boundary. It deterministically

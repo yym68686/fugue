@@ -406,7 +406,7 @@ func TestClientRejectsEnabledConfigurationDrift(t *testing.T) {
 		"typed nil":          func(config *Config) { config.CredentialSource = typedNil },
 		"nil HTTP client":    func(config *Config) { config.HTTPClient = nil },
 		"short timeout":      func(config *Config) { config.RequestTimeout = time.Second - time.Millisecond },
-		"long timeout":       func(config *Config) { config.RequestTimeout = maxRequestTimeout + time.Second },
+		"long timeout":       func(config *Config) { config.RequestTimeout = MaximumRequestTimeout + time.Second },
 		"fractional timeout": func(config *Config) { config.RequestTimeout = time.Second + time.Nanosecond },
 		"small response":     func(config *Config) { config.MaxResponseBytes = minimumResponseLimit - 1 },
 		"large response": func(config *Config) {

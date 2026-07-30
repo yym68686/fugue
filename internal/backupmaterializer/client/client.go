@@ -23,8 +23,9 @@ import (
 const (
 	APIVersion = "backup-materializer-client.fugue.dev/v1"
 
-	defaultRequestTimeout  = 5 * time.Second
-	maxRequestTimeout      = 30 * time.Second
+	DefaultRequestTimeout = 5 * time.Second
+	MaximumRequestTimeout = 30 * time.Second
+
 	defaultMaxResponse     = int64(materializercontract.MaxObserverInputBundleBytes)
 	minimumResponseLimit   = int64(1024)
 	maxWorkloadTokenBytes  = 16 << 10
@@ -102,9 +103,9 @@ func New(config Config) (*Client, error) {
 		return nil, ErrConfig
 	}
 	if config.RequestTimeout == 0 {
-		config.RequestTimeout = defaultRequestTimeout
+		config.RequestTimeout = DefaultRequestTimeout
 	}
-	if config.RequestTimeout < time.Second || config.RequestTimeout > maxRequestTimeout ||
+	if config.RequestTimeout < time.Second || config.RequestTimeout > MaximumRequestTimeout ||
 		config.RequestTimeout%time.Millisecond != 0 {
 		return nil, ErrConfig
 	}
