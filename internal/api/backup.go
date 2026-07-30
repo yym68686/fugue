@@ -220,7 +220,17 @@ func (s *Server) sweepFailedBackupRunObjects(parent context.Context) {
 			}
 			if strings.TrimSpace(backendID) == "" {
 				for _, run := range backendRuns {
-					_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "backup run has no backend")
+					if !backupFailedRunProvesNoObjectUpload(run) {
+						_ = s.store.RecordBackupRunObjectCleanupFailure(run.ID, time.Now().UTC(), "backup run has no backend")
+						continue
+					}
+					if err := s.store.MarkBackupRunObjectsCleaned(run.ID, time.Now().UTC()); err != nil {
+						if s.log != nil && !errors.Is(err, store.ErrConflict) {
+							s.log.Printf("failed backup run %s cleanup completion marker failed: %v", run.ID, err)
+						}
+						continue
+					}
+					cleanedRuns++
 				}
 				continue
 			}
@@ -314,6 +324,21 @@ func backupFailedRunObjectKeys(run model.BackupRun, backend *dataObjectBackend, 
 		bytes += object.Size
 	}
 	return keys, bytes, nil
+}
+
+// backupFailedRunProvesNoObjectUpload identifies the one backend-less state
+// that is safe to complete without listing an object store. BackendID is
+// immutable after run creation, and every upload runner rejects an empty
+// backend before it opens an object client or attempts a PUT. Keep the error
+// code and zero-accounting checks so any inconsistent legacy row remains
+// fail-closed for operator review.
+func backupFailedRunProvesNoObjectUpload(run model.BackupRun) bool {
+	status := strings.TrimSpace(strings.ToLower(run.Status))
+	return (status == model.BackupRunStatusFailed || status == model.BackupRunStatusCanceled) &&
+		strings.TrimSpace(run.BackendID) == "" &&
+		strings.TrimSpace(run.ErrorCode) == "backup_backend_missing" &&
+		run.BytesWritten == 0 &&
+		run.ArtifactCount == 0
 }
 
 func backupFailedRunObjectKeyAllowed(run model.BackupRun, key string) bool {
