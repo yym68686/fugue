@@ -84,7 +84,7 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 			return fmt.Errorf("managed postgres for app %s is configured on runtime %s but the observed primary is elsewhere", app.ID, targetRuntimeID)
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing managed postgres standby on runtime %s", targetRuntimeID))
-		stageSpec := databaseSwitchoverStageSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID)
+		stageSpec := databaseSwitchoverSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID)
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			cause := fmt.Errorf("prepare managed postgres standby on %s: %w", targetRuntimeID, err)
 			return s.rollbackAppOwnedManagedPostgresStage(ctx, op, app, currentDatabase, cause)
@@ -215,7 +215,7 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 			return fmt.Errorf("managed postgres service %s is configured on runtime %s but the observed primary is elsewhere", target.ServiceID, targetRuntimeID)
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing managed postgres service %s standby on runtime %s", target.ServiceID, targetRuntimeID))
-		stagePostgres := databaseSwitchoverStagePostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID)
+		stagePostgres := databaseSwitchoverPostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID)
 		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
 		if err != nil {
 			return fmt.Errorf("stage managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
@@ -871,30 +871,6 @@ func databaseSwitchoverSpec(
 	return next
 }
 
-func databaseSwitchoverStageSpec(
-	base model.AppSpec,
-	postgres *model.AppPostgresSpec,
-	primaryRuntimeID, failoverTargetRuntimeID string,
-) model.AppSpec {
-	next := base
-	if postgres != nil {
-		postgresCopy := databaseSwitchoverStagePostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
-		next.Postgres = &postgresCopy
-	}
-	return next
-}
-
-func databaseSwitchoverStagePostgresSpec(
-	postgres *model.AppPostgresSpec,
-	primaryRuntimeID, failoverTargetRuntimeID string,
-) model.AppPostgresSpec {
-	postgresCopy := databaseSwitchoverPostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
-	// The source remains primary while the target standby is prepared, so keep
-	// its explicit node pin until CloudNativePG has completed the switchover.
-	postgresCopy.PrimaryNodeName = strings.TrimSpace(postgres.PrimaryNodeName)
-	return postgresCopy
-}
-
 func databaseSwitchoverPostgresSpec(
 	postgres *model.AppPostgresSpec,
 	primaryRuntimeID, failoverTargetRuntimeID string,
@@ -902,9 +878,6 @@ func databaseSwitchoverPostgresSpec(
 	postgresCopy := *model.CloneAppPostgresSpec(postgres)
 	postgresCopy.RuntimeID = strings.TrimSpace(primaryRuntimeID)
 	postgresCopy.FailoverTargetRuntimeID = strings.TrimSpace(failoverTargetRuntimeID)
-	// A node pin belongs to the old primary runtime. Carrying it into the final
-	// spec can misreport placement and can reject scheduling on a shared target.
-	postgresCopy.PrimaryNodeName = ""
 	postgresCopy.PrimaryPlacementPendingRebalance = false
 	if postgresCopy.Instances < 2 {
 		postgresCopy.Instances = 2
