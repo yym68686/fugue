@@ -355,10 +355,11 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 		}
 		if s.Config.KubectlApply {
 			applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
-			if err := s.applyManagedAppDesiredState(applyCtx, fencedApp, scheduling); err != nil {
+			appliedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, fencedApp, scheduling)
+			if err != nil {
 				return fmt.Errorf("apply fenced managed app state %s: %w", app.ID, err)
 			}
-			if err := s.waitForManagedAppRollout(ctx, fencedApp, ""); err != nil {
+			if err := s.waitForManagedAppRollout(ctx, appliedApp, ""); err != nil {
 				return fmt.Errorf("wait for fenced managed app rollout %s: %w", app.ID, err)
 			}
 		}
@@ -389,10 +390,11 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 	}
 	if s.Config.KubectlApply {
 		applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
-		if err := s.applyManagedAppDesiredState(applyCtx, failedOverApp, scheduling); err != nil {
+		appliedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, failedOverApp, scheduling)
+		if err != nil {
 			return fmt.Errorf("apply failed-over managed app state %s: %w", app.ID, err)
 		}
-		if err := s.waitForManagedAppRollout(ctx, failedOverApp, ""); err != nil {
+		if err := s.waitForManagedAppRollout(ctx, appliedApp, ""); err != nil {
 			return fmt.Errorf("wait for failed-over managed app rollout %s: %w", app.ID, err)
 		}
 	}
