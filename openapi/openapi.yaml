@@ -14781,6 +14781,11 @@ components:
           type: string
         zone:
           type: string
+        hosted_zones:
+          type: array
+          items:
+            type: string
+          description: Normalized hosted zones that authoritative DNS nodes must load dynamically.
         records:
           type: array
           items:
