@@ -1,0 +1,55 @@
+name: validate backup input bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - internal/backupmaterializer/**
+      - internal/backupcontrol/**
+      - internal/backupidentity/**
+      - internal/componentmanifest/backup_input_bundle_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-input-bundle.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - internal/backupmaterializer/**
+      - internal/backupcontrol/**
+      - internal/backupidentity/**
+      - internal/componentmanifest/backup_input_bundle_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-input-bundle.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-input-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup input bundle (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify sealed spec and identity handoff
+        run: |
+          set -euo pipefail
+          go test ./internal/backupmaterializer ./internal/backupcontrol ./internal/backupidentity -count=1
+          go test -race ./internal/backupmaterializer -count=5
+          go test ./internal/componentmanifest -run TestBackupInputBundleWorkflowIsReadOnly -count=1
+          go vet ./internal/backupmaterializer ./internal/backupcontrol ./internal/backupidentity

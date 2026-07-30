@@ -490,6 +490,27 @@ OpenAPI auth generator, environment wiring, rotation, revocation, expiry, race,
 and dependency boundaries with read-only permissions and no publish/deploy
 step.
 
+`internal/backupmaterializer` now defines the private
+`backup-materializer.fugue.dev/v1/BackupObserverInputBundle` seam between the
+legacy data/signer owner and a future fixed-purpose materializer. The pure
+builder accepts one already validated `BackupRunSpec`, mints a dedicated
+15-minute observer identity, immediately verifies that identity with the same
+rotation-aware keyring, and seals the exact spec/token pair under one digest.
+Redundant cell, run, spec-digest, credential, token-id, issued, renew-after,
+and expiry bindings are all strict; unknown/trailing/oversized JSON, signature
+or digest drift, expiry, revocation, non-canonical time, and either production
+mutation flag fail closed. Ordinary `String` and `GoString` formatting always
+redact the token, while the private JSON handoff intentionally contains it.
+The envelope carries no endpoint, bucket, object key, backend credential,
+database handle, or Kubernetes capability.
+
+This atom adds only the contract and its independent read-only
+`backup-input-bundle-${ref}` validation lane. There is still no bundle HTTP
+route, materializer process, Secret writer, service account, RBAC grant, image,
+or workload. The current default-off chart continues to consume its existing
+external ConfigMap/Secret until a later reviewed atom moves both keys into one
+bundle-derived Secret projection; production behavior is therefore unchanged.
+
 `GET /v1/backup-control/runs/{run}/observation` is the first private bridge
 over that identity boundary. It accepts only the dedicated observer bearer
 credential and one canonically encoded `spec_digest` query value, then binds
