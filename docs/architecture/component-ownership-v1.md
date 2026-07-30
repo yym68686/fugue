@@ -547,7 +547,21 @@ bodies or either bearer credential in errors.
 This adapter depends on Kubernetes API structs only, not client-go, informers,
 filesystem, datastore, signer, or mutation capability. Its independent
 `backup-materializer-review-${ref}` lane is read-only and cannot publish or
-deploy. There is still no server middleware, credential-file reader, RBAC,
+deploy.
+
+`internal/backupmaterializerreview/projected` adds the capability-separated
+in-cluster bootstrap. It accepts only safe regular files or Kubernetes' exact
+atomic-writer topology (`<name> -> ..data/<name>`), with canonical in-volume
+generation links, bounded reads, restricted token modes, strict CA-only PEM,
+and file/root identity checks across every read. It rereads the caller token
+for each review, builds a fresh CA pool and TLS connection for each request,
+disables proxy and connection reuse, and therefore observes both kubelet token
+rotation and projected CA rotation without retaining an old credential or
+trust bundle. A malformed or racing generation makes only that review
+unavailable; a later valid generation recovers without process restart.
+
+The same read-only lane recursively validates this bootstrap and its dependency
+closure. There is still no server middleware, route, environment wiring, RBAC,
 ServiceAccount, projected-token volume, materializer process, or chart wiring;
 those remain separately reviewed default-off atoms, so production behavior is
 unchanged.
