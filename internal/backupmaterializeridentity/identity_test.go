@@ -64,6 +64,35 @@ func TestMaterializerIdentityBindsExactCellAudienceServiceAccountAndPod(t *testi
 	}
 }
 
+func TestMaterializerIdentityDerivesCanonicalReviewedCell(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 30, 10, 5, 0, 0, time.UTC)
+	reviewer := &recordingReviewer{result: validReviewResult(testCellKey)}
+	claims, err := AuthenticateReviewedCell(context.Background(), reviewer, testSAToken, now)
+	if err != nil {
+		t.Fatalf("authenticate reviewed materializer cell: %v", err)
+	}
+	if claims.CellKey != testCellKey || claims.ServiceAccountName != ServiceAccountNameForCell(testCellKey) ||
+		claims.CredentialID != CredentialIDForCell(testCellKey) || claims.ReviewedAt != now || reviewer.called != 1 {
+		t.Fatalf("review-derived materializer claims drifted: claims=%+v reviewer=%+v", claims, reviewer)
+	}
+	for name, username := range map[string]string{
+		"other namespace": "system:serviceaccount:default:" + ServiceAccountNameForCell(testCellKey),
+		"unknown cell":    "system:serviceaccount:" + ServiceAccountNamespace + ":fugue-backup-materializer-all-0123456789abcdef",
+		"extra suffix":    serviceAccountUsername(testCellKey) + "-other",
+		"empty":           "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := validReviewResult(testCellKey)
+			result.Username = username
+			reviewer := &recordingReviewer{result: result}
+			if _, err := AuthenticateReviewedCell(context.Background(), reviewer, testSAToken, now); !errors.Is(err, ErrInvalidIdentity) {
+				t.Fatalf("derived-cell error = %v, want invalid identity", err)
+			}
+		})
+	}
+}
+
 func TestMaterializerIdentityRejectsUnboundLegacyAndCrossCellReviews(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
@@ -133,6 +162,11 @@ func TestMaterializerIdentityRejectsMalformedTokensBeforeReviewAndSurfacesReview
 			_, err := Authenticate(context.Background(), nil, testSAToken, testCellKey, now)
 			return err
 		},
+		"typed nil reviewer": func() error {
+			var reviewer *recordingReviewer
+			_, err := Authenticate(context.Background(), reviewer, testSAToken, testCellKey, now)
+			return err
+		},
 		"zero time": func() error {
 			_, err := Authenticate(context.Background(), &recordingReviewer{}, testSAToken, testCellKey, time.Time{})
 			return err
@@ -149,7 +183,8 @@ func TestMaterializerIdentityRejectsMalformedTokensBeforeReviewAndSurfacesReview
 		})
 	}
 	reviewer := &recordingReviewer{err: errors.New("tokenreview unavailable")}
-	if _, err := Authenticate(context.Background(), reviewer, testSAToken, testCellKey, now); !errors.Is(err, ErrReviewerUnavailable) || errors.Is(err, ErrInvalidIdentity) {
+	if _, err := Authenticate(context.Background(), reviewer, testSAToken, testCellKey, now); !errors.Is(err, ErrReviewerUnavailable) ||
+		errors.Is(err, ErrInvalidIdentity) || strings.Contains(err.Error(), "tokenreview unavailable") {
 		t.Fatalf("reviewer outage error = %v, want reviewer unavailable only", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())

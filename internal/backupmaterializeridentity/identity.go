@@ -8,7 +8,7 @@ package backupmaterializeridentity
 import (
 	"context"
 	"errors"
-	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -93,17 +93,72 @@ func Authenticate(
 	expectedCellKey string,
 	now time.Time,
 ) (Claims, error) {
-	if ctx == nil || reviewer == nil || now.IsZero() || !canonicalCellKey.MatchString(expectedCellKey) || !canonicalTokenShape(token) {
+	if !canonicalCellKey.MatchString(expectedCellKey) {
 		return Claims{}, ErrInvalidIdentity
 	}
+	result, err := reviewIdentity(ctx, reviewer, token, now)
+	if err != nil {
+		return Claims{}, err
+	}
+	return BindReviewResult(result, expectedCellKey, now)
+}
+
+// AuthenticateReviewedCell derives the canonical backup cell from the exact
+// reviewed ServiceAccount username, then applies the same Pod-bound policy as
+// Authenticate. This lets a GET-only HTTP boundary authenticate before a
+// later handler loads cell-owned state; that handler must still compare its
+// server-derived resource cell with Claims.CellKey.
+func AuthenticateReviewedCell(
+	ctx context.Context,
+	reviewer TokenReviewer,
+	token string,
+	now time.Time,
+) (Claims, error) {
+	result, err := reviewIdentity(ctx, reviewer, token, now)
+	if err != nil {
+		return Claims{}, err
+	}
+	usernamePrefix := "system:serviceaccount:" + ServiceAccountNamespace + ":"
+	if !strings.HasPrefix(result.Username, usernamePrefix) {
+		return Claims{}, ErrInvalidIdentity
+	}
+	cellKey := CellKeyForServiceAccountName(strings.TrimPrefix(result.Username, usernamePrefix))
+	if cellKey == "" {
+		return Claims{}, ErrInvalidIdentity
+	}
+	return BindReviewResult(result, cellKey, now)
+}
+
+func reviewIdentity(
+	ctx context.Context,
+	reviewer TokenReviewer,
+	token string,
+	now time.Time,
+) (ReviewResult, error) {
+	if ctx == nil || nilTokenReviewer(reviewer) || now.IsZero() || !canonicalTokenShape(token) {
+		return ReviewResult{}, ErrInvalidIdentity
+	}
 	if err := ctx.Err(); err != nil {
-		return Claims{}, fmt.Errorf("%w: %v", ErrReviewerUnavailable, err)
+		return ReviewResult{}, ErrReviewerUnavailable
 	}
 	result, err := reviewer.ReviewToken(ctx, token, []string{Audience})
 	if err != nil {
-		return Claims{}, fmt.Errorf("%w: %v", ErrReviewerUnavailable, err)
+		return ReviewResult{}, ErrReviewerUnavailable
 	}
-	return BindReviewResult(result, expectedCellKey, now)
+	return result, nil
+}
+
+func nilTokenReviewer(reviewer TokenReviewer) bool {
+	if reviewer == nil {
+		return true
+	}
+	value := reflect.ValueOf(reviewer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // BindReviewResult applies the policy to an already authenticated TokenReview

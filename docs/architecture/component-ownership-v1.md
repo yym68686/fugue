@@ -528,7 +528,24 @@ fail-closed retry handling. The resulting request-context claims contain no
 bearer token and round-trip all six canonical backup cell kinds within the DNS
 label limit.
 
-The identity policy is standard-library-only and has its own read-only
+The identity policy is standard-library-only. Its reviewed-cell entry point
+derives a canonical cell only from the exact ServiceAccount username and then
+reapplies the complete audience, groups, UID, JTI, and Pod-binding policy; it
+does not trust the derived string by itself.
+
+`internal/backupmaterializeridentity/httpauth` exposes that policy as the
+`backup-materializer-http-auth@v1` claims boundary. It rejects every non-GET
+method before parsing or review, accepts one exact Bearer header, returns the
+same private `401` for malformed and foreign identities, and converts reviewer
+unavailability into a detail-free retryable `503`. On success it clones the
+request, removes `Authorization` and `Proxy-Authorization`, and places only
+validated cell claims in context. A response-writer guard restores
+`private, no-store` and `Vary: Authorization` at every explicit write and after
+an implicit success, so a downstream handler cannot accidentally make the
+private bundle cacheable. The package has no Kubernetes, filesystem, store,
+signer, server configuration, or mutation dependency.
+
+The identity policy and HTTP boundary share the recursive read-only
 `backup-materializer-identity-${ref}` validation lane.
 
 `internal/backupmaterializerreview` now supplies the separately owned
@@ -561,10 +578,10 @@ trust bundle. A malformed or racing generation makes only that review
 unavailable; a later valid generation recovers without process restart.
 
 The same read-only lane recursively validates this bootstrap and its dependency
-closure. There is still no server middleware, route, environment wiring, RBAC,
-ServiceAccount, projected-token volume, materializer process, or chart wiring;
-those remain separately reviewed default-off atoms, so production behavior is
-unchanged.
+closure. The HTTP middleware is not attached to a server or route, and there is
+still no environment wiring, RBAC, ServiceAccount, projected-token volume,
+materializer process, or chart wiring; those remain separately reviewed
+default-off atoms, so production behavior is unchanged.
 
 `GET /v1/backup-control/runs/{run}/observation` is the first private bridge
 over that identity boundary. It accepts only the dedicated observer bearer

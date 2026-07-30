@@ -45,7 +45,7 @@ jobs:
       - name: Verify cell-bound projected workload identity policy
         run: |
           set -euo pipefail
-          go test ./internal/backupmaterializeridentity -count=1
-          go test -race ./internal/backupmaterializeridentity -count=5
+          go test ./internal/backupmaterializeridentity/... -count=1
+          go test -race ./internal/backupmaterializeridentity/... -count=5
           go test ./internal/componentmanifest -run TestBackupMaterializerIdentityWorkflowIsReadOnly -count=1
-          go vet ./internal/backupmaterializeridentity
+          go vet ./internal/backupmaterializeridentity/...
