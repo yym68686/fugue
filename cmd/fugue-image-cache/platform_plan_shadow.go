@@ -51,10 +51,11 @@ const (
 	imageCachePlatformPlanPath      = "/v1/image-plane/replication-plan"
 	imageCachePlatformHeartbeatPath = "/v1/platform-state/consumers/trusted-heartbeat"
 
-	imageCachePlatformCredentialMaxBytes = 32 << 10
-	imageCachePlatformPlanMaxBytes       = 4 << 20
-	imageCachePlatformHeartbeatMaxBytes  = 1 << 20
-	imageCachePlatformPlanErrorMaxBytes  = 512
+	imageCachePlatformCredentialMaxBytes  = 32 << 10
+	imageCachePlatformPlanMaxBytes        = 4 << 20
+	imageCachePlatformHeartbeatMaxBytes   = 1 << 20
+	imageCachePlatformPlanErrorMaxBytes   = 512
+	imageCachePlatformPlanReadinessMaxAge = 2 * time.Minute
 )
 
 var errImageCachePlatformHeartbeatConflict = errors.New("image-cache platform heartbeat conflict")

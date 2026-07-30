@@ -27,6 +27,9 @@ remain owned by the legacy image-cache path.
 - Failure of this loop does not fail the registry liveness endpoint and does
   not delete cached images. It is visible as a degraded nested status on
   `GET /fugue/cache/v1/health`.
+- `GET /fugue/cache/v1/platform-plan/readyz` is an independent readiness gate.
+  It returns success only after a fresh observation within two minutes; it does
+  not change `/healthz` or the legacy registry readiness contract.
 
 ## Configuration
 

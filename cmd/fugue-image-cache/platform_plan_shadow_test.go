@@ -173,6 +173,56 @@ func TestImageCacheManagementHealthExposesNestedShadowStatusWithoutFailingRegist
 	}
 }
 
+func TestImageCachePlatformPlanReadinessIsIndependentAndFresh(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	request := httptest.NewRequest(http.MethodGet, "http://image-cache.test/fugue/cache/v1/platform-plan/readyz", nil)
+	for name, test := range map[string]struct {
+		cache *imageCache
+		code  int
+	}{
+		"disabled": {cache: &imageCache{}, code: http.StatusServiceUnavailable},
+		"configuration error": {
+			cache: &imageCache{platformPlanErr: "invalid config"}, code: http.StatusServiceUnavailable,
+		},
+		"degraded": {
+			cache: &imageCache{platformPlan: &imageCachePlatformPlanConsumer{status: imageCachePlatformPlanStatus{
+				Enabled: true, ObservationOnly: true, State: "degraded", LastObservationAt: &now,
+			}}},
+			code: http.StatusServiceUnavailable,
+		},
+		"stale observation": {
+			cache: &imageCache{platformPlan: &imageCachePlatformPlanConsumer{status: imageCachePlatformPlanStatus{
+				Enabled: true, ObservationOnly: true, State: "observed", LastObservationAt: timePointer(now.Add(-imageCachePlatformPlanReadinessMaxAge - time.Second)),
+			}}},
+			code: http.StatusServiceUnavailable,
+		},
+		"fresh observation": {
+			cache: &imageCache{platformPlan: &imageCachePlatformPlanConsumer{status: imageCachePlatformPlanStatus{
+				Enabled: true, ObservationOnly: true, State: "observed", LastObservationAt: &now,
+			}}},
+			code: http.StatusOK,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			test.cache.ServeHTTP(recorder, request.Clone(context.Background()))
+			if recorder.Code != test.code {
+				t.Fatalf("platform-plan readiness status=%d, want %d body=%s", recorder.Code, test.code, recorder.Body.String())
+			}
+			liveness := httptest.NewRecorder()
+			test.cache.ServeHTTP(liveness, httptest.NewRequest(http.MethodGet, "http://image-cache.test/healthz", nil))
+			if liveness.Code != http.StatusOK {
+				t.Fatalf("platform-plan state leaked into registry liveness: %d", liveness.Code)
+			}
+		})
+	}
+}
+
+func timePointer(value time.Time) *time.Time {
+	return &value
+}
+
 func TestImageCachePlatformShadowObservationAndHeartbeatAreAtomicAndObservationOnly(t *testing.T) {
 	now := time.Date(2026, 7, 29, 23, 0, 0, 0, time.UTC)
 	fixture := newTestImageCachePlatformPlan("worker-a", now, 7, 5)

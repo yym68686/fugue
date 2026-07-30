@@ -409,6 +409,17 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 		writeManagementJSON(w, http.StatusOK, response)
 		return
 	}
+	if path == "/fugue/cache/v1/platform-plan/readyz" && r.Method == http.MethodGet {
+		w.Header().Set("Cache-Control", "private, no-store, max-age=0")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if !c.platformPlanReady(time.Now().UTC()) {
+			http.Error(w, "platform plan shadow is not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
 	if !c.authorizeManagement(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -429,6 +440,19 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (c *imageCache) platformPlanReady(now time.Time) bool {
+	if c == nil || c.platformPlan == nil || c.platformPlanErr != "" {
+		return false
+	}
+	status := c.platformPlan.Status()
+	if !status.Enabled || !status.ObservationOnly || status.State != "observed" || status.LastObservationAt == nil {
+		return false
+	}
+	observedAt := status.LastObservationAt.UTC()
+	now = now.UTC()
+	return !observedAt.After(now.Add(30*time.Second)) && observedAt.After(now.Add(-imageCachePlatformPlanReadinessMaxAge))
 }
 
 func (c *imageCache) authorizeManagement(r *http.Request) bool {
