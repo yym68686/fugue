@@ -143,6 +143,9 @@ func TestPlanRejectsBindingDataPolicyAndTimeDrift(t *testing.T) {
 			if err := Validate(candidate, now.Add(time.Minute)); !errors.Is(err, ErrPlan) {
 				t.Fatalf("drift error = %v, want invalid plan", err)
 			}
+			if err := ValidateLastKnownGood(candidate, now.Add(time.Minute)); !errors.Is(err, ErrPlan) {
+				t.Fatalf("last-known-good drift error = %v, want invalid plan", err)
+			}
 		})
 	}
 	badDigest := plan
@@ -150,18 +153,36 @@ func TestPlanRejectsBindingDataPolicyAndTimeDrift(t *testing.T) {
 	if err := Validate(badDigest, now.Add(time.Minute)); !errors.Is(err, ErrPlan) {
 		t.Fatalf("plan digest drift error = %v, want invalid plan", err)
 	}
-	for name, validationTime := range map[string]time.Time{
-		"zero":     {},
-		"replayed": plan.IssuedAt.Add(materializercontract.MaxObserverInputDeliveryAge + time.Second),
-		"renewed":  plan.RenewAfter,
-		"expired":  plan.ExpiresAt,
-	} {
+	if err := ValidateLastKnownGood(badDigest, now.Add(time.Minute)); !errors.Is(err, ErrPlan) {
+		t.Fatalf("last-known-good digest drift error = %v, want invalid plan", err)
+	}
+	for name, validationTime := range map[string]time.Time{"zero": {}, "expired": plan.ExpiresAt} {
 		t.Run(name, func(t *testing.T) {
 			if err := Validate(plan, validationTime); !errors.Is(err, ErrPlan) {
 				t.Fatalf("time validation error = %v, want invalid plan", err)
 			}
+			if err := ValidateLastKnownGood(plan, validationTime); !errors.Is(err, ErrPlan) {
+				t.Fatalf("last-known-good time validation error = %v, want invalid plan", err)
+			}
 			if _, err := plan.Data(validationTime); !errors.Is(err, ErrPlan) {
 				t.Fatalf("private data time error = %v, want invalid plan", err)
+			}
+		})
+	}
+	for name, validationTime := range map[string]time.Time{
+		"delivery window elapsed": plan.IssuedAt.Add(materializercontract.MaxObserverInputDeliveryAge + time.Second),
+		"renewal due":             plan.RenewAfter,
+		"after renewal":           plan.RenewAfter.Add(time.Minute),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := Validate(plan, validationTime); !errors.Is(err, ErrPlan) {
+				t.Fatalf("apply-window validation error = %v, want invalid plan", err)
+			}
+			if _, err := plan.Data(validationTime); !errors.Is(err, ErrPlan) {
+				t.Fatalf("stale plan unexpectedly exposed private apply data: %v", err)
+			}
+			if err := ValidateLastKnownGood(plan, validationTime); err != nil {
+				t.Fatalf("unexpired materialized LKG was not retainable: %v", err)
 			}
 		})
 	}

@@ -146,8 +146,23 @@ func Build(bundle materializercontract.ObserverInputBundle, now time.Time) (Plan
 }
 
 // Validate reconstructs and validates the source bundle, raw data digests,
-// deterministic object identity, non-executable policy, and plan digest.
+// deterministic object identity, non-executable policy, and plan digest for a
+// new apply decision. A plan may no longer be applied after its delivery or
+// renewal boundary, even though an already materialized generation may remain
+// a valid last-known-good value until token expiry.
 func Validate(plan Plan, now time.Time) error {
+	return validate(plan, now, true)
+}
+
+// ValidateLastKnownGood validates an already materialized generation for
+// retention only. It never makes the plan applyable and deliberately ignores
+// the one-time delivery and renewal boundaries while still requiring the full
+// binding, raw-data digests, fixed non-executable policy, and unexpired token.
+func ValidateLastKnownGood(plan Plan, now time.Time) error {
+	return validate(plan, now, false)
+}
+
+func validate(plan Plan, now time.Time, requireApplyWindow bool) error {
 	now = now.UTC().Truncate(time.Second)
 	if now.IsZero() || plan.APIVersion != PlanAPIVersion || plan.Kind != PlanKind || plan.Policy != PlanPolicy ||
 		plan.Namespace != SecretNamespace || !canonicalCellKey.MatchString(plan.CellKey) ||
@@ -188,8 +203,11 @@ func Validate(plan Plan, now time.Time) error {
 		ProductionMutationAllowed: false,
 		Digest:                    plan.BundleDigest,
 	}
-	if materializercontract.ValidateObserverInputBundleEnvelope(bundle, now) != nil ||
-		plan.IssuedAt.Before(now.Add(-materializercontract.MaxObserverInputDeliveryAge)) || !plan.RenewAfter.After(now) {
+	if materializercontract.ValidateObserverInputBundleEnvelope(bundle, now) != nil {
+		return ErrPlan
+	}
+	if requireApplyWindow && (plan.IssuedAt.Before(now.Add(-materializercontract.MaxObserverInputDeliveryAge)) ||
+		!plan.RenewAfter.After(now)) {
 		return ErrPlan
 	}
 	return nil

@@ -713,6 +713,16 @@ last-known-good generation, while permanently setting `executionAllowed` and
 `backupcontrol` plus the keyless bundle contract: no signer, filesystem,
 network, Kubernetes type/client, datastore, Secret writer, or process exists.
 
+The plan has separate lifecycle validation for new application and retained
+LKG state. A new apply candidate must still be inside the one-minute delivery
+window and strictly before `renewAfter`; its private data accessor uses that
+same gate, so an old plan cannot be replayed. Once a generation has already
+been materialized, `ValidateLastKnownGood` permits retention after those
+one-time boundaries only while the complete plan/data binding remains intact
+and the observer token is still unexpired. At `expiresAt` it fails closed. This
+keeps transient renewal failure from deleting a still-working generation
+without allowing the materializer to write that stale generation again.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
