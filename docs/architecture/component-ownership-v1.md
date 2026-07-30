@@ -568,6 +568,34 @@ route table and no concrete source or signer is attached. The existing
 `backup-input-bundle-${ref}` lane now recursively validates this handler and
 its identity dependency rather than creating another release queue.
 
+`internal/backupmaterializer/legacysource` implements the transitional
+`backup-materializer-legacy-source@v1` compatibility edge around one injected,
+bounded snapshot callback. The callback returns only a legacy run plus the
+data owner's irreversible backend-generation digest. The adapter reuses the
+single `backupadapter.BuildShadowSpec` mapping, requires the exact reviewed
+cell/run precondition, and reduces not-found, inconsistent, and unavailable
+snapshot outcomes to fixed errors with no backend detail. Its production
+dependency closure contains no store, API, database, HTTP, Kubernetes,
+filesystem, signer, or mutation capability.
+
+`internal/backupmaterializer/localissuer` supplies the separate
+`backup-materializer-local-issuer@v1` signing edge. Construction validates and
+copies the dedicated observer keyring into an immutable closure, preventing
+later map mutation or ordinary struct formatting from exposing or changing
+signing state. Issuance is context-bounded, delegates to the self-verifying
+bundle builder, and collapses every signing/configuration failure to one fixed
+detail-free unavailable result. It has no source/store/model, network,
+filesystem, Kubernetes, route, or mutation dependency.
+
+A black-box test uses the real JSON store's read-only run and redacted backend
+generation methods, then crosses the source, materializer TokenReview claims,
+HTTP handler, and local issuer boundaries. The returned private bundle is
+cryptographically valid while the store remains byte-for-byte unchanged;
+bucket, endpoint, backend credentials, and the caller ServiceAccount token do
+not cross the response. Neither adapter is attached to the server or generated
+route. The existing input-bundle lane covers both adapters and their exact
+legacy mapping dependency without adding a release queue.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with

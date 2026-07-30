@@ -7,8 +7,10 @@ on:
     paths:
       - internal/backupmaterializer/**
       - internal/backupmaterializeridentity/**
+      - internal/backupadapter/**
       - internal/backupcontrol/**
       - internal/backupidentity/**
+      - internal/model/backup.go
       - internal/componentmanifest/backup_input_bundle_workflow_test.go
       - docs/architecture/component-ownership-v1.yaml
       - .github/workflows/validate-backup-input-bundle.yml
@@ -18,8 +20,10 @@ on:
     paths:
       - internal/backupmaterializer/**
       - internal/backupmaterializeridentity/**
+      - internal/backupadapter/**
       - internal/backupcontrol/**
       - internal/backupidentity/**
+      - internal/model/backup.go
       - internal/componentmanifest/backup_input_bundle_workflow_test.go
       - docs/architecture/component-ownership-v1.yaml
       - .github/workflows/validate-backup-input-bundle.yml
@@ -51,7 +55,7 @@ jobs:
       - name: Verify sealed spec and identity handoff
         run: |
           set -euo pipefail
-          go test ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupcontrol ./internal/backupidentity -count=1
+          go test ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity -count=1
           go test -race ./internal/backupmaterializer/... -count=5
           go test ./internal/componentmanifest -run TestBackupInputBundleWorkflowIsReadOnly -count=1
-          go vet ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupcontrol ./internal/backupidentity
+          go vet ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity

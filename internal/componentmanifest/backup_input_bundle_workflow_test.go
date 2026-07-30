@@ -61,12 +61,14 @@ func TestBackupInputBundleWorkflowIsReadOnly(t *testing.T) {
 	for _, required := range []string{
 		"internal/backupmaterializer/**",
 		"internal/backupmaterializeridentity/**",
+		"internal/backupadapter/**",
 		"internal/backupcontrol/**",
 		"internal/backupidentity/**",
+		"internal/model/backup.go",
 		"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
 		"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
 		"go test -race ./internal/backupmaterializer/...",
-		"go vet ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupcontrol ./internal/backupidentity",
+		"go vet ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity",
 		"validate backup input bundle (no publish)",
 	} {
 		if !strings.Contains(raw, required) {
