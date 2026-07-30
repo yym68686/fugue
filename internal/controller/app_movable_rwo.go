@@ -80,11 +80,12 @@ func (s *Service) prepareMovableRWOStorageForOperation(
 			return desiredApp, changed, err
 		}
 		applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
-		if err := s.applyManagedAppDesiredState(applyCtx, fencedApp, sourceScheduling); err != nil {
+		appliedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, fencedApp, sourceScheduling)
+		if err != nil {
 			return desiredApp, changed, fmt.Errorf("scale source app to zero before movable RWO copy: %w", err)
 		}
 		scaledSourceDown = true
-		if err := s.waitForManagedAppRollout(ctx, fencedApp, op.ID); err != nil {
+		if err := s.waitForManagedAppRollout(ctx, appliedApp, op.ID); err != nil {
 			return desiredApp, changed, fmt.Errorf("wait for source app scale-down before movable RWO copy: %w", err)
 		}
 	}

@@ -1087,8 +1087,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 					}
 					return fmt.Errorf("apply safe rollout candidate revision %s: %w", app.ID, err)
 				}
-			} else if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
-				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
+			} else {
+				appliedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
+				if err != nil {
+					return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
+				}
+				app = appliedApp
 			}
 			timer.Mark("apply_desired_state")
 			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
@@ -1135,9 +1139,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				return err
 			}
 			if safeRollout != nil && safeRollout.StableAlignmentAllowed {
-				if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
+				alignedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
+				if err != nil {
 					return fmt.Errorf("align managed app desired state after safe rollout %s: %w", app.ID, err)
 				}
+				app = alignedApp
 				alignmentResult := s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
 				s.recordRolloutReadinessResultStep(op, app, alignmentResult)
 				if err := alignmentResult.Error(); err != nil {

@@ -600,6 +600,52 @@ func managedPostgresCanonicalizationRolloutApps() (model.App, model.App) {
 	return current, desired
 }
 
+func TestManagedAppLiveGuardReturnsRefinedRolloutIdentity(t *testing.T) {
+	current := managedAppLiveGuardTestApp(nil)
+	current.Spec.Image = "registry.example/live-guard:v2"
+	current.Spec.RestartToken = "restart_previous_attempt"
+	current.Spec.RolloutIntent = model.AppRolloutIntentOnlineImageUpdate
+
+	managed := managedAppLiveGuardObject(t, current, runtime.SchedulingConstraints{})
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, ReadyReplicas: 1}
+	svc := &Service{Renderer: runtime.Renderer{}}
+	live, found := svc.expectedManagedAppDeployment(svc.Renderer.PrepareApp(current), runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected rendered deployment")
+	}
+	managedAppLiveGuardMarkReady(&live, 1)
+	client := managedAppLiveGuardClient(t, managed, live, true, true, nil)
+
+	desired := current
+	desired.Spec.RestartToken = "restart_current_attempt"
+	// The operation classified this from its older durable-store baseline. The
+	// live guard sees that the image is already serving and correctly refines
+	// the actual transition to a restart.
+	desired.Spec.RolloutIntent = model.AppRolloutIntentOnlineImageUpdate
+	applied, err := svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, desired, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("apply managed app desired state: %v", err)
+	}
+	if applied.Spec.RolloutIntent != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected live guard rollout intent %q, got %q", model.AppRolloutIntentOnlineRestart, applied.Spec.RolloutIntent)
+	}
+
+	staleWaiterHash := expectedManagedAppSpecHash(desired, runtime.SchedulingConstraints{})
+	appliedWaiterHash := expectedManagedAppSpecHash(applied, runtime.SchedulingConstraints{})
+	if staleWaiterHash == appliedWaiterHash {
+		t.Fatalf("expected live guard refinement to change rollout identity, both were %q", staleWaiterHash)
+	}
+	managedApplied, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(applied, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode applied managed app: %v", err)
+	}
+	if got := runtime.ManagedAppSpecHash(managedApplied.Spec); got != appliedWaiterHash {
+		t.Fatalf("returned applied snapshot must reproduce Kubernetes identity: got %q want %q", got, appliedWaiterHash)
+	}
+}
+
 func TestApplyManagedAppDesiredStateDoesNotWriteBeforeLiveIdentityProof(t *testing.T) {
 	app := managedAppLiveGuardTestApp(nil)
 	managed := managedAppLiveGuardObject(t, app, runtime.SchedulingConstraints{})

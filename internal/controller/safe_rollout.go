@@ -978,11 +978,12 @@ func (s *Service) restoreSafeZeroDowntimePreviousSpec(ctx context.Context, op mo
 		return fmt.Errorf("resolve previous scheduling for safe rollout restore: %w", err)
 	}
 	applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
-	if err := s.applyManagedAppDesiredState(applyCtx, previous, scheduling); err != nil {
+	appliedPrevious, err := s.applyManagedAppDesiredStateResult(applyCtx, previous, scheduling)
+	if err != nil {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "restore_previous", model.ReleaseStepStatusFailed, "restore previous spec failed: "+err.Error(), state.Candidate.ID, nil)
 		return fmt.Errorf("restore previous desired state after safe rollout failure: %w", err)
 	}
-	result := s.waitForManagedAppRolloutResultWithScheduling(ctx, previous, op.ID, scheduling)
+	result := s.waitForManagedAppRolloutResultWithScheduling(ctx, appliedPrevious, op.ID, scheduling)
 	if err := result.Error(); err != nil {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "restore_previous", model.ReleaseStepStatusFailed, "restore previous rollout failed: "+err.Error(), state.Candidate.ID, map[string]any{
 			"rollout_result": result,

@@ -23,16 +23,28 @@ const (
 )
 
 func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) error {
+	_, err := s.applyManagedAppDesiredStateResult(ctx, app, scheduling)
+	return err
+}
+
+// applyManagedAppDesiredStateResult returns the exact desired snapshot that
+// passed the live zero-downtime guard and was written to Kubernetes. The guard
+// can legitimately refine transient rollout identity from the durable-store
+// view (for example, image update -> restart when an earlier attempt already
+// serves the image). Callers that wait for rollout convergence must use this
+// returned snapshot or they can wait forever on a spec hash that was never
+// applied.
+func (s *Service) applyManagedAppDesiredStateResult(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) (model.App, error) {
 	client, err := s.kubeClient()
 	if err != nil {
-		return fmt.Errorf("initialize kubernetes managed app client: %w", err)
+		return model.App{}, fmt.Errorf("initialize kubernetes managed app client: %w", err)
 	}
 
 	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
 		app = normalizedApp
 	}
 	if err := validateManagedAppDeployableImage(app); err != nil {
-		return err
+		return model.App{}, err
 	}
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app = s.Renderer.PrepareApp(app)
@@ -40,13 +52,13 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	name := runtime.ManagedAppResourceName(app)
 	managed, found, err := client.getManagedApp(ctx, namespace, name)
 	if err != nil {
-		return fmt.Errorf("read managed app %s/%s before zero-downtime preflight: %w", namespace, name, err)
+		return model.App{}, fmt.Errorf("read managed app %s/%s before zero-downtime preflight: %w", namespace, name, err)
 	}
 	if !found {
 		managedMap := runtime.BuildManagedAppObject(app, scheduling)
 		managed, err = runtime.ManagedAppObjectFromMap(managedMap)
 		if err != nil {
-			return fmt.Errorf("build managed app zero-downtime preflight snapshot: %w", err)
+			return model.App{}, fmt.Errorf("build managed app zero-downtime preflight snapshot: %w", err)
 		}
 	}
 	managed.Spec.Scheduling = cloneControllerSchedulingConstraints(managed.Spec.Scheduling)
@@ -60,26 +72,29 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 		scheduling,
 	)
 	if guardErr != nil {
-		return guardErr
+		return model.App{}, guardErr
 	}
 	app = preparedApp
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
-		return fmt.Errorf("apply managed app state objects: %w", err)
+		return model.App{}, fmt.Errorf("apply managed app state objects: %w", err)
 	}
 	if err := client.replaceObjectSpecsByKind(ctx, objects, runtime.ManagedAppAPIVersion, runtime.ManagedAppKind); err != nil {
-		return fmt.Errorf("replace managed app desired spec: %w", err)
+		return model.App{}, fmt.Errorf("replace managed app desired spec: %w", err)
 	}
 
 	managed, found, err = client.getManagedApp(ctx, namespace, name)
 	if err != nil {
-		return fmt.Errorf("read managed app %s/%s after apply: %w", namespace, name, err)
+		return model.App{}, fmt.Errorf("read managed app %s/%s after apply: %w", namespace, name, err)
 	}
 	if !found {
-		return fmt.Errorf("managed app %s/%s was not found after apply", namespace, name)
+		return model.App{}, fmt.Errorf("managed app %s/%s was not found after apply", namespace, name)
 	}
 	managed.Spec.Scheduling = cloneControllerSchedulingConstraints(scheduling)
-	return s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, false, false, true)
+	if err := s.reconcileManagedAppResolvedObject(ctx, client, namespace, managed, app, false, false, true); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
 }
 
 func (s *Service) deleteManagedAppDesiredState(ctx context.Context, app model.App) error {
