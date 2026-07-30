@@ -167,6 +167,9 @@ func CellSnapshotRuntimeLabels(snapshot CellSnapshot) map[string]string {
 	if value := strings.TrimSpace(snapshot.Mesh.Provider); value != "" {
 		labels[CellRuntimeLabelMeshProvider] = value
 	}
+	if value := strings.TrimSpace(snapshot.ClusterID); value != "" {
+		labels[CellRuntimeLabelClusterID] = value
+	}
 	if value := strings.TrimSpace(snapshot.Mesh.IP); value != "" {
 		labels[CellRuntimeLabelMeshIP] = value
 	}

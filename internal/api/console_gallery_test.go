@@ -6,11 +6,56 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+func TestConsoleLifecycleDoesNotCallIncompleteDeployedObservationRunning(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:     "app_console_observed",
+		Spec:   model.AppSpec{Image: "registry.example/app:v1", Ports: []int{8080}, Replicas: 1},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+		ObservedStatus: &model.AppObservedStatus{
+			Phase:      "deployed",
+			Fresh:      true,
+			ObservedAt: time.Now().UTC(),
+			ClusterID:  "cluster-a",
+			Generation: 2, ObservedGeneration: 2,
+			ReadyReplicas:    intPointerForConsoleTest(0),
+			PhysicalReplicas: intPointerForConsoleTest(0),
+		},
+	}
+	got := consoleLifecyclePhase(app)
+	if got != "unavailable" {
+		t.Fatalf("incomplete deployed observation must be unavailable in Console lifecycle, got %q", got)
+	}
+	lifecycle := buildConsoleProjectLifecycle([]string{got}, 1, 1, false, false, false)
+	if lifecycle.Label != "Unavailable" || lifecycle.Tone != "warning" {
+		t.Fatalf("incomplete observation must not produce green Running lifecycle: %+v", lifecycle)
+	}
+}
+
+func TestConsoleLifecycleDoesNotCallLegacyDeployedStateRunning(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec:   model.AppSpec{Replicas: 1},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	if got := consoleLifecyclePhase(app); got != "unavailable" {
+		t.Fatalf("legacy deployed state without observed evidence must be unavailable, got %q", got)
+	}
+	if hasConsoleLiveRelease(app) {
+		t.Fatal("legacy deployed state without observed evidence must not be a live Console release")
+	}
+}
+
+func intPointerForConsoleTest(value int) *int { return &value }
 
 func TestBuildConsoleProjectLifecycleUsesUpdatingForMixedLiveAndPending(t *testing.T) {
 	t.Parallel()

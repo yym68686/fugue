@@ -901,6 +901,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	currentApp := app
 	timer.Mark("load_app")
 	var completionDesiredSpec *model.AppSpec
+	// A migration cutover may only be recorded after the same operation's
+	// target-image preflight succeeded. The boolean is deliberately ephemeral;
+	// the durable proof is written into the migration ledger by the gate below.
+	imagePreflightVerified := false
 	s.markReleaseAttemptOperationRunning(op, app)
 
 	switch op.Type {
@@ -1019,6 +1023,13 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 		if err := s.ensureDeployableImage(ctx, op, app, scheduling); err != nil {
 			return err
+		}
+		if op.Type == model.OperationTypeMigrate && app.Spec.Replicas > 0 &&
+			s.deployImageAvailabilityCheckEnabled() && strings.TrimSpace(s.managedDeployImageRef(app)) != "" {
+			// ensureDeployableImage is a no-op when no registry/distributed
+			// inspector is configured. Do not mislabel that path as verified
+			// image replication in the migration ledger.
+			imagePreflightVerified = true
 		}
 		timer.Mark("image_ready")
 	}
@@ -1170,6 +1181,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return err
 	}
 	timer.Mark("final_active_check")
+	if op.Type == model.OperationTypeMigrate {
+		if _, gateErr := s.verifyManagedAppMigrationCutover(ctx, op, app, imagePreflightVerified); gateErr != nil {
+			return fmt.Errorf("migration cutover gate for app %s: %w", app.ID, gateErr)
+		}
+		timer.Mark("migration_cutover_gate")
+	}
 
 	message := fmt.Sprintf("managed app reconciled in namespace %s", bundle.TenantNamespace)
 	if op.Type == model.OperationTypeDelete {
@@ -1182,6 +1199,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		completed, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
 	}
 	if err != nil {
+		if op.Type == model.OperationTypeMigrate {
+			s.recordManagedMigrationCompletionFailure(op, app, "migration operation completion failed: "+err.Error())
+		}
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
 	}
 	timer.Mark("complete_operation")

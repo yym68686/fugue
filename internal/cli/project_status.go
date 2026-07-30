@@ -159,11 +159,15 @@ func buildProjectServiceStatus(app model.App, report *appBuildArtifactReport, di
 		service = firstNonEmptyTrimmed(strings.TrimSpace(report.Service), service)
 	}
 
-	summary := strings.TrimSpace(app.Status.Phase)
+	phase, _, _, statusMessage := appObservedDisplayProjection(app)
+	summary := phase
 	if diagnosis != nil && strings.TrimSpace(diagnosis.Summary) != "" {
 		summary = strings.TrimSpace(diagnosis.Summary)
 	} else if report != nil {
 		summary = fallbackArtifactSummary(report)
+	}
+	if strings.TrimSpace(statusMessage) != "" && (summary == "" || strings.EqualFold(summary, "deployed") || strings.EqualFold(summary, "unknown")) {
+		summary = statusMessage
 	}
 	if summary == "" {
 		summary = "no live service signal was observed"
@@ -173,10 +177,10 @@ func buildProjectServiceStatus(app model.App, report *appBuildArtifactReport, di
 		Service:   service,
 		AppID:     strings.TrimSpace(app.ID),
 		AppName:   strings.TrimSpace(app.Name),
-		Phase:     strings.TrimSpace(app.Status.Phase),
+		Phase:     phase,
 		Category:  strings.TrimSpace(firstNonEmptyTrimmed(categoryFromDiagnosis(diagnosis), statusCategoryFromReport(report))),
 		Summary:   summary,
-		Runtime:   strings.TrimSpace(firstNonEmptyTrimmed(projectStageStatus(report, "runtime"), strings.TrimSpace(app.Status.Phase))),
+		Runtime:   strings.TrimSpace(firstNonEmptyTrimmed(projectStageStatus(report, "runtime"), phase)),
 		Warnings:  nil,
 		Build:     strings.TrimSpace(projectStageStatus(report, "build")),
 		Push:      strings.TrimSpace(projectStageStatus(report, "push")),
@@ -320,8 +324,14 @@ func projectDeleteSummary(op model.Operation, app model.App) string {
 	if message := strings.TrimSpace(operationMessage(&op)); message != "" {
 		return message
 	}
-	if strings.TrimSpace(app.ID) != "" && strings.TrimSpace(app.Status.Phase) != "" {
-		return fmt.Sprintf("app phase=%s", strings.TrimSpace(app.Status.Phase))
+	if strings.TrimSpace(app.ID) != "" {
+		phase := strings.TrimSpace(app.Status.Phase)
+		if app.ObservedStatus != nil {
+			phase = strings.TrimSpace(app.ObservedStatus.Phase)
+		}
+		if phase != "" {
+			return fmt.Sprintf("app phase=%s", phase)
+		}
 	}
 	switch strings.TrimSpace(op.Status) {
 	case model.OperationStatusCompleted:
@@ -420,6 +430,9 @@ func topologyPlanStatusFilters(plan *model.TopologyDeployPlan, apps []model.App)
 
 func projectStatusNeedsArtifactInventory(app model.App, operations []model.Operation) bool {
 	phase := strings.ToLower(strings.TrimSpace(app.Status.Phase))
+	if app.ObservedStatus != nil {
+		phase = strings.ToLower(strings.TrimSpace(app.ObservedStatus.Phase))
+	}
 	switch phase {
 	case "", "ready", "available":
 	default:

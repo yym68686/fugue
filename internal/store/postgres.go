@@ -1715,6 +1715,36 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operation_evidence_release_collected ON fugue_operation_evidence (release_attempt_id, collected_at ASC) WHERE release_attempt_id <> ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operation_evidence_tenant_collected ON fugue_operation_evidence (tenant_id, collected_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_operation_evidence_type_collected ON fugue_operation_evidence (evidence_type, collected_at DESC)`,
+	// Migration ledgers cannot live exclusively under operation/app/tenant
+	// foreign keys: those parents may be purged before the mandatory 90-day
+	// audit window expires. This archive intentionally has no cascading FKs.
+	`CREATE TABLE IF NOT EXISTS fugue_app_migration_ledgers (
+		id TEXT PRIMARY KEY,
+		tenant_id TEXT NOT NULL,
+		project_id TEXT NOT NULL DEFAULT '',
+		app_id TEXT NOT NULL,
+		operation_id TEXT NOT NULL,
+		observed_at TIMESTAMPTZ NOT NULL,
+		collected_at TIMESTAMPTZ NOT NULL,
+		retain_until TIMESTAMPTZ NOT NULL,
+		ledger_json JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_app_migration_ledgers_operation_collected ON fugue_app_migration_ledgers (operation_id, collected_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_app_migration_ledgers_app_collected ON fugue_app_migration_ledgers (app_id, collected_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_app_migration_ledgers_tenant_collected ON fugue_app_migration_ledgers (tenant_id, collected_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_app_migration_ledgers_retain_until ON fugue_app_migration_ledgers (retain_until)`,
+	// Backfill pre-archive migration evidence before a later app/tenant purge
+	// can cascade it away. The payload already is the versioned ledger JSON.
+	`INSERT INTO fugue_app_migration_ledgers (
+		id, tenant_id, project_id, app_id, operation_id, observed_at,
+		collected_at, retain_until, ledger_json, created_at
+	)
+	SELECT id, tenant_id, project_id, app_id, operation_id, observed_at,
+		collected_at, collected_at + INTERVAL '90 days', payload_json, created_at
+	FROM fugue_operation_evidence
+	WHERE evidence_type IN ('migration_started', 'migration_completed', 'migration_failed')
+	ON CONFLICT (id) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS fugue_audit_events (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL,

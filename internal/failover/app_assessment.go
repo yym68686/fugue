@@ -88,8 +88,12 @@ func failoverWarnings(app model.App, runtime *model.Runtime) []string {
 		warnings = append(warnings, "desired replicas are below 2")
 	}
 
-	if app.Spec.Replicas > 0 && app.Status.CurrentReplicas == 0 {
+	readyReplicas, observationReady := failoverObservedReplicaState(app)
+	if app.Spec.Replicas > 0 && readyReplicas == 0 {
 		warnings = append(warnings, "app is not currently serving replicas")
+	}
+	if app.Spec.Replicas > 0 && app.ObservedStatus != nil && !observationReady {
+		warnings = append(warnings, "live runtime observation is not ready or complete")
 	}
 
 	if runtime == nil {
@@ -110,6 +114,30 @@ func failoverWarnings(app model.App, runtime *model.Runtime) []string {
 	}
 
 	return warnings
+}
+
+// failoverObservedReplicaState keeps continuity decisions aligned with the
+// shared observed-status contract. The legacy fallback is intentionally used
+// only when an older API response has no observed envelope at all; an explicit
+// unknown/unavailable observation always wins over historical replicas.
+func failoverObservedReplicaState(app model.App) (ready int, observedReady bool) {
+	if observed := app.ObservedStatus; observed != nil {
+		if observed.ReadyReplicas != nil {
+			ready = *observed.ReadyReplicas
+		}
+		observedReady = observed.Fresh && strings.EqualFold(strings.TrimSpace(observed.Phase), "deployed") &&
+			app.Spec.Replicas > 0 && observed.DesiredReplicas == app.Spec.Replicas &&
+			observed.ClusterID != "" && observed.Generation > 0 && observed.ObservedGeneration >= observed.Generation &&
+			ready >= app.Spec.Replicas &&
+			observed.RuntimeObjectPresent != nil && *observed.RuntimeObjectPresent &&
+			observed.NamespacePresent != nil && *observed.NamespacePresent &&
+			observed.EndpointPresent != nil && *observed.EndpointPresent &&
+			observed.EndpointReady != nil && *observed.EndpointReady &&
+			observed.PhysicalReplicas != nil && *observed.PhysicalReplicas >= app.Spec.Replicas &&
+			observed.ImagePresent != nil && *observed.ImagePresent && len(observed.InvariantViolations) == 0
+		return ready, observedReady
+	}
+	return app.Status.CurrentReplicas, app.Status.CurrentReplicas >= app.Spec.Replicas
 }
 
 func currentRuntimeID(app model.App) string {

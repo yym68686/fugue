@@ -2229,15 +2229,70 @@ func CloneAppSourceSyncStatus(in *AppSourceSyncStatus) *AppSourceSyncStatus {
 }
 
 type AppStatus struct {
-	Phase                   string               `json:"phase"`
-	CurrentRuntimeID        string               `json:"current_runtime_id,omitempty"`
-	CurrentReplicas         int                  `json:"current_replicas"`
-	CurrentReleaseStartedAt *time.Time           `json:"current_release_started_at,omitempty"`
-	CurrentReleaseReadyAt   *time.Time           `json:"current_release_ready_at,omitempty"`
-	LastOperationID         string               `json:"last_operation_id,omitempty"`
-	LastMessage             string               `json:"last_message,omitempty"`
-	UpdatedAt               time.Time            `json:"updated_at"`
-	SourceSync              *AppSourceSyncStatus `json:"source_sync,omitempty"`
+	Phase                   string     `json:"phase"`
+	CurrentRuntimeID        string     `json:"current_runtime_id,omitempty"`
+	CurrentReplicas         int        `json:"current_replicas"`
+	CurrentReleaseStartedAt *time.Time `json:"current_release_started_at,omitempty"`
+	CurrentReleaseReadyAt   *time.Time `json:"current_release_ready_at,omitempty"`
+	LastOperationID         string     `json:"last_operation_id,omitempty"`
+	LastMessage             string     `json:"last_message,omitempty"`
+	// LastFailedOperation is durable operator-facing history. It is never used
+	// as evidence that the current runtime is serving; consumers must use
+	// ObservedStatus for that decision.
+	LastFailedOperation *AppOperationFailure `json:"last_failed_operation,omitempty"`
+	UpdatedAt           time.Time            `json:"updated_at"`
+	SourceSync          *AppSourceSyncStatus `json:"source_sync,omitempty"`
+}
+
+// AppOperationFailure is the redacted, stable summary of the most recent
+// failed operation for an app. It intentionally excludes desired specs,
+// sources, and other potentially sensitive operation payloads.
+type AppOperationFailure struct {
+	ID              string     `json:"id"`
+	Type            string     `json:"type"`
+	ErrorMessage    string     `json:"error_message,omitempty"`
+	ResultMessage   string     `json:"result_message,omitempty"`
+	RequestedByType string     `json:"requested_by_type,omitempty"`
+	RequestedByID   string     `json:"requested_by_id,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+}
+
+func AppOperationFailureFromOperation(op Operation) *AppOperationFailure {
+	if op.Status != OperationStatusFailed || strings.TrimSpace(op.ID) == "" {
+		return nil
+	}
+	out := &AppOperationFailure{
+		ID:              strings.TrimSpace(op.ID),
+		Type:            strings.TrimSpace(op.Type),
+		ErrorMessage:    strings.TrimSpace(op.ErrorMessage),
+		ResultMessage:   strings.TrimSpace(op.ResultMessage),
+		RequestedByType: strings.TrimSpace(op.RequestedByType),
+		RequestedByID:   strings.TrimSpace(op.RequestedByID),
+		CreatedAt:       op.CreatedAt,
+		UpdatedAt:       op.UpdatedAt,
+	}
+	if op.CompletedAt != nil {
+		completedAt := op.CompletedAt.UTC()
+		out.CompletedAt = &completedAt
+	}
+	return out
+}
+
+// AppHasCurrentFailedOperation distinguishes the failure that currently owns
+// the app's effective status from an older diagnostic failure retained for
+// operator visibility. A failed operation is unresolved when it is still the
+// app's last operation; once a later operation has completed, the historical
+// failure must not permanently suppress a subsequent live/LKG projection.
+// Empty LastOperationID is treated conservatively as unresolved for legacy
+// records that predate operation attribution.
+func AppHasCurrentFailedOperation(status AppStatus) bool {
+	if status.LastFailedOperation == nil || strings.TrimSpace(status.LastFailedOperation.ID) == "" {
+		return false
+	}
+	lastOperationID := strings.TrimSpace(status.LastOperationID)
+	return lastOperationID == "" || lastOperationID == strings.TrimSpace(status.LastFailedOperation.ID)
 }
 
 // AppObservedStatus is a point-in-time runtime observation. It is deliberately
@@ -2253,15 +2308,22 @@ type AppObservedStatus struct {
 	RuntimeObjectPresent *bool     `json:"runtime_object_present,omitempty"`
 	NamespacePresent     *bool     `json:"namespace_present,omitempty"`
 	ServicePresent       *bool     `json:"service_present,omitempty"`
+	EndpointPresent      *bool     `json:"endpoint_present,omitempty"`
 	EndpointReady        *bool     `json:"endpoint_ready,omitempty"`
+	PhysicalReplicas     *int      `json:"physical_replicas,omitempty"`
+	PhysicalDesired      *int      `json:"physical_desired_replicas,omitempty"`
+	ImagePresent         *bool     `json:"image_present,omitempty"`
+	ImageRef             string    `json:"image_ref,omitempty"`
 	Fresh                bool      `json:"fresh"`
 	ObservedAt           time.Time `json:"observed_at"`
-	ClusterID            string    `json:"cluster_id,omitempty"`
-	Generation           int64     `json:"generation,omitempty"`
-	ObservedGeneration   int64     `json:"observed_generation,omitempty"`
+	ClusterID            string    `json:"cluster_id"`
+	Generation           int64     `json:"generation"`
+	ObservedGeneration   int64     `json:"observed_generation"`
 	EvidenceSource       string    `json:"evidence_source"`
+	EvidenceSources      []string  `json:"evidence_sources,omitempty"`
 	Reason               string    `json:"reason"`
 	Message              string    `json:"message,omitempty"`
+	InvariantViolations  []string  `json:"invariant_violations,omitempty"`
 }
 
 type App struct {
@@ -3372,24 +3434,28 @@ type State struct {
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
 	Operations                 []Operation                 `json:"operations"`
 	OperationEvidence          []OperationEvidence         `json:"operation_evidence,omitempty"`
-	AuditEvents                []AuditEvent                `json:"audit_events"`
-	Idempotency                []IdempotencyRecord         `json:"idempotency"`
-	TenantBilling              []TenantBilling             `json:"tenant_billing"`
-	BillingEvents              []TenantBillingEvent        `json:"billing_events"`
-	ResourceUsageSamples       []ResourceUsageSample       `json:"resource_usage_samples,omitempty"`
-	DataBackends               []DataBackend               `json:"data_backends,omitempty"`
-	DataBackendSecrets         []DataBackendSecret         `json:"data_backend_secrets,omitempty"`
-	BackupBackends             []BackupBackend             `json:"backup_backends,omitempty"`
-	BackupBackendSecrets       []BackupBackendSecret       `json:"backup_backend_secrets,omitempty"`
-	BackupPolicies             []BackupPolicy              `json:"backup_policies,omitempty"`
-	BackupRuns                 []BackupRun                 `json:"backup_runs,omitempty"`
-	BackupArtifacts            []BackupArtifact            `json:"backup_artifacts,omitempty"`
-	BackupRestorePlans         []BackupRestorePlan         `json:"backup_restore_plans,omitempty"`
-	BackupRestoreRuns          []BackupRestoreRun          `json:"backup_restore_runs,omitempty"`
-	DataWorkspaces             []DataWorkspace             `json:"data_workspaces,omitempty"`
-	DataSnapshots              []DataSnapshot              `json:"data_snapshots,omitempty"`
-	DataTransfers              []DataTransfer              `json:"data_transfers,omitempty"`
-	DataGrants                 []DataGrant                 `json:"data_grants,omitempty"`
-	DataWorkspaceAccessGrants  []DataWorkspaceAccessGrant  `json:"data_workspace_access_grants,omitempty"`
-	DataRuntimeCaches          []RuntimeDataCacheMetadata  `json:"data_runtime_caches,omitempty"`
+	// AppMigrationLedgers is an audit archive deliberately independent from
+	// Apps and Operations. It must survive app/project/tenant purge for its
+	// minimum 90-day retention window.
+	AppMigrationLedgers       []AppMigrationLedger       `json:"app_migration_ledgers,omitempty"`
+	AuditEvents               []AuditEvent               `json:"audit_events"`
+	Idempotency               []IdempotencyRecord        `json:"idempotency"`
+	TenantBilling             []TenantBilling            `json:"tenant_billing"`
+	BillingEvents             []TenantBillingEvent       `json:"billing_events"`
+	ResourceUsageSamples      []ResourceUsageSample      `json:"resource_usage_samples,omitempty"`
+	DataBackends              []DataBackend              `json:"data_backends,omitempty"`
+	DataBackendSecrets        []DataBackendSecret        `json:"data_backend_secrets,omitempty"`
+	BackupBackends            []BackupBackend            `json:"backup_backends,omitempty"`
+	BackupBackendSecrets      []BackupBackendSecret      `json:"backup_backend_secrets,omitempty"`
+	BackupPolicies            []BackupPolicy             `json:"backup_policies,omitempty"`
+	BackupRuns                []BackupRun                `json:"backup_runs,omitempty"`
+	BackupArtifacts           []BackupArtifact           `json:"backup_artifacts,omitempty"`
+	BackupRestorePlans        []BackupRestorePlan        `json:"backup_restore_plans,omitempty"`
+	BackupRestoreRuns         []BackupRestoreRun         `json:"backup_restore_runs,omitempty"`
+	DataWorkspaces            []DataWorkspace            `json:"data_workspaces,omitempty"`
+	DataSnapshots             []DataSnapshot             `json:"data_snapshots,omitempty"`
+	DataTransfers             []DataTransfer             `json:"data_transfers,omitempty"`
+	DataGrants                []DataGrant                `json:"data_grants,omitempty"`
+	DataWorkspaceAccessGrants []DataWorkspaceAccessGrant `json:"data_workspace_access_grants,omitempty"`
+	DataRuntimeCaches         []RuntimeDataCacheMetadata `json:"data_runtime_caches,omitempty"`
 }

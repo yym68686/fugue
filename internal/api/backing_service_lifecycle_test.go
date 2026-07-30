@@ -923,7 +923,10 @@ func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T
 func TestManagedAppInventoryRejectsDuplicateAppID(t *testing.T) {
 	t.Parallel()
 
-	managed := runtime.ManagedAppObject{Spec: runtime.ManagedAppSpec{AppID: "app_duplicate"}}
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Name: "app-duplicate", Namespace: "tenant-demo"},
+		Spec:     runtime.ManagedAppSpec{AppID: "app_duplicate", TenantID: "tenant-demo"},
+	}
 	kubeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []runtime.ManagedAppObject{managed, managed}})
 	}))

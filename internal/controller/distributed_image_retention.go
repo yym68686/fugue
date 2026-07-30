@@ -25,6 +25,20 @@ func (s *Service) reconcileDistributedImageRetentionForApp(ctx context.Context, 
 	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
 		return DistributedImageRetentionPlan{AppID: strings.TrimSpace(app.ID)}, nil
 	}
+	// Retention is an artifact-retirement operation.  Keep the source image,
+	// pins, and replicas untouched until this app's migration ledger records a
+	// verified target cutover.  The check is intentionally here rather than
+	// only in callers because both the periodic sweep and post-deploy paths
+	// invoke this function directly.
+	if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		return DistributedImageRetentionPlan{AppID: strings.TrimSpace(app.ID)}, err
+	} else if blocked {
+		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image retention blocked: "+reason)
+		if s.Logger != nil {
+			s.Logger.Printf("preserve old distributed image artifacts for %s: retention is blocked: %s", app.ID, reason)
+		}
+		return DistributedImageRetentionPlan{AppID: strings.TrimSpace(app.ID)}, nil
+	}
 	images, err := s.Store.ListImages(model.ImageFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true})
 	if err != nil {
 		return DistributedImageRetentionPlan{}, err

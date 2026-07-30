@@ -49,7 +49,7 @@ func TestRunAppReleaseTrackingSyncWaitsForAlreadyCurrentOperation(t *testing.T) 
 		t.Fatal("expected sync --wait to refresh app status after operation completion")
 	}
 	out := stdout.String()
-	for _, want := range []string{"operation_id=op_deploy", "app_phase=deployed"} {
+	for _, want := range []string{"operation_id=op_deploy", "app_phase=unknown"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

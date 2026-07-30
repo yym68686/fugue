@@ -430,6 +430,14 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
+	if blocked, reason, err := s.store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		httpx.WriteError(w, http.StatusBadGateway, err.Error())
+		return
+	} else if blocked {
+		_ = s.store.RecordMigrationArtifactRetirementBlocked(app.ID, "manual image deletion blocked: "+reason)
+		httpx.WriteError(w, http.StatusConflict, "old migration artifacts remain protected: "+reason)
+		return
+	}
 	var req appImageActionRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())

@@ -95,8 +95,14 @@ func fallbackLiveAppPhase(app model.App) (string, bool) {
 }
 
 func failedPhaseForApp(app model.App) string {
+	// A failed operation must not resurrect a green/deployed phase from the
+	// durable CurrentReplicas/ready timestamps. Until a fresh runtime observer
+	// proves the old workload, the only truthful projection is unknown.
 	if phase, ok := fallbackLiveAppPhase(app); ok {
-		return phase
+		if phase == "disabled" {
+			return phase
+		}
+		return "unknown"
 	}
 	return "failed"
 }
@@ -112,10 +118,13 @@ func repairFailedAppPhase(app *model.App) bool {
 	if !ok {
 		return false
 	}
-	if app.Status.Phase == phase {
+	if phase == "disabled" {
 		return false
 	}
-	app.Status.Phase = phase
+	if app.Status.Phase == "unknown" {
+		return false
+	}
+	app.Status.Phase = "unknown"
 	return true
 }
 
@@ -125,16 +134,77 @@ func normalizeAppStatusForRead(app *model.App) {
 	}
 	model.ApplyAppSpecDefaults(&app.Spec)
 	repairFailedAppPhase(app)
+	invalidateStoredPhaseAfterFailure(app)
+}
+
+func invalidateStoredPhaseAfterFailure(app *model.App) bool {
+	if app == nil || app.Status.LastFailedOperation == nil {
+		return false
+	}
+	if !model.AppHasCurrentFailedOperation(app.Status) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(app.Status.Phase)) {
+	case "deployed", "running", "ready", "active":
+		// A historical failure does not prove that the previous workload is
+		// still serving. Only the live observed-status calculator may restore a
+		// green phase after a fresh cluster/generation/endpoint observation.
+		app.Status.Phase = "unknown"
+		return true
+	default:
+		return false
+	}
 }
 
 func repairAllAppStatuses(state *model.State) bool {
 	changed := false
+	latestFailures := make(map[string]model.Operation)
+	for _, op := range state.Operations {
+		if op.Status != model.OperationStatusFailed || strings.TrimSpace(op.AppID) == "" {
+			continue
+		}
+		if existing, ok := latestFailures[op.AppID]; ok && !operationIsNewerForStatusRepair(op, existing) {
+			continue
+		}
+		latestFailures[op.AppID] = op
+	}
 	for index := range state.Apps {
 		if repairFailedAppPhase(&state.Apps[index]) {
 			changed = true
 		}
+		failure := model.AppOperationFailureFromOperation(latestFailures[state.Apps[index].ID])
+		if !appOperationFailureEqual(state.Apps[index].Status.LastFailedOperation, failure) {
+			state.Apps[index].Status.LastFailedOperation = failure
+			changed = true
+		}
+		if invalidateStoredPhaseAfterFailure(&state.Apps[index]) {
+			changed = true
+		}
 	}
 	return changed
+}
+
+func operationIsNewerForStatusRepair(candidate, existing model.Operation) bool {
+	if candidate.UpdatedAt.Equal(existing.UpdatedAt) {
+		if candidate.CreatedAt.Equal(existing.CreatedAt) {
+			return candidate.ID > existing.ID
+		}
+		return candidate.CreatedAt.After(existing.CreatedAt)
+	}
+	return candidate.UpdatedAt.After(existing.UpdatedAt)
+}
+
+func appOperationFailureEqual(left, right *model.AppOperationFailure) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.ID != right.ID || left.Type != right.Type || left.ErrorMessage != right.ErrorMessage || left.ResultMessage != right.ResultMessage || left.RequestedByType != right.RequestedByType || left.RequestedByID != right.RequestedByID || !left.CreatedAt.Equal(right.CreatedAt) || !left.UpdatedAt.Equal(right.UpdatedAt) {
+		return false
+	}
+	if left.CompletedAt == nil || right.CompletedAt == nil {
+		return left.CompletedAt == nil && right.CompletedAt == nil
+	}
+	return left.CompletedAt.Equal(*right.CompletedAt)
 }
 
 func deletedAppName(name, operationID string) string {

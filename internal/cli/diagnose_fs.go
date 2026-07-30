@@ -129,11 +129,12 @@ func (c *CLI) runFilesystemDiagnosis(client *Client, app model.App, opts filesys
 
 	accessMode, mountRoot := determineFilesystemDiagnosisScope(app, requestPath, opts.Source)
 	namespace := fugueruntime.NamespaceForTenant(app.TenantID)
+	phase, _, _, _ := appObservedDisplayProjection(app)
 	result := filesystemDiagnosisResult{
 		SchemaVersion: filesystemDiagnosisSchemaVersion,
 		App:           strings.TrimSpace(app.Name),
 		AppID:         strings.TrimSpace(app.ID),
-		Phase:         strings.TrimSpace(app.Status.Phase),
+		Phase:         phase,
 		Component:     component,
 		Source:        strings.TrimSpace(opts.Source),
 		AccessMode:    accessMode,

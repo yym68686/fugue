@@ -136,11 +136,12 @@ func buildProjectMonitorSnapshot(snapshot any, opts monitorOptions) climonitor.S
 		}
 		appRows := make([][]string, 0, len(value.Detail.Apps))
 		for _, app := range value.Detail.Apps {
+			phase, ready, runtimeID, _ := appObservedDisplayProjection(app)
 			appRows = append(appRows, []string{
 				firstNonEmptyTrimmed(app.Name, app.ID),
-				firstNonEmptyTrimmed(app.Status.Phase, "-"),
-				fmt.Sprintf("%d/%d", app.Status.CurrentReplicas, maxInt(app.Spec.Replicas, app.Status.CurrentReplicas)),
-				firstNonEmptyTrimmed(app.Status.CurrentRuntimeID, app.Spec.RuntimeID, "-"),
+				firstNonEmptyTrimmed(phase, "-"),
+				fmt.Sprintf("%d/%d", ready, maxInt(app.Spec.Replicas, ready)),
+				firstNonEmptyTrimmed(runtimeID, app.Spec.RuntimeID, "-"),
 				appRouteURL(app),
 			})
 		}

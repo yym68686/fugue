@@ -13,7 +13,7 @@ func TestRichTextAppStatusOptIn(t *testing.T) {
 	defer server.Close()
 
 	out := runRichCommand(t, server.URL, "app", "status", "demo")
-	assertRichOutput(t, out, "┌ App demo", "status [ready]", "route", "op_running")
+	assertRichOutput(t, out, "┌ App demo", "status [deployed]", "route", "op_running")
 }
 
 func TestRichTextRequiresExperimentFlag(t *testing.T) {
@@ -105,9 +105,9 @@ func newRichAppStatusServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
-			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","route":{"public_url":"https://demo.example.com"},"spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","route":{"public_url":"https://demo.example.com"},"spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"deployed","current_replicas":2},"observed_status":{"phase":"deployed","desired_replicas":2,"ready_replicas":2,"runtime_object_present":true,"namespace_present":true,"endpoint_present":true,"endpoint_ready":true,"physical_replicas":2,"image_present":true,"fresh":true,"observed_at":"2026-04-02T00:00:00Z","cluster_id":"cluster-1","generation":2,"observed_generation":2,"evidence_source":"kubernetes_api"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
-			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","route":{"public_url":"https://demo.example.com"},"spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","route":{"public_url":"https://demo.example.com"},"spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"deployed","current_replicas":2},"observed_status":{"phase":"deployed","desired_replicas":2,"ready_replicas":2,"runtime_object_present":true,"namespace_present":true,"endpoint_present":true,"endpoint_ready":true,"physical_replicas":2,"image_present":true,"fresh":true,"observed_at":"2026-04-02T00:00:00Z","cluster_id":"cluster-1","generation":2,"observed_generation":2,"evidence_source":"kubernetes_api"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations" && r.URL.Query().Get("app_id") == "app_123":
 			_, _ = w.Write([]byte(`{"operations":[{"id":"op_running","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"running","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","result_message":"waiting for route","created_at":"2026-04-02T00:02:00Z","updated_at":"2026-04-02T00:02:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":

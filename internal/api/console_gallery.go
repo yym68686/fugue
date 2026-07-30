@@ -364,8 +364,36 @@ func isConsolePausedLifecycleValue(value string) bool {
 }
 
 func isConsoleTerminalAppFailurePhase(app model.App) bool {
-	normalized := normalizeConsoleText(app.Status.Phase)
+	normalized := normalizeConsoleText(consoleLifecyclePhase(app))
 	return normalized != "" && includesConsoleKeyword(normalized, "error", "fail", "stopped")
+}
+
+// consoleObservedReadyForServing is the Console-side presentation gate. The
+// runtime phase alone is not enough: a green project lifecycle requires the
+// same fresh cluster/generation/object/endpoint/image/replica evidence that
+// the shared observed-status contract exposes to the other consumers.
+func consoleObservedReadyForServing(app model.App) bool {
+	return appObservedReadyForServing(app, time.Now().UTC())
+}
+
+func consoleLifecyclePhase(app model.App) string {
+	if app.ObservedStatus == nil {
+		phase := strings.TrimSpace(app.Status.Phase)
+		switch strings.ToLower(phase) {
+		case "deployed", "running", "ready", "active":
+			// The Console requests the live contract for lifecycle decisions. A
+			// legacy deployed field without an observed envelope is not enough to
+			// call the project Running.
+			return "unavailable"
+		default:
+			return phase
+		}
+	}
+	phase := strings.TrimSpace(app.ObservedStatus.Phase)
+	if phase == "deployed" && !consoleObservedReadyForServing(app) {
+		return "unavailable"
+	}
+	return phase
 }
 
 func buildConsoleProjectLifecycle(statuses []string, appCount, serviceCount int, tracksGitHub bool, hasLiveApp, hasPendingApp bool) consoleProjectLifecycle {
@@ -390,6 +418,8 @@ func buildConsoleProjectLifecycle(statuses []string, appCount, serviceCount int,
 		return consoleProjectLifecycle{Label: "Building", Live: true, SyncMode: "active", Tone: "positive"}
 	case containsConsoleStatus(normalized, "deploying"):
 		return consoleProjectLifecycle{Label: "Deploying", Live: true, SyncMode: "active", Tone: "positive"}
+	case containsAnyConsoleStatus(normalized, []string{"unknown", "unavailable"}):
+		return consoleProjectLifecycle{Label: "Unavailable", Live: false, SyncMode: "passive", Tone: "warning"}
 	case containsAnyConsoleStatus(normalized, []string{"queued", "pending", "migrating"}):
 		return consoleProjectLifecycle{Label: "Queued", Live: true, SyncMode: "active", Tone: "positive"}
 	case len(normalized) > 0 && everyConsoleStatusPaused(normalized):
@@ -472,14 +502,7 @@ func isConsoleReleaseOperationCandidate(operation model.Operation) bool {
 }
 
 func hasConsoleLiveRelease(app model.App) bool {
-	normalizedPhase := normalizeConsoleText(app.Status.Phase)
-	if app.Status.CurrentReplicas > 0 {
-		return true
-	}
-
-	return normalizedPhase != "" &&
-		(includesConsoleKeyword(normalizedPhase, "running", "healthy", "active", "deployed") ||
-			isConsolePausedLifecycleValue(normalizedPhase))
+	return app.ObservedStatus != nil && consoleObservedReadyForServing(app)
 }
 
 func readConsoleActiveReleaseOperation(operation *model.Operation, app model.App) *model.Operation {
@@ -830,7 +853,7 @@ func (s *Server) buildConsoleGalleryResponse(ctx context.Context, principal mode
 
 			if liveRelease || activeOperation == nil {
 				serviceCount++
-				statuses = append(statuses, app.Status.Phase)
+				statuses = append(statuses, consoleLifecyclePhase(app))
 			}
 
 			if activeOperation != nil {

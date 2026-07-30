@@ -9018,8 +9018,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: true
+              $ref: "#/components/schemas/AgentCompleteOperationRequest"
       responses:
         '200':
           description: Successful response
@@ -16442,15 +16441,44 @@ components:
           type: string
         last_message:
           type: string
+        last_failed_operation:
+          $ref: "#/components/schemas/AppOperationFailure"
         updated_at:
           type: string
           format: date-time
         source_sync:
           $ref: "#/components/schemas/AppSourceSyncStatus"
+    AppOperationFailure:
+      type: object
+      additionalProperties: false
+      required: [id, type, created_at, updated_at]
+      description: Redacted durable summary of the most recent failed operation. It is diagnostic history, never runtime evidence.
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        error_message:
+          type: string
+        result_message:
+          type: string
+        requested_by_type:
+          type: string
+        requested_by_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
     AppObservedStatus:
       type: object
       additionalProperties: false
-      required: [phase, desired_replicas, fresh, observed_at, evidence_source, reason]
+      required: [phase, desired_replicas, fresh, observed_at, cluster_id, generation, observed_generation, evidence_source, reason]
       description: Point-in-time runtime evidence kept separate from the desired spec and durable stored status. Omitted presence/readiness fields mean the observation could not determine that fact.
       properties:
         phase:
@@ -16470,8 +16498,20 @@ components:
           type: boolean
         service_present:
           type: boolean
+        endpoint_present:
+          type: boolean
         endpoint_ready:
           type: boolean
+        physical_replicas:
+          type: integer
+          format: int32
+        physical_desired_replicas:
+          type: integer
+          format: int32
+        image_present:
+          type: boolean
+        image_ref:
+          type: string
         fresh:
           type: boolean
         observed_at:
@@ -16479,19 +16519,131 @@ components:
           format: date-time
         cluster_id:
           type: string
-          description: Stable identity of the observed Kubernetes cluster incarnation.
+          description: Stable identity of the observed Kubernetes cluster incarnation. Empty only when the query could not establish cluster identity.
+        generation:
+          type: integer
+          format: int64
+          description: ManagedApp generation from this observation; zero when no runtime object/generation was available.
+        observed_generation:
+          type: integer
+          format: int64
+          description: Controller-observed ManagedApp generation; zero when unavailable.
+        evidence_source:
+          type: string
+        evidence_sources:
+          type: array
+          items:
+            type: string
+        reason:
+          type: string
+        message:
+          type: string
+        invariant_violations:
+          type: array
+          items:
+            type: string
+    AppMigrationLedger:
+      type: object
+      additionalProperties: false
+      required: [schema_version, id, tenant_id, app_id, operation_id, new_runtime_id, old_cluster_id, new_cluster_id, image_replication_status, runtime_object_status, endpoint_required, endpoint_status, desired_replicas, cutover_status, old_artifacts_protected, operator_type, operator_id, evidence_source, associated_operation_id, observed_at, created_at, updated_at, retain_until]
+      description: Immutable per-application migration evidence retained for at least 90 days. It is an audit/cutover record, not runtime status.
+      properties:
+        schema_version:
+          type: integer
+          format: int32
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        operation_id:
+          type: string
+        old_runtime_id:
+          type: string
+        new_runtime_id:
+          type: string
+        old_cluster_id:
+          type: string
+        new_cluster_id:
+          type: string
+        image_ref:
+          type: string
+        image_replication_status:
+          type: string
+          enum: [unknown, verified, missing, failed]
+        image_replication_result:
+          type: string
+        runtime_object_status:
+          type: string
+          enum: [unknown, verified, missing, failed, ready, created]
+        runtime_object_result:
+          type: string
+        endpoint_required:
+          type: boolean
+        endpoint_status:
+          type: string
+          enum: [unknown, verified, missing, failed, ready, not_applicable]
+        endpoint_result:
+          type: string
+        endpoint_ready:
+          type: boolean
+        physical_replicas:
+          type: integer
+          format: int32
+        desired_replicas:
+          type: integer
+          format: int32
         generation:
           type: integer
           format: int64
         observed_generation:
           type: integer
           format: int64
+        invariant_violations:
+          type: array
+          items:
+            type: string
+        cutover_status:
+          type: string
+          enum: [pending, verified, completed, blocked, failed]
+        old_artifacts_protected:
+          type: boolean
+        failure_reason:
+          type: string
+        operator_type:
+          type: string
+        operator_id:
+          type: string
         evidence_source:
           type: string
-        reason:
+        associated_operation_id:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        retain_until:
+          type: string
+          format: date-time
+    AgentCompleteOperationRequest:
+      type: object
+      additionalProperties: false
+      description: Agent completion payload. Migration operations must include a verified migration_ledger before completion; other operation types may omit it.
+      properties:
+        manifest_path:
           type: string
         message:
           type: string
+        migration_ledger:
+          $ref: "#/components/schemas/AppMigrationLedger"
     AppSpec:
       type: object
       additionalProperties: false

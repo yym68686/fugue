@@ -156,25 +156,18 @@ func consoleProjectsTable(projects []consoleProjectSummary) cliconsole.Table {
 func consoleAppsTable(apps []model.App) cliconsole.Table {
 	rows := make([]cliconsole.Row, 0, len(apps))
 	for _, app := range apps {
-		phase := app.Status.Phase
-		currentReplicas := app.Status.CurrentReplicas
-		runtimeID := firstNonEmptyTrimmed(app.Status.CurrentRuntimeID, app.Spec.RuntimeID, "-")
-		if observed := app.ObservedStatus; observed != nil {
-			phase = observed.Phase
-			if observed.ReadyReplicas != nil {
-				currentReplicas = *observed.ReadyReplicas
-			}
-			runtimeID = firstNonEmptyTrimmed(observed.RuntimeID, runtimeID)
-		}
+		phase, currentReplicas, runtimeID, lastMessage := appObservedDisplayProjection(app)
+		runtimeID = firstNonEmptyTrimmed(runtimeID, "-")
 		rows = append(rows, cliconsole.Row{Cells: []string{
 			firstNonEmptyTrimmed(app.Name, app.ID),
 			firstNonEmptyTrimmed(phase, "-"),
 			fmt.Sprintf("%d/%d", currentReplicas, maxInt(app.Spec.Replicas, currentReplicas)),
 			runtimeID,
 			appRouteURL(app),
+			firstNonEmptyTrimmed(lastMessage, "-"),
 		}})
 	}
-	return cliconsole.Table{Title: string(cliconsole.PageApps), Headers: []string{"APP", "PHASE", "REPLICAS", "RUNTIME", "URL"}, Rows: rows}
+	return cliconsole.Table{Title: string(cliconsole.PageApps), Headers: []string{"APP", "PHASE", "REPLICAS", "RUNTIME", "URL", "DETAIL"}, Rows: rows}
 }
 
 func consoleProjectDetailTable(detail consoleProjectDetailResponse) cliconsole.Table {

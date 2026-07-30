@@ -824,7 +824,8 @@ func (c *Client) GetApp(id string) (model.App, error) {
 	var response struct {
 		App model.App `json:"app"`
 	}
-	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id), nil, &response); err != nil {
+	relative := path.Join("/v1/apps", id) + "?include_live_status=true"
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return model.App{}, err
 	}
 	return response.App, nil

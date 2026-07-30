@@ -941,7 +941,8 @@ func (c *CLI) waitForAppStatusSettleAfterOperation(client *Client, appID string,
 			return app, nil
 		}
 	}
-	c.progressf("warning=app status still %s after operation %s completed; returning latest status", strings.TrimSpace(app.Status.Phase), strings.TrimSpace(op.ID))
+	phase, _, _, _ := appObservedDisplayProjection(app)
+	c.progressf("warning=app status still %s after operation %s completed; returning latest status", phase, strings.TrimSpace(op.ID))
 	return app, nil
 }
 
@@ -1024,12 +1025,9 @@ func (c *CLI) renderAppCommandResult(result appCommandResult) error {
 	}
 	pairs := make([]kvPair, 0, 6)
 	if result.App != nil {
+		phase, _, runtimeID, _ := appObservedDisplayProjection(*result.App)
 		pairs = append(pairs, kvPair{Key: "app", Value: formatDisplayName(result.App.Name, result.App.ID, c.showIDs())})
-		pairs = append(pairs, kvPair{Key: "phase", Value: strings.TrimSpace(result.App.Status.Phase)})
-		runtimeID := strings.TrimSpace(result.App.Status.CurrentRuntimeID)
-		if runtimeID == "" {
-			runtimeID = strings.TrimSpace(result.App.Spec.RuntimeID)
-		}
+		pairs = append(pairs, kvPair{Key: "phase", Value: phase})
 		pairs = append(pairs, kvPair{Key: "runtime", Value: runtimeID})
 		if result.App.Route != nil && strings.TrimSpace(result.App.Route.PublicURL) != "" {
 			pairs = append(pairs, kvPair{Key: "url", Value: result.App.Route.PublicURL})

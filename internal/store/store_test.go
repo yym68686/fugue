@@ -12,6 +12,46 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
+func recordTestMigrationCutover(t *testing.T, s *Store, op model.Operation, app model.App, targetRuntimeID string) {
+	t.Helper()
+	ready := true
+	physical := app.Spec.Replicas
+	if physical <= 0 {
+		physical = 1
+	}
+	_, err := s.RecordAppMigrationLedger(model.AppMigrationLedger{
+		TenantID:               op.TenantID,
+		ProjectID:              app.ProjectID,
+		AppID:                  app.ID,
+		OperationID:            op.ID,
+		OldRuntimeID:           op.SourceRuntimeID,
+		NewRuntimeID:           targetRuntimeID,
+		OldClusterID:           "cluster-old-test",
+		NewClusterID:           "cluster-new-test",
+		ImageRef:               app.Spec.Image,
+		ImageReplicationStatus: model.AppMigrationEvidenceVerified,
+		RuntimeObjectStatus:    model.AppMigrationEvidenceVerified,
+		EndpointRequired:       model.AppHasClusterService(app.Spec),
+		EndpointStatus: func() string {
+			if model.AppHasClusterService(app.Spec) {
+				return model.AppMigrationEvidenceReady
+			}
+			return model.AppMigrationEvidenceNotApplicable
+		}(),
+		EndpointReady:         &ready,
+		PhysicalReplicas:      &physical,
+		DesiredReplicas:       app.Spec.Replicas,
+		Generation:            1,
+		ObservedGeneration:    1,
+		CutoverStatus:         model.AppMigrationCutoverVerified,
+		OldArtifactsProtected: true,
+		EvidenceSource:        model.OperationEvidenceSourceManualDebugBundle,
+	})
+	if err != nil {
+		t.Fatalf("record migration cutover evidence: %v", err)
+	}
+}
+
 func TestFailAssignedAgentOperationAtomicallyFinalizesReleaseAttempt(t *testing.T) {
 	t.Parallel()
 
@@ -278,6 +318,7 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	if len(ops) != 1 || ops[0].ID != migrateOp.ID {
 		t.Fatalf("expected migrate operation assigned to runtime, got %+v", ops)
 	}
+	recordTestMigrationCutover(t, s, migrateOp, app, externalRuntime.ID)
 
 	if _, err := s.CompleteAgentOperation(migrateOp.ID, externalRuntime.ID, "/tmp/nginx-external.yaml", "migrated"); err != nil {
 		t.Fatalf("complete agent operation: %v", err)
@@ -1405,6 +1446,7 @@ func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
 	if claimed.ID != migrateOp.ID || claimed.Status != model.OperationStatusWaitingAgent || claimed.AssignedRuntimeID != externalRuntime.ID {
 		t.Fatalf("unexpected claimed migrate operation: %+v", claimed)
 	}
+	recordTestMigrationCutover(t, s, migrateOp, app, externalRuntime.ID)
 
 	if _, err := s.CompleteAgentOperation(migrateOp.ID, externalRuntime.ID, "/tmp/nginx-external.yaml", "migrated"); err != nil {
 		t.Fatalf("complete agent migrate operation: %v", err)
@@ -5237,8 +5279,8 @@ func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get app: %v", err)
 	}
-	if app.Status.Phase != "deployed" {
-		t.Fatalf("expected deployed phase to be preserved, got %q", app.Status.Phase)
+	if app.Status.Phase != "unknown" {
+		t.Fatalf("expected unknown phase until fresh runtime evidence, got %q", app.Status.Phase)
 	}
 	if app.Status.LastOperationID != rebuildOp.ID {
 		t.Fatalf("expected last operation %s, got %s", rebuildOp.ID, app.Status.LastOperationID)
@@ -5453,8 +5495,8 @@ func TestInitRepairsFailedPhaseForLiveApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get app after repair: %v", err)
 	}
-	if app.Status.Phase != "deployed" {
-		t.Fatalf("expected failed phase to be repaired to deployed, got %q", app.Status.Phase)
+	if app.Status.Phase != "unknown" {
+		t.Fatalf("expected failed phase to remain unknown without fresh runtime evidence, got %q", app.Status.Phase)
 	}
 	if app.Status.LastMessage != "stale failure" {
 		t.Fatalf("expected last message to stay unchanged, got %q", app.Status.LastMessage)
@@ -5542,6 +5584,73 @@ func TestCreateOperationImmediatelyRefreshesFailedAppStatus(t *testing.T) {
 	}
 	if app.Status.LastMessage != "deploy queued" {
 		t.Fatalf("expected deploy queued message, got %q", app.Status.LastMessage)
+	}
+}
+
+func TestFailedOperationIsExposedAsHistoryWithoutServingAsRuntimeEvidence(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Failure history")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example/demo:old",
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desired := app.Spec
+	op, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &desired})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	if _, _, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim operation: %v", err)
+	}
+	beforeFailure, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app before failure: %v", err)
+	}
+	failed, err := s.FailOperation(op.ID, "image missing")
+	if err != nil {
+		t.Fatalf("fail operation: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if app.Status.LastFailedOperation == nil || app.Status.LastFailedOperation.ID != failed.ID || app.Status.LastFailedOperation.ErrorMessage != "image missing" {
+		t.Fatalf("expected redacted last failure summary, got %#v", app.Status.LastFailedOperation)
+	}
+	if app.Status.CurrentReplicas != beforeFailure.Status.CurrentReplicas {
+		t.Fatalf("failure history must not rewrite stored replica count: before=%d after=%d", beforeFailure.Status.CurrentReplicas, app.Status.CurrentReplicas)
+	}
+	if app.ObservedStatus != nil {
+		t.Fatalf("store must not synthesize runtime evidence from a failed operation: %#v", app.ObservedStatus)
+	}
+
+	// Re-open/repair proves the history is also backfilled for pre-existing
+	// failed operations rather than depending on the failure transition hook.
+	if err := s.Init(); err != nil {
+		t.Fatalf("repair store: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get repaired app: %v", err)
+	}
+	if app.Status.LastFailedOperation == nil || app.Status.LastFailedOperation.ID != failed.ID {
+		t.Fatalf("expected failed operation history after repair, got %#v", app.Status.LastFailedOperation)
 	}
 }
 

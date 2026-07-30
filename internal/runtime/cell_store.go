@@ -63,16 +63,17 @@ type CellDesiredTask struct {
 }
 
 type CellOutboxEvent struct {
-	ID            int64     `json:"id"`
-	EventType     string    `json:"event_type"`
-	OperationID   string    `json:"operation_id"`
-	ManifestPath  string    `json:"manifest_path,omitempty"`
-	Message       string    `json:"message,omitempty"`
-	Attempts      int       `json:"attempts"`
-	NextAttemptAt time.Time `json:"next_attempt_at"`
-	LastError     string    `json:"last_error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID              int64                     `json:"id"`
+	EventType       string                    `json:"event_type"`
+	OperationID     string                    `json:"operation_id"`
+	ManifestPath    string                    `json:"manifest_path,omitempty"`
+	Message         string                    `json:"message,omitempty"`
+	MigrationLedger *model.AppMigrationLedger `json:"migration_ledger,omitempty"`
+	Attempts        int                       `json:"attempts"`
+	NextAttemptAt   time.Time                 `json:"next_attempt_at"`
+	LastError       string                    `json:"last_error,omitempty"`
+	CreatedAt       time.Time                 `json:"created_at"`
+	UpdatedAt       time.Time                 `json:"updated_at"`
 }
 
 func OpenCellStore(path string) (*CellStore, error) {
@@ -160,6 +161,10 @@ func (s *CellStore) HasPendingCompletion(operationID string) (bool, error) {
 }
 
 func (s *CellStore) EnqueueCompletion(operationID, manifestPath, message string) error {
+	return s.EnqueueCompletionWithMigrationLedger(operationID, manifestPath, message, nil)
+}
+
+func (s *CellStore) EnqueueCompletionWithMigrationLedger(operationID, manifestPath, message string, ledger *model.AppMigrationLedger) error {
 	if s == nil {
 		return nil
 	}
@@ -178,6 +183,10 @@ func (s *CellStore) EnqueueCompletion(operationID, manifestPath, message string)
 		if event.EventType == CellOutboxEventAgentCompletion && strings.TrimSpace(event.OperationID) == operationID {
 			event.ManifestPath = strings.TrimSpace(manifestPath)
 			event.Message = strings.TrimSpace(message)
+			if ledger != nil {
+				copyLedger := model.NormalizeAppMigrationLedger(*ledger, now)
+				event.MigrationLedger = &copyLedger
+			}
 			event.UpdatedAt = now
 			if event.NextAttemptAt.IsZero() {
 				event.NextAttemptAt = now
@@ -192,16 +201,34 @@ func (s *CellStore) EnqueueCompletion(operationID, manifestPath, message string)
 	}
 	s.state.NextOutbox = id + 1
 	s.state.Outbox = append(s.state.Outbox, CellOutboxEvent{
-		ID:            id,
-		EventType:     CellOutboxEventAgentCompletion,
-		OperationID:   operationID,
-		ManifestPath:  strings.TrimSpace(manifestPath),
-		Message:       strings.TrimSpace(message),
-		NextAttemptAt: now,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:              id,
+		EventType:       CellOutboxEventAgentCompletion,
+		OperationID:     operationID,
+		ManifestPath:    strings.TrimSpace(manifestPath),
+		Message:         strings.TrimSpace(message),
+		MigrationLedger: cloneMigrationLedger(ledger),
+		NextAttemptAt:   now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	})
 	return s.persistLocked()
+}
+
+func cloneMigrationLedger(in *model.AppMigrationLedger) *model.AppMigrationLedger {
+	if in == nil {
+		return nil
+	}
+	out := model.NormalizeAppMigrationLedger(*in, time.Now().UTC())
+	if in.EndpointReady != nil {
+		value := *in.EndpointReady
+		out.EndpointReady = &value
+	}
+	if in.PhysicalReplicas != nil {
+		value := *in.PhysicalReplicas
+		out.PhysicalReplicas = &value
+	}
+	out.InvariantViolations = append([]string(nil), in.InvariantViolations...)
+	return &out
 }
 
 func (s *CellStore) ListDueCompletions(now time.Time, limit int) ([]CellOutboxEvent, error) {

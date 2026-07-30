@@ -469,6 +469,12 @@ func (s *Server) edgeRouteUpstream(ctx context.Context, app model.App, runtimeOb
 }
 
 func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string, string) {
+	// An authoritative runtime absence belongs to observed state and must win
+	// over a desired replica count of zero. Otherwise Edge would relabel the
+	// shared calculator's unavailable result as merely disabled.
+	if observed := app.ObservedStatus; observed != nil && observed.Phase == "unavailable" {
+		return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
+	}
 	switch {
 	case app.Spec.Replicas == 0:
 		return model.EdgeRouteStatusDisabled, "desired replicas is 0"
@@ -480,24 +486,79 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 		return model.EdgeRouteStatusUnavailable, "app source exposes a non-HTTP service protocol"
 	default:
 		if observed := app.ObservedStatus; observed != nil {
+			if observed.Phase != "unknown" && !appObservedStatusFresh(observed, time.Now().UTC()) {
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "runtime observation is stale")
+			}
+			// A stale envelope must never be advertised as a healthy deployed
+			// route. The only availability-preserving exception is the explicit
+			// unknown/LKG branch below, which is guarded by the durable failed-op
+			// check and does not claim a fresh deployment.
+			if observed.Phase == "deployed" && (!observed.Fresh || strings.TrimSpace(observed.ClusterID) == "" || observed.Generation <= 0 || observed.ObservedGeneration < observed.Generation) {
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "deployed status lacks fresh cluster/generation evidence")
+			}
+			if len(observed.InvariantViolations) > 0 {
+				return model.EdgeRouteStatusUnavailable, "runtime invariant violation: " + strings.Join(observed.InvariantViolations, ", ")
+			}
+			if observed.RuntimeObjectPresent != nil && !*observed.RuntimeObjectPresent {
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "managed app runtime object not found")
+			}
+			if observed.NamespacePresent != nil && !*observed.NamespacePresent {
+				return model.EdgeRouteStatusUnavailable, "app namespace is unavailable"
+			}
+			if observed.ServicePresent != nil && !*observed.ServicePresent {
+				return model.EdgeRouteStatusUnavailable, "app service is unavailable"
+			}
+			if observed.EndpointPresent != nil && !*observed.EndpointPresent {
+				return model.EdgeRouteStatusUnavailable, "app endpoint is unavailable"
+			}
+			if observed.EndpointReady != nil && !*observed.EndpointReady {
+				return model.EdgeRouteStatusUnavailable, "app endpoint has no ready addresses"
+			}
+			if observed.PhysicalReplicas != nil && *observed.PhysicalReplicas == 0 {
+				return model.EdgeRouteStatusUnavailable, "app has no physical ready replicas"
+			}
+			if observed.ImagePresent != nil && !*observed.ImagePresent {
+				return model.EdgeRouteStatusUnavailable, "current app image is unavailable"
+			}
+			if observed.Phase == "deployed" && strings.TrimSpace(app.Spec.Image) != "" && observed.ImagePresent == nil {
+				return model.EdgeRouteStatusUnavailable, "current image evidence is unavailable"
+			}
+			if observed.Phase == "deployed" &&
+				(app.Route != nil || model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec)) &&
+				(observed.EndpointPresent == nil || observed.EndpointReady == nil) {
+				return model.EdgeRouteStatusUnavailable, "endpoint evidence is unavailable"
+			}
 			switch observed.Phase {
 			case "unavailable":
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
 			case "unknown":
-				if app.StoredStatus != nil && app.StoredStatus.CurrentReplicas > 0 {
+				// A failed operation invalidates the durable replica count.  In
+				// that case the edge must remain unavailable until the shared
+				// calculator publishes fresh cluster/generation evidence.  When
+				// there is no failed operation, retain the existing last-known-good
+				// serving behavior during a temporary observer outage; Console and
+				// the CLI still remain non-green because they require fresh proof.
+				if app.StoredStatus != nil && app.StoredStatus.CurrentReplicas > 0 && !model.AppHasCurrentFailedOperation(app.Status) {
 					return model.EdgeRouteStatusActive, "live runtime observation unknown; serving last-known-good"
 				}
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "live runtime observation is unknown")
 			}
-			if observed.ReadyReplicas != nil && *observed.ReadyReplicas == 0 {
+			if observed.ReadyReplicas != nil && *observed.ReadyReplicas < app.Spec.Replicas {
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
+			}
+			if observed.Phase == "deployed" && !appObservedReadyForServing(app, time.Now().UTC()) {
+				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "deployed status lacks complete serving evidence")
 			}
 			return model.EdgeRouteStatusActive, ""
 		}
-		if app.Status.CurrentReplicas == 0 {
-			return model.EdgeRouteStatusUnavailable, appRouteUnavailableMessage(app)
+		// A temporary observer outage may use an existing last-known-good route,
+		// but never after a failed operation.  The frontend/CLI green gate still
+		// requires a fresh observed-status envelope, so this is availability
+		// preservation rather than a deployed claim.
+		if !model.AppHasCurrentFailedOperation(app.Status) && app.Status.CurrentReplicas > 0 {
+			return model.EdgeRouteStatusActive, "live runtime observation unavailable; serving last-known-good"
 		}
-		return model.EdgeRouteStatusActive, ""
+		return model.EdgeRouteStatusUnavailable, "live runtime observation is unavailable"
 	}
 }
 

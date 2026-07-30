@@ -15,6 +15,12 @@ func (s *Service) cleanupDeletedAppDistributedImages(ctx context.Context, app mo
 	if s == nil || s.Store == nil {
 		return nil
 	}
+	if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		return err
+	} else if blocked {
+		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image cleanup blocked: "+reason)
+		return nil
+	}
 	pins, err := s.Store.ListImagePins(model.ImagePinFilter{
 		TenantID: strings.TrimSpace(app.TenantID),
 		AppID:    strings.TrimSpace(app.ID),
@@ -49,6 +55,14 @@ func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context) error {
 		if pin.ExpiresAt == nil || pin.ExpiresAt.After(now) {
 			continue
 		}
+		if appID := strings.TrimSpace(pin.AppID); appID != "" {
+			if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(appID); err != nil {
+				return err
+			} else if blocked {
+				_ = s.Store.RecordMigrationArtifactRetirementBlocked(appID, "expired image pin removal blocked: "+reason)
+				continue
+			}
+		}
 		if err := s.Store.DeleteImagePin(pin.ID, pin.TenantID, true); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
@@ -58,6 +72,12 @@ func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context) error {
 
 func (s *Service) scheduleDistributedImagePruneForApp(ctx context.Context, app model.App) error {
 	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
+		return nil
+	}
+	if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		return err
+	} else if blocked {
+		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image prune blocked: "+reason)
 		return nil
 	}
 	images, err := s.Store.ListImages(model.ImageFilter{
@@ -81,6 +101,14 @@ func (s *Service) scheduleDistributedImagePruneForApp(ctx context.Context, app m
 func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model.Image) error {
 	if s == nil || s.Store == nil || strings.TrimSpace(image.ID) == "" {
 		return nil
+	}
+	if appID := strings.TrimSpace(image.AppID); appID != "" {
+		if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(appID); err != nil {
+			return err
+		} else if blocked {
+			_ = s.Store.RecordMigrationArtifactRetirementBlocked(appID, "distributed image prune blocked: "+reason)
+			return nil
+		}
 	}
 	pins, err := s.Store.ListImagePins(model.ImagePinFilter{
 		ImageID:       image.ID,

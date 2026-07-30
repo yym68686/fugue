@@ -997,9 +997,18 @@ func kubeReplicaSetRevision(replicaSet kubeReplicaSet) int {
 }
 
 func (c *kubeClient) listEndpointSlicesForService(ctx context.Context, namespace, serviceName string) ([]kubeEndpointSlice, error) {
+	items, _, err := c.listEndpointSlicesForServiceWithAvailability(ctx, namespace, serviceName)
+	return items, err
+}
+
+// listEndpointSlicesForServiceWithAvailability distinguishes an unavailable
+// API group (404) from a failed/forbidden query. Callers that make a safety
+// decision must not treat RBAC, transport, or decode failures as an empty
+// endpoint inventory.
+func (c *kubeClient) listEndpointSlicesForServiceWithAvailability(ctx context.Context, namespace, serviceName string) ([]kubeEndpointSlice, bool, error) {
 	serviceName = strings.TrimSpace(serviceName)
 	if serviceName == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	query := url.Values{}
 	query.Set("labelSelector", "kubernetes.io/service-name="+serviceName)
@@ -1008,30 +1017,35 @@ func (c *kubeClient) listEndpointSlicesForService(ctx context.Context, namespace
 	var list kubeEndpointSliceList
 	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
 	if err != nil {
-		if status == http.StatusForbidden || status == http.StatusNotFound {
-			return nil, nil
+		if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+			return nil, false, nil
 		}
-		return nil, err
+		return nil, true, err
 	}
-	return list.Items, nil
+	return list.Items, true, nil
 }
 
 func (c *kubeClient) getEndpointsForService(ctx context.Context, namespace, serviceName string) (kubeEndpoints, bool, error) {
+	endpoints, found, _, err := c.getEndpointsForServiceWithAvailability(ctx, namespace, serviceName)
+	return endpoints, found, err
+}
+
+func (c *kubeClient) getEndpointsForServiceWithAvailability(ctx context.Context, namespace, serviceName string) (kubeEndpoints, bool, bool, error) {
 	serviceName = strings.TrimSpace(serviceName)
 	if serviceName == "" {
-		return kubeEndpoints{}, false, nil
+		return kubeEndpoints{}, false, false, nil
 	}
 	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/endpoints/" + url.PathEscape(serviceName)
 
 	var endpoints kubeEndpoints
 	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &endpoints)
 	if err != nil {
-		if status == http.StatusForbidden || status == http.StatusNotFound {
-			return kubeEndpoints{}, false, nil
+		if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+			return kubeEndpoints{}, false, false, nil
 		}
-		return kubeEndpoints{}, false, err
+		return kubeEndpoints{}, false, true, err
 	}
-	return endpoints, true, nil
+	return endpoints, true, true, nil
 }
 
 func (c *kubeClient) getRawDeployment(ctx context.Context, namespace, name string) (map[string]any, bool, error) {

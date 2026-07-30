@@ -55,6 +55,19 @@ func (s *Service) pruneExcessManagedAppImagesWithSnapshot(
 	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return nil
 	}
+	// A migration keeps both the source and target artifacts live until the
+	// target-side evidence envelope has been verified.  This guard sits at the
+	// lowest shared retention entry point so scheduled sweeps, post-deploy
+	// maintenance, and direct controller calls cannot bypass the cutover gate.
+	if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		return err
+	} else if blocked {
+		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "managed image retention blocked: "+reason)
+		if s.Logger != nil {
+			s.Logger.Printf("preserve old app artifacts for %s: managed image retention is blocked: %s", app.ID, reason)
+		}
+		return nil
+	}
 	if s.imageStoreDistributedMode() {
 		_, err := s.reconcileDistributedImageRetentionForApp(ctx, app, targetOps, liveRefs)
 		return err

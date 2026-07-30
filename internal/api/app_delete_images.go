@@ -12,6 +12,12 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 	if s == nil || s.store == nil || !s.appImageInventoryConfigured() {
 		return nil
 	}
+	if blocked, reason, err := s.store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		return err
+	} else if blocked {
+		_ = s.store.RecordMigrationArtifactRetirementBlocked(app.ID, "image cleanup blocked: "+reason)
+		return nil
+	}
 
 	targetOps, err := s.store.ListOperationsByApp(app.TenantID, true, app.ID)
 	if err != nil {

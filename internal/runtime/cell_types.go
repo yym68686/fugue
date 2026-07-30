@@ -13,10 +13,12 @@ const (
 	CellRuntimeLabelRouteCount      = CellRuntimeLabelPrefix + "route-count"
 	CellRuntimeLabelOutboxPending   = CellRuntimeLabelPrefix + "outbox-pending"
 	CellRuntimeLabelObservedAt      = CellRuntimeLabelPrefix + "observed-at"
+	CellRuntimeLabelClusterID       = CellRuntimeLabelPrefix + "cluster-id"
 )
 
 type CellSnapshot struct {
 	RuntimeID          string     `json:"runtime_id,omitempty"`
+	ClusterID          string     `json:"cluster_id,omitempty"`
 	RuntimeName        string     `json:"runtime_name,omitempty"`
 	MachineName        string     `json:"machine_name,omitempty"`
 	MachineFingerprint string     `json:"machine_fingerprint,omitempty"`
