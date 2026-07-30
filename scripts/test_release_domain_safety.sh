@@ -11863,6 +11863,32 @@ FUGUE_EDGE_IMAGE_TAG="${EDGE_WORKER_REF}"
   fi
 )
 
+(
+  digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  assert_eq \
+    "$(release_image_identity_record_from_ref "ghcr.io/acme/fugue-edge:stable")" \
+    'ghcr.io/acme/fugue-edge|stable|' \
+    "release image identity must retain a tag and an explicit empty digest"
+  assert_eq \
+    "$(release_image_identity_record_from_ref "registry.example.test:5443/acme/fugue-edge@${digest}")" \
+    "registry.example.test:5443/acme/fugue-edge||${digest}" \
+    "release image identity must accept a digest-only ref with a registry port"
+  assert_eq \
+    "$(release_image_identity_record_from_ref "ghcr.io/acme/fugue-edge:source@${digest}")" \
+    "ghcr.io/acme/fugue-edge|source|${digest}" \
+    "release image identity must retain an optional source tag beside a digest"
+  for invalid_ref in \
+    'ghcr.io/acme/fugue-edge' \
+    'ghcr.io/acme/fugue-edge@sha256:not-a-digest' \
+    "ghcr.io/acme/fugue-edge@${digest}@${digest}" \
+    'ghcr.io/acme/fugue edge:stable' \
+    'ghcr.io/acme/fugue-edge:stable|extra'; do
+    if release_image_identity_record_from_ref "${invalid_ref}" >/dev/null; then
+      fail "release image identity must reject malformed ref ${invalid_ref}"
+    fi
+  done
+)
+
 for public_preserve_failure_mode in inventory partial-bluegreen; do
   (
     FUGUE_NAMESPACE=fugue-system
@@ -11948,7 +11974,7 @@ done
   FUGUE_DNS_TCP_ADDR=:53
   FUGUE_DNS_EXTRA_GROUPS='zeta|edge-zeta|zz|203.0.113.30|token-zeta|203.0.113.30;alpha|edge-alpha|aa|203.0.113.20|token-alpha|203.0.113.20'
   live_daemonsets_json_snapshot() {
-    printf '%s\n' '{"apiVersion":"apps/v1","items":[{"metadata":{"name":"fugue-fugue-dns"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:primary-stable","resources":{},"command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}},{"metadata":{"name":"fugue-fugue-dns-alpha"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:alpha-stable","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}},{"metadata":{"name":"fugue-fugue-dns-zeta"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:zeta-stable","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}}]}'
+    printf '%s\n' '{"apiVersion":"apps/v1","items":[{"metadata":{"name":"fugue-fugue-dns"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge@sha256:1111111111111111111111111111111111111111111111111111111111111111","resources":{},"command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}},{"metadata":{"name":"fugue-fugue-dns-alpha"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:alpha-stable","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}},{"metadata":{"name":"fugue-fugue-dns-zeta"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge@sha256:2222222222222222222222222222222222222222222222222222222222222222","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}}]}'
   }
   preserve_public_data_plane_from_live || fail "public preserve must retain the complete migrated DNS transport contract"
   assert_eq "${FUGUE_DNS_CONTAINER_NAME}|${FUGUE_DNS_UDP_CONTAINER_PORT}|${FUGUE_DNS_TCP_CONTAINER_PORT}|${FUGUE_DNS_UDP_ADDR}|${FUGUE_DNS_TCP_ADDR}" 'dns-server|53|5353|:53|:5353' "public preserve must publish the exact live DNS transport globals"
@@ -11957,12 +11983,40 @@ done
     fail "public preserve must retain the live DNS TCP containerPort"
   [[ "${joined_args}" == *"dns.tcpAddr=:5353"* ]] ||
     fail "public preserve must retain the live DNS TCP bind address"
-  [[ "${joined_args}" == *"dns.groups[0].image.tag=zeta-stable"* ]] ||
-    fail "public preserve must map the zeta image to its configured group index"
+  [[ "${joined_args}" == *"dns.image.repository=ghcr.io/acme/fugue-edge"* && "${joined_args}" == *"dns.image.tag="* ]] ||
+    fail "public preserve must retain a digest-only primary DNS repository without inventing a tag"
+  [[ "${joined_args}" == *"dns.image.digest=sha256:1111111111111111111111111111111111111111111111111111111111111111"* ]] ||
+    fail "public preserve must retain the live primary DNS digest"
+  [[ "${joined_args}" == *"dns.groups[0].image.tag="* ]] ||
+    fail "public preserve must not invent a source tag for the digest-only zeta group"
+  [[ "${joined_args}" == *"dns.groups[0].image.digest=sha256:2222222222222222222222222222222222222222222222222222222222222222"* ]] ||
+    fail "public preserve must map the zeta digest to its configured group index"
   [[ "${joined_args}" == *"dns.groups[1].image.tag=alpha-stable"* ]] ||
     fail "public preserve must map the alpha image to its configured group index"
+  [[ "${joined_args}" == *"dns.groups[1].image.digest="* ]] ||
+    fail "public preserve must explicitly clear a stale digest for the tagged alpha group"
   [[ "${joined_args}" != *"dns.groups[0].name="* && "${joined_args}" != *"dns.groups[1].name="* ]] ||
     fail "public preserve must not cross-wire DNS group identities through sorted live indexes"
+)
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_EDGE_ENABLED=false
+  FUGUE_DNS_ENABLED=true
+  FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED=false
+  FUGUE_DNS_EXTRA_GROUPS=''
+  diagnostic_file="$(mktemp)"
+  trap 'rm -f "${diagnostic_file}"' EXIT
+  live_daemonsets_json_snapshot() {
+    printf '%s\n' '{"apiVersion":"apps/v1","items":[{"metadata":{"name":"fugue-fugue-dns"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge@sha256:not-a-digest","resources":{},"command":["/usr/local/bin/fugue-dns"],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"}]}]}}}}]}'
+  }
+  if preserve_public_data_plane_from_live >"${diagnostic_file}" 2>&1; then
+    fail "public preserve must reject a malformed digest-pinned DNS image"
+  fi
+  grep -Fq \
+    'public data-plane preserve failed; live primary DNS image is not a canonical tagged or digest-pinned reference' \
+    "${diagnostic_file}" || fail "public preserve must diagnose the exact malformed primary DNS image"
 )
 
 (

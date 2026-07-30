@@ -7851,6 +7851,34 @@ tagged_image_record_from_ref() {
   printf '%s|%s' "${repository}" "${tag}"
 }
 
+release_image_identity_record_from_ref() {
+  local image_ref="$1"
+  local repository=""
+  local tag=""
+  local digest=""
+  local no_digest=""
+  local last=""
+
+  image_ref="$(trim_field "${image_ref}")"
+  [[ -n "${image_ref}" && "${image_ref}" != *[[:space:]]* && "${image_ref}" != *"|"* && "${image_ref}" != *@*@* ]] || return 1
+  if [[ "${image_ref}" == *@* ]]; then
+    digest="${image_ref##*@}"
+    release_image_digest_valid "${digest}" || return 1
+  fi
+  no_digest="$(image_ref_without_digest "${image_ref}")"
+  last="${no_digest##*/}"
+  if [[ "${last}" == *:* ]]; then
+    repository="${no_digest%:*}"
+    tag="${last##*:}"
+  else
+    repository="${no_digest}"
+  fi
+  release_image_repository_valid "${repository}" || return 1
+  [[ -z "${tag}" ]] || release_image_tag_valid "${tag}" || return 1
+  [[ -n "${tag}" || -n "${digest}" ]] || return 1
+  printf '%s|%s|%s' "${repository}" "${tag}" "${digest}"
+}
+
 dns_group_image_records_from_daemonset_snapshot() {
   local daemonsets_json="$1"
   local dns_prefix="${FUGUE_RELEASE_FULLNAME}-dns-"
@@ -8366,7 +8394,7 @@ preserve_public_data_plane_from_live() {
   local dns_ds="${FUGUE_RELEASE_FULLNAME}-dns"
   local daemonsets_json=""
   local edge_json="" edge_front_json="" edge_worker_a_json="" edge_worker_b_json="" ssh_front_json="" dns_json=""
-  local image_ref="" image_record="" repository="" tag=""
+  local image_ref="" image_record="" repository="" tag="" digest=""
   local edge_resources="" caddy_resources="" dns_resources=""
   local dns_container_name=""
   local dns_transport_record=""
@@ -8377,6 +8405,7 @@ preserve_public_data_plane_from_live() {
   local probe_enabled="" probe_port="" probe_timeout=""
   local base_repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY:-}}"
   local base_tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG:-}}"
+  local base_digest=""
   local blue_count=0
   local group_records="" group_name="" group_image="" group_index=""
   local configured_group_names="" live_group_names=""
@@ -8425,19 +8454,40 @@ preserve_public_data_plane_from_live() {
     if (( blue_count == 3 )); then
       pending_args+=(--set edge.blueGreen.enabled=true --set edge.caddy.publicHostPorts.enabled=false)
       image_ref="$(workload_container_image_from_json "${edge_worker_a_json}" edge)" || return 1
-      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-      IFS='|' read -r base_repository base_tag <<<"${image_record}"
-      pending_args+=(--set-string "edge.blueGreen.slots.a.image.repository=${base_repository}" --set-string "edge.blueGreen.slots.a.image.tag=${base_tag}")
+      image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+        log "public data-plane preserve failed; live edge worker-a image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+        return 1
+      }
+      IFS='|' read -r base_repository base_tag base_digest <<<"${image_record}"
+      pending_args+=(
+        --set-string "edge.blueGreen.slots.a.image.repository=${base_repository}"
+        --set-string "edge.blueGreen.slots.a.image.tag=${base_tag}"
+        --set-string "edge.blueGreen.slots.a.image.digest=${base_digest}"
+      )
 
       image_ref="$(workload_container_image_from_json "${edge_worker_b_json}" edge)" || return 1
-      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-      IFS='|' read -r repository tag <<<"${image_record}"
-      pending_args+=(--set-string "edge.blueGreen.slots.b.image.repository=${repository}" --set-string "edge.blueGreen.slots.b.image.tag=${tag}")
+      image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+        log "public data-plane preserve failed; live edge worker-b image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+        return 1
+      }
+      IFS='|' read -r repository tag digest <<<"${image_record}"
+      pending_args+=(
+        --set-string "edge.blueGreen.slots.b.image.repository=${repository}"
+        --set-string "edge.blueGreen.slots.b.image.tag=${tag}"
+        --set-string "edge.blueGreen.slots.b.image.digest=${digest}"
+      )
 
       image_ref="$(workload_container_image_from_json "${edge_front_json}" edge-front)" || return 1
-      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-      IFS='|' read -r repository tag <<<"${image_record}"
-      pending_args+=(--set-string "edge.blueGreen.front.image.repository=${repository}" --set-string "edge.blueGreen.front.image.tag=${tag}")
+      image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+        log "public data-plane preserve failed; live edge front image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+        return 1
+      }
+      IFS='|' read -r repository tag digest <<<"${image_record}"
+      pending_args+=(
+        --set-string "edge.blueGreen.front.image.repository=${repository}"
+        --set-string "edge.blueGreen.front.image.tag=${tag}"
+        --set-string "edge.blueGreen.front.image.digest=${digest}"
+      )
 
       edge_resources="$(workload_container_resources_from_json "${edge_worker_a_json}" edge)" || return 1
       caddy_resources="$(workload_container_resources_from_json "${edge_worker_a_json}" caddy)" || return 1
@@ -8448,23 +8498,41 @@ preserve_public_data_plane_from_live() {
         return 1
       }
       image_ref="$(workload_container_image_from_json "${edge_json}" edge)" || return 1
-      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-      IFS='|' read -r base_repository base_tag <<<"${image_record}"
+      image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+        log "public data-plane preserve failed; live legacy edge image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+        return 1
+      }
+      IFS='|' read -r base_repository base_tag base_digest <<<"${image_record}"
       image_ref="$(workload_container_image_from_json "${edge_json}" caddy)" || return 1
-      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-      IFS='|' read -r repository tag <<<"${image_record}"
-      pending_args+=(--set-string "edge.caddy.image.repository=${repository}" --set-string "edge.caddy.image.tag=${tag}")
+      image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+        log "public data-plane preserve failed; live Caddy image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+        return 1
+      }
+      IFS='|' read -r repository tag digest <<<"${image_record}"
+      pending_args+=(
+        --set-string "edge.caddy.image.repository=${repository}"
+        --set-string "edge.caddy.image.tag=${tag}"
+        --set-string "edge.caddy.image.digest=${digest}"
+      )
       edge_resources="$(workload_container_resources_from_json "${edge_json}" edge)" || return 1
       caddy_resources="$(workload_container_resources_from_json "${edge_json}" caddy)" || return 1
       log "public data-plane legacy edge topology preserved from one live DaemonSet snapshot"
     fi
+    pending_args+=(--set-string "edge.image.digest=${base_digest}")
     pending_args+=(--set-json "edge.resources=${edge_resources}" --set-json "edge.caddy.resources=${caddy_resources}")
 
     if [[ -n "${ssh_front_json}" ]]; then
       image_ref="$(workload_container_image_from_json "${ssh_front_json}" ssh-front)" || return 1
-      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-      IFS='|' read -r repository tag <<<"${image_record}"
-      pending_args+=(--set-string "edge.sshFront.image.repository=${repository}" --set-string "edge.sshFront.image.tag=${tag}")
+      image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+        log "public data-plane preserve failed; live SSH front image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+        return 1
+      }
+      IFS='|' read -r repository tag digest <<<"${image_record}"
+      pending_args+=(
+        --set-string "edge.sshFront.image.repository=${repository}"
+        --set-string "edge.sshFront.image.tag=${tag}"
+        --set-string "edge.sshFront.image.digest=${digest}"
+      )
     fi
   fi
 
@@ -8489,9 +8557,16 @@ preserve_public_data_plane_from_live() {
       pending_args+=(--set-string "dns.containerName=${dns_container_name}")
     fi
     image_ref="$(workload_container_image_from_json "${dns_json}" "${dns_container_name}")" || return 1
-    image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
-    IFS='|' read -r repository tag <<<"${image_record}"
-    pending_args+=(--set-string "dns.image.repository=${repository}" --set-string "dns.image.tag=${tag}")
+    image_record="$(release_image_identity_record_from_ref "${image_ref}")" || {
+      log "public data-plane preserve failed; live primary DNS image is not a canonical tagged or digest-pinned reference: ${image_ref}"
+      return 1
+    }
+    IFS='|' read -r repository tag digest <<<"${image_record}"
+    pending_args+=(
+      --set-string "dns.image.repository=${repository}"
+      --set-string "dns.image.tag=${tag}"
+      --set-string "dns.image.digest=${digest}"
+    )
     dns_resources="$(workload_container_resources_from_json "${dns_json}" "${dns_container_name}")" || return 1
     pending_args+=(--set-json "dns.resources=${dns_resources}")
     probe_enabled="$(workload_container_env_from_json "${dns_json}" "${dns_container_name}" FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED)" || return 1
@@ -8511,11 +8586,15 @@ preserve_public_data_plane_from_live() {
     while IFS=$'\t' read -r group_name group_image; do
       [[ -n "${group_name}" ]] || continue
       group_index="$(dns_group_index_from_config "${group_name}")" || return 1
-      image_record="$(tagged_image_record_from_ref "${group_image}")" || return 1
-      IFS='|' read -r repository tag <<<"${image_record}"
+      image_record="$(release_image_identity_record_from_ref "${group_image}")" || {
+        log "public data-plane preserve failed; live DNS group ${group_name} image is not a canonical tagged or digest-pinned reference: ${group_image}"
+        return 1
+      }
+      IFS='|' read -r repository tag digest <<<"${image_record}"
       pending_args+=(
         --set-string "dns.groups[${group_index}].image.repository=${repository}"
         --set-string "dns.groups[${group_index}].image.tag=${tag}"
+        --set-string "dns.groups[${group_index}].image.digest=${digest}"
       )
     done <<<"${group_records}"
     log "public data-plane DNS topology preserved from the same live DaemonSet inventory snapshot"
