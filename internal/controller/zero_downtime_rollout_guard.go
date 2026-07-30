@@ -584,11 +584,15 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 
 // recoverManagedAppPendingDeploySnapshot closes the narrow crash window where
 // a deploy applied and became Ready, but the operation failed before its
-// desired snapshot was committed to the store. The ManagedApp status retains
-// the controller-authored pending release identity while background reconcile
-// restores the older durable spec. A later deploy must use the actual serving
-// snapshot as its zero-downtime baseline instead of treating that proven
-// half-commit as arbitrary live drift.
+// desired snapshot was committed to the store. The ManagedApp status normally
+// retains the controller-authored pending release identity while background
+// reconcile restores the older durable spec. Older status writes (and a few
+// pre-fix failure paths), however, promoted that identity directly to
+// CurrentReleaseKey and cleared PendingReleaseKey before the operation was
+// durably completed. When that happens, a later deploy must still be able to
+// use the actual serving snapshot as its zero-downtime baseline instead of
+// treating the controller-authored, operation-proven release as arbitrary
+// live drift.
 //
 // Recovery is deliberately operation-only and fail-closed. The pending key
 // must match the live Deployment, belong to a completed failed deploy that
@@ -605,8 +609,24 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 	liveKey = strings.TrimSpace(liveKey)
 	pendingKey := strings.TrimSpace(managed.Status.PendingReleaseKey)
 	pendingStartedAt := parseManagedAppStatusTimestamp(managed.Status.PendingReleaseStartedAt)
+	recoveryKey := pendingKey
+	recoveryStartedAt := pendingStartedAt
+	// A completed rollout can be represented by CurrentReleaseKey without a
+	// pending key when the status publish raced operation completion. Accept
+	// that form only with both controller-authored release timestamps and the
+	// durable serving evidence; the operation-history proof below remains
+	// mandatory. This does not broaden recovery to arbitrary live annotations.
+	if recoveryKey == "" {
+		recoveryKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
+		recoveryStartedAt = parseManagedAppStatusTimestamp(managed.Status.CurrentReleaseStartedAt)
+		if recoveryKey == "" || recoveryStartedAt == nil ||
+			parseManagedAppStatusTimestamp(managed.Status.CurrentReleaseReadyAt) == nil ||
+			!managedAppStatusShowsServing(managed.Status) {
+			return model.App{}, false, nil
+		}
+	}
 	apply := managedAppApplySourceFromContext(ctx)
-	if liveKey == "" || pendingKey != liveKey || pendingStartedAt == nil ||
+	if liveKey == "" || recoveryKey != liveKey || recoveryStartedAt == nil ||
 		managed.Status.ObservedGeneration < managed.Metadata.Generation ||
 		apply.Source != managedAppApplySourceOperation || apply.OperationID == "" ||
 		s == nil || s.Store == nil {
@@ -639,7 +659,7 @@ func (s *Service) recoverManagedAppPendingDeploySnapshot(
 		if candidate.StartedAt != nil {
 			attemptStartedAt = *candidate.StartedAt
 		}
-		if pendingStartedAt.Before(attemptStartedAt) || pendingStartedAt.After(*candidate.CompletedAt) {
+		if recoveryStartedAt.Before(attemptStartedAt) || recoveryStartedAt.After(*candidate.CompletedAt) {
 			continue
 		}
 
