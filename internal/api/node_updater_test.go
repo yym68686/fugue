@@ -908,6 +908,9 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/run/fugue/image-cache`,
 		`/v1/node-updater/image-cache/identity`,
 		`validate_image_cache_platform_credential_file`,
+		`prepare_image_plane_shadow_state_directory "/var/lib/fugue/image-plane-shadow" 65532 65532`,
+		`directory_flags |= getattr(os, "O_NOFOLLOW", 0)`,
+		`os.mkdir(name, mode=0o750, dir_fd=parent_fd)`,
 		`refresh_image_cache_platform_identity`,
 		`refresh-image-cache-identity)`,
 		`FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH=`,
@@ -986,6 +989,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`skipped from host resolver namespace`,
 		`__FUGUE_NODE_UPDATER_SCRIPT_VERSION__`,
 		`__FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_CAPABILITY__`,
+		`FUGUE_IMAGE_PLANE_SHADOW_STATE_DIR`,
 		`"kube-proxy iptables/ipvs rules present", not has_proxy`,
 	} {
 		if strings.Contains(script, forbidden) {
@@ -1094,6 +1098,7 @@ func TestNodeUpdaterImageCachePlatformCredentialRotationIsAtomicAndNodeBound(t *
 	harness := prefix + `
 curl() {
   local output_file=""
+  FAKE_CURL_CALLS=$((FAKE_CURL_CALLS + 1))
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -o)
@@ -1112,6 +1117,15 @@ curl() {
   printf '%s' "${FAKE_CREDENTIAL_JSON}" >"${output_file}"
 }
 
+SHADOW_STATE_PREPARE_CALLS=0
+prepare_image_plane_shadow_state_directory() {
+  SHADOW_STATE_PREPARE_CALLS=$((SHADOW_STATE_PREPARE_CALLS + 1))
+  if [ "${FAKE_SHADOW_PREP_FAIL:-false}" = "true" ]; then
+    return 1
+  fi
+  return 0
+}
+
 runtime_root="${RUNTIME_ROOT}"
 credential_dir="${runtime_root}/identity"
 FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR="${credential_dir}"
@@ -1122,6 +1136,17 @@ FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY_SECONDS=30
 FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME="worker-a"
 FUGUE_NODE_UPDATER_TOKEN="node-updater-secret"
 FUGUE_API_BASE="https://api.fugue.test"
+FAKE_CURL_CALLS=0
+
+FAKE_SHADOW_PREP_FAIL=true
+FAKE_CREDENTIAL_JSON="${VALID_CREDENTIAL_JSON}"
+if refresh_image_cache_platform_identity; then
+  echo "identity refresh continued after shadow state preparation failed" >&2
+  exit 1
+fi
+[ "${FAKE_CURL_CALLS}" -eq 0 ]
+[ ! -e "${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE}" ]
+FAKE_SHADOW_PREP_FAIL=false
 
 FAKE_CREDENTIAL_JSON="${VALID_CREDENTIAL_JSON}"
 refresh_image_cache_platform_identity
@@ -1159,6 +1184,14 @@ if refresh_image_cache_platform_identity; then
   exit 1
 fi
 [ ! -e "${runtime_root}/real-identity/platform-component-credential.json" ]
+[ "${SHADOW_STATE_PREPARE_CALLS}" -eq 6 ] || {
+  echo "shadow state preparation calls=${SHADOW_STATE_PREPARE_CALLS}, want 6" >&2
+  exit 1
+}
+[ "${FAKE_CURL_CALLS}" -eq 4 ] || {
+  echo "platform credential curl calls=${FAKE_CURL_CALLS}, want 4" >&2
+  exit 1
+}
 `
 
 	runtimeRoot, err := filepath.EvalSymlinks(t.TempDir())
@@ -1184,6 +1217,105 @@ fi
 		if strings.Contains(string(output), secret) {
 			t.Fatalf("node updater platform credential output leaked a secret: %s", output)
 		}
+	}
+}
+
+func TestNodeUpdaterImagePlaneShadowStatePreparationIsAtomicAndSymlinkSafe(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{"bash", "python3"} {
+		if _, err := exec.LookPath(command); err != nil {
+			t.Skipf("%s not available", command)
+		}
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+	runtimeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve shadow state test root: %v", err)
+	}
+	harness := prefix + `
+runtime_root="${RUNTIME_ROOT}"
+state_parent="${runtime_root}/fugue"
+state_dir="${state_parent}/image-plane-shadow"
+owner="$(id -u)"
+group="$(id -g)"
+mkdir -p "${state_parent}"
+
+prepare_image_plane_shadow_state_directory "${state_dir}" "${owner}" "${group}"
+printf 'preserve-me' >"${state_dir}/marker"
+prepare_image_plane_shadow_state_directory "${state_dir}" "${owner}" "${group}"
+python3 - "${state_dir}" "${owner}" "${group}" <<'PY_VERIFY_IMAGE_PLANE_SHADOW_STATE'
+import os
+import stat
+import sys
+
+path, owner_raw, group_raw = sys.argv[1:]
+current = os.stat(path, follow_symlinks=False)
+if not stat.S_ISDIR(current.st_mode):
+    raise SystemExit("prepared image-plane shadow state is not a directory")
+if current.st_uid != int(owner_raw) or current.st_gid != int(group_raw):
+    raise SystemExit("prepared image-plane shadow state ownership drifted")
+if stat.S_IMODE(current.st_mode) != 0o750:
+    raise SystemExit("prepared image-plane shadow state mode drifted")
+with open(os.path.join(path, "marker"), "r", encoding="utf-8") as fh:
+    if fh.read() != "preserve-me":
+        raise SystemExit("idempotent preparation changed lane-local state")
+PY_VERIFY_IMAGE_PLANE_SHADOW_STATE
+
+if prepare_image_plane_shadow_state_directory "/var/lib/fugue/image-cache/shadow" "${owner}" "${group}" >/dev/null 2>&1; then
+  echo "legacy image-cache overlap was accepted" >&2
+  exit 1
+fi
+if prepare_image_plane_shadow_state_directory "/run/fugue/image-cache/state" "${owner}" "${group}" >/dev/null 2>&1; then
+  echo "credential directory overlap was accepted" >&2
+  exit 1
+fi
+if prepare_image_plane_shadow_state_directory "${state_parent}/../fugue/noncanonical" "${owner}" "${group}" >/dev/null 2>&1; then
+  echo "noncanonical shadow state path was accepted" >&2
+  exit 1
+fi
+if prepare_image_plane_shadow_state_directory "${state_parent}/bad-owner" 0 "${group}" >/dev/null 2>&1; then
+  echo "root shadow state owner was accepted" >&2
+  exit 1
+fi
+
+rm -rf "${state_dir}"
+real_state="${runtime_root}/real-state"
+mkdir -m 0700 "${real_state}"
+ln -s "${real_state}" "${state_dir}"
+if prepare_image_plane_shadow_state_directory "${state_dir}" "${owner}" "${group}" >/dev/null 2>&1; then
+  echo "symlinked shadow state target was accepted" >&2
+  exit 1
+fi
+mode="$(stat -c '%a' "${real_state}" 2>/dev/null || stat -f '%Lp' "${real_state}")"
+[ "${mode}" = "700" ] || { echo "symlink target mode changed to ${mode}" >&2; exit 1; }
+
+rm -f "${state_dir}"
+real_parent="${runtime_root}/real-parent"
+linked_parent="${runtime_root}/linked-parent"
+mkdir "${real_parent}"
+ln -s "${real_parent}" "${linked_parent}"
+if prepare_image_plane_shadow_state_directory "${linked_parent}/image-plane-shadow" "${owner}" "${group}" >/dev/null 2>&1; then
+  echo "symlinked shadow state ancestor was accepted" >&2
+  exit 1
+fi
+[ ! -e "${real_parent}/image-plane-shadow" ]
+`
+
+	scriptPath := filepath.Join(runtimeRoot, "node-updater-image-plane-shadow-state-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater shadow state harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(), "RUNTIME_ROOT="+runtimeRoot)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater shadow state harness failed: %v\n%s", err, output)
 	}
 }
 

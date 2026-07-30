@@ -3305,6 +3305,94 @@ if expires_at <= now + datetime.timedelta(seconds=minimum_validity):
 PY_IMAGE_CACHE_PLATFORM_CREDENTIAL
 }
 
+prepare_image_plane_shadow_state_directory() {
+  local state_dir="$1"
+  local owner="$2"
+  local group="$3"
+  command -v python3 >/dev/null 2>&1 || {
+    log "cannot prepare image-plane shadow state: python3 is unavailable"
+    return 1
+  }
+  python3 - "${state_dir}" "${owner}" "${group}" <<'PY_IMAGE_PLANE_SHADOW_STATE'
+import os
+import stat
+import sys
+
+state_dir, owner_raw, group_raw = sys.argv[1:]
+legacy_dir = "/var/lib/fugue/image-cache"
+credential_dir = "/run/fugue/image-cache"
+
+if (
+    not state_dir.startswith("/")
+    or state_dir == "/"
+    or state_dir != os.path.normpath(state_dir)
+    or "//" in state_dir
+):
+    raise SystemExit("image-plane shadow state path must be non-root, absolute, and canonical")
+
+try:
+    owner = int(owner_raw)
+    group = int(group_raw)
+except ValueError:
+    raise SystemExit("image-plane shadow state owner or group is invalid")
+if not (1 <= owner <= 2**31 - 1 and 1 <= group <= 2**31 - 1):
+    raise SystemExit("image-plane shadow state owner or group is outside the allowed range")
+
+for protected_dir in (legacy_dir, credential_dir):
+    try:
+        common = os.path.commonpath((state_dir, protected_dir))
+    except ValueError:
+        raise SystemExit("image-plane shadow state path cannot be compared safely")
+    if common in (state_dir, protected_dir):
+        raise SystemExit("image-plane shadow state path overlaps protected legacy or credential state")
+
+parent = os.path.dirname(state_dir)
+name = os.path.basename(state_dir)
+if not parent or not name or name in (".", ".."):
+    raise SystemExit("image-plane shadow state path has no safe parent")
+
+directory_flags = os.O_RDONLY | os.O_DIRECTORY
+directory_flags |= getattr(os, "O_CLOEXEC", 0)
+directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+parent_fd = None
+target_fd = None
+try:
+    parent_fd = os.open("/", directory_flags)
+    for component in parent.lstrip("/").split("/"):
+        if not component:
+            continue
+        next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+        os.close(parent_fd)
+        parent_fd = next_fd
+    try:
+        os.mkdir(name, mode=0o750, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    target_fd = os.open(name, directory_flags, dir_fd=parent_fd)
+    current = os.fstat(target_fd)
+    if not stat.S_ISDIR(current.st_mode):
+        raise SystemExit("image-plane shadow state target is not a directory")
+    if current.st_uid != owner or current.st_gid != group:
+        os.fchown(target_fd, owner, group)
+    os.fchmod(target_fd, 0o750)
+    current = os.fstat(target_fd)
+    if (
+        current.st_uid != owner
+        or current.st_gid != group
+        or stat.S_IMODE(current.st_mode) != 0o750
+    ):
+        raise SystemExit("image-plane shadow state ownership or mode did not converge")
+except OSError as exc:
+    detail = exc.strerror or exc.__class__.__name__
+    raise SystemExit("image-plane shadow state path cannot be prepared safely: " + detail)
+finally:
+    if target_fd is not None:
+        os.close(target_fd)
+    if parent_fd is not None:
+        os.close(parent_fd)
+PY_IMAGE_PLANE_SHADOW_STATE
+}
+
 prepare_image_cache_platform_credential_directory() {
   local credential_dir="${FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_DIR%/}"
   local expected_file="${credential_dir}/platform-component-credential.json"
@@ -3397,6 +3485,10 @@ refresh_image_cache_platform_identity() {
       return 1
     fi
   done
+  if ! prepare_image_plane_shadow_state_directory "/var/lib/fugue/image-plane-shadow" 65532 65532; then
+    log "cannot refresh image-cache platform identity: isolated shadow state preparation failed"
+    return 1
+  fi
   expected_node="$(node_deep_health_cluster_node_name | tr '[:upper:]' '[:lower:]')"
   if [ -z "${expected_node}" ]; then
     log "cannot refresh image-cache platform identity: cluster node identity is unavailable"

@@ -101,6 +101,17 @@ or repair host directories. The shadow state path must not equal, contain, or
 be contained by the legacy `/var/lib/fugue/image-cache` host path. This keeps a
 bad shadow observation, restart loop, or rollback local to the new lane.
 
+Node-updater v37 owns the prerequisite transition. Once a release coordinator
+later authorizes `FUGUE_IMAGE_CACHE_PLATFORM_IDENTITY_ENABLED=true` on one
+bounded node, every identity refresh first prepares the fixed shadow directory
+with uid/gid 65532 and mode 0750. The updater opens every path component without
+following symlinks, uses directory-relative create/open operations, rejects
+legacy or credential overlap, preserves existing files, and refuses to request
+a credential if preparation fails. There is no configurable production state
+path and no recursive chown. While the freeze remains active, do not roll out
+node-updater v37 or set this flag; the checked-in implementation and tests are
+not live readiness evidence.
+
 Safe repository-only validation while production release is frozen is:
 
 ```console

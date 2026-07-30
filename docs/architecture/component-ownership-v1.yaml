@@ -76,7 +76,7 @@ components:
     releaseLane: image-plane
     coordinator: release-control
     ownedState: [image-replication-spec, image-replication-observation-lkg, image-inventory, image-replica-status, image-gc-state]
-    contracts: [image-replication-plan@v1, image-availability@v1, image-evidence@v1]
+    contracts: [image-replication-plan@v1, image-availability@v1, image-evidence@v1, image-plane-host-state@v1]
     dependencies: [node-platform]
     failureBoundary: image-plane
     lkgPolicy: required
@@ -109,8 +109,8 @@ components:
     artifactKinds: [node-agent, node-updater]
     releaseLane: node-platform
     coordinator: release-control
-    ownedState: [node-policy, node-task, node-heartbeat, image-cache-platform-credential-lkg]
-    contracts: [node-platform@v1, platform-component-identity@v1]
+    ownedState: [node-policy, node-task, node-heartbeat, image-cache-platform-credential-lkg, image-plane-shadow-host-directory]
+    contracts: [node-platform@v1, platform-component-identity@v1, image-plane-host-state@v1]
     dependencies: []
     failureBoundary: node-platform
     lkgPolicy: required

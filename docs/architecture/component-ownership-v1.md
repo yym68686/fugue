@@ -235,6 +235,19 @@ unschedulable or unready and cannot alter the legacy image-cache DaemonSet.
 Production installation and enablement remain prohibited while the release
 freeze is active.
 
+Node-updater script v37 implements that host-state side of the
+`image-plane-host-state@v1` contract without enabling it. When the existing
+default-off image-cache platform identity refresh is explicitly enabled, the
+node-platform lane first converges exactly
+`/var/lib/fugue/image-plane-shadow` to uid/gid 65532 and mode 0750. It walks
+every existing ancestor with `O_NOFOLLOW`, creates and opens the final directory
+relative to a pinned parent descriptor, rejects legacy-cache or credential-path
+overlap, and never recursively changes the observation files inside. A
+symlink, missing/unsafe parent, ownership error, or mode error stops before the
+credential HTTP request, leaving both the legacy cache and any existing shadow
+LKG untouched. The updater version bump is repository evidence only until an
+authorized node-platform rollout occurs.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while
