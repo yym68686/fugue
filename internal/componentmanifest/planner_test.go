@@ -63,6 +63,8 @@ func TestPlanRepositoryReleaseControlOwnsMigrationPlanner(t *testing.T) {
 func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	for _, changedPath := range []string{
+		".github/workflows/validate-backup-release-candidate.yml",
+		"cmd/fugue-backup-release-plan/main.go",
 		"deploy/helm/fugue-backup-observer/templates/deployment.yaml",
 		"internal/backuprelease/candidate.go",
 	} {

@@ -404,6 +404,17 @@ verified before producing a digest. The resulting record permanently carries
 `productionMutationAllowed=false`; recalculating its digest cannot turn it
 into a deploy authorization.
 
+`cmd/fugue-backup-release-plan` is the candidate lane's only compiler-facing
+entrypoint. It accepts three canonical local inputs (request JSON, rendered
+manifest, and chart directory), rejects symlinks, hardlink aliases, path
+containment, duplicate/unknown/trailing JSON, unstable files, and unbounded
+chart topology, then checks the chart digest before invoking the pure
+candidate builder. The path-scoped
+`validate-backup-release-candidate.yml` workflow runs this contract, Helm lint,
+deterministic digest, and disabled-chart render with `contents: read`; it has
+no registry, artifact, Kubernetes, Helm mutation, dispatch, or production
+capability.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

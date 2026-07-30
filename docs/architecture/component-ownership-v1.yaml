@@ -94,7 +94,9 @@ components:
     sourceRoots:
       - Dockerfile.backup-observer
       - .github/workflows/build-backup-observer-image.yml
+      - .github/workflows/validate-backup-release-candidate.yml
       - cmd/fugue-backup-observer
+      - cmd/fugue-backup-release-plan
       - deploy/helm/fugue-backup-observer
       - internal/api/backup.go
       - internal/backupcontrol
