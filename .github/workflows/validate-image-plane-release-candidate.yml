@@ -1,0 +1,76 @@
+name: validate image-plane release candidate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - cmd/fugue-image-plane-release-plan/**
+      - internal/imageplanerelease/**
+      - internal/componentmanifest/**
+      - deploy/helm/fugue-image-plane/**
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-image-plane-release-candidate.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - cmd/fugue-image-plane-release-plan/**
+      - internal/imageplanerelease/**
+      - internal/componentmanifest/**
+      - deploy/helm/fugue-image-plane/**
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-image-plane-release-candidate.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-plane-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate candidate (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Verify candidate contract and dependency boundary
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-image-plane-release-plan ./internal/imageplanerelease ./internal/componentmanifest ./deploy/helm/fugue-image-plane
+          go build -trimpath -buildvcs=false -o /tmp/fugue-image-plane-release-plan ./cmd/fugue-image-plane-release-plan
+          deps="$(go list -deps ./cmd/fugue-image-plane-release-plan)"
+          if grep -Eq '^(database/sql|fugue/internal/(api|releasecontrol|store)(/|$)|k8s.io/client-go(/|$)|helm.sh/|github.com/google/go-containerregistry|github.com/jackc/pgx)' <<<"${deps}"; then
+            echo 'image-plane release planner dependency boundary widened' >&2
+            exit 1
+          fi
+
+      - name: Verify deterministic inert chart boundary
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-image-plane
+          first="$(/tmp/fugue-image-plane-release-plan --digest-chart --chart "${GITHUB_WORKSPACE}/deploy/helm/fugue-image-plane")"
+          second="$(/tmp/fugue-image-plane-release-plan --digest-chart --chart "${GITHUB_WORKSPACE}/deploy/helm/fugue-image-plane")"
+          [[ "${first}" =~ ^sha256:[0-9a-f]{64}$ && "${first}" == "${second}" ]]
+          rendered="$(helm template image-plane-shadow deploy/helm/fugue-image-plane)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled image-plane chart rendered Kubernetes resources' >&2
+            exit 1
+          fi

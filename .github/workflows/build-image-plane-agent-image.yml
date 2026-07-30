@@ -14,10 +14,7 @@ on:
       - cmd/fugue-image-cache/shadow_agent_main.go
       - cmd/fugue-image-cache/shadow_agent_test.go
       - cmd/fugue-image-cache/agent_image_boundary_test.go
-      - cmd/fugue-image-plane-release-plan/**
-      - internal/imageplanerelease/**
       - deploy/helm/fugue-image-plane/**
-      - docs/architecture/component-ownership-v1.yaml
       - scripts/test_image_plane_agent_image.sh
       - .github/workflows/build-image-plane-agent-image.yml
       - go.mod
@@ -33,10 +30,7 @@ on:
       - cmd/fugue-image-cache/shadow_agent_main.go
       - cmd/fugue-image-cache/shadow_agent_test.go
       - cmd/fugue-image-cache/agent_image_boundary_test.go
-      - cmd/fugue-image-plane-release-plan/**
-      - internal/imageplanerelease/**
       - deploy/helm/fugue-image-plane/**
-      - docs/architecture/component-ownership-v1.yaml
       - scripts/test_image_plane_agent_image.sh
       - .github/workflows/build-image-plane-agent-image.yml
       - go.mod
@@ -73,7 +67,6 @@ jobs:
         run: |
           set -euo pipefail
           go test ./cmd/fugue-image-cache -run 'TestImageCache(ProcessModeIsExplicit|PlatformPlanAgent)'
-          go test ./cmd/fugue-image-plane-release-plan ./internal/imageplanerelease
           go build -tags=imageplaneagent -trimpath -buildvcs=false -o /tmp/fugue-image-plane-agent ./cmd/fugue-image-cache
           deps="$(go list -tags=imageplaneagent -deps ./cmd/fugue-image-cache)"
           if grep -Eq '^(database/sql|fugue/internal/|k8s.io/|github.com/google/go-containerregistry|github.com/jackc/pgx)' <<<"${deps}"; then

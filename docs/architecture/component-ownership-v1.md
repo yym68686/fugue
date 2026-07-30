@@ -264,6 +264,14 @@ store, release-control, Kubernetes client, registry, Helm execution, or process
 execution dependency and only reads bounded, non-symlink inputs. Its
 deterministic chart digest covers every relative file path and byte in the
 chart directory.
+Candidate validation has its own read-only
+`image-plane-candidate-${ref}` workflow rather than running inside the agent
+image job. It builds no container and has no package write, registry login,
+artifact upload, workflow dispatch, production environment, self-hosted
+runner, Helm mutation, or Kubernetes command. The agent, candidate, legacy
+cache, and release-control checks therefore have independent cancellation and
+queue boundaries even when a shared chart edit correctly asks more than one
+consumer to validate compatibility.
 
 The workload mounts a dedicated host state directory at
 `/var/lib/fugue/image-cache` inside the container but never mounts the legacy

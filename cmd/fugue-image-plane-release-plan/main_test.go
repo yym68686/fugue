@@ -6,10 +6,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+const imagePlaneCandidateWorkflowPath = "../../.github/workflows/validate-image-plane-release-candidate.yml"
+
+type candidateWorkflowStep struct {
+	Name string `yaml:"name"`
+	Uses string `yaml:"uses"`
+	Run  string `yaml:"run"`
+}
 
 func TestRunRejectsAmbiguousOrUnknownInput(t *testing.T) {
 	var stdout bytes.Buffer
@@ -165,6 +176,116 @@ func TestImagePlaneReleasePlannerDependencyAndCapabilityBoundary(t *testing.T) {
 	} {
 		if strings.Contains(string(source), forbidden) {
 			t.Fatalf("planner source contains forbidden execution capability %q", forbidden)
+		}
+	}
+}
+
+func TestImagePlaneCandidateWorkflowIsIndependentValidationOnly(t *testing.T) {
+	data, err := os.ReadFile(imagePlaneCandidateWorkflowPath)
+	if err != nil {
+		t.Fatalf("read candidate workflow: %v", err)
+	}
+	var workflow struct {
+		Name        string            `yaml:"name"`
+		Permissions map[string]string `yaml:"permissions"`
+		On          struct {
+			Push struct {
+				Branches []string `yaml:"branches"`
+				Paths    []string `yaml:"paths"`
+			} `yaml:"push"`
+			PullRequest struct {
+				Paths []string `yaml:"paths"`
+			} `yaml:"pull_request"`
+		} `yaml:"on"`
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress bool   `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+		Jobs map[string]struct {
+			RunsOn      string                  `yaml:"runs-on"`
+			Timeout     int                     `yaml:"timeout-minutes"`
+			Permissions map[string]string       `yaml:"permissions"`
+			Steps       []candidateWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse candidate workflow: %v", err)
+	}
+	if workflow.Name != "validate image-plane release candidate" ||
+		!reflect.DeepEqual(workflow.Permissions, map[string]string{"contents": "read"}) ||
+		!reflect.DeepEqual(workflow.On.Push.Branches, []string{"main"}) || len(workflow.On.Push.Paths) == 0 ||
+		!reflect.DeepEqual(workflow.On.Push.Paths, workflow.On.PullRequest.Paths) ||
+		workflow.Concurrency.Group != "image-plane-candidate-${{ github.ref }}" || !workflow.Concurrency.CancelInProgress ||
+		len(workflow.Jobs) != 1 {
+		t.Fatalf("candidate workflow boundary drifted: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["validate-only"]
+	if !ok || job.RunsOn != "ubuntu-latest" || job.Timeout != 10 || len(job.Permissions) != 0 || len(job.Steps) == 0 {
+		t.Fatalf("candidate validation-only job drifted: %+v", workflow.Jobs)
+	}
+	raw := string(data)
+	for _, required := range []string{
+		"cmd/fugue-image-plane-release-plan/**",
+		"internal/imageplanerelease/**",
+		"internal/componentmanifest/**",
+		"deploy/helm/fugue-image-plane/**",
+		"docs/architecture/component-ownership-v1.yaml",
+		"go test ./cmd/fugue-image-plane-release-plan ./internal/imageplanerelease ./internal/componentmanifest ./deploy/helm/fugue-image-plane",
+		"go build -trimpath -buildvcs=false -o /tmp/fugue-image-plane-release-plan",
+		"--digest-chart",
+		"helm lint deploy/helm/fugue-image-plane",
+		"helm template image-plane-shadow deploy/helm/fugue-image-plane",
+		"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+		"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+		"azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310",
+	} {
+		if !strings.Contains(raw, required) {
+			t.Fatalf("candidate workflow is missing boundary %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"packages: write",
+		"actions/upload-artifact@",
+		"docker/login-action@",
+		"--push",
+		"push: true",
+		"ghcr.io/",
+		"environment: production",
+		"workflow_dispatch",
+		"self-hosted",
+		"kubectl ",
+		"helm install",
+		"helm upgrade",
+		"helm uninstall",
+		"helm push",
+		"helm package",
+		"docker build",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("candidate validation workflow contains forbidden capability %q", forbidden)
+		}
+	}
+	for _, step := range job.Steps {
+		if step.Uses != "" && !regexp.MustCompile(`^[^@]+@[0-9a-f]{40}$`).MatchString(step.Uses) {
+			t.Fatalf("candidate workflow action %q is not pinned to a full commit SHA", step.Uses)
+		}
+		if step.Run == "" {
+			continue
+		}
+		command := exec.Command("bash", "-n")
+		command.Stdin = strings.NewReader(step.Run)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("candidate workflow step %q has invalid bash: %v output=%q", step.Name, err, output)
+		}
+	}
+
+	agentWorkflow, err := os.ReadFile("../../.github/workflows/build-image-plane-agent-image.yml")
+	if err != nil {
+		t.Fatalf("read agent workflow: %v", err)
+	}
+	for _, candidatePath := range []string{"cmd/fugue-image-plane-release-plan", "internal/imageplanerelease"} {
+		if strings.Contains(string(agentWorkflow), candidatePath) {
+			t.Fatalf("agent image workflow still owns candidate path %q", candidatePath)
 		}
 	}
 }

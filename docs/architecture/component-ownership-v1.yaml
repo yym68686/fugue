@@ -69,6 +69,7 @@ components:
       - Dockerfile.image-plane-agent
       - .github/workflows/build-image-plane-agent-image.yml
       - .github/workflows/build-image-plane-image.yml
+      - .github/workflows/validate-image-plane-release-candidate.yml
       - cmd/fugue-image-cache
       - cmd/fugue-image-plane-release-plan
       - deploy/helm/fugue-image-plane
