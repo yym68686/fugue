@@ -1,0 +1,29 @@
+# The observation agent is compiled from an explicit source closure. The
+# image-cache registry implementation and its third-party OCI dependencies are
+# deliberately absent from this build context boundary.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+
+RUN apk add --no-cache ca-certificates
+COPY go.mod go.sum ./
+COPY cmd/fugue-image-cache/env.go ./cmd/fugue-image-cache/env.go
+COPY cmd/fugue-image-cache/http_lifecycle.go ./cmd/fugue-image-cache/http_lifecycle.go
+COPY cmd/fugue-image-cache/platform_plan_shadow.go ./cmd/fugue-image-cache/platform_plan_shadow.go
+COPY cmd/fugue-image-cache/shadow_agent.go ./cmd/fugue-image-cache/shadow_agent.go
+COPY cmd/fugue-image-cache/shadow_agent_main.go ./cmd/fugue-image-cache/shadow_agent_main.go
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -tags=imageplaneagent -trimpath -buildvcs=false -ldflags='-s -w' \
+    -o /out/fugue-image-plane-agent ./cmd/fugue-image-cache
+
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+LABEL org.opencontainers.image.title="fugue-image-plane-agent" \
+      org.opencontainers.image.description="Fugue observation-only image-plane agent"
+WORKDIR /app
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/fugue-image-plane-agent /usr/local/bin/fugue-image-plane-agent
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/fugue-image-plane-agent"]

@@ -144,6 +144,19 @@ the new lane cannot publish or replace it yet.
 Feature-branch pushes are intentionally covered by the PR event only, avoiding
 duplicate push and PR builds for the same revision; direct `main` changes retain
 the push check.
+
+The shadow observer now has a second, narrower compilation boundary rather
+than merely another runtime argument. `Dockerfile.image-plane-agent` copies
+only five explicitly named agent/contract/lifecycle source files and builds
+with the `imageplaneagent` tag, which excludes the legacy `main.go`. Its Linux
+amd64/arm64 dependency closure contains no Fugue internal package, OCI registry
+library, Kubernetes client, database driver, or PostgreSQL package. The final
+non-root image declares no port and starts
+`/usr/local/bin/fugue-image-plane-agent` directly. A distinct path-scoped
+`image-plane-agent-${ref}` workflow builds and probes this artifact and owns
+the default-disabled chart checks; the legacy image-cache workflow no longer
+owns that chart. Both workflows remain read-only/build-only and can run
+independently from release-control and every other subsystem lane.
 The image-plane process now also owns a bounded lifecycle boundary: SIGTERM or
 SIGINT stops discovery of new background hydrate/report work, drains active HTTP
 requests and cache-owned jobs under one 25-second deadline, and exits non-zero
@@ -221,10 +234,13 @@ API root, `OnDelete` replacement, and the exact opt-in node selector
 `fugue.io/image-plane-shadow=true`. It produces one observation-only DaemonSet
 with no Service, ports, host network, service-account token, RBAC, init
 container, or broad credential. Its explicit `platform-plan-shadow` process
-mode does not initialize the legacy OCI registry, store, image-location API,
-management handlers, or registry background jobs; it exposes only
-credential-free health and observation readiness. Both are probed only over
-Pod loopback from inside the container.
+mode remains as a compatibility path, but the chart rejects the legacy
+registry-capable repository and requires the dedicated
+`fugue-image-plane-agent` artifact. That binary cannot initialize the legacy
+OCI registry, store, image-location API, management handlers, or registry
+background jobs because those sources and dependencies are absent from its
+compilation. It exposes only credential-free health and observation readiness.
+Both are probed only over Pod loopback from inside the container.
 
 The workload mounts a dedicated host state directory at
 `/var/lib/fugue/image-cache` inside the container but never mounts the legacy

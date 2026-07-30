@@ -84,9 +84,8 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 	}
 	container := pod.Containers[0]
 	if container.Name != "image-plane-shadow" ||
-		container.Image != "registry.example.test/fugue/image-cache@"+imagePlaneTestDigest ||
-		container.ImagePullPolicy != corev1.PullIfNotPresent || len(container.Ports) != 0 || len(container.Command) != 0 ||
-		!reflect.DeepEqual(container.Args, []string{"platform-plan-shadow"}) {
+		container.Image != "registry.example.test/fugue/fugue-image-plane-agent@"+imagePlaneTestDigest ||
+		container.ImagePullPolicy != corev1.PullIfNotPresent || len(container.Ports) != 0 || len(container.Command) != 0 || len(container.Args) != 0 {
 		t.Fatalf("shadow container artifact or network boundary drifted: %+v", container)
 	}
 	security := container.SecurityContext
@@ -174,6 +173,7 @@ func TestEnabledImagePlaneChartRejectsUnsafeOrUnboundedValues(t *testing.T) {
 	}{
 		{name: "missing repository", args: []string{"--set-string", "image.repository="}, want: "image.repository is required"},
 		{name: "tagged repository", args: []string{"--set-string", "image.repository=registry.example.test/fugue/image-cache:latest"}, want: "without a tag or digest"},
+		{name: "legacy image-cache artifact", args: []string{"--set-string", "image.repository=registry.example.test/fugue/image-cache"}, want: "dedicated fugue-image-plane-agent artifact"},
 		{name: "missing digest", args: []string{"--set-string", "image.digest="}, want: "image.digest is required"},
 		{name: "uppercase digest", args: []string{"--set-string", "image.digest=sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, want: "exact lowercase sha256"},
 		{name: "plaintext API", args: []string{"--set-string", "api.baseURL=http://api.example.test"}, want: "absolute HTTPS"},
@@ -218,7 +218,7 @@ func TestEnabledImagePlaneChartRejectsUnsafeOrUnboundedValues(t *testing.T) {
 func validImagePlaneArgs() []string {
 	return []string{
 		"--set", "enabled=true",
-		"--set-string", "image.repository=registry.example.test/fugue/image-cache",
+		"--set-string", "image.repository=registry.example.test/fugue/fugue-image-plane-agent",
 		"--set-string", "image.digest=" + imagePlaneTestDigest,
 		"--set-string", "api.baseURL=https://api.fugue-system.svc.cluster.local:8443",
 	}

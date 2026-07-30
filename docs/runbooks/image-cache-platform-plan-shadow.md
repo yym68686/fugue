@@ -75,15 +75,17 @@ An explicitly enabled render still creates only one shadow DaemonSet and cannot
 publish, replicate, prune, or serve registry traffic:
 
 - the image is required as a fully qualified repository plus exact lowercase
-  `sha256` digest; tags are rejected;
+  `sha256` digest; tags are rejected, and the repository must end in
+  `/fugue-image-plane-agent` so the legacy cache image cannot be selected;
 - replacement is `OnDelete`, so a chart update cannot automatically fan out;
 - scheduling is restricted to the exact opt-in label
   `fugue.io/image-plane-shadow=true`;
 - the health listener is Pod-loopback-only, with no declared container port,
   Service, host port, or host network;
-- the explicit `platform-plan-shadow` process mode does not initialize the
-  legacy registry, disk store, image-location reporter, management mutation
-  endpoints, or registry background workers;
+- the dedicated image entrypoint runs only the platform-plan agent. Its build
+  tag and exact Docker source closure omit the legacy registry, disk store,
+  image-location reporter, management mutation endpoints, registry background
+  workers, OCI registry library, and all Fugue internal packages;
 - the Pod has no Kubernetes API token, ServiceAccount, RBAC, init container, or
   privileged capability;
 - startup/liveness check agent health, while readiness checks only the fresh

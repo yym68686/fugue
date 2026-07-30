@@ -7,7 +7,6 @@ on:
     paths:
       - Dockerfile.image-cache
       - cmd/fugue-image-cache/**
-      - deploy/helm/fugue-image-plane/**
       - internal/imagecacheusage/**
       - scripts/test_image_plane_image.sh
       - .github/workflows/build-image-plane-image.yml
@@ -17,7 +16,6 @@ on:
     paths:
       - Dockerfile.image-cache
       - cmd/fugue-image-cache/**
-      - deploy/helm/fugue-image-plane/**
       - internal/imagecacheusage/**
       - scripts/test_image_plane_image.sh
       - .github/workflows/build-image-plane-image.yml
@@ -46,11 +44,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Setup Helm
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: v4.2.0
-
       - name: Test the independent dependency closure
         run: |
           set -euo pipefail
@@ -58,17 +51,6 @@ jobs:
           deps="$(go list -deps ./cmd/fugue-image-cache)"
           if grep -Eq '^(database/sql|fugue/internal/(api|controller|store)|k8s.io/|github.com/jackc/pgx)' <<<"${deps}"; then
             echo 'image-plane dependency boundary widened' >&2
-            exit 1
-          fi
-
-      - name: Validate the deployment-disabled chart
-        run: |
-          set -euo pipefail
-          helm lint deploy/helm/fugue-image-plane
-          go test ./deploy/helm/fugue-image-plane
-          rendered="$(helm template image-plane-shadow deploy/helm/fugue-image-plane)"
-          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
-            echo 'disabled image-plane chart rendered Kubernetes resources' >&2
             exit 1
           fi
 

@@ -5,7 +5,9 @@ enabled: false
 
 image:
   # A fully qualified repository plus immutable digest is mandatory. Mutable
-  # tags are intentionally unsupported in this independent lane.
+  # tags are intentionally unsupported in this independent lane. During
+  # shadow migration the repository must end in /fugue-image-plane-agent so
+  # the legacy registry-capable artifact cannot be selected accidentally.
   repository: ""
   digest: ""
 

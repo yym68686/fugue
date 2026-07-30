@@ -57,7 +57,7 @@ func TestImageCachePlatformPlanAgentExposesOnlyCredentialFreeHealth(t *testing.T
 		Generation:        "generation-7",
 		LastObservationAt: &now,
 	}}
-	handler := &imageCachePlatformPlanAgentHandler{owner: &imageCache{
+	handler := &imageCachePlatformPlanAgentHandler{owner: &imageCachePlatformPlanAgent{
 		clusterNode:  "worker-a",
 		platformPlan: consumer,
 	}}
@@ -109,7 +109,7 @@ func TestImageCachePlatformPlanAgentExposesOnlyCredentialFreeHealth(t *testing.T
 
 func TestImageCachePlatformPlanAgentHealthSeparatesLivenessFromReadiness(t *testing.T) {
 	t.Parallel()
-	handler := &imageCachePlatformPlanAgentHandler{owner: &imageCache{platformPlanErr: "invalid configuration"}}
+	handler := &imageCachePlatformPlanAgentHandler{owner: &imageCachePlatformPlanAgent{platformPlanErr: "invalid configuration"}}
 	liveness := httptest.NewRecorder()
 	handler.ServeHTTP(liveness, httptest.NewRequest(http.MethodGet, "http://image-plane.test/healthz", nil))
 	if liveness.Code != http.StatusOK {

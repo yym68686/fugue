@@ -3,6 +3,9 @@
 {{- if or (contains "@" $repository) (contains "://" $repository) (not (regexMatch "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$" $repository)) -}}
 {{- fail "image.repository must be a fully qualified lowercase OCI repository without a tag or digest" -}}
 {{- end -}}
+{{- if not (hasSuffix "/fugue-image-plane-agent" $repository) -}}
+{{- fail "image.repository must select the dedicated fugue-image-plane-agent artifact during shadow migration" -}}
+{{- end -}}
 {{- $digest := trim (required "image.digest is required when image-plane is enabled" .Values.image.digest) -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
 {{- fail "image.digest must be an exact lowercase sha256 digest" -}}
@@ -109,8 +112,6 @@ spec:
         - name: image-plane-shadow
           image: {{ printf "%s@%s" $repository $digest | quote }}
           imagePullPolicy: IfNotPresent
-          args:
-            - platform-plan-shadow
           securityContext:
             allowPrivilegeEscalation: false
             privileged: false

@@ -10,10 +10,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-const imageCacheProcessModePlatformPlanShadow = "platform-plan-shadow"
+const (
+	imageCacheProcessModePlatformPlanShadow = "platform-plan-shadow"
+	imageCachePlatformPlanAgentShutdownTime = 25 * time.Second
+)
 
 func imageCacheProcessMode(args []string) (string, error) {
 	if len(args) == 0 {
@@ -38,7 +42,7 @@ func runImageCachePlatformPlanAgent(lifecycle context.Context) error {
 	}
 	apiBase := strings.TrimRight(env("FUGUE_API_BASE", os.Getenv("FUGUE_API_URL")), "/")
 	clusterNode := env("FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME", os.Getenv("NODE_NAME"))
-	owner := &imageCache{clusterNode: clusterNode, lifecycle: lifecycle}
+	owner := &imageCachePlatformPlanAgent{clusterNode: clusterNode, lifecycle: lifecycle}
 	platformPlan, platformPlanErr := newImageCachePlatformPlanConsumerFromEnvironment(apiBase, clusterNode)
 	if platformPlanErr != nil {
 		owner.platformPlanErr = boundedImageCachePlatformError(platformPlanErr)
@@ -69,7 +73,7 @@ func runImageCachePlatformPlanAgent(lifecycle context.Context) error {
 		lifecycle,
 		server,
 		listener,
-		defaultImageCacheShutdownTimeout,
+		imageCachePlatformPlanAgentShutdownTime,
 		owner.waitForBackground,
 	)
 }
@@ -91,7 +95,7 @@ func validateImageCachePlatformPlanAgentListenAddress(address string) error {
 }
 
 type imageCachePlatformPlanAgentHandler struct {
-	owner *imageCache
+	owner *imageCachePlatformPlanAgent
 }
 
 func (h *imageCachePlatformPlanAgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +137,70 @@ func (h *imageCachePlatformPlanAgentHandler) serveReadiness(w http.ResponseWrite
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+type imageCachePlatformPlanAgent struct {
+	clusterNode     string
+	platformPlan    *imageCachePlatformPlanConsumer
+	platformPlanErr string
+	lifecycle       context.Context
+	background      sync.WaitGroup
+}
+
+func (a *imageCachePlatformPlanAgent) backgroundContext() context.Context {
+	if a != nil && a.lifecycle != nil {
+		return a.lifecycle
+	}
+	return context.Background()
+}
+
+func (a *imageCachePlatformPlanAgent) startBackground(work func(context.Context)) bool {
+	if a == nil || work == nil {
+		return false
+	}
+	ctx := a.backgroundContext()
+	if ctx.Err() != nil {
+		return false
+	}
+	a.background.Add(1)
+	go func() {
+		defer a.background.Done()
+		work(ctx)
+	}()
+	return true
+}
+
+func (a *imageCachePlatformPlanAgent) waitForBackground(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("image-plane shadow background drain context is nil")
+	}
+	done := make(chan struct{})
+	go func() {
+		a.background.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (a *imageCachePlatformPlanAgent) platformPlanReady(now time.Time) bool {
+	if a == nil || a.platformPlan == nil || a.platformPlanErr != "" {
+		return false
+	}
+	status := a.platformPlan.Status()
+	if !status.Enabled || !status.ObservationOnly || status.State != "observed" || status.LastObservationAt == nil {
+		return false
+	}
+	observedAt := status.LastObservationAt.UTC()
+	now = now.UTC()
+	return !observedAt.After(now.Add(30*time.Second)) && observedAt.After(now.Add(-imageCachePlatformPlanReadinessMaxAge))
 }
 
 func (h *imageCachePlatformPlanAgentHandler) serveHealth(w http.ResponseWriter) {

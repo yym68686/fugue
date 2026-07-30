@@ -66,13 +66,16 @@ components:
     ownershipMode: transitional-shared
     sourceRoots:
       - Dockerfile.image-cache
+      - Dockerfile.image-plane-agent
+      - .github/workflows/build-image-plane-agent-image.yml
       - .github/workflows/build-image-plane-image.yml
       - cmd/fugue-image-cache
       - deploy/helm/fugue-image-plane
       - internal/imagecacheusage
       - internal/releaseimageconsumer
+      - scripts/test_image_plane_agent_image.sh
       - scripts/test_image_plane_image.sh
-    artifactKinds: [image-cache, image-replication-plan]
+    artifactKinds: [image-cache, image-plane-agent, image-replication-plan]
     releaseLane: image-plane
     coordinator: release-control
     ownedState: [image-replication-spec, image-replication-observation-lkg, image-inventory, image-replica-status, image-gc-state]
