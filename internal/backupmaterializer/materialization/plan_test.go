@@ -75,14 +75,20 @@ func TestSecretIdentityIsCanonicalForEveryBackupCellKind(t *testing.T) {
 		cellKey := "backup/" + kind + "/0123456789abcdef"
 		cellID := kind + "-0123456789abcdef"
 		name := secretNameForCell(cellKey)
+		identity, err := SecretIdentityForCell(cellKey)
 		if got := cellIDForKey(cellKey); got != cellID ||
+			err != nil || identity.Namespace != SecretNamespace || identity.SecretName != name ||
+			identity.CellKey != cellKey || identity.CellID != cellID ||
 			name != "fugue-backup-observer-"+cellID+"-input" || len(name) > 63 || !canonicalName.MatchString(name) {
-			t.Fatalf("cell %q produced invalid identity: id=%q name=%q length=%d", cellKey, got, name, len(name))
+			t.Fatalf("cell %q produced invalid identity: id=%q name=%q identity=%#v err=%v", cellKey, got, name, identity, err)
 		}
 	}
 	for _, invalid := range []string{"", "backup/app-database/ABC", "backup/unknown/0123456789abcdef"} {
 		if cellIDForKey(invalid) != "" || secretNameForCell(invalid) != "" {
 			t.Fatalf("invalid cell %q produced a Secret identity", invalid)
+		}
+		if _, err := SecretIdentityForCell(invalid); !errors.Is(err, ErrPlan) {
+			t.Fatalf("invalid cell %q identity error = %v, want invalid plan", invalid, err)
 		}
 	}
 }
@@ -146,6 +152,9 @@ func TestPlanRejectsBindingDataPolicyAndTimeDrift(t *testing.T) {
 			if err := ValidateLastKnownGood(candidate, now.Add(time.Minute)); !errors.Is(err, ErrPlan) {
 				t.Fatalf("last-known-good drift error = %v, want invalid plan", err)
 			}
+			if err := ValidateSealed(candidate); !errors.Is(err, ErrPlan) {
+				t.Fatalf("sealed drift error = %v, want invalid plan", err)
+			}
 		})
 	}
 	badDigest := plan
@@ -155,6 +164,9 @@ func TestPlanRejectsBindingDataPolicyAndTimeDrift(t *testing.T) {
 	}
 	if err := ValidateLastKnownGood(badDigest, now.Add(time.Minute)); !errors.Is(err, ErrPlan) {
 		t.Fatalf("last-known-good digest drift error = %v, want invalid plan", err)
+	}
+	if err := ValidateSealed(badDigest); !errors.Is(err, ErrPlan) {
+		t.Fatalf("sealed digest drift error = %v, want invalid plan", err)
 	}
 	for name, validationTime := range map[string]time.Time{"zero": {}, "expired": plan.ExpiresAt} {
 		t.Run(name, func(t *testing.T) {
@@ -168,6 +180,9 @@ func TestPlanRejectsBindingDataPolicyAndTimeDrift(t *testing.T) {
 				t.Fatalf("private data time error = %v, want invalid plan", err)
 			}
 		})
+	}
+	if err := ValidateSealed(plan); err != nil {
+		t.Fatalf("sealed structural validation incorrectly applied a current lifetime gate: %v", err)
 	}
 	for name, validationTime := range map[string]time.Time{
 		"delivery window elapsed": plan.IssuedAt.Add(materializercontract.MaxObserverInputDeliveryAge + time.Second),

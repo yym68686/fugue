@@ -723,6 +723,37 @@ and the observer token is still unexpired. At `expiresAt` it fails closed. This
 keeps transient renewal failure from deleting a still-working generation
 without allowing the materializer to write that stale generation again.
 
+`internal/backupmaterializer/reconcile` defines the pure
+`backup-materializer-secret-reconcile@v1` object-evidence and decision
+boundary. It assigns each materializer loop exactly one canonical cell-local
+Secret identity and publishes a data-free Opaque Secret manifest containing
+only owned labels, recovery annotations, the two expected data keys and their
+digests. The manifest requires a mutable, independently owned object: a Secret
+that is immutable, already deleting, or has any owner reference cannot become
+a managed snapshot and therefore cannot later disappear through unrelated
+garbage collection or make renewal permanently unreplaceable.
+
+A managed snapshot is sealed only when UID and opaque resourceVersion are
+present, all owned metadata bindings match the source plan, and the object has
+exactly `spec.json` and `token` with the expected content digests. Unknown
+labels and annotations are tolerated so admission metadata can be preserved;
+unknown data keys are rejected. Raw values are neither retained independently
+nor rendered in JSON or diagnostics. Structural validation is separate from
+current lifetime validation, allowing an expired generation to be recognized
+without ever making it applyable again.
+
+The cell-local policy emits exactly five shadow outcomes: create-if-absent,
+no-op for an identical generation, UID plus resourceVersion-fenced replace,
+retain an unexpired last-known-good generation when the source is unavailable,
+or block. Creation is never an upsert, replacement retains the current
+generation on conflict/failure, and source loss or token expiry is never a
+delete instruction. Foreign and malformed objects are blocked rather than
+adopted or overwritten. Every decision is digest-bound and permanently sets
+`deleteAllowed`, `executionAllowed`, and `productionMutationAllowed` false.
+This package has no Kubernetes types/client, filesystem, network, datastore,
+signer, process, RBAC, chart, or deployment capability; observation recovery
+and a fixed-purpose writer remain later, separately reviewed atoms.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with

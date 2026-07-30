@@ -85,6 +85,31 @@ type SecretData struct {
 	ObserverToken []byte
 }
 
+// SecretIdentity is the deterministic, cell-local Kubernetes identity owned
+// by one materializer loop. It contains no credential or Secret data.
+type SecretIdentity struct {
+	Namespace  string `json:"namespace"`
+	SecretName string `json:"secretName"`
+	CellKey    string `json:"cellKey"`
+	CellID     string `json:"cellId"`
+}
+
+// SecretIdentityForCell returns the one Secret identity a cell-local
+// materializer may observe. It grants no read or mutation capability.
+func SecretIdentityForCell(cellKey string) (SecretIdentity, error) {
+	cellID := cellIDForKey(cellKey)
+	secretName := secretNameForCell(cellKey)
+	if cellID == "" || !canonicalName.MatchString(secretName) {
+		return SecretIdentity{}, ErrPlan
+	}
+	return SecretIdentity{
+		Namespace:  SecretNamespace,
+		SecretName: secretName,
+		CellKey:    cellKey,
+		CellID:     cellID,
+	}, nil
+}
+
 // Build validates the authenticated bundle envelope and deterministically
 // seals its two data items into a non-executable cell-local plan.
 func Build(bundle materializercontract.ObserverInputBundle, now time.Time) (Plan, error) {
@@ -102,19 +127,18 @@ func Build(bundle materializercontract.ObserverInputBundle, now time.Time) (Plan
 	if err != nil || decodedSpec != bundle.DesiredSpec {
 		return Plan{}, ErrPlan
 	}
-	cellID := cellIDForKey(bundle.CellKey)
-	secretName := secretNameForCell(bundle.CellKey)
-	if cellID == "" || !canonicalName.MatchString(secretName) {
+	identity, err := SecretIdentityForCell(bundle.CellKey)
+	if err != nil {
 		return Plan{}, ErrPlan
 	}
 	plan := Plan{
 		APIVersion:                PlanAPIVersion,
 		Kind:                      PlanKind,
 		Policy:                    PlanPolicy,
-		Namespace:                 SecretNamespace,
-		SecretName:                secretName,
+		Namespace:                 identity.Namespace,
+		SecretName:                identity.SecretName,
 		CellKey:                   bundle.CellKey,
-		CellID:                    cellID,
+		CellID:                    identity.CellID,
 		RunID:                     bundle.RunID,
 		SpecDigest:                bundle.SpecDigest,
 		BundleDigest:              bundle.Digest,
@@ -128,7 +152,7 @@ func Build(bundle materializercontract.ObserverInputBundle, now time.Time) (Plan
 		IssuedAt:                  bundle.IssuedAt,
 		RenewAfter:                bundle.RenewAfter,
 		ExpiresAt:                 bundle.ExpiresAt,
-		IdempotencyKey:            "backup-observer-input/" + cellID + "/" + strings.TrimPrefix(bundle.Digest, "sha256:"),
+		IdempotencyKey:            "backup-observer-input/" + identity.CellID + "/" + strings.TrimPrefix(bundle.Digest, "sha256:"),
 		RetainExistingOnFailure:   true,
 		RequireResourceVersionCAS: true,
 		LastKnownGoodRequired:     true,
@@ -160,6 +184,17 @@ func Validate(plan Plan, now time.Time) error {
 // binding, raw-data digests, fixed non-executable policy, and unexpired token.
 func ValidateLastKnownGood(plan Plan, now time.Time) error {
 	return validate(plan, now, false)
+}
+
+// ValidateSealed validates the complete immutable binding independently of a
+// current apply or retention decision. It is intended for authenticating an
+// already observed generation before a reconcile policy evaluates its current
+// lifetime; success never authorizes applying or retaining the plan.
+func ValidateSealed(plan Plan) error {
+	if plan.IssuedAt.IsZero() {
+		return ErrPlan
+	}
+	return validate(plan, plan.IssuedAt, false)
 }
 
 func validate(plan Plan, now time.Time, requireApplyWindow bool) error {
