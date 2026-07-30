@@ -1,0 +1,30 @@
+# Digest pins the multi-architecture Go builder so the backup lane cannot move
+# its toolchain implicitly.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+
+RUN apk add --no-cache ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+
+# This exact source closure is the independently compiled backup observer. It
+# cannot initialize the legacy API/store/model, a database, Kubernetes, an
+# object store, the registry, or a backup execution process.
+COPY cmd/fugue-backup-observer ./cmd/fugue-backup-observer
+COPY internal/backupcontrol ./internal/backupcontrol
+COPY internal/backupobserver ./internal/backupobserver
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false -ldflags='-s -w' \
+    -o /out/fugue-backup-observer ./cmd/fugue-backup-observer
+
+FROM scratch
+LABEL org.opencontainers.image.title="fugue-backup-observer" \
+      org.opencontainers.image.description="Observation-only Fugue backup cell observer"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/fugue-backup-observer /usr/local/bin/fugue-backup-observer
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/fugue-backup-observer"]

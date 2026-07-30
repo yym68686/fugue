@@ -346,6 +346,27 @@ execution dependency. Durable restart recovery, the server-side least-
 privilege observation endpoint, the standalone artifact, and its default-off
 chart remain later atoms, so this code cannot observe or mutate production yet.
 
+`cmd/fugue-backup-observer` turns that core into a separately compiled process
+without importing any additional Fugue package. Configuration is
+default-disabled and exact: enabled mode requires one cell key, absolute spec
+and token files, HTTPS API root, and bounded reconcile/request/attempt/shutdown
+values. Its local health server accepts only an explicit loopback IP, exposes
+no command endpoint, and includes an internal loopback-only probe mode so a
+scratch container never needs a shell or HTTP utility. SIGTERM cancels the
+cell loop and completes a bounded graceful HTTP shutdown.
+
+`Dockerfile.backup-observer` copies only the command, `backupcontrol`, and
+`backupobserver` source closures into a digest-pinned Go builder. The resulting
+CA-enabled `scratch` image runs as `65532:65532`, declares no port, and is
+probed with a read-only root to prove disabled liveness, unready observation
+state, no published port, no credential-shaped logs, and clean SIGTERM exit.
+The path-scoped `backup-observer-image-${ref}` workflow has only
+`contents: read`, builds with `--load`, and owns no registry login, artifact
+upload, package write, dispatch, Helm, Kubernetes, production environment, or
+deploy step. It is therefore an independent compilation and CI cancellation
+boundary, not a published or installed backup service. The legacy API remains
+the only running backup owner.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

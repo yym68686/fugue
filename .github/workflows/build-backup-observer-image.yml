@@ -1,0 +1,84 @@
+name: build backup observer image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile.backup-observer
+      - cmd/fugue-backup-observer/**
+      - internal/backupcontrol/**
+      - internal/backupobserver/**
+      - scripts/test_backup_observer_image.sh
+      - .github/workflows/build-backup-observer-image.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - Dockerfile.backup-observer
+      - cmd/fugue-backup-observer/**
+      - internal/backupcontrol/**
+      - internal/backupobserver/**
+      - scripts/test_backup_observer_image.sh
+      - .github/workflows/build-backup-observer-image.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-observer-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-only:
+    name: build and probe observer (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test the independent dependency closure
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-backup-observer ./internal/backupcontrol ./internal/backupobserver
+          deps="$(go list -deps ./cmd/fugue-backup-observer)"
+          if grep -Eq '^(database/sql|os/exec|fugue/internal/(api|auth|controller|model|store)|k8s.io/|github.com/(aws|google/go-containerregistry|jackc))' <<<"${deps}"; then
+            echo 'backup observer dependency boundary widened' >&2
+            exit 1
+          fi
+          local_deps="$(grep '^fugue/' <<<"${deps}" | sort -u)"
+          expected_local_deps=$'fugue/cmd/fugue-backup-observer\nfugue/internal/backupcontrol\nfugue/internal/backupobserver'
+          if [[ "${local_deps}" != "${expected_local_deps}" ]]; then
+            printf 'backup observer local dependency closure drifted:\n%s\n' "${local_deps}" >&2
+            exit 1
+          fi
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
+              go build -trimpath -buildvcs=false -o "/tmp/fugue-backup-observer-${arch}" ./cmd/fugue-backup-observer
+          done
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build image locally without publishing
+        env:
+          IMAGE_REF: fugue-backup-observer:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.backup-observer \
+            --tag "${IMAGE_REF}" \
+            --load \
+            .
+
+      - name: Probe the local image
+        run: scripts/test_backup_observer_image.sh "fugue-backup-observer:${GITHUB_SHA}"

@@ -92,11 +92,15 @@ components:
     runtimeKinds: [deployment, cronjob]
     ownershipMode: transitional-shared
     sourceRoots:
+      - Dockerfile.backup-observer
+      - .github/workflows/build-backup-observer-image.yml
+      - cmd/fugue-backup-observer
       - internal/api/backup.go
       - internal/backupcontrol
       - internal/backupobserver
       - internal/store/backup.go
-    artifactKinds: [backup-worker, backup-run-observation]
+      - scripts/test_backup_observer_image.sh
+    artifactKinds: [backup-worker, backup-observer, backup-run-observation]
     releaseLane: backup
     coordinator: release-control
     ownedState: [backup-policy, backup-run, backup-run-spec, backup-run-observation-lkg, backup-artifact, restore-checkpoint]
