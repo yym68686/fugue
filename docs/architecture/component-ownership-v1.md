@@ -587,14 +587,27 @@ bundle builder, and collapses every signing/configuration failure to one fixed
 detail-free unavailable result. It has no source/store/model, network,
 filesystem, Kubernetes, route, or mutation dependency.
 
+`internal/backupmaterializer/storesource` is the sole transitional
+`backup-materializer-store-source@v1` data-owner bridge. Its stored interface
+contains exactly `GetBackupRun` and `GetBackupBackendObservation`; no mutation
+method on the monolithic store is reachable through it. Each read uses
+platform scope only for one exact run and its referenced backend, validates
+run/backend/tenant identity, and emits only the legacy run plus the already
+irreversible generation digest. Missing, inconsistent, and unavailable store
+outcomes are reduced to fixed snapshot errors, and formatting cannot expose
+the underlying store. The package has no API, HTTP, signer, Kubernetes,
+filesystem, or direct SQL dependency. A real JSON-store test proves the
+adapter and legacy mapper leave the store byte-for-byte unchanged.
+
 A black-box test uses the real JSON store's read-only run and redacted backend
 generation methods, then crosses the source, materializer TokenReview claims,
 HTTP handler, and local issuer boundaries. The returned private bundle is
 cryptographically valid while the store remains byte-for-byte unchanged;
 bucket, endpoint, backend credentials, and the caller ServiceAccount token do
-not cross the response. Neither adapter is attached to the server or generated
-route. The existing input-bundle lane covers both adapters and their exact
-legacy mapping dependency without adding a release queue.
+not cross the response. None of these adapters is attached to the server or
+generated route. The existing input-bundle lane covers these adapters and
+their exact legacy mapping dependency plus only the two relevant backup store files,
+without adding a release queue.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

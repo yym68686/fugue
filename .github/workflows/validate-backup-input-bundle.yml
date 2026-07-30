@@ -11,6 +11,8 @@ on:
       - internal/backupcontrol/**
       - internal/backupidentity/**
       - internal/model/backup.go
+      - internal/store/backup.go
+      - internal/store/backup_observation.go
       - internal/componentmanifest/backup_input_bundle_workflow_test.go
       - docs/architecture/component-ownership-v1.yaml
       - .github/workflows/validate-backup-input-bundle.yml
@@ -24,6 +26,8 @@ on:
       - internal/backupcontrol/**
       - internal/backupidentity/**
       - internal/model/backup.go
+      - internal/store/backup.go
+      - internal/store/backup_observation.go
       - internal/componentmanifest/backup_input_bundle_workflow_test.go
       - docs/architecture/component-ownership-v1.yaml
       - .github/workflows/validate-backup-input-bundle.yml
