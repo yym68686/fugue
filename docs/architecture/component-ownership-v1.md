@@ -873,9 +873,30 @@ Loopback serving and the cell loop share one cancellation boundary. Shutdown
 stops new health traffic, drains the server, and waits for the loop under one
 bounded deadline. The binary also supplies direct loopback-only health and
 readiness probes without shell or external HTTP tooling. This atom creates an
-independently compiled shadow process, not a production workload: there is no
-image, ServiceAccount, RBAC, token projection, Helm object, Secret write path,
-release dispatch, or production enablement yet.
+independently compiled shadow process, not a production workload; at that
+boundary there is still no image, ServiceAccount, RBAC, token projection, Helm
+object, Secret write path, release dispatch, or production enablement.
+
+`Dockerfile.backup-materializer` and the dedicated
+`backup-materializer-image-${ref}` workflow add the next independent artifact
+boundary. The scratch image contains only the static non-root materializer
+binary. Its build context copies the exact production dependency closure; it
+does not copy legacy API/store/model, identity signing/review code, desired
+input serving adapters, Kubernetes SDKs, a Secret writer, backup execution,
+object-store/registry clients, a shell, or global CA roots. The two outbound
+read adapters trust only their separately projected CA bundles.
+
+The path-scoped workflow has only `contents: read`, pins every action by full
+commit, tests the exact local dependency set, compiles Linux amd64 and arm64,
+loads the image only into the ephemeral runner, and probes it without a
+network. The black-box probe runs the default-disabled image with a read-only
+root, no Linux capabilities, no-new-privileges, no published or declared port,
+and deliberately invalid private projection settings. It must become live but
+remain unready, omit capability-shaped data from logs, lack `/bin/sh`, and
+exit cleanly on SIGTERM. The workflow has no login, push, artifact upload,
+dispatch, Helm, Kubernetes, environment, or production capability. There is
+still no ServiceAccount, RBAC, projected volume, Pod, chart, Secret write path,
+published image, or production enablement.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

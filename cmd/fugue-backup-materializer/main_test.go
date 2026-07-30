@@ -337,6 +337,61 @@ func TestBinaryDependencyBoundary(t *testing.T) {
 	}
 }
 
+func TestDockerfileHasExactReadOnlySourceAndScratchBoundary(t *testing.T) {
+	document, err := os.ReadFile("../../Dockerfile.backup-materializer")
+	if err != nil {
+		t.Fatalf("read materializer Dockerfile: %v", err)
+	}
+	raw := string(document)
+	var sourceCopies []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "COPY ") && !strings.HasPrefix(line, "COPY --from=") {
+			sourceCopies = append(sourceCopies, line)
+		}
+	}
+	wantCopies := []string{
+		"COPY go.mod go.sum ./",
+		"COPY cmd/fugue-backup-materializer ./cmd/fugue-backup-materializer",
+		"COPY internal/backupcontrol ./internal/backupcontrol",
+		"COPY internal/backupmaterializer/agent ./internal/backupmaterializer/agent",
+		"COPY internal/backupmaterializer/client ./internal/backupmaterializer/client",
+		"COPY internal/backupmaterializer/contract ./internal/backupmaterializer/contract",
+		"COPY internal/backupmaterializer/materialization ./internal/backupmaterializer/materialization",
+		"COPY internal/backupmaterializer/reconcile ./internal/backupmaterializer/reconcile",
+		"COPY internal/backupmaterializer/reconciler ./internal/backupmaterializer/reconciler",
+		"COPY internal/backupmaterializer/secretreader ./internal/backupmaterializer/secretreader",
+	}
+	if !reflect.DeepEqual(sourceCopies, wantCopies) {
+		t.Fatalf("materializer Docker source closure drifted: got=%v want=%v", sourceCopies, wantCopies)
+	}
+	for _, required := range []string{
+		"golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587",
+		"CGO_ENABLED=0",
+		"-trimpath",
+		"-buildvcs=false",
+		"FROM scratch",
+		"USER 65532:65532",
+		`ENTRYPOINT ["/usr/local/bin/fugue-backup-materializer"]`,
+	} {
+		if !strings.Contains(raw, required) {
+			t.Fatalf("materializer Dockerfile is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"COPY internal/api", "COPY internal/auth", "COPY internal/backupidentity",
+		"COPY internal/backupmaterializer/composition", "COPY internal/backupmaterializer/httpapi",
+		"COPY internal/backupmaterializer/localissuer", "COPY internal/backupmaterializer/storesource",
+		"COPY internal/backupmaterializeridentity", "COPY internal/backupmaterializerreview",
+		"COPY internal/model", "COPY internal/store", "EXPOSE ", "apk add curl", "apk add bash",
+		"/etc/ssl/certs/ca-certificates.crt",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("materializer Dockerfile widened runtime/source boundary through %q", forbidden)
+		}
+	}
+}
+
 func validEnvironment() map[string]string {
 	return map[string]string{
 		"FUGUE_BACKUP_MATERIALIZER_ENABLED":                    "true",

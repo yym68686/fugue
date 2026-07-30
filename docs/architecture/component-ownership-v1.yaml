@@ -95,7 +95,9 @@ components:
     runtimeKinds: [deployment, cronjob]
     ownershipMode: transitional-shared
     sourceRoots:
+      - Dockerfile.backup-materializer
       - Dockerfile.backup-observer
+      - .github/workflows/build-backup-materializer-image.yml
       - .github/workflows/build-backup-observer-image.yml
       - .github/workflows/validate-backup-release-candidate.yml
       - .github/workflows/validate-backup-observation-store.yml
@@ -124,6 +126,7 @@ components:
       - internal/store/backup.go
       - internal/store/backup_observation.go
       - internal/store/backup_observation_test.go
+      - scripts/test_backup_materializer_image.sh
       - scripts/test_backup_observer_image.sh
     artifactKinds: [backup-worker, backup-observer, backup-materializer, backup-run-observation, backup-observer-input-bundle, backup-release-candidate]
     releaseLane: backup
