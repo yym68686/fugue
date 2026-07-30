@@ -94,12 +94,13 @@ components:
     sourceRoots:
       - internal/api/backup.go
       - internal/backupcontrol
+      - internal/backupobserver
       - internal/store/backup.go
     artifactKinds: [backup-worker, backup-run-observation]
     releaseLane: backup
     coordinator: release-control
     ownedState: [backup-policy, backup-run, backup-run-spec, backup-run-observation-lkg, backup-artifact, restore-checkpoint]
-    contracts: [backup@v1, backup-run-spec-status@v1]
+    contracts: [backup@v1, backup-observation-api@v1, backup-run-spec-status@v1]
     dependencies: [control-plane]
     failureBoundary: backup-storage
     lkgPolicy: required

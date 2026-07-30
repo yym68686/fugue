@@ -323,6 +323,29 @@ backup subsystem therefore remains `transitional-shared` and continues to run
 unchanged under the legacy release while its independent data and failure
 boundary are built behind shadow contracts.
 
+`internal/backupobserver` is the next isolated control-loop boundary. It reads
+one exact spec and a separately mounted credential on every bounded attempt,
+then performs only a fixed-purpose HTTPS `GET` for that run and spec digest.
+The adapter refuses redirects, URL credentials, noncanonical URL paths,
+plaintext transport outside an explicit test-only option, unbounded responses,
+unsafe content/cache headers, and any status that fails the strict v1 digest
+and spec binding. A deployment must preconfigure one exact backup cell; a spec
+for another target cell is rejected before the credential is opened or a
+network request is made.
+
+The observer is still only a library in this atom and is not started by any
+legacy binary, chart, or workflow. Disabled mode performs no file or remote I/O.
+When driven by a later standalone process, an invalid, expired, future-dated,
+unauthorized, or unavailable observation makes only that cell unready while
+retaining the last validated observation in memory. Local operational
+endpoints expose no input or command surface and never include credentials or
+remote error bodies. Its production dependency closure contains only
+`backupcontrol`, `backupobserver`, and the Go standard library; in particular it
+has no API/store/model, database, Kubernetes, object-storage, or process-
+execution dependency. Durable restart recovery, the server-side least-
+privilege observation endpoint, the standalone artifact, and its default-off
+chart remain later atoms, so this code cannot observe or mutate production yet.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while
