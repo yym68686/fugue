@@ -1174,6 +1174,65 @@ func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T
 	}
 }
 
+func TestBuildManagedAppStatusIgnoresFailureFromSupersededPendingRelease(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v3",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+	newReleaseKey := runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{})
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Generation: 3},
+		Spec:     runtime.ManagedAppSpec{Scheduling: runtime.SchedulingConstraints{}},
+		Status: runtime.ManagedAppStatus{
+			Phase:                   runtime.ManagedAppPhaseError,
+			Message:                 "old release image pull failed",
+			ObservedGeneration:      2,
+			PendingReleaseKey:       "release_failed_v2",
+			PendingReleaseStartedAt: time.Date(2026, time.March, 26, 9, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 3
+	deployment.Status.ObservedGeneration = 3
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+
+	oldPod := kubePod{}
+	oldPod.Metadata.Name = "demo-old-failed"
+	oldPod.Metadata.CreationTimestamp = time.Date(2026, time.March, 26, 9, 1, 0, 0, time.UTC)
+	oldPod.Status.Phase = "Running"
+	oldPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name: "demo",
+		State: kubeRuntimeState{Waiting: &kubeStateDetail{
+			Reason:  "ImagePullBackOff",
+			Message: "old release manifest missing",
+		}},
+	}}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, []kubePod{oldPod}, nil)
+	if status.Phase != runtime.ManagedAppPhaseProgressing {
+		t.Fatalf("expected superseding release to start as progressing, got phase=%q message=%q", status.Phase, status.Message)
+	}
+	if strings.Contains(status.Message, "demo-old-failed") || strings.Contains(status.Message, "old release") {
+		t.Fatalf("expected superseded pending-release failure to be ignored, got %q", status.Message)
+	}
+	if status.PendingReleaseKey != newReleaseKey {
+		t.Fatalf("expected new pending release key %q, got %q", newReleaseKey, status.PendingReleaseKey)
+	}
+	if status.PendingReleaseStartedAt == "" || status.PendingReleaseStartedAt == managed.Status.PendingReleaseStartedAt {
+		t.Fatalf("expected a fresh pending release cutoff, got %q", status.PendingReleaseStartedAt)
+	}
+}
+
 func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

@@ -1383,6 +1383,13 @@ func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, releaseKey st
 	if strings.TrimSpace(previous.PendingReleaseKey) == releaseKey {
 		return parseManagedAppStatusTimestamp(previous.PendingReleaseStartedAt), true
 	}
+	if strings.TrimSpace(previous.PendingReleaseKey) != "" {
+		// A different pending release owns every failure recorded before this
+		// reconcile. Do not let its failed Pods poison the first status snapshot
+		// for the newly applied release; applyManagedAppReleaseStatus establishes
+		// a fresh cutoff for subsequent observations below.
+		return nil, false
+	}
 
 	currentKey := strings.TrimSpace(previous.CurrentReleaseKey)
 	if currentKey == "" && strings.TrimSpace(previous.PendingReleaseKey) == "" {
