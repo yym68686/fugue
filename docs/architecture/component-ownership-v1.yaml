@@ -99,6 +99,7 @@ components:
       - cmd/fugue-backup-release-plan
       - deploy/helm/fugue-backup-observer
       - internal/api/backup.go
+      - internal/backupadapter
       - internal/backupcontrol
       - internal/backupobserver
       - internal/backuprelease

@@ -415,6 +415,18 @@ deterministic digest, and disabled-chart render with `contents: read`; it has
 no registry, artifact, Kubernetes, Helm mutation, dispatch, or production
 capability.
 
+`internal/backupadapter` is the pure compatibility seam between legacy backup
+records and the v1 backup-control contract. The future API bridge and spec
+materializer must both use its one mapping for stable target scope, cell key,
+backend generation, retry/lease bounds, observed state, and artifact LKG. It
+accepts no store handle, credential, object location, network client, or
+execution adapter. A successful legacy run becomes observable only when
+exactly one active artifact matches the run, backend, target, kind, and both
+content digests; ambiguous or drifting records fail closed. Legacy worker and
+error detail are canonicalized or irreversibly digested before crossing the
+boundary, while volatile app placement and backend health probes cannot churn
+the ownership cell or backend generation.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

@@ -59,12 +59,13 @@ func TestBackupCandidateWorkflowIsPathScopedValidationOnly(t *testing.T) {
 	raw := string(data)
 	for _, required := range []string{
 		"cmd/fugue-backup-release-plan/**",
+		"internal/backupadapter/**",
 		"internal/backuprelease/**",
 		"internal/componentmanifest/**",
 		"deploy/helm/fugue-backup-observer/**",
 		"docs/architecture/component-ownership-v1.yaml",
 		"azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310",
-		"go test ./cmd/fugue-backup-release-plan ./internal/backuprelease ./internal/componentmanifest ./deploy/helm/fugue-backup-observer",
+		"go test ./cmd/fugue-backup-release-plan ./internal/backupadapter ./internal/backuprelease ./internal/componentmanifest ./deploy/helm/fugue-backup-observer",
 		"go build -trimpath -buildvcs=false -o /tmp/fugue-backup-release-plan",
 		"helm lint deploy/helm/fugue-backup-observer",
 		"--digest-chart",

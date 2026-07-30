@@ -66,6 +66,7 @@ func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 		".github/workflows/validate-backup-release-candidate.yml",
 		"cmd/fugue-backup-release-plan/main.go",
 		"deploy/helm/fugue-backup-observer/templates/deployment.yaml",
+		"internal/backupadapter/legacy.go",
 		"internal/backuprelease/candidate.go",
 	} {
 		plan, err := PlanChanges(manifest, []string{changedPath})
