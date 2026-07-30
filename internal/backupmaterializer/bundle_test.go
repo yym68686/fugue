@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/backupcontrol"
 	"fugue/internal/backupidentity"
+	materializercontract "fugue/internal/backupmaterializer/contract"
 )
 
 func TestObserverInputBundleBindsOneExactSpecAndCredentialGeneration(t *testing.T) {
@@ -49,6 +50,10 @@ func TestObserverInputBundleBindsOneExactSpecAndCredentialGeneration(t *testing.
 	if err != nil || !reflect.DeepEqual(decoded, bundle) {
 		t.Fatalf("decode input bundle: decoded=%#v err=%v", decoded, err)
 	}
+	envelope, err := DecodeObserverInputBundleEnvelope(document, now.Add(time.Minute))
+	if err != nil || !reflect.DeepEqual(envelope, bundle) {
+		t.Fatalf("decode transport envelope: decoded=%#v err=%v", envelope, err)
+	}
 	reissued, err := IssueObserverInputBundle(keyring, spec, "tenant-1", now)
 	if err != nil {
 		t.Fatalf("reissue input bundle: %v", err)
@@ -60,6 +65,57 @@ func TestObserverInputBundleBindsOneExactSpecAndCredentialGeneration(t *testing.
 		if strings.Contains(string(document), forbidden) {
 			t.Fatalf("input bundle exposed physical backend material %q: %s", forbidden, document)
 		}
+	}
+}
+
+func TestObserverInputBundleEnvelopeSeparatesTransportValidationFromSigningCapability(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	keyring := testBundleKeyring()
+	bundle, err := IssueObserverInputBundle(keyring, testBundleSpec(t), "tenant-1", now)
+	if err != nil {
+		t.Fatalf("issue input bundle: %v", err)
+	}
+	if err := ValidateObserverInputBundleEnvelope(bundle, now.Add(time.Minute)); err != nil {
+		t.Fatalf("validate authenticated transport envelope: %v", err)
+	}
+
+	// The transport validator deliberately has no signing key. It verifies the
+	// complete clear-text token envelope but cannot authenticate the HMAC. The
+	// full validator remains the authority whenever a keyring is available.
+	parts := strings.Split(strings.TrimPrefix(bundle.ObserverToken, "fugue_bo_v1."), ".")
+	if len(parts) != 3 || parts[2] == "" {
+		t.Fatalf("issued token shape drifted: %q", bundle.ObserverToken)
+	}
+	replacement := byte('A')
+	if parts[2][0] == replacement {
+		replacement = 'B'
+	}
+	parts[2] = string(replacement) + parts[2][1:]
+	tampered := bundle
+	tampered.ObserverToken = "fugue_bo_v1." + strings.Join(parts, ".")
+	tampered.Digest = DigestObserverInputBundle(tampered)
+	if err := ValidateObserverInputBundleEnvelope(tampered, now.Add(time.Minute)); err != nil {
+		t.Fatalf("transport envelope unexpectedly acquired signing authority: %v", err)
+	}
+	if err := ValidateObserverInputBundle(tampered, keyring, now.Add(time.Minute)); !errors.Is(err, ErrObserverInputBundle) {
+		t.Fatalf("full validator accepted a tampered HMAC: %v", err)
+	}
+
+	future, err := IssueObserverInputBundle(
+		keyring,
+		testBundleSpec(t),
+		"tenant-1",
+		now.Add(backupidentity.FutureSkew+time.Second),
+	)
+	if err != nil {
+		t.Fatalf("issue future input bundle: %v", err)
+	}
+	if err := ValidateObserverInputBundleEnvelope(future, now); !errors.Is(err, ErrObserverInputBundle) {
+		t.Fatalf("future envelope error = %v, want invalid bundle", err)
+	}
+	if err := ValidateObserverInputBundleEnvelope(bundle, bundle.ExpiresAt); !errors.Is(err, ErrObserverInputBundle) {
+		t.Fatalf("expired envelope error = %v, want invalid bundle", err)
 	}
 }
 
@@ -131,6 +187,33 @@ func TestObserverInputBundleSupportsSignerRotationAndRevocation(t *testing.T) {
 	}
 }
 
+func TestObserverInputBundleContractAndIdentityPolicyRemainAligned(t *testing.T) {
+	t.Parallel()
+	if materializercontract.ObserverIdentityFutureSkew != backupidentity.FutureSkew ||
+		materializercontract.ObserverIdentityPermission != backupidentity.PermissionReadRunObservation {
+		t.Fatalf(
+			"wire/identity constants drifted: skew=%s/%s permission=%q/%q",
+			materializercontract.ObserverIdentityFutureSkew,
+			backupidentity.FutureSkew,
+			materializercontract.ObserverIdentityPermission,
+			backupidentity.PermissionReadRunObservation,
+		)
+	}
+	for _, kind := range []string{
+		backupcontrol.TargetControlPlaneDatabase,
+		backupcontrol.TargetAppDatabase,
+		backupcontrol.TargetPersistentStorage,
+		backupcontrol.TargetDataWorkspace,
+		backupcontrol.TargetRegistry,
+		backupcontrol.TargetPlatformComponent,
+	} {
+		cellKey := "backup/" + kind + "/0123456789abcdef"
+		if got, want := materializercontract.CredentialIDForCell(cellKey), backupidentity.CredentialIDForCell(cellKey); got == "" || got != want {
+			t.Fatalf("wire credential ID for %q = %q, identity policy = %q", cellKey, got, want)
+		}
+	}
+}
+
 func TestObserverInputBundleDecoderIsStrictBoundedAndRedactedByFormatting(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
@@ -181,9 +264,38 @@ func TestObserverInputBundleDependencyBoundary(t *testing.T) {
 		}
 	}
 	sort.Strings(local)
-	want := []string{"fugue/internal/backupcontrol", "fugue/internal/backupidentity"}
+	want := []string{
+		"fugue/internal/backupcontrol",
+		"fugue/internal/backupidentity",
+		"fugue/internal/backupmaterializer/contract",
+	}
 	if !reflect.DeepEqual(local, want) {
 		t.Fatalf("backup materializer dependency boundary widened: got=%v want=%v", local, want)
+	}
+
+	contractCommand := exec.Command("go", "list", "-f", `{{join .Imports "\n"}}`, "./contract")
+	contractOutput, err := contractCommand.Output()
+	if err != nil {
+		t.Fatalf("list pure materializer contract dependencies: %v", err)
+	}
+	contractImports := strings.Fields(string(contractOutput))
+	sort.Strings(contractImports)
+	wantContractImports := []string{
+		"bytes",
+		"crypto/sha256",
+		"encoding/base64",
+		"encoding/hex",
+		"encoding/json",
+		"errors",
+		"fmt",
+		"fugue/internal/backupcontrol",
+		"io",
+		"regexp",
+		"strings",
+		"time",
+	}
+	if !reflect.DeepEqual(contractImports, wantContractImports) {
+		t.Fatalf("pure materializer contract dependency boundary widened: got=%v want=%v", contractImports, wantContractImports)
 	}
 }
 

@@ -490,12 +490,14 @@ OpenAPI auth generator, environment wiring, rotation, revocation, expiry, race,
 and dependency boundaries with read-only permissions and no publish/deploy
 step.
 
-`internal/backupmaterializer` now defines the private
+`internal/backupmaterializer/contract` now defines the private
 `backup-materializer.fugue.dev/v1/BackupObserverInputBundle` seam between the
-legacy data/signer owner and a future fixed-purpose materializer. The pure
-builder accepts one already validated `BackupRunSpec`, mints a dedicated
-15-minute observer identity, immediately verifies that identity with the same
-rotation-aware keyring, and seals the exact spec/token pair under one digest.
+legacy data/signer owner and a future fixed-purpose materializer without
+importing the signing implementation. The compatible root
+`internal/backupmaterializer` issuer accepts one already validated
+`BackupRunSpec`, mints a dedicated 15-minute observer identity, immediately
+verifies that identity with the same rotation-aware keyring, and seals the
+exact spec/token pair under one digest.
 Redundant cell, run, spec-digest, credential, token-id, issued, renew-after,
 and expiry bindings are all strict; unknown/trailing/oversized JSON, signature
 or digest drift, expiry, revocation, non-canonical time, and either production
@@ -503,6 +505,14 @@ mutation flag fail closed. Ordinary `String` and `GoString` formatting always
 redact the token, while the private JSON handoff intentionally contains it.
 The envelope carries no endpoint, bucket, object key, backend credential,
 database handle, or Kubernetes capability.
+
+A capability-separated envelope decoder also verifies the complete public
+token payload, redundant bindings, digest, and current lifetime without
+receiving the HMAC key. It is valid only after the authenticated materializer
+transport has succeeded and deliberately cannot authenticate the signature;
+the full keyring validator remains mandatory anywhere that already owns
+verification capability. This prevents the future input client from gaining
+the ability to mint observer credentials merely to consume one generation.
 
 The pure-contract atom initially added only the bundle and its independent
 read-only `backup-input-bundle-${ref}` validation lane. The default-off HTTP
@@ -639,6 +649,25 @@ typed nil, disabled endpoint, missing handler, or enablement change remains a
 private 404. `cmd/fugue-api` still supplies no endpoint, environment input,
 keyring, projected volume, or API origin, so requests cannot proceed past the
 private availability gate in the running topology.
+
+`internal/backupmaterializer/client` defines the default-off
+`backup-materializer-client@v1` consumer boundary for that route. Disabled
+construction ignores and retains none of the URL, cell, run, credential
+source, HTTP client, or clock. Enabled construction binds one canonical cell
+and run to one HTTPS origin, rereads an injected audience-bound workload JWT
+for every request, issues only the exact GET, refuses redirects, and bounds
+time and response bytes.
+
+The client accepts only `application/json` with `private`, `no-store`,
+`Pragma: no-cache`, `Vary: Authorization`, `nosniff`, and no content encoding.
+It strictly decodes the bundle envelope, public token claims, cell/run/spec
+bindings, digest, issue/expiry window, and requires the generation still to be
+within its bounded delivery-age window and before its renewal boundary. Remote
+bodies and both credentials are excluded
+from errors. Its production dependency closure contains no filesystem,
+Kubernetes API, store, model, signer, Secret, process, or mutation capability;
+credential projection, TLS-root rotation, durable materialization, and
+process wiring remain separate later atoms.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

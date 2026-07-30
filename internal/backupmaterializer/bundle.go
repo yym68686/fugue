@@ -1,68 +1,39 @@
-// Package backupmaterializer defines the private, secret-bearing handoff used
-// to materialize one exact backup observer input generation. It deliberately
-// has no store, network, Kubernetes, filesystem, or process-execution
-// capability: a caller supplies an already validated desired spec and the
-// dedicated observer identity keyring.
+// Package backupmaterializer owns issuance and full cryptographic validation
+// for the private observer input bundle. The pure wire/envelope contract lives
+// in the capability-separated contract subpackage so consumers do not import
+// the observer signing implementation.
 package backupmaterializer
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
 	"fugue/internal/backupcontrol"
 	"fugue/internal/backupidentity"
+	materializercontract "fugue/internal/backupmaterializer/contract"
 )
 
 const (
-	ObserverInputBundleAPIVersion = "backup-materializer.fugue.dev/v1"
-	ObserverInputBundleKind       = "BackupObserverInputBundle"
-	ObserverInputBundlePolicy     = "single-secret-observation-input-v1"
+	ObserverInputBundleAPIVersion = materializercontract.ObserverInputBundleAPIVersion
+	ObserverInputBundleKind       = materializercontract.ObserverInputBundleKind
+	ObserverInputBundlePolicy     = materializercontract.ObserverInputBundlePolicy
 
-	ObserverIdentityTTL         = 15 * time.Minute
-	ObserverIdentityRenewAfter  = 5 * time.Minute
-	MaxObserverInputBundleBytes = 64 << 10
+	ObserverIdentityTTL         = materializercontract.ObserverIdentityTTL
+	ObserverIdentityRenewAfter  = materializercontract.ObserverIdentityRenewAfter
+	MaxObserverInputBundleBytes = materializercontract.MaxObserverInputBundleBytes
 )
 
-var ErrObserverInputBundle = errors.New("invalid backup observer input bundle")
+var ErrObserverInputBundle = materializercontract.ErrObserverInputBundle
 
-// ObserverInputBundle is the one secret-bearing generation that a future
-// fixed-purpose materializer will project into one cell-local Secret. Keeping
-// the spec and token in one digest-bound envelope prevents independent callers
-// from inventing or silently mixing either half of the input pair.
-//
-// ObserverToken is intentionally JSON-visible because it is the private
-// handoff payload. String and GoString redact it so ordinary structured or
-// diagnostic formatting cannot disclose the bearer credential.
-type ObserverInputBundle struct {
-	APIVersion                string                      `json:"apiVersion"`
-	Kind                      string                      `json:"kind"`
-	Policy                    string                      `json:"policy"`
-	CellKey                   string                      `json:"cellKey"`
-	RunID                     string                      `json:"runId"`
-	SpecDigest                string                      `json:"specDigest"`
-	CredentialID              string                      `json:"credentialId"`
-	TokenID                   string                      `json:"tokenId"`
-	DesiredSpec               backupcontrol.BackupRunSpec `json:"desiredSpec"`
-	ObserverToken             string                      `json:"observerToken"`
-	IssuedAt                  time.Time                   `json:"issuedAt"`
-	RenewAfter                time.Time                   `json:"renewAfter"`
-	ExpiresAt                 time.Time                   `json:"expiresAt"`
-	ObservationOnly           bool                        `json:"observationOnly"`
-	ProductionMutationAllowed bool                        `json:"productionMutationAllowed"`
-	Digest                    string                      `json:"digest"`
-}
+// ObserverInputBundle remains a source-compatible alias while its pure wire
+// definition is owned by the contract package.
+type ObserverInputBundle = materializercontract.ObserverInputBundle
 
 // IssueObserverInputBundle mints one exact, fixed-lifetime observer input
 // generation. The token is verified against the same keyring before it is
 // returned, so signer and verifier configuration drift fails closed inside the
-// trusted issuer rather than crossing the future HTTP/materialization seam.
+// trusted issuer rather than crossing the HTTP/materialization seam.
 func IssueObserverInputBundle(
 	keyring backupidentity.Keyring,
 	spec backupcontrol.BackupRunSpec,
@@ -111,28 +82,11 @@ func IssueObserverInputBundle(
 	return bundle, nil
 }
 
-// ValidateObserverInputBundle verifies the strict redundant bindings, digest,
-// fixed lifetime, and the bearer token signature/claims at the supplied time.
+// ValidateObserverInputBundle verifies the public envelope and authenticates
+// the bearer token signature and claims with the supplied keyring.
 func ValidateObserverInputBundle(bundle ObserverInputBundle, keyring backupidentity.Keyring, now time.Time) error {
-	if now.IsZero() ||
-		bundle.APIVersion != ObserverInputBundleAPIVersion ||
-		bundle.Kind != ObserverInputBundleKind ||
-		bundle.Policy != ObserverInputBundlePolicy ||
-		!bundle.ObservationOnly || bundle.ProductionMutationAllowed ||
-		backupcontrol.ValidateBackupRunSpec(bundle.DesiredSpec) != nil ||
-		bundle.CellKey != bundle.DesiredSpec.CellKey ||
-		bundle.RunID != bundle.DesiredSpec.RunID ||
-		bundle.SpecDigest != bundle.DesiredSpec.Digest ||
-		bundle.CredentialID != backupidentity.CredentialIDForCell(bundle.CellKey) ||
-		strings.TrimSpace(bundle.ObserverToken) != bundle.ObserverToken ||
-		bundle.ObserverToken == "" || bundle.TokenID == "" ||
-		!canonicalBundleTime(bundle.IssuedAt) ||
-		!canonicalBundleTime(bundle.RenewAfter) ||
-		!canonicalBundleTime(bundle.ExpiresAt) ||
-		bundle.RenewAfter != bundle.IssuedAt.Add(ObserverIdentityRenewAfter) ||
-		bundle.ExpiresAt != bundle.IssuedAt.Add(ObserverIdentityTTL) ||
-		bundle.Digest != DigestObserverInputBundle(bundle) {
-		return ErrObserverInputBundle
+	if err := ValidateObserverInputBundleEnvelope(bundle, now); err != nil {
+		return err
 	}
 	claims, err := backupidentity.Parse(keyring, bundle.ObserverToken, now.UTC().Truncate(time.Second))
 	if err != nil ||
@@ -148,24 +102,23 @@ func ValidateObserverInputBundle(bundle ObserverInputBundle, keyring backupident
 	return nil
 }
 
-// DecodeObserverInputBundle enforces a bounded, additional-properties-denied
-// wire boundary before performing semantic and cryptographic validation.
+// ValidateObserverInputBundleEnvelope delegates to the pure, keyless wire
+// contract. It does not authenticate the HMAC; use ValidateObserverInputBundle
+// wherever a verification keyring is already owned.
+func ValidateObserverInputBundleEnvelope(bundle ObserverInputBundle, now time.Time) error {
+	return materializercontract.ValidateObserverInputBundleEnvelope(bundle, now)
+}
+
+// DecodeObserverInputBundle applies the strict envelope decoder and then the
+// full cryptographic validator.
 func DecodeObserverInputBundle(
 	document []byte,
 	keyring backupidentity.Keyring,
 	now time.Time,
 ) (ObserverInputBundle, error) {
-	if len(document) == 0 || len(document) > MaxObserverInputBundleBytes {
-		return ObserverInputBundle{}, ErrObserverInputBundle
-	}
-	var bundle ObserverInputBundle
-	decoder := json.NewDecoder(bytes.NewReader(document))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&bundle); err != nil {
-		return ObserverInputBundle{}, ErrObserverInputBundle
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ObserverInputBundle{}, ErrObserverInputBundle
+	bundle, err := materializercontract.DecodeObserverInputBundleEnvelope(document, now)
+	if err != nil {
+		return ObserverInputBundle{}, err
 	}
 	if err := ValidateObserverInputBundle(bundle, keyring, now); err != nil {
 		return ObserverInputBundle{}, err
@@ -173,35 +126,12 @@ func DecodeObserverInputBundle(
 	return bundle, nil
 }
 
+// DecodeObserverInputBundleEnvelope exposes the source-compatible keyless
+// decoder while keeping its implementation in the pure contract package.
+func DecodeObserverInputBundleEnvelope(document []byte, now time.Time) (ObserverInputBundle, error) {
+	return materializercontract.DecodeObserverInputBundleEnvelope(document, now)
+}
+
 func DigestObserverInputBundle(bundle ObserverInputBundle) string {
-	bundle.Digest = ""
-	document, err := json.Marshal(bundle)
-	if err != nil {
-		return ""
-	}
-	digest := sha256.Sum256(document)
-	return "sha256:" + hex.EncodeToString(digest[:])
-}
-
-func (bundle ObserverInputBundle) String() string {
-	return fmt.Sprintf(
-		"BackupObserverInputBundle{cell=%q run=%q spec=%q credential=%q tokenID=%q observerToken=[REDACTED] issuedAt=%q renewAfter=%q expiresAt=%q digest=%q}",
-		bundle.CellKey,
-		bundle.RunID,
-		bundle.SpecDigest,
-		bundle.CredentialID,
-		bundle.TokenID,
-		bundle.IssuedAt.Format(time.RFC3339),
-		bundle.RenewAfter.Format(time.RFC3339),
-		bundle.ExpiresAt.Format(time.RFC3339),
-		bundle.Digest,
-	)
-}
-
-func (bundle ObserverInputBundle) GoString() string {
-	return bundle.String()
-}
-
-func canonicalBundleTime(value time.Time) bool {
-	return !value.IsZero() && value.Location() == time.UTC && value.Nanosecond() == 0
+	return materializercontract.DigestObserverInputBundle(bundle)
 }
