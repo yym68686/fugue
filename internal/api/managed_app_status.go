@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"golang.org/x/sync/errgroup"
@@ -25,6 +26,7 @@ const (
 	defaultManagedAppStatusCacheTTL       = 15 * time.Second
 	defaultManagedAppStatusRefreshTimeout = 5 * time.Second
 	defaultManagedAppStatusRefreshBackoff = 15 * time.Second
+	defaultAppObservedStatusMaxAge        = time.Minute
 	managedAppStatusListRefreshKey        = "list"
 	managedAppInventoryRefreshKey         = "inventory"
 )
@@ -33,6 +35,55 @@ var (
 	errManagedAppStatusClientUnavailable = errors.New("managed app status client unavailable")
 	errManagedAppStatusRefreshBackoff    = errors.New("managed app status refresh backoff active")
 )
+
+func appObservedStatusFresh(observed *model.AppObservedStatus, now time.Time) bool {
+	if observed == nil || !observed.Fresh || observed.ObservedAt.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	observedAt := observed.ObservedAt.UTC()
+	return !observedAt.After(now.Add(30*time.Second)) && now.Sub(observedAt) <= defaultAppObservedStatusMaxAge
+}
+
+// appObservedReadyForServing is the shared publication gate for API surfaces
+// that may render or advertise a green/active application. The observed phase
+// is necessary but never sufficient: every affirmative field must belong to a
+// fresh, cluster-identified, current-generation observation.
+func appObservedReadyForServing(app model.App, now time.Time) bool {
+	observed := app.ObservedStatus
+	if observed == nil || !strings.EqualFold(strings.TrimSpace(observed.Phase), "deployed") ||
+		app.Spec.Replicas <= 0 || observed.DesiredReplicas != app.Spec.Replicas ||
+		!appObservedStatusFresh(observed, now) || strings.TrimSpace(observed.ClusterID) == "" ||
+		strings.TrimSpace(observed.EvidenceSource) == "" || observed.Generation <= 0 ||
+		observed.ObservedGeneration < observed.Generation || len(observed.InvariantViolations) > 0 {
+		return false
+	}
+	if observed.RuntimeObjectPresent == nil || !*observed.RuntimeObjectPresent ||
+		observed.NamespacePresent == nil || !*observed.NamespacePresent ||
+		observed.EndpointPresent == nil || !*observed.EndpointPresent ||
+		observed.EndpointReady == nil || !*observed.EndpointReady ||
+		observed.ImagePresent == nil || !*observed.ImagePresent {
+		return false
+	}
+	if observed.ReadyReplicas == nil || *observed.ReadyReplicas < app.Spec.Replicas ||
+		observed.PhysicalReplicas == nil || *observed.PhysicalReplicas < app.Spec.Replicas ||
+		(app.Spec.Replicas > 0 && *observed.PhysicalReplicas <= 0) {
+		return false
+	}
+	if observed.PhysicalDesired != nil && *observed.PhysicalDesired < app.Spec.Replicas {
+		return false
+	}
+	if model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
+		if observed.ServicePresent == nil || !*observed.ServicePresent {
+			return false
+		}
+	}
+	return true
+}
 
 type managedAppStatusClient struct {
 	client      *http.Client
@@ -88,10 +139,13 @@ type managedAppRuntimeEvidence struct {
 }
 
 type managedAppKubeSnapshot struct {
-	namespaces  map[string]struct{}
-	deployments map[string]kubeDeploymentRuntimeEvidence
-	services    map[string]struct{}
-	endpoints   map[string]kubeEndpointRuntimeEvidence
+	namespaces              map[string]struct{}
+	deployments             map[string]kubeDeploymentRuntimeEvidence
+	services                map[string]struct{}
+	endpoints               map[string]kubeEndpointRuntimeEvidence
+	endpointSlices          map[string]kubeEndpointRuntimeEvidence
+	endpointsAvailable      bool
+	endpointSlicesAvailable bool
 }
 
 type kubeResourceList struct {
@@ -120,6 +174,7 @@ type kubeDeploymentRuntimeEvidence struct {
 	} `json:"spec"`
 	Status struct {
 		Replicas           int   `json:"replicas"`
+		UpdatedReplicas    int   `json:"updatedReplicas"`
 		ReadyReplicas      int   `json:"readyReplicas"`
 		AvailableReplicas  int   `json:"availableReplicas"`
 		ObservedGeneration int64 `json:"observedGeneration"`
@@ -375,10 +430,52 @@ func (c *managedAppStatusClient) getManagedApp(ctx context.Context, app model.Ap
 	if err != nil {
 		return runtime.ManagedAppObject{}, false, err
 	}
+	if err := validateObservedManagedAppObject(managed); err != nil {
+		return runtime.ManagedAppObject{}, false, err
+	}
 	return managed, true, nil
 }
 
+func validateObservedManagedAppObject(managed runtime.ManagedAppObject) error {
+	if strings.TrimSpace(managed.Metadata.Name) == "" || strings.TrimSpace(managed.Metadata.Namespace) == "" {
+		return fmt.Errorf("managed app object identity is incomplete")
+	}
+	if strings.TrimSpace(managed.Spec.AppID) == "" || strings.TrimSpace(managed.Spec.TenantID) == "" {
+		return fmt.Errorf("managed app spec identity is incomplete")
+	}
+	return nil
+}
+
+// confirmManagedAppLookupAfterNotFound distinguishes a missing namespaced
+// object from a missing/disabled ManagedApp CRD. Kubernetes uses 404 for both
+// cases, so a point GET alone is not sufficient evidence for an unavailable
+// runtime. A successful, fully paginated cluster inventory is the authoritative
+// absence check; any failure must remain unknown.
+func (c *managedAppStatusClient) confirmManagedAppLookupAfterNotFound(ctx context.Context, app model.App) (runtime.ManagedAppObject, bool, error) {
+	if strings.TrimSpace(app.ID) == "" {
+		return runtime.ManagedAppObject{}, false, fmt.Errorf("cannot confirm managed app absence without app id")
+	}
+	items, err := c.listObservedManagedAppsByAppID(ctx)
+	if err != nil {
+		return runtime.ManagedAppObject{}, false, fmt.Errorf("confirm managed app absence from inventory: %w", err)
+	}
+	managed, found := items[strings.TrimSpace(app.ID)]
+	return managed, found, nil
+}
+
 func (c *managedAppStatusClient) listManagedAppsByAppID(ctx context.Context) (map[string]runtime.ManagedAppObject, error) {
+	return c.listManagedAppsByAppIDWithValidation(ctx, false)
+}
+
+// listObservedManagedAppsByAppID is used only for the cluster-identified
+// observed-status path. Unlike the compatibility inventory used by backing
+// service lifecycle reads, it rejects malformed objects rather than skipping
+// them; otherwise a successful list could falsely authorize absence.
+func (c *managedAppStatusClient) listObservedManagedAppsByAppID(ctx context.Context) (map[string]runtime.ManagedAppObject, error) {
+	return c.listManagedAppsByAppIDWithValidation(ctx, true)
+}
+
+func (c *managedAppStatusClient) listManagedAppsByAppIDWithValidation(ctx context.Context, requireIdentity bool) (map[string]runtime.ManagedAppObject, error) {
 	basePath := "/apis/" + runtime.ManagedAppAPIGroup + "/v1alpha1/" + runtime.ManagedAppPlural
 	items := make(map[string]runtime.ManagedAppObject)
 	seenContinue := make(map[string]struct{})
@@ -393,8 +490,17 @@ func (c *managedAppStatusClient) listManagedAppsByAppID(ctx context.Context) (ma
 			if err != nil {
 				return nil, err
 			}
+			if requireIdentity {
+				if err := validateObservedManagedAppObject(managed); err != nil {
+					return nil, err
+				}
+			}
 			appID := strings.TrimSpace(managed.Spec.AppID)
 			if appID == "" {
+				// Compatibility callers historically use this inventory for
+				// backing-service status and may encounter retained objects that
+				// predate app identity fields. They cannot participate in an
+				// observed-status absence decision, so simply omit them here.
 				continue
 			}
 			if _, exists := items[appID]; exists {
@@ -445,8 +551,27 @@ func (c *managedAppStatusClient) listKubeResources(ctx context.Context, basePath
 	}
 }
 
+// listKubeResourcesOptional is used for EndpointSlice, which is not present
+// on a few older/locked-down Kubernetes APIs. A 404/405 means the API group is
+// unavailable and the legacy Endpoints snapshot remains the authoritative
+// source; all other failures are incomplete evidence and must fail closed.
+func (c *managedAppStatusClient) listKubeResourcesOptional(ctx context.Context, basePath string) ([]map[string]any, bool, error) {
+	items, err := c.listKubeResources(ctx, basePath)
+	if err == nil {
+		return items, true, nil
+	}
+	var statusErr *kubeStatusError
+	if errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusMethodNotAllowed) {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
 func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (managedAppKubeSnapshot, error) {
-	var namespaceItems, deploymentItems, serviceItems, endpointItems []map[string]any
+	var namespaceItems, deploymentItems, serviceItems, endpointItems, endpointSliceItems []map[string]any
+	endpointsAvailable := false
+	endpointSlicesAvailable := false
+	var endpointsErr, endpointSlicesErr error
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		var err error
@@ -473,27 +598,46 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 		return nil
 	})
 	group.Go(func() error {
-		var err error
-		endpointItems, err = c.listKubeResources(groupCtx, "/api/v1/endpoints")
-		if err != nil {
-			return fmt.Errorf("list kubernetes endpoints: %w", err)
-		}
+		endpointItems, endpointsAvailable, endpointsErr = c.listKubeResourcesOptional(groupCtx, "/api/v1/endpoints")
+		return nil
+	})
+	group.Go(func() error {
+		endpointSliceItems, endpointSlicesAvailable, endpointSlicesErr = c.listKubeResourcesOptional(groupCtx, "/apis/discovery.k8s.io/v1/endpointslices")
 		return nil
 	})
 	if err := group.Wait(); err != nil {
 		return managedAppKubeSnapshot{}, err
 	}
+	// An alternate endpoint API may be used only when the other API is
+	// genuinely unsupported (404/405, which listKubeResourcesOptional maps to
+	// a nil error). Any transport, auth, decode, or server failure means the
+	// snapshot is incomplete and the shared calculator must publish unknown;
+	// a successful alternate API cannot prove that the failed query was safe.
+	if endpointsErr != nil {
+		return managedAppKubeSnapshot{}, fmt.Errorf("list kubernetes endpoints: %w", endpointsErr)
+	}
+	if endpointSlicesErr != nil {
+		return managedAppKubeSnapshot{}, fmt.Errorf("list kubernetes endpoint slices: %w", endpointSlicesErr)
+	}
+	if !endpointsAvailable && !endpointSlicesAvailable {
+		return managedAppKubeSnapshot{}, fmt.Errorf("no kubernetes endpoint API is available")
+	}
 
 	snapshot := managedAppKubeSnapshot{
-		namespaces:  make(map[string]struct{}, len(namespaceItems)),
-		deployments: make(map[string]kubeDeploymentRuntimeEvidence, len(deploymentItems)),
-		services:    make(map[string]struct{}, len(serviceItems)),
-		endpoints:   make(map[string]kubeEndpointRuntimeEvidence, len(endpointItems)),
+		namespaces:              make(map[string]struct{}, len(namespaceItems)),
+		deployments:             make(map[string]kubeDeploymentRuntimeEvidence, len(deploymentItems)),
+		services:                make(map[string]struct{}, len(serviceItems)),
+		endpoints:               make(map[string]kubeEndpointRuntimeEvidence, len(endpointItems)),
+		endpointSlices:          make(map[string]kubeEndpointRuntimeEvidence, len(endpointSliceItems)),
+		endpointsAvailable:      endpointsAvailable,
+		endpointSlicesAvailable: endpointSlicesAvailable,
 	}
 	for _, raw := range namespaceItems {
-		if name := kubeObjectNamespaceOrName(raw, ""); name != "" {
-			snapshot.namespaces[name] = struct{}{}
+		name := kubeObjectNamespaceOrName(raw, "")
+		if name == "" {
+			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes namespace: metadata.name is missing")
 		}
+		snapshot.namespaces[name] = struct{}{}
 	}
 	for _, raw := range deploymentItems {
 		var deployment kubeDeploymentRuntimeEvidence
@@ -502,7 +646,7 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 		}
 		key := kubeNamespacedKey(deployment.Metadata.Namespace, deployment.Metadata.Name)
 		if key == "/" {
-			continue
+			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes deployment: metadata name/namespace is missing")
 		}
 		snapshot.deployments[key] = deployment
 	}
@@ -510,13 +654,15 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 		key := kubeObjectNamespacedKey(raw)
 		if key != "/" {
 			snapshot.services[key] = struct{}{}
+		} else {
+			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes service: metadata name/namespace is missing")
 		}
 	}
 	for _, raw := range endpointItems {
 		metadata := kubeObjectMetadata(raw)
 		key := kubeNamespacedKey(metadata.namespace, metadata.name)
 		if key == "/" {
-			continue
+			return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes endpoint: metadata name/namespace is missing")
 		}
 		evidence := kubeEndpointRuntimeEvidence{Present: true}
 		if subsets, ok := raw["subsets"].([]any); ok {
@@ -530,6 +676,43 @@ func (c *managedAppStatusClient) readRuntimeSnapshot(ctx context.Context) (manag
 			}
 		}
 		snapshot.endpoints[key] = evidence
+	}
+	if endpointSlicesAvailable {
+		for _, raw := range endpointSliceItems {
+			metadata := kubeObjectMetadata(raw)
+			if metadata.namespace == "" || metadata.name == "" {
+				return managedAppKubeSnapshot{}, fmt.Errorf("decode kubernetes endpoint slice: metadata name/namespace is missing")
+			}
+			serviceName := ""
+			if metadataRaw, ok := raw["metadata"].(map[string]any); ok {
+				if labels, ok := metadataRaw["labels"].(map[string]any); ok {
+					serviceName, _ = labels["kubernetes.io/service-name"].(string)
+				}
+			}
+			key := kubeNamespacedKey(metadata.namespace, serviceName)
+			if key == "/" || strings.TrimSpace(serviceName) == "" {
+				continue
+			}
+			evidence := snapshot.endpointSlices[key]
+			evidence.Present = true
+			if endpoints, ok := raw["endpoints"].([]any); ok {
+				for _, rawEndpoint := range endpoints {
+					endpoint, ok := rawEndpoint.(map[string]any)
+					if !ok {
+						continue
+					}
+					addresses := kubeAddressCount(endpoint["addresses"])
+					conditions, _ := endpoint["conditions"].(map[string]any)
+					ready, hasReady := conditions["ready"].(bool)
+					if hasReady && ready {
+						evidence.ReadyAddresses += addresses
+					} else {
+						evidence.NotReadyAddresses += addresses
+					}
+				}
+			}
+			snapshot.endpointSlices[key] = evidence
+		}
 	}
 	return snapshot, nil
 }
@@ -812,6 +995,24 @@ func appMayUseManagedRuntime(app model.App, runtimeByID map[string]model.Runtime
 	if appUsesManagedRuntime(app, runtimeByID) {
 		return true
 	}
+	// During a migration the durable desired runtime can already be managed
+	// while Status.CurrentRuntimeID still names the source runtime (or vice
+	// versa). Inspect both identities; choosing only the current one would
+	// skip the live observer and leave a stale deployed projection in place.
+	for _, runtimeID := range []string{app.Status.CurrentRuntimeID, app.Spec.RuntimeID} {
+		runtimeID = strings.TrimSpace(runtimeID)
+		if runtimeID == "" || runtimeID == appProxyRuntimeID(app) {
+			continue
+		}
+		runtimeObj, ok := runtimeByID[runtimeID]
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(runtimeObj.Type) {
+		case "", model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
+			return true
+		}
+	}
 	// A nil/empty runtime inventory is an observation failure, not evidence
 	// that an app uses an external runtime. Treat a non-empty runtime id as
 	// eligible so the caller reports unknown instead of reusing stale state.
@@ -863,6 +1064,36 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	evidence := managedAppRuntimeEvidence{
 		evidenceSources: []string{runtime.AppObservationSourceKubernetesAPI},
 	}
+	if found {
+		expectedName := strings.TrimSpace(runtime.ManagedAppResourceName(app))
+		expectedNamespace := strings.TrimSpace(runtime.NamespaceForTenant(app.TenantID))
+		if observedName := strings.TrimSpace(managed.Metadata.Name); observedName != expectedName {
+			evidence.invariantViolations = append(evidence.invariantViolations, "managed_app_name_mismatch")
+		}
+		if observedNamespace := strings.TrimSpace(managed.Metadata.Namespace); observedNamespace != expectedNamespace {
+			evidence.invariantViolations = append(evidence.invariantViolations, "managed_app_namespace_mismatch")
+		}
+		if observedAppID := strings.TrimSpace(managed.Spec.AppID); observedAppID != "" && observedAppID != strings.TrimSpace(app.ID) {
+			evidence.invariantViolations = append(evidence.invariantViolations, "managed_app_identity_mismatch")
+		}
+		if observedTenantID := strings.TrimSpace(managed.Spec.TenantID); observedTenantID != "" && observedTenantID != strings.TrimSpace(app.TenantID) {
+			evidence.invariantViolations = append(evidence.invariantViolations, "managed_app_tenant_mismatch")
+		}
+		observedRuntimeID := strings.TrimSpace(managed.Spec.AppSpec.RuntimeID)
+		if observedRuntimeID != "" {
+			expectedRuntimeIDs := map[string]struct{}{}
+			for _, runtimeID := range []string{app.Spec.RuntimeID, app.Status.CurrentRuntimeID} {
+				if runtimeID = strings.TrimSpace(runtimeID); runtimeID != "" {
+					expectedRuntimeIDs[runtimeID] = struct{}{}
+				}
+			}
+			if len(expectedRuntimeIDs) > 0 {
+				if _, matches := expectedRuntimeIDs[observedRuntimeID]; !matches {
+					evidence.invariantViolations = append(evidence.invariantViolations, "managed_app_runtime_mismatch")
+				}
+			}
+		}
+	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	_, namespaceExists := snapshot.namespaces[strings.TrimSpace(namespace)]
 	namespacePresent := namespaceExists
@@ -884,8 +1115,21 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		servicePresent := serviceExists
 		evidence.servicePresent = &servicePresent
 		endpoint, endpointExists := snapshot.endpoints[serviceKey]
+		slice := snapshot.endpointSlices[serviceKey]
+		// Prefer EndpointSlice whenever that API is available, even when this
+		// service has no slice. Falling back to legacy Endpoints merely because
+		// the slice map lacks a key could advertise a stale endpoint from the
+		// older API after the current slice inventory has gone empty.
+		// Combining the two sources with OR could advertise a ready route from a
+		// stale legacy Endpoints object while the current slices report zero
+		// ready addresses. The fallback is used only when the EndpointSlice API
+		// itself is unavailable.
 		endpointPresent := endpointExists && endpoint.Present
 		endpointReady := endpointPresent && endpoint.ReadyAddresses > 0
+		if snapshot.endpointSlicesAvailable {
+			endpointPresent = slice.Present
+			endpointReady = slice.Present && slice.ReadyAddresses > 0
+		}
 		evidence.endpointPresent = &endpointPresent
 		evidence.endpointReady = &endpointReady
 	}
@@ -897,7 +1141,15 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 			if deployment.Spec.Replicas != nil {
 				physicalDesired = *deployment.Spec.Replicas
 			}
-			physicalReady = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
+			// Deployment readyReplicas can still belong to the previous
+			// ReplicaSet after the template/generation changed. Only replicas
+			// that are simultaneously updated, ready, and available are current
+			// physical proof for this generation.
+			physicalReady = minObservedReplicaCount(
+				deployment.Status.UpdatedReplicas,
+				deployment.Status.ReadyReplicas,
+				deployment.Status.AvailableReplicas,
+			)
 		}
 		evidence.physicalDesiredReplicas = &physicalDesired
 		evidence.physicalReplicas = &physicalReady
@@ -914,7 +1166,17 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		evidence.imageRef = imageRef
 		managedImage := strings.Contains(imageRef, "/fugue-apps/")
 		if managedImage && s != nil && s.store != nil {
-			present, err := s.currentManagedImagePresence(app, imageRef)
+			observedRuntimeID := strings.TrimSpace(app.Spec.RuntimeID)
+			if found {
+				// Runtime identity from the object in this Kubernetes snapshot is
+				// the only image-location scope that can be associated with the
+				// current target during a migration. Do not use the durable source
+				// runtime when the target object has already been created.
+				if runtimeID := strings.TrimSpace(managed.Spec.AppSpec.RuntimeID); runtimeID != "" {
+					observedRuntimeID = runtimeID
+				}
+			}
+			present, err := s.currentManagedImagePresence(app, imageRef, observedRuntimeID)
 			if err != nil {
 				return managedAppRuntimeEvidence{}, err
 			}
@@ -924,10 +1186,14 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		if deployment, deploymentExists := snapshot.deployments[deploymentKey]; deploymentExists &&
 			deployment.Metadata.Generation > 0 &&
 			deployment.Status.ObservedGeneration >= deployment.Metadata.Generation &&
-			maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas) > 0 {
+			minObservedReplicaCount(
+				deployment.Status.UpdatedReplicas,
+				deployment.Status.ReadyReplicas,
+				deployment.Status.AvailableReplicas,
+			) > 0 {
 			deployedImage := firstDeploymentContainerImage(deployment)
 			if deployedImage != "" {
-				matches := deployedImage == imageRef
+				matches := s.observedRuntimeImageRefsEquivalent(app, imageRef, deployedImage)
 				evidence.imagePresent = &matches
 				if !matches {
 					evidence.invariantViolations = append(evidence.invariantViolations, "current_image_mismatch")
@@ -940,11 +1206,58 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	// decides the observed phase; this list is never inferred from stored
 	// replicas alone.
 	if found && app.Spec.Replicas > 0 {
-		if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deployed") && managed.Status.ReadyReplicas == 0 {
+		storedPhase := app.Status.Phase
+		if app.StoredStatus != nil {
+			storedPhase = app.StoredStatus.Phase
+		}
+		if strings.EqualFold(strings.TrimSpace(storedPhase), "deployed") && managed.Status.ReadyReplicas == 0 {
 			evidence.invariantViolations = append(evidence.invariantViolations, "stored_deployed_but_observed_ready_zero")
 		}
 	}
 	return evidence, nil
+}
+
+func minObservedReplicaCount(values ...int) int {
+	if len(values) == 0 {
+		return 0
+	}
+	minimum := values[0]
+	for _, value := range values[1:] {
+		if value < minimum {
+			minimum = value
+		}
+	}
+	if minimum < 0 {
+		return 0
+	}
+	return minimum
+}
+
+func (s *Server) observedRuntimeImageRefsEquivalent(app model.App, expected, actual string) bool {
+	expected = strings.TrimSpace(expected)
+	actual = strings.TrimSpace(actual)
+	if expected == "" || actual == "" {
+		return false
+	}
+	if expected == actual {
+		return true
+	}
+	// A managed image has a registry push address and a runtime pull address.
+	// They identify the same artifact when both normalize through the server's
+	// configured mapping; raw string comparison would create a false mismatch.
+	expected = appimages.NormalizeRuntimeImageRefForSource(
+		expected,
+		model.AppBuildSource(app),
+		s.registryPushBase,
+		s.registryPullBase,
+	)
+	actual = appimages.NormalizeRuntimeImageRefForSource(
+		actual,
+		model.AppBuildSource(app),
+		s.registryPushBase,
+		s.registryPullBase,
+	)
+	return expected != "" && expected == actual
 }
 
 func firstDeploymentContainerImage(deployment kubeDeploymentRuntimeEvidence) string {
@@ -956,7 +1269,14 @@ func firstDeploymentContainerImage(deployment kubeDeploymentRuntimeEvidence) str
 	return ""
 }
 
-func (s *Server) currentManagedImagePresence(app model.App, imageRef string) (*bool, error) {
+func (s *Server) currentManagedImagePresence(app model.App, imageRef, runtimeID string) (*bool, error) {
+	// Image-location rows without a runtime identity cannot be tied to the
+	// current migration target (and may have been written by the source
+	// cluster). They are diagnostic history, not observed runtime evidence.
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return nil, nil
+	}
 	refs := []string{strings.TrimSpace(imageRef)}
 	if app.Source != nil {
 		refs = append(refs, strings.TrimSpace(app.Source.ResolvedImageRef), strings.TrimSpace(app.Source.ImageRef))
@@ -981,10 +1301,11 @@ func (s *Server) currentManagedImagePresence(app model.App, imageRef string) (*b
 			model.ImageLocationStatusFailed,
 		} {
 			locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
-				TenantID: strings.TrimSpace(app.TenantID),
-				AppID:    strings.TrimSpace(app.ID),
-				ImageRef: ref,
-				Status:   status,
+				TenantID:  strings.TrimSpace(app.TenantID),
+				AppID:     strings.TrimSpace(app.ID),
+				ImageRef:  ref,
+				Status:    status,
+				RuntimeID: runtimeID,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("list current image locations: %w", err)
@@ -1040,6 +1361,15 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 	managed, found, err := client.getManagedApp(refreshCtx, app)
 	if err != nil {
 		return managedAppStatusCacheEntry{}, err
+	}
+	if !found {
+		// A namespaced GET 404 is ambiguous (object missing vs. CRD/API group
+		// unavailable). Only a successful complete inventory can authorize the
+		// unavailable/ready=0 result.
+		managed, found, err = client.confirmManagedAppLookupAfterNotFound(refreshCtx, app)
+		if err != nil {
+			return managedAppStatusCacheEntry{}, err
+		}
 	}
 	confirmedClusterID, err := client.getClusterID(refreshCtx)
 	if err != nil {
@@ -1123,7 +1453,12 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			return managedAppStatusListCacheEntry{}, err
 		}
 	}
-	items, err := client.listManagedAppsByAppID(refreshCtx)
+	var items map[string]runtime.ManagedAppObject
+	if requireClusterIdentity {
+		items, err = client.listObservedManagedAppsByAppID(refreshCtx)
+	} else {
+		items, err = client.listManagedAppsByAppID(refreshCtx)
+	}
 	if err != nil {
 		return managedAppStatusListCacheEntry{}, err
 	}

@@ -460,6 +460,11 @@ func (w *appProxyObservationResponseWriter) statusCode() int {
 }
 
 func appProxyRuntimeID(app model.App) string {
+	if app.ObservedStatus != nil {
+		if runtimeID := strings.TrimSpace(app.ObservedStatus.RuntimeID); runtimeID != "" {
+			return runtimeID
+		}
+	}
 	if runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID); runtimeID != "" {
 		return runtimeID
 	}

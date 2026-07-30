@@ -60,7 +60,8 @@ func writeAppTableWithRuntimeNames(w io.Writer, apps []model.App, runtimeNames m
 		return err
 	}
 	for _, app := range apps {
-		runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID)
+		phase, currentReplicas, runtimeID, lastMessage := appObservedDisplayProjection(app)
+		replicaDisplay := currentReplicas
 		if runtimeID == "" {
 			runtimeID = strings.TrimSpace(app.Spec.RuntimeID)
 		}
@@ -73,12 +74,12 @@ func writeAppTableWithRuntimeNames(w io.Writer, apps []model.App, runtimeNames m
 			tw,
 			"%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 			formatDisplayName(app.Name, app.ID, showIDs),
-			strings.TrimSpace(app.Status.Phase),
-			maxInt(app.Status.CurrentReplicas, app.Spec.Replicas),
+			phase,
+			replicaDisplay,
 			formatDisplayName(runtimeName, runtimeID, showIDs),
 			formatResourceUsageSummary(app.CurrentResourceUsage),
 			url,
-			formatAppListDetail(app.Status.LastMessage),
+			formatAppListDetail(lastMessage),
 		); err != nil {
 			return err
 		}
@@ -190,18 +191,8 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 	if app.Route != nil {
 		url = strings.TrimSpace(app.Route.PublicURL)
 	}
-	phase := strings.TrimSpace(app.Status.Phase)
-	currentReplicas := app.Status.CurrentReplicas
-	runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID)
-	var observed *model.AppObservedStatus
-	if app.ObservedStatus != nil {
-		observed = app.ObservedStatus
-		phase = strings.TrimSpace(observed.Phase)
-		if observed.ReadyReplicas != nil {
-			currentReplicas = *observed.ReadyReplicas
-		}
-		runtimeID = strings.TrimSpace(observed.RuntimeID)
-	}
+	phase, currentReplicas, runtimeID, _ := appObservedDisplayProjection(app)
+	observed := app.ObservedStatus
 	if runtimeID == "" {
 		runtimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}

@@ -61,10 +61,11 @@ func (s *Server) attachOperationEvidenceDiagnosis(ctx context.Context, op model.
 		diagnosis.Confidence = defaultDiagnosisConfidence(op, *diagnosis)
 	}
 	evidence, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{
-		TenantID:      op.TenantID,
-		PlatformAdmin: true,
-		OperationID:   op.ID,
-		Limit:         1000,
+		TenantID:               op.TenantID,
+		PlatformAdmin:          true,
+		OperationID:            op.ID,
+		Limit:                  1000,
+		IncludeMigrationLedger: op.Type == model.OperationTypeMigrate,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

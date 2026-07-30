@@ -77,6 +77,7 @@ func resilienceRunbooks() []model.RunbookReference {
 		{Name: "bad control-plane release rollback", Path: "docs/runbooks/bad-control-plane-release-rollback.md", IncidentClass: "control_plane_release_regression"},
 		{Name: "request attribution", Path: "docs/runbooks/request-attribution.md", IncidentClass: "request_error_attributed"},
 		{Name: "stateless runtime migration", Path: "docs/runbooks/stateless-runtime-migration.md", IncidentClass: "runtime_continuity"},
+		{Name: "observed runtime evidence", Path: "docs/runbooks/observed-runtime-evidence.md", IncidentClass: "observed_runtime_evidence"},
 		{Name: "stateful app preflight", Path: "docs/runbooks/stateful-app-preflight.md", IncidentClass: "stateful_preflight"},
 		{Name: "platform artifact release", Path: "docs/runbooks/platform-artifact-release.md", IncidentClass: "platform_artifact_release"},
 		{Name: "platform artifact rollback", Path: "docs/runbooks/platform-artifact-rollback.md", IncidentClass: "platform_artifact_rollback"},
@@ -230,8 +231,12 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 	for _, app := range apps {
 		runtimeID := firstNonEmpty(strings.TrimSpace(app.Status.CurrentRuntimeID), strings.TrimSpace(app.Spec.RuntimeID))
 		desired := app.Spec.Replicas
-		ready := app.Status.CurrentReplicas
-		phase := strings.TrimSpace(app.Status.Phase)
+		// CurrentReplicas is durable control-plane history, not a runtime
+		// witness. Start the robustness projection at zero and only replace it
+		// with the shared observed envelope's ready count. This prevents a
+		// failed/unknown K8s query from reporting an old deployed replica count.
+		ready := 0
+		phase := "unknown"
 		stateless := appContinuityStateless(app)
 		status := model.RuntimeContinuityStatus{
 			AppID:           app.ID,
@@ -246,6 +251,10 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			},
 		}
 		if observed := app.ObservedStatus; observed != nil {
+			if observedRuntimeID := strings.TrimSpace(observed.RuntimeID); observedRuntimeID != "" {
+				runtimeID = observedRuntimeID
+				status.RuntimeID = observedRuntimeID
+			}
 			status.Evidence["observed_at"] = observed.ObservedAt.UTC().Format(time.RFC3339Nano)
 			status.Evidence["evidence_source"] = observed.EvidenceSource
 			status.Evidence["cluster_id"] = observed.ClusterID
@@ -281,7 +290,10 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			}
 			phase = observed.Phase
 			status.Evidence["phase"] = phase
-			if !observed.Fresh || phase == "unknown" {
+			if strings.EqualFold(strings.TrimSpace(phase), "deployed") && !appObservedReadyForServing(app, time.Now().UTC()) {
+				status.Blockers = append(status.Blockers, "deployed observation lacks complete serving evidence")
+			}
+			if !appObservedStatusFresh(observed, time.Now().UTC()) || phase == "unknown" {
 				status.Blockers = append(status.Blockers, "runtime observation is not fresh")
 			}
 			if observed.RuntimeObjectPresent != nil && !*observed.RuntimeObjectPresent {
@@ -322,6 +334,11 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 					status.Blockers = append(status.Blockers, "observed deployed but route is unavailable: "+firstNonEmpty(routeReason, routeStatus))
 				}
 			}
+		} else if desired > 0 {
+			// A stored replica count is not a current runtime observation. Keep
+			// robustness fail-closed until the shared calculator publishes a
+			// fresh cluster/generation/endpoint envelope.
+			status.Blockers = append(status.Blockers, "no current runtime observation proof")
 		}
 		if app.Route != nil {
 			status.Hostname = normalizeExternalAppDomain(app.Route.Hostname)
@@ -546,6 +563,70 @@ func robustnessChecksFromRuntimeContinuity(statuses []model.RuntimeContinuitySta
 		})
 	}
 	return checks
+}
+
+// robustnessHardObservedInvariantChecks is deliberately separate from the
+// tenant-workload continuity report above. Existing continuity/failover
+// reporting may remain report-only, but contradictions that can publish a
+// false-green runtime or route are platform safety invariants and must block
+// release publication without an opt-in tenant signal.
+func robustnessHardObservedInvariantChecks(statuses []model.RuntimeContinuityStatus) []model.RobustnessCheck {
+	checks := []model.RobustnessCheck{}
+	for _, status := range statuses {
+		violations := make([]string, 0)
+		for _, blocker := range status.Blockers {
+			if isHardObservedInvariantBlocker(blocker) {
+				violations = appendUniqueStrings(violations, blocker)
+			}
+		}
+		if len(violations) == 0 {
+			continue
+		}
+		evidence := cloneStringMap(status.Evidence)
+		if evidence == nil {
+			evidence = map[string]string{}
+		}
+		evidence["guardian"] = "observed-runtime-invariants"
+		evidence["release_gate_scope"] = model.ReleaseSignalGateScopeControlPlane
+		evidence["report_only"] = "false"
+		evidence["app_id"] = strings.TrimSpace(status.AppID)
+		checks = append(checks, model.RobustnessCheck{
+			Name:       "app_observed_runtime_invariant",
+			Pass:       false,
+			Severity:   model.RobustnessSeverityBlockPublish,
+			Subject:    "app:" + firstNonEmpty(status.AppName, status.AppID),
+			Expected:   "stored and published runtime state has fresh, complete evidence",
+			Observed:   strings.Join(violations, "; "),
+			Message:    strings.Join(violations, "; "),
+			Evidence:   evidence,
+			RepairHint: "refresh the shared Kubernetes observed-status envelope and resolve every invariant before publishing routes or retiring artifacts",
+		})
+	}
+	return checks
+}
+
+func isHardObservedInvariantBlocker(blocker string) bool {
+	blocker = strings.ToLower(strings.TrimSpace(blocker))
+	for _, marker := range []string{
+		"managed app runtime object not found",
+		"namespace missing",
+		"no current runtime observation proof",
+		"runtime observation is not fresh",
+		"endpoint missing",
+		"endpoint not ready",
+		"current image missing",
+		"physical replicas are zero",
+		"ready replicas ",
+		"desired replicas ",
+		"stored status deployed without current runtime proof",
+		"observed deployed but route is unavailable",
+		"invariant:",
+	} {
+		if strings.Contains(blocker, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) robustnessPlatformConsumerChecks() ([]model.RobustnessCheck, error) {

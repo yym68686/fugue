@@ -149,6 +149,10 @@ type OperationEvidenceFilter struct {
 	Severities       []string
 	Since            *time.Time
 	Limit            int
+	// IncludeMigrationLedger is opt-in because migration snapshots have a
+	// dedicated ledger query and should not change the bounded diagnostic
+	// evidence stream's historical cardinality.
+	IncludeMigrationLedger bool
 }
 
 type OperationTimelineEntry struct {

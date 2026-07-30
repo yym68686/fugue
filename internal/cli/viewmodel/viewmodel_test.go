@@ -33,6 +33,27 @@ func TestViewModelsNormalStateAndFieldMapping(t *testing.T) {
 			LastOperationID:  "op_deploy",
 		},
 	}
+	readyEvidence := 2
+	presentEvidence := true
+	app.ObservedStatus = &model.AppObservedStatus{
+		Phase:                "deployed",
+		DesiredReplicas:      replicas,
+		ReadyReplicas:        &readyEvidence,
+		RuntimeObjectPresent: &presentEvidence,
+		NamespacePresent:     &presentEvidence,
+		ServicePresent:       &presentEvidence,
+		EndpointPresent:      &presentEvidence,
+		EndpointReady:        &presentEvidence,
+		PhysicalReplicas:     &readyEvidence,
+		ImagePresent:         &presentEvidence,
+		Fresh:                true,
+		ObservedAt:           time.Now().UTC(),
+		ClusterID:            "cluster-123",
+		Generation:           3,
+		ObservedGeneration:   3,
+		EvidenceSource:       "kubernetes_api",
+		Reason:               "managed_app_ready",
+	}
 	operations := []model.Operation{
 		{ID: "op_import", AppID: app.ID, Type: "import", Status: "completed", CreatedAt: created, UpdatedAt: created},
 		{ID: "op_deploy", AppID: app.ID, Type: "deploy", Status: "running", CreatedAt: created.Add(time.Minute), UpdatedAt: created.Add(time.Minute)},
@@ -61,7 +82,7 @@ func TestViewModelsNormalStateAndFieldMapping(t *testing.T) {
 	}
 
 	health := NewAppHealth(app, operations)
-	if health.State.Kind != StateReady || health.Name != "web" || health.Phase != "ready" || health.Tone != TonePositive || health.Operations.ActiveCount != 1 {
+	if health.State.Kind != StateReady || health.Name != "web" || health.Phase != "deployed" || health.Tone != TonePositive || health.Operations.ActiveCount != 1 {
 		t.Fatalf("unexpected app health %+v", health)
 	}
 
@@ -130,6 +151,27 @@ func TestAppHealthGreenRequiresCompleteFreshRuntimeEvidence(t *testing.T) {
 	app.ObservedStatus.Fresh = false
 	if health := NewAppHealth(app, nil); health.Tone == TonePositive {
 		t.Fatalf("stale evidence must not be green, got %+v", health)
+	}
+	app.ObservedStatus.Fresh = true
+	app.ObservedStatus.DesiredReplicas = 0
+	if health := NewAppHealth(app, nil); health.Tone == TonePositive {
+		t.Fatalf("desired replica contract mismatch must not be green, got %+v", health)
+	}
+}
+
+func TestStoredDeployedWithoutObservationIsNotGreen(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:     "app_no_observation",
+		Name:   "no-observation",
+		Route:  &model.AppRoute{Hostname: "demo.example.com", PublicURL: "https://demo.example.com"},
+		Spec:   model.AppSpec{Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	health := NewAppHealth(app, nil)
+	if health.Tone == TonePositive || health.Route.Tone == TonePositive {
+		t.Fatalf("stored deployed state without runtime evidence must not be green: %+v", health)
 	}
 }
 

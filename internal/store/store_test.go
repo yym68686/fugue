@@ -12,6 +12,46 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
+func recordTestMigrationCutover(t *testing.T, s *Store, op model.Operation, app model.App, targetRuntimeID string) {
+	t.Helper()
+	ready := true
+	physical := app.Spec.Replicas
+	if physical <= 0 {
+		physical = 1
+	}
+	_, err := s.RecordAppMigrationLedger(model.AppMigrationLedger{
+		TenantID:               op.TenantID,
+		ProjectID:              app.ProjectID,
+		AppID:                  app.ID,
+		OperationID:            op.ID,
+		OldRuntimeID:           op.SourceRuntimeID,
+		NewRuntimeID:           targetRuntimeID,
+		OldClusterID:           "cluster-old-test",
+		NewClusterID:           "cluster-new-test",
+		ImageRef:               app.Spec.Image,
+		ImageReplicationStatus: model.AppMigrationEvidenceVerified,
+		RuntimeObjectStatus:    model.AppMigrationEvidenceVerified,
+		EndpointRequired:       model.AppHasClusterService(app.Spec),
+		EndpointStatus: func() string {
+			if model.AppHasClusterService(app.Spec) {
+				return model.AppMigrationEvidenceReady
+			}
+			return model.AppMigrationEvidenceNotApplicable
+		}(),
+		EndpointReady:         &ready,
+		PhysicalReplicas:      &physical,
+		DesiredReplicas:       app.Spec.Replicas,
+		Generation:            1,
+		ObservedGeneration:    1,
+		CutoverStatus:         model.AppMigrationCutoverVerified,
+		OldArtifactsProtected: true,
+		EvidenceSource:        model.OperationEvidenceSourceManualDebugBundle,
+	})
+	if err != nil {
+		t.Fatalf("record migration cutover evidence: %v", err)
+	}
+}
+
 func TestFailAssignedAgentOperationAtomicallyFinalizesReleaseAttempt(t *testing.T) {
 	t.Parallel()
 
@@ -278,6 +318,7 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	if len(ops) != 1 || ops[0].ID != migrateOp.ID {
 		t.Fatalf("expected migrate operation assigned to runtime, got %+v", ops)
 	}
+	recordTestMigrationCutover(t, s, migrateOp, app, externalRuntime.ID)
 
 	if _, err := s.CompleteAgentOperation(migrateOp.ID, externalRuntime.ID, "/tmp/nginx-external.yaml", "migrated"); err != nil {
 		t.Fatalf("complete agent operation: %v", err)
@@ -1405,6 +1446,7 @@ func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
 	if claimed.ID != migrateOp.ID || claimed.Status != model.OperationStatusWaitingAgent || claimed.AssignedRuntimeID != externalRuntime.ID {
 		t.Fatalf("unexpected claimed migrate operation: %+v", claimed)
 	}
+	recordTestMigrationCutover(t, s, migrateOp, app, externalRuntime.ID)
 
 	if _, err := s.CompleteAgentOperation(migrateOp.ID, externalRuntime.ID, "/tmp/nginx-external.yaml", "migrated"); err != nil {
 		t.Fatalf("complete agent migrate operation: %v", err)
@@ -5237,8 +5279,8 @@ func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get app: %v", err)
 	}
-	if app.Status.Phase != "deployed" {
-		t.Fatalf("expected deployed phase to be preserved, got %q", app.Status.Phase)
+	if app.Status.Phase != "unknown" {
+		t.Fatalf("expected unknown phase until fresh runtime evidence, got %q", app.Status.Phase)
 	}
 	if app.Status.LastOperationID != rebuildOp.ID {
 		t.Fatalf("expected last operation %s, got %s", rebuildOp.ID, app.Status.LastOperationID)
@@ -5453,8 +5495,8 @@ func TestInitRepairsFailedPhaseForLiveApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get app after repair: %v", err)
 	}
-	if app.Status.Phase != "deployed" {
-		t.Fatalf("expected failed phase to be repaired to deployed, got %q", app.Status.Phase)
+	if app.Status.Phase != "unknown" {
+		t.Fatalf("expected failed phase to remain unknown without fresh runtime evidence, got %q", app.Status.Phase)
 	}
 	if app.Status.LastMessage != "stale failure" {
 		t.Fatalf("expected last message to stay unchanged, got %q", app.Status.LastMessage)

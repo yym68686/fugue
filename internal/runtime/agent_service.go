@@ -202,6 +202,16 @@ func (s *AgentService) sendHeartbeat(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("refresh cell snapshot: %w", err)
 	}
+	if s.Config.ApplyWithKubectl {
+		if clusterID, clusterErr := s.agentClusterID(ctx); clusterErr == nil {
+			snapshot.ClusterID = clusterID
+			if saveErr := s.CellStore.SaveSnapshot(snapshot); saveErr != nil {
+				s.logf("persist kubernetes cluster identity deferred: %v", saveErr)
+			}
+		} else {
+			s.logf("kubernetes cluster identity heartbeat evidence unavailable: %v", clusterErr)
+		}
+	}
 	if err := s.RefreshCellPeers(ctx, snapshot); err != nil {
 		s.logf("cell peer discovery deferred: %v", err)
 	}
@@ -342,6 +352,7 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 	if err != nil {
 		return fmt.Errorf("render bundle: %w", err)
 	}
+	imagePreflightVerified := false
 	if s.Config.ApplyWithKubectl {
 		switch task.Operation.Type {
 		case model.OperationTypeDelete:
@@ -351,6 +362,9 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 		default:
 			if err := s.ensureAgentImagePresent(ctx, app); err != nil {
 				return err
+			}
+			if task.Operation.Type == model.OperationTypeMigrate && app.Spec.Replicas > 0 {
+				imagePreflightVerified = true
 			}
 			if err := ApplyKubectl(bundle.ManifestPath); err != nil {
 				return fmt.Errorf("kubectl apply: %w", err)
@@ -365,7 +379,15 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 	if err := s.CellStore.MarkDesiredTaskApplied(task.Operation.ID, bundle.ManifestPath); err != nil {
 		return fmt.Errorf("mark cell desired task applied: %w", err)
 	}
-	if err := s.CellStore.EnqueueCompletion(task.Operation.ID, bundle.ManifestPath, message); err != nil {
+	var migrationLedger *model.AppMigrationLedger
+	if task.Operation.Type == model.OperationTypeMigrate {
+		ledger, evidenceErr := s.collectAgentMigrationLedger(ctx, task.Operation, app, task.SourceClusterID, imagePreflightVerified)
+		if evidenceErr != nil {
+			return permanentAgentPreflightRefusal(fmt.Errorf("migration cutover evidence unavailable: %w", evidenceErr))
+		}
+		migrationLedger = &ledger
+	}
+	if err := s.CellStore.EnqueueCompletionWithMigrationLedger(task.Operation.ID, bundle.ManifestPath, message, migrationLedger); err != nil {
 		return fmt.Errorf("enqueue completion outbox event: %w", err)
 	}
 	if err := s.flushCompletionOutbox(ctx); err != nil {
@@ -443,7 +465,7 @@ func (s *AgentService) flushCompletionOutbox(ctx context.Context) error {
 		return err
 	}
 	for _, event := range events {
-		if err := s.sendCompletion(ctx, event.OperationID, event.ManifestPath, event.Message); err != nil {
+		if err := s.sendCompletion(ctx, event.OperationID, event.ManifestPath, event.Message, event.MigrationLedger); err != nil {
 			if agentCompletionErrorTerminal(err) {
 				operationID, markErr := s.CellStore.MarkOutboxDelivered(event.ID)
 				if markErr != nil {
@@ -477,10 +499,13 @@ func (s *AgentService) flushCompletionOutbox(ctx context.Context) error {
 	return nil
 }
 
-func (s *AgentService) sendCompletion(ctx context.Context, operationID, manifestPath, message string) error {
+func (s *AgentService) sendCompletion(ctx context.Context, operationID, manifestPath, message string, migrationLedger *model.AppMigrationLedger) error {
 	reqBody := map[string]any{
 		"manifest_path": strings.TrimSpace(manifestPath),
 		"message":       message,
+	}
+	if migrationLedger != nil {
+		reqBody["migration_ledger"] = migrationLedger
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {

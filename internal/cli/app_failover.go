@@ -674,6 +674,11 @@ func mapRuntimesByID(runtimes []model.Runtime) map[string]*model.Runtime {
 }
 
 func appRuntimeID(app model.App) string {
+	if observed := app.ObservedStatus; observed != nil {
+		if runtimeID := strings.TrimSpace(observed.RuntimeID); runtimeID != "" {
+			return runtimeID
+		}
+	}
 	runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID)
 	if runtimeID != "" {
 		return runtimeID
@@ -698,12 +703,13 @@ func writeAppFailoverTable(w io.Writer, results []appFailoverResult) error {
 		return err
 	}
 	for _, result := range results {
+		_, ready, _, _ := appObservedDisplayProjection(result.App)
 		if _, err := fmt.Fprintf(
 			tw,
 			"%s\t%s\t%d/%d\t%s\t%s\t%s\n",
 			result.App.Name,
 			result.Assessment.Classification,
-			result.App.Status.CurrentReplicas,
+			ready,
 			result.App.Spec.Replicas,
 			formatFailoverRuntime(result.Assessment),
 			blankDash(result.BackupReadiness),
@@ -716,16 +722,19 @@ func writeAppFailoverTable(w io.Writer, results []appFailoverResult) error {
 }
 
 func writeAppFailoverStatus(w io.Writer, result appFailoverResult) error {
+	phase, ready, runtimeID, message := appObservedDisplayProjection(result.App)
 	pairs := []kvPair{
 		{Key: "app_id", Value: result.App.ID},
 		{Key: "name", Value: result.App.Name},
+		{Key: "observed_phase", Value: phase},
 		{Key: "classification", Value: result.Assessment.Classification},
 		{Key: "summary", Value: result.Assessment.Summary},
 		{Key: "desired_replicas", Value: fmt.Sprintf("%d", result.App.Spec.Replicas)},
-		{Key: "current_replicas", Value: fmt.Sprintf("%d", result.App.Status.CurrentReplicas)},
-		{Key: "runtime_id", Value: result.Assessment.RuntimeID},
+		{Key: "current_replicas", Value: fmt.Sprintf("%d", ready)},
+		{Key: "runtime_id", Value: firstNonEmptyTrimmed(runtimeID, result.Assessment.RuntimeID)},
 		{Key: "runtime_type", Value: result.Assessment.RuntimeType},
 		{Key: "runtime_status", Value: result.Assessment.RuntimeStatus},
+		{Key: "message", Value: message},
 		{Key: "backup_readiness", Value: result.BackupReadiness},
 		{Key: "blockers", Value: strings.Join(result.Assessment.Blockers, "; ")},
 		{Key: "warnings", Value: strings.Join(result.Assessment.Warnings, "; ")},

@@ -13,6 +13,15 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 	if s == nil || s.Store == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return nil
 	}
+	if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
+		return err
+	} else if blocked {
+		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "image cleanup blocked: "+reason)
+		if s.Logger != nil {
+			s.Logger.Printf("preserve old app artifacts for %s: migration cutover is not verified: %s", app.ID, reason)
+		}
+		return nil
+	}
 	if s.imageStoreDistributedMode() {
 		return s.cleanupDeletedAppDistributedImages(ctx, app)
 	}

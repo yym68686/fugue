@@ -474,7 +474,7 @@ func projectDatabaseInventory(apps []model.App, serviceByID map[string]model.Bac
 			AppID:       app.ID,
 			AppName:     app.Name,
 			ServiceName: postgres.ServiceName,
-			Status:      app.Status.Phase,
+			Status:      observedPhaseForDisplay(app),
 			Database:    postgres.Database,
 			User:        postgres.User,
 			RuntimeID:   firstNonEmpty(postgres.RuntimeID, app.Spec.RuntimeID, app.Status.CurrentRuntimeID),

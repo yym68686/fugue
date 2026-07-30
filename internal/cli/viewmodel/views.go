@@ -158,9 +158,11 @@ func NewRoutePathFromApp(app model.App) RoutePathView {
 		return RoutePathView{State: EmptyState("app has no public route"), Tone: ToneMuted}
 	}
 	route := *app.Route
-	tone := TonePositive
+	tone := ToneWarning
 	if strings.TrimSpace(route.PublicURL) == "" {
-		tone = ToneWarning
+		tone = ToneMuted
+	} else if appObservedGreenEligible(app, app.ObservedStatus) {
+		tone = TonePositive
 	}
 	return RoutePathView{
 		State:          ReadyState(),
@@ -218,7 +220,7 @@ func NewOperationTimeline(operations []model.Operation) OperationTimelineView {
 
 func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthView {
 	phase := strings.TrimSpace(app.Status.Phase)
-	currentReplicas := app.Status.CurrentReplicas
+	currentReplicas := 0
 	runtimeID := firstNonEmpty(strings.TrimSpace(app.Status.CurrentRuntimeID), strings.TrimSpace(app.Spec.RuntimeID))
 	observedAt := (*time.Time)(nil)
 	clusterID := ""
@@ -237,6 +239,7 @@ func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthVi
 	var invariantViolations []string
 	if observed := app.ObservedStatus; observed != nil {
 		phase = strings.TrimSpace(observed.Phase)
+		currentReplicas = 0
 		if observed.ReadyReplicas != nil {
 			currentReplicas = *observed.ReadyReplicas
 		}
@@ -257,9 +260,20 @@ func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthVi
 		imagePresent = cloneBool(observed.ImagePresent)
 		evidenceSources = append([]string(nil), observed.EvidenceSources...)
 		invariantViolations = append([]string(nil), observed.InvariantViolations...)
+	} else {
+		// Durable CurrentReplicas is not a runtime witness. Keep the view
+		// unknown/zero until the backend supplies an observed envelope, while
+		// preserving explicit in-flight/error phases for diagnosis.
+		if isLegacyGreenPhase(phase) {
+			phase = "unknown"
+		}
+	}
+	lastMessage := strings.TrimSpace(app.Status.LastMessage)
+	if observed := app.ObservedStatus; observed != nil {
+		lastMessage = firstNonEmpty(observed.Message, observed.Reason, lastMessage)
 	}
 	tone := ToneForAppPhase(phase)
-	if observed := app.ObservedStatus; observed != nil && tone == TonePositive && !appObservedGreenEligible(app, observed) {
+	if tone == TonePositive && !appObservedGreenEligible(app, app.ObservedStatus) {
 		tone = ToneWarning
 	}
 	return AppHealthView{
@@ -274,7 +288,7 @@ func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthVi
 		CurrentReplicas:     currentReplicas,
 		RuntimeID:           runtimeID,
 		URL:                 routeURL(app),
-		LastMessage:         strings.TrimSpace(app.Status.LastMessage),
+		LastMessage:         lastMessage,
 		LastOperationID:     strings.TrimSpace(app.Status.LastOperationID),
 		ObservedAt:          observedAt,
 		ClusterID:           clusterID,
@@ -298,8 +312,25 @@ func NewAppHealth(app model.App, activeOperations []model.Operation) AppHealthVi
 	}
 }
 
+func isLegacyGreenPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "deployed", "running", "ready", "active", "healthy":
+		return true
+	default:
+		return false
+	}
+}
+
 func appObservedGreenEligible(app model.App, observed *model.AppObservedStatus) bool {
-	if observed == nil || !observed.Fresh || observed.Phase != "deployed" || observed.ReadyReplicas == nil {
+	if observed == nil || !observed.Fresh || observed.Phase != "deployed" || observed.ReadyReplicas == nil ||
+		app.Spec.Replicas <= 0 || observed.DesiredReplicas != app.Spec.Replicas ||
+		strings.TrimSpace(observed.ClusterID) == "" || strings.TrimSpace(observed.EvidenceSource) == "" ||
+		observed.Generation <= 0 || observed.ObservedGeneration < observed.Generation {
+		return false
+	}
+	now := time.Now().UTC()
+	observedAt := observed.ObservedAt.UTC()
+	if observedAt.IsZero() || observedAt.After(now.Add(30*time.Second)) || now.Sub(observedAt) > time.Minute {
 		return false
 	}
 	if app.Spec.Replicas > 0 {
@@ -309,16 +340,19 @@ func appObservedGreenEligible(app model.App, observed *model.AppObservedStatus) 
 			observed.PhysicalReplicas == nil || *observed.PhysicalReplicas < app.Spec.Replicas {
 			return false
 		}
-	}
-	if model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
-		if observed.ServicePresent == nil || !*observed.ServicePresent {
+		if observed.PhysicalDesired != nil && *observed.PhysicalDesired < app.Spec.Replicas {
 			return false
 		}
-		if observed.EndpointPresent == nil || !*observed.EndpointPresent || observed.EndpointReady == nil || !*observed.EndpointReady {
-			return false
+		if model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
+			if observed.ServicePresent == nil || !*observed.ServicePresent {
+				return false
+			}
 		}
 	}
-	if strings.TrimSpace(app.Spec.Image) != "" && (observed.ImagePresent == nil || !*observed.ImagePresent) {
+	if observed.EndpointPresent == nil || !*observed.EndpointPresent || observed.EndpointReady == nil || !*observed.EndpointReady {
+		return false
+	}
+	if observed.ImagePresent == nil || !*observed.ImagePresent {
 		return false
 	}
 	return len(observed.InvariantViolations) == 0

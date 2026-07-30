@@ -269,6 +269,27 @@ func TestRuntimeContinuityReportsTenantWorkloadRisksWithoutPlatformHardGate(t *t
 	}
 }
 
+func TestObservedRuntimeInvariantFailuresArePlatformHardGates(t *testing.T) {
+	checks := robustnessHardObservedInvariantChecks([]model.RuntimeContinuityStatus{{
+		AppID:           "app_missing",
+		AppName:         "missing",
+		DesiredReplicas: 1,
+		ReadyReplicas:   0,
+		Blockers: []string{
+			"managed app runtime object not found",
+			"endpoint missing",
+			"physical replicas are zero",
+		},
+		Evidence: map[string]string{"cluster_id": "cluster-uid", "fresh": "true"},
+	}})
+	if len(checks) != 1 || checks[0].Pass || checks[0].Severity != model.RobustnessSeverityBlockPublish {
+		t.Fatalf("observed runtime contradiction must block publication: %+v", checks)
+	}
+	if checks[0].Evidence["release_gate_scope"] != model.ReleaseSignalGateScopeControlPlane || checks[0].Evidence["report_only"] != "false" {
+		t.Fatalf("hard observed invariant lost control-plane gate evidence: %+v", checks[0].Evidence)
+	}
+}
+
 func TestExplicitReleaseSignalPromotesTenantWorkloadContinuityToControlPlaneGate(t *testing.T) {
 	t.Parallel()
 

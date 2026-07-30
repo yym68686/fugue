@@ -23,12 +23,13 @@ func (s *Server) handleGetOperationEvidence(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	filter := model.OperationEvidenceFilter{
-		TenantID:      principal.TenantID,
-		PlatformAdmin: principal.IsPlatformAdmin(),
-		OperationID:   op.ID,
-		Types:         splitQueryCSV(r.URL.Query()["type"]),
-		Severities:    splitQueryCSV(r.URL.Query()["severity"]),
-		Limit:         queryIntDefault(r, "limit", 200),
+		TenantID:               principal.TenantID,
+		PlatformAdmin:          principal.IsPlatformAdmin(),
+		OperationID:            op.ID,
+		Types:                  splitQueryCSV(r.URL.Query()["type"]),
+		Severities:             splitQueryCSV(r.URL.Query()["severity"]),
+		Limit:                  queryIntDefault(r, "limit", 200),
+		IncludeMigrationLedger: op.Type == model.OperationTypeMigrate,
 	}
 	if since := strings.TrimSpace(r.URL.Query().Get("since")); since != "" {
 		parsed, parseErr := time.Parse(time.RFC3339, since)
@@ -84,10 +85,11 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		return model.OperationDebugBundle{}, err
 	}
 	evidence, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{
-		TenantID:      op.TenantID,
-		PlatformAdmin: principal.IsPlatformAdmin(),
-		OperationID:   op.ID,
-		Limit:         1000,
+		TenantID:               op.TenantID,
+		PlatformAdmin:          principal.IsPlatformAdmin(),
+		OperationID:            op.ID,
+		Limit:                  1000,
+		IncludeMigrationLedger: op.Type == model.OperationTypeMigrate,
 	})
 	if err != nil {
 		return model.OperationDebugBundle{}, err

@@ -2822,9 +2822,44 @@ func (s *Store) CreateOperationWithResult(op model.Operation) (model.Operation, 
 	if err != nil {
 		return model.Operation{}, OperationCreateResult{}, err
 	}
-	return created, OperationCreateResult{
+	result := OperationCreateResult{
 		Created: strings.TrimSpace(created.ID) != "" && !outcome.ReusedExistingOperation,
-	}, nil
+	}
+	// Every migration gets an immutable ledger entry before a worker can act on
+	// it.  If the audit write cannot be made, fail the operation closed so no
+	// target artifact can be promoted without a 90-day record.
+	if created.Type == model.OperationTypeMigrate && strings.TrimSpace(created.ID) != "" {
+		if _, found, ledgerErr := s.LatestAppMigrationLedger(created.ID); ledgerErr != nil {
+			return created, result, ledgerErr
+		} else if !found {
+			initialLedger := model.AppMigrationLedger{
+				TenantID:              created.TenantID,
+				AppID:                 created.AppID,
+				OperationID:           created.ID,
+				OldRuntimeID:          created.SourceRuntimeID,
+				NewRuntimeID:          created.TargetRuntimeID,
+				CutoverStatus:         model.AppMigrationCutoverPending,
+				OldArtifactsProtected: true,
+			}
+			// Capture the image and desired replica baseline at ledger creation
+			// time.  The app's durable spec may be updated after a migration is
+			// queued; retaining this immutable baseline is what lets global cache
+			// cleanup protect the source artifact while cutover is pending.
+			if migrationApp, appErr := s.GetApp(created.AppID); appErr == nil {
+				initialLedger.ImageRef = strings.TrimSpace(migrationApp.Spec.Image)
+				initialLedger.DesiredReplicas = migrationApp.Spec.Replicas
+				initialLedger.ProjectID = migrationApp.ProjectID
+			} else if !errors.Is(appErr, ErrNotFound) {
+				_, _ = s.FailOperation(created.ID, "migration ledger initialization could not load app: "+appErr.Error())
+				return created, result, appErr
+			}
+			if _, ledgerErr := s.RecordAppMigrationLedger(initialLedger); ledgerErr != nil {
+				_, _ = s.FailOperation(created.ID, "migration ledger initialization failed: "+ledgerErr.Error())
+				return created, result, fmt.Errorf("initialize migration ledger for operation %s: %w", created.ID, ledgerErr)
+			}
+		}
+	}
+	return created, result, nil
 }
 
 func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCreatePolicy) (model.Operation, operationCreateOutcome, error) {
@@ -3812,6 +3847,11 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 		if runtimeID != "" && state.Operations[index].AssignedRuntimeID != runtimeID {
 			return ErrNotFound
 		}
+		if state.Operations[index].Type == model.OperationTypeMigrate {
+			if err := validateMigrationCutoverInState(state, state.Operations[index]); err != nil {
+				return err
+			}
+		}
 		if !operationCanTransitionToCompleted(state.Operations[index]) {
 			return ErrConflict
 		}
@@ -3930,7 +3970,16 @@ func (s *Store) RequeueInFlightManagedOperations(message string) (int, error) {
 
 func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 	if s.usingDatabase() {
-		return s.pgFailOperation(id, message)
+		op, err := s.pgFailOperation(id, message)
+		if err != nil {
+			return op, err
+		}
+		if op.Type == model.OperationTypeMigrate {
+			if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
+				return op, errors.Join(err, ledgerErr)
+			}
+		}
+		return op, nil
 	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -3947,7 +3996,15 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 		op = state.Operations[index]
 		return nil
 	})
-	return op, err
+	if err != nil {
+		return op, err
+	}
+	if op.Type == model.OperationTypeMigrate {
+		if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
+			return op, ledgerErr
+		}
+	}
+	return op, nil
 }
 
 // FailAssignedAgentOperation atomically rejects a task that is still waiting
@@ -3961,7 +4018,14 @@ func (s *Store) FailAssignedAgentOperation(id, runtimeID, message string) (model
 		return model.Operation{}, false, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgFailAssignedAgentOperation(id, runtimeID, message)
+		op, claimed, err := s.pgFailAssignedAgentOperation(id, runtimeID, message)
+		if err != nil || !claimed || op.Type != model.OperationTypeMigrate {
+			return op, claimed, err
+		}
+		if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
+			return op, claimed, ledgerErr
+		}
+		return op, claimed, nil
 	}
 	var op model.Operation
 	claimed := false
@@ -3989,7 +4053,13 @@ func (s *Store) FailAssignedAgentOperation(id, runtimeID, message string) (model
 		claimed = true
 		return nil
 	})
-	return op, claimed, err
+	if err != nil || !claimed || op.Type != model.OperationTypeMigrate {
+		return op, claimed, err
+	}
+	if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
+		return op, claimed, ledgerErr
+	}
+	return op, claimed, nil
 }
 
 func finalizeAssignedAgentReleaseFailure(state *model.State, op model.Operation, now time.Time, message string) {
@@ -4344,6 +4414,10 @@ func ensureDefaults(state *model.State) {
 	if state.OperationEvidence == nil {
 		state.OperationEvidence = []model.OperationEvidence{}
 	}
+	if state.AppMigrationLedgers == nil {
+		state.AppMigrationLedgers = []model.AppMigrationLedger{}
+	}
+	backfillMigrationLedgerArchiveInState(state, time.Now().UTC())
 	if state.AuditEvents == nil {
 		state.AuditEvents = []model.AuditEvent{}
 	}

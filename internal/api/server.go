@@ -1819,18 +1819,46 @@ func (s *Server) handleAgentOperations(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		tasks = append(tasks, runtime.AgentTask{
-			Operation: op,
-			App:       app,
+			Operation:       op,
+			App:             app,
+			SourceClusterID: s.sourceClusterIDForAgentTask(r.Context(), op),
 		})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
 }
 
+func (s *Server) sourceClusterIDForAgentTask(ctx context.Context, op model.Operation) string {
+	if s == nil || op.Type != model.OperationTypeMigrate {
+		return ""
+	}
+	if source, err := s.store.GetRuntime(op.SourceRuntimeID); err == nil {
+		for _, key := range []string{"fugue.io/cell-cluster-id", "fugue.io/cluster-id", "cluster_id"} {
+			if value := strings.TrimSpace(source.Labels[key]); value != "" {
+				return value
+			}
+		}
+		switch strings.TrimSpace(source.Type) {
+		case model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
+			// A managed runtime belongs to the Kubernetes cluster directly queried
+			// by this API. Read its UID live; never substitute an app-status cache,
+			// which may already describe a migration target.
+			if client, clientErr := s.managedAppStatusClient(); clientErr == nil {
+				defer client.closeIdleConnections()
+				if clusterID, clusterErr := client.getClusterID(ctx); clusterErr == nil {
+					return strings.TrimSpace(clusterID)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	var req struct {
-		ManifestPath string `json:"manifest_path"`
-		Message      string `json:"message"`
+		ManifestPath    string                    `json:"manifest_path"`
+		Message         string                    `json:"message"`
+		MigrationLedger *model.AppMigrationLedger `json:"migration_ledger,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -1849,8 +1877,83 @@ func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	if opBeforeComplete.Type == model.OperationTypeMigrate {
+		if strings.TrimSpace(opBeforeComplete.AssignedRuntimeID) != strings.TrimSpace(principal.ActorID) {
+			httpx.WriteError(w, http.StatusNotFound, "operation is not assigned to this runtime")
+			return
+		}
+		if req.MigrationLedger == nil {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration completion requires target runtime evidence")
+			httpx.WriteError(w, http.StatusConflict, "migration completion requires target runtime evidence")
+			return
+		}
+		ledger := *req.MigrationLedger
+		ledger.TenantID = opBeforeComplete.TenantID
+		ledger.AppID = opBeforeComplete.AppID
+		ledger.OperationID = opBeforeComplete.ID
+		if (strings.TrimSpace(ledger.OldRuntimeID) != "" && strings.TrimSpace(ledger.OldRuntimeID) != strings.TrimSpace(opBeforeComplete.SourceRuntimeID)) ||
+			(strings.TrimSpace(ledger.NewRuntimeID) != "" && strings.TrimSpace(ledger.NewRuntimeID) != strings.TrimSpace(opBeforeComplete.TargetRuntimeID)) {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration evidence runtime identity does not match the operation")
+			httpx.WriteError(w, http.StatusConflict, "migration evidence runtime identity does not match the operation")
+			return
+		}
+		ledger.OldRuntimeID = opBeforeComplete.SourceRuntimeID
+		ledger.NewRuntimeID = opBeforeComplete.TargetRuntimeID
+		ledger.EvidenceSource = "runtime_agent_kubernetes_api"
+		ledger.OperatorType = "runtime-agent"
+		ledger.OperatorID = principal.ActorID
+		ledger.AssociatedOperationID = opBeforeComplete.ID
+		expectedSourceCluster := strings.TrimSpace(s.sourceClusterIDForAgentTask(r.Context(), opBeforeComplete))
+		if expectedSourceCluster == "" || expectedSourceCluster != strings.TrimSpace(ledger.OldClusterID) {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration evidence source cluster identity does not match the operation")
+			httpx.WriteError(w, http.StatusConflict, "migration evidence source cluster identity does not match the operation")
+			return
+		}
+		runtimeObj, runtimeErr := s.store.GetRuntime(principal.ActorID)
+		if runtimeErr != nil {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration target runtime identity is unavailable")
+			httpx.WriteError(w, http.StatusConflict, "migration target runtime identity is unavailable")
+			return
+		}
+		expectedCluster := ""
+		for _, key := range []string{runtime.CellRuntimeLabelClusterID, "fugue.io/cluster-id", "cluster_id"} {
+			if value := strings.TrimSpace(runtimeObj.Labels[key]); value != "" {
+				expectedCluster = value
+				break
+			}
+		}
+		if expectedCluster == "" || expectedCluster != strings.TrimSpace(ledger.NewClusterID) {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration evidence cluster identity does not match the assigned runtime")
+			httpx.WriteError(w, http.StatusConflict, "migration evidence cluster identity does not match the assigned runtime")
+			return
+		}
+		if err := store.ValidateAppMigrationCutover(ledger); err != nil {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration cutover gate failed: "+err.Error())
+			httpx.WriteError(w, http.StatusConflict, "migration cutover gate failed: "+err.Error())
+			return
+		}
+		if _, ledgerErr := s.store.RecordAppMigrationLedger(ledger); ledgerErr != nil {
+			s.recordMigrationCompletionFailure(opBeforeComplete, "record migration cutover ledger failed: "+ledgerErr.Error())
+			s.writeStoreError(w, ledgerErr)
+			return
+		}
+		if strings.TrimSpace(ledger.NewClusterID) != "" {
+			if _, heartbeatErr := s.store.UpdateRuntimeHeartbeatWithLabels(principal.ActorID, "", map[string]string{
+				runtime.CellRuntimeLabelClusterID: strings.TrimSpace(ledger.NewClusterID),
+			}); heartbeatErr != nil && s.log != nil {
+				s.log.Printf("persist migration cluster identity for runtime %s deferred: %v", principal.ActorID, heartbeatErr)
+			}
+		}
+	}
 	op, err := s.store.CompleteAgentOperation(r.PathValue("id"), principal.ActorID, req.ManifestPath, req.Message)
 	if err != nil {
+		if opBeforeComplete.Type == model.OperationTypeMigrate {
+			// The verified envelope was recorded before the store's atomic
+			// completion transition. If that transition loses a race or fails,
+			// immediately append a failed snapshot so the retirement gate cannot
+			// mistake a non-completed operation for a safe cutover.
+			s.recordMigrationCompletionFailure(opBeforeComplete, "migration operation completion failed: "+err.Error())
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -1875,6 +1978,57 @@ func (s *Server) handleAgentCompleteOperation(w http.ResponseWriter, r *http.Req
 	}
 	s.appendAudit(principal, "operation.complete", "operation", op.ID, op.TenantID, map[string]string{"mode": op.ExecutionMode})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": op})
+}
+
+// recordMigrationCompletionFailure leaves an immutable failure snapshot when
+// an agent submits an invalid/incomplete cutover envelope.  The completion
+// endpoint is intentionally fail-closed, but a plain 409 would otherwise
+// leave the waiting operation without the audit event and operator-facing
+// last-failure history required for safe artifact retention.
+func (s *Server) recordMigrationCompletionFailure(op model.Operation, reason string) {
+	if s == nil || s.store == nil || op.Type != model.OperationTypeMigrate {
+		return
+	}
+	var projectID, imageRef string
+	var desiredReplicas int
+	if app, err := s.store.GetApp(op.AppID); err == nil {
+		projectID = app.ProjectID
+		imageRef = strings.TrimSpace(app.Spec.Image)
+		desiredReplicas = app.Spec.Replicas
+	} else if !errors.Is(err, store.ErrNotFound) {
+		if s.log != nil {
+			s.log.Printf("load app %s for migration failure ledger: %v", op.AppID, err)
+		}
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "migration completion evidence failed"
+	}
+	_, ledgerErr := s.store.RecordAppMigrationLedger(model.AppMigrationLedger{
+		TenantID:              op.TenantID,
+		ProjectID:             projectID,
+		AppID:                 op.AppID,
+		OperationID:           op.ID,
+		OldRuntimeID:          op.SourceRuntimeID,
+		NewRuntimeID:          op.TargetRuntimeID,
+		ImageRef:              imageRef,
+		DesiredReplicas:       desiredReplicas,
+		CutoverStatus:         model.AppMigrationCutoverBlocked,
+		OldArtifactsProtected: true,
+		FailureReason:         reason,
+		EvidenceSource:        model.OperationEvidenceSourceKubernetesAPI,
+		OperatorType:          op.RequestedByType,
+		OperatorID:            op.RequestedByID,
+	})
+	if ledgerErr != nil && s.log != nil {
+		s.log.Printf("record migration failure ledger for operation %s: %v", op.ID, ledgerErr)
+	}
+	if _, claimed, failErr := s.store.FailAssignedAgentOperation(op.ID, op.AssignedRuntimeID, reason); failErr != nil && s.log != nil {
+		s.log.Printf("fail migration operation %s after invalid completion: %v", op.ID, failErr)
+	} else if !claimed && s.log != nil {
+		s.log.Printf("migration operation %s was no longer waiting when completion evidence failed", op.ID)
+	}
 }
 
 func (s *Server) handleAgentFailOperation(w http.ResponseWriter, r *http.Request) {

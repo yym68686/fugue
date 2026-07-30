@@ -48,10 +48,29 @@ func TestPGFinalizeAssignedAgentReleaseFailureTxIsAtomic(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows(strings.Split(releaseAttemptSelectColumns, ", ")).AddRow(attemptValues...))
 	mock.ExpectExec("(?s)INSERT INTO fugue_operation_evidence .* VALUES").
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("(?s)DELETE FROM fugue_operation_evidence.*operation_id").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("(?s)DELETE FROM fugue_operation_evidence.*app_id").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	for _, scope := range []struct {
+		value string
+		limit int
+	}{
+		{value: op.ID, limit: operationEvidenceRetentionLimitPerOperation},
+		{value: op.AppID, limit: operationEvidenceRetentionLimitPerApp},
+	} {
+		// Migration ledgers have a 90-day retention boundary and must be
+		// pruned independently from ordinary 30-day operation evidence, even
+		// when both writes happen inside this atomic release-failure path.
+		mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type IN`).
+			WithArgs(scope.value, sqlmock.AnyArg(), scope.limit,
+				model.OperationEvidenceTypeMigrationStarted,
+				model.OperationEvidenceTypeMigrationCompleted,
+				model.OperationEvidenceTypeMigrationFailed).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type NOT IN`).
+			WithArgs(scope.value, sqlmock.AnyArg(), scope.limit,
+				model.OperationEvidenceTypeMigrationStarted,
+				model.OperationEvidenceTypeMigrationCompleted,
+				model.OperationEvidenceTypeMigrationFailed).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+	}
 	mock.ExpectExec("(?s)UPDATE fugue_release_attempts.*status").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("(?s)INSERT INTO fugue_release_steps .* VALUES").

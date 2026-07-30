@@ -3064,6 +3064,9 @@ ORDER BY app_id, updated_at DESC, created_at DESC, id DESC
 			app.Status.LastFailedOperation = failure
 			changed = true
 		}
+		if invalidateStoredPhaseAfterFailure(&app) {
+			changed = true
+		}
 		if !changed {
 			continue
 		}
@@ -4500,6 +4503,21 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	op, err := s.pgGetOperationTx(ctx, tx, id, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+	if op.Type == model.OperationTypeMigrate {
+		ledger, found, ledgerErr := s.pgLatestMigrationLedgerTx(ctx, tx, op.ID)
+		if ledgerErr != nil {
+			return model.Operation{}, ledgerErr
+		}
+		if !found {
+			return model.Operation{}, errMigrationCutoverEvidenceMissing
+		}
+		if ledger.CutoverStatus != model.AppMigrationCutoverVerified && ledger.CutoverStatus != model.AppMigrationCutoverCompleted {
+			return model.Operation{}, fmt.Errorf("%w: cutover status=%s", errMigrationCutoverEvidenceMissing, ledger.CutoverStatus)
+		}
+		if err := ValidateAppMigrationCutover(ledger); err != nil {
+			return model.Operation{}, err
+		}
 	}
 	if runtimeID != "" && op.AssignedRuntimeID != runtimeID {
 		return model.Operation{}, ErrNotFound

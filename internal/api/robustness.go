@@ -249,6 +249,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, robustnessChecksFromRuntimeContinuity(runtimeContinuity)...)
+	checks = append(checks, robustnessHardObservedInvariantChecks(runtimeContinuity)...)
 	var routeExplain *model.RouteExplainResponse
 	if subject != "" {
 		explain, err := s.explainRouteForRobustness(r, subject)

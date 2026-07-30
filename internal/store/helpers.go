@@ -95,8 +95,14 @@ func fallbackLiveAppPhase(app model.App) (string, bool) {
 }
 
 func failedPhaseForApp(app model.App) string {
+	// A failed operation must not resurrect a green/deployed phase from the
+	// durable CurrentReplicas/ready timestamps. Until a fresh runtime observer
+	// proves the old workload, the only truthful projection is unknown.
 	if phase, ok := fallbackLiveAppPhase(app); ok {
-		return phase
+		if phase == "disabled" {
+			return phase
+		}
+		return "unknown"
 	}
 	return "failed"
 }
@@ -112,10 +118,13 @@ func repairFailedAppPhase(app *model.App) bool {
 	if !ok {
 		return false
 	}
-	if app.Status.Phase == phase {
+	if phase == "disabled" {
 		return false
 	}
-	app.Status.Phase = phase
+	if app.Status.Phase == "unknown" {
+		return false
+	}
+	app.Status.Phase = "unknown"
 	return true
 }
 
@@ -125,6 +134,26 @@ func normalizeAppStatusForRead(app *model.App) {
 	}
 	model.ApplyAppSpecDefaults(&app.Spec)
 	repairFailedAppPhase(app)
+	invalidateStoredPhaseAfterFailure(app)
+}
+
+func invalidateStoredPhaseAfterFailure(app *model.App) bool {
+	if app == nil || app.Status.LastFailedOperation == nil {
+		return false
+	}
+	if !model.AppHasCurrentFailedOperation(app.Status) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(app.Status.Phase)) {
+	case "deployed", "running", "ready", "active":
+		// A historical failure does not prove that the previous workload is
+		// still serving. Only the live observed-status calculator may restore a
+		// green phase after a fresh cluster/generation/endpoint observation.
+		app.Status.Phase = "unknown"
+		return true
+	default:
+		return false
+	}
 }
 
 func repairAllAppStatuses(state *model.State) bool {
@@ -146,6 +175,9 @@ func repairAllAppStatuses(state *model.State) bool {
 		failure := model.AppOperationFailureFromOperation(latestFailures[state.Apps[index].ID])
 		if !appOperationFailureEqual(state.Apps[index].Status.LastFailedOperation, failure) {
 			state.Apps[index].Status.LastFailedOperation = failure
+			changed = true
+		}
+		if invalidateStoredPhaseAfterFailure(&state.Apps[index]) {
 			changed = true
 		}
 	}

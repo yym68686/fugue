@@ -86,6 +86,9 @@ func (s *Store) pgListOperationEvidence(filter model.OperationEvidenceFilter) ([
 		args = append(args, filter.ReleaseAttemptID)
 		clauses = append(clauses, fmt.Sprintf("release_attempt_id = $%d", len(args)))
 	}
+	if !filter.IncludeMigrationLedger {
+		clauses = append(clauses, "evidence_type NOT IN ('migration_started', 'migration_completed', 'migration_failed')")
+	}
 	if types := normalizedOperationFilterValues(filter.Types); len(types) > 0 {
 		clauses = append(clauses, fmt.Sprintf("lower(evidence_type) IN (%s)", sqlPlaceholderList(len(args)+1, len(types))))
 		for _, value := range types {
@@ -107,8 +110,10 @@ func (s *Store) pgListOperationEvidence(filter model.OperationEvidenceFilter) ([
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
 	query += " ORDER BY collected_at DESC, id DESC"
-	args = append(args, filter.Limit)
-	query += fmt.Sprintf(" LIMIT $%d", len(args))
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -208,49 +213,70 @@ func pruneOperationEvidenceTx(ctx context.Context, tx *sql.Tx, inserted model.Op
 		cutoffBase = time.Now().UTC()
 	}
 	cutoff := cutoffBase.UTC().Add(-operationEvidenceRetentionWindow)
+	migrationCutoff := cutoffBase.UTC().Add(-operationMigrationLedgerRetentionWindow)
 	if operationID := strings.TrimSpace(inserted.OperationID); operationID != "" {
-		if err := pruneOperationEvidenceScopeTx(ctx, tx, "operation_id", operationID, cutoff, operationEvidenceRetentionLimitPerOperation); err != nil {
+		if err := pruneOperationEvidenceScopeTx(ctx, tx, "operation_id", operationID, cutoff, migrationCutoff, operationEvidenceRetentionLimitPerOperation); err != nil {
 			return err
 		}
 	}
 	if appID := strings.TrimSpace(inserted.AppID); appID != "" {
-		return pruneOperationEvidenceScopeTx(ctx, tx, "app_id", appID, cutoff, operationEvidenceRetentionLimitPerApp)
+		return pruneOperationEvidenceScopeTx(ctx, tx, "app_id", appID, cutoff, migrationCutoff, operationEvidenceRetentionLimitPerApp)
 	}
 	if tenantID := strings.TrimSpace(inserted.TenantID); tenantID != "" {
-		return pruneOperationEvidenceTenantWithoutAppTx(ctx, tx, tenantID, cutoff)
+		return pruneOperationEvidenceTenantWithoutAppTx(ctx, tx, tenantID, cutoff, migrationCutoff)
 	}
 	return nil
 }
 
-func pruneOperationEvidenceScopeTx(ctx context.Context, tx *sql.Tx, column, value string, cutoff time.Time, limit int) error {
+func pruneOperationEvidenceScopeTx(ctx context.Context, tx *sql.Tx, column, value string, cutoff, migrationCutoff time.Time, limit int) error {
 	if strings.TrimSpace(value) == "" || limit <= 0 {
 		return nil
 	}
 	if column != "operation_id" && column != "app_id" {
 		return ErrInvalidInput
 	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+DELETE FROM fugue_operation_evidence
+WHERE %s = $1
+  AND evidence_type IN ($4, $5, $6)
+  AND collected_at < $2
+`, column), value, migrationCutoff, limit, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed); err != nil {
+		return mapDBErr(err)
+	}
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 DELETE FROM fugue_operation_evidence
 WHERE %s = $1
+  AND evidence_type NOT IN ($4, $5, $6)
   AND (
 	collected_at < $2
 	OR id NOT IN (
 		SELECT id
 		FROM fugue_operation_evidence
 		WHERE %s = $1
+		  AND evidence_type NOT IN ($4, $5, $6)
 		ORDER BY collected_at DESC, id DESC
 		LIMIT $3
 	)
   )
-`, column, column), value, cutoff, limit)
+`, column, column), value, cutoff, limit, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed)
 	return mapDBErr(err)
 }
 
-func pruneOperationEvidenceTenantWithoutAppTx(ctx context.Context, tx *sql.Tx, tenantID string, cutoff time.Time) error {
+func pruneOperationEvidenceTenantWithoutAppTx(ctx context.Context, tx *sql.Tx, tenantID string, cutoff, migrationCutoff time.Time) error {
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_operation_evidence
+WHERE tenant_id = $1
+  AND app_id = ''
+  AND evidence_type IN ($4, $5, $6)
+  AND collected_at < $2
+`, tenantID, migrationCutoff, operationEvidenceRetentionLimitPerTenant, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed); err != nil {
+		return mapDBErr(err)
+	}
 	_, err := tx.ExecContext(ctx, `
 DELETE FROM fugue_operation_evidence
 WHERE tenant_id = $1
   AND app_id = ''
+  AND evidence_type NOT IN ($4, $5, $6)
   AND (
 	collected_at < $2
 	OR id NOT IN (
@@ -258,11 +284,12 @@ WHERE tenant_id = $1
 		FROM fugue_operation_evidence
 		WHERE tenant_id = $1
 		  AND app_id = ''
+		  AND evidence_type NOT IN ($4, $5, $6)
 		ORDER BY collected_at DESC, id DESC
 		LIMIT $3
 	)
   )
-`, tenantID, cutoff, operationEvidenceRetentionLimitPerTenant)
+`, tenantID, cutoff, operationEvidenceRetentionLimitPerTenant, model.OperationEvidenceTypeMigrationStarted, model.OperationEvidenceTypeMigrationCompleted, model.OperationEvidenceTypeMigrationFailed)
 	return mapDBErr(err)
 }
 

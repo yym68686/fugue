@@ -551,6 +551,7 @@ type controllerImageCacheProtectedSet struct {
 	availableRefs        map[string]struct{}
 	lostRefs             map[string]struct{}
 	deletedRefs          map[string]struct{}
+	migrationRefs        map[string]struct{}
 	pinnedRefs           map[string]struct{}
 	liveRefs             map[string]struct{}
 	taskRefs             map[string]struct{}
@@ -578,6 +579,7 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 		availableRefs:        map[string]struct{}{},
 		lostRefs:             map[string]struct{}{},
 		deletedRefs:          map[string]struct{}{},
+		migrationRefs:        map[string]struct{}{},
 		pinnedRefs:           map[string]struct{}{},
 		liveRefs:             map[string]struct{}{},
 		taskRefs:             map[string]struct{}{},
@@ -626,6 +628,39 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 			addControllerImageKeys(protected.lostRefs, keys...)
 		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
 			addControllerImageKeys(protected.deletedRefs, keys...)
+		}
+	}
+	// A pending/failed/blocked migration protects every known image generation
+	// for the application.  The global node-cache sweeper has no app argument,
+	// so this protection must be materialized in its reference set; otherwise a
+	// cache manifest could be deleted between migration retries even though the
+	// per-app registry cleanup path is correctly gated.
+	latestMigrationByApp, err := s.Store.LatestAppMigrationLedgersByApp()
+	if err != nil {
+		return protected, err
+	}
+	for _, image := range images {
+		ledger, pending := latestMigrationByApp[strings.TrimSpace(image.AppID)]
+		if !pending || ledger.CutoverStatus == model.AppMigrationCutoverVerified || ledger.CutoverStatus == model.AppMigrationCutoverCompleted {
+			continue
+		}
+		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		addControllerImageKeys(protected.migrationRefs, keys...)
+		addControllerImageDetails(protected.imageIDsByRef, keys, image.ID)
+		if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
+			protected.protectedBlobDigests[digest] = struct{}{}
+		}
+	}
+	for _, ledger := range latestMigrationByApp {
+		if ledger.CutoverStatus == model.AppMigrationCutoverVerified || ledger.CutoverStatus == model.AppMigrationCutoverCompleted {
+			continue
+		}
+		if imageRef := strings.TrimSpace(ledger.ImageRef); imageRef != "" {
+			keys := controllerImageReferenceKeys(imageRef, "")
+			addControllerImageKeys(protected.migrationRefs, keys...)
+			if digest := imageDigest(imageRef); digest != "" {
+				protected.protectedBlobDigests[digest] = struct{}{}
+			}
 		}
 	}
 	pins, err := s.Store.ListImagePins(model.ImagePinFilter{PlatformAdmin: true})
@@ -858,6 +893,7 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 		refs   map[string]struct{}
 		reason string
 	}{
+		{protected.migrationRefs, "migration_cutover_pending"},
 		{protected.liveRefs, "current_workload"},
 		{protected.pinnedRefs, "active_pin"},
 		{protected.taskRefs, "active_task"},
@@ -866,6 +902,9 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 			out.Protected = true
 			out.SkipReason = rule.reason
 			switch rule.reason {
+			case "migration_cutover_pending":
+				out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
+				out.SkipDetails = []string{"migration cutover evidence is not verified; old image artifacts remain protected"}
 			case "current_workload":
 				out.MatchedWorkloadRefs = controllerImageDetailsForKeys(protected.workloadRefsByRef, keys)
 				out.SkipDetails = []string{"exact image generation is used by a live workload"}

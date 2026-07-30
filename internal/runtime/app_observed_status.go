@@ -10,19 +10,20 @@ import (
 const (
 	AppObservationSourceKubernetesAPI = "kubernetes_api"
 
-	AppObservationReasonManagedAppReady            = "managed_app_ready"
-	AppObservationReasonManagedAppProgressing      = "managed_app_progressing"
-	AppObservationReasonManagedAppDisabled         = "managed_app_disabled"
-	AppObservationReasonManagedAppDeleting         = "managed_app_deleting"
-	AppObservationReasonManagedAppError            = "managed_app_error"
-	AppObservationReasonManagedAppStatusEmpty      = "managed_app_status_empty"
-	AppObservationReasonManagedAppNotFound         = "managed_app_not_found"
-	AppObservationReasonGenerationNotObserved      = "generation_not_observed"
-	AppObservationReasonClusterIdentityMissing     = "cluster_identity_missing"
-	AppObservationReasonKubernetesQueryFailed      = "kubernetes_query_failed"
-	AppObservationReasonObservationStale           = "observation_stale"
-	AppObservationReasonDesiredReplicasZero        = "desired_replicas_zero"
-	AppObservationReasonRuntimeObservationNotReady = "runtime_observation_not_ready"
+	AppObservationReasonManagedAppReady             = "managed_app_ready"
+	AppObservationReasonManagedAppProgressing       = "managed_app_progressing"
+	AppObservationReasonManagedAppDisabled          = "managed_app_disabled"
+	AppObservationReasonManagedAppDeleting          = "managed_app_deleting"
+	AppObservationReasonManagedAppError             = "managed_app_error"
+	AppObservationReasonManagedAppStatusEmpty       = "managed_app_status_empty"
+	AppObservationReasonManagedAppNotFound          = "managed_app_not_found"
+	AppObservationReasonGenerationNotObserved       = "generation_not_observed"
+	AppObservationReasonClusterIdentityMissing      = "cluster_identity_missing"
+	AppObservationReasonKubernetesQueryFailed       = "kubernetes_query_failed"
+	AppObservationReasonObservationStale            = "observation_stale"
+	AppObservationReasonObservationTimestampMissing = "observation_timestamp_missing"
+	AppObservationReasonDesiredReplicasZero         = "desired_replicas_zero"
+	AppObservationReasonRuntimeObservationNotReady  = "runtime_observation_not_ready"
 )
 
 // AppRuntimeObservation is the complete evidence envelope used by the single
@@ -53,9 +54,6 @@ type AppRuntimeObservation struct {
 
 func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) model.AppObservedStatus {
 	observedAt := evidence.ObservedAt.UTC()
-	if observedAt.IsZero() {
-		observedAt = time.Now().UTC()
-	}
 	source := strings.TrimSpace(evidence.EvidenceSource)
 	if source == "" {
 		source = AppObservationSourceKubernetesAPI
@@ -79,6 +77,12 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		status.Fresh = false
 		status.Reason = AppObservationReasonKubernetesQueryFailed
 		status.Message = firstObservedStatusMessage(evidence.ErrorMessage, "live runtime observation is unavailable")
+		return status
+	}
+	if evidence.ObservedAt.IsZero() {
+		status.Fresh = false
+		status.Reason = AppObservationReasonObservationTimestampMissing
+		status.Message = firstObservedStatusMessage(evidence.ErrorMessage, "live runtime observation has no timestamp")
 		return status
 	}
 	if strings.TrimSpace(evidence.ClusterID) == "" {
@@ -106,14 +110,6 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 	status.ImagePresent = cloneBoolPointer(evidence.ImagePresent)
 	status.ImageRef = strings.TrimSpace(evidence.ImageRef)
 	status.InvariantViolations = append([]string(nil), evidence.InvariantViolations...)
-	if app.Spec.Replicas == 0 {
-		ready := 0
-		status.Phase = "disabled"
-		status.ReadyReplicas = &ready
-		status.Reason = AppObservationReasonDesiredReplicasZero
-		status.Message = "desired replicas is 0"
-		return status
-	}
 	if !evidence.Found {
 		ready := 0
 		status.Phase = "unavailable"
@@ -123,8 +119,24 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		status.InvariantViolations = observedStatusInvariantViolations(status, app)
 		return status
 	}
+	if app.Spec.Replicas == 0 {
+		ready := 0
+		status.Phase = "disabled"
+		status.ReadyReplicas = &ready
+		status.Reason = AppObservationReasonDesiredReplicasZero
+		status.Message = "desired replicas is 0"
+		return status
+	}
 
 	managed := evidence.ManagedApp
+	// Once the object is found, its runtime identity is the observed value. The
+	// durable app spec may still describe the source runtime while a migration
+	// is in flight, so projecting the stored runtime here would mix desired and
+	// observed state and make cluster evidence look authoritative for the wrong
+	// runtime.
+	if runtimeID := strings.TrimSpace(managed.Spec.AppSpec.RuntimeID); runtimeID != "" {
+		status.RuntimeID = runtimeID
+	}
 	status.Generation = managed.Metadata.Generation
 	status.ObservedGeneration = managed.Status.ObservedGeneration
 	ready := managed.Status.ReadyReplicas
@@ -132,10 +144,16 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		ready = *evidence.PhysicalReplicas
 	}
 	status.ReadyReplicas = &ready
-	if managed.Status.DesiredReplicas > 0 {
-		status.DesiredReplicas = managed.Status.DesiredReplicas
-	}
+	// desired_replicas belongs to the durable app spec. The Kubernetes
+	// controller's own desired count is exposed separately as
+	// physical_desired_replicas so a lagging/foreign ManagedApp cannot rewrite
+	// the control-plane desired state in the observed contract.
 	status.Message = strings.TrimSpace(managed.Status.Message)
+	// Record independently observed invariant failures even when the
+	// controller has not yet acknowledged the current generation. Generation
+	// lag makes the overall phase unknown, but must not hide a zero-replica,
+	// missing-image, or missing-endpoint signal from operators.
+	status.InvariantViolations = append(status.InvariantViolations, observedStatusInvariantViolations(status, app)...)
 
 	if managed.Metadata.Generation <= 0 || managed.Status.ObservedGeneration < managed.Metadata.Generation {
 		status.Phase = "unknown"
@@ -148,8 +166,6 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 		}
 		return status
 	}
-	status.InvariantViolations = append(status.InvariantViolations, observedStatusInvariantViolations(status, app)...)
-
 	switch strings.TrimSpace(managed.Status.Phase) {
 	case ManagedAppPhaseReady:
 		status.Phase = "deployed"
@@ -176,7 +192,7 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 	// image, namespace, and endpoint evidence also passes. Preserve explicit
 	// controller error/progress phases for diagnosis while still making a
 	// previously green/deployed state fail closed.
-	if len(status.InvariantViolations) > 0 && status.Phase == "deployed" {
+	if len(status.InvariantViolations) > 0 && (status.Phase == "deployed" || (status.Phase == "disabled" && app.Spec.Replicas > 0)) {
 		status.Phase = "unavailable"
 		status.Reason = AppObservationReasonRuntimeObservationNotReady
 		status.Message = firstObservedStatusMessage(status.Message, strings.Join(status.InvariantViolations, "; "))
@@ -214,9 +230,6 @@ func observedStatusInvariantViolations(status model.AppObservedStatus, app model
 		}
 		violations = append(violations, value)
 	}
-	if app.Spec.Replicas <= 0 {
-		return violations
-	}
 	if status.NamespacePresent != nil && !*status.NamespacePresent {
 		appendUnique("namespace_missing")
 	}
@@ -232,22 +245,35 @@ func observedStatusInvariantViolations(status model.AppObservedStatus, app model
 	if status.EndpointReady != nil && !*status.EndpointReady {
 		appendUnique("endpoint_unready")
 	}
+	storedPhase := app.Status.Phase
+	if app.StoredStatus != nil {
+		storedPhase = app.StoredStatus.Phase
+	}
+	if strings.EqualFold(strings.TrimSpace(storedPhase), "deployed") &&
+		(boolPointerIsFalse(status.RuntimeObjectPresent) ||
+			boolPointerIsFalse(status.NamespacePresent) ||
+			boolPointerIsFalse(status.ServicePresent) ||
+			boolPointerIsFalse(status.EndpointPresent) ||
+			boolPointerIsFalse(status.EndpointReady)) {
+		appendUnique("stored_deployed_without_runtime_evidence")
+	}
+	if app.Spec.Replicas <= 0 {
+		return violations
+	}
 	if status.ImagePresent != nil && !*status.ImagePresent {
 		appendUnique("image_missing")
 	}
 	if status.PhysicalReplicas != nil && *status.PhysicalReplicas <= 0 {
 		appendUnique("physical_replicas_zero")
 	}
+	if status.PhysicalDesired != nil && *status.PhysicalDesired < status.DesiredReplicas {
+		appendUnique("physical_desired_replicas_below_desired")
+	}
 	if status.DesiredReplicas > 0 && status.ReadyReplicas != nil && *status.ReadyReplicas == 0 {
 		appendUnique("desired_replicas_unready")
 	}
-	if strings.EqualFold(strings.TrimSpace(app.Status.Phase), "deployed") &&
-		(boolPointerIsFalse(status.RuntimeObjectPresent) ||
-			boolPointerIsFalse(status.NamespacePresent) ||
-			boolPointerIsFalse(status.ServicePresent) ||
-			boolPointerIsFalse(status.EndpointPresent) ||
-			boolPointerIsFalse(status.EndpointReady) ||
-			(status.ReadyReplicas != nil && *status.ReadyReplicas == 0) ||
+	if strings.EqualFold(strings.TrimSpace(storedPhase), "deployed") &&
+		((status.ReadyReplicas != nil && *status.ReadyReplicas == 0) ||
 			(status.PhysicalReplicas != nil && *status.PhysicalReplicas == 0)) {
 		appendUnique("stored_deployed_without_runtime_evidence")
 	}
@@ -264,18 +290,30 @@ func boolPointerIsFalse(value *bool) bool {
 // if it were a current observation.
 func ApplyAppObservedStatus(app model.App, observed model.AppObservedStatus) model.App {
 	out := app
-	stored := app.Status
-	stored.SourceSync = model.CloneAppSourceSyncStatus(app.Status.SourceSync)
-	if app.Status.LastFailedOperation != nil {
-		failure := *app.Status.LastFailedOperation
-		if app.Status.LastFailedOperation.CompletedAt != nil {
-			completedAt := app.Status.LastFailedOperation.CompletedAt.UTC()
+	stored := cloneObservedAppStatus(app.Status)
+	if app.StoredStatus != nil {
+		// Re-overlaying an already projected app must not promote the previous
+		// observed projection into durable stored state.
+		stored = cloneObservedAppStatus(*app.StoredStatus)
+	}
+	if stored.LastFailedOperation != nil {
+		failure := *stored.LastFailedOperation
+		if stored.LastFailedOperation.CompletedAt != nil {
+			completedAt := stored.LastFailedOperation.CompletedAt.UTC()
 			failure.CompletedAt = &completedAt
 		}
 		stored.LastFailedOperation = &failure
 	}
 	out.StoredStatus = &stored
 	out.ObservedStatus = &observed
+	if out.Status.LastFailedOperation == nil && stored.LastFailedOperation != nil {
+		failure := *stored.LastFailedOperation
+		if stored.LastFailedOperation.CompletedAt != nil {
+			completedAt := stored.LastFailedOperation.CompletedAt.UTC()
+			failure.CompletedAt = &completedAt
+		}
+		out.Status.LastFailedOperation = &failure
+	}
 	out.Status.Phase = observed.Phase
 	out.Status.CurrentRuntimeID = observed.RuntimeID
 	if observed.ReadyReplicas != nil {
@@ -286,6 +324,20 @@ func ApplyAppObservedStatus(app model.App, observed model.AppObservedStatus) mod
 	out.Status.UpdatedAt = observed.ObservedAt
 	if strings.TrimSpace(observed.Message) != "" {
 		out.Status.LastMessage = strings.TrimSpace(observed.Message)
+	}
+	return out
+}
+
+func cloneObservedAppStatus(in model.AppStatus) model.AppStatus {
+	out := in
+	out.SourceSync = model.CloneAppSourceSyncStatus(in.SourceSync)
+	if in.LastFailedOperation != nil {
+		failure := *in.LastFailedOperation
+		if in.LastFailedOperation.CompletedAt != nil {
+			completedAt := in.LastFailedOperation.CompletedAt.UTC()
+			failure.CompletedAt = &completedAt
+		}
+		out.LastFailedOperation = &failure
 	}
 	return out
 }

@@ -49,13 +49,17 @@ type MigrationEvidenceMetricCount struct {
 const (
 	defaultOperationEvidenceLimit = 200
 	maxOperationEvidenceLimit     = 1000
-	defaultReleaseAttemptLimit    = 50
-	maxReleaseAttemptLimit        = 500
+	// Used only by the internal, migration-only ledger reader. A 90-day safety
+	// ledger must not silently truncate at the diagnostic API's page limit.
+	unboundedMigrationEvidenceLimit = -1
+	defaultReleaseAttemptLimit      = 50
+	maxReleaseAttemptLimit          = 500
 
 	operationEvidenceRetentionLimitPerApp       = 2000
 	operationEvidenceRetentionLimitPerOperation = 500
 	operationEvidenceRetentionLimitPerTenant    = 5000
 	operationEvidenceRetentionWindow            = 30 * 24 * time.Hour
+	operationMigrationLedgerRetentionWindow     = 90 * 24 * time.Hour
 	releaseEvidenceResearchFollowupWindow       = time.Hour
 )
 
@@ -396,10 +400,11 @@ func (s *Store) ListOperationTimeline(tenantID string, platformAdmin bool, opera
 		return nil, ErrNotFound
 	}
 	evidence, err := s.ListOperationEvidence(model.OperationEvidenceFilter{
-		TenantID:      tenantID,
-		PlatformAdmin: platformAdmin,
-		OperationID:   operationID,
-		Limit:         maxOperationEvidenceLimit,
+		TenantID:               tenantID,
+		PlatformAdmin:          platformAdmin,
+		OperationID:            operationID,
+		Limit:                  maxOperationEvidenceLimit,
+		IncludeMigrationLedger: true,
 	})
 	if err != nil {
 		return nil, err
@@ -776,15 +781,28 @@ func normalizeOperationEvidence(in model.OperationEvidence) model.OperationEvide
 }
 
 func normalizeOperationEvidenceFilter(in model.OperationEvidenceFilter) model.OperationEvidenceFilter {
+	unboundedMigrationOnly := in.Limit == unboundedMigrationEvidenceLimit && in.IncludeMigrationLedger && len(in.Types) > 0
+	for _, value := range in.Types {
+		if !isLongLivedMigrationEvidenceType(value) {
+			unboundedMigrationOnly = false
+			break
+		}
+	}
 	in.TenantID = strings.TrimSpace(in.TenantID)
 	in.OperationID = strings.TrimSpace(in.OperationID)
 	in.AppID = strings.TrimSpace(in.AppID)
 	in.ReleaseAttemptID = strings.TrimSpace(in.ReleaseAttemptID)
-	if in.Limit <= 0 {
+	if in.Limit <= 0 && !unboundedMigrationOnly {
 		in.Limit = defaultOperationEvidenceLimit
 	}
-	if in.Limit > maxOperationEvidenceLimit {
+	if in.Limit > maxOperationEvidenceLimit && !unboundedMigrationOnly {
 		in.Limit = maxOperationEvidenceLimit
+	}
+	for _, value := range in.Types {
+		if isLongLivedMigrationEvidenceType(value) {
+			in.IncludeMigrationLedger = true
+			break
+		}
 	}
 	return in
 }
@@ -829,6 +847,9 @@ func normalizeEvidenceRedactionStatus(raw string) string {
 }
 
 func operationEvidenceMatchesFilter(e model.OperationEvidence, filter model.OperationEvidenceFilter) bool {
+	if isLongLivedMigrationEvidenceType(e.Type) && !filter.IncludeMigrationLedger {
+		return false
+	}
 	if !filter.PlatformAdmin && strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(e.TenantID) != strings.TrimSpace(filter.TenantID) {
 		return false
 	}
@@ -904,11 +925,20 @@ func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(
 		return items
 	}
 	cutoff := now.UTC().Add(-operationEvidenceRetentionWindow)
+	migrationCutoff := now.UTC().Add(-operationMigrationLedgerRetentionWindow)
 	out := items[:0]
 	scoped := []model.OperationEvidence{}
+	migration := []model.OperationEvidence{}
 	for _, item := range items {
 		if !inScope(item) {
 			out = append(out, item)
+			continue
+		}
+		if isLongLivedMigrationEvidenceType(item.Type) {
+			if !item.CollectedAt.IsZero() && item.CollectedAt.Before(migrationCutoff) {
+				continue
+			}
+			migration = append(migration, item)
 			continue
 		}
 		if !item.CollectedAt.IsZero() && item.CollectedAt.Before(cutoff) {
@@ -926,8 +956,30 @@ func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(
 		scoped = scoped[:limit]
 	}
 	sortOperationEvidenceOldestFirst(scoped)
+	// Migration ledgers are immutable audit snapshots. They are retained for
+	// the full 90-day window and are not evicted by the bounded diagnostic
+	// history limits used for ordinary evidence.
+	sort.SliceStable(migration, func(i, j int) bool {
+		if migration[i].CollectedAt.Equal(migration[j].CollectedAt) {
+			return migration[i].ID < migration[j].ID
+		}
+		return migration[i].CollectedAt.Before(migration[j].CollectedAt)
+	})
 	out = append(out, scoped...)
+	out = append(out, migration...)
+	sortOperationEvidenceOldestFirst(out)
 	return out
+}
+
+func isLongLivedMigrationEvidenceType(evidenceType string) bool {
+	switch strings.TrimSpace(evidenceType) {
+	case model.OperationEvidenceTypeMigrationStarted,
+		model.OperationEvidenceTypeMigrationCompleted,
+		model.OperationEvidenceTypeMigrationFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeReleaseAttempt(in model.ReleaseAttempt) model.ReleaseAttempt {

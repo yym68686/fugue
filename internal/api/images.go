@@ -135,9 +135,42 @@ func (s *Server) handleCreateImagePin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteImagePin(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	if _, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin()); err != nil {
+	image, err := s.store.GetImage(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	// Removing a pin is an artifact-retirement action: a subsequent cache or
+	// registry sweep may delete the last copy. Keep it fail-closed while this
+	// app has an unverified migration cutover.
+	pins, err := s.store.ListImagePins(model.ImagePinFilter{
+		ImageID:       image.ID,
+		TenantID:      principal.TenantID,
+		PlatformAdmin: principal.IsPlatformAdmin(),
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	for _, pin := range pins {
+		if strings.TrimSpace(pin.ID) != strings.TrimSpace(r.PathValue("pin_id")) {
+			continue
+		}
+		appID := strings.TrimSpace(pin.AppID)
+		if appID == "" {
+			appID = strings.TrimSpace(image.AppID)
+		}
+		if appID != "" {
+			if blocked, reason, gateErr := s.store.MigrationArtifactsRetirementBlocked(appID); gateErr != nil {
+				httpx.WriteError(w, http.StatusBadGateway, gateErr.Error())
+				return
+			} else if blocked {
+				_ = s.store.RecordMigrationArtifactRetirementBlocked(appID, "manual image pin removal blocked: "+reason)
+				httpx.WriteError(w, http.StatusConflict, "old migration artifacts remain protected: "+reason)
+				return
+			}
+		}
+		break
 	}
 	if err := s.store.DeleteImagePin(r.PathValue("pin_id"), principal.TenantID, principal.IsPlatformAdmin()); err != nil {
 		s.writeStoreError(w, err)

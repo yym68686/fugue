@@ -786,7 +786,7 @@ func (c *CLI) syncAppImageAndWait(client *Client, appID string, wait bool) (appI
 				response.Operation = op
 			}
 			if app != nil {
-				response.AppPhase = strings.TrimSpace(app.Status.Phase)
+				response.AppPhase, _, _, _ = appObservedDisplayProjection(*app)
 				response.RolloutPending = appImageSyncCLIRolloutPending(*app)
 			}
 		}
@@ -796,7 +796,7 @@ func (c *CLI) syncAppImageAndWait(client *Client, appID string, wait bool) (appI
 			if err != nil {
 				return appImageSyncResponse{}, err
 			}
-			response.AppPhase = strings.TrimSpace(app.Status.Phase)
+			response.AppPhase, _, _, _ = appObservedDisplayProjection(app)
 			response.RolloutPending = appImageSyncCLIRolloutPending(app)
 		}
 
@@ -850,7 +850,7 @@ func (c *CLI) waitForAppImageSyncRollout(client *Client, appID string) (model.Ap
 		if !appImageSyncCLIRolloutPending(app) {
 			return app, nil
 		}
-		phase := strings.TrimSpace(app.Status.Phase)
+		phase, _, _, _ := appObservedDisplayProjection(app)
 		if phase != lastPhase {
 			c.progressf("app_phase=%s rollout_pending=true", phase)
 			lastPhase = phase
@@ -867,10 +867,24 @@ func appImageSyncCLIRolloutPending(app model.App) bool {
 	if app.Spec.Replicas <= 0 {
 		return false
 	}
-	if app.Status.CurrentReplicas < app.Spec.Replicas {
+	phase := strings.ToLower(strings.TrimSpace(app.Status.Phase))
+	ready := app.Status.CurrentReplicas
+	if observed := app.ObservedStatus; observed != nil {
+		phase = strings.ToLower(strings.TrimSpace(observed.Phase))
+		ready = 0
+		if observed.ReadyReplicas != nil {
+			ready = *observed.ReadyReplicas
+		}
+	} else if model.AppHasCurrentFailedOperation(app.Status) {
+		// A failed current operation invalidates the durable replica count;
+		// without a fresh observed envelope the waiter must continue to report
+		// rollout pending rather than treating the old deployment as ready.
+		phase = "unknown"
+		ready = 0
+	}
+	if ready < app.Spec.Replicas {
 		return true
 	}
-	phase := strings.ToLower(strings.TrimSpace(app.Status.Phase))
 	return phase != "" && phase != "deployed"
 }
 

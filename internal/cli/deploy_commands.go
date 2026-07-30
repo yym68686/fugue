@@ -943,8 +943,20 @@ func appBuildImageRefMatches(app model.App, imageRef string) bool {
 }
 
 func appPhaseStillApplying(app model.App) bool {
-	switch strings.ToLower(strings.TrimSpace(app.Status.Phase)) {
+	phase := strings.TrimSpace(app.Status.Phase)
+	if observed := app.ObservedStatus; observed != nil {
+		phase = strings.TrimSpace(observed.Phase)
+	} else if model.AppHasCurrentFailedOperation(app.Status) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(phase)) {
 	case "building", "deploying", "importing", "pending":
+		return true
+	case "unknown", "unavailable":
+		// A live query that is unknown/unavailable cannot prove that the
+		// requested image is serving. Keep the waiter fail-closed. The raw
+		// stored phase is retained only for compatibility with an older API
+		// that cannot return an observed envelope at all.
 		return true
 	default:
 		return false

@@ -2,6 +2,7 @@ package failover
 
 import (
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -90,6 +91,46 @@ func TestAssessAppReadyForLiveTransfer(t *testing.T) {
 		t.Fatalf("expected no warnings, got %#v", assessment.Warnings)
 	}
 }
+
+func TestAssessAppDoesNotUseHistoricalReplicasWhenObservedRuntimeIsUnavailable(t *testing.T) {
+	t.Parallel()
+	app := model.App{
+		Spec:   model.AppSpec{RuntimeID: "runtime_managed_shared", Replicas: 1},
+		Status: model.AppStatus{CurrentRuntimeID: "runtime_managed_shared", CurrentReplicas: 1},
+		ObservedStatus: &model.AppObservedStatus{
+			Phase: "unavailable", DesiredReplicas: 1, ReadyReplicas: intPtr(0), Fresh: true,
+			ObservedAt: time.Now().UTC(), ClusterID: "cluster-a", Generation: 2, ObservedGeneration: 2,
+			EvidenceSource: "kubernetes_api", RuntimeObjectPresent: boolPtr(false),
+		},
+	}
+	assessment := AssessApp(app, &model.Runtime{ID: app.Spec.RuntimeID, Type: model.RuntimeTypeManagedShared, Status: model.RuntimeStatusActive})
+	if assessment.Classification != AppClassificationCaution {
+		t.Fatalf("historical replicas must not keep unavailable app ready, got %+v", assessment)
+	}
+}
+
+func TestAssessAppRejectsObservedDesiredReplicaMismatch(t *testing.T) {
+	t.Parallel()
+	ready := 2
+	present := true
+	app := model.App{
+		Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID, Replicas: 2},
+		ObservedStatus: &model.AppObservedStatus{
+			Phase: "deployed", DesiredReplicas: 1, ReadyReplicas: &ready, Fresh: true,
+			ObservedAt: time.Now().UTC(), ClusterID: "cluster-a", Generation: 2, ObservedGeneration: 2,
+			EvidenceSource: "kubernetes_api", RuntimeObjectPresent: &present, NamespacePresent: &present,
+			EndpointPresent: &present, EndpointReady: &present, PhysicalReplicas: &ready, ImagePresent: &present,
+		},
+	}
+	assessment := AssessApp(app, &model.Runtime{ID: app.Spec.RuntimeID, Type: model.RuntimeTypeManagedShared, Status: model.RuntimeStatusActive})
+	if assessment.Classification == AppClassificationReady {
+		t.Fatalf("mismatched desired replica evidence must not be ready: %+v", assessment)
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
+func intPtr(value int) *int { return &value }
 
 func TestAssessAppReadyWithManagedPostgresAndNoPersistentStorage(t *testing.T) {
 	t.Parallel()

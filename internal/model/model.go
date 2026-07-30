@@ -2279,6 +2279,21 @@ func AppOperationFailureFromOperation(op Operation) *AppOperationFailure {
 	return out
 }
 
+// AppHasCurrentFailedOperation distinguishes the failure that currently owns
+// the app's effective status from an older diagnostic failure retained for
+// operator visibility. A failed operation is unresolved when it is still the
+// app's last operation; once a later operation has completed, the historical
+// failure must not permanently suppress a subsequent live/LKG projection.
+// Empty LastOperationID is treated conservatively as unresolved for legacy
+// records that predate operation attribution.
+func AppHasCurrentFailedOperation(status AppStatus) bool {
+	if status.LastFailedOperation == nil || strings.TrimSpace(status.LastFailedOperation.ID) == "" {
+		return false
+	}
+	lastOperationID := strings.TrimSpace(status.LastOperationID)
+	return lastOperationID == "" || lastOperationID == strings.TrimSpace(status.LastFailedOperation.ID)
+}
+
 // AppObservedStatus is a point-in-time runtime observation. It is deliberately
 // separate from AppStatus: AppStatus is durable control-plane state, while this
 // structure records what an evidence source actually observed in a specific
@@ -2300,9 +2315,9 @@ type AppObservedStatus struct {
 	ImageRef             string    `json:"image_ref,omitempty"`
 	Fresh                bool      `json:"fresh"`
 	ObservedAt           time.Time `json:"observed_at"`
-	ClusterID            string    `json:"cluster_id,omitempty"`
-	Generation           int64     `json:"generation,omitempty"`
-	ObservedGeneration   int64     `json:"observed_generation,omitempty"`
+	ClusterID            string    `json:"cluster_id"`
+	Generation           int64     `json:"generation"`
+	ObservedGeneration   int64     `json:"observed_generation"`
 	EvidenceSource       string    `json:"evidence_source"`
 	EvidenceSources      []string  `json:"evidence_sources,omitempty"`
 	Reason               string    `json:"reason"`
@@ -3418,24 +3433,28 @@ type State struct {
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
 	Operations                 []Operation                 `json:"operations"`
 	OperationEvidence          []OperationEvidence         `json:"operation_evidence,omitempty"`
-	AuditEvents                []AuditEvent                `json:"audit_events"`
-	Idempotency                []IdempotencyRecord         `json:"idempotency"`
-	TenantBilling              []TenantBilling             `json:"tenant_billing"`
-	BillingEvents              []TenantBillingEvent        `json:"billing_events"`
-	ResourceUsageSamples       []ResourceUsageSample       `json:"resource_usage_samples,omitempty"`
-	DataBackends               []DataBackend               `json:"data_backends,omitempty"`
-	DataBackendSecrets         []DataBackendSecret         `json:"data_backend_secrets,omitempty"`
-	BackupBackends             []BackupBackend             `json:"backup_backends,omitempty"`
-	BackupBackendSecrets       []BackupBackendSecret       `json:"backup_backend_secrets,omitempty"`
-	BackupPolicies             []BackupPolicy              `json:"backup_policies,omitempty"`
-	BackupRuns                 []BackupRun                 `json:"backup_runs,omitempty"`
-	BackupArtifacts            []BackupArtifact            `json:"backup_artifacts,omitempty"`
-	BackupRestorePlans         []BackupRestorePlan         `json:"backup_restore_plans,omitempty"`
-	BackupRestoreRuns          []BackupRestoreRun          `json:"backup_restore_runs,omitempty"`
-	DataWorkspaces             []DataWorkspace             `json:"data_workspaces,omitempty"`
-	DataSnapshots              []DataSnapshot              `json:"data_snapshots,omitempty"`
-	DataTransfers              []DataTransfer              `json:"data_transfers,omitempty"`
-	DataGrants                 []DataGrant                 `json:"data_grants,omitempty"`
-	DataWorkspaceAccessGrants  []DataWorkspaceAccessGrant  `json:"data_workspace_access_grants,omitempty"`
-	DataRuntimeCaches          []RuntimeDataCacheMetadata  `json:"data_runtime_caches,omitempty"`
+	// AppMigrationLedgers is an audit archive deliberately independent from
+	// Apps and Operations. It must survive app/project/tenant purge for its
+	// minimum 90-day retention window.
+	AppMigrationLedgers       []AppMigrationLedger       `json:"app_migration_ledgers,omitempty"`
+	AuditEvents               []AuditEvent               `json:"audit_events"`
+	Idempotency               []IdempotencyRecord        `json:"idempotency"`
+	TenantBilling             []TenantBilling            `json:"tenant_billing"`
+	BillingEvents             []TenantBillingEvent       `json:"billing_events"`
+	ResourceUsageSamples      []ResourceUsageSample      `json:"resource_usage_samples,omitempty"`
+	DataBackends              []DataBackend              `json:"data_backends,omitempty"`
+	DataBackendSecrets        []DataBackendSecret        `json:"data_backend_secrets,omitempty"`
+	BackupBackends            []BackupBackend            `json:"backup_backends,omitempty"`
+	BackupBackendSecrets      []BackupBackendSecret      `json:"backup_backend_secrets,omitempty"`
+	BackupPolicies            []BackupPolicy             `json:"backup_policies,omitempty"`
+	BackupRuns                []BackupRun                `json:"backup_runs,omitempty"`
+	BackupArtifacts           []BackupArtifact           `json:"backup_artifacts,omitempty"`
+	BackupRestorePlans        []BackupRestorePlan        `json:"backup_restore_plans,omitempty"`
+	BackupRestoreRuns         []BackupRestoreRun         `json:"backup_restore_runs,omitempty"`
+	DataWorkspaces            []DataWorkspace            `json:"data_workspaces,omitempty"`
+	DataSnapshots             []DataSnapshot             `json:"data_snapshots,omitempty"`
+	DataTransfers             []DataTransfer             `json:"data_transfers,omitempty"`
+	DataGrants                []DataGrant                `json:"data_grants,omitempty"`
+	DataWorkspaceAccessGrants []DataWorkspaceAccessGrant `json:"data_workspace_access_grants,omitempty"`
+	DataRuntimeCaches         []RuntimeDataCacheMetadata `json:"data_runtime_caches,omitempty"`
 }
