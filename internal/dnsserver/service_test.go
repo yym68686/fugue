@@ -144,6 +144,94 @@ func TestServiceRoutesConfiguredExtraZones(t *testing.T) {
 	}
 }
 
+func TestServiceReconcilesDynamicHostedZonesAndPreservesStaticZones(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("zone"); got != "dynamic.example" {
+			t.Fatalf("unexpected dynamic zone bundle request %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(model.EdgeDNSBundle{
+			Version:     "dnsgen_dynamic",
+			GeneratedAt: time.Now().UTC(),
+			DNSNodeID:   r.URL.Query().Get("dns_node_id"),
+			Zone:        "dynamic.example",
+			Records: []model.EdgeDNSRecord{{
+				Name:       "www.dynamic.example",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.42"},
+				TTL:        60,
+				RecordKind: model.EdgeDNSRecordKindHosted,
+				Status:     model.EdgeRouteStatusActive,
+			}},
+		})
+	}))
+	defer server.Close()
+
+	service := NewService(config.DNSConfig{
+		APIURL:       server.URL,
+		EdgeToken:    "edge-secret",
+		DNSNodeID:    "dns-node-1",
+		Zone:         "fugue.pro",
+		ExtraZones:   []string{"static.example"},
+		AnswerIPs:    []string{"203.0.113.10"},
+		TTL:          60,
+		Nameservers:  []string{"ns1.dns.fugue.pro", "ns2.dns.fugue.pro"},
+		CachePath:    filepath.Join(t.TempDir(), "dns-cache.json"),
+		ListenAddr:   "127.0.0.1:0",
+		UDPAddr:      "127.0.0.1:0",
+		SyncInterval: time.Hour,
+		HTTPTimeout:  time.Second,
+	}, log.New(ioDiscard{}, "", 0))
+	staticChild := service.zoneServices["static.example"]
+	if staticChild == nil {
+		t.Fatal("expected configured static zone service")
+	}
+	staticChild.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_static",
+		Zone:    "static.example",
+		Records: []model.EdgeDNSRecord{{
+			Name:       "www.static.example",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.43"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindHosted,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}, `"dnsgen_static"`, false, "")
+	service.setBundle(model.EdgeDNSBundle{
+		Version:     "dnsgen_root_with_dynamic",
+		Zone:        "fugue.pro",
+		HostedZones: []string{"dynamic.example"},
+	}, `"dnsgen_root_with_dynamic"`, false, "")
+
+	service.reconcileHostedZoneServices(context.Background(), false)
+	dynamicChild := service.zoneServices["dynamic.example"]
+	if dynamicChild == nil {
+		t.Fatal("expected hosted zone inventory to create a dynamic zone service")
+	}
+	if dynamicChild.Config.DNSNodeID != "dns-node-1--zone-dynamic-example" {
+		t.Fatalf("unexpected dynamic zone node identity %q", dynamicChild.Config.DNSNodeID)
+	}
+	dynamicAnswer := dnsQuery(t, service, "www.dynamic.example.", miekgdns.TypeA)
+	if dynamicAnswer.Rcode != miekgdns.RcodeSuccess || len(dynamicAnswer.Answer) != 1 {
+		t.Fatalf("expected dynamic zone answer, got rcode=%s answer=%+v", miekgdns.RcodeToString[dynamicAnswer.Rcode], dynamicAnswer.Answer)
+	}
+
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_root_without_dynamic",
+		Zone:    "fugue.pro",
+	}, `"dnsgen_root_without_dynamic"`, false, "")
+	service.reconcileHostedZoneServices(context.Background(), false)
+	if selected := service.serviceForQuestionName("www.dynamic.example"); selected != nil {
+		t.Fatalf("expected removed hosted zone not to remain authoritative, got zone %q", selected.Config.Zone)
+	}
+	staticAnswer := dnsQuery(t, service, "www.static.example.", miekgdns.TypeA)
+	if staticAnswer.Rcode != miekgdns.RcodeSuccess || len(staticAnswer.Answer) != 1 {
+		t.Fatalf("expected configured static zone to remain loaded, got rcode=%s answer=%+v", miekgdns.RcodeToString[staticAnswer.Rcode], staticAnswer.Answer)
+	}
+}
+
 func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 	t.Parallel()
 
