@@ -431,7 +431,7 @@ func (s *Service) syncManagedAppObservedStatus(
 			return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
 		}
 	}
-	if managedAppStatusReady(status, app) {
+	if managedAppStatusReady(status, app) || managedAppStatusServingCurrent(managed, status, app) {
 		if err := s.cleanupRetainedManagedAppEvictedPods(ctx, client, namespace, app, appPods); err != nil && s.Logger != nil {
 			s.Logger.Printf("cleanup retained evicted managed app pods for %s/%s failed: %v", namespace, managed.Metadata.Name, err)
 		}
@@ -878,7 +878,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 	if managedAppDisabledOrphanStatusCurrent(managed.Status, reason) &&
 		managed.Status.ObservedGeneration == managed.Metadata.Generation &&
 		managedAppOrphanWorkloadZeroVerified(managed.Status) {
-		stillZero, err := managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
+		stillZero, err := s.managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
 		if err == nil && stillZero {
 			return nil
 		}
@@ -915,7 +915,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		}
 	}
 
-	workloadZero, err := managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
+	workloadZero, err := s.managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
 	if err != nil {
 		cause := fmt.Errorf("verify orphan managed app workload %s/%s at zero: %w", namespace, resourceName, err)
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, cause)
@@ -944,7 +944,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 	return nil
 }
 
-func managedAppOrphanWorkloadAtZero(
+func (s *Service) managedAppOrphanWorkloadAtZero(
 	ctx context.Context,
 	client *kubeClient,
 	namespace string,
@@ -965,7 +965,17 @@ func managedAppOrphanWorkloadAtZero(
 		}
 		return false, fmt.Errorf("list matching app pods %s/%s: %w", namespace, resourceName, err)
 	}
-	return len(pods) == 0, nil
+	for _, pod := range pods {
+		phase := strings.TrimSpace(pod.Status.Phase)
+		if strings.EqualFold(phase, "Failed") || strings.EqualFold(phase, "Succeeded") {
+			continue
+		}
+		return false, nil
+	}
+	if err := s.cleanupRetainedManagedAppEvictedPods(ctx, client, namespace, app, pods); err != nil && s != nil && s.Logger != nil {
+		s.Logger.Printf("cleanup retained evicted orphan managed app pods for %s/%s failed: %v", namespace, resourceName, err)
+	}
+	return true, nil
 }
 
 func managedAppOrphanDeploymentAtZero(deployment kubeDeployment, found bool) bool {
@@ -1241,6 +1251,13 @@ func managedAppStatusReady(status runtime.ManagedAppStatus, app model.App) bool 
 	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseReady) &&
 		status.ReadyReplicas >= app.Spec.Replicas &&
 		app.Spec.Replicas > 0
+}
+
+func managedAppStatusServingCurrent(managed runtime.ManagedAppObject, status runtime.ManagedAppStatus, app model.App) bool {
+	return app.Spec.Replicas > 0 &&
+		status.DesiredReplicas == app.Spec.Replicas &&
+		status.ReadyReplicas >= app.Spec.Replicas &&
+		status.ObservedGeneration >= managed.Metadata.Generation
 }
 
 func managedDeploymentStatusReady(deployment kubeDeployment, desiredReplicas int) bool {

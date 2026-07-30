@@ -4505,3 +4505,96 @@ func TestManagedAppOrphanDeploymentAtZeroRequiresObservedZeroStatus(t *testing.T
 		t.Fatal("expected any ready replica to block orphan adoption marker")
 	}
 }
+
+func TestManagedAppOrphanWorkloadAtZeroIgnoresAndPrunesTerminalPods(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	name := runtime.RuntimeAppResourceName(app)
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = name
+	deployment.Metadata.Generation = 3
+	deployment.Status.ObservedGeneration = 3
+
+	deleted := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, name):
+			payload, err := json.Marshal(deployment)
+			if err != nil {
+				t.Fatalf("marshal deployment: %v", err)
+			}
+			return okJSONResponse(string(payload)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			if got := req.URL.Query().Get("labelSelector"); got != managedAppPodLabelSelector(app) {
+				t.Fatalf("unexpected pod selector %q", got)
+			}
+			return okJSONResponse(`{"items":[
+				{"metadata":{"name":"demo-evicted","uid":"pod-uid","creationTimestamp":"2026-07-20T10:00:00Z","labels":{"app.kubernetes.io/managed-by":"fugue","app.kubernetes.io/name":"demo","fugue.pro/app-id":"app_demo","fugue.pro/tenant-id":"tenant_demo"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"demo-rs","uid":"rs-uid","controller":true}]},"status":{"phase":"Failed","reason":"Evicted","conditions":[{"type":"DisruptionTarget","status":"True","lastTransitionTime":"2026-07-20T11:00:00Z"}]}},
+				{"metadata":{"name":"demo-succeeded","creationTimestamp":"2026-07-20T10:00:00Z"},"status":{"phase":"Succeeded"}}
+			]}`), nil
+		case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods/demo-evicted":
+			var options struct {
+				Preconditions struct {
+					UID string `json:"uid"`
+				} `json:"preconditions"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&options); err != nil {
+				t.Fatalf("decode delete options: %v", err)
+			}
+			if options.Preconditions.UID != "pod-uid" {
+				t.Fatalf("expected exact UID precondition, got %q", options.Preconditions.UID)
+			}
+			deleted++
+			return okJSONResponse(`{}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+	service := &Service{now: func() time.Time { return now }, Logger: log.New(io.Discard, "", 0)}
+
+	zero, err := service.managedAppOrphanWorkloadAtZero(context.Background(), client, namespace, app)
+	if err != nil {
+		t.Fatalf("observe orphan workload zero: %v", err)
+	}
+	if !zero {
+		t.Fatal("expected terminal pods not to count as a live orphan workload")
+	}
+	if deleted != 1 {
+		t.Fatalf("expected the proven old Evicted pod to be pruned, got %d deletes", deleted)
+	}
+}
+
+func TestManagedAppStatusServingCurrentAllowsTerminalCleanupDuringStatusError(t *testing.T) {
+	t.Parallel()
+
+	managed := runtime.ManagedAppObject{Metadata: runtime.ManagedAppMeta{Generation: 7}}
+	app := model.App{Spec: model.AppSpec{Replicas: 1}}
+	status := runtime.ManagedAppStatus{
+		Phase:              runtime.ManagedAppPhaseError,
+		DesiredReplicas:    1,
+		ReadyReplicas:      1,
+		ObservedGeneration: 7,
+	}
+	if !managedAppStatusServingCurrent(managed, status, app) {
+		t.Fatal("expected a current fully serving workload to permit old terminal-pod cleanup")
+	}
+	status.ObservedGeneration = 6
+	if managedAppStatusServingCurrent(managed, status, app) {
+		t.Fatal("expected stale observed status to fail closed")
+	}
+	status.ObservedGeneration = 7
+	status.ReadyReplicas = 0
+	if managedAppStatusServingCurrent(managed, status, app) {
+		t.Fatal("expected a non-serving workload to fail closed")
+	}
+}
