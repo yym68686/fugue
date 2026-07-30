@@ -111,6 +111,15 @@ type BackupRunObjectCleanupFilter struct {
 	Limit  int
 }
 
+// BackupUsageArtifact carries artifact metadata plus internal physical cleanup
+// markers. The marker fields are not part of the public artifact contract.
+type BackupUsageArtifact struct {
+	Artifact                  model.BackupArtifact
+	PhysicalDeletedAt         *time.Time
+	PhysicalDeleteAttemptedAt *time.Time
+	PhysicalDeleteError       string
+}
+
 type BackupRunUpdate struct {
 	Status        *string
 	LeaseOwner    *string
@@ -2161,6 +2170,55 @@ func (s *Store) ListBackupRestoreRuns(tenantID string, platformAdmin bool, limit
 	return runs, err
 }
 
+// ListBackupUsageArtifacts returns the complete, unpaginated artifact
+// reference set used to reconcile object-store inventory. It is deliberately
+// separate from the user-facing history list, whose limit must never truncate
+// accounting evidence.
+func (s *Store) ListBackupUsageArtifacts(tenantID string, platformAdmin bool) ([]BackupUsageArtifact, error) {
+	if s.usingDatabase() {
+		return s.pgListBackupUsageArtifacts(tenantID, platformAdmin)
+	}
+
+	s.backupArtifactPhysicalCleanupMu.Lock()
+	cleaned := make(map[string]time.Time, len(s.backupArtifactPhysicalCleanup))
+	for id, deletedAt := range s.backupArtifactPhysicalCleanup {
+		cleaned[id] = deletedAt
+	}
+	attempted := make(map[string]time.Time, len(s.backupArtifactPhysicalAttempts))
+	for id, attemptedAt := range s.backupArtifactPhysicalAttempts {
+		attempted[id] = attemptedAt
+	}
+	s.backupArtifactPhysicalCleanupMu.Unlock()
+
+	artifacts := []BackupUsageArtifact{}
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, artifact := range state.BackupArtifacts {
+			artifact = model.NormalizeBackupArtifact(artifact)
+			if !platformAdmin && artifact.TenantID != tenantID {
+				continue
+			}
+			usageArtifact := BackupUsageArtifact{Artifact: artifact}
+			if deletedAt, ok := cleaned[artifact.ID]; ok {
+				deletedAt := deletedAt
+				usageArtifact.PhysicalDeletedAt = &deletedAt
+			}
+			if attemptedAt, ok := attempted[artifact.ID]; ok {
+				attemptedAt := attemptedAt
+				usageArtifact.PhysicalDeleteAttemptedAt = &attemptedAt
+			}
+			artifacts = append(artifacts, usageArtifact)
+		}
+		sort.Slice(artifacts, func(i, j int) bool {
+			if artifacts[i].Artifact.CreatedAt.Equal(artifacts[j].Artifact.CreatedAt) {
+				return artifacts[i].Artifact.ID < artifacts[j].Artifact.ID
+			}
+			return artifacts[i].Artifact.CreatedAt.Before(artifacts[j].Artifact.CreatedAt)
+		})
+		return nil
+	})
+	return artifacts, err
+}
+
 func (s *Store) BackupUsage(tenantID string, platformAdmin bool) (model.BackupUsage, error) {
 	if s.usingDatabase() {
 		return s.pgBackupUsage(tenantID, platformAdmin)
@@ -3187,6 +3245,36 @@ func scanBackupArtifact(scanner sqlRowScanner) (model.BackupArtifact, error) {
 		artifact.DeletedAt = &deletedAt.Time
 	}
 	return model.NormalizeBackupArtifact(artifact), nil
+}
+
+func scanBackupUsageArtifact(scanner sqlRowScanner) (BackupUsageArtifact, error) {
+	var artifact model.BackupArtifact
+	var tenantID, runID, backendID sql.NullString
+	var deletedAt, physicalDeletedAt, physicalDeleteAttemptedAt sql.NullTime
+	var physicalDeleteError string
+	if err := scanner.Scan(&artifact.ID, &runID, &tenantID, &backendID, &artifact.Kind, &artifact.ObjectKey, &artifact.ManifestObjectKey, &artifact.SizeBytes, &artifact.Status, &artifact.Protected, &artifact.Billable, &artifact.CreatedAt, &deletedAt, &physicalDeletedAt, &physicalDeleteAttemptedAt, &physicalDeleteError); err != nil {
+		return BackupUsageArtifact{}, mapDBErr(err)
+	}
+	if runID.Valid {
+		artifact.RunID = runID.String
+	}
+	if tenantID.Valid {
+		artifact.TenantID = tenantID.String
+	}
+	if backendID.Valid {
+		artifact.BackendID = backendID.String
+	}
+	if deletedAt.Valid {
+		artifact.DeletedAt = &deletedAt.Time
+	}
+	usageArtifact := BackupUsageArtifact{Artifact: model.NormalizeBackupArtifact(artifact), PhysicalDeleteError: physicalDeleteError}
+	if physicalDeletedAt.Valid {
+		usageArtifact.PhysicalDeletedAt = &physicalDeletedAt.Time
+	}
+	if physicalDeleteAttemptedAt.Valid {
+		usageArtifact.PhysicalDeleteAttemptedAt = &physicalDeleteAttemptedAt.Time
+	}
+	return usageArtifact, nil
 }
 
 func scanBackupRestorePlan(scanner sqlRowScanner) (model.BackupRestorePlan, error) {
@@ -4946,6 +5034,35 @@ func (s *Store) pgBackupUsage(tenantID string, platformAdmin bool) (model.Backup
 		Currency:              "USD",
 		UpdatedAt:             time.Now().UTC(),
 	}), nil
+}
+
+func (s *Store) pgListBackupUsageArtifacts(tenantID string, platformAdmin bool) ([]BackupUsageArtifact, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Reconciliation needs only object identity and lifecycle fields. Avoid
+	// loading or decoding large manifest_json/target_json payloads for the
+	// complete, unpaginated history scan.
+	query := `SELECT id, run_id, tenant_id, backend_id, kind, object_key, manifest_object_key, size_bytes, status, protected, billable, created_at, deleted_at, physical_deleted_at, physical_delete_attempted_at, physical_delete_error FROM fugue_backup_artifacts`
+	args := []any{}
+	if !platformAdmin {
+		args = append(args, tenantID)
+		query += ` WHERE tenant_id = $1`
+	}
+	query += ` ORDER BY created_at ASC, id ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	artifacts := []BackupUsageArtifact{}
+	for rows.Next() {
+		artifact, err := scanBackupUsageArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, mapDBErr(rows.Err())
 }
 
 func backupBackendSelectSQL() string {

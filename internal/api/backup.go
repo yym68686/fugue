@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"fugue/internal/backupschedule"
+	"fugue/internal/backupusage"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/observability"
@@ -1386,7 +1387,7 @@ func (s *Server) handleGetBackupUsage(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing backup.read scope")
 		return
 	}
-	usage, err := s.store.BackupUsage(principal.TenantID, principal.IsPlatformAdmin())
+	usage, err := s.loadBackupUsage(r.Context(), principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -1410,7 +1411,7 @@ func (s *Server) handleGetAdminBackupStatus(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
-	usage, err := s.store.BackupUsage("", true)
+	usage, err := s.loadBackupUsage(r.Context(), "", true)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -3624,7 +3625,7 @@ func contextWithoutCancel(parent context.Context) context.Context {
 	return context.WithoutCancel(parent)
 }
 
-func (s *Server) platformBackupPosture(policies []model.BackupPolicy, usage model.BackupUsage) []model.BackupPosture {
+func (s *Server) platformBackupPosture(policies []model.BackupPolicy, usage backupusage.Usage) []model.BackupPosture {
 	var out []model.BackupPosture
 	for _, policy := range policies {
 		if policy.Target.Type != model.BackupTargetControlPlaneDatabase {
@@ -3796,7 +3797,7 @@ func looksExternalPlatformEndpoint(raw string) bool {
 		!strings.HasPrefix(value, "100.64.")
 }
 
-func (s *Server) writeBackupMetrics(w io.Writer) {
+func (s *Server) writeBackupMetrics(ctx context.Context, w io.Writer) {
 	policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{IncludeDisabled: true, PlatformAdmin: true, Limit: 500})
 	if err == nil {
 		policyCounts := map[string]float64{}
@@ -3864,12 +3865,36 @@ func (s *Server) writeBackupMetrics(w io.Writer) {
 			}, count)
 		}
 	}
-	usage, err := s.store.BackupUsage("", true)
+	usage, err := s.loadBackupUsage(ctx, "", true)
 	if err == nil {
 		observability.WriteGaugeMetric(w, "fugue_backup_billable_bytes", "Billable backup storage bytes metered by Fugue.", map[string]string{
 			"provider":       usage.Provider,
 			"markup_percent": strconv.Itoa(usage.MarkupPercent),
 		}, float64(usage.BillableBytes))
+		if usage.PhysicalBytes != nil {
+			observability.WriteGaugeMetric(w, "fugue_backup_physical_bytes", "Exact physical bytes observed in reconciled R2 backup object storage.", nil, float64(*usage.PhysicalBytes))
+		}
+		if usage.PhysicalObjectCount != nil {
+			observability.WriteGaugeMetric(w, "fugue_backup_physical_objects", "Exact physical objects observed in reconciled R2 backup object storage.", nil, float64(*usage.PhysicalObjectCount))
+		}
+		if reconciliation := usage.Reconciliation; reconciliation != nil {
+			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_status", "Current backup object reconciliation status.", map[string]string{"status": reconciliation.Status}, 1)
+			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_backends", "R2 backup backends included in reconciliation.", map[string]string{"state": "configured"}, float64(reconciliation.BackendCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_backends", "R2 backup backends included in reconciliation.", map[string]string{"state": "measured"}, float64(reconciliation.MeasuredBackendCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_unreferenced_bytes", "Physical R2 backup bytes without artifact metadata.", nil, float64(reconciliation.UnreferencedBytes))
+			observability.WriteGaugeMetric(w, "fugue_backup_provisional_objects", "Unreferenced R2 backup objects still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalObjectCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_provisional_bytes", "Unreferenced R2 backup bytes still inside failed-upload cleanup grace.", nil, float64(reconciliation.ProvisionalBytes))
+			observability.WriteGaugeMetric(w, "fugue_backup_orphaned_bytes", "Physical R2 backup bytes without artifact metadata after cleanup grace.", nil, float64(reconciliation.OrphanedBytes))
+			observability.WriteGaugeMetric(w, "fugue_backup_orphaned_objects", "Physical R2 backup objects without artifact metadata after cleanup grace.", nil, float64(reconciliation.OrphanedObjectCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_missing_active_objects", "Active artifact objects missing from physical R2 inventory.", nil, float64(reconciliation.MissingActiveObjectCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_overdue_deletion_objects", "Deleted artifact objects still present after physical cleanup grace.", nil, float64(reconciliation.OverdueDeletionObjectCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_lingering_deleted_objects", "R2 backup objects still observed after durable physical-deletion success.", nil, float64(reconciliation.LingeringDeletedObjectCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_duplicate_references", "Duplicate durable references to one physical R2 backup object.", nil, float64(reconciliation.DuplicateReferenceCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_invalid_references", "Durable backup object references that cannot be safely reconciled.", nil, float64(reconciliation.InvalidReferenceCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_size_mismatches", "R2 backup objects whose physical size differs from durable artifact metadata.", nil, float64(reconciliation.SizeMismatchCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_unresolved_backends", "Backup backends required by durable metadata but unavailable to reconciliation.", nil, float64(reconciliation.UnresolvedBackendCount))
+			observability.WriteGaugeMetric(w, "fugue_backup_reconciliation_drift", "Whether backup storage reconciliation found drift or incomplete measurement.", nil, boolMetric(reconciliation.Status == backupusage.ReconciliationStatusDrift || reconciliation.Status == backupusage.ReconciliationStatusPartial || reconciliation.Status == backupusage.ReconciliationStatusUnavailable))
+		}
 	}
 }
 

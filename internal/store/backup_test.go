@@ -1273,6 +1273,66 @@ func TestBackupUsageCountsBillableR2BytesWithMarkup(t *testing.T) {
 	}
 }
 
+func TestListBackupUsageArtifactsIsUnpaginatedTenantScopedAndIncludesCleanupMarkers(t *testing.T) {
+	clearDefaultDataBackendEnv(t)
+
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	deletedAt := time.Now().UTC().Add(-2 * time.Hour)
+	for index := 0; index < 525; index++ {
+		tenantID := "tenant_a"
+		if index >= 500 {
+			tenantID = "tenant_b"
+		}
+		status := model.BackupArtifactStatusActive
+		var artifactDeletedAt *time.Time
+		if index == 0 {
+			status = model.BackupArtifactStatusDeleted
+			artifactDeletedAt = &deletedAt
+		}
+		_, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
+			ID:                fmt.Sprintf("usage-artifact-%03d", index),
+			RunID:             fmt.Sprintf("backup_run_usage_%03d", index),
+			TenantID:          tenantID,
+			Target:            model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: tenantID, AppID: "app_usage"},
+			BackendID:         "backup_backend_usage",
+			Kind:              model.BackupArtifactKindAppPGDump,
+			ObjectKey:         fmt.Sprintf("apps/%s/project/app/backup_run_usage_%03d/database.dump", tenantID, index),
+			ManifestObjectKey: fmt.Sprintf("apps/%s/project/app/backup_run_usage_%03d/manifest.json", tenantID, index),
+			Status:            status,
+			DeletedAt:         artifactDeletedAt,
+		})
+		if err != nil {
+			t.Fatalf("create artifact %d: %v", index, err)
+		}
+	}
+	physicalDeletedAt := time.Now().UTC()
+	if err := stateStore.MarkBackupArtifactPhysicalDeleted("usage-artifact-000", physicalDeletedAt); err != nil {
+		t.Fatalf("mark physical deletion: %v", err)
+	}
+
+	tenantArtifacts, err := stateStore.ListBackupUsageArtifacts("tenant_a", false)
+	if err != nil {
+		t.Fatalf("list tenant usage artifacts: %v", err)
+	}
+	if len(tenantArtifacts) != 500 {
+		t.Fatalf("tenant usage artifact count = %d, want 500 without history truncation", len(tenantArtifacts))
+	}
+	if tenantArtifacts[0].PhysicalDeletedAt == nil || !tenantArtifacts[0].PhysicalDeletedAt.Equal(physicalDeletedAt) {
+		t.Fatalf("physical cleanup marker missing: %+v", tenantArtifacts[0])
+	}
+
+	platformArtifacts, err := stateStore.ListBackupUsageArtifacts("", true)
+	if err != nil {
+		t.Fatalf("list platform usage artifacts: %v", err)
+	}
+	if len(platformArtifacts) != 525 {
+		t.Fatalf("platform usage artifact count = %d, want 525", len(platformArtifacts))
+	}
+}
+
 func TestBackupArtifactManifestIsSelfDescribing(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 

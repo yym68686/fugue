@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/backupschedule"
+	"fugue/internal/backupusage"
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
@@ -813,7 +814,7 @@ func (c *CLI) newBackupRestoreOfflineControlPlaneCommand() *cobra.Command {
 func (c *CLI) newBackupUsageCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "usage",
-		Short: "Show billable backup storage usage",
+		Short: "Show billable and physical backup storage usage",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -1450,9 +1451,42 @@ func renderBackupRestoreRun(w io.Writer, run model.BackupRestoreRun, showID bool
 	return nil
 }
 
-func renderBackupUsage(w io.Writer, usage model.BackupUsage) error {
+func renderBackupUsage(w io.Writer, usage backupusage.Usage) error {
 	_, _ = fmt.Fprintf(w, "billable_bytes: %d\nprovider: %s\nmarkup_percent: %d\neffective_multiplier: %.2f\nprice_code: %s\n",
 		usage.BillableBytes, usage.Provider, usage.MarkupPercent, usage.EffectiveMultiplier, blankDash(usage.CloudflareR2PriceCode))
+	physicalBytes := "unavailable"
+	if usage.PhysicalBytes != nil {
+		physicalBytes = strconv.FormatInt(*usage.PhysicalBytes, 10)
+	}
+	physicalObjects := "unavailable"
+	if usage.PhysicalObjectCount != nil {
+		physicalObjects = strconv.Itoa(*usage.PhysicalObjectCount)
+	}
+	_, _ = fmt.Fprintf(w, "physical_bytes: %s\nphysical_object_count: %s\n", physicalBytes, physicalObjects)
+	if reconciliation := usage.Reconciliation; reconciliation != nil {
+		_, _ = fmt.Fprintf(w, "reconciliation_status: %s\nreconciliation_backends: %d/%d\nreferenced_bytes: %d\npending_deletion_objects: %d\nunreferenced_bytes: %d\nprovisional_objects: %d\norphaned_bytes: %d\norphaned_objects: %d\nmissing_active_objects: %d\noverdue_deletion_objects: %d\nlingering_deleted_objects: %d\nduplicate_references: %d\ninvalid_references: %d\nsize_mismatches: %d\nunresolved_backends: %d\nreconciled_at: %s\n",
+			reconciliation.Status,
+			reconciliation.MeasuredBackendCount,
+			reconciliation.BackendCount,
+			reconciliation.ReferencedBytes,
+			reconciliation.PendingDeletionObjectCount,
+			reconciliation.UnreferencedBytes,
+			reconciliation.ProvisionalObjectCount,
+			reconciliation.OrphanedBytes,
+			reconciliation.OrphanedObjectCount,
+			reconciliation.MissingActiveObjectCount,
+			reconciliation.OverdueDeletionObjectCount,
+			reconciliation.LingeringDeletedObjectCount,
+			reconciliation.DuplicateReferenceCount,
+			reconciliation.InvalidReferenceCount,
+			reconciliation.SizeMismatchCount,
+			reconciliation.UnresolvedBackendCount,
+			reconciliation.ObservedAt.UTC().Format(time.RFC3339),
+		)
+		if strings.TrimSpace(reconciliation.Message) != "" {
+			_, _ = fmt.Fprintf(w, "reconciliation_message: %s\n", reconciliation.Message)
+		}
+	}
 	return nil
 }
 

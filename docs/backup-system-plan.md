@@ -517,6 +517,10 @@ fugue backup backend delete prod-r2
 fugue backup usage
 ```
 
+Usage output keeps recorded active billable bytes separate from an exact R2
+object inventory and reports reconciliation drift, cleanup-grace objects,
+orphaned bytes, missing active objects, and unavailable/partial measurements.
+
 Platform-admin variants:
 
 ```bash
@@ -856,6 +860,16 @@ Metrics:
 - `fugue_backup_run_failures_total`
 - `fugue_backup_artifact_bytes`
 - `fugue_backup_retention_deletes_total`
+- `fugue_backup_physical_bytes`
+- `fugue_backup_physical_objects`
+- `fugue_backup_reconciliation_status`
+- `fugue_backup_reconciliation_drift`
+- `fugue_backup_orphaned_bytes`
+- `fugue_backup_missing_active_objects`
+- `fugue_backup_overdue_deletion_objects`
+- `fugue_backup_lingering_deleted_objects`
+- `fugue_backup_size_mismatches`
+- `fugue_backup_unresolved_backends`
 - `fugue_restore_run_duration_seconds`
 - `fugue_restore_run_failures_total`
 

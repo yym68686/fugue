@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path"
 
+	"fugue/internal/backupusage"
 	"fugue/internal/model"
 )
 
@@ -22,7 +23,7 @@ type backupRunEnvelope struct {
 type adminBackupStatusResponse struct {
 	Policies []model.BackupPolicy  `json:"policies"`
 	Runs     []model.BackupRun     `json:"runs"`
-	Usage    model.BackupUsage     `json:"usage"`
+	Usage    backupusage.Usage     `json:"usage"`
 	Posture  []model.BackupPosture `json:"posture"`
 }
 
@@ -213,12 +214,12 @@ func (c *Client) CreateBackupRestoreRun(req map[string]any) (model.BackupRestore
 	return resp.Run, nil
 }
 
-func (c *Client) GetBackupUsage() (model.BackupUsage, error) {
+func (c *Client) GetBackupUsage() (backupusage.Usage, error) {
 	var resp struct {
-		Usage model.BackupUsage `json:"usage"`
+		Usage backupusage.Usage `json:"usage"`
 	}
 	if err := c.doJSON(http.MethodGet, "/v1/backups/usage", nil, &resp); err != nil {
-		return model.BackupUsage{}, err
+		return backupusage.Usage{}, err
 	}
 	return resp.Usage, nil
 }
