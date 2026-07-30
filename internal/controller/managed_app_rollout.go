@@ -260,12 +260,7 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			return fmt.Errorf("read managed app rollout for %s/%s: %w", namespace, managedAppName, err)
 		}
 		watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
-		if ready {
-			if managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling, expectedManagedAppSpecHash); !managedReady {
-				ready = false
-				message = managedMessage
-			}
-		}
+		managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling, expectedManagedAppSpecHash)
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
 			if err != nil {
@@ -315,15 +310,27 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 			}
 		}
 		if ready {
-			if err := s.cleanupStrandedManagedAppPods(waitCtx, client, namespace, app); err != nil && s.Logger != nil {
-				s.Logger.Printf("cleanup stranded managed app pods after rollout failed for %s/%s: %v", namespace, name, err)
-			}
 			if s.Store != nil {
 				if err := s.refreshManagedAppStatus(waitCtx, client, app); err != nil {
 					return fmt.Errorf("publish managed app ready status for %s/%s: %w", namespace, name, err)
 				}
+				managed, foundManagedApp, err = client.getManagedApp(waitCtx, namespace, managedAppName)
+				if err != nil {
+					return fmt.Errorf("read managed app after ready status publish for %s/%s: %w", namespace, managedAppName, err)
+				}
+				watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
+				managedReady, managedMessage = managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling, expectedManagedAppSpecHash)
 			}
-			return nil
+			if managedReady {
+				if err := s.cleanupStrandedManagedAppPods(waitCtx, client, namespace, app); err != nil && s.Logger != nil {
+					s.Logger.Printf("cleanup stranded managed app pods after rollout failed for %s/%s: %v", namespace, name, err)
+				}
+				return nil
+			}
+			ready = false
+			if strings.TrimSpace(managedMessage) != "" {
+				message = managedMessage
+			}
 		}
 		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp, expectedManagedAppSpecHash); failureMessage != "" {
 			s.captureManagedAppRolloutFailureEvidence(waitCtx, app, operationID, namespace, managed, failureMessage)

@@ -121,6 +121,135 @@ func TestRefreshManagedAppStatusPublishesReadyWhileOperationIsActive(t *testing.
 	}
 }
 
+func TestWaitForManagedAppRolloutPublishesReadyBeforeGatingOnObservedStatus(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Rollout status tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example/fugue-apps/demo:release",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/demo:release"})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:    app.TenantID,
+		AppID:       app.ID,
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &app.Spec,
+	})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	op, claimed, err := stateStore.TryClaimPendingOperation(op.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim operation: claimed=%v err=%v", claimed, err)
+	}
+
+	app = runtime.Renderer{}.PrepareApp(app)
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managedName := runtime.ManagedAppResourceName(app)
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Metadata.Generation = 2
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:               runtime.ManagedAppPhaseProgressing,
+		Message:             "waiting for old replicas to terminate",
+		DesiredReplicas:     1,
+		ObservedGeneration:  2,
+		LastAppliedSpecHash: runtime.ManagedAppSpecHash(managed.Spec),
+	}
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected deployment")
+	}
+	deployment.Metadata.Name = runtime.RuntimeAppResourceName(app)
+	managedAppLiveGuardMarkReady(&deployment, 1)
+	pod := readyTemplatePod("demo-ready", deployment, kubeResourceRequirements{})
+
+	statusPatches := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
+			payload, marshalErr := json.Marshal(managed)
+			if marshalErr != nil {
+				t.Fatalf("marshal managed app: %v", marshalErr)
+			}
+			return okJSONResponse(string(payload)), nil
+		case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, deployment.Metadata.Name):
+			payload, marshalErr := json.Marshal(deployment)
+			if marshalErr != nil {
+				t.Fatalf("marshal deployment: %v", marshalErr)
+			}
+			return okJSONResponse(string(payload)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			payload, marshalErr := json.Marshal(kubePodList{Items: []kubePod{pod}})
+			if marshalErr != nil {
+				t.Fatalf("marshal pods: %v", marshalErr)
+			}
+			return okJSONResponse(string(payload)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/pods":
+			return okJSONResponse(`{"items":[]}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/nodes":
+			return okJSONResponse(`{"items":[]}`), nil
+		case req.Method == http.MethodPatch && req.URL.Path == managedAppAPIPath(namespace, managedName)+"/status":
+			var body struct {
+				Status runtime.ManagedAppStatus `json:"status"`
+			}
+			if decodeErr := json.NewDecoder(req.Body).Decode(&body); decodeErr != nil {
+				t.Fatalf("decode status patch: %v", decodeErr)
+			}
+			managed.Status = body.Status
+			statusPatches++
+			return okJSONResponse(`{}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Renderer: runtime.Renderer{},
+		Logger:   log.New(io.Discard, "", 0),
+		newKubeClient: func(string) (*kubeClient, error) {
+			return client, nil
+		},
+	}
+	if err := svc.waitForManagedAppRolloutWithScheduling(context.Background(), app, op.ID, runtime.SchedulingConstraints{}); err != nil {
+		t.Fatalf("ready deployment must publish observed status before the final status gate: %v", err)
+	}
+	if statusPatches != 1 {
+		t.Fatalf("expected exactly one ready status patch, got %d", statusPatches)
+	}
+	if managed.Status.Phase != runtime.ManagedAppPhaseReady || managed.Status.ReadyReplicas != 1 {
+		t.Fatalf("expected refreshed managed app Ready 1/1, got %+v", managed.Status)
+	}
+}
+
 func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 	t.Parallel()
 
