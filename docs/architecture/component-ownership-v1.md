@@ -528,11 +528,29 @@ fail-closed retry handling. The resulting request-context claims contain no
 bearer token and round-trip all six canonical backup cell kinds within the DNS
 label limit.
 
-This identity atom is standard-library-only and has its own read-only
-`backup-materializer-identity-${ref}` validation lane. It deliberately adds no
-TokenReview client, OpenAPI security scheme, middleware, RBAC, ServiceAccount,
-projected token, or running materializer yet; those remain separately reviewed
-default-off atoms.
+The identity policy is standard-library-only and has its own read-only
+`backup-materializer-identity-${ref}` validation lane.
+
+`internal/backupmaterializerreview` now supplies the separately owned
+`backup-materializer-token-review@v1` network adapter. It performs exactly one
+`POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
+the fixed materializer audience. The API caller credential comes from a
+pluggable source on every request so projected-token rotation is observed; it
+must be a different credential from the workload token being reviewed. The
+transport requires HTTPS, refuses redirects, uses a short timeout and bounded
+response, and accepts only a strict `201 application/json` TokenReview that
+echoes the exact request spec. It translates the response into the minimal
+token-free policy result, reduces remote status errors to a fixed marker,
+rejects credential echoes in translated fields, and never returns response
+bodies or either bearer credential in errors.
+
+This adapter depends on Kubernetes API structs only, not client-go, informers,
+filesystem, datastore, signer, or mutation capability. Its independent
+`backup-materializer-review-${ref}` lane is read-only and cannot publish or
+deploy. There is still no server middleware, credential-file reader, RBAC,
+ServiceAccount, projected-token volume, materializer process, or chart wiring;
+those remain separately reviewed default-off atoms, so production behavior is
+unchanged.
 
 `GET /v1/backup-control/runs/{run}/observation` is the first private bridge
 over that identity boundary. It accepts only the dedicated observer bearer
