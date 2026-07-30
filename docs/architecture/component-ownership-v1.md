@@ -196,6 +196,22 @@ superseded expected set. A generation sequence may decrease only for a new
 expected set behind a strictly newer release fence, which makes an intentional
 rollback possible without weakening replay protection.
 
+The image-cache binary now contains a separately gated shadow consumer behind
+`FUGUE_IMAGE_CACHE_PLATFORM_PLAN_SHADOW_ENABLED=true`. It reloads the rotated
+credential file for every reconciliation, refuses redirects, bounds response
+sizes and long polls, and cross-checks the version, node, scope, content hash,
+release, expected set, and fence before accepting state. HTTPS is mandatory by
+default; plaintext HTTP requires a separate explicit test-only exception. The
+complete response is written atomically as mode 0600 to
+`FUGUE_IMAGE_CACHE_REPLICATION_PLAN_PATH`, with a previous generation and a
+bounded generation archive. Bearer material is rejected from persistent state.
+The consumer reports `observed`/`passed` status with canonical evidence and a
+server-owned monotonic cursor; it deliberately does not report `applied`, so
+this shadow reader cannot become production convergence evidence or mutate the
+serving registry. API, credential, persistence, or heartbeat failure degrades
+only this loop: the current node-local registry and last observation remain in
+place. No legacy chart sets the enable flag in this phase.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

@@ -75,6 +75,8 @@ type imageCache struct {
 	sourceMu        sync.RWMutex
 	sourceByTarget  map[string]sourceCacheEntry
 	sourceTTL       time.Duration
+	platformPlan    *imageCachePlatformPlanConsumer
+	platformPlanErr string
 	lifecycle       context.Context
 	background      sync.WaitGroup
 }
@@ -195,7 +197,19 @@ func main() {
 		lifecycle: lifecycle,
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
-		log.Print("control-plane API credentials are not configured; cache will serve local registry storage only")
+		log.Print("legacy image-location API credentials are not configured; related reporting and lookup are disabled")
+	}
+	platformPlan, platformPlanErr := newImageCachePlatformPlanConsumerFromEnvironment(cache.apiBase, cache.clusterNode)
+	if platformPlanErr != nil {
+		cache.platformPlanErr = boundedImageCachePlatformError(platformPlanErr)
+		log.Printf("image-cache shadow platform plan is disabled by invalid configuration: %v", platformPlanErr)
+	} else if platformPlan != nil {
+		cache.platformPlan = platformPlan
+		if !cache.startBackground(platformPlan.Run) {
+			log.Print("image-cache shadow platform plan could not start because the component lifecycle is already stopping")
+		} else {
+			log.Printf("image-cache shadow platform plan enabled node=%s credential_file=%s observation_file=%s", cache.clusterNode, platformPlan.config.CredentialPath, platformPlan.config.ObservationPath)
+		}
 	}
 	if cache.cacheEndpoint == "" {
 		cache.cacheEndpoint = "http://" + cache.localBase
@@ -372,11 +386,27 @@ func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
 		path = strings.TrimRight(r.URL.Path, "/")
 	}
 	if path == "/fugue/cache/v1/health" && r.Method == http.MethodGet {
-		writeManagementJSON(w, http.StatusOK, map[string]any{
+		response := map[string]any{
 			"status":       "ok",
 			"endpoint":     c.cacheEndpoint,
 			"cluster_node": c.clusterNode,
-		})
+			"platform_plan_shadow": imageCachePlatformPlanStatus{
+				Enabled:         false,
+				ObservationOnly: true,
+				State:           "disabled",
+			},
+		}
+		if c.platformPlan != nil {
+			response["platform_plan_shadow"] = c.platformPlan.Status()
+		} else if c.platformPlanErr != "" {
+			response["platform_plan_shadow"] = imageCachePlatformPlanStatus{
+				Enabled:         false,
+				ObservationOnly: true,
+				State:           "configuration_error",
+				LastError:       c.platformPlanErr,
+			}
+		}
+		writeManagementJSON(w, http.StatusOK, response)
 		return
 	}
 	if !c.authorizeManagement(r) {

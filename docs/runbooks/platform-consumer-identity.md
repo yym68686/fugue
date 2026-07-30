@@ -42,8 +42,10 @@ substitute for this binding.
 
 The short-lived identity token and trusted heartbeat handler are wired in the
 control plane. The image-cache lane is the first fixed-purpose integration: its
-credential issuer, plan read API, and heartbeat release/cursor contract exist,
-but the consumer loop and production chart enablement remain default-off.
+credential issuer, plan read API, heartbeat release/cursor contract, and
+observation-only consumer loop exist. The loop is compiled into the independent
+image-cache artifact but remains default-off, and no production chart enables
+or mounts it yet.
 Until each real consumer integration is complete:
 
 - legacy heartbeat rows are not trusted promotion evidence;

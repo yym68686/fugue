@@ -145,6 +145,34 @@ func TestImageCachePlatformHeartbeatEvidenceMatchesControlPlaneCanonicalContract
 	}
 }
 
+func TestImageCacheManagementHealthExposesNestedShadowStatusWithoutFailingRegistry(t *testing.T) {
+	t.Parallel()
+	consumer := &imageCachePlatformPlanConsumer{status: imageCachePlatformPlanStatus{
+		Enabled: true, ObservationOnly: true, State: "degraded", LastError: "credential unavailable",
+	}}
+	cache := &imageCache{
+		cacheEndpoint: "http://127.0.0.1:5000",
+		clusterNode:   "worker-a",
+		platformPlan:  consumer,
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://image-cache.test/fugue/cache/v1/health", nil)
+	recorder := httptest.NewRecorder()
+	cache.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("shadow degradation failed registry health: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Status             string                       `json:"status"`
+		PlatformPlanShadow imageCachePlatformPlanStatus `json:"platform_plan_shadow"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode management health: %v", err)
+	}
+	if response.Status != "ok" || response.PlatformPlanShadow.State != "degraded" || !response.PlatformPlanShadow.ObservationOnly {
+		t.Fatalf("unexpected nested shadow status: %+v", response)
+	}
+}
+
 func TestImageCachePlatformShadowObservationAndHeartbeatAreAtomicAndObservationOnly(t *testing.T) {
 	now := time.Date(2026, 7, 29, 23, 0, 0, 0, time.UTC)
 	fixture := newTestImageCachePlatformPlan("worker-a", now, 7, 5)
