@@ -212,6 +212,29 @@ serving registry. API, credential, persistence, or heartbeat failure degrades
 only this loop: the current node-local registry and last observation remain in
 place. No legacy chart sets the enable flag in this phase.
 
+`deploy/helm/fugue-image-plane` is the first separate image-plane workload
+boundary. The chart renders zero objects by default and is validated in the
+image-plane-only build lane; that lane still has read-only repository
+permission and cannot publish an image, package a chart, dispatch a release, or
+touch a cluster. Explicit rendering requires an immutable image digest, HTTPS
+API root, `OnDelete` replacement, and the exact opt-in node selector
+`fugue.io/image-plane-shadow=true`. It produces one observation-only DaemonSet
+with no Service, ports, host network, service-account token, RBAC, init
+container, or broad credential. Health and platform-plan readiness are probed
+only over Pod loopback from inside the container.
+
+The workload mounts a dedicated host state directory at
+`/var/lib/fugue/image-cache` inside the container but never mounts the legacy
+serving cache directory. The host paths must be separate canonical directories;
+the chart uses `hostPath.type=Directory`, never `DirectoryOrCreate`, so the
+node-platform owner must first create the shadow state directory as uid/gid
+65532 and provide the mode-0640 component identity directory. This is the first
+explicit image-plane dependency on node-platform, while the observation LKG
+remains owned by image-plane. Missing prerequisites make only this shadow Pod
+unschedulable or unready and cannot alter the legacy image-cache DaemonSet.
+Production installation and enablement remain prohibited while the release
+freeze is active.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while

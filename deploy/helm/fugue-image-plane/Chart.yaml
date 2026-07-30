@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fugue-image-plane
+description: Independent, shadow-only Fugue node image-plane component
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

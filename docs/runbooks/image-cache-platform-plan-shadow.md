@@ -56,15 +56,66 @@ FUGUE_IMAGE_CACHE_PLATFORM_PLAN_ARCHIVE_LIMIT=5
 ```
 
 HTTPS is required by default. A controlled test or explicitly isolated
-cluster-internal network may set
+test harness may set
 `FUGUE_IMAGE_CACHE_PLATFORM_PLAN_ALLOW_INSECURE_HTTP=true`; this exception must
-not be carried into a production ownership cutover. Redirects remain forbidden
-in either mode.
+not be carried into any Kubernetes chart or production ownership cutover. The
+independent chart has no value or environment mapping for this exception and
+requires an HTTPS API URL. Redirects remain forbidden in either mode.
 
 Invalid explicit configuration disables the optional loop and is logged; it
 does not take down the serving registry. Management health reports
 `configuration_error`; the independent chart must surface this as a rollout
 failure before any later ownership cutover.
+
+## Independent chart boundary
+
+`deploy/helm/fugue-image-plane` belongs only to the image-plane lane. It is
+inert by default: `helm template` with default values must return no objects.
+An explicitly enabled render still creates only one shadow DaemonSet and cannot
+publish, replicate, prune, or serve registry traffic:
+
+- the image is required as a fully qualified repository plus exact lowercase
+  `sha256` digest; tags are rejected;
+- replacement is `OnDelete`, so a chart update cannot automatically fan out;
+- scheduling is restricted to the exact opt-in label
+  `fugue.io/image-plane-shadow=true`;
+- the registry listener is Pod-loopback-only, with no declared container port,
+  Service, host port, or host network;
+- the Pod has no Kubernetes API token, ServiceAccount, RBAC, init container, or
+  privileged capability;
+- startup/liveness check legacy health, while readiness checks only the fresh
+  platform-plan observation endpoint;
+- the dedicated host state directory is mounted read/write, and the component
+  credential directory is mounted read-only.
+
+Before any release coordinator later authorizes a bounded shadow install, the
+node-platform lane must atomically pre-create:
+
+```text
+/var/lib/fugue/image-plane-shadow  uid=65532 gid=65532
+/run/fugue/image-cache             contains platform-component-credential.json mode 0640
+```
+
+The chart deliberately requires `hostPath.type=Directory`; it must not create
+or repair host directories. The shadow state path must not equal, contain, or
+be contained by the legacy `/var/lib/fugue/image-cache` host path. This keeps a
+bad shadow observation, restart loop, or rollback local to the new lane.
+
+Safe repository-only validation while production release is frozen is:
+
+```console
+helm lint deploy/helm/fugue-image-plane
+go test ./deploy/helm/fugue-image-plane
+test -z "$(helm template image-plane-shadow deploy/helm/fugue-image-plane)"
+```
+
+Do not run `helm install`, `helm upgrade`, label a production node, publish an
+image, or dispatch a release until the unique release coordinator explicitly
+unfreezes and authorizes that exact digest and node. A later authorized rollback
+removes only the independent shadow DaemonSet (or returns the chart to disabled)
+and leaves both the legacy DaemonSet and its host state untouched; retain the
+shadow observation directory as diagnostic LKG unless incident policy requires
+its separately approved removal.
 
 ## Read-only diagnosis
 
@@ -96,6 +147,7 @@ failure before any later ownership cutover.
   exist for the node, then compare the server cursor with the current release
   fence. Never reset the server cursor manually to make a stale client pass.
 
-Enablement, shadow installation, fault injection, and rollback evidence belong
-to the later independent image-plane chart atom and remain prohibited while the
-production release freeze is active.
+Enablement, shadow installation, fault injection, and live rollback evidence
+remain prohibited while the production release freeze is active. The chart and
+repository checks above are design/build evidence only, not production health
+evidence.

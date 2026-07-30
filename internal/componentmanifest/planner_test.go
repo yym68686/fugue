@@ -10,27 +10,32 @@ import (
 
 func TestPlanRepositoryImageChangeIsShadowOnly(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
-	plan, err := PlanChanges(manifest, []string{"cmd/fugue-image-cache/main.go"})
-	if err != nil {
-		t.Fatalf("PlanChanges() error = %v", err)
-	}
-	if plan.DispatchMode != DispatchModeShadow {
-		t.Fatalf("dispatch mode = %q, want %q", plan.DispatchMode, DispatchModeShadow)
-	}
-	if !plan.RequiresLegacyRelease {
-		t.Fatal("shadow change must remain bound to the legacy release until cutover")
-	}
-	if got, want := impactIDs(plan.ImpactedComponents), []string{"image-plane"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("impacted components = %v, want %v", got, want)
-	}
-	if got, want := plan.ValidationOnlyComponents, []string{"backup-storage", "control-plane", "edge-dns", "operator-cli"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("validation-only components = %v, want %v", got, want)
-	}
-	if got, want := resourceIDs(plan.SharedResources), []string{"legacy-fugue-helm-release", "registry"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("shared resources = %v, want %v", got, want)
-	}
-	if err := plan.VerifyDigest(); err != nil {
-		t.Fatalf("VerifyDigest() error = %v", err)
+	for _, changedPath := range []string{
+		"cmd/fugue-image-cache/main.go",
+		"deploy/helm/fugue-image-plane/templates/daemonset.yaml",
+	} {
+		plan, err := PlanChanges(manifest, []string{changedPath})
+		if err != nil {
+			t.Fatalf("PlanChanges(%q) error = %v", changedPath, err)
+		}
+		if plan.DispatchMode != DispatchModeShadow {
+			t.Fatalf("PlanChanges(%q) dispatch mode = %q, want %q", changedPath, plan.DispatchMode, DispatchModeShadow)
+		}
+		if !plan.RequiresLegacyRelease {
+			t.Fatalf("PlanChanges(%q) must remain bound to the legacy release until cutover", changedPath)
+		}
+		if got, want := impactIDs(plan.ImpactedComponents), []string{"image-plane"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) impacted components = %v, want %v", changedPath, got, want)
+		}
+		if got, want := plan.ValidationOnlyComponents, []string{"backup-storage", "control-plane", "edge-dns", "operator-cli"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) validation-only components = %v, want %v", changedPath, got, want)
+		}
+		if got, want := resourceIDs(plan.SharedResources), []string{"legacy-fugue-helm-release", "registry"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) shared resources = %v, want %v", changedPath, got, want)
+		}
+		if err := plan.VerifyDigest(); err != nil {
+			t.Fatalf("PlanChanges(%q) VerifyDigest() error = %v", changedPath, err)
+		}
 	}
 }
 

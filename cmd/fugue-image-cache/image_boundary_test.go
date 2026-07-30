@@ -66,9 +66,13 @@ func TestImagePlaneWorkflowIsPathScopedBuildOnly(t *testing.T) {
 	for _, required := range []string{
 		"Dockerfile.image-cache",
 		"cmd/fugue-image-cache/**",
+		"deploy/helm/fugue-image-plane/**",
 		"internal/imagecacheusage/**",
 		"scripts/test_image_plane_image.sh",
+		"azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310",
 		"docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c",
+		"helm lint deploy/helm/fugue-image-plane",
+		"helm template image-plane-shadow deploy/helm/fugue-image-plane",
 		"docker buildx build",
 		"--load",
 	} {
@@ -85,7 +89,11 @@ func TestImagePlaneWorkflowIsPathScopedBuildOnly(t *testing.T) {
 		"environment: production",
 		"workflow_dispatch",
 		"kubectl ",
-		"helm ",
+		"helm install",
+		"helm upgrade",
+		"helm uninstall",
+		"helm push",
+		"helm package",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("image-plane build-only workflow contains forbidden mutation %q", forbidden)

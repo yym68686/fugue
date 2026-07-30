@@ -1,0 +1,64 @@
+# The chart is inert until a release coordinator authorizes a bounded shadow
+# installation. Enabling it never authorizes image replication or ownership
+# cutover; the process reports apply_status=observed only.
+enabled: false
+
+image:
+  # A fully qualified repository plus immutable digest is mandatory. Mutable
+  # tags are intentionally unsupported in this independent lane.
+  repository: ""
+  digest: ""
+
+api:
+  # HTTPS is mandatory. The component appends fixed versioned paths and refuses
+  # redirects, credentials in the URL, queries, and fragments.
+  baseURL: ""
+
+runtime:
+  # The process listens only on Pod loopback; exec probes inspect it from
+  # inside the container, and the chart creates no network-visible port.
+  port: 5001
+  longPoll: 30s
+  requestTimeout: 40s
+  retryMin: 2s
+  retryMax: 60s
+  noPlanRetry: 15s
+  credentialMinValidity: 30s
+  archiveLimit: 5
+
+credential:
+  # The node-platform owner must pre-create this directory and atomically
+  # rotate platform-component-credential.json as root:65532 mode 0640.
+  hostPath: /run/fugue/image-cache
+
+state:
+  # The node-platform owner must pre-create this directory as uid/gid 65532.
+  # It is deliberately distinct from the serving legacy image-cache hostPath.
+  hostPath: /var/lib/fugue/image-plane-shadow
+  legacyHostPath: /var/lib/fugue/image-cache
+
+updateStrategy:
+  # Automatic Pod replacement is forbidden during shadow evidence gathering.
+  type: OnDelete
+
+# A chart enablement is bounded to explicitly opted-in nodes. The template
+# requires this exact label/value and rejects an empty or broader selector.
+nodeSelector:
+  fugue.io/image-plane-shadow: "true"
+
+tolerations: []
+affinity: {}
+# A shadow observer must never preempt a serving workload. The template rejects
+# any non-empty value during this migration phase.
+priorityClassName: ""
+imagePullSecrets: []
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+    ephemeral-storage: 16Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+    ephemeral-storage: 128Mi

@@ -68,15 +68,16 @@ components:
       - Dockerfile.image-cache
       - .github/workflows/build-image-plane-image.yml
       - cmd/fugue-image-cache
+      - deploy/helm/fugue-image-plane
       - internal/imagecacheusage
       - internal/releaseimageconsumer
       - scripts/test_image_plane_image.sh
     artifactKinds: [image-cache, image-replication-plan]
     releaseLane: image-plane
     coordinator: release-control
-    ownedState: [image-replication-spec, image-inventory, image-replica-status, image-gc-state]
+    ownedState: [image-replication-spec, image-replication-observation-lkg, image-inventory, image-replica-status, image-gc-state]
     contracts: [image-replication-plan@v1, image-availability@v1, image-evidence@v1]
-    dependencies: []
+    dependencies: [node-platform]
     failureBoundary: image-plane
     lkgPolicy: required
 

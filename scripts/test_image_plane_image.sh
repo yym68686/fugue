@@ -28,6 +28,13 @@ docker run --detach \
   --env FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED=false \
   "${image_ref}" >/dev/null
 
+probe_tool="$(docker exec "${container}" /bin/sh -c 'command -v wget')"
+if [[ "${probe_tool}" != "/usr/bin/wget" ]]; then
+  docker logs "${container}" >&2 || true
+  printf 'image-plane chart probe dependency is unavailable: %s\n' "${probe_tool}" >&2
+  exit 1
+fi
+
 endpoint=""
 for _ in $(seq 1 50); do
   endpoint="$(docker port "${container}" 5000/tcp 2>/dev/null | head -n 1 || true)"
