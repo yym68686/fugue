@@ -141,6 +141,16 @@ type imageCacheBlobUploadState struct {
 func main() {
 	lifecycle, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	mode, err := imageCacheProcessMode(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	if mode == imageCacheProcessModePlatformPlanShadow {
+		if err := runImageCachePlatformPlanAgent(lifecycle); err != nil {
+			log.Fatalf("serve image-plane shadow agent: %v", err)
+		}
+		return
+	}
 
 	listenAddr := env("FUGUE_IMAGE_CACHE_LISTEN_ADDR", ":5000")
 	storeDir := env("FUGUE_IMAGE_CACHE_STORE_DIR", "/var/lib/fugue/image-cache/registry")

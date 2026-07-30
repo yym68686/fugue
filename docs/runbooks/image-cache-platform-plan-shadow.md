@@ -79,11 +79,14 @@ publish, replicate, prune, or serve registry traffic:
 - replacement is `OnDelete`, so a chart update cannot automatically fan out;
 - scheduling is restricted to the exact opt-in label
   `fugue.io/image-plane-shadow=true`;
-- the registry listener is Pod-loopback-only, with no declared container port,
+- the health listener is Pod-loopback-only, with no declared container port,
   Service, host port, or host network;
+- the explicit `platform-plan-shadow` process mode does not initialize the
+  legacy registry, disk store, image-location reporter, management mutation
+  endpoints, or registry background workers;
 - the Pod has no Kubernetes API token, ServiceAccount, RBAC, init container, or
   privileged capability;
-- startup/liveness check legacy health, while readiness checks only the fresh
+- startup/liveness check agent health, while readiness checks only the fresh
   platform-plan observation endpoint;
 - the dedicated host state directory is mounted read/write, and the component
   credential directory is mounted read-only.

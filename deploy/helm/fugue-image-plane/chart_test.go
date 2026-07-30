@@ -85,7 +85,8 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 	container := pod.Containers[0]
 	if container.Name != "image-plane-shadow" ||
 		container.Image != "registry.example.test/fugue/image-cache@"+imagePlaneTestDigest ||
-		container.ImagePullPolicy != corev1.PullIfNotPresent || len(container.Ports) != 0 {
+		container.ImagePullPolicy != corev1.PullIfNotPresent || len(container.Ports) != 0 || len(container.Command) != 0 ||
+		!reflect.DeepEqual(container.Args, []string{"platform-plan-shadow"}) {
 		t.Fatalf("shadow container artifact or network boundary drifted: %+v", container)
 	}
 	security := container.SecurityContext
@@ -103,8 +104,6 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 
 	wantEnv := map[string]string{
 		"FUGUE_IMAGE_CACHE_LISTEN_ADDR":                      "127.0.0.1:5001",
-		"FUGUE_IMAGE_CACHE_STORE_DIR":                        "/var/lib/fugue/image-cache/registry-unused",
-		"FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED":               "false",
 		"FUGUE_IMAGE_CACHE_PLATFORM_PLAN_SHADOW_ENABLED":     "true",
 		"FUGUE_API_BASE":                                     "https://api.fugue-system.svc.cluster.local:8443",
 		"FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE":         "/run/fugue/image-cache/platform-component-credential.json",
@@ -133,7 +132,16 @@ func TestEnabledImagePlaneChartRendersOneIsolatedShadowDaemonSet(t *testing.T) {
 	if !reflect.DeepEqual(gotEnv, wantEnv) {
 		t.Fatalf("environment=%#v, want %#v", gotEnv, wantEnv)
 	}
-	for _, forbidden := range []string{"FUGUE_API_KEY", "FUGUE_NODE_UPDATER_TOKEN", "FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN", "FUGUE_IMAGE_CACHE_PLATFORM_PLAN_ALLOW_INSECURE_HTTP"} {
+	for _, forbidden := range []string{
+		"FUGUE_API_KEY",
+		"FUGUE_NODE_UPDATER_TOKEN",
+		"FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN",
+		"FUGUE_IMAGE_CACHE_PLATFORM_PLAN_ALLOW_INSECURE_HTTP",
+		"FUGUE_IMAGE_CACHE_STORE_DIR",
+		"FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED",
+		"FUGUE_IMAGE_CACHE_REGISTRY_BASE",
+		"FUGUE_IMAGE_CACHE_UPSTREAM_BASE",
+	} {
 		if _, exists := gotEnv[forbidden]; exists {
 			t.Fatalf("shadow chart injected forbidden broad or insecure credential setting %s", forbidden)
 		}

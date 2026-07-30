@@ -109,6 +109,8 @@ spec:
         - name: image-plane-shadow
           image: {{ printf "%s@%s" $repository $digest | quote }}
           imagePullPolicy: IfNotPresent
+          args:
+            - platform-plan-shadow
           securityContext:
             allowPrivilegeEscalation: false
             privileged: false
@@ -122,10 +124,6 @@ spec:
           env:
             - name: FUGUE_IMAGE_CACHE_LISTEN_ADDR
               value: {{ printf "127.0.0.1:%d" $port | quote }}
-            - name: FUGUE_IMAGE_CACHE_STORE_DIR
-              value: /var/lib/fugue/image-cache/registry-unused
-            - name: FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED
-              value: "false"
             - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_SHADOW_ENABLED
               value: "true"
             - name: FUGUE_API_BASE

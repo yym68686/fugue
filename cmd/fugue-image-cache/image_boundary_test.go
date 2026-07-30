@@ -174,6 +174,20 @@ func TestImagePlaneProbeScriptIsExecutableAndValidBash(t *testing.T) {
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("image-plane probe mode %o is not executable", info.Mode().Perm())
 	}
+	data, err := os.ReadFile(imagePlaneProbeScript)
+	if err != nil {
+		t.Fatalf("read image-plane probe: %v", err)
+	}
+	for _, required := range []string{
+		"platform-plan-shadow",
+		"image-plane shadow agent entered the legacy registry startup path",
+		"image-plane shadow agent unexpectedly published a container port",
+		"image-plane shadow agent exposed forbidden legacy path",
+	} {
+		if !strings.Contains(string(data), required) {
+			t.Fatalf("image-plane probe is missing isolated-agent assertion %q", required)
+		}
+	}
 	output, err := exec.Command("bash", "-n", imagePlaneProbeScript).CombinedOutput()
 	if err != nil {
 		t.Fatalf("image-plane probe has invalid bash: %v\n%s", err, output)

@@ -220,8 +220,11 @@ touch a cluster. Explicit rendering requires an immutable image digest, HTTPS
 API root, `OnDelete` replacement, and the exact opt-in node selector
 `fugue.io/image-plane-shadow=true`. It produces one observation-only DaemonSet
 with no Service, ports, host network, service-account token, RBAC, init
-container, or broad credential. Health and platform-plan readiness are probed
-only over Pod loopback from inside the container.
+container, or broad credential. Its explicit `platform-plan-shadow` process
+mode does not initialize the legacy OCI registry, store, image-location API,
+management handlers, or registry background jobs; it exposes only
+credential-free health and observation readiness. Both are probed only over
+Pod loopback from inside the container.
 
 The workload mounts a dedicated host state directory at
 `/var/lib/fugue/image-cache` inside the container but never mounts the legacy
