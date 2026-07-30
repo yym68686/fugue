@@ -2,7 +2,7 @@ GOCACHE ?= $(CURDIR)/.gocache
 BIN_DIR ?= $(CURDIR)/bin
 DOCKER ?= docker
 
-.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-release-control build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
+.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-release-control build-backup-materializer build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
 	bash ./scripts/scan_hardcoded_production_facts.sh
@@ -58,6 +58,12 @@ build-observability-pilot:
 build-release-control:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-release-control ./cmd/fugue-release-control
+
+# The default-off shadow materializer remains outside the legacy aggregate
+# build so this cell-local binary can evolve without rebuilding other lanes.
+build-backup-materializer:
+	mkdir -p $(BIN_DIR)
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-backup-materializer ./cmd/fugue-backup-materializer
 
 build-image-cache:
 	mkdir -p $(BIN_DIR)

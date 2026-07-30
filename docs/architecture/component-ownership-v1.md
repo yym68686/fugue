@@ -846,8 +846,36 @@ the exact evaluation time and nested decision. Every path keeps
 `deleteAllowed`, `executionAllowed`, and `productionMutationAllowed` false.
 The package owns no HTTP, filesystem, Kubernetes, store, signer, writer,
 timer, goroutine, process, RBAC, workload, chart, or deployment capability.
-The concrete client and Secret reader satisfy its injected interfaces, but no
-production composition constructs this loop yet.
+The concrete client and Secret reader satisfy its injected interfaces.
+
+`internal/backupmaterializer/agent` and
+`cmd/fugue-backup-materializer` add the default-off
+`backup-materializer-agent@v1` process boundary around exactly one such cell.
+The supervisor runs an immediate evaluation and then one serial, bounded
+evaluation per interval. It exposes only loopback `GET /healthz`,
+`GET /readyz`, and `GET /v1/status`; its digest-bound snapshot retains the
+last valid result after a local attempt failure but fails readiness closed
+until the cell evaluates successfully again. A create or CAS candidate is
+reported as non-ready and non-executable, while no-op or valid LKG retention
+is ready. No status permits delete, execution, or production mutation.
+
+The process acquires two deliberately separate projected identities only when
+explicitly enabled: one audience-bound projection for the desired-input API
+and one Kubernetes-API projection for observing the exact cell Secret. It
+constructs the GET-only projected adapters and pure reconciler directly; its
+compiled dependency closure contains no legacy API, store/model, database,
+Kubernetes SDK, TokenReview adapter, signer, Secret writer, backup executor,
+object-store client, registry client, or subprocess capability. Disabled mode
+ignores and retains none of the cell, run, endpoint, projection, or timing
+inputs and performs no projection or network access.
+
+Loopback serving and the cell loop share one cancellation boundary. Shutdown
+stops new health traffic, drains the server, and waits for the loop under one
+bounded deadline. The binary also supplies direct loopback-only health and
+readiness probes without shell or external HTTP tooling. This atom creates an
+independently compiled shadow process, not a production workload: there is no
+image, ServiceAccount, RBAC, token projection, Helm object, Secret write path,
+release dispatch, or production enablement yet.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
