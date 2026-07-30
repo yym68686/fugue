@@ -36,6 +36,7 @@ type Server struct {
 	controlPlaneNamespace            string
 	controlPlaneReleaseInstance      string
 	backupCoordination               BackupCoordinationConfig
+	backupMaterializerEndpoint       BackupMaterializerEndpoint
 	controlPlaneCNPGBackupEnabled    bool
 	controlPlaneCNPGBackupName       string
 	registryGCLeaseName              string
@@ -173,6 +174,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 			LeaseDuration:  cfg.BackupCoordination.LeaseDuration,
 			RenewPeriod:    cfg.BackupCoordination.RenewPeriod,
 		},
+		backupMaterializerEndpoint:       cfg.BackupMaterializerEndpoint,
 		controlPlaneCNPGBackupEnabled:    cfg.ControlPlaneCNPGBackupEnabled,
 		controlPlaneCNPGBackupName:       strings.TrimSpace(cfg.ControlPlaneCNPGBackupName),
 		registryGCLeaseName:              strings.TrimSpace(cfg.RegistryGCLeaseName),

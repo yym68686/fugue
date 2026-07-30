@@ -23,6 +23,7 @@ type ServerConfig struct {
 	ControlPlaneNamespace            string
 	ControlPlaneReleaseInstance      string
 	BackupCoordination               BackupCoordinationConfig
+	BackupMaterializerEndpoint       BackupMaterializerEndpoint
 	ControlPlaneCNPGBackupEnabled    bool
 	ControlPlaneCNPGBackupName       string
 	RegistryGCLeaseName              string

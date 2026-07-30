@@ -37,14 +37,30 @@ func TestInferAuthKindRecognizesBackupObserverBearer(t *testing.T) {
 	}
 }
 
+func TestInferAuthKindRecognizesBackupMaterializerBearer(t *testing.T) {
+	t.Parallel()
+
+	security := openapi3.SecurityRequirements{
+		openapi3.SecurityRequirement{"BackupMaterializerBearerAuth": []string{}},
+	}
+	got, err := inferAuthKind(&openapi3.T{}, &openapi3.Operation{Security: &security})
+	if err != nil {
+		t.Fatalf("infer backup materializer auth: %v", err)
+	}
+	if got != "backup-materializer" {
+		t.Fatalf("expected backup-materializer auth, got %q", got)
+	}
+}
+
 func TestInferAuthKindRejectsCombinedBearerSchemes(t *testing.T) {
 	t.Parallel()
 
 	security := openapi3.SecurityRequirements{
 		openapi3.SecurityRequirement{
-			"BearerAuth":                  []string{},
-			"PlatformComponentBearerAuth": []string{},
-			"BackupObserverBearerAuth":    []string{},
+			"BearerAuth":                   []string{},
+			"PlatformComponentBearerAuth":  []string{},
+			"BackupObserverBearerAuth":     []string{},
+			"BackupMaterializerBearerAuth": []string{},
 		},
 	}
 	if _, err := inferAuthKind(&openapi3.T{}, &openapi3.Operation{Security: &security}); err == nil {
@@ -68,6 +84,25 @@ func TestRenderRoutesUsesBackupObserverMiddleware(t *testing.T) {
 	}
 	if !strings.Contains(string(rendered), "s.auth.RequireBackupObserver(http.HandlerFunc(s.handleGetBackupRunObservation))") {
 		t.Fatalf("generated route did not use backup observer middleware:\n%s", rendered)
+	}
+}
+
+func TestRenderRoutesUsesBackupMaterializerEndpointGate(t *testing.T) {
+	t.Parallel()
+
+	rendered, err := renderRoutesFile([]routeDefinition{{
+		Method:      "GET",
+		Path:        "/v1/backup-control/runs/{run}/observer-input-bundle",
+		Pattern:     "GET /v1/backup-control/runs/{run}/observer-input-bundle",
+		OperationID: "getBackupObserverInputBundle",
+		HandlerName: "handleGetBackupObserverInputBundle",
+		Auth:        "backup-materializer",
+	}})
+	if err != nil {
+		t.Fatalf("render routes: %v", err)
+	}
+	if !strings.Contains(string(rendered), "s.requireBackupMaterializerEndpoint(http.HandlerFunc(s.handleGetBackupObserverInputBundle))") {
+		t.Fatalf("generated route did not use backup materializer endpoint gate:\n%s", rendered)
 	}
 }
 

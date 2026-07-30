@@ -9364,6 +9364,84 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backup-control/runs/{run}/observer-input-bundle:
+    get:
+      operationId: getBackupObserverInputBundle
+      summary: Read One Backup Observer Input Bundle
+      description: >-
+        Private v1 handoff for one Pod-bound backup materializer. The route is
+        unavailable unless a complete endpoint is explicitly injected. The
+        reviewed projected ServiceAccount identity, path run, and server-owned
+        backup cell must agree before one short-lived observation-only spec and
+        observer credential bundle is returned. This operation cannot schedule,
+        claim, execute, delete, restore, or otherwise mutate a backup.
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupObserverInputBundle
+      security:
+        - BackupMaterializerBearerAuth: []
+      parameters:
+        - in: path
+          name: run
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+      responses:
+        '200':
+          description: Exact current private input bundle for the identity-owned run and cell.
+          headers:
+            Cache-Control:
+              description: Private no-store policy required for the secret-bearing bundle.
+              schema:
+                type: string
+                pattern: '(^|.*,\s*)private(\s*,.*|$)'
+            Pragma:
+              description: Legacy intermediary cache prevention.
+              schema:
+                type: string
+                enum: [no-cache]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupObserverInputBundle"
+        '400':
+          description: The path, query, or body precondition is malformed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '401':
+          description: The projected materializer identity is missing, invalid, expired, foreign, or unbound.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '404':
+          description: The endpoint is disabled or the exact identity-owned run and cell are not visible.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '409':
+          description: The current legacy snapshot is inconsistent or not representable by the v1 desired spec.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: TokenReview, bounded source access, or observer identity issuance is unavailable.
+          headers:
+            Retry-After:
+              description: Seconds the materializer should wait before a bounded retry.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backups/runs:
     get:
       operationId: listBackupRuns
@@ -10801,6 +10879,11 @@ components:
       scheme: bearer
       bearerFormat: fugue_bo_v1
       description: Short-lived identity bound to one exact backup run, ownership cell, and desired-spec digest; all other Fugue credentials are rejected.
+    BackupMaterializerBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: kubernetes-service-account-jwt
+      description: Projected Pod-bound ServiceAccount JWT reviewed for exactly the fugue-backup-materializer.fugue.dev audience; Fugue credentials and legacy ServiceAccount Secrets are rejected.
     EdgeToken:
       type: apiKey
       in: query
@@ -11418,6 +11501,166 @@ components:
         finished_at:
           type: string
           format: date-time
+    BackupRunDesiredTarget:
+      type: object
+      additionalProperties: false
+      required: [type, scopeKey]
+      properties:
+        type:
+          type: string
+          enum: [control-plane-db, app-database, persistent-storage, data-workspace, registry, platform-component]
+        scopeKey:
+          type: string
+          pattern: '^(platform|tenant|project|app)/[a-z0-9][a-z0-9._:-]{0,127}(/[a-z0-9][a-z0-9._:-]{0,127})*$'
+          description: Canonical logical ownership scope; it contains no physical backend address or credential.
+    BackupRunDesiredSpec:
+      type: object
+      additionalProperties: false
+      required:
+        - apiVersion
+        - kind
+        - mode
+        - runId
+        - requestId
+        - target
+        - cellKey
+        - backendId
+        - backendGeneration
+        - artifactKind
+        - attemptLimit
+        - leaseTtlSeconds
+        - operationTimeoutSeconds
+        - idempotencyKey
+        - observationOnly
+        - productionWriteAllowed
+        - digest
+      properties:
+        apiVersion:
+          type: string
+          enum: [backup-control.fugue.dev/v1]
+        kind:
+          type: string
+          enum: [BackupRunSpec]
+        mode:
+          type: string
+          enum: [shadow]
+        runId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        requestId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        target:
+          $ref: "#/components/schemas/BackupRunDesiredTarget"
+        cellKey:
+          type: string
+          pattern: '^backup/(control-plane-db|app-database|persistent-storage|data-workspace|registry|platform-component)/[0-9a-f]{16}$'
+        backendId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        backendGeneration:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        artifactKind:
+          type: string
+          enum: [control-plane-pg-dump, app-pg-dump, file-archive, data-snapshot, registry-archive]
+        attemptLimit:
+          type: integer
+          minimum: 1
+          maximum: 10
+        leaseTtlSeconds:
+          type: integer
+          minimum: 30
+          maximum: 600
+        operationTimeoutSeconds:
+          type: integer
+          minimum: 60
+          maximum: 3600
+        idempotencyKey:
+          type: string
+          pattern: '^backup-run/[a-z0-9][a-z0-9._:-]{0,127}$'
+        observationOnly:
+          type: boolean
+          enum: [true]
+        productionWriteAllowed:
+          type: boolean
+          enum: [false]
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    BackupObserverInputBundle:
+      type: object
+      additionalProperties: false
+      required:
+        - apiVersion
+        - kind
+        - policy
+        - cellKey
+        - runId
+        - specDigest
+        - credentialId
+        - tokenId
+        - desiredSpec
+        - observerToken
+        - issuedAt
+        - renewAfter
+        - expiresAt
+        - observationOnly
+        - productionMutationAllowed
+        - digest
+      properties:
+        apiVersion:
+          type: string
+          enum: [backup-materializer.fugue.dev/v1]
+        kind:
+          type: string
+          enum: [BackupObserverInputBundle]
+        policy:
+          type: string
+          enum: [single-secret-observation-input-v1]
+        cellKey:
+          type: string
+          pattern: '^backup/(control-plane-db|app-database|persistent-storage|data-workspace|registry|platform-component)/[0-9a-f]{16}$'
+        runId:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$'
+        specDigest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        credentialId:
+          type: string
+          pattern: '^backup-observer:(control-plane-db|app-database|persistent-storage|data-workspace|registry|platform-component):[0-9a-f]{16}$'
+        tokenId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{22}$'
+        desiredSpec:
+          $ref: "#/components/schemas/BackupRunDesiredSpec"
+        observerToken:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 4096
+          pattern: '^fugue_bo_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'
+          description: Short-lived private bearer credential; it must never enter logs, metrics, status, or caches.
+          x-fugue-sensitive: true
+        issuedAt:
+          type: string
+          format: date-time
+        renewAfter:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        observationOnly:
+          type: boolean
+          enum: [true]
+        productionMutationAllowed:
+          type: boolean
+          enum: [false]
+        digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
     BackupRunObservationArtifactRef:
       type: object
       additionalProperties: false

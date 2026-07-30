@@ -11,6 +11,14 @@ on:
       - internal/backupadapter/**
       - internal/backupcontrol/**
       - internal/backupidentity/**
+      - internal/api/backup_materializer.go
+      - internal/api/backup_materializer_test.go
+      - internal/api/routes_gen.go
+      - internal/apispec/backup_materializer_test.go
+      - internal/apispec/spec.go
+      - internal/apispec/spec_gen.go
+      - cmd/fugue-openapi-gen/**
+      - openapi/openapi.yaml
       - internal/model/backup.go
       - internal/store/backup.go
       - internal/store/backup_observation.go
@@ -27,6 +35,14 @@ on:
       - internal/backupadapter/**
       - internal/backupcontrol/**
       - internal/backupidentity/**
+      - internal/api/backup_materializer.go
+      - internal/api/backup_materializer_test.go
+      - internal/api/routes_gen.go
+      - internal/apispec/backup_materializer_test.go
+      - internal/apispec/spec.go
+      - internal/apispec/spec_gen.go
+      - cmd/fugue-openapi-gen/**
+      - openapi/openapi.yaml
       - internal/model/backup.go
       - internal/store/backup.go
       - internal/store/backup_observation.go
@@ -61,7 +77,12 @@ jobs:
       - name: Verify sealed spec and identity handoff
         run: |
           set -euo pipefail
-          go test ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity -count=1
+          go test ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupmaterializerreview/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity -count=1
           go test -race ./internal/backupmaterializer/... -count=5
+          go test ./internal/api -run TestBackupMaterializerEndpoint -count=1
+          go test -race ./internal/api -run TestBackupMaterializerEndpoint -count=3
+          go test ./internal/apispec -run 'Test(BackupMaterializerOpenAPIContractIsPrivateStrictAndDefaultOff|GeneratedArtifactsAreUpToDate|EmbeddedSpecIsValid)' -count=1
+          go test ./cmd/fugue-openapi-gen -count=1
           go test ./internal/componentmanifest -run TestBackupInputBundleWorkflowIsReadOnly -count=1
-          go vet ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity
+          go vet ./internal/api ./internal/apispec ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupmaterializerreview/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity ./cmd/fugue-openapi-gen
+          go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check

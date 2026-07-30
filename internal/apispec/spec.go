@@ -5,12 +5,13 @@ package apispec
 type AuthKind string
 
 const (
-	AuthNone              AuthKind = "none"
-	AuthAPI               AuthKind = "api"
-	AuthRuntime           AuthKind = "runtime"
-	AuthNodeUpdater       AuthKind = "node-updater"
-	AuthPlatformComponent AuthKind = "platform-component"
-	AuthBackupObserver    AuthKind = "backup-observer"
+	AuthNone               AuthKind = "none"
+	AuthAPI                AuthKind = "api"
+	AuthRuntime            AuthKind = "runtime"
+	AuthNodeUpdater        AuthKind = "node-updater"
+	AuthPlatformComponent  AuthKind = "platform-component"
+	AuthBackupObserver     AuthKind = "backup-observer"
+	AuthBackupMaterializer AuthKind = "backup-materializer"
 )
 
 type Route struct {

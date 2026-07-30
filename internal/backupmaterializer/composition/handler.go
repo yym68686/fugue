@@ -47,6 +47,11 @@ type Handler struct {
 	next    http.Handler
 }
 
+// BackupMaterializerEndpointV1 is a compile-time marker required by the
+// generated API route gate. It prevents an arbitrary http.Handler from being
+// injected as this private identity-owning endpoint by accident.
+func (handler *Handler) BackupMaterializerEndpointV1() {}
+
 func New(config Config) (*Handler, error) {
 	if !config.Enabled {
 		return &Handler{}, nil

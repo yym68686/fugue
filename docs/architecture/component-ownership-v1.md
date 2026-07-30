@@ -504,12 +504,14 @@ redact the token, while the private JSON handoff intentionally contains it.
 The envelope carries no endpoint, bucket, object key, backend credential,
 database handle, or Kubernetes capability.
 
-This atom adds only the contract and its independent read-only
-`backup-input-bundle-${ref}` validation lane. There is still no bundle HTTP
-route, materializer process, Secret writer, service account, RBAC grant, image,
-or workload. The current default-off chart continues to consume its existing
-external ConfigMap/Secret until a later reviewed atom moves both keys into one
-bundle-derived Secret projection; production behavior is therefore unchanged.
+The pure-contract atom initially added only the bundle and its independent
+read-only `backup-input-bundle-${ref}` validation lane. The default-off HTTP
+registration described below now exposes the versioned shape but has no
+process-root composition. There is still no materializer process, Secret
+writer, service account, RBAC grant, image, or workload. The current
+default-off chart continues to consume its existing external ConfigMap/Secret
+until a later reviewed atom moves both keys into one bundle-derived Secret
+projection; production behavior is therefore unchanged.
 
 `internal/backupmaterializeridentity` defines the corresponding caller side as
 `backup-materializer-identity@v1` without creating another Fugue bearer-key
@@ -548,8 +550,8 @@ signer, server configuration, or mutation dependency.
 The identity policy and HTTP boundary share the recursive read-only
 `backup-materializer-identity-${ref}` validation lane.
 
-`internal/backupmaterializer/httpapi` defines the unregistered
-`backup-materializer-input-api@v1` handler core for the future exact
+`internal/backupmaterializer/httpapi` defines the
+`backup-materializer-input-api@v1` handler core for the exact
 `GET /v1/backup-control/runs/{run}/observer-input-bundle` route. It accepts no
 query string or request body and never guesses a desired run from creation
 time or list ordering. A capability-separated source is queried with the exact
@@ -563,10 +565,11 @@ responses are bounded strict private JSON and cannot contain the caller's
 projected ServiceAccount token.
 
 The handler imports no legacy API, store, model, database, Kubernetes, object
-storage, filesystem, or process capability. It is not present in the generated
-route table and no concrete source or signer is attached. The existing
-`backup-input-bundle-${ref}` lane now recursively validates this handler and
-its identity dependency rather than creating another release queue.
+storage, filesystem, or process capability. It owns no route registration; a
+separate generated default-off gate now names it, but the process root attaches
+no concrete composition. The existing `backup-input-bundle-${ref}` lane
+recursively validates this handler and its identity dependency rather than
+creating another release queue.
 
 `internal/backupmaterializer/legacysource` implements the transitional
 `backup-materializer-legacy-source@v1` compatibility edge around one injected,
@@ -617,6 +620,25 @@ bucket, endpoint, backend credentials, API caller credential, and presented
 materializer credential do not cross the response. The existing input-bundle
 lane covers the composition and its reviewer dependency plus the exact legacy
 mapping and two relevant backup store files, without adding a release queue.
+
+The authoritative OpenAPI source now registers the exact GET-only
+`backup-materializer-input-route@v1` path and a dedicated
+`BackupMaterializerBearerAuth` scheme for a Pod-bound projected ServiceAccount
+JWT. Its strict response schemas mirror every JSON field in
+`BackupObserverInputBundle`, `BackupRunSpec`, and `BackupTarget`; the bearer
+field is explicitly sensitive, bounded, and absent from error responses. The
+generated route passes through `internal/api/backup_materializer.go`, which
+contains only a private availability gate and an injected v1 endpoint
+interface. It cannot construct TokenReview, store, source, or signer
+capabilities.
+
+Every existing `ServerConfig{}` leaves that interface nil, producing a private
+404 before authentication or data access. An injected endpoint must implement
+the explicit v1 marker and report enabled at both admission and dispatch; a
+typed nil, disabled endpoint, missing handler, or enablement change remains a
+private 404. `cmd/fugue-api` still supplies no endpoint, environment input,
+keyring, projected volume, or API origin, so requests cannot proceed past the
+private availability gate in the running topology.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
