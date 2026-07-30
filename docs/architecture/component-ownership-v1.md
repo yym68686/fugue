@@ -599,15 +599,24 @@ the underlying store. The package has no API, HTTP, signer, Kubernetes,
 filesystem, or direct SQL dependency. A real JSON-store test proves the
 adapter and legacy mapper leave the store byte-for-byte unchanged.
 
-A black-box test uses the real JSON store's read-only run and redacted backend
-generation methods, then crosses the source, materializer TokenReview claims,
-HTTP handler, and local issuer boundaries. The returned private bundle is
+`internal/backupmaterializer/composition` is the default-disabled
+`backup-materializer-composition@v1` composition root. A disabled construction
+does not validate or retain the supplied store, keyring, projected credential,
+CA, API origin, or clock and returns a private fail-closed handler. An enabled
+construction joins only the read-only store bridge, legacy mapper, immutable
+local issuer, rotating projected TokenReview adapter, claims-only middleware,
+and input handler core. Constructor failures collapse to one fixed error, and
+ordinary configuration and handler formatting is redacted.
+
+The composition root owns no mux, generated path, server, environment reader,
+ServiceAccount, RBAC, Secret writer, Kubernetes mutation, or datastore write.
+A black-box test uses the real JSON store and a TLS TokenReview endpoint, then
+crosses every composed boundary. The returned private bundle is
 cryptographically valid while the store remains byte-for-byte unchanged;
-bucket, endpoint, backend credentials, and the caller ServiceAccount token do
-not cross the response. None of these adapters is attached to the server or
-generated route. The existing input-bundle lane covers these adapters and
-their exact legacy mapping dependency plus only the two relevant backup store files,
-without adding a release queue.
+bucket, endpoint, backend credentials, API caller credential, and presented
+materializer credential do not cross the response. The existing input-bundle
+lane covers the composition and its reviewer dependency plus the exact legacy
+mapping and two relevant backup store files, without adding a release queue.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

@@ -61,6 +61,7 @@ func TestBackupInputBundleWorkflowIsReadOnly(t *testing.T) {
 	for _, required := range []string{
 		"internal/backupmaterializer/**",
 		"internal/backupmaterializeridentity/**",
+		"internal/backupmaterializerreview/**",
 		"internal/backupadapter/**",
 		"internal/backupcontrol/**",
 		"internal/backupidentity/**",
