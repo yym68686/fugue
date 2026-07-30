@@ -342,9 +342,9 @@ endpoints expose no input or command surface and never include credentials or
 remote error bodies. Its production dependency closure contains only
 `backupcontrol`, `backupobserver`, and the Go standard library; in particular it
 has no API/store/model, database, Kubernetes, object-storage, or process-
-execution dependency. Durable restart recovery, the server-side least-
-privilege observation endpoint, the standalone artifact, and its default-off
-chart remain later atoms, so this code cannot observe or mutate production yet.
+execution dependency. The server-side least-privilege observation endpoint,
+standalone artifact, and default-off chart are added by later atoms, while
+production enablement remains separately gated.
 
 `cmd/fugue-backup-observer` turns that core into a separately compiled process
 without importing any additional Fugue package. Configuration is
@@ -377,6 +377,31 @@ therefore fails that attempt and is reread cleanly on the next loop; it cannot
 mix a spec or token across generations. This allows ordinary projected
 Secret/ConfigMap updates and avoids `subPath`, whose file would otherwise stay
 pinned to the old generation.
+
+The observer core also supports optional durable cell-local recovery through
+`FUGUE_BACKUP_OBSERVER_LKG_FILE`. The state path must be canonical, absolute,
+and outside both projected-input trees. Every successful observation is bound
+to its exact validated spec in a strict `backup-observer.fugue.dev/v1`
+envelope, self-digested, bounded, and atomically published as a private `0600`
+regular file only after fsync. A valid current generation is preserved as one
+previous generation before replacement; startup can recover that previous
+generation when current content is corrupt, but reports the fallback and
+remains unready until a fresh observation succeeds. Unknown fields, semantic
+or digest drift, cross-cell state, broad modes, world-writable parents,
+symlinks, and topology races fail closed. A remote success is not reported
+Ready when durable publication fails; v2 status reports `persist-failed`
+until a later atomic publication succeeds. The file contains no token, physical
+backend configuration, object location, or raw remote error. This atom adds
+the recovery mechanism and environment contract only: the existing chart does
+not yet mount a writable state volume or set the variable, so its behavior and
+production reachability remain unchanged until a separately reviewed chart
+and release-candidate atom.
+
+Because local status now reports the explicit `lkgState` generation source,
+its wire version advances to `backup-observer.fugue.dev/v2`; the sealed backup
+candidate references that exact version. The independent on-disk LKG envelope
+remains v1. No deployed v1 status consumer exists, so the version transition
+does not require a compatibility overlap or production rollout.
 
 The observer artifact now also has an independent Helm lane at
 `deploy/helm/fugue-backup-observer`. It is default-off and renders exactly one

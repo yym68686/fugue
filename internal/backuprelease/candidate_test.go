@@ -50,7 +50,7 @@ func TestBuildCandidateBindsCellArtifactsManifestAndLocks(t *testing.T) {
 		first.PlanLaneLockKey != "lane/backup" || first.ReleaseName != testReleaseName || first.WorkloadName != "fugue-backup-observer-app-database-0123456789abcdef" ||
 		first.ImageDigest != testImageDigest || first.ChartDigest != testChartDigest || first.ReleaseNamespace != "fugue-system" ||
 		first.BackupSpecContract != backuprelease.BackupSpecContractV1 || first.BackupStatusContract != backuprelease.BackupStatusContractV1 ||
-		first.ObserverStatusContract != backuprelease.BackupObserverStatusContractV1 || !first.ObservationOnly || first.ExecutionAllowed ||
+		first.ObserverStatusContract != backuprelease.BackupObserverStatusContractV2 || !first.ObservationOnly || first.ExecutionAllowed ||
 		first.ProductionMutationAllowed || !first.RollbackRequired || !first.LastKnownGoodRequired {
 		t.Fatalf("candidate boundary drifted: %+v", first)
 	}

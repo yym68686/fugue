@@ -57,6 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           go test ./cmd/fugue-backup-observer ./internal/backupcontrol ./internal/backupobserver
+          go test -race ./internal/backupobserver -run 'Test(ServicePersistsAndRestoresCellLocalLKGAcrossRestart|BackupObserverLKG|ServiceFailsClosedWhenDurableLKGCannotBePublished|ServiceConfigSeparatesLKGFromProjectedInputs)' -count=3
           deps="$(go list -deps ./cmd/fugue-backup-observer)"
           if grep -Eq '^(database/sql|os/exec|fugue/internal/(api|auth|controller|model|store)|k8s.io/|github.com/(aws|google/go-containerregistry|jackc))' <<<"${deps}"; then
             echo 'backup observer dependency boundary widened' >&2

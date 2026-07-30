@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	ServiceAPIVersion        = "backup-observer.fugue.dev/v1"
+	ServiceAPIVersion        = "backup-observer.fugue.dev/v2"
 	ServiceKind              = "BackupObserverStatus"
 	ServiceModeDisabled      = "disabled"
 	ServiceModeShadow        = "shadow"
@@ -49,6 +49,7 @@ type ServiceConfig struct {
 	ExpectedCellKey           string
 	SpecPath                  string
 	TokenPath                 string
+	LKGPath                   string
 	APIBaseURL                string
 	Interval                  time.Duration
 	AttemptTimeout            time.Duration
@@ -84,6 +85,7 @@ type Snapshot struct {
 	DesiredSpec               *backupcontrol.BackupRunSpec   `json:"desiredSpec,omitempty"`
 	CurrentStatus             *backupcontrol.BackupRunStatus `json:"currentStatus,omitempty"`
 	LastKnownGood             *backupcontrol.BackupRunStatus `json:"lastKnownGood,omitempty"`
+	LKGState                  string                         `json:"lkgState"`
 }
 
 // Service retries only its own cell. Invalid input or a remote outage makes
@@ -125,11 +127,25 @@ func NewService(cfg ServiceConfig, logger *log.Logger) (*Service, error) {
 			Mode:                      ServiceModeDisabled,
 			ObservationOnly:           true,
 			ProductionMutationAllowed: false,
+			LKGState:                  LKGStateDisabled,
 		},
 	}
 	if cfg.Enabled {
 		service.snapshot.Mode = ServiceModeShadow
 		service.snapshot.CellKey = cfg.ExpectedCellKey
+		restored := restoreBackupObserverLKG(cfg.LKGPath, cfg.ExpectedCellKey)
+		service.snapshot.LKGState = restored.State
+		if restored.State == LKGStateCurrent || restored.State == LKGStatePrevious {
+			copySpec := restored.Spec
+			copyStatus := restored.Status
+			service.snapshot.DesiredSpec = &copySpec
+			service.snapshot.LastKnownGood = &copyStatus
+		}
+		if restored.State == LKGStateInvalid {
+			service.snapshot.FailureCode = "lkg_invalid"
+		} else if restored.State == LKGStatePrevious {
+			service.snapshot.FailureCode = "lkg_current_invalid"
+		}
 	}
 	return service, nil
 }
@@ -148,6 +164,16 @@ func validateServiceConfig(cfg ServiceConfig) error {
 	}
 	if filepath.Clean(cfg.SpecPath) == filepath.Clean(cfg.TokenPath) {
 		return fmt.Errorf("%w: spec and token paths must differ", ErrServiceConfig)
+	}
+	if cfg.LKGPath != "" {
+		if strings.TrimSpace(cfg.LKGPath) != cfg.LKGPath || !filepath.IsAbs(cfg.LKGPath) || filepath.Clean(cfg.LKGPath) != cfg.LKGPath {
+			return fmt.Errorf("%w: LKG path must be a canonical absolute path", ErrServiceConfig)
+		}
+		for _, inputPath := range []string{cfg.SpecPath, cfg.TokenPath} {
+			if pathsOverlap(filepath.Dir(cfg.LKGPath), filepath.Dir(inputPath)) {
+				return fmt.Errorf("%w: LKG state must not overlap projected inputs", ErrServiceConfig)
+			}
+		}
 	}
 	if cfg.Interval != 0 && (cfg.Interval < minReconcileInterval || cfg.Interval > maxReconcileInterval) {
 		return fmt.Errorf("%w: interval must be between %s and %s", ErrServiceConfig, minReconcileInterval, maxReconcileInterval)
@@ -216,6 +242,10 @@ func (service *Service) ReconcileOnce(ctx context.Context) error {
 	now := service.now().UTC()
 	if status.ObservedAt.After(now.Add(maxObservationFutureSkew)) || !status.ValidUntil.After(now) {
 		return service.failAttempt("observation_stale", errors.New("observation is expired or from the future"))
+	}
+	if err := persistBackupObserverLKG(service.cfg.LKGPath, service.cfg.ExpectedCellKey, spec, status, now); err != nil {
+		service.markLKGPersistFailed()
+		return service.failAttempt("lkg_persist_failed", err)
 	}
 	service.succeedAttempt(now, spec, status)
 	return nil
@@ -328,6 +358,25 @@ func (service *Service) succeedAttempt(now time.Time, spec backupcontrol.BackupR
 	service.snapshot.DesiredSpec = &copySpec
 	service.snapshot.CurrentStatus = &copyStatus
 	service.snapshot.LastKnownGood = &copyStatus
+	if service.cfg.LKGPath == "" {
+		service.snapshot.LKGState = LKGStateMemoryOnly
+	} else {
+		service.snapshot.LKGState = LKGStateCurrent
+	}
+}
+
+func (service *Service) markLKGPersistFailed() {
+	service.stateMu.Lock()
+	service.snapshot.LKGState = LKGStatePersistFailed
+	service.stateMu.Unlock()
+}
+
+func pathsOverlap(left, right string) bool {
+	within := func(parent, candidate string) bool {
+		relative, err := filepath.Rel(parent, candidate)
+		return err == nil && (relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+	}
+	return within(left, right) || within(right, left)
 }
 
 func observationFailureCode(err error) string {

@@ -39,7 +39,7 @@ func TestDisabledServicePerformsNoInputOrRemoteIO(t *testing.T) {
 	}
 	snapshot := service.Snapshot()
 	if snapshot.Mode != ServiceModeDisabled || snapshot.Ready || snapshot.AttemptCount != 0 ||
-		!snapshot.ObservationOnly || snapshot.ProductionMutationAllowed {
+		!snapshot.ObservationOnly || snapshot.ProductionMutationAllowed || snapshot.LKGState != LKGStateDisabled {
 		t.Fatalf("disabled boundary drifted: %+v", snapshot)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -83,7 +83,8 @@ func TestServiceReconcilesExactHTTPStatusAndRetainsLKGOnOutage(t *testing.T) {
 	first := service.Snapshot()
 	if !first.Ready || first.CurrentStatus == nil || first.LastKnownGood == nil ||
 		first.CurrentStatus.Digest != status.Digest || first.LastKnownGood.Digest != status.Digest ||
-		first.CellKey != spec.CellKey || first.AttemptCount != 1 || first.ConsecutiveFailures != 0 {
+		first.CellKey != spec.CellKey || first.AttemptCount != 1 || first.ConsecutiveFailures != 0 ||
+		first.LKGState != LKGStateMemoryOnly {
 		t.Fatalf("successful snapshot drifted: %+v", first)
 	}
 	encoded, err := json.Marshal(first)

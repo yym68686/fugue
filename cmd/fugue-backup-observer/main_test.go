@@ -31,6 +31,7 @@ func TestObserverConfigEnablesOnlyExactBoundedHTTPSCell(t *testing.T) {
 		"FUGUE_BACKUP_OBSERVER_CELL_KEY":           "backup/app-database/0123456789abcdef",
 		"FUGUE_BACKUP_OBSERVER_SPEC_FILE":          "/run/fugue/backup/spec.json",
 		"FUGUE_BACKUP_OBSERVER_TOKEN_FILE":         "/run/secrets/backup-observer/token",
+		"FUGUE_BACKUP_OBSERVER_LKG_FILE":           "/var/lib/fugue-backup-observer/lkg.json",
 		"FUGUE_BACKUP_OBSERVER_API_BASE_URL":       "https://api.fugue.test/internal",
 		"FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL": "15s",
 		"FUGUE_BACKUP_OBSERVER_ATTEMPT_TIMEOUT":    "18s",
@@ -46,6 +47,7 @@ func TestObserverConfigEnablesOnlyExactBoundedHTTPSCell(t *testing.T) {
 		cfg.Service.ExpectedCellKey != values["FUGUE_BACKUP_OBSERVER_CELL_KEY"] ||
 		cfg.Service.SpecPath != values["FUGUE_BACKUP_OBSERVER_SPEC_FILE"] ||
 		cfg.Service.TokenPath != values["FUGUE_BACKUP_OBSERVER_TOKEN_FILE"] ||
+		cfg.Service.LKGPath != values["FUGUE_BACKUP_OBSERVER_LKG_FILE"] ||
 		cfg.Service.APIBaseURL != values["FUGUE_BACKUP_OBSERVER_API_BASE_URL"] ||
 		cfg.Service.Interval != 15*time.Second || cfg.Service.AttemptTimeout != 18*time.Second ||
 		cfg.Service.RequestTimeout != 8*time.Second || cfg.ShutdownTimeout != 9*time.Second ||
@@ -60,6 +62,7 @@ func TestObserverConfigRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 		"FUGUE_BACKUP_OBSERVER_CELL_KEY":     "backup/app-database/0123456789abcdef",
 		"FUGUE_BACKUP_OBSERVER_SPEC_FILE":    "/run/fugue/backup/spec.json",
 		"FUGUE_BACKUP_OBSERVER_TOKEN_FILE":   "/run/secrets/backup-observer/token",
+		"FUGUE_BACKUP_OBSERVER_LKG_FILE":     "/var/lib/fugue-backup-observer/lkg.json",
 		"FUGUE_BACKUP_OBSERVER_API_BASE_URL": "https://api.fugue.test",
 	}
 	for name, override := range map[string]map[string]string{
@@ -69,6 +72,7 @@ func TestObserverConfigRejectsAmbiguousOrUnsafeValues(t *testing.T) {
 		"missing cell":     {"FUGUE_BACKUP_OBSERVER_CELL_KEY": ""},
 		"relative spec":    {"FUGUE_BACKUP_OBSERVER_SPEC_FILE": "spec.json"},
 		"relative token":   {"FUGUE_BACKUP_OBSERVER_TOKEN_FILE": "token"},
+		"relative LKG":     {"FUGUE_BACKUP_OBSERVER_LKG_FILE": "lkg.json"},
 		"plaintext API":    {"FUGUE_BACKUP_OBSERVER_API_BASE_URL": "http://api.fugue.test"},
 		"zero interval":    {"FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL": "0s"},
 		"excess interval":  {"FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL": "11m"},

@@ -41,7 +41,7 @@ const (
 	CandidateRecoveryLane           = "backup"
 	BackupSpecContractV1            = "backup-control.fugue.dev/v1/BackupRunSpec"
 	BackupStatusContractV1          = "backup-control.fugue.dev/v1/BackupRunStatus"
-	BackupObserverStatusContractV1  = "backup-observer.fugue.dev/v1/BackupObserverStatus"
+	BackupObserverStatusContractV2  = "backup-observer.fugue.dev/v2/BackupObserverStatus"
 	ComponentPlanStatusAPIVersionV1 = "release-control.fugue.dev/v1"
 	ComponentPlanStatusKindV1       = "ComponentPlanStatus"
 	ComponentPlanStatusPolicyV1     = "artifact-ledger-shadow-v1"
@@ -210,7 +210,7 @@ func BuildCandidate(request CandidateRequest, renderedManifest []byte) (Candidat
 		MaxResponseBytes:          request.MaxResponseBytes,
 		BackupSpecContract:        BackupSpecContractV1,
 		BackupStatusContract:      BackupStatusContractV1,
-		ObserverStatusContract:    BackupObserverStatusContractV1,
+		ObserverStatusContract:    BackupObserverStatusContractV2,
 		ReleaseChannel:            CandidateReleaseChannel,
 		RecoveryLane:              CandidateRecoveryLane,
 		FailureBoundary:           request.CellKey,
@@ -381,7 +381,7 @@ func VerifyCandidate(candidate Candidate) error {
 		!candidate.ObservationOnly || candidate.ExecutionAllowed || candidate.ProductionMutationAllowed ||
 		!candidate.RollbackRequired || candidate.RollbackMode != CandidateRollbackMode || !candidate.LastKnownGoodRequired ||
 		candidate.BackupSpecContract != BackupSpecContractV1 || candidate.BackupStatusContract != BackupStatusContractV1 ||
-		candidate.ObserverStatusContract != BackupObserverStatusContractV1 || candidate.ComponentPlanFence <= 0 ||
+		candidate.ObserverStatusContract != BackupObserverStatusContractV2 || candidate.ComponentPlanFence <= 0 ||
 		candidate.ComponentPlanLaneVersion <= 0 || strings.TrimSpace(candidate.ComponentPlanArtifactID) == "" {
 		return ErrCandidate
 	}

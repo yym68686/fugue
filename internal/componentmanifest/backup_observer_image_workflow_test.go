@@ -69,6 +69,7 @@ func TestBackupObserverImageWorkflowIsPathScopedBuildOnly(t *testing.T) {
 		"helm lint deploy/helm/fugue-backup-observer",
 		"go test ./deploy/helm/fugue-backup-observer",
 		"helm template backup-observer deploy/helm/fugue-backup-observer",
+		"go test -race ./internal/backupobserver",
 		"docker buildx build",
 		"--load",
 		"GOARCH=\"${arch}\"",

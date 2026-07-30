@@ -158,6 +158,7 @@ func observerConfigFromEnv(getenv func(string) string) (observerConfig, error) {
 			ExpectedCellKey:  strings.TrimSpace(getenv("FUGUE_BACKUP_OBSERVER_CELL_KEY")),
 			SpecPath:         strings.TrimSpace(getenv("FUGUE_BACKUP_OBSERVER_SPEC_FILE")),
 			TokenPath:        strings.TrimSpace(getenv("FUGUE_BACKUP_OBSERVER_TOKEN_FILE")),
+			LKGPath:          strings.TrimSpace(getenv("FUGUE_BACKUP_OBSERVER_LKG_FILE")),
 			APIBaseURL:       strings.TrimSpace(getenv("FUGUE_BACKUP_OBSERVER_API_BASE_URL")),
 			Interval:         interval,
 			AttemptTimeout:   attemptTimeout,
