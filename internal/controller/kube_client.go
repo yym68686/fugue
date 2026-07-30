@@ -241,6 +241,42 @@ type kubePod struct {
 		InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
 		ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
 	} `json:"status"`
+	ObservedUID             string                  `json:"-"`
+	ObservedOwnerReferences []kubePodOwnerReference `json:"-"`
+	ObservedStartTime       time.Time               `json:"-"`
+}
+
+type kubePodOwnerReference struct {
+	APIVersion string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Name       string `json:"name,omitempty"`
+	UID        string `json:"uid,omitempty"`
+	Controller bool   `json:"controller,omitempty"`
+}
+
+func (p *kubePod) UnmarshalJSON(data []byte) error {
+	type podAlias kubePod
+	var decoded podAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var observed struct {
+		Metadata struct {
+			UID             string                  `json:"uid,omitempty"`
+			OwnerReferences []kubePodOwnerReference `json:"ownerReferences,omitempty"`
+		} `json:"metadata"`
+		Status struct {
+			StartTime time.Time `json:"startTime,omitempty"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(data, &observed); err != nil {
+		return err
+	}
+	*p = kubePod(decoded)
+	p.ObservedUID = strings.TrimSpace(observed.Metadata.UID)
+	p.ObservedOwnerReferences = observed.Metadata.OwnerReferences
+	p.ObservedStartTime = observed.Status.StartTime
+	return nil
 }
 
 type kubePodSpec struct {
@@ -276,10 +312,11 @@ type kubeResourceRequirements struct {
 }
 
 type kubePodCondition struct {
-	Type    string `json:"type,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Reason  string `json:"reason,omitempty"`
-	Message string `json:"message,omitempty"`
+	Type               string    `json:"type,omitempty"`
+	Status             string    `json:"status,omitempty"`
+	Reason             string    `json:"reason,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	LastTransitionTime time.Time `json:"lastTransitionTime,omitempty"`
 }
 
 type kubeContainerStatus struct {

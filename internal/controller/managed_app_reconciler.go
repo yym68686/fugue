@@ -431,6 +431,11 @@ func (s *Service) syncManagedAppObservedStatus(
 			return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
 		}
 	}
+	if managedAppStatusReady(status, app) {
+		if err := s.cleanupRetainedManagedAppEvictedPods(ctx, client, namespace, app, appPods); err != nil && s.Logger != nil {
+			s.Logger.Printf("cleanup retained evicted managed app pods for %s/%s failed: %v", namespace, managed.Metadata.Name, err)
+		}
+	}
 	s.sampleManagedAppReadyEndpoints(ctx, client, namespace, app, status)
 	if err := s.Store.SyncManagedAppRuntimeStatus(app.ID, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
 		return fmt.Errorf("sync managed app runtime status for %s: %w", app.ID, err)

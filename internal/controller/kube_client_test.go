@@ -38,6 +38,35 @@ func TestFormatKubeTimestampUsesMicrosecondPrecision(t *testing.T) {
 	}
 }
 
+func TestKubePodUnmarshalCapturesEvictionIdentityWithoutChangingFixtureShape(t *testing.T) {
+	var pod kubePod
+	if err := json.Unmarshal([]byte(`{
+		"metadata": {
+			"name": "app-demo-rs-abc",
+			"uid": "pod-uid",
+			"creationTimestamp": "2026-07-23T09:40:57Z",
+			"ownerReferences": [{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"app-demo-rs","uid":"rs-uid","controller":true}]
+		},
+		"status": {
+			"phase": "Failed",
+			"reason": "Evicted",
+			"startTime": "2026-07-23T09:46:42Z",
+			"conditions": [{"type":"DisruptionTarget","status":"True","lastTransitionTime":"2026-07-23T09:54:34Z"}]
+		}
+	}`), &pod); err != nil {
+		t.Fatalf("unmarshal pod: %v", err)
+	}
+	if pod.Metadata.Name != "app-demo-rs-abc" || pod.ObservedUID != "pod-uid" || pod.ObservedStartTime.IsZero() {
+		t.Fatalf("expected pod identity and start time, got %+v", pod)
+	}
+	if len(pod.ObservedOwnerReferences) != 1 || pod.ObservedOwnerReferences[0].Kind != "ReplicaSet" || !pod.ObservedOwnerReferences[0].Controller {
+		t.Fatalf("expected ReplicaSet owner identity, got %+v", pod.ObservedOwnerReferences)
+	}
+	if len(pod.Status.Conditions) != 1 || pod.Status.Conditions[0].LastTransitionTime.IsZero() {
+		t.Fatalf("expected disruption transition timestamp, got %+v", pod.Status.Conditions)
+	}
+}
+
 func TestGetPodIPReadsStatusPodIP(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
