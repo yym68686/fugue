@@ -48,6 +48,12 @@ type Store struct {
 	backupArtifactPhysicalCleanup   map[string]time.Time
 	backupArtifactPhysicalAttempts  map[string]time.Time
 
+	// backupRunObjectCleanup tracks durable-equivalent cleanup state for the
+	// file-backed store. PostgreSQL stores the same markers on the run row.
+	backupRunObjectCleanupMu       sync.Mutex
+	backupRunObjectCleanup         map[string]time.Time
+	backupRunObjectCleanupAttempts map[string]time.Time
+
 	platformArtifactKeyringMu sync.RWMutex
 	platformArtifactKeyring   bundleauth.Keyring
 }

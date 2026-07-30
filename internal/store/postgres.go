@@ -1334,10 +1334,17 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		started_at TIMESTAMPTZ NULL,
-		finished_at TIMESTAMPTZ NULL
+		finished_at TIMESTAMPTZ NULL,
+		orphan_cleanup_at TIMESTAMPTZ NULL,
+		orphan_cleanup_attempted_at TIMESTAMPTZ NULL,
+		orphan_cleanup_error TEXT NOT NULL DEFAULT ''
 	)`,
+	`ALTER TABLE fugue_backup_runs ADD COLUMN IF NOT EXISTS orphan_cleanup_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_backup_runs ADD COLUMN IF NOT EXISTS orphan_cleanup_attempted_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_backup_runs ADD COLUMN IF NOT EXISTS orphan_cleanup_error TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_runs_policy_created ON fugue_backup_runs (policy_id, created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_runs_target_history ON fugue_backup_runs (target_type, target_tenant_id, target_project_id, target_app_id, created_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_backup_runs_orphan_gc ON fugue_backup_runs (orphan_cleanup_attempted_at, finished_at, updated_at) WHERE orphan_cleanup_at IS NULL AND status IN ('failed', 'canceled')`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_backup_runs_active_target ON fugue_backup_runs (target_type, COALESCE(target_tenant_id, ''), COALESCE(target_project_id, ''), COALESCE(target_app_id, '')) WHERE status IN ('pending', 'running')`,
 	`CREATE TABLE IF NOT EXISTS fugue_backup_artifacts (
 		id TEXT PRIMARY KEY,

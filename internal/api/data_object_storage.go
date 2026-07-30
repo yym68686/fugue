@@ -132,6 +132,32 @@ func (b *dataObjectBackend) objectKey(objectKey string) string {
 	return path.Join(prefix, objectKey)
 }
 
+// logicalObjectKey reverses objectKey only for an exact backend-prefix match.
+// It is used by read-only orphan reconciliation so a key from another logical
+// namespace can never be fed back through deleteLogicalObjects.
+func (b *dataObjectBackend) logicalObjectKey(physicalKey string) (string, bool) {
+	canonicalPhysicalKey := strings.Trim(strings.TrimSpace(physicalKey), "/")
+	if physicalKey != canonicalPhysicalKey || physicalKey == "" || path.Clean(physicalKey) != physicalKey || strings.ContainsRune(physicalKey, '\x00') {
+		return "", false
+	}
+	prefix := strings.Trim(strings.TrimSpace(b.backend.Prefix), "/")
+	if prefix == "" {
+		return physicalKey, true
+	}
+	if path.Clean(prefix) != prefix || strings.ContainsRune(prefix, '\x00') {
+		return "", false
+	}
+	prefix += "/"
+	if !strings.HasPrefix(physicalKey, prefix) {
+		return "", false
+	}
+	logical := strings.TrimPrefix(physicalKey, prefix)
+	if logical == "" || path.Clean(logical) != logical || strings.ContainsRune(logical, '\x00') {
+		return "", false
+	}
+	return logical, true
+}
+
 func (b *dataObjectBackend) headObject(ctx context.Context, objectKey string) (bool, error) {
 	_, exists, err := b.headObjectInfo(ctx, objectKey)
 	return exists, err
