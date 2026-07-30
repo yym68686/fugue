@@ -1468,3 +1468,91 @@ func TestBackupListWithoutTargetTypeIncludesAppScopedItems(t *testing.T) {
 		t.Fatalf("expected app artifact without target type filter, got %+v", artifacts)
 	}
 }
+
+func TestPolicyBackedAppDatabaseRunPersistsCurrentPlacementWithoutChangingIdentity(t *testing.T) {
+	clearDefaultDataBackendEnv(t)
+
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	oldTarget := model.BackupTarget{
+		Type:        model.BackupTargetAppDatabase,
+		TenantID:    "tenant_a",
+		ProjectID:   "project_a",
+		AppID:       "app_a",
+		RuntimeID:   "runtime_old",
+		ServiceName: "postgres-old",
+		Database:    "app_old",
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		TenantID:  oldTarget.TenantID,
+		ProjectID: oldTarget.ProjectID,
+		AppID:     oldTarget.AppID,
+		Name:      "app-db",
+		Target:    oldTarget,
+		BackendID: backend.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	currentTarget := oldTarget
+	currentTarget.RuntimeID = "runtime_current"
+	currentTarget.ServiceName = "postgres-current"
+	currentTarget.Database = "app_current"
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:  policy.ID,
+		TenantID:  policy.TenantID,
+		ProjectID: policy.ProjectID,
+		AppID:     policy.AppID,
+		Target:    currentTarget,
+		BackendID: backend.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusFailed,
+	})
+	if err != nil {
+		t.Fatalf("create rebound run: %v", err)
+	}
+	if !backupTargetsEqual(run.Target, currentTarget) {
+		t.Fatalf("expected run to persist current placement, got %+v", run.Target)
+	}
+	saved, err := stateStore.GetBackupPolicy(policy.ID, "", true)
+	if err != nil {
+		t.Fatalf("get rebound policy: %v", err)
+	}
+	if !backupTargetsEqual(saved.Target, currentTarget) {
+		t.Fatalf("expected policy placement to be rebound atomically with run creation, got %+v", saved.Target)
+	}
+
+	spoofed := currentTarget
+	spoofed.AppID = "app_other"
+	spoofed.RuntimeID = "runtime_other"
+	second, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:  policy.ID,
+		TenantID:  policy.TenantID,
+		ProjectID: policy.ProjectID,
+		AppID:     policy.AppID,
+		Target:    spoofed,
+		BackendID: backend.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusFailed,
+	})
+	if err != nil {
+		t.Fatalf("create policy-authoritative run: %v", err)
+	}
+	if !backupTargetsEqual(second.Target, currentTarget) {
+		t.Fatalf("expected stable policy identity to reject proposed target replacement, got %+v", second.Target)
+	}
+}

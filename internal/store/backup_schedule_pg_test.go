@@ -304,6 +304,66 @@ func TestPGCreateBackupRunAdvancesSixHourSchedule(t *testing.T) {
 	assertBackupSchedulePGExpectations(t, mock)
 }
 
+func TestPGCreatePolicyBackedRunPersistsReboundDatabasePlacement(t *testing.T) {
+	t.Parallel()
+
+	s, mock := newBackupSchedulePGTestStore(t)
+	policy := backupScheduleTestPolicy("policy_rebind_database")
+	policy.Target.RuntimeID = "runtime_old"
+	policy.Target.ServiceName = "postgres-old"
+	policy.Target.Database = "database_old"
+	currentTarget := policy.Target
+	currentTarget.RuntimeID = "runtime_current"
+	currentTarget.ServiceName = "postgres-current"
+	currentTarget.Database = "database_current"
+	run := model.NormalizeBackupRun(model.BackupRun{
+		ID:              "backup_run_rebind_database",
+		PolicyID:        policy.ID,
+		TenantID:        policy.TenantID,
+		ProjectID:       policy.ProjectID,
+		AppID:           policy.AppID,
+		Target:          currentTarget,
+		BackendID:       policy.BackendID,
+		Trigger:         model.BackupRunTriggerRetry,
+		Status:          model.BackupRunStatusPending,
+		RequestedByType: "system",
+		RequestedByID:   "backup-retry",
+		CreatedAt:       time.Date(2026, time.July, 12, 12, 0, 5, 0, time.UTC),
+	})
+	returnedRun := run
+	returnedRun.UpdatedAt = run.CreatedAt
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT .* FROM fugue_backup_policies WHERE id = \$1 FOR UPDATE`).
+		WithArgs(policy.ID).
+		WillReturnRows(backupSchedulePolicyRows(policy))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_apps WHERE id = $1 FOR UPDATE`)).
+		WithArgs(policy.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(policy.AppID))
+	expectPGDatabaseMutationForBackup(mock, policy.AppID, currentTarget.ServiceName, "")
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (SELECT 1 FROM fugue_backup_runs WHERE status IN ('pending', 'running') AND target_type = $1 AND COALESCE(target_tenant_id, '') = $2 AND COALESCE(target_project_id, '') = $3 AND COALESCE(target_app_id, '') = $4)`)).
+		WithArgs(currentTarget.Type, currentTarget.TenantID, currentTarget.ProjectID, currentTarget.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery(`(?s)INSERT INTO fugue_backup_runs .*RETURNING`).
+		WillReturnRows(backupScheduleRunRows(returnedRun))
+	mock.ExpectExec(`(?s)UPDATE fugue_backup_policies\s+SET target_type = \$2,.*target_json = \$6,.*WHERE id = \$1`).
+		WithArgs(policy.ID, currentTarget.Type, currentTarget.TenantID, currentTarget.ProjectID, currentTarget.AppID, sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE fugue_backup_policies SET last_run_id = $2, last_run_at = $3, next_run_at = $4, updated_at = $3 WHERE id = $1`)).
+		WithArgs(policy.ID, run.ID, sqlmock.AnyArg(), backupSixHourTimeArgument{}).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	created, err := s.CreateBackupRun(run)
+	if err != nil {
+		t.Fatalf("create rebound policy run: %v", err)
+	}
+	if !backupTargetsEqual(created.Target, currentTarget) {
+		t.Fatalf("expected persisted run target to use current placement, got %+v", created.Target)
+	}
+	assertBackupSchedulePGExpectations(t, mock)
+}
+
 func TestPGCreateScheduledBackupRunRechecksPolicyDueUnderLock(t *testing.T) {
 	t.Parallel()
 

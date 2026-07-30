@@ -9129,6 +9129,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackupPolicyResponse"
+        '409':
+          description: The supplied app-database runtime is stale and does not match the app's current managed PostgreSQL runtime.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/backups/policies/{id}:
@@ -9174,6 +9180,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackupPolicyResponse"
+        '409':
+          description: The supplied app-database runtime is stale and does not match the app's current managed PostgreSQL runtime.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/backups/runs:
@@ -11073,12 +11085,15 @@ components:
           type: string
         runtime_id:
           type: string
+          description: For app-database targets, Fugue treats the app's current managed PostgreSQL runtime as authoritative and rebinds policy-backed runs after placement changes.
         name:
           type: string
         service_name:
           type: string
+          description: For app-database targets, Fugue persists the current managed PostgreSQL service name rather than a stale caller-supplied value.
         database:
           type: string
+          description: For app-database targets, Fugue persists the current managed PostgreSQL database name rather than a stale caller-supplied value.
         component:
           type: string
     BackupRetentionPolicy:

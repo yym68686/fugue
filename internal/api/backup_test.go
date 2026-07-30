@@ -319,7 +319,12 @@ func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T)
 	}
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
 	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/backups/policies", apiKey, map[string]any{
-		"target": map[string]any{"type": model.BackupTargetAppDatabase},
+		"target": map[string]any{
+			"type":         model.BackupTargetAppDatabase,
+			"runtime_id":   appRuntime.ID,
+			"service_name": "stale-postgres-service",
+			"database":     "stale_database",
+		},
 	})
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected app backup policy to accept its referenced database runtime, code=%d body=%s", recorder.Code, recorder.Body.String())
@@ -328,8 +333,8 @@ func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T)
 		Policy model.BackupPolicy `json:"policy"`
 	}
 	mustDecodeJSON(t, recorder, &policyResponse)
-	if policyResponse.Policy.Target.RuntimeID != databaseRuntime.ID {
-		t.Fatalf("expected policy database runtime %q, got %+v", databaseRuntime.ID, policyResponse.Policy.Target)
+	if policyResponse.Policy.Target.RuntimeID != databaseRuntime.ID || policyResponse.Policy.Target.ServiceName != "postgres-app-db" || policyResponse.Policy.Target.Database != "appdb" {
+		t.Fatalf("expected policy to replace stale placement with the current managed database target, got %+v", policyResponse.Policy.Target)
 	}
 	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); err != nil {
 		t.Fatalf("expected app-referenced database runtime to be authorized, got %v", err)
@@ -344,8 +349,94 @@ func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T)
 	}
 
 	target.RuntimeID = appRuntime.ID
-	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
-		t.Fatalf("expected visible app runtime unrelated to the database target to be unauthorized, got %v", err)
+	target.ServiceName = "stale-postgres-service"
+	target.Database = "stale_database"
+	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetRuntimeMismatch) || errors.Is(err, errBackupTargetNotAuthorized) || !strings.Contains(err.Error(), appRuntime.ID) || !strings.Contains(err.Error(), databaseRuntime.ID) {
+		t.Fatalf("expected a precise current-runtime mismatch instead of a tenant error, got %v", err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/backups/policies", apiKey, map[string]any{
+		"name":       "stale-runtime-policy",
+		"project_id": project.ID,
+		"app_id":     app.ID,
+		"target": map[string]any{
+			"type":       model.BackupTargetAppDatabase,
+			"project_id": project.ID,
+			"app_id":     app.ID,
+			"runtime_id": appRuntime.ID,
+		},
+	})
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "backup_target_runtime_mismatch") || strings.Contains(recorder.Body.String(), "does not belong to tenant") {
+		t.Fatalf("expected stale generic policy target to return a precise conflict, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	adminServer := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	recorder = performJSONRequest(t, adminServer, http.MethodPost, "/v1/backups/policies", "bootstrap-secret", map[string]any{
+		"name":       "admin-stale-runtime-policy",
+		"tenant_id":  appTenant.ID,
+		"project_id": project.ID,
+		"app_id":     app.ID,
+		"target": map[string]any{
+			"type":       model.BackupTargetAppDatabase,
+			"tenant_id":  appTenant.ID,
+			"project_id": project.ID,
+			"app_id":     app.ID,
+			"runtime_id": appRuntime.ID,
+		},
+	})
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "backup_target_runtime_mismatch") {
+		t.Fatalf("expected platform admin stale runtime to return the same precise conflict, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	recorder = performJSONRequest(t, adminServer, http.MethodPost, "/v1/backups/policies", "bootstrap-secret", map[string]any{
+		"name":       "admin-current-placement-policy",
+		"tenant_id":  appTenant.ID,
+		"project_id": project.ID,
+		"app_id":     app.ID,
+		"target": map[string]any{
+			"type":       model.BackupTargetAppDatabase,
+			"tenant_id":  appTenant.ID,
+			"project_id": project.ID,
+			"app_id":     app.ID,
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected platform admin policy without placement fields to resolve the current database target, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var adminPolicyResponse struct {
+		Policy model.BackupPolicy `json:"policy"`
+	}
+	mustDecodeJSON(t, recorder, &adminPolicyResponse)
+	if adminPolicyResponse.Policy.Target.RuntimeID != databaseRuntime.ID || adminPolicyResponse.Policy.Target.ServiceName != "postgres-app-db" || adminPolicyResponse.Policy.Target.Database != "appdb" {
+		t.Fatalf("expected platform admin policy to persist the current database placement, got %+v", adminPolicyResponse.Policy.Target)
+	}
+
+	legacyPolicy := policyResponse.Policy
+	legacyPolicy.Target = target
+	legacyPolicy.Target.RuntimeID = appRuntime.ID
+	legacyPolicy.Target.ServiceName = "stale-postgres-service"
+	legacyPolicy.Target.Database = "stale_database"
+	legacyPolicy.Enabled = false
+	legacyPolicy.Status = model.BackupPolicyStatusDisabled
+	legacyPolicy.DisabledReason = "disabled by user"
+	legacyPolicy, err = stateStore.UpsertBackupPolicy(legacyPolicy)
+	if err != nil {
+		t.Fatalf("persist legacy stale policy: %v", err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/backups/policies/"+legacyPolicy.ID, apiKey, map[string]any{"enabled": true})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enable legacy stale policy: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var enabledPolicyResponse struct {
+		Policy model.BackupPolicy `json:"policy"`
+	}
+	mustDecodeJSON(t, recorder, &enabledPolicyResponse)
+	if enabledPolicyResponse.Policy.Target.RuntimeID != databaseRuntime.ID || enabledPolicyResponse.Policy.Target.ServiceName != "postgres-app-db" || enabledPolicyResponse.Policy.Target.Database != "appdb" {
+		t.Fatalf("expected enable-only patch to persist the current database placement, got %+v", enabledPolicyResponse.Policy.Target)
+	}
+	persistedEnabledPolicy, err := stateStore.GetBackupPolicy(legacyPolicy.ID, appTenant.ID, false)
+	if err != nil {
+		t.Fatalf("get enabled rebound policy: %v", err)
+	}
+	if persistedEnabledPolicy.Target != enabledPolicyResponse.Policy.Target {
+		t.Fatalf("expected enabled policy response and persisted target to match: response=%+v persisted=%+v", enabledPolicyResponse.Policy.Target, persistedEnabledPolicy.Target)
 	}
 	if rebound, err := server.rebindAppDatabaseBackupTarget(model.BackupRun{
 		TenantID:  appTenant.ID,
@@ -354,7 +445,7 @@ func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T)
 		Target:    target,
 	}); err != nil {
 		t.Fatalf("rebind stale app database backup target: %v", err)
-	} else if rebound.Target.RuntimeID != databaseRuntime.ID || rebound.Target.ServiceName != target.ServiceName || rebound.Target.Database != target.Database {
+	} else if rebound.Target.RuntimeID != databaseRuntime.ID || rebound.Target.ServiceName != "postgres-app-db" || rebound.Target.Database != "appdb" {
 		t.Fatalf("expected stale policy target to follow the current managed database placement, got %+v", rebound.Target)
 	}
 	if _, err := server.runBackup(context.Background(), model.BackupRun{
@@ -377,8 +468,8 @@ func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T)
 	}
 
 	target.RuntimeID = unrelatedRuntime.ID
-	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
-		t.Fatalf("expected unrelated hidden runtime to remain unauthorized, got %v", err)
+	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetRuntimeMismatch) || errors.Is(err, errBackupTargetNotAuthorized) {
+		t.Fatalf("expected unrelated runtime on the authorized app to report a runtime mismatch, got %v", err)
 	}
 
 	target.RuntimeID = databaseRuntime.ID
@@ -2553,6 +2644,112 @@ func TestScheduleBackupRetryCreatesPendingRetryRun(t *testing.T) {
 	}
 	if retry.NextRetryAt == nil || retry.NextRetryAt.Before(before.Add(4*time.Minute)) || retry.NextRetryAt.After(before.Add(6*time.Minute)) {
 		t.Fatalf("expected retry next run about five minutes out, got %+v", retry.NextRetryAt)
+	}
+}
+
+func TestScheduleBackupRetryRebindsManagedPostgresPolicyTarget(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Backup Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	oldRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "old-db-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create old runtime: %v", err)
+	}
+	currentRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "current-db-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create current runtime: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "switched-app", "", model.AppSpec{
+		Image:    "ghcr.io/example/app:latest",
+		Replicas: 1,
+		Postgres: &model.AppPostgresSpec{
+			Database:    "current_database",
+			User:        "app",
+			Password:    "test-password",
+			ServiceName: "postgres-current",
+			RuntimeID:   currentRuntime.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	staleTarget := model.BackupTarget{
+		Type:        model.BackupTargetAppDatabase,
+		TenantID:    tenant.ID,
+		ProjectID:   project.ID,
+		AppID:       app.ID,
+		RuntimeID:   oldRuntime.ID,
+		ServiceName: "postgres-old",
+		Database:    "old_database",
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		TenantID:  tenant.ID,
+		ProjectID: project.ID,
+		AppID:     app.ID,
+		Name:      "switched-db",
+		Target:    staleTarget,
+		BackendID: backend.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create stale policy: %v", err)
+	}
+	failed, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:   policy.ID,
+		TenantID:   tenant.ID,
+		ProjectID:  project.ID,
+		AppID:      app.ID,
+		Target:     staleTarget,
+		BackendID:  backend.ID,
+		Trigger:    model.BackupRunTriggerRetry,
+		Status:     model.BackupRunStatusFailed,
+		Attempt:    2,
+		RetryCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("create failed stale run: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.scheduleBackupRetry(ctx, failed)
+
+	runs, err := stateStore.ListBackupRuns(store.BackupRunFilter{Status: model.BackupRunStatusPending, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list rebound retry: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Target.RuntimeID != currentRuntime.ID || runs[0].Target.ServiceName != "postgres-current" || runs[0].Target.Database != "current_database" {
+		t.Fatalf("expected retry target to use current managed postgres placement, got %+v", runs)
+	}
+	saved, err := stateStore.GetBackupPolicy(policy.ID, "", true)
+	if err != nil {
+		t.Fatalf("get rebound policy: %v", err)
+	}
+	if saved.Target.RuntimeID != currentRuntime.ID || saved.Target.ServiceName != "postgres-current" || saved.Target.Database != "current_database" {
+		t.Fatalf("expected retry creation to persist the current policy placement, got %+v", saved.Target)
 	}
 }
 
