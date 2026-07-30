@@ -791,6 +791,38 @@ ServiceAccount, RBAC, workload, chart, or environment wiring. Credential and
 CA projection plus any writer remain separate later atoms, so the production
 topology and current Secret state are unchanged.
 
+`internal/backupmaterializer/reconciler` composes those two read boundaries
+with the pure CAS/LKG policy as the default-off
+`backup-materializer-reconciler@v1` single-cell, single-cycle shadow control
+loop. It samples one injected trusted clock, observes the exact current Secret
+first, and does not request private desired input when the current object is
+foreign or malformed. Current-source failure, invalid evidence, and
+cross-cell evidence become one retryable `current-observation-unavailable`
+status local to that cell; they do not fail another cell or authorize an
+overwrite. Only a valid absent or managed observation can reach the desired
+source.
+
+A desired-source failure becomes unavailable, while an invalid, stale, or
+cross-cell bundle becomes invalid. Both flow through the same nil-desired
+policy: retain a structurally valid unexpired LKG, otherwise block, and never
+delete. A valid generation can produce only the already-defined
+create-if-absent, no-op, or UID plus resourceVersion CAS replacement
+candidate. Runtime source failures are represented as digest-bound cell-local
+status rather than process-wide errors; caller cancellation and impossible
+internal contract drift remain errors for the future supervisor.
+
+The public status distinguishes not-read, available, unavailable, and invalid
+desired state. `ready` is true only for no-op or LKG retention, `converged`
+only for no-op, and `lastKnownGoodServing` only for LKG retention. Its stable
+idempotency key excludes evaluation time but binds cell, current observation,
+desired state and generation, action, and reason; the status digest includes
+the exact evaluation time and nested decision. Every path keeps
+`deleteAllowed`, `executionAllowed`, and `productionMutationAllowed` false.
+The package owns no HTTP, filesystem, Kubernetes, store, signer, writer,
+timer, goroutine, process, RBAC, workload, chart, or deployment capability.
+The concrete client and Secret reader satisfy its injected interfaces, but no
+production composition constructs this loop yet.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
