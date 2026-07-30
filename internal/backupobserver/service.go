@@ -142,7 +142,7 @@ func validateServiceConfig(cfg ServiceConfig) error {
 		return fmt.Errorf("%w: expected cell key is not canonical", ErrServiceConfig)
 	}
 	for label, value := range map[string]string{"spec path": cfg.SpecPath, "token path": cfg.TokenPath} {
-		if strings.TrimSpace(value) != value || !filepath.IsAbs(value) {
+		if strings.TrimSpace(value) != value || !filepath.IsAbs(value) || filepath.Clean(value) != value {
 			return fmt.Errorf("%w: %s must be a canonical absolute path", ErrServiceConfig, label)
 		}
 	}
@@ -377,17 +377,40 @@ func readToken(path string) (string, error) {
 }
 
 func readRegularFile(path string, limit int64, credential bool) ([]byte, error) {
-	before, err := os.Lstat(path)
+	if limit <= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("path or read limit is not canonical")
+	}
+	parent := filepath.Dir(path)
+	parentInfo, err := os.Lstat(parent)
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("path is not a regular non-symlink file")
+	if !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("input parent is not a non-symlink directory")
+	}
+	requestedInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	resolved := path
+	projected := false
+	if requestedInfo.Mode()&os.ModeSymlink != 0 {
+		projected = true
+		resolved, err = resolveProjectedInput(path)
+		if err != nil {
+			return nil, err
+		}
+	} else if !requestedInfo.Mode().IsRegular() {
+		return nil, errors.New("input is not a regular file")
+	}
+	before, err := os.Lstat(resolved)
+	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("resolved input is not a regular file")
 	}
 	if credential && before.Mode().Perm()&0o137 != 0 {
 		return nil, errors.New("credential permissions are too broad")
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +426,64 @@ func readRegularFile(path string, limit int64, credential bool) ([]byte, error) 
 	if int64(len(document)) > limit {
 		return nil, fmt.Errorf("file exceeds %d bytes", limit)
 	}
+	currentResolved := path
+	if projected {
+		currentResolved, err = resolveProjectedInput(path)
+		if err != nil || currentResolved != resolved {
+			return nil, errors.New("projected input generation changed while reading")
+		}
+	} else {
+		currentRequested, statErr := os.Lstat(path)
+		if statErr != nil || !currentRequested.Mode().IsRegular() || currentRequested.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("regular input topology changed while reading")
+		}
+	}
+	current, err := os.Stat(currentResolved)
+	if err != nil || !os.SameFile(after, current) {
+		return nil, errors.New("input identity changed while reading")
+	}
 	return document, nil
+}
+
+// resolveProjectedInput accepts only Kubernetes' atomic writer layout:
+//
+//	<name> -> ..data/<name>
+//	..data -> ..<generation>
+//
+// The resolved generation must stay within the same non-symlink volume root.
+// Arbitrary symlinks and links escaping that root remain forbidden.
+func resolveProjectedInput(path string) (string, error) {
+	parent := filepath.Dir(path)
+	base := filepath.Base(path)
+	linkTarget, err := os.Readlink(path)
+	if err != nil || linkTarget != filepath.Join("..data", base) {
+		return "", errors.New("input symlink is not a Kubernetes projected-file link")
+	}
+	dataLink := filepath.Join(parent, "..data")
+	dataInfo, err := os.Lstat(dataLink)
+	if err != nil || dataInfo.Mode()&os.ModeSymlink == 0 {
+		return "", errors.New("projected input has no atomic data link")
+	}
+	generation, err := os.Readlink(dataLink)
+	if err != nil || filepath.IsAbs(generation) || filepath.Clean(generation) != generation ||
+		filepath.Base(generation) != generation || generation == ".." || !strings.HasPrefix(generation, "..") {
+		return "", errors.New("projected input generation link is not canonical")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", errors.New("resolve projected input")
+	}
+	resolved = filepath.Clean(resolved)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", errors.New("resolve projected input parent")
+	}
+	relative, err := filepath.Rel(filepath.Clean(resolvedParent), resolved)
+	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("projected input escapes its volume root")
+	}
+	return resolved, nil
 }
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {

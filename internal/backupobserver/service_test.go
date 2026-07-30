@@ -243,6 +243,7 @@ func TestServiceConfigAndCredentialFilesFailClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*ServiceConfig){
 		"bad cell":         func(cfg *ServiceConfig) { cfg.ExpectedCellKey = "backup/all" },
 		"relative spec":    func(cfg *ServiceConfig) { cfg.SpecPath = "spec.json" },
+		"unclean spec":     func(cfg *ServiceConfig) { cfg.SpecPath = "/run/fugue/../spec.json" },
 		"same paths":       func(cfg *ServiceConfig) { cfg.TokenPath = cfg.SpecPath },
 		"plaintext API":    func(cfg *ServiceConfig) { cfg.APIBaseURL = "http://api.fugue.test" },
 		"URL credential":   func(cfg *ServiceConfig) { cfg.APIBaseURL = "https://user:pass@api.fugue.test" },
@@ -285,6 +286,90 @@ func TestServiceConfigAndCredentialFilesFailClosed(t *testing.T) {
 	}
 	if _, err := readToken(symlink); err == nil {
 		t.Fatal("symlinked credential was accepted")
+	}
+}
+
+func TestProjectedSpecAndCredentialRotateWithinVolume(t *testing.T) {
+	root := t.TempDir()
+	firstGeneration := "..2026_07_30_03_00_00.000000001"
+	secondGeneration := "..2026_07_30_03_01_00.000000002"
+	spec := observerSpec(t, "run-1", "request-1", "app/app-1/database")
+	for _, generation := range []string{firstGeneration, secondGeneration} {
+		if err := os.Mkdir(filepath.Join(root, generation), 0o750); err != nil {
+			t.Fatalf("mkdir generation %s: %v", generation, err)
+		}
+		writeJSONFile(t, filepath.Join(root, generation, "spec.json"), spec, 0o440)
+		token := "observer-token-first\n"
+		if generation == secondGeneration {
+			token = "observer-token-second\n"
+		}
+		if err := os.WriteFile(filepath.Join(root, generation, "token"), []byte(token), 0o440); err != nil {
+			t.Fatalf("write projected token: %v", err)
+		}
+	}
+	if err := os.Symlink(firstGeneration, filepath.Join(root, "..data")); err != nil {
+		t.Fatalf("link first generation: %v", err)
+	}
+	for _, name := range []string{"spec.json", "token"} {
+		if err := os.Symlink(filepath.Join("..data", name), filepath.Join(root, name)); err != nil {
+			t.Fatalf("link projected %s: %v", name, err)
+		}
+	}
+	decoded, err := readSpec(filepath.Join(root, "spec.json"))
+	if err != nil || !reflect.DeepEqual(decoded, spec) {
+		t.Fatalf("read projected spec: decoded=%+v err=%v", decoded, err)
+	}
+	first, err := readToken(filepath.Join(root, "token"))
+	if err != nil || first != "observer-token-first" {
+		t.Fatalf("read first projected token: token=%q err=%v", first, err)
+	}
+	dataTemporary := filepath.Join(root, "..data_tmp")
+	if err := os.Symlink(secondGeneration, dataTemporary); err != nil {
+		t.Fatalf("link second generation: %v", err)
+	}
+	if err := os.Rename(dataTemporary, filepath.Join(root, "..data")); err != nil {
+		t.Fatalf("rotate projected generation: %v", err)
+	}
+	second, err := readToken(filepath.Join(root, "token"))
+	if err != nil || second != "observer-token-second" {
+		t.Fatalf("read rotated projected token: token=%q err=%v", second, err)
+	}
+}
+
+func TestProjectedInputRejectsEscapingOrBroadGeneration(t *testing.T) {
+	for name, setup := range map[string]func(*testing.T, string) string{
+		"escaping data link": func(t *testing.T, root string) string {
+			t.Helper()
+			if err := os.Symlink("../outside", filepath.Join(root, "..data")); err != nil {
+				t.Fatalf("link escape: %v", err)
+			}
+			return "token"
+		},
+		"broad credential": func(t *testing.T, root string) string {
+			t.Helper()
+			generation := "..2026_07_30_03_00_00.000000001"
+			if err := os.Mkdir(filepath.Join(root, generation), 0o750); err != nil {
+				t.Fatalf("mkdir generation: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, generation, "token"), []byte("observer-token\n"), 0o444); err != nil {
+				t.Fatalf("write broad token: %v", err)
+			}
+			if err := os.Symlink(generation, filepath.Join(root, "..data")); err != nil {
+				t.Fatalf("link data: %v", err)
+			}
+			return "token"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			base := setup(t, root)
+			if err := os.Symlink(filepath.Join("..data", base), filepath.Join(root, base)); err != nil {
+				t.Fatalf("link projected input: %v", err)
+			}
+			if _, err := readToken(filepath.Join(root, base)); err == nil {
+				t.Fatal("unsafe projected credential was accepted")
+			}
+		})
 	}
 }
 

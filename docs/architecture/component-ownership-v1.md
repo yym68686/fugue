@@ -367,6 +367,17 @@ deploy step. It is therefore an independent compilation and CI cancellation
 boundary, not a published or installed backup service. The legacy API remains
 the only running backup owner.
 
+The observer input reader supports credential/spec rotation without weakening
+its path boundary. It accepts either a stable regular file or exactly the
+Kubernetes atomic-writer topology `<name> -> ..data/<name>` with a relative
+in-volume generation link. It resolves the volume root, rejects arbitrary or
+escaping links, validates credential mode on the resolved file, and rechecks
+both generation and inode after the bounded read. A rotation racing an attempt
+therefore fails that attempt and is reread cleanly on the next loop; it cannot
+mix a spec or token across generations. This allows ordinary projected
+Secret/ConfigMap updates and avoids `subPath`, whose file would otherwise stay
+pinned to the old generation.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while
