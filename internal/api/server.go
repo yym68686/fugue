@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/backupusage"
 	"fugue/internal/bundleauth"
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
@@ -92,6 +93,8 @@ type Server struct {
 	appImageRegistry                 appImageRegistry
 	requestRegistryGC                func(context.Context, string) error
 	projectImageUsageCache           expiringResponseCache[projectImageUsageResponse]
+	backupUsageReconciliationCache   expiringResponseCache[backupusage.Reconciliation]
+	backupUsageObjectInventoryCache  expiringResponseCache[backupUsageObjectInventory]
 	readinessKubernetesAPICache      expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache        expiringResponseCache[[]clusterNodeSnapshot]
 	persistentVolumeUsageCache       expiringResponseCache[persistentVolumeUsagePolicies]
@@ -225,6 +228,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		inspectBuilderPlacement:          sourceimport.InspectBuilderPlacementForProfile,
 		appImageRegistry:                 newRemoteAppImageRegistry(),
 		projectImageUsageCache:           newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
+		backupUsageReconciliationCache:   newExpiringResponseCache[backupusage.Reconciliation](defaultBackupUsageReconciliationCacheTTL),
+		backupUsageObjectInventoryCache:  newExpiringResponseCache[backupUsageObjectInventory](defaultBackupUsageReconciliationCacheTTL),
 		readinessKubernetesAPICache:      newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:        newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
 		persistentVolumeUsageCache:       newExpiringResponseCache[persistentVolumeUsagePolicies](persistentVolumeUsageCacheTTL),
@@ -327,14 +332,14 @@ func (s *Server) MetricsHandler() http.Handler {
 	return http.HandlerFunc(s.handleMetrics)
 }
 
-func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	observability.WriteComponentRuntimeMetrics(w, "api", s.metricsStartedAt)
 	observability.WriteGaugeMetric(w, "fugue_api_ready", "Whether the Fugue API is ready to serve traffic.", nil, boolMetric(s.IsReady()))
 	status := s.observabilityConfig.Normalize().Status()
 	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
-	s.writeBackupMetrics(w)
+	s.writeBackupMetrics(r.Context(), w)
 	s.writeRobustnessMetrics(w)
 	s.writeAutomationShadowLoopMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)

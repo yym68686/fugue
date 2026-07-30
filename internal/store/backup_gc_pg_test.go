@@ -106,6 +106,53 @@ func TestPGFailedBackupRunObjectCleanupIsDurableAndArtifactSafe(t *testing.T) {
 	}
 }
 
+func TestPGListBackupUsageArtifactsIsUnpaginatedAndIncludesPhysicalState(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	stateStore := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	createdAt := time.Date(2026, time.July, 30, 1, 0, 0, 0, time.UTC)
+	deletedAt := createdAt.Add(time.Hour)
+	physicalDeletedAt := deletedAt.Add(time.Hour)
+	physicalAttemptedAt := physicalDeletedAt.Add(-time.Minute)
+	artifact := model.NormalizeBackupArtifact(model.BackupArtifact{
+		ID:                "artifact_usage_pg",
+		RunID:             "backup_run_usage_pg",
+		TenantID:          "tenant_usage_pg",
+		Target:            model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_usage_pg", AppID: "app_usage_pg"},
+		BackendID:         "backend_usage_pg",
+		Kind:              model.BackupArtifactKindAppPGDump,
+		ObjectKey:         "apps/tenant_usage_pg/project/app_usage_pg/backup_run_usage_pg/database.dump",
+		ManifestObjectKey: "apps/tenant_usage_pg/project/app_usage_pg/backup_run_usage_pg/manifest.json",
+		SizeBytes:         123,
+		Status:            model.BackupArtifactStatusDeleted,
+		CreatedAt:         createdAt,
+		DeletedAt:         &deletedAt,
+	})
+
+	mock.ExpectQuery(`(?s)SELECT .*physical_deleted_at, physical_delete_attempted_at, physical_delete_error FROM fugue_backup_artifacts WHERE tenant_id = \$1 ORDER BY created_at ASC, id ASC$`).
+		WithArgs(artifact.TenantID).
+		WillReturnRows(backupUsageArtifactRows(physicalDeletedAt, physicalAttemptedAt, "", artifact))
+
+	artifacts, err := stateStore.ListBackupUsageArtifacts(artifact.TenantID, false)
+	if err != nil {
+		t.Fatalf("list backup usage artifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Artifact.ID != artifact.ID {
+		t.Fatalf("unexpected artifacts: %+v", artifacts)
+	}
+	if artifacts[0].PhysicalDeletedAt == nil || !artifacts[0].PhysicalDeletedAt.Equal(physicalDeletedAt) || artifacts[0].PhysicalDeleteAttemptedAt == nil || !artifacts[0].PhysicalDeleteAttemptedAt.Equal(physicalAttemptedAt) {
+		t.Fatalf("physical state was not scanned: %+v", artifacts[0])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
 func TestPGBackupArtifactRestoreMutationInterlockUsesArtifactRowLock(t *testing.T) {
 	t.Parallel()
 
@@ -236,6 +283,33 @@ func backupGCRestorePlanRows(plans ...model.BackupRestorePlan) *sqlmock.Rows {
 			plan.CreatedByID,
 			plan.CreatedAt,
 			plan.UpdatedAt,
+		)
+	}
+	return rows
+}
+
+func backupUsageArtifactRows(physicalDeletedAt, physicalAttemptedAt time.Time, physicalError string, artifacts ...model.BackupArtifact) *sqlmock.Rows {
+	columns := []string{"id", "run_id", "tenant_id", "backend_id", "kind", "object_key", "manifest_object_key", "size_bytes", "status", "protected", "billable", "created_at", "deleted_at", "physical_deleted_at", "physical_delete_attempted_at", "physical_delete_error"}
+	rows := sqlmock.NewRows(columns)
+	for _, artifact := range artifacts {
+		artifact = model.NormalizeBackupArtifact(artifact)
+		rows.AddRow(
+			artifact.ID,
+			backupScheduleNullableString(artifact.RunID),
+			backupScheduleNullableString(artifact.TenantID),
+			backupScheduleNullableString(artifact.BackendID),
+			artifact.Kind,
+			artifact.ObjectKey,
+			artifact.ManifestObjectKey,
+			artifact.SizeBytes,
+			artifact.Status,
+			artifact.Protected,
+			artifact.Billable,
+			artifact.CreatedAt,
+			backupScheduleNullableTime(artifact.DeletedAt),
+			physicalDeletedAt,
+			physicalAttemptedAt,
+			physicalError,
 		)
 	}
 	return rows

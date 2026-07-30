@@ -11370,6 +11370,107 @@ components:
           type: string
         mode:
           type: string
+    BackupUsageReconciliation:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - backend_count
+        - measured_backend_count
+        - expected_object_count
+        - referenced_object_count
+        - referenced_bytes
+        - active_object_count
+        - active_bytes
+        - pending_deletion_object_count
+        - pending_deletion_bytes
+        - unreferenced_object_count
+        - unreferenced_bytes
+        - provisional_object_count
+        - provisional_bytes
+        - orphaned_object_count
+        - orphaned_bytes
+        - missing_active_object_count
+        - overdue_deletion_object_count
+        - overdue_deletion_bytes
+        - lingering_deleted_object_count
+        - lingering_deleted_bytes
+        - duplicate_reference_count
+        - invalid_reference_count
+        - size_mismatch_count
+        - unresolved_backend_count
+        - observed_at
+      properties:
+        status:
+          type: string
+          enum: [complete, reconciling, drift, partial, unavailable]
+          description: Complete means every visible R2 backend was measured without structural drift; reconciling permits only recent unreferenced uploads within cleanup grace.
+        backend_count:
+          type: integer
+          description: Number of visible Cloudflare R2 backend records included in the inventory.
+        measured_backend_count:
+          type: integer
+          description: Number of backend records whose physical namespace was listed successfully.
+        expected_object_count:
+          type: integer
+        referenced_object_count:
+          type: integer
+        referenced_bytes:
+          type: integer
+          format: int64
+        active_object_count:
+          type: integer
+        active_bytes:
+          type: integer
+          format: int64
+        pending_deletion_object_count:
+          type: integer
+        pending_deletion_bytes:
+          type: integer
+          format: int64
+        unreferenced_object_count:
+          type: integer
+        unreferenced_bytes:
+          type: integer
+          format: int64
+        provisional_object_count:
+          type: integer
+          description: Unreferenced objects whose last-modified time remains within failed-upload cleanup grace.
+        provisional_bytes:
+          type: integer
+          format: int64
+        orphaned_object_count:
+          type: integer
+          description: Unreferenced physical objects older than failed-upload cleanup grace.
+        orphaned_bytes:
+          type: integer
+          format: int64
+        missing_active_object_count:
+          type: integer
+        overdue_deletion_object_count:
+          type: integer
+        overdue_deletion_bytes:
+          type: integer
+          format: int64
+        lingering_deleted_object_count:
+          type: integer
+          description: Objects still present even though durable metadata records physical deletion.
+        lingering_deleted_bytes:
+          type: integer
+          format: int64
+        duplicate_reference_count:
+          type: integer
+        invalid_reference_count:
+          type: integer
+        size_mismatch_count:
+          type: integer
+        unresolved_backend_count:
+          type: integer
+        observed_at:
+          type: string
+          format: date-time
+        message:
+          type: string
     BackupUsage:
       type: object
       additionalProperties: false
@@ -11383,6 +11484,14 @@ components:
         billable_bytes:
           type: integer
           format: int64
+          description: Database-recorded active billable artifact bytes; this remains the billing ledger and is distinct from physical R2 bytes.
+        physical_bytes:
+          type: integer
+          format: int64
+          description: Exact attributable R2 bytes, including manifests, deletion grace, and unreferenced objects. Omitted unless every visible R2 backend was measured.
+        physical_object_count:
+          type: integer
+          description: Exact attributable R2 object count. Omitted unless every visible R2 backend was measured.
         cloudflare_r2_price_code:
           type: string
         markup_percent:
@@ -11394,6 +11503,8 @@ components:
         updated_at:
           type: string
           format: date-time
+        reconciliation:
+          $ref: "#/components/schemas/BackupUsageReconciliation"
     BackupPosture:
       type: object
       additionalProperties: true

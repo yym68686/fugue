@@ -117,3 +117,11 @@ Fugue-managed R2 backup storage is metered by occupied active artifact bytes.
 The effective billing model is Cloudflare R2 public storage price plus 5%.
 Bring-your-own R2 credentials can be used as a backend, but those bytes are not
 charged by Fugue as managed R2 storage unless the backend is marked billable.
+
+The same command independently lists the physical R2 object inventory. Physical
+bytes include manifests, objects still inside deletion grace, and any
+unreferenced uploads; they are not silently substituted for the billing ledger.
+`reconciliation_status` reports `complete`, `reconciling`, `drift`, `partial`,
+or `unavailable`. Exact physical totals are omitted when every visible R2
+backend could not be measured, so an object-store outage is never displayed as
+zero usage.

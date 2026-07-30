@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/backupusage"
 	"fugue/internal/httpx"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
@@ -215,7 +216,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, nodeDeepHealthChecks...)
-	backupChecks, err := s.robustnessBackupChecks()
+	backupChecks, err := s.robustnessBackupChecks(r.Context())
 	if err != nil {
 		return model.RobustnessStatus{}, err
 	}
@@ -694,17 +695,47 @@ func mostCommonGeneration(counts map[string]int) string {
 	return best
 }
 
-func (s *Server) robustnessBackupChecks() ([]model.RobustnessCheck, error) {
+func (s *Server) robustnessBackupChecks(ctx context.Context) ([]model.RobustnessCheck, error) {
 	policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{IncludeDisabled: true, PlatformAdmin: true, Limit: 500})
 	if err != nil {
 		return nil, err
 	}
-	usage, err := s.store.BackupUsage("", true)
+	usage, err := s.loadBackupUsage(ctx, "", true)
 	if err != nil {
 		return nil, err
 	}
 	posture := s.platformBackupPosture(policies, usage)
 	checks := make([]model.RobustnessCheck, 0, len(posture)+2)
+	reconciliation := usage.Reconciliation
+	reconciliationPass := reconciliation != nil && (reconciliation.Status == backupusage.ReconciliationStatusComplete || reconciliation.Status == backupusage.ReconciliationStatusReconciling)
+	reconciliationObserved := "status=unavailable"
+	reconciliationMessage := "backup object-store reconciliation is unavailable"
+	if reconciliation != nil {
+		reconciliationObserved = fmt.Sprintf("status=%s measured_backends=%d/%d orphaned_objects=%d missing_active=%d overdue_deletion=%d lingering_deleted=%d invalid_references=%d size_mismatches=%d unresolved_backends=%d",
+			reconciliation.Status,
+			reconciliation.MeasuredBackendCount,
+			reconciliation.BackendCount,
+			reconciliation.OrphanedObjectCount,
+			reconciliation.MissingActiveObjectCount,
+			reconciliation.OverdueDeletionObjectCount,
+			reconciliation.LingeringDeletedObjectCount,
+			reconciliation.InvalidReferenceCount,
+			reconciliation.SizeMismatchCount,
+			reconciliation.UnresolvedBackendCount,
+		)
+		reconciliationMessage = reconciliation.Message
+	}
+	checks = append(checks, model.RobustnessCheck{
+		Name:       "backup_storage_reconciliation",
+		Pass:       reconciliationPass,
+		Severity:   model.RobustnessSeverityDegraded,
+		Subject:    "backup_storage",
+		Expected:   "R2 physical inventory is completely measured without durable metadata drift",
+		Observed:   reconciliationObserved,
+		Message:    reconciliationMessage,
+		Evidence:   map[string]string{"guardian": "backup-storage-reconciliation"},
+		RepairHint: "inspect backup usage reconciliation, then allow failed-upload cleanup or repair missing/lingering objects",
+	})
 	for _, item := range posture {
 		target := strings.TrimSpace(item.Target.Type)
 		if target == "" {
