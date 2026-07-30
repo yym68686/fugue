@@ -229,6 +229,19 @@ func TestManagedAppLiveGuardRefusesUnknownReleaseIdentity(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "matches neither current snapshot") {
 		t.Fatalf("a pending identity without operation-history proof must fail closed, got %v", err)
 	}
+	// The same unproven identity must remain fail-closed when an older status
+	// writer promoted it to CurrentReleaseKey and cleared the pending fields.
+	managed.Status.PendingReleaseKey = ""
+	managed.Status.PendingReleaseStartedAt = ""
+	managed.Status.CurrentReleaseKey = "unknown-live-release"
+	managed.Status.CurrentReleaseStartedAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	managed.Status.CurrentReleaseReadyAt = time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = svc.prepareManagedAppReconcileRolloutWithEvidence(
+		context.Background(), client, managed.Metadata.Namespace, managed, app, model.OperationTypeDeploy, runtime.SchedulingConstraints{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "matches neither current snapshot") {
+		t.Fatalf("a current identity without operation-history proof must fail closed, got %v", err)
+	}
 }
 
 func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *testing.T) {
@@ -360,6 +373,34 @@ func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *t
 	}
 	if prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineRestart {
 		t.Fatalf("expected pending image to become the current baseline for a restart-only retry, got %q", prepared.Spec.RolloutIntent)
+	}
+
+	// Older failed status publication could promote the serving key directly to
+	// CurrentReleaseKey and clear PendingReleaseKey. The exact failed operation
+	// proof must make that representation recoverable as well.
+	releaseStartedAt := failedDeploy.CreatedAt
+	if failedDeploy.StartedAt != nil {
+		releaseStartedAt = *failedDeploy.StartedAt
+	}
+	managed.Status.PendingReleaseKey = ""
+	managed.Status.PendingReleaseStartedAt = ""
+	managed.Status.CurrentReleaseKey = pendingKey
+	managed.Status.CurrentReleaseStartedAt = releaseStartedAt.UTC().Format(time.RFC3339Nano)
+	managed.Status.CurrentReleaseReadyAt = failedDeploy.CompletedAt.UTC().Format(time.RFC3339Nano)
+	prepared, err = svc.prepareManagedAppReconcileRolloutWithEvidence(
+		ctx,
+		client,
+		managed.Metadata.Namespace,
+		managed,
+		desired,
+		model.OperationTypeDeploy,
+		runtime.SchedulingConstraints{},
+	)
+	if err != nil {
+		t.Fatalf("controller-authored current release key must be a recoverable baseline: %v", err)
+	}
+	if prepared.Spec.RolloutIntent != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected current release fallback to preserve restart intent, got %q", prepared.Spec.RolloutIntent)
 	}
 }
 
