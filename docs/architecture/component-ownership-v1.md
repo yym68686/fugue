@@ -298,6 +298,31 @@ credential HTTP request, leaving both the legacy cache and any existing shadow
 LKG untouched. The updater version bump is repository evidence only until an
 authorized node-platform rollout occurs.
 
+The `backup-storage` extraction starts with the pure
+`backup-control.fugue.dev/v1` spec/status boundary. A shadow
+`BackupRunSpec` derives its cell and artifact kind from one canonical target,
+binds the request idempotency key and opaque backend-configuration generation,
+and bounds attempts, lease duration, and operation time. Its corresponding
+status is an expiring observation of the legacy run, bound to the exact spec
+digest and cell. A successful observation must carry a current-run LKG artifact
+whose kind and backend generation match that spec; an in-progress observation
+may retain an older same-kind LKG so a backend rotation does not erase known
+recoverable state. Artifact references contain content and manifest digests but
+no credential, endpoint, bucket, object key, DSN, or physical storage address.
+Only structured error codes and error digests cross this boundary.
+
+`internal/backupcontrol` has no dependency on the legacy API, store, model,
+database, Kubernetes, network, or object-storage implementation. A dependency-
+closure test enforces that property before a standalone observer or adapter is
+introduced. Bounded v1 decoders reject unknown fields, trailing JSON, invalid
+digests, and oversized documents at that future adapter boundary. The contract
+is permanently observation-only in this atom: it
+cannot claim a production write, acquire a backup lease, execute a backup,
+delete an object, restore data, or alter the existing scheduler. The live
+backup subsystem therefore remains `transitional-shared` and continues to run
+unchanged under the legacy release while its independent data and failure
+boundary are built behind shadow contracts.
+
 The repository-wide Go CI baseline likewise runs feature branches through the
 PR event only and direct `main` updates through the push event. PR runs share a
 PR-number concurrency key so obsolete revisions are canceled locally, while
