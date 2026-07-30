@@ -673,10 +673,11 @@ delete_daemonset_pods_no_wait() {
     log "${display_name} daemonset ${daemonset_name} has no pods to replace"
     return 0
   fi
-  log "deleting ${display_name} pods for ${daemonset_name}: ${pods[*]}"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    log "dry-run: would delete ${display_name} pods for ${daemonset_name}: ${pods[*]}"
     return 0
   fi
+  log "deleting ${display_name} pods for ${daemonset_name}: ${pods[*]}"
   kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pods[@]}" --wait=false >/dev/null
 }
 
@@ -1351,6 +1352,7 @@ authoritative_dns_targets_for_daemonset() (
 import hashlib
 import ipaddress
 import json
+import os
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -1359,6 +1361,9 @@ with open(sys.argv[2], encoding="utf-8") as handle:
     nodes_document = json.load(handle)
 requested_name = sys.argv[3]
 expected_namespace = sys.argv[4]
+allow_wildcard_host_binding = os.environ.get(
+    "FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING", ""
+) == "true"
 daemonset_metadata = daemonset.get("metadata") or {}
 daemonset_status = daemonset.get("status") or {}
 daemonset_name = daemonset_metadata.get("name") or ""
@@ -1423,7 +1428,13 @@ tcp = ports["dns-tcp"]
 def exact_port(entry, protocol):
     container_port = entry.get("containerPort")
     host_port = entry.get("hostPort")
-    host_ip = str(entry.get("hostIP") or "").strip()
+    raw_host_ip = entry.get("hostIP")
+    if raw_host_ip is None:
+        host_ip = ""
+    elif isinstance(raw_host_ip, str):
+        host_ip = raw_host_ip.strip()
+    else:
+        raise SystemExit(f"authoritative DNS daemonSet has an invalid {protocol} hostIP")
     if (
         entry.get("protocol") != protocol
         or isinstance(container_port, bool)
@@ -1434,6 +1445,8 @@ def exact_port(entry, protocol):
         or not 1 <= host_port <= 65535
     ):
         raise SystemExit(f"authoritative DNS daemonSet has an invalid {protocol} public port")
+    if allow_wildcard_host_binding and host_ip in {"", "0.0.0.0"}:
+        return container_port, host_port, host_ip
     try:
         parsed = ipaddress.ip_address(host_ip)
     except ValueError:
@@ -1444,7 +1457,8 @@ def exact_port(entry, protocol):
 
 udp_container_port, udp_host_port, udp_host_ip = exact_port(udp, "UDP")
 tcp_container_port, tcp_host_port, tcp_host_ip = exact_port(tcp, "TCP")
-if udp_host_ip != tcp_host_ip:
+explicit_host_ips = {value for value in (udp_host_ip, tcp_host_ip) if value not in {"", "0.0.0.0"}}
+if len(explicit_host_ips) != 1:
     raise SystemExit("authoritative DNS UDP/TCP public ports do not share one hostIP")
 
 nodes = {}
@@ -1577,7 +1591,10 @@ for pod in doc.get("items") or []:
     if node is None:
         raise SystemExit(f"authoritative DNS Pod {name} references an absent Node {node_name}")
     node_uid, node_identity_hash, external_ip = node_query_identity(node, node_name)
-    if external_ip != udp_host_ip or external_ip != tcp_host_ip:
+    if any(
+        value != external_ip and not (allow_wildcard_host_binding and value in {"", "0.0.0.0"})
+        for value in (udp_host_ip, tcp_host_ip)
+    ):
         raise SystemExit(
             f"authoritative DNS Pod {name} Node ExternalIPv4 does not match both public hostIP mappings"
         )
@@ -1860,6 +1877,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os
 import re
 import sys
 
@@ -1993,6 +2011,19 @@ def daemonset_identity(document):
     ).hexdigest()
 
 def daemonset_query_port(document):
+    allow_wildcard_host_binding = os.environ.get(
+        "FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING", ""
+    ) == "true"
+
+    def host_binding_matches(entry):
+        value = entry.get("hostIP")
+        if value == expected_query_server:
+            return True
+        return (
+            allow_wildcard_host_binding
+            and (value is None or (isinstance(value, str) and value.strip() in {"", "0.0.0.0"}))
+        )
+
     semantic = []
     for container in ((((document.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []):
         command = container.get("command") or []
@@ -2011,7 +2042,7 @@ def daemonset_query_port(document):
         raise SystemExit("authoritative DNS daemonSet public transport ports drifted")
     udp = by_name["dns-udp"]
     tcp = by_name["dns-tcp"]
-    if udp.get("hostIP") != tcp.get("hostIP") or udp.get("hostIP") != expected_query_server:
+    if not host_binding_matches(udp) or not host_binding_matches(tcp):
         raise SystemExit("authoritative DNS daemonSet UDP/TCP hostIP drifted")
     selected = udp if expected_transport == "udp" else tcp
     expected_protocol = expected_transport.upper()
@@ -2026,7 +2057,7 @@ def daemonset_query_port(document):
         or selected.get("protocol") != expected_protocol
         or selected.get("hostPort") != host_port
         or selected.get("containerPort") != container_port
-        or selected.get("hostIP") != expected_query_server
+        or not host_binding_matches(selected)
     ):
         raise SystemExit("authoritative DNS daemonSet query transport mapping drifted")
     return host_port, container_port
@@ -2882,6 +2913,10 @@ check_authoritative_dns_on_nodes() {
   fi
 }
 
+check_authoritative_dns_legacy_source_on_nodes() {
+  FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING=true check_authoritative_dns_on_nodes "$@"
+}
+
 smoke_curl_with_retry() {
   local label="$1"
   shift
@@ -3063,20 +3098,97 @@ print(json.dumps(patch, separators=(",", ":")))
 '
 }
 
+dns_explicit_host_binding_patch_for_daemonset() {
+  local daemonset_name="$1"
+
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import ipaddress
+import json
+import sys
+
+document = json.load(sys.stdin)
+containers = (((document.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+semantic = []
+for index, container in enumerate(containers):
+    command = container.get("command") or []
+    env_names = {entry.get("name") for entry in container.get("env") or []}
+    if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
+        semantic.append((index, container))
+if len(semantic) != 1:
+    raise SystemExit("DNS daemonset must have exactly one semantic fugue-dns container")
+container_index, container = semantic[0]
+ports = container.get("ports") or []
+by_name = {}
+for index, port in enumerate(ports):
+    name = port.get("name")
+    if not isinstance(name, str) or not name or name in by_name:
+        raise SystemExit("DNS daemonset has an unnamed or duplicate semantic port")
+    by_name[name] = (index, port)
+if "dns-udp" not in by_name or "dns-tcp" not in by_name:
+    raise SystemExit("DNS daemonset is missing its public UDP/TCP ports")
+udp_index, udp = by_name["dns-udp"]
+tcp_index, tcp = by_name["dns-tcp"]
+udp_host_ip = udp.get("hostIP")
+if not isinstance(udp_host_ip, str) or udp_host_ip.strip() != udp_host_ip:
+    raise SystemExit("DNS daemonset UDP hostIP is not an exact string")
+try:
+    parsed_udp_host_ip = ipaddress.ip_address(udp_host_ip)
+except ValueError:
+    raise SystemExit("DNS daemonset UDP hostIP is invalid")
+if parsed_udp_host_ip.version != 4 or parsed_udp_host_ip.is_unspecified or str(parsed_udp_host_ip) != udp_host_ip:
+    raise SystemExit("DNS daemonset UDP hostIP is not a canonical explicit IPv4 address")
+tcp_host_ip = tcp.get("hostIP")
+if tcp_host_ip is not None and not isinstance(tcp_host_ip, str):
+    raise SystemExit("DNS daemonset TCP hostIP is invalid")
+tcp_host_ip = (tcp_host_ip or "").strip()
+if tcp_host_ip not in {"", "0.0.0.0", udp_host_ip}:
+    raise SystemExit("DNS daemonset TCP hostIP conflicts with its explicit UDP hostIP")
+for label, entry, protocol in (("UDP", udp, "UDP"), ("TCP", tcp, "TCP")):
+    host_port = entry.get("hostPort")
+    container_port = entry.get("containerPort")
+    if (
+        entry.get("protocol") != protocol
+        or isinstance(host_port, bool)
+        or not isinstance(host_port, int)
+        or not 1 <= host_port <= 65535
+        or isinstance(container_port, bool)
+        or not isinstance(container_port, int)
+        or not 1 <= container_port <= 65535
+    ):
+        raise SystemExit(f"DNS daemonset has an invalid {label} public port")
+target_ports = [dict(port) for port in ports]
+target_ports[udp_index]["hostIP"] = udp_host_ip
+target_ports[tcp_index]["hostIP"] = udp_host_ip
+print(json.dumps([{
+    "op": "replace",
+    "path": f"/spec/template/spec/containers/{container_index}/ports",
+    "value": target_ports,
+}], separators=(",", ":")))
+'
+}
+
 patch_dns_template() {
   local daemonset_name="$1"
   local patch
+  local host_binding_patch
 
   if ! patch="$(container_patch_for_dns "${daemonset_name}")"; then
     return 1
   fi
-  log "patching dns ${daemonset_name} template"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    host_binding_patch="$(dns_explicit_host_binding_patch_for_daemonset "${daemonset_name}")" || return $?
+    log "dry-run: would patch dns ${daemonset_name} template and repair explicit UDP/TCP host bindings"
     printf '%s\n' "${patch}"
+    printf '%s\n' "${host_binding_patch}"
     return 0
   fi
+  log "patching dns ${daemonset_name} template"
   kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null || return $?
   wait_daemonset_observed "${daemonset_name}" || return $?
+  host_binding_patch="$(dns_explicit_host_binding_patch_for_daemonset "${daemonset_name}")" || return $?
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=json -p "${host_binding_patch}" >/dev/null || return $?
+  wait_daemonset_observed "${daemonset_name}" || return $?
+  authoritative_dns_targets_for_daemonset "${daemonset_name}" >/dev/null || return $?
 }
 
 dns_manifest_snapshot_query() {
@@ -5152,13 +5264,13 @@ restore_dns_daemonset() {
   if [[ -n "$(trim_field "${original_uids}")" && "${current_uids}" == "${original_uids}" ]]; then
     log "DNS daemonset ${daemonset_name} still has its original pod UID set; rollback will not restart it"
     wait_daemonset_ready "${daemonset_name}" || return $?
-    check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+    check_authoritative_dns_legacy_source_on_nodes "${daemonset_name}" || return $?
     return 0
   fi
   replacement_uids="${current_uids}"
   delete_daemonset_pods_no_wait "${daemonset_name}" "DNS rollback" || return $?
   wait_daemonset_replaced_and_ready "${daemonset_name}" "${replacement_uids}" || return $?
-  check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+  check_authoritative_dns_legacy_source_on_nodes "${daemonset_name}" || return $?
 }
 
 rollback_dns_daemonsets() {
@@ -5197,6 +5309,10 @@ abort_dns_release() {
   local reason="$1"
   shift
 
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    error "${reason}; dry-run made no DNS mutation, so no rollback was attempted"
+    return 1
+  fi
   error "${reason}; aborting DNS release and restoring pinned templates"
   if ! rollback_dns_daemonsets "$@"; then
     error "DNS rollback verification failed; release remains failed and requires operator review"
@@ -5625,7 +5741,11 @@ run_dns_ondelete_release() {
     if ! wait_daemonset_replaced_and_ready "${daemonset_name}" "${before_uids}"; then
       abort_dns_release "DNS daemonset ${daemonset_name} did not become ready" "${rollback_state[@]}" || return 1
     fi
-    if ! check_authoritative_dns_on_nodes "${daemonset_name}"; then
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+      if ! check_authoritative_dns_legacy_source_on_nodes "${daemonset_name}"; then
+        abort_dns_release "authoritative DNS source validation failed for ${daemonset_name}" "${rollback_state[@]}" || return 1
+      fi
+    elif ! check_authoritative_dns_on_nodes "${daemonset_name}"; then
       abort_dns_release "authoritative DNS validation failed for ${daemonset_name}" "${rollback_state[@]}" || return 1
     fi
   done
@@ -5919,6 +6039,7 @@ main() {
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID:-pdp-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:-local}}"
   FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT="${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT:-a}"
   FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE="${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE:-/var/lib/fugue/edge-blue-green/active-slot}"
+  unset FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING
   validate_requested_edge_image_identity
   FUGUE_EDGE_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_RESOURCES_JSON "${FUGUE_EDGE_RESOURCES_JSON:-${default_edge_resources}}")"
   FUGUE_EDGE_CADDY_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_CADDY_RESOURCES_JSON "${FUGUE_EDGE_CADDY_RESOURCES_JSON:-${default_caddy_resources}}")"
