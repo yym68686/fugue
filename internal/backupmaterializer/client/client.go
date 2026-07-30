@@ -25,7 +25,6 @@ const (
 
 	defaultRequestTimeout  = 5 * time.Second
 	maxRequestTimeout      = 30 * time.Second
-	maxBundleDeliveryAge   = time.Minute
 	defaultMaxResponse     = int64(materializercontract.MaxObserverInputBundleBytes)
 	minimumResponseLimit   = int64(1024)
 	maxWorkloadTokenBytes  = 16 << 10
@@ -226,7 +225,7 @@ func (client *Client) Fetch(ctx context.Context) (materializercontract.ObserverI
 	bundle, err := materializercontract.DecodeObserverInputBundleEnvelope(document, now)
 	if err != nil || bundle.CellKey != client.expectedCellKey || bundle.RunID != client.expectedRunID ||
 		bundle.DesiredSpec.CellKey != client.expectedCellKey || bundle.DesiredSpec.RunID != client.expectedRunID ||
-		bundle.IssuedAt.Before(now.Add(-maxBundleDeliveryAge)) || !bundle.RenewAfter.After(now) {
+		bundle.IssuedAt.Before(now.Add(-materializercontract.MaxObserverInputDeliveryAge)) || !bundle.RenewAfter.After(now) {
 		return materializercontract.ObserverInputBundle{}, ErrInputResponse
 	}
 	return bundle, nil

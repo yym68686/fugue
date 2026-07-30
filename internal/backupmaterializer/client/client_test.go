@@ -19,6 +19,7 @@ import (
 	"fugue/internal/backupcontrol"
 	"fugue/internal/backupidentity"
 	"fugue/internal/backupmaterializer"
+	materializercontract "fugue/internal/backupmaterializer/contract"
 	materializerhttpapi "fugue/internal/backupmaterializer/httpapi"
 )
 
@@ -222,7 +223,7 @@ func TestClientRejectsResponseMetadataContractAndBindingDrift(t *testing.T) {
 	unknown = append(unknown, []byte(`,"unexpected":true}`)...)
 	otherCell := issueBundle(t, keyring, testSpec(t, "run-1", backupcontrol.TargetRegistry, "platform/registry"), now)
 	otherRun := issueBundle(t, keyring, testSpec(t, "other-run", backupcontrol.TargetAppDatabase, "app/app-1/database"), now)
-	replayed := issueBundle(t, keyring, spec, now.Add(-2*maxBundleDeliveryAge))
+	replayed := issueBundle(t, keyring, spec, now.Add(-2*materializercontract.MaxObserverInputDeliveryAge))
 	staleRenewal := issueBundle(t, keyring, spec, now.Add(-backupmaterializer.ObserverIdentityRenewAfter))
 	future := issueBundle(t, keyring, spec, now.Add(backupidentity.FutureSkew+time.Second))
 	claimDrift := validBundle

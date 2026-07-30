@@ -666,8 +666,25 @@ within its bounded delivery-age window and before its renewal boundary. Remote
 bodies and both credentials are excluded
 from errors. Its production dependency closure contains no filesystem,
 Kubernetes API, store, model, signer, Secret, process, or mutation capability;
-credential projection, TLS-root rotation, durable materialization, and
+credential projection, TLS-root rotation, a durable Secret writer, and
 process wiring remain separate later atoms.
+
+`internal/backupmaterializer/materialization` defines the non-executable
+`backup-materializer-secret-plan@v1` desired-data boundary. It deterministically
+maps one freshly validated bundle to the exact cell-local
+`fugue-backup-observer-<kind>-<cell-id>-input` Secret identity in
+`fugue-system`, with only `spec.json` and `token` data keys. The plan binds the
+run/spec/bundle/credential generation, exact desired spec, content digests,
+issue/renew/expiry window, and a cell/generation idempotency key.
+
+Raw spec bytes and the observer bearer remain unexported in the plan and are
+absent from its JSON form; an explicitly private accessor returns fresh copies
+and diagnostic formatting redacts both. The v1 policy requires
+resource-version CAS, retention of the existing generation on failure, and a
+last-known-good generation, while permanently setting `executionAllowed` and
+`productionMutationAllowed` false. Its production dependency closure is only
+`backupcontrol` plus the keyless bundle contract: no signer, filesystem,
+network, Kubernetes type/client, datastore, Secret writer, or process exists.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

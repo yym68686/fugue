@@ -28,6 +28,7 @@ const (
 	ObserverIdentityRenewAfter  = 5 * time.Minute
 	ObserverIdentityFutureSkew  = 30 * time.Second
 	ObserverIdentityPermission  = "backup.run-observation.read.v1"
+	MaxObserverInputDeliveryAge = time.Minute
 	MaxObserverInputBundleBytes = 64 << 10
 
 	observerIdentityVersion = "v1"
