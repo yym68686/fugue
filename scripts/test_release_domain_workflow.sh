@@ -628,6 +628,10 @@ if carrier_recorder
     '"repos/${GITHUB_REPOSITORY}/git/commits"',
     '--input "${object_tmp}/commit-request.json"',
     '"repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}"',
+    'bounded_git_object_readback() {',
+    'for attempt in $(seq 1 15)',
+    '"${attempt}" == \'15\' ]] || sleep 2',
+    'carrier %s readback did not settle after 15 attempts',
     'response.get("message") != request["message"]',
     'len(parents) != 1 or parents[0].get("sha") != sys.argv[5]',
     'for field in ("author", "committer"):',
@@ -656,9 +660,10 @@ if carrier_recorder
     matches.fetch(0)
   end
   fail_contract("carrier baseline writer old-OID guard and scratch cleanup are not strictly before its unique mutation") unless ordered_positions.each_cons(2).all? { |left, right| left < right }
-  assert_equal(advance_run.scan("gh api").length, 10, "carrier baseline writer API count")
+  assert_equal(advance_run.scan("gh api").length, 8, "carrier baseline writer API count")
   assert_equal(advance_run.scan("gh api graphql").length, 2, "carrier baseline writer GraphQL count")
   assert_equal(advance_run.scan("--method POST").length, 3, "carrier object POST count")
+  assert_equal(advance_run.scan("bounded_git_object_readback").length, 4, "carrier bounded object readback count")
   assert_equal(advance_run.scan("updateRefs(").length, 1, "carrier baseline writer mutation count")
   assert_equal(advance_run.scan("-F 'force=false'").length, 1, "carrier baseline writer force policy count")
   for forbidden in [

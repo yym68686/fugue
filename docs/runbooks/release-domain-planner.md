@@ -314,10 +314,12 @@ The next hosted one-shot checkpoint materializes one no-op forward carrier
 without moving the baseline ref. It binds the exact current metadata object
 and the runtime SHA already represented by that object, derives the canonical
 blob, one-file tree, and one-parent commit with local Git plumbing, attempts
-each immutable Git database write once, and settles each write by exact object
-readback. A pre-write intent artifact and a result artifact preserve the
-object identities. The baseline ref must remain at the previous object before
-and after materialization; carrier ref CAS remains a later checkpoint.
+each immutable Git database write once, and settles each write by bounded exact
+object readback so temporary Git object visibility lag cannot turn an already
+materialized object into a false failure. A pre-write intent artifact and a
+result artifact preserve the object identities. The baseline ref must remain
+at the previous object before and after materialization; carrier ref CAS
+remains a later checkpoint.
 
 The following independent hosted one-shot checkpoint advances only the
 baseline ref from the exact previous metadata object to that validated
@@ -340,7 +342,8 @@ whose sole parent and `previous_baseline_object_sha` both equal that observed
 object and whose `runtime_sha` equals the deployed target, then attempts one
 GraphQL `updateRefs` CAS from the observed object to the carrier with
 `force: false`. Blob, tree, commit, and mutation transport ambiguity is settled
-only by exact object or ref readback. Temporary materialization state is
+only by bounded exact object or ref readback, including temporary object-store
+visibility lag. Temporary materialization state is
 removed before the CAS, and exact ref readback plus an infallible diagnostic is
 the final boundary. The deploy workflow remains disabled, so this checkpoint
 does not run the self-hosted, cluster, runtime, or recorder paths.
