@@ -207,6 +207,62 @@ func TestPlanRejectsBindingDataPolicyAndTimeDrift(t *testing.T) {
 	}
 }
 
+func TestRestoreSealedRecoversHistoricalGenerationWithoutAuthorizingIt(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 7, 31, 2, 0, 0, 0, time.UTC)
+	bundle := testBundle(t, issuedAt)
+	built, err := Build(bundle, issuedAt.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("build fresh plan: %v", err)
+	}
+	restored, err := RestoreSealed(bundle)
+	if err != nil || !reflect.DeepEqual(restored, built) {
+		t.Fatalf("restored plan drifted: restored=%#v built=%#v err=%v", restored, built, err)
+	}
+	if err := ValidateSealed(restored); err != nil {
+		t.Fatalf("restored structural binding failed: %v", err)
+	}
+	if _, err := restored.Data(restored.RenewAfter); !errors.Is(err, ErrPlan) {
+		t.Fatalf("restored stale data error = %v, want apply denial", err)
+	}
+	if err := ValidateLastKnownGood(restored, restored.RenewAfter); err != nil {
+		t.Fatalf("restored generation should remain retainable before expiry: %v", err)
+	}
+	if err := ValidateLastKnownGood(restored, restored.ExpiresAt); !errors.Is(err, ErrPlan) {
+		t.Fatalf("restored expired LKG error = %v, want fail closed", err)
+	}
+	if err := ValidateSealed(restored); err != nil {
+		t.Fatalf("current expiry leaked into structural recovery: %v", err)
+	}
+
+	tests := map[string]func(*materializercontract.ObserverInputBundle){
+		"API version": func(value *materializercontract.ObserverInputBundle) {
+			value.APIVersion = "backup-materializer.fugue.dev/v2"
+			value.Digest = materializercontract.DigestObserverInputBundle(*value)
+		},
+		"renewal": func(value *materializercontract.ObserverInputBundle) {
+			value.RenewAfter = value.RenewAfter.Add(time.Second)
+			value.Digest = materializercontract.DigestObserverInputBundle(*value)
+		},
+		"token": func(value *materializercontract.ObserverInputBundle) {
+			value.ObserverToken += "x"
+			value.Digest = materializercontract.DigestObserverInputBundle(*value)
+		},
+		"digest": func(value *materializercontract.ObserverInputBundle) {
+			value.Digest = strings.Repeat("0", 64)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := bundle
+			mutate(&candidate)
+			if _, err := RestoreSealed(candidate); !errors.Is(err, ErrPlan) {
+				t.Fatalf("restore drift error = %v, want invalid plan", err)
+			}
+		})
+	}
+}
+
 func TestPlanSerializationAndFormattingNeverExposePrivateData(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 31, 1, 0, 0, 0, time.UTC)

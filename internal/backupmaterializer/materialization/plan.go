@@ -113,10 +113,23 @@ func SecretIdentityForCell(cellKey string) (SecretIdentity, error) {
 // Build validates the authenticated bundle envelope and deterministically
 // seals its two data items into a non-executable cell-local plan.
 func Build(bundle materializercontract.ObserverInputBundle, now time.Time) (Plan, error) {
+	return sealBundle(bundle, now, true)
+}
+
+// RestoreSealed reconstructs an already materialized generation from its
+// complete private bundle binding. It validates structure at the original
+// issue instant, not current freshness, and therefore never authorizes apply
+// or LKG retention; callers must separately use Validate or
+// ValidateLastKnownGood for those decisions.
+func RestoreSealed(bundle materializercontract.ObserverInputBundle) (Plan, error) {
+	return sealBundle(bundle, bundle.IssuedAt, false)
+}
+
+func sealBundle(bundle materializercontract.ObserverInputBundle, now time.Time, requireApplyWindow bool) (Plan, error) {
 	now = now.UTC().Truncate(time.Second)
 	if err := materializercontract.ValidateObserverInputBundleEnvelope(bundle, now); err != nil ||
-		bundle.IssuedAt.Before(now.Add(-materializercontract.MaxObserverInputDeliveryAge)) ||
-		!bundle.RenewAfter.After(now) {
+		requireApplyWindow && (bundle.IssuedAt.Before(now.Add(-materializercontract.MaxObserverInputDeliveryAge)) ||
+			!bundle.RenewAfter.After(now)) {
 		return Plan{}, ErrPlan
 	}
 	specDocument, err := json.Marshal(bundle.DesiredSpec)
@@ -163,7 +176,11 @@ func Build(bundle materializercontract.ObserverInputBundle, now time.Time) (Plan
 		observerToken:             bundle.ObserverToken,
 	}
 	plan.Digest = DigestPlan(plan)
-	if err := Validate(plan, now); err != nil {
+	if requireApplyWindow {
+		if err := Validate(plan, now); err != nil {
+			return Plan{}, err
+		}
+	} else if err := ValidateSealed(plan); err != nil {
 		return Plan{}, err
 	}
 	return plan, nil

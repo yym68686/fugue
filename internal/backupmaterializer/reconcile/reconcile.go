@@ -15,6 +15,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"fugue/internal/backupcontrol"
+	materializercontract "fugue/internal/backupmaterializer/contract"
 	"fugue/internal/backupmaterializer/materialization"
 )
 
@@ -267,6 +269,66 @@ func SealCurrent(plan materialization.Plan, evidence SecretEvidence) (Snapshot, 
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+// RecoverCurrent reconstructs the private sealed plan using only one existing
+// Secret's owned annotations and exact data values. It deliberately validates
+// no current apply or LKG lifetime; SealCurrent proves the object binding and a
+// later decision applies the appropriate current-time gate.
+func RecoverCurrent(evidence SecretEvidence) (Snapshot, error) {
+	issuedAt, issuedOK := parseCanonicalTimestamp(evidence.Annotations[AnnotationIssuedAt])
+	renewAfter, renewOK := parseCanonicalTimestamp(evidence.Annotations[AnnotationRenewAfter])
+	expiresAt, expiresOK := parseCanonicalTimestamp(evidence.Annotations[AnnotationExpiresAt])
+	specDocument, specOK := evidence.Data[materialization.SpecDataKey]
+	observerToken, tokenOK := evidence.Data[materialization.TokenDataKey]
+	if !issuedOK || !renewOK || !expiresOK || !specOK || !tokenOK {
+		return Snapshot{}, ErrReconcile
+	}
+	desiredSpec, err := backupcontrol.DecodeBackupRunSpec(specDocument)
+	if err != nil {
+		return Snapshot{}, ErrReconcile
+	}
+	bundle := materializercontract.ObserverInputBundle{
+		APIVersion:                materializercontract.ObserverInputBundleAPIVersion,
+		Kind:                      materializercontract.ObserverInputBundleKind,
+		Policy:                    materializercontract.ObserverInputBundlePolicy,
+		CellKey:                   evidence.Annotations[AnnotationCellKey],
+		RunID:                     evidence.Annotations[AnnotationRunID],
+		SpecDigest:                evidence.Annotations[AnnotationSpecDigest],
+		CredentialID:              evidence.Annotations[AnnotationCredentialID],
+		TokenID:                   evidence.Annotations[AnnotationTokenID],
+		DesiredSpec:               desiredSpec,
+		ObserverToken:             string(observerToken),
+		IssuedAt:                  issuedAt,
+		RenewAfter:                renewAfter,
+		ExpiresAt:                 expiresAt,
+		ObservationOnly:           true,
+		ProductionMutationAllowed: false,
+		Digest:                    evidence.Annotations[AnnotationBundleDigest],
+	}
+	plan, err := materialization.RestoreSealed(bundle)
+	if err != nil {
+		return Snapshot{}, ErrReconcile
+	}
+	return SealCurrent(plan, evidence)
+}
+
+// ObserveExisting classifies one object returned for the exact cell target.
+// An object that does not claim this materializer's managed-by label is
+// foreign. A claimed object that cannot be fully recovered is malformed. Both
+// states are valid blocking observations rather than reconcile errors.
+func ObserveExisting(cellKey string, evidence SecretEvidence) (Observation, error) {
+	identity, err := materialization.SecretIdentityForCell(cellKey)
+	if err != nil {
+		return Observation{}, ErrReconcile
+	}
+	if evidence.Labels[LabelManagedBy] == labelManagedByValue {
+		if snapshot, recoverErr := RecoverCurrent(evidence); recoverErr == nil && snapshotMatches(snapshot, identity) {
+			return ObserveManaged(snapshot)
+		}
+		return ObserveObstruction(cellKey, StateMalformed, safeOpaque(evidence.UID), safeOpaque(evidence.ResourceVersion))
+	}
+	return ObserveObstruction(cellKey, StateForeign, safeOpaque(evidence.UID), safeOpaque(evidence.ResourceVersion))
 }
 
 // ObserveAbsent records an authoritative not-found result for the exact cell
@@ -749,6 +811,18 @@ func validOpaque(value string) bool {
 
 func canonicalTime(value time.Time) bool {
 	return !value.IsZero() && value.Location() == time.UTC && value.Nanosecond() == 0
+}
+
+func parseCanonicalTimestamp(value string) (time.Time, bool) {
+	parsed, err := time.Parse(time.RFC3339, value)
+	return parsed, err == nil && canonicalTime(parsed) && parsed.Format(time.RFC3339) == value
+}
+
+func safeOpaque(value string) string {
+	if validOpaque(value) {
+		return value
+	}
+	return ""
 }
 
 func digestJSON(value any) string {

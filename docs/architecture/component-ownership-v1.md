@@ -742,6 +742,17 @@ nor rendered in JSON or diagnostics. Structural validation is separate from
 current lifetime validation, allowing an expired generation to be recognized
 without ever making it applyable again.
 
+Restart recovery does not depend on an in-memory copy of the prior plan.
+`RecoverCurrent` strictly decodes the stored desired spec, canonical issue,
+renewal, and expiry annotations, bundle identity, observer-token claims, and
+all manifest/content digests, then reconstructs the same sealed private plan.
+It validates structure at the original issue instant only; the reconcile
+decision still applies the trusted current clock before retaining an LKG.
+`ObserveExisting` turns a valid recovered object into managed state, an object
+without this materializer's ownership claim into foreign state, and a claimed
+but unrecoverable object into malformed state. Invalid current objects are
+therefore stable cell-local blocking evidence rather than process-wide errors.
+
 The cell-local policy emits exactly five shadow outcomes: create-if-absent,
 no-op for an identical generation, UID plus resourceVersion-fenced replace,
 retain an unexpired last-known-good generation when the source is unavailable,

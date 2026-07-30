@@ -157,6 +157,152 @@ func TestSealCurrentRequiresExactManagedMetadataAndData(t *testing.T) {
 	}
 }
 
+func TestRecoverCurrentRebuildsManagedLKGAfterRestart(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 1, 2, 30, 0, 0, time.UTC)
+	applyAt := issuedAt.Add(30 * time.Second)
+	plan := testPlan(t, "run-1", issuedAt, applyAt)
+	evidence := testEvidence(t, plan, applyAt)
+	evidence.Labels["admission.example/extra"] = "preserved"
+	evidence.Annotations["admission.example/audit"] = "preserved"
+
+	recovered, err := RecoverCurrent(evidence)
+	if err != nil {
+		t.Fatalf("recover current without in-memory plan: %v", err)
+	}
+	if recovered.PlanDigest != plan.Digest || recovered.CellKey != plan.CellKey || recovered.UID != evidence.UID ||
+		recovered.ResourceVersion != evidence.ResourceVersion || recovered.SpecDataDigest != plan.SpecDocumentDigest ||
+		recovered.TokenDataDigest != plan.ObserverTokenDigest || ValidateSnapshot(recovered) != nil {
+		t.Fatalf("recovered snapshot drifted: %#v", recovered)
+	}
+	observation, err := ObserveExisting(plan.CellKey, evidence)
+	if err != nil || observation.State != StateManaged || observation.SnapshotDigest != recovered.Digest {
+		t.Fatalf("recovered observation drifted: observation=%#v err=%v", observation, err)
+	}
+	retainAt := plan.RenewAfter.Add(time.Minute)
+	decision, err := Decide(plan.CellKey, nil, observation, retainAt)
+	if err != nil || decision.Action != ActionRetainLastKnownGood || decision.Reason != ReasonSourceUnavailableRetainLKG ||
+		!decision.RetainExisting || !decision.Stable || decision.MutationCandidate || decision.DeleteAllowed {
+		t.Fatalf("restart LKG decision drifted: decision=%#v err=%v", decision, err)
+	}
+	expired, err := Decide(plan.CellKey, nil, observation, plan.ExpiresAt)
+	if err != nil || expired.Action != ActionBlock || expired.Reason != ReasonLastKnownGoodExpired ||
+		!expired.RetainExisting || expired.DeleteAllowed {
+		t.Fatalf("restart expiry decision drifted: decision=%#v err=%v", expired, err)
+	}
+}
+
+func TestObserveExistingClassifiesForeignAndMalformedWithoutAdoption(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 1, 2, 45, 0, 0, time.UTC)
+	applyAt := issuedAt.Add(30 * time.Second)
+	plan := testPlan(t, "run-1", issuedAt, applyAt)
+
+	foreignEvidence := testEvidence(t, plan, applyAt)
+	foreignEvidence.Labels[LabelManagedBy] = "other-controller"
+	if _, err := RecoverCurrent(foreignEvidence); !errors.Is(err, ErrReconcile) {
+		t.Fatalf("foreign recovery error = %v, want fail closed", err)
+	}
+	foreign, err := ObserveExisting(plan.CellKey, foreignEvidence)
+	if err != nil || foreign.State != StateForeign {
+		t.Fatalf("foreign observation drifted: observation=%#v err=%v", foreign, err)
+	}
+	foreignDecision, err := Decide(plan.CellKey, &plan, foreign, applyAt)
+	if err != nil || foreignDecision.Action != ActionBlock || foreignDecision.Reason != ReasonCurrentObjectForeign ||
+		foreignDecision.MutationCandidate || foreignDecision.RetainExisting || foreignDecision.DeleteAllowed {
+		t.Fatalf("foreign decision drifted: decision=%#v err=%v", foreignDecision, err)
+	}
+
+	malformations := map[string]func(*SecretEvidence){
+		"namespace": func(value *SecretEvidence) { value.Namespace = "default" },
+		"name":      func(value *SecretEvidence) { value.SecretName = "other" },
+		"UID":       func(value *SecretEvidence) { value.UID = "uid\nreplacement" },
+		"resource version": func(value *SecretEvidence) {
+			value.ResourceVersion = " 42"
+		},
+		"type":      func(value *SecretEvidence) { value.SecretType = "kubernetes.io/tls" },
+		"immutable": func(value *SecretEvidence) { value.Immutable = true },
+		"deleting":  func(value *SecretEvidence) { value.DeletionPending = true },
+		"owner":     func(value *SecretEvidence) { value.OwnerReferenceCount = 1 },
+		"cell label": func(value *SecretEvidence) {
+			value.Labels[LabelCellID] = "registry-0123456789abcdef"
+		},
+		"plan API": func(value *SecretEvidence) {
+			value.Annotations[AnnotationPlanAPIVersion] = "backup-materialization.fugue.dev/v2"
+		},
+		"plan policy": func(value *SecretEvidence) {
+			value.Annotations[AnnotationPlanPolicy] = "unsafe-upsert"
+		},
+		"plan digest": func(value *SecretEvidence) {
+			value.Annotations[AnnotationPlanDigest] = plan.BundleDigest
+		},
+		"cell annotation": func(value *SecretEvidence) {
+			value.Annotations[AnnotationCellKey] = "backup/registry/0123456789abcdef"
+		},
+		"run": func(value *SecretEvidence) {
+			value.Annotations[AnnotationRunID] = "other-run"
+		},
+		"spec digest": func(value *SecretEvidence) {
+			value.Annotations[AnnotationSpecDigest] = plan.BundleDigest
+		},
+		"bundle digest": func(value *SecretEvidence) {
+			value.Annotations[AnnotationBundleDigest] = plan.SpecDigest
+		},
+		"credential": func(value *SecretEvidence) {
+			value.Annotations[AnnotationCredentialID] = "backup-observer:other"
+		},
+		"token ID": func(value *SecretEvidence) {
+			value.Annotations[AnnotationTokenID] = strings.Repeat("A", 22)
+		},
+		"issue timestamp": func(value *SecretEvidence) {
+			value.Annotations[AnnotationIssuedAt] = issuedAt.Format("2006-01-02T15:04:05+00:00")
+		},
+		"renew timestamp": func(value *SecretEvidence) {
+			value.Annotations[AnnotationRenewAfter] = "invalid"
+		},
+		"expiry timestamp": func(value *SecretEvidence) {
+			delete(value.Annotations, AnnotationExpiresAt)
+		},
+		"spec digest annotation": func(value *SecretEvidence) {
+			value.Annotations[AnnotationSpecDocumentDigest] = plan.ObserverTokenDigest
+		},
+		"token digest annotation": func(value *SecretEvidence) {
+			value.Annotations[AnnotationObserverTokenDigest] = plan.SpecDocumentDigest
+		},
+		"spec bytes":  func(value *SecretEvidence) { value.Data[materialization.SpecDataKey][0] ^= 0xff },
+		"token bytes": func(value *SecretEvidence) { value.Data[materialization.TokenDataKey][0] ^= 0xff },
+		"extra data":  func(value *SecretEvidence) { value.Data["other"] = []byte("value") },
+		"missing annotations": func(value *SecretEvidence) {
+			value.Annotations = nil
+		},
+		"missing data": func(value *SecretEvidence) { value.Data = nil },
+	}
+	for name, mutate := range malformations {
+		t.Run(name, func(t *testing.T) {
+			evidence := cloneEvidence(testEvidence(t, plan, applyAt))
+			mutate(&evidence)
+			if _, err := RecoverCurrent(evidence); !errors.Is(err, ErrReconcile) {
+				t.Fatalf("recovery error = %v, want fail closed", err)
+			}
+			observation, err := ObserveExisting(plan.CellKey, evidence)
+			if err != nil || observation.State != StateMalformed {
+				t.Fatalf("malformed observation drifted: observation=%#v err=%v", observation, err)
+			}
+			decision, err := Decide(plan.CellKey, &plan, observation, applyAt)
+			if err != nil || decision.Action != ActionBlock || decision.Reason != ReasonCurrentObjectMalformed ||
+				decision.MutationCandidate || decision.RetainExisting || decision.DeleteAllowed {
+				t.Fatalf("malformed decision drifted: decision=%#v err=%v", decision, err)
+			}
+		})
+	}
+
+	otherCell := "backup/registry/0123456789abcdef"
+	crossCell, err := ObserveExisting(otherCell, testEvidence(t, plan, applyAt))
+	if err != nil || crossCell.State != StateMalformed {
+		t.Fatalf("cross-cell current object was not isolated: observation=%#v err=%v", crossCell, err)
+	}
+}
+
 func TestReconcileDecisionMatrixIsCellLocalCASAndLKGOnly(t *testing.T) {
 	t.Parallel()
 	issuedAt := time.Date(2026, 8, 1, 3, 0, 0, 0, time.UTC)
@@ -441,6 +587,8 @@ func TestReconcileProductionDependencyBoundaryIsPureAndNonExecutable(t *testing.
 		"encoding/json",
 		"errors",
 		"fmt",
+		"fugue/internal/backupcontrol",
+		"fugue/internal/backupmaterializer/contract",
 		"fugue/internal/backupmaterializer/materialization",
 		"strings",
 		"time",
