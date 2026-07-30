@@ -279,17 +279,32 @@ func TestAgentRunRetriesWithoutLoggingCycleErrorsAndStopsCleanly(t *testing.T) {
 	}
 	service.interval = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
-	deadline := time.After(2 * time.Second)
-	for !service.Snapshot().Ready {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		// Close the observation-to-cancellation gap against the same mutex
+		// that gates a new attempt. Otherwise a heavily instrumented runner
+		// can start attempt three after Ready was observed but before cancel,
+		// and that legitimately records the parent cancellation as a failure.
+		service.attemptMu.Lock()
+		ready := service.Snapshot().Ready
+		if ready {
+			cancel()
+			service.attemptMu.Unlock()
+			break
+		}
+		service.attemptMu.Unlock()
 		select {
-		case <-deadline:
+		case <-deadline.C:
 			t.Fatalf("run did not retry: calls=%d snapshot=%#v", cycle.Calls(), service.Snapshot())
-		case <-time.After(time.Millisecond):
+		case <-poll.C:
 		}
 	}
-	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("run shutdown: %v", err)
 	}
