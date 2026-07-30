@@ -955,6 +955,26 @@ does not wire the adapter into the process, image, projected credential, or
 control loop. Its dedicated read-only validation lane has no build, upload,
 dispatch, Helm, Kubernetes, release, or production capability.
 
+`internal/backupmaterializer/secretwriter/projected` adds the default-off
+`backup-materializer-secret-dry-run-projection@v1` bootstrap without wiring it
+into the materializer binary. It accepts only a safe regular-file projection
+or Kubernetes' exact atomic-writer link topology, rereads the token and CA for
+each request, rejects group/world-writable credentials or trust roots, and
+creates a fresh TLS 1.2+ direct connection with no proxy, keepalive, cookie,
+redirect, or connection reuse.
+
+The transport independently reads the bounded request body before opening a
+socket and validates the fixed credential headers, HTTPS authority,
+method/path pair, exact dry-run query, target cell, create/CAS metadata, the
+canonical writer-generated JSON bytes, sealed spec/token generation, and
+absence of owners, finalizers or generated request fields. The Kubernetes API
+remains responsible for authenticating its configured token audience. The
+transport then removes the replayable body factory before sending. A partial
+atomic-writer rotation fails only that validation attempt; a later complete
+token/CA generation recovers without restart. This package remains outside the
+process dependency closure and image workflow, so it has no active credential,
+RBAC, Pod, Secret mutation, release, or production capability.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with

@@ -34,15 +34,16 @@ const (
 
 	RequestUserAgent = "fugue-backup-materializer-secret-dry-run/1"
 	FieldManager     = "fugue-backup-materializer"
+	DryRunRawQuery   = "dryRun=All&fieldManager=fugue-backup-materializer&fieldValidation=Strict"
 
 	DefaultRequestTimeout = 5 * time.Second
 	MaximumRequestTimeout = 30 * time.Second
 	DefaultMaxResponse    = int64(256 << 10)
 	MaximumResponse       = int64(1 << 20)
 	MaximumDecisionAge    = 5 * time.Second
+	MaximumRequestBytes   = int64(128 << 10)
 
 	minimumResponseBytes = int64(4 << 10)
-	maximumRequestBytes  = int64(128 << 10)
 	maxBearerTokenBytes  = 16 << 10
 	secretCollectionPath = "/api/v1/namespaces/" + materialization.SecretNamespace + "/secrets"
 )
@@ -319,6 +320,75 @@ func ValidateResult(result Result) error {
 	return nil
 }
 
+// ValidateTransportRequest independently proves that a request handed to a
+// capability-bearing transport is still the one-cell, server-side dry-run
+// shape emitted by Writer. It authenticates the complete sealed Secret body
+// through the same recovery contract used by the reader, but grants no
+// network or execution capability and does not replace Writer's freshness
+// check.
+func ValidateTransportRequest(method, path, rawQuery, expectedCellKey string, document []byte) error {
+	identity, err := materialization.SecretIdentityForCell(expectedCellKey)
+	if err != nil || rawQuery != DryRunRawQuery || len(document) == 0 || int64(len(document)) > MaximumRequestBytes {
+		return ErrIntent
+	}
+	var request secretDocument
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return ErrIntent
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return ErrIntent
+	}
+	canonicalDocument, err := json.Marshal(request)
+	if err != nil || !bytes.Equal(canonicalDocument, document) {
+		return ErrIntent
+	}
+	metadata := request.Metadata
+	if request.APIVersion != "v1" || request.Kind != "Secret" || request.Type != reconcile.SecretTypeOpaque ||
+		request.Immutable == nil || *request.Immutable || len(request.StringData) != 0 ||
+		metadata.Name != identity.SecretName || metadata.Namespace != identity.Namespace || metadata.GenerateName != "" ||
+		metadata.SelfLink != "" || metadata.Generation != 0 || len(metadata.CreationTimestamp) != 0 ||
+		len(metadata.DeletionTimestamp) != 0 || metadata.DeletionGracePeriodSeconds != nil ||
+		len(metadata.OwnerReferences) != 0 || len(metadata.Finalizers) != 0 || len(metadata.ManagedFields) != 0 ||
+		len(request.Data) != 2 {
+		return ErrIntent
+	}
+	uid := metadata.UID
+	resourceVersion := metadata.ResourceVersion
+	switch method {
+	case http.MethodPost:
+		if path != secretCollectionPath || uid != "" || resourceVersion != "" {
+			return ErrIntent
+		}
+		uid = "transport-validation"
+		resourceVersion = "1"
+	case http.MethodPut:
+		if path != secretCollectionPath+"/"+identity.SecretName || uid == "" || resourceVersion == "" {
+			return ErrIntent
+		}
+	default:
+		return ErrIntent
+	}
+	data := make(map[string][]byte, len(request.Data))
+	for key, encoded := range request.Data {
+		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
+			return ErrIntent
+		}
+		data[key] = decoded
+	}
+	observation, err := reconcile.ObserveExisting(expectedCellKey, reconcile.SecretEvidence{
+		Namespace: identity.Namespace, SecretName: identity.SecretName, UID: uid, ResourceVersion: resourceVersion,
+		SecretType: request.Type, Labels: request.Metadata.Labels, Annotations: request.Metadata.Annotations,
+		Data: data, Immutable: false, DeletionPending: false, OwnerReferenceCount: 0,
+	})
+	if err != nil || observation.State != reconcile.StateManaged {
+		return ErrIntent
+	}
+	return nil
+}
+
 func DigestResult(result Result) string {
 	result.Digest = ""
 	document, err := json.Marshal(result)
@@ -424,7 +494,7 @@ func buildRequest(
 		expectedStatus = http.StatusOK
 	}
 	encoded, err := json.Marshal(document)
-	if err != nil || len(encoded) == 0 || int64(len(encoded)) > maximumRequestBytes {
+	if err != nil || len(encoded) == 0 || int64(len(encoded)) > MaximumRequestBytes {
 		return nil, "", "", 0, ErrIntent
 	}
 	return encoded, method, endpoint, expectedStatus, nil
@@ -474,7 +544,11 @@ func dryRunQuery() string {
 	query.Set("dryRun", "All")
 	query.Set("fieldManager", FieldManager)
 	query.Set("fieldValidation", "Strict")
-	return query.Encode()
+	encoded := query.Encode()
+	if encoded != DryRunRawQuery {
+		return ""
+	}
+	return encoded
 }
 
 func canonicalAPIServerURL(raw string, allowInsecureHTTP bool) (*url.URL, error) {

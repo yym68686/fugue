@@ -65,9 +65,10 @@ func TestBackupMaterializerSecretDryRunWorkflowIsReadOnlyAndPathScoped(t *testin
 		"internal/backupmaterializer/secretwriter/**",
 		"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
 		"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
-		"go test ./internal/backupmaterializer/secretwriter -count=10",
-		"go test -race ./internal/backupmaterializer/secretwriter -count=3",
+		"go test ./internal/backupmaterializer/secretwriter/... -count=10",
+		"go test -race ./internal/backupmaterializer/secretwriter/... -count=3",
 		"go list -deps ./internal/backupmaterializer/secretwriter",
+		"go list -deps ./internal/backupmaterializer/secretwriter/projected",
 		"validate backup materializer Secret dry-run (no publish)",
 	} {
 		if !strings.Contains(raw, required) {

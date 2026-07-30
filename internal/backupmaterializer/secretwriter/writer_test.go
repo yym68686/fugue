@@ -428,6 +428,120 @@ func TestDryRunHonorsCanceledContextWithoutCapabilityUse(t *testing.T) {
 	}
 }
 
+func TestValidateTransportRequestAcceptsOnlyCanonicalSealedWriterOutput(t *testing.T) {
+	t.Parallel()
+	now := testNow()
+	previous := testPlan(t, "run-transport-previous", now)
+	desired := testPlan(t, "run-transport-desired", now)
+	create := testCreateDecision(t, previous, now)
+	replace := testReplaceDecision(t, previous, desired, now)
+	writer := &Writer{
+		collectionURL: "https://kubernetes.example.test" + secretCollectionPath + "?" + DryRunRawQuery,
+		itemURL:       "https://kubernetes.example.test" + secretCollectionPath + "/" + desired.SecretName + "?" + DryRunRawQuery,
+	}
+	createDocument, createMethod, _, _, err := buildRequest(writer, previous, create, now)
+	if err != nil {
+		t.Fatalf("build canonical create request: %v", err)
+	}
+	replaceDocument, replaceMethod, _, _, err := buildRequest(writer, desired, replace, now)
+	if err != nil {
+		t.Fatalf("build canonical replace request: %v", err)
+	}
+	if err := ValidateTransportRequest(createMethod, secretCollectionPath, DryRunRawQuery, previous.CellKey, createDocument); err != nil {
+		t.Fatalf("canonical create rejected: %v", err)
+	}
+	if err := ValidateTransportRequest(replaceMethod, secretCollectionPath+"/"+desired.SecretName, DryRunRawQuery, desired.CellKey, replaceDocument); err != nil {
+		t.Fatalf("canonical replace rejected: %v", err)
+	}
+
+	tests := map[string]struct {
+		method   string
+		path     string
+		query    string
+		cellKey  string
+		document []byte
+		mutate   func(*secretDocument)
+	}{
+		"wrong method":       {method: http.MethodDelete},
+		"wrong path":         {path: secretCollectionPath + "/other"},
+		"live query":         {query: "fieldManager=" + FieldManager},
+		"wrong cell":         {cellKey: testPlanForTarget(t, "run-transport-other", backupcontrol.BackupTarget{Type: backupcontrol.TargetRegistry, ScopeKey: "platform/registry"}, now).CellKey},
+		"empty body":         {document: []byte{}},
+		"oversized body":     {document: bytes.Repeat([]byte{'x'}, int(MaximumRequestBytes)+1)},
+		"leading whitespace": {document: append([]byte{' '}, createDocument...)},
+		"trailing JSON":      {document: append(append([]byte(nil), createDocument...), []byte(` {}`)...)},
+		"duplicate field":    {document: append([]byte(`{"apiVersion":"v1","apiVersion":"v1","kind":"Secret","metadata":`), createDocument[len(`{"apiVersion":"v1","kind":"Secret","metadata":`):]...)},
+		"generated null":     {document: bytes.Replace(createDocument, []byte(`"namespace":"fugue-system"`), []byte(`"namespace":"fugue-system","deletionTimestamp":null`), 1)},
+		"create CAS": {mutate: func(value *secretDocument) {
+			value.Metadata.UID = "01234567-89ab-cdef-0123-456789abcdef"
+			value.Metadata.ResourceVersion = "42"
+		}},
+		"immutable": {mutate: func(value *secretDocument) { immutable := true; value.Immutable = &immutable }},
+		"owner": {mutate: func(value *secretDocument) {
+			value.Metadata.OwnerReferences = []json.RawMessage{json.RawMessage(`{"uid":"x"}`)}
+		}},
+		"finalizer":      {mutate: func(value *secretDocument) { value.Metadata.Finalizers = []string{"retain"} }},
+		"generated UID":  {mutate: func(value *secretDocument) { value.Metadata.UID = "generated" }},
+		"extra data":     {mutate: func(value *secretDocument) { value.Data["extra"] = "eA==" }},
+		"invalid base64": {mutate: func(value *secretDocument) { value.Data[materialization.TokenDataKey] = "***" }},
+		"mutated label":  {mutate: func(value *secretDocument) { value.Metadata.Labels[reconcile.LabelManagedBy] = "other" }},
+		"mutated plan": {mutate: func(value *secretDocument) {
+			value.Metadata.Annotations[reconcile.AnnotationPlanDigest] = strings.Repeat("0", 64)
+		}},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			method := createMethod
+			if test.method != "" {
+				method = test.method
+			}
+			path := secretCollectionPath
+			if test.path != "" {
+				path = test.path
+			}
+			query := DryRunRawQuery
+			if test.query != "" {
+				query = test.query
+			}
+			cellKey := previous.CellKey
+			if test.cellKey != "" {
+				cellKey = test.cellKey
+			}
+			document := append([]byte(nil), createDocument...)
+			if test.document != nil {
+				document = append([]byte(nil), test.document...)
+			} else if test.mutate != nil {
+				var wire secretDocument
+				if err := json.Unmarshal(document, &wire); err != nil {
+					t.Fatalf("decode fixture: %v", err)
+				}
+				test.mutate(&wire)
+				var err error
+				document, err = json.Marshal(wire)
+				if err != nil {
+					t.Fatalf("encode mutation: %v", err)
+				}
+			}
+			if err := ValidateTransportRequest(method, path, query, cellKey, document); !errors.Is(err, ErrIntent) {
+				t.Fatalf("mutation accepted: error=%v bytes=%d", err, len(document))
+			}
+		})
+	}
+
+	var replaceWire secretDocument
+	if err := json.Unmarshal(replaceDocument, &replaceWire); err != nil {
+		t.Fatalf("decode replace fixture: %v", err)
+	}
+	replaceWire.Metadata.ResourceVersion = ""
+	withoutCAS, err := json.Marshal(replaceWire)
+	if err != nil {
+		t.Fatalf("encode replace without CAS: %v", err)
+	}
+	if err := ValidateTransportRequest(replaceMethod, secretCollectionPath+"/"+desired.SecretName, DryRunRawQuery, desired.CellKey, withoutCAS); !errors.Is(err, ErrIntent) {
+		t.Fatalf("replace without CAS accepted: %v", err)
+	}
+}
+
 func TestWriterAndResultRejectNilAndPublicContractDrift(t *testing.T) {
 	t.Parallel()
 	if (*Writer)(nil).Enabled() || !strings.Contains((*Writer)(nil).String(), "<nil>") ||
@@ -611,8 +725,8 @@ func assertDryRunRequest(
 			t.Fatalf("request header %s = %q, want %q", name, got, want)
 		}
 	}
-	body, err := io.ReadAll(io.LimitReader(request.Body, maximumRequestBytes+1))
-	if err != nil || len(body) == 0 || int64(len(body)) > maximumRequestBytes {
+	body, err := io.ReadAll(io.LimitReader(request.Body, MaximumRequestBytes+1))
+	if err != nil || len(body) == 0 || int64(len(body)) > MaximumRequestBytes {
 		t.Fatalf("read bounded request: bytes=%d err=%v", len(body), err)
 	}
 	var wire secretDocument
@@ -641,6 +755,9 @@ func assertDryRunRequest(
 	}
 	if decision.Action == reconcile.ActionCreateIfAbsent && (wire.Metadata.UID != "" || wire.Metadata.ResourceVersion != "") {
 		t.Fatalf("create request unexpectedly contains CAS values: %+v", wire.Metadata)
+	}
+	if err := ValidateTransportRequest(request.Method, request.URL.Path, request.URL.RawQuery, plan.CellKey, body); err != nil {
+		t.Fatalf("core transport validator rejected emitted request: %v", err)
 	}
 	return wire
 }
