@@ -256,11 +256,39 @@ func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectN
 			kvPair{Key: "observed_cluster_id", Value: observed.ClusterID},
 			kvPair{Key: "observed_generation", Value: fmt.Sprintf("%d/%d", observed.ObservedGeneration, observed.Generation)},
 			kvPair{Key: "observed_evidence_source", Value: observed.EvidenceSource},
+			kvPair{Key: "observed_evidence_sources", Value: strings.Join(observed.EvidenceSources, ",")},
 			kvPair{Key: "observed_reason", Value: observed.Reason},
+			kvPair{Key: "observed_invariant_violations", Value: strings.Join(observed.InvariantViolations, ",")},
 		)
 		if observed.RuntimeObjectPresent != nil {
 			pairs = append(pairs, kvPair{Key: "runtime_object_present", Value: fmt.Sprintf("%t", *observed.RuntimeObjectPresent)})
 		}
+		if observed.NamespacePresent != nil {
+			pairs = append(pairs, kvPair{Key: "namespace_present", Value: fmt.Sprintf("%t", *observed.NamespacePresent)})
+		}
+		if observed.ServicePresent != nil {
+			pairs = append(pairs, kvPair{Key: "service_present", Value: fmt.Sprintf("%t", *observed.ServicePresent)})
+		}
+		if observed.EndpointPresent != nil {
+			pairs = append(pairs, kvPair{Key: "endpoint_present", Value: fmt.Sprintf("%t", *observed.EndpointPresent)})
+		}
+		if observed.EndpointReady != nil {
+			pairs = append(pairs, kvPair{Key: "endpoint_ready", Value: fmt.Sprintf("%t", *observed.EndpointReady)})
+		}
+		if observed.PhysicalReplicas != nil {
+			pairs = append(pairs, kvPair{Key: "physical_replicas", Value: fmt.Sprintf("%d", *observed.PhysicalReplicas)})
+		}
+		if observed.ImagePresent != nil {
+			pairs = append(pairs, kvPair{Key: "image_present", Value: fmt.Sprintf("%t", *observed.ImagePresent)})
+		}
+	}
+	if failure := app.Status.LastFailedOperation; failure != nil {
+		pairs = append(pairs,
+			kvPair{Key: "last_failed_operation_id", Value: failure.ID},
+			kvPair{Key: "last_failed_operation_type", Value: failure.Type},
+			kvPair{Key: "last_failed_operation_error", Value: failure.ErrorMessage},
+			kvPair{Key: "last_failed_operation_at", Value: formatModeTime(failure.CompletedAt)},
+		)
 	}
 	if app.Route != nil {
 		pairs = append(pairs,
