@@ -3421,6 +3421,11 @@ mode = sys.argv[1]
 udp_host_ip = "203.0.113.10"
 tcp_host_ip = "203.0.113.11" if mode == "transport-address-mismatch" else udp_host_ip
 udp_host_port = 5302 if mode == "daemonset-port-drift" else 5300
+tcp_port = {"name": "dns-tcp", "containerPort": 1054, "hostPort": 5301, "protocol": "TCP"}
+if mode == "tcp-hostip-wildcard":
+    tcp_port["hostIP"] = "0.0.0.0"
+elif mode != "tcp-hostip-omitted":
+    tcp_port["hostIP"] = tcp_host_ip
 daemonset = {
     "apiVersion": "apps/v1",
     "kind": "DaemonSet",
@@ -3433,7 +3438,7 @@ daemonset = {
             "ports": [
                 {"name": "http", "containerPort": 7834, "protocol": "TCP"},
                 {"name": "dns-udp", "containerPort": 1053, "hostIP": udp_host_ip, "hostPort": udp_host_port, "protocol": "UDP"},
-                {"name": "dns-tcp", "containerPort": 1054, "hostIP": tcp_host_ip, "hostPort": 5301, "protocol": "TCP"},
+                tcp_port,
             ],
             "env": [{"name": "FUGUE_DNS_ZONE", "value": "example.test"}],
         }]}},
@@ -3561,6 +3566,35 @@ PY
       fail "authoritative target enumeration must reject ${fixture_mode}"
     fi
   done
+  for fixture_mode in tcp-hostip-omitted tcp-hostip-wildcard; do
+    if authoritative_dns_targets_for_daemonset dns-us >/dev/null 2>&1; then
+      fail "strict authoritative target enumeration must reject legacy ${fixture_mode}"
+    fi
+    legacy_target_row="$(
+      export FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING=true
+      authoritative_dns_targets_for_daemonset dns-us
+    )" || fail "legacy source validation must accept ${fixture_mode} when one transport remains explicitly pinned"
+    IFS=$'\t' read -r legacy_external_ip legacy_udp_host_port legacy_udp_container_port legacy_tcp_host_port legacy_tcp_container_port legacy_rest <<<"${legacy_target_row}"
+    [[ "${legacy_external_ip}" == "203.0.113.10" && "${legacy_udp_host_port}" == "5300" && "${legacy_udp_container_port}" == "1053" && "${legacy_tcp_host_port}" == "5301" && "${legacy_tcp_container_port}" == "1054" ]] ||
+      fail "legacy ${fixture_mode} validation must remain pinned to the exact Node ExternalIPv4 and transport ports"
+  done
+  fixture_mode=tcp-hostip-omitted
+  explicit_binding_patch="$(dns_explicit_host_binding_patch_for_daemonset dns-us)" ||
+    fail "DNS target patch must repair an omitted legacy TCP hostIP"
+  python3 - "${explicit_binding_patch}" <<'PY'
+import json
+import sys
+
+patch = json.loads(sys.argv[1])
+assert len(patch) == 1
+assert patch[0]["op"] == "replace"
+assert patch[0]["path"] == "/spec/template/spec/containers/0/ports"
+ports = {entry["name"]: entry for entry in patch[0]["value"]}
+assert ports["dns-udp"]["hostIP"] == "203.0.113.10"
+assert ports["dns-tcp"]["hostIP"] == "203.0.113.10"
+assert ports["dns-udp"]["protocol"] == "UDP"
+assert ports["dns-tcp"]["protocol"] == "TCP"
+PY
   fixture_mode=oversized-documents
   oversized_target_row="$(authoritative_dns_targets_for_daemonset dns-us)" ||
     fail "authoritative target enumeration must not pass Kubernetes documents through process argv"
@@ -4665,6 +4699,41 @@ assert publication["identity"]["nodeUID"] == "node-a-uid"
 assert publication["soa"]["mname"] == "ns1.example.test."
 PY
 
+  stable_daemonset_json="${daemonset_json}"
+  daemonset_json="$(python3 - "${daemonset_json}" <<'PY'
+import json
+import sys
+
+document = json.loads(sys.argv[1])
+ports = document["spec"]["template"]["spec"]["containers"][0]["ports"]
+next(port for port in ports if port.get("name") == "dns-tcp").pop("hostIP", None)
+print(json.dumps(document, separators=(",", ":")))
+PY
+)"
+  legacy_target_row="$(
+    export FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING=true
+    authoritative_dns_targets_for_daemonset dns-us
+  )" || fail "legacy rollback source must enumerate an omitted TCP hostIP"
+  IFS=$'\t' read -r legacy_external_ip legacy_udp_host_port legacy_udp_container_port legacy_tcp_host_port legacy_tcp_container_port legacy_pod legacy_uid legacy_pod_host_ip legacy_pod_identity legacy_node legacy_node_uid legacy_node_identity legacy_revision legacy_ds_uid legacy_ds_identity <<<"${legacy_target_row}"
+  legacy_publication="$(
+    export FUGUE_AUTHORITATIVE_DNS_ALLOW_WILDCARD_HOST_BINDING=true
+    authoritative_dns_publication_snapshot_for_pod \
+      "${legacy_pod}" example.test api.example.test "${legacy_external_ip}" "${legacy_tcp_host_port}" "${legacy_tcp_container_port}" tcp \
+      "${legacy_uid}" "${legacy_pod_host_ip}" "${legacy_pod_identity}" "${legacy_node}" "${legacy_node_uid}" "${legacy_node_identity}" \
+      "${legacy_revision}" dns-us "${legacy_ds_uid}" "${legacy_ds_identity}"
+  )" || fail "legacy rollback publication must verify an omitted TCP hostIP against the pinned ExternalIPv4"
+  python3 - "${legacy_publication}" <<'PY'
+import json
+import sys
+
+publication = json.loads(sys.argv[1])
+assert publication["identity"]["queryServer"] == "203.0.113.10"
+assert publication["identity"]["queryHostPort"] == 53
+assert publication["identity"]["queryContainerPort"] == 5353
+assert publication["identity"]["queryTransport"] == "tcp"
+PY
+  daemonset_json="${stable_daemonset_json}"
+
   assert_publication_source_drift_rejected() {
     local label="$1"
     if authoritative_dns_publication_snapshot_for_pod \
@@ -4674,7 +4743,6 @@ PY
       fail "authoritative publication must reject ${label} drift from its pinned query source"
     fi
   }
-  stable_daemonset_json="${daemonset_json}"
   daemonset_json="${daemonset_json/\"hostPort\":53/\"hostPort\":54}"
   assert_publication_source_drift_rejected "DaemonSet port"
   daemonset_json="${stable_daemonset_json}"
