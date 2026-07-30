@@ -548,6 +548,26 @@ signer, server configuration, or mutation dependency.
 The identity policy and HTTP boundary share the recursive read-only
 `backup-materializer-identity-${ref}` validation lane.
 
+`internal/backupmaterializer/httpapi` defines the unregistered
+`backup-materializer-input-api@v1` handler core for the future exact
+`GET /v1/backup-control/runs/{run}/observer-input-bundle` route. It accepts no
+query string or request body and never guesses a desired run from creation
+time or list ordering. A capability-separated source is queried with the exact
+reviewed cell and path run, then supplies one current, already redacted
+`BackupRunSpec`; the handler validates the complete contract and exact path
+run, compares the returned server-owned spec cell with the reviewed
+materializer claims, and only then invokes a separately injected issuer. A
+foreign-cell run is indistinguishable from an absent run, source/signer details
+never enter responses, and a drifted source or issuer fails closed. Successful
+responses are bounded strict private JSON and cannot contain the caller's
+projected ServiceAccount token.
+
+The handler imports no legacy API, store, model, database, Kubernetes, object
+storage, filesystem, or process capability. It is not present in the generated
+route table and no concrete source or signer is attached. The existing
+`backup-input-bundle-${ref}` lane now recursively validates this handler and
+its identity dependency rather than creating another release queue.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
@@ -578,10 +598,11 @@ trust bundle. A malformed or racing generation makes only that review
 unavailable; a later valid generation recovers without process restart.
 
 The same read-only lane recursively validates this bootstrap and its dependency
-closure. The HTTP middleware is not attached to a server or route, and there is
-still no environment wiring, RBAC, ServiceAccount, projected-token volume,
-materializer process, or chart wiring; those remain separately reviewed
-default-off atoms, so production behavior is unchanged.
+closure. Neither the HTTP middleware nor the input handler is attached to a
+server or generated route, and there is still no environment wiring, RBAC,
+ServiceAccount, projected-token volume, materializer process, or chart wiring;
+those remain separately reviewed default-off atoms, so production behavior is
+unchanged.
 
 `GET /v1/backup-control/runs/{run}/observation` is the first private bridge
 over that identity boundary. It accepts only the dedicated observer bearer

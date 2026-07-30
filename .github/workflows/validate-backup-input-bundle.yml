@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - internal/backupmaterializer/**
+      - internal/backupmaterializeridentity/**
       - internal/backupcontrol/**
       - internal/backupidentity/**
       - internal/componentmanifest/backup_input_bundle_workflow_test.go
@@ -16,6 +17,7 @@ on:
   pull_request:
     paths:
       - internal/backupmaterializer/**
+      - internal/backupmaterializeridentity/**
       - internal/backupcontrol/**
       - internal/backupidentity/**
       - internal/componentmanifest/backup_input_bundle_workflow_test.go
@@ -49,7 +51,7 @@ jobs:
       - name: Verify sealed spec and identity handoff
         run: |
           set -euo pipefail
-          go test ./internal/backupmaterializer ./internal/backupcontrol ./internal/backupidentity -count=1
-          go test -race ./internal/backupmaterializer -count=5
+          go test ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupcontrol ./internal/backupidentity -count=1
+          go test -race ./internal/backupmaterializer/... -count=5
           go test ./internal/componentmanifest -run TestBackupInputBundleWorkflowIsReadOnly -count=1
-          go vet ./internal/backupmaterializer ./internal/backupcontrol ./internal/backupidentity
+          go vet ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupcontrol ./internal/backupidentity
