@@ -4598,3 +4598,123 @@ func TestManagedAppStatusServingCurrentAllowsTerminalCleanupDuringStatusError(t 
 		t.Fatal("expected a non-serving workload to fail closed")
 	}
 }
+
+func TestCurrentZeroDowntimeBlockPrunesOldEvictedPodAfterFreshReadyProof(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	name := runtime.RuntimeAppResourceName(app)
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = name
+	deployment.Metadata.Generation = 4
+	deployment.Status.ObservedGeneration = 4
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	pod := kubePod{}
+	pod.Metadata.Name = "demo-evicted"
+	pod.Metadata.CreationTimestamp = now.Add(-49 * time.Hour)
+	pod.Metadata.Labels = map[string]string{
+		runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue,
+		runtime.FugueLabelName:      runtime.RuntimeResourceName(app.Name),
+		runtime.FugueLabelAppID:     app.ID,
+		runtime.FugueLabelTenantID:  app.TenantID,
+	}
+	pod.ObservedUID = "pod-uid"
+	pod.ObservedOwnerReferences = []kubePodOwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "demo-rs",
+		UID:        "rs-uid",
+		Controller: true,
+	}}
+	pod.Status.Phase = "Failed"
+	pod.Status.Reason = "Evicted"
+	pod.Status.Conditions = []kubePodCondition{{
+		Type:               "DisruptionTarget",
+		Status:             "True",
+		Reason:             "TerminationByKubelet",
+		LastTransitionTime: now.Add(-48 * time.Hour),
+	}}
+
+	deleted := false
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, name):
+			payload, err := json.Marshal(deployment)
+			if err != nil {
+				t.Fatalf("marshal deployment: %v", err)
+			}
+			return okJSONResponse(string(payload)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			if got := req.URL.Query().Get("labelSelector"); got != managedAppPodLabelSelector(app) {
+				t.Fatalf("unexpected pod selector %q", got)
+			}
+			return okJSONResponse(`{"items":[{"metadata":{"name":"demo-evicted","uid":"pod-uid","creationTimestamp":"2026-07-28T11:00:00Z","labels":{"app.kubernetes.io/managed-by":"fugue","app.kubernetes.io/name":"demo","fugue.pro/app-id":"app_demo","fugue.pro/tenant-id":"tenant_demo"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"demo-rs","uid":"rs-uid","controller":true}]},"status":{"phase":"Failed","reason":"Evicted","conditions":[{"type":"DisruptionTarget","status":"True","reason":"TerminationByKubelet","lastTransitionTime":"2026-07-28T12:00:00Z"}]}}]}`), nil
+		case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods/"+pod.Metadata.Name:
+			var options struct {
+				Preconditions struct {
+					UID string `json:"uid"`
+				} `json:"preconditions"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&options); err != nil {
+				t.Fatalf("decode delete options: %v", err)
+			}
+			if options.Preconditions.UID != pod.ObservedUID {
+				t.Fatalf("expected UID precondition %q, got %q", pod.ObservedUID, options.Preconditions.UID)
+			}
+			deleted = true
+			return okJSONResponse(`{}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+	service := &Service{now: func() time.Time { return now }, Logger: log.New(io.Discard, "", 0)}
+
+	if err := service.reconcileCurrentManagedAppZeroDowntimeBlock(context.Background(), client, namespace, app); err != nil {
+		t.Fatalf("reconcile current zero-downtime block: %v", err)
+	}
+	if !deleted {
+		t.Fatal("expected the proven old Evicted pod to be pruned")
+	}
+}
+
+func TestCurrentZeroDowntimeBlockSkipsCleanupWithoutFreshReadyProof(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	name := runtime.RuntimeAppResourceName(app)
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = name
+	deployment.Metadata.Generation = 4
+	deployment.Status.ObservedGeneration = 3
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Path != deploymentAPIPath(namespace, name) {
+			t.Fatalf("unready proof must not list or delete pods, got %s %s", req.Method, req.URL.String())
+		}
+		payload, err := json.Marshal(deployment)
+		if err != nil {
+			t.Fatalf("marshal deployment: %v", err)
+		}
+		return okJSONResponse(string(payload)), nil
+	})
+	client := &kubeClient{client: &http.Client{Transport: transport}, baseURL: "http://kube.test", namespace: namespace}
+	service := &Service{Logger: log.New(io.Discard, "", 0)}
+
+	if err := service.reconcileCurrentManagedAppZeroDowntimeBlock(context.Background(), client, namespace, app); err != nil {
+		t.Fatalf("reconcile current zero-downtime block: %v", err)
+	}
+}
