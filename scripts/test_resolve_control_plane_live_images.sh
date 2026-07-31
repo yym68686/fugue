@@ -642,16 +642,23 @@ if grep -Fq 'SECRET-MUST-NOT-LEAK' "${DIGEST_OUTPUT}" "${DIGEST_STDOUT}" "${DIGE
   fail "Helm values secret leaked through resolver outputs or logs"
 fi
 
-PUBLIC_TARGET_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-PUBLIC_RELEASE_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD^^)"
-PUBLIC_INACTIVE_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD^^^)"
-PUBLIC_HELM_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD^^^^)"
-PUBLIC_NONANCESTOR_SHA="$(
+PUBLIC_FIXTURE_TREE="$(git -C "${REPO_ROOT}" rev-parse HEAD^{tree})"
+public_fixture_commit() {
+  local message="$1"
+  local parent="${2:-}"
+  local commit_args=(commit-tree "${PUBLIC_FIXTURE_TREE}")
+  [[ -z "${parent}" ]] || commit_args+=(-p "${parent}")
   GIT_AUTHOR_NAME=fugue-test GIT_AUTHOR_EMAIL=fugue-test@example.invalid \
+  GIT_AUTHOR_DATE=2026-07-31T00:00:00Z \
   GIT_COMMITTER_NAME=fugue-test GIT_COMMITTER_EMAIL=fugue-test@example.invalid \
-    git -C "${REPO_ROOT}" commit-tree "$(git -C "${REPO_ROOT}" rev-parse HEAD^{tree})" \
-      -m 'resolver non-ancestor fixture'
-)"
+  GIT_COMMITTER_DATE=2026-07-31T00:00:00Z \
+    git -C "${REPO_ROOT}" "${commit_args[@]}" -m "${message}"
+}
+PUBLIC_HELM_SHA="$(public_fixture_commit 'resolver Helm slot fixture')"
+PUBLIC_INACTIVE_SHA="$(public_fixture_commit 'resolver inactive slot fixture' "${PUBLIC_HELM_SHA}")"
+PUBLIC_RELEASE_SHA="$(public_fixture_commit 'resolver release record fixture' "${PUBLIC_INACTIVE_SHA}")"
+PUBLIC_TARGET_SHA="$(public_fixture_commit 'resolver target fixture' "${PUBLIC_RELEASE_SHA}")"
+PUBLIC_NONANCESTOR_SHA="$(public_fixture_commit 'resolver non-ancestor fixture')"
 PUBLIC_RECORD_OBJECTS="${TMP_ROOT}/public-record-objects.json"
 PUBLIC_RECORD_VALUES="${TMP_ROOT}/public-record-values.json"
 python3 - "${PUBLIC_RECORD_OBJECTS}" "${PUBLIC_RECORD_VALUES}" \

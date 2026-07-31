@@ -7739,6 +7739,35 @@ assert_eq "$(plan_value "${RESOLVE_TEST_OUTPUT}" edge_image_baseline_ref)" "edge
 rm -rf "${RESOLVE_TEST_DIR}"
 rm -f "${RESOLVE_TEST_OUTPUT}"
 
+RESOLVE_SHALLOW_SOURCE="$(mktemp -d)"
+RESOLVE_SHALLOW_CLONE="$(mktemp -d)"
+git -C "${RESOLVE_SHALLOW_SOURCE}" init -q
+git -C "${RESOLVE_SHALLOW_SOURCE}" config user.name fugue-test
+git -C "${RESOLVE_SHALLOW_SOURCE}" config user.email fugue-test@example.invalid
+printf 'resolver shallow root\n' >"${RESOLVE_SHALLOW_SOURCE}/fixture-root"
+git -C "${RESOLVE_SHALLOW_SOURCE}" add fixture-root
+git -C "${RESOLVE_SHALLOW_SOURCE}" commit -q -m 'resolver shallow root'
+mkdir -p "${RESOLVE_SHALLOW_SOURCE}/scripts/lib"
+cp "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh" \
+  "${REPO_ROOT}/scripts/test_resolve_control_plane_live_images.sh" \
+  "${RESOLVE_SHALLOW_SOURCE}/scripts/"
+cp "${REPO_ROOT}/scripts/lib/release_image_ref.sh" "${RESOLVE_SHALLOW_SOURCE}/scripts/lib/"
+chmod +x "${RESOLVE_SHALLOW_SOURCE}/scripts/resolve_control_plane_live_images.sh" \
+  "${RESOLVE_SHALLOW_SOURCE}/scripts/test_resolve_control_plane_live_images.sh"
+git -C "${RESOLVE_SHALLOW_SOURCE}" add scripts
+git -C "${RESOLVE_SHALLOW_SOURCE}" commit -q -m 'resolver shallow target'
+rmdir "${RESOLVE_SHALLOW_CLONE}"
+git clone -q --depth=1 "file://${RESOLVE_SHALLOW_SOURCE}" "${RESOLVE_SHALLOW_CLONE}"
+assert_eq "$(git -C "${RESOLVE_SHALLOW_CLONE}" rev-parse --is-shallow-repository)" "true" \
+  "resolver shallow regression uses a real depth-one clone"
+if git -C "${RESOLVE_SHALLOW_CLONE}" rev-parse HEAD^ >/dev/null 2>&1; then
+  fail "resolver shallow regression must not have the target parent"
+fi
+assert_eq "$(bash "${RESOLVE_SHALLOW_CLONE}/scripts/test_resolve_control_plane_live_images.sh")" \
+  "control-plane live image resolver tests passed" \
+  "resolver tests synthesize release ancestry without fetched Git history"
+rm -rf "${RESOLVE_SHALLOW_SOURCE}" "${RESOLVE_SHALLOW_CLONE}"
+
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
