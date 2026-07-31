@@ -144,6 +144,36 @@ func MaterializeLiveRelativeTargetPublishedImageRefs(
 	buildPlan BuildArtifactPlan,
 	releasePlan Plan,
 ) ([]byte, error) {
+	return materializeObservedLiveRelativeTargetPublishedImageRefs(
+		baseManifest, baseManifest, targetManifest, ownership,
+		defaultNamespace, trustedTarget, buildPlan, releasePlan,
+	)
+}
+
+// MaterializeObservedLiveRelativeTargetPublishedImageRefs uses a separately
+// attested image-only projection of the actual Kubernetes workload state when
+// deciding whether a target image is already active. The Helm base remains the
+// release-plan and rollback source of truth; observedLiveManifest is accepted
+// only after VerifyObservedLiveImageManifest proves that it differs from that
+// base exclusively at existing container image fields.
+func MaterializeObservedLiveRelativeTargetPublishedImageRefs(
+	baseManifest, observedLiveManifest, targetManifest, ownership []byte,
+	defaultNamespace, trustedTarget string,
+	buildPlan BuildArtifactPlan,
+	releasePlan Plan,
+) ([]byte, error) {
+	return materializeObservedLiveRelativeTargetPublishedImageRefs(
+		baseManifest, observedLiveManifest, targetManifest, ownership,
+		defaultNamespace, trustedTarget, buildPlan, releasePlan,
+	)
+}
+
+func materializeObservedLiveRelativeTargetPublishedImageRefs(
+	baseManifest, observedLiveManifest, targetManifest, ownership []byte,
+	defaultNamespace, trustedTarget string,
+	buildPlan BuildArtifactPlan,
+	releasePlan Plan,
+) ([]byte, error) {
 	if err := VerifyPlanDigest(releasePlan); err != nil {
 		return nil, fmt.Errorf("verify release plan: %w", err)
 	}
@@ -162,9 +192,16 @@ func MaterializeLiveRelativeTargetPublishedImageRefs(
 	if defaultNamespace != context.DefaultNamespace {
 		return nil, fmt.Errorf("live-relative target default namespace mismatch")
 	}
+	if !bytes.Equal(baseManifest, observedLiveManifest) {
+		if err := VerifyObservedLiveImageManifest(
+			baseManifest, observedLiveManifest, ownership, defaultNamespace,
+		); err != nil {
+			return nil, fmt.Errorf("verify observed live image manifest: %w", err)
+		}
+	}
 
 	materialized, err := materializeTargetPublishedImageRefs(
-		baseManifest, targetManifest, ownership, defaultNamespace, trustedTarget, buildPlan,
+		observedLiveManifest, targetManifest, ownership, defaultNamespace, trustedTarget, buildPlan,
 	)
 	if err != nil {
 		return nil, err
@@ -187,7 +224,7 @@ func MaterializeLiveRelativeTargetPublishedImageRefs(
 	if err := spec.ValidateBindings(context.BindingMap()); err != nil {
 		return nil, fmt.Errorf("validate ownership bindings: %w", err)
 	}
-	baseObjects, baseUnknown := decodeManifest(baseManifest, spec, defaultNamespace, "live-relative base")
+	baseObjects, baseUnknown := decodeManifest(observedLiveManifest, spec, defaultNamespace, "live-relative observed base")
 	targetObjects, targetUnknown := decodeManifest(materialized, spec, defaultNamespace, "live-relative target")
 	if len(baseUnknown) != 0 || len(targetUnknown) != 0 {
 		return nil, manifestEvidenceError(append(baseUnknown, targetUnknown...))

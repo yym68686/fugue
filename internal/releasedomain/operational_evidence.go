@@ -24,6 +24,7 @@ const (
 	OperationalActivationEvidencePolicy     = "consumer-activation-render-adapter-intersection-v2"
 	OperationalActivationReportPolicy       = "consumer-activation-render-adapter-intersection-v3-report-only"
 	OperationalRenderedOnlyActivationPolicy = "consumer-activation-render-adapter-intersection-v4-rendered-only"
+	OperationalObservedLiveActivationPolicy = "consumer-activation-render-adapter-intersection-v5-observed-live"
 	OperationalImageCacheConvergencePolicy  = "authorized-image-cache-convergence-v1"
 	OperationalRenderedOnlyPolicy           = "empty-build-activation-render-adapter-v1"
 	operationalRenderedOnlyMismatchIssue    = "image activation domains differ from immutable rendered-object domains"
@@ -125,6 +126,7 @@ type OperationalActivationWitness struct {
 	Evidence                      ImageActivationEvidence `json:"evidence"`
 	Rendered                      RenderedClassification  `json:"rendered"`
 	BaseManifestDigest            string                  `json:"baseManifestDigest"`
+	ObservedLiveManifestDigest    string                  `json:"observedLiveManifestDigest,omitempty"`
 	TargetManifestDigest          string                  `json:"targetManifestDigest"`
 	ImmutableTargetManifestDigest string                  `json:"immutableTargetManifestDigest"`
 	OwnershipDigest               string                  `json:"ownershipDigest"`
@@ -356,7 +358,7 @@ func BuildOperationalDomainEvidenceFromActivation(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalActivationEvidencePolicy, false,
+		ownershipDigest, "", plan, OperationalActivationEvidencePolicy, false,
 	)
 }
 
@@ -379,7 +381,7 @@ func BuildOperationalDomainEvidenceFromActivationReportOnly(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalActivationReportPolicy, false,
+		ownershipDigest, "", plan, OperationalActivationReportPolicy, false,
 	)
 }
 
@@ -402,7 +404,32 @@ func BuildOperationalDomainEvidenceFromRenderedOnlyActivation(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalRenderedOnlyActivationPolicy, false,
+		ownershipDigest, "", plan, OperationalRenderedOnlyActivationPolicy, false,
+	)
+}
+
+// BuildOperationalDomainEvidenceFromObservedLiveActivation emits the v5
+// rendered-only policy. It keeps the Helm base/target digests intact while
+// binding image activation to a separately captured image-only live witness.
+// Consumers must also supply those exact observed-live bytes when resolving
+// the report; the embedded digest alone is never sufficient authorization.
+func BuildOperationalDomainEvidenceFromObservedLiveActivation(
+	changed ChangedFileEvidence,
+	buildPlan BuildArtifactPlan,
+	activationPlan ImageActivationPlan,
+	activationEvidence ImageActivationEvidence,
+	activationRendered RenderedClassification,
+	baseManifestDigest string,
+	observedLiveManifestDigest string,
+	targetManifestDigest string,
+	immutableTargetManifestDigest string,
+	ownershipDigest string,
+	plan Plan,
+) (OperationalDomainEvidence, error) {
+	return buildOperationalDomainEvidenceFromActivation(
+		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
+		ownershipDigest, observedLiveManifestDigest, plan, OperationalObservedLiveActivationPolicy, false,
 	)
 }
 
@@ -432,7 +459,7 @@ func BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence(
 	return buildOperationalDomainEvidenceFromActivation(
 		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
 		baseManifestDigest, targetManifestDigest, immutableTargetManifestDigest,
-		ownershipDigest, plan, OperationalImageCacheConvergencePolicy, true,
+		ownershipDigest, "", plan, OperationalImageCacheConvergencePolicy, true,
 	)
 }
 
@@ -446,6 +473,7 @@ func buildOperationalDomainEvidenceFromActivation(
 	targetManifestDigest string,
 	immutableTargetManifestDigest string,
 	ownershipDigest string,
+	observedLiveManifestDigest string,
 	plan Plan,
 	policy string,
 	authorizedImageCacheConvergence bool,
@@ -476,11 +504,20 @@ func buildOperationalDomainEvidenceFromActivation(
 		activationEvidence.ResolvedImageActivationPlanDigest != activationPlan.Digest {
 		return OperationalDomainEvidence{}, fmt.Errorf("operational activation witness binding mismatch")
 	}
+	expectedLiveStateDigest := baseManifestDigest
+	if policy == OperationalObservedLiveActivationPolicy {
+		if err := validateCanonicalSHA256Digest(observedLiveManifestDigest, "operational activation observed live manifest digest"); err != nil {
+			return OperationalDomainEvidence{}, err
+		}
+		expectedLiveStateDigest = observedLiveManifestDigest
+	} else if observedLiveManifestDigest != "" {
+		return OperationalDomainEvidence{}, fmt.Errorf("legacy operational activation must not include an observed live manifest")
+	}
 	if plan.Digests.ChangedFiles != changed.Digest() ||
 		plan.Digests.BaseManifest != baseManifestDigest ||
 		plan.Digests.TargetManifest != targetManifestDigest ||
 		plan.Digests.Ownership != ownershipDigest ||
-		activationPlan.LiveStateDigest != baseManifestDigest {
+		activationPlan.LiveStateDigest != expectedLiveStateDigest {
 		return OperationalDomainEvidence{}, fmt.Errorf("operational activation rendered binding mismatch")
 	}
 	for label, digest := range map[string]string{
@@ -549,7 +586,8 @@ func buildOperationalDomainEvidenceFromActivation(
 	witness := OperationalActivationWitness{
 		BuildPlan: buildPlan, Plan: activationPlan, Evidence: activationEvidence,
 		Rendered:           activationRendered,
-		BaseManifestDigest: baseManifestDigest, TargetManifestDigest: targetManifestDigest,
+		BaseManifestDigest: baseManifestDigest, ObservedLiveManifestDigest: observedLiveManifestDigest,
+		TargetManifestDigest:          targetManifestDigest,
 		ImmutableTargetManifestDigest: immutableTargetManifestDigest, OwnershipDigest: ownershipDigest,
 	}
 	report := OperationalDomainEvidence{
@@ -566,6 +604,7 @@ func buildOperationalDomainEvidenceFromActivation(
 		Observation: OutcomeUnknown, Issues: issues, ActivationWitness: []OperationalActivationWitness{witness},
 	}
 	if policy == OperationalActivationReportPolicy || policy == OperationalRenderedOnlyActivationPolicy ||
+		policy == OperationalObservedLiveActivationPolicy ||
 		policy == OperationalImageCacheConvergencePolicy {
 		observation := buildRenderedOnlyOperationalObservation(
 			buildPlan, activationPlan, activationEvidence, activationRendered, bindings,
@@ -633,6 +672,7 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 		(report.Policy != OperationalEvidencePolicy && report.Policy != OperationalActivationEvidencePolicy &&
 			report.Policy != OperationalActivationReportPolicy &&
 			report.Policy != OperationalRenderedOnlyActivationPolicy &&
+			report.Policy != OperationalObservedLiveActivationPolicy &&
 			report.Policy != OperationalImageCacheConvergencePolicy) {
 		return fmt.Errorf("operational domain evidence identity is unsupported")
 	}
@@ -683,7 +723,8 @@ func VerifyOperationalDomainEvidence(report OperationalDomainEvidence) error {
 			return fmt.Errorf("operational evidence embedded image plan: %w", err)
 		}
 	case OperationalActivationEvidencePolicy, OperationalActivationReportPolicy,
-		OperationalRenderedOnlyActivationPolicy, OperationalImageCacheConvergencePolicy:
+		OperationalRenderedOnlyActivationPolicy, OperationalObservedLiveActivationPolicy,
+		OperationalImageCacheConvergencePolicy:
 		if len(report.ActivationWitness) != 1 {
 			return fmt.Errorf("operational activation evidence requires one exact witness")
 		}
@@ -787,11 +828,23 @@ func verifyOperationalActivationWitness(report OperationalDomainEvidence, witnes
 			return err
 		}
 	}
+	expectedLiveStateDigest := witness.BaseManifestDigest
+	if report.Policy == OperationalObservedLiveActivationPolicy {
+		if err := validateCanonicalSHA256Digest(
+			witness.ObservedLiveManifestDigest,
+			"operational activation witness observed live manifest digest",
+		); err != nil {
+			return err
+		}
+		expectedLiveStateDigest = witness.ObservedLiveManifestDigest
+	} else if witness.ObservedLiveManifestDigest != "" {
+		return fmt.Errorf("legacy operational activation witness contains observed live evidence")
+	}
 	if witness.BuildPlan.BaseCommit != report.BaseCommit || witness.BuildPlan.TargetCommit != report.TargetCommit ||
 		witness.BuildPlan.ChangedFilesDigest != report.ChangedFilesDigest ||
 		witness.Plan.BaseCommit != report.BaseCommit || witness.Plan.TargetCommit != report.TargetCommit ||
 		witness.Plan.BuildArtifactPlanDigest != witness.BuildPlan.Digest ||
-		witness.Plan.Digest != report.ImagePlanDigest || witness.Plan.LiveStateDigest != witness.BaseManifestDigest ||
+		witness.Plan.Digest != report.ImagePlanDigest || witness.Plan.LiveStateDigest != expectedLiveStateDigest ||
 		witness.Evidence.BaseCommit != report.BaseCommit || witness.Evidence.TargetCommit != report.TargetCommit ||
 		witness.Evidence.BuildArtifactPlanDigest != witness.BuildPlan.Digest ||
 		witness.Evidence.ResolvedImageActivationPlanDigest != witness.Plan.Digest {
@@ -917,6 +970,28 @@ func buildRenderedOnlyOperationalObservation(
 // zero-write result: built artifacts are all absent from the target, or the
 // empty build plan proves the immutable target already equals live state.
 func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
+	return resolveOperationalPlan(conservative, report, nil)
+}
+
+// ResolveOperationalPlanWithObservedLiveManifest is the only resolver for a
+// v5 observed-live report. The caller must provide the exact private canonical
+// image-only witness whose digest was embedded by the report producer.
+func ResolveOperationalPlanWithObservedLiveManifest(
+	conservative Plan,
+	report OperationalDomainEvidence,
+	observedLiveManifest []byte,
+) (Plan, error) {
+	if len(observedLiveManifest) == 0 {
+		return Plan{}, fmt.Errorf("operational activation observed live manifest is required")
+	}
+	return resolveOperationalPlan(conservative, report, observedLiveManifest)
+}
+
+func resolveOperationalPlan(
+	conservative Plan,
+	report OperationalDomainEvidence,
+	observedLiveManifest []byte,
+) (Plan, error) {
 	if err := VerifyPlanDigest(conservative); err != nil {
 		return Plan{}, fmt.Errorf("operational activation conservative plan: %w", err)
 	}
@@ -925,6 +1000,16 @@ func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence)
 	}
 	if err := VerifyOperationalDomainEvidence(report); err != nil {
 		return Plan{}, fmt.Errorf("operational activation report: %w", err)
+	}
+	if report.Policy == OperationalObservedLiveActivationPolicy {
+		witness := report.ActivationWitness[0]
+		if len(observedLiveManifest) == 0 ||
+			digestBytesSHA256(observedLiveManifest) != witness.ObservedLiveManifestDigest ||
+			witness.Plan.LiveStateDigest != witness.ObservedLiveManifestDigest {
+			return Plan{}, fmt.Errorf("operational activation observed live manifest binding mismatch")
+		}
+	} else if len(observedLiveManifest) != 0 {
+		return Plan{}, fmt.Errorf("legacy operational activation does not accept an observed live manifest")
 	}
 	authorizedDomain, domainEligible := operationalAuthorizationCandidate(report)
 	zeroEligible := operationalZeroResolutionEligible(report)
@@ -947,12 +1032,17 @@ func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence)
 	}
 	if report.Policy == OperationalActivationEvidencePolicy || report.Policy == OperationalActivationReportPolicy ||
 		report.Policy == OperationalRenderedOnlyActivationPolicy ||
+		report.Policy == OperationalObservedLiveActivationPolicy ||
 		report.Policy == OperationalImageCacheConvergencePolicy {
 		witness := report.ActivationWitness[0]
+		expectedLiveStateDigest := conservative.Digests.BaseManifest
+		if report.Policy == OperationalObservedLiveActivationPolicy {
+			expectedLiveStateDigest = witness.ObservedLiveManifestDigest
+		}
 		if witness.BaseManifestDigest != conservative.Digests.BaseManifest ||
 			witness.TargetManifestDigest != conservative.Digests.TargetManifest ||
 			witness.OwnershipDigest != conservative.Digests.Ownership ||
-			witness.Plan.LiveStateDigest != conservative.Digests.BaseManifest ||
+			witness.Plan.LiveStateDigest != expectedLiveStateDigest ||
 			witness.BuildPlan.ChangedFilesDigest != conservative.Digests.ChangedFiles {
 			return Plan{}, fmt.Errorf("operational activation immutable rendered witness mismatch")
 		}
@@ -1017,7 +1107,7 @@ func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence
 }
 
 func operationalZeroResolutionEligible(report OperationalDomainEvidence) bool {
-	if report.Policy != OperationalRenderedOnlyActivationPolicy || report.AuthorizationEligible ||
+	if !isConsumableRenderedOnlyPolicy(report.Policy) || report.AuthorizationEligible ||
 		len(report.Issues) != 0 || report.Observation != OutcomeZero || report.CandidateDomain != "" ||
 		len(report.ImageTargets) != 0 || len(report.ImageRolloutDomains) != 0 ||
 		len(report.RenderedDomains) != 0 || len(report.AdapterDomains) != 0 ||
@@ -1057,7 +1147,7 @@ func operationalAuthorizationCandidate(report OperationalDomainEvidence) (Domain
 		len(report.IntersectionDomains) == 1 && report.CandidateDomain == report.IntersectionDomains[0] {
 		return report.CandidateDomain, true
 	}
-	if report.Policy != OperationalRenderedOnlyActivationPolicy || len(report.RenderedOnlyObservations) != 1 ||
+	if !isConsumableRenderedOnlyPolicy(report.Policy) || len(report.RenderedOnlyObservations) != 1 ||
 		!reflect.DeepEqual(report.Issues, []string{operationalRenderedOnlyMismatchIssue}) ||
 		len(report.ImageTargets) != 0 || len(report.ConsumerDomains) != 0 ||
 		len(report.ImageRolloutDomains) != 0 || len(report.AdapterDomains) != 0 ||
@@ -1071,6 +1161,11 @@ func operationalAuthorizationCandidate(report OperationalDomainEvidence) (Domain
 		return "", false
 	}
 	return observation.CandidateDomain, true
+}
+
+func isConsumableRenderedOnlyPolicy(policy string) bool {
+	return policy == OperationalRenderedOnlyActivationPolicy ||
+		policy == OperationalObservedLiveActivationPolicy
 }
 
 func verifyOperationalConservativeClassification(report OperationalDomainEvidence) error {

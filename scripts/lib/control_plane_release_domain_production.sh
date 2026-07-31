@@ -92,13 +92,14 @@ import os
 import stat
 import sys
 
-expected_names = [
+legacy_names = [
     "build-artifact-plan.json",
     "composite-decomposition-evidence.json",
     "image-activation-evidence.json",
     "image-activation-plan.json",
     "immutable-target-manifest.yaml",
 ]
+observed_names = sorted(legacy_names + ["observed-live-manifest.yaml"])
 payloads = []
 for directory in map(os.path.abspath, sys.argv[1:]):
     metadata = os.lstat(directory)
@@ -109,10 +110,11 @@ for directory in map(os.path.abspath, sys.argv[1:]):
         or metadata.st_uid != os.geteuid()
     ):
         raise SystemExit(1)
-    if sorted(os.listdir(directory)) != expected_names:
+    names = sorted(os.listdir(directory))
+    if names not in (sorted(legacy_names), observed_names):
         raise SystemExit(1)
     directory_payload = []
-    for name in expected_names:
+    for name in names:
         path = os.path.join(directory, name)
         at_path = os.lstat(path)
         if (
@@ -217,6 +219,8 @@ control_plane_release_domain_setup_private_workdir() {
   CONTROL_PLANE_RELEASE_DOMAIN_VERIFY_RESULT="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/verify.result"
   CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/changed-file-evidence.json"
   CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_IMAGE_PLAN="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/operational-image-plan.json"
+  CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST=""
+  CONTROL_PLANE_RELEASE_DOMAIN_OBSERVED_LIVE_AUTHORIZED="false"
   CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_SNAPSHOT="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/upgrade-argv.source.snapshot"
   CONTROL_PLANE_RELEASE_DOMAIN_ARGV_INPUT_IDENTITIES="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/upgrade-argv-input-identities.json"
   CONTROL_PLANE_RELEASE_DOMAIN_RUNTIME_TMP_DIR="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/runtime"
@@ -1215,6 +1219,13 @@ control_plane_release_domain_private_authorize_consumer() {
 	    --operational-report "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT}"
 	    --operational-report-digest "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_REPORT_DIGEST}"
 	  )
+	  if [[ -n "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST:-}" ]]; then
+	    [[ -f "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST}" &&
+	      ! -L "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST}" ]] || return 2
+	    operational_args+=(
+	      --activation-live-canonical-manifest "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST}"
+	    )
+	  fi
 	fi
 
   rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZATION_RESULT}"
@@ -1356,6 +1367,9 @@ control_plane_release_domain_try_operational_activation() {
 	CONTROL_PLANE_RELEASE_DOMAIN_PLAN_DIGEST="${plan_digest}"
 	CONTROL_PLANE_RELEASE_DOMAIN_PRELIMINARY_OUTCOME="single"
 	CONTROL_PLANE_RELEASE_DOMAIN_OPERATIONAL_ZERO_AUTHORIZED="false"
+	if [[ -n "${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST:-}" ]]; then
+	  CONTROL_PLANE_RELEASE_DOMAIN_OBSERVED_LIVE_AUTHORIZED="true"
+	fi
 	control_plane_release_domain_verify_bundle_command || return
 	rm -f "${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/authorization.blocked"
 }
@@ -1397,9 +1411,11 @@ control_plane_release_domain_materialize_operational_report() {
   local published_image_repository=""
   local published_image_ref=""
   local activation_output=""
+  local observed_live_manifest=""
   local -a targets=()
   local -a target_args=()
   local -a activation_artifact_args=()
+  local -a activation_observed_args=()
   local -a image_plan_command=()
   local -a activation_plan_command=()
 
@@ -1507,6 +1523,18 @@ PY
 )" || return 2
   control_plane_release_domain_validate_digest "${plan_digest}" || return 2
 
+  case "${FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE:-false}" in
+    false)
+      observed_live_manifest="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/observed-live-${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}.manifest"
+      control_plane_release_domain_capture_observed_live_manifest \
+        "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/base-manifest.yaml" \
+        "${observed_live_manifest}" || return
+      activation_observed_args=(--observed-live-manifest "${observed_live_manifest}")
+      ;;
+    true) ;;
+    *) return 2 ;;
+  esac
+
   activation_plan_command=("${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" image-activation-plans \
     --changed-evidence "${CONTROL_PLANE_RELEASE_DOMAIN_CHANGED_EVIDENCE}" \
     --ownership "${CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE}" \
@@ -1518,6 +1546,9 @@ PY
     --trusted-target "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" \
     --provenance-digest "${FUGUE_RELEASE_DOMAIN_VERIFIED_IMAGE_ARTIFACTS_DIGEST}" \
     --output-dir "${activation_output}")
+  if (( ${#activation_observed_args[@]} > 0 )); then
+    activation_plan_command+=("${activation_observed_args[@]}")
+  fi
   if (( ${#activation_artifact_args[@]} > 0 )); then
     activation_plan_command+=("${activation_artifact_args[@]}")
   fi
@@ -1537,12 +1568,20 @@ PY
     --trusted-base "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" \
     --trusted-target "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" \
     --output "${report_output}")
+  if (( ${#activation_observed_args[@]} > 0 )); then
+    operational_report_command+=(
+      --observed-live-manifest "${activation_output}/observed-live-manifest.yaml"
+    )
+  fi
   case "${FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE:-false}" in
     false) ;;
     true) operational_report_command+=(--authorized-image-cache-convergence) ;;
     *) return 2 ;;
   esac
   "${operational_report_command[@]}" || return
+  if (( ${#activation_observed_args[@]} > 0 )); then
+    CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST="${activation_output}/observed-live-manifest.yaml"
+  fi
 
   if [[ "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE}" == "apply" ]]; then
     control_plane_release_domain_compare_build_activation_reports \
@@ -1550,6 +1589,47 @@ PY
     control_plane_release_domain_compare_uploaded_operational_report \
       "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}" "${report_output}"
   fi
+}
+
+control_plane_release_domain_capture_observed_live_manifest() {
+  (( $# == 2 )) || return 2
+  local base_manifest="$1"
+  local output="$2"
+  local raw="${output}.workloads.json"
+
+  [[ -f "${base_manifest}" && ! -L "${base_manifest}" &&
+    ! -e "${output}" && ! -L "${output}" &&
+    ! -e "${raw}" && ! -L "${raw}" ]] || return 2
+  if ! (umask 077; release_bounded_kubectl \
+    "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-30}" \
+    "observed live workload image inventory" \
+    -n "${FUGUE_NAMESPACE}" get \
+    deployments.apps,daemonsets.apps,statefulsets.apps,cronjobs.batch \
+    -o json >"${raw}"); then
+    return 1
+  fi
+  chmod 600 "${raw}" || return
+  if ! "${FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL}" observed-live-manifest \
+    --base-manifest "${base_manifest}" \
+    --live-workloads "${raw}" \
+    --ownership "${CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE}" \
+    --namespace "${FUGUE_NAMESPACE}" \
+    --output "${output}"; then
+    return 1
+  fi
+  rm -f "${raw}" || return
+}
+
+control_plane_release_domain_verify_observed_live_manifest() {
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_OBSERVED_LIVE_AUTHORIZED:-false}" == "true" ]] || return 0
+  local expected="${CONTROL_PLANE_RELEASE_DOMAIN_ACTIVATION_LIVE_MANIFEST:-}"
+  local current="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/observed-live-prewrite.manifest"
+
+  [[ -f "${expected}" && ! -L "${expected}" ]] || return 2
+  control_plane_release_domain_capture_observed_live_manifest \
+    "${CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR}/base-manifest.yaml" \
+    "${current}" || return
+  cmp -s "${expected}" "${current}"
 }
 
 control_plane_release_domain_read_exact_result() {
@@ -2064,6 +2144,7 @@ control_plane_release_domain_prepare_common() {
   control_plane_release_domain_run_release_preflight_handoff verify || return
   control_plane_release_domain_pending_signal &&
     return "$(control_plane_release_domain_pending_status)"
+  control_plane_release_domain_verify_observed_live_manifest || return
 
   case "${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN}" in
     node-local|authoritative-dns)
@@ -2292,7 +2373,7 @@ control_plane_release_domain_validate_dependencies() {
     preserve_maintenance_agents_from_live preserve_strict_drain_agent_image_from_live \
     live_deployment_replicas stateful_dependency_changed \
     finalize_dns_manifest_transaction write_dns_manifest_release_record_after_commit \
-    cleanup_finalized_dns_manifest_snapshot; do
+    cleanup_finalized_dns_manifest_snapshot release_bounded_kubectl; do
     control_plane_release_domain_require_function "${name}" || return
   done
 }
@@ -2656,7 +2737,7 @@ control_plane_release_run_atomic_domain_release() {
   if control_plane_release_domain_private_recovery_required; then
     :
   elif ! control_plane_release_domain_cleanup_private_workdir; then
-    control_plane_release_domain_log \
+    control_plane_release_domain_production_error \
       "private release workdir cleanup failed after transaction completion; renewer_pid=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-none} renewer_stop_failed=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FAILED:-false}"
     final_status=2
   fi
