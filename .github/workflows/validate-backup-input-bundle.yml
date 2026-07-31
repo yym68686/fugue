@@ -1,0 +1,88 @@
+name: validate backup input bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - internal/backupmaterializer/**
+      - internal/backupmaterializeridentity/**
+      - internal/backupmaterializerreview/**
+      - internal/backupadapter/**
+      - internal/backupcontrol/**
+      - internal/backupidentity/**
+      - internal/api/backup_materializer.go
+      - internal/api/backup_materializer_test.go
+      - internal/api/routes_gen.go
+      - internal/apispec/backup_materializer_test.go
+      - internal/apispec/spec.go
+      - internal/apispec/spec_gen.go
+      - cmd/fugue-openapi-gen/**
+      - openapi/openapi.yaml
+      - internal/model/backup.go
+      - internal/store/backup.go
+      - internal/store/backup_observation.go
+      - internal/componentmanifest/backup_input_bundle_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-input-bundle.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - internal/backupmaterializer/**
+      - internal/backupmaterializeridentity/**
+      - internal/backupmaterializerreview/**
+      - internal/backupadapter/**
+      - internal/backupcontrol/**
+      - internal/backupidentity/**
+      - internal/api/backup_materializer.go
+      - internal/api/backup_materializer_test.go
+      - internal/api/routes_gen.go
+      - internal/apispec/backup_materializer_test.go
+      - internal/apispec/spec.go
+      - internal/apispec/spec_gen.go
+      - cmd/fugue-openapi-gen/**
+      - openapi/openapi.yaml
+      - internal/model/backup.go
+      - internal/store/backup.go
+      - internal/store/backup_observation.go
+      - internal/componentmanifest/backup_input_bundle_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-input-bundle.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-input-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup input bundle (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify sealed spec and identity handoff
+        run: |
+          set -euo pipefail
+          go test ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupmaterializerreview/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity -count=1
+          go test -race ./internal/backupmaterializer/... -count=5
+          go test ./internal/api -run TestBackupMaterializerEndpoint -count=1
+          go test -race ./internal/api -run TestBackupMaterializerEndpoint -count=3
+          go test ./internal/apispec -run 'Test(BackupMaterializerOpenAPIContractIsPrivateStrictAndDefaultOff|GeneratedArtifactsAreUpToDate|EmbeddedSpecIsValid)' -count=1
+          go test ./cmd/fugue-openapi-gen -count=1
+          go test ./internal/componentmanifest -run TestBackupInputBundleWorkflowIsReadOnly -count=1
+          go vet ./internal/api ./internal/apispec ./internal/backupmaterializer/... ./internal/backupmaterializeridentity/... ./internal/backupmaterializerreview/... ./internal/backupadapter ./internal/backupcontrol ./internal/backupidentity ./cmd/fugue-openapi-gen
+          go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check

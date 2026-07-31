@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fugue-backup-materializer-dry-run-guard
+description: Fail-closed admission guard for one Fugue backup Secret dry-run gateway cell
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

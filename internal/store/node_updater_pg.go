@@ -221,6 +221,17 @@ FROM fugue_node_updaters`
 	return updaters, mapDBErr(rows.Err())
 }
 
+func (s *Store) pgGetNodeUpdater(updaterID string) (model.NodeUpdater, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	updater, err := s.pgFindNodeUpdaterTarget(ctx, s.db, strings.TrimSpace(updaterID), "", "")
+	if err != nil {
+		return model.NodeUpdater{}, err
+	}
+	return redactNodeUpdater(updater), nil
+}
+
 func (s *Store) pgCreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

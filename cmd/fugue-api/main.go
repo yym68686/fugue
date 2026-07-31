@@ -32,6 +32,7 @@ func main() {
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
 	authenticator.PlatformComponentIdentityKeyring = platformComponentIdentityKeyringFromEnv()
+	authenticator.BackupObserverIdentityKeyring = backupObserverIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		DatabaseURL:                 cfg.DatabaseURL,

@@ -1,0 +1,39 @@
+# Digest pins the multi-architecture builder so the backup validator lane
+# cannot move its toolchain implicitly.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy only the independently compiled validation-process closure. Legacy API,
+# stores, signers, reviewers, Kubernetes SDKs, backup execution, release code,
+# and every other Fugue command remain absent from the build context layer.
+COPY cmd/fugue-backup-materializer-validator ./cmd/fugue-backup-materializer-validator
+COPY internal/backupcontrol ./internal/backupcontrol
+COPY internal/backupmaterializer/client ./internal/backupmaterializer/client
+COPY internal/backupmaterializer/contract ./internal/backupmaterializer/contract
+COPY internal/backupmaterializer/dryrunreconciler ./internal/backupmaterializer/dryrunreconciler
+COPY internal/backupmaterializer/materialization ./internal/backupmaterializer/materialization
+COPY internal/backupmaterializer/reconcile ./internal/backupmaterializer/reconcile
+COPY internal/backupmaterializer/reconciler ./internal/backupmaterializer/reconciler
+COPY internal/backupmaterializer/secretdryrunrequest ./internal/backupmaterializer/secretdryrunrequest
+COPY internal/backupmaterializer/secretreader ./internal/backupmaterializer/secretreader
+COPY internal/backupmaterializer/secretwriter ./internal/backupmaterializer/secretwriter
+COPY internal/backupmaterializer/validationagent ./internal/backupmaterializer/validationagent
+COPY internal/backupmaterializer/validationcomposition ./internal/backupmaterializer/validationcomposition
+COPY internal/backupmaterializer/validationcycle ./internal/backupmaterializer/validationcycle
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false -ldflags='-s -w' \
+    -o /out/fugue-backup-materializer-validator ./cmd/fugue-backup-materializer-validator
+
+FROM scratch
+LABEL org.opencontainers.image.title="fugue-backup-materializer-validator" \
+      org.opencontainers.image.description="Server-side-dry-run Fugue backup Secret validator"
+COPY --from=build /out/fugue-backup-materializer-validator /usr/local/bin/fugue-backup-materializer-validator
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/fugue-backup-materializer-validator"]

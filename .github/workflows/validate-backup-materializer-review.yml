@@ -1,0 +1,53 @@
+name: validate backup materializer review
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - internal/backupmaterializerreview/**
+      - internal/backupmaterializeridentity/**
+      - internal/componentmanifest/backup_materializer_review_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-materializer-review.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - internal/backupmaterializerreview/**
+      - internal/backupmaterializeridentity/**
+      - internal/componentmanifest/backup_materializer_review_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-materializer-review.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-materializer-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup materializer TokenReview adapter (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify bounded TokenReview transport boundary
+        run: |
+          set -euo pipefail
+          go test ./internal/backupmaterializerreview/... ./internal/backupmaterializeridentity -count=1
+          go test -race ./internal/backupmaterializerreview/... -count=5
+          go test ./internal/componentmanifest -run TestBackupMaterializerReviewWorkflowIsReadOnly -count=1
+          go vet ./internal/backupmaterializerreview/...

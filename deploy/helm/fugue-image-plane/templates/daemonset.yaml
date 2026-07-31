@@ -1,0 +1,205 @@
+{{- if .Values.enabled -}}
+{{- $repository := trim (required "image.repository is required when image-plane is enabled" .Values.image.repository) -}}
+{{- if or (contains "@" $repository) (contains "://" $repository) (not (regexMatch "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$" $repository)) -}}
+{{- fail "image.repository must be a fully qualified lowercase OCI repository without a tag or digest" -}}
+{{- end -}}
+{{- if not (hasSuffix "/fugue-image-plane-agent" $repository) -}}
+{{- fail "image.repository must select the dedicated fugue-image-plane-agent artifact during shadow migration" -}}
+{{- end -}}
+{{- $digest := trim (required "image.digest is required when image-plane is enabled" .Values.image.digest) -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail "image.digest must be an exact lowercase sha256 digest" -}}
+{{- end -}}
+{{- $apiBaseURL := trim (required "api.baseURL is required when image-plane is enabled" .Values.api.baseURL) -}}
+{{- if not (regexMatch "^https://[^/?#[:space:]@]+(?:/[^?#[:space:]]*)?$" $apiBaseURL) -}}
+{{- fail "api.baseURL must be an absolute HTTPS URL without credentials, query, or fragment" -}}
+{{- end -}}
+{{- $cellID := trim (required "cell.id is required when image-plane is enabled" .Values.cell.id) -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $cellID) -}}
+{{- fail "cell.id must be an exact lowercase DNS label of at most 63 characters" -}}
+{{- end -}}
+{{- if ne (toString .Values.updateStrategy.type) "OnDelete" -}}
+{{- fail "updateStrategy.type must be exactly OnDelete during shadow migration" -}}
+{{- end -}}
+{{- if ne (trim (toString .Values.priorityClassName)) "" -}}
+{{- fail "priorityClassName is forbidden for the observation-only shadow workload" -}}
+{{- end -}}
+{{- if not (kindIs "map" .Values.nodeSelector) -}}
+{{- fail "nodeSelector may contain only the shared fugue.io/image-plane-shadow=true opt-in; cell selection comes from cell.id" -}}
+{{- end -}}
+{{- $shadowSelector := index .Values.nodeSelector "fugue.io/image-plane-shadow" | default "" | toString -}}
+{{- if or (ne $shadowSelector "true") (ne (len .Values.nodeSelector) 1) -}}
+{{- fail "nodeSelector may contain only the shared fugue.io/image-plane-shadow=true opt-in; cell selection comes from cell.id" -}}
+{{- end -}}
+{{- $credentialHostPath := include "fugue-image-plane.validateHostPath" (list "credential.hostPath" .Values.credential.hostPath) -}}
+{{- $stateHostPath := include "fugue-image-plane.validateHostPath" (list "state.hostPath" .Values.state.hostPath) -}}
+{{- $legacyHostPath := include "fugue-image-plane.validateHostPath" (list "state.legacyHostPath" .Values.state.legacyHostPath) -}}
+{{- if or (eq $stateHostPath $legacyHostPath) (hasPrefix (printf "%s/" $legacyHostPath) $stateHostPath) (hasPrefix (printf "%s/" $stateHostPath) $legacyHostPath) -}}
+{{- fail "state.hostPath must be isolated from state.legacyHostPath during shadow migration" -}}
+{{- end -}}
+{{- if or (eq $stateHostPath $credentialHostPath) (hasPrefix (printf "%s/" $credentialHostPath) $stateHostPath) (hasPrefix (printf "%s/" $stateHostPath) $credentialHostPath) -}}
+{{- fail "state and credential host paths must be isolated" -}}
+{{- end -}}
+{{- if ne $credentialHostPath "/run/fugue/image-cache" -}}
+{{- fail "credential.hostPath must remain exactly /run/fugue/image-cache during shadow migration" -}}
+{{- end -}}
+{{- if ne $stateHostPath "/var/lib/fugue/image-plane-shadow" -}}
+{{- fail "state.hostPath must remain exactly /var/lib/fugue/image-plane-shadow during shadow migration" -}}
+{{- end -}}
+{{- if ne $legacyHostPath "/var/lib/fugue/image-cache" -}}
+{{- fail "state.legacyHostPath must remain exactly /var/lib/fugue/image-cache during shadow migration" -}}
+{{- end -}}
+{{- $portRaw := toString .Values.runtime.port -}}
+{{- if not (regexMatch "^[1-9][0-9]{3,4}$" $portRaw) -}}
+{{- fail "runtime.port must be an integer between 1024 and 65535" -}}
+{{- end -}}
+{{- $port := int $portRaw -}}
+{{- if or (lt $port 1024) (gt $port 65535) -}}
+{{- fail "runtime.port must be an integer between 1024 and 65535" -}}
+{{- end -}}
+{{- $longPoll := include "fugue-image-plane.validateDuration" (list "runtime.longPoll" .Values.runtime.longPoll 1 30) -}}
+{{- $requestTimeout := include "fugue-image-plane.validateDuration" (list "runtime.requestTimeout" .Values.runtime.requestTimeout 2 60) -}}
+{{- if le (int (trimSuffix "s" $requestTimeout)) (int (trimSuffix "s" $longPoll)) -}}
+{{- fail "runtime.requestTimeout must be greater than runtime.longPoll" -}}
+{{- end -}}
+{{- $retryMin := include "fugue-image-plane.validateDuration" (list "runtime.retryMin" .Values.runtime.retryMin 1 60) -}}
+{{- $retryMax := include "fugue-image-plane.validateDuration" (list "runtime.retryMax" .Values.runtime.retryMax 1 300) -}}
+{{- if lt (int (trimSuffix "s" $retryMax)) (int (trimSuffix "s" $retryMin)) -}}
+{{- fail "runtime.retryMax must be greater than or equal to runtime.retryMin" -}}
+{{- end -}}
+{{- $noPlanRetry := include "fugue-image-plane.validateDuration" (list "runtime.noPlanRetry" .Values.runtime.noPlanRetry 1 300) -}}
+{{- $credentialMinValidity := include "fugue-image-plane.validateDuration" (list "runtime.credentialMinValidity" .Values.runtime.credentialMinValidity 1 600) -}}
+{{- $archiveLimitRaw := toString .Values.runtime.archiveLimit -}}
+{{- if not (regexMatch "^[0-9]{1,2}$" $archiveLimitRaw) -}}
+{{- fail "runtime.archiveLimit must be an integer between 3 and 32" -}}
+{{- end -}}
+{{- $archiveLimit := int $archiveLimitRaw -}}
+{{- if or (lt $archiveLimit 3) (gt $archiveLimit 32) -}}
+{{- fail "runtime.archiveLimit must be an integer between 3 and 32" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fugue-image-plane.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "fugue-image-plane.labels" . | nindent 4 }}
+spec:
+  revisionHistoryLimit: 2
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      {{- include "fugue-image-plane.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue-image-plane.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: image-plane-shadow
+          image: {{ printf "%s@%s" $repository $digest | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: FUGUE_IMAGE_CACHE_LISTEN_ADDR
+              value: {{ printf "127.0.0.1:%d" $port | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_SHADOW_ENABLED
+              value: "true"
+            - name: FUGUE_API_BASE
+              value: {{ $apiBaseURL | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_FILE
+              value: /run/fugue/image-cache/platform-component-credential.json
+            - name: FUGUE_IMAGE_CACHE_REPLICATION_PLAN_PATH
+              value: /var/lib/fugue/image-cache/replication-plan.json
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_LONG_POLL
+              value: {{ $longPoll | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_REQUEST_TIMEOUT
+              value: {{ $requestTimeout | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_RETRY_MIN
+              value: {{ $retryMin | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_RETRY_MAX
+              value: {{ $retryMax | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_NO_PLAN_RETRY
+              value: {{ $noPlanRetry | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_CREDENTIAL_MIN_VALIDITY
+              value: {{ $credentialMinValidity | quote }}
+            - name: FUGUE_IMAGE_CACHE_PLATFORM_PLAN_ARCHIVE_LIMIT
+              value: {{ $archiveLimitRaw | quote }}
+            - name: FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: shadow-state
+              mountPath: /var/lib/fugue/image-cache
+            - name: component-identity
+              mountPath: /run/fugue/image-cache
+              readOnly: true
+          startupProbe:
+            exec:
+              command: ["/usr/bin/wget", "-q", "-T", "2", "-Y", "off", "--spider", {{ printf "http://127.0.0.1:%d/healthz" $port | quote }}]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["/usr/bin/wget", "-q", "-T", "2", "-Y", "off", "--spider", {{ printf "http://127.0.0.1:%d/healthz" $port | quote }}]
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/bin/wget", "-q", "-T", "2", "-Y", "off", "--spider", {{ printf "http://127.0.0.1:%d/fugue/cache/v1/platform-plan/readyz" $port | quote }}]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: shadow-state
+          hostPath:
+            path: {{ $stateHostPath | quote }}
+            type: Directory
+        - name: component-identity
+          hostPath:
+            path: {{ $credentialHostPath | quote }}
+            type: Directory
+      nodeSelector:
+        fugue.io/image-plane-shadow: "true"
+        fugue.io/image-plane-cell: {{ $cellID | quote }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

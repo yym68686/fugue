@@ -1,0 +1,200 @@
+{{- if not (kindIs "bool" .Values.enabled) -}}
+{{- fail "enabled must be exactly a boolean" -}}
+{{- end -}}
+{{- if .Values.enabled -}}
+{{- if ne (toString .Values.replicaCount) "1" -}}
+{{- fail "replicaCount must be exactly 1 for one observer per backup cell" -}}
+{{- end -}}
+{{- $repository := trim (required "image.repository is required when backup-observer is enabled" .Values.image.repository) -}}
+{{- if or (ne $repository (toString .Values.image.repository)) (contains "@" $repository) (contains "://" $repository) (not (regexMatch "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$" $repository)) -}}
+{{- fail "image.repository must be a fully qualified lowercase OCI repository without a tag or digest" -}}
+{{- end -}}
+{{- if not (hasSuffix "/fugue-backup-observer" $repository) -}}
+{{- fail "image.repository must select the dedicated fugue-backup-observer artifact" -}}
+{{- end -}}
+{{- $digest := trim (required "image.digest is required when backup-observer is enabled" .Values.image.digest) -}}
+{{- if or (ne $digest (toString .Values.image.digest)) (not (regexMatch "^sha256:[0-9a-f]{64}$" $digest)) -}}
+{{- fail "image.digest must be an exact lowercase sha256 digest" -}}
+{{- end -}}
+{{- $cellKey := trim (required "cell.key is required when backup-observer is enabled" .Values.cell.key) -}}
+{{- if or (ne $cellKey (toString .Values.cell.key)) (not (regexMatch "^backup/(control-plane-db|app-database|persistent-storage|data-workspace|registry|platform-component)/[0-9a-f]{16}$" $cellKey)) -}}
+{{- fail "cell.key must be the canonical backup/<kind>/<16 lowercase hex> key" -}}
+{{- end -}}
+{{- $apiBaseURL := trim (required "api.baseURL is required when backup-observer is enabled" .Values.api.baseURL) -}}
+{{- if or (ne $apiBaseURL (toString .Values.api.baseURL)) (not (regexMatch "^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+)?$" $apiBaseURL)) (hasSuffix "/" $apiBaseURL) (contains "//" (trimPrefix "https://" $apiBaseURL)) (contains "/../" $apiBaseURL) (contains "/./" $apiBaseURL) (hasSuffix "/.." $apiBaseURL) -}}
+{{- fail "api.baseURL must be a canonical absolute HTTPS URL without credentials, query, fragment, or traversal" -}}
+{{- end -}}
+{{- $apiAuthority := regexFind "^[^/]+" (trimPrefix "https://" $apiBaseURL) -}}
+{{- $apiPort := trimPrefix ":" (regexFind ":[0-9]+$" $apiAuthority) -}}
+{{- if and (ne $apiPort "") (or (lt (int $apiPort) 1) (gt (int $apiPort) 65535)) -}}
+{{- fail "api.baseURL port must be between 1 and 65535" -}}
+{{- end -}}
+{{- $specMapName := include "fugue-backup-observer.validateName" (list "spec.existingConfigMap.name" .Values.spec.existingConfigMap.name) -}}
+{{- $specMapKey := include "fugue-backup-observer.validateKey" (list "spec.existingConfigMap.key" .Values.spec.existingConfigMap.key) -}}
+{{- $tokenSecretName := include "fugue-backup-observer.validateName" (list "token.existingSecret.name" .Values.token.existingSecret.name) -}}
+{{- $tokenSecretKey := include "fugue-backup-observer.validateKey" (list "token.existingSecret.key" .Values.token.existingSecret.key) -}}
+{{- $lkgClaimName := include "fugue-backup-observer.validateName" (list "lkg.existingClaim.name" .Values.lkg.existingClaim.name) -}}
+{{- $expectedLKGClaimName := printf "%s-lkg" (include "fugue-backup-observer.fullname" .) -}}
+{{- if ne $lkgClaimName $expectedLKGClaimName -}}
+{{- fail (printf "lkg.existingClaim.name must be exactly %s for this backup cell" $expectedLKGClaimName) -}}
+{{- end -}}
+{{- $reconcileInterval := include "fugue-backup-observer.validateDuration" (list "runtime.reconcileInterval" .Values.runtime.reconcileInterval 1 600) -}}
+{{- $attemptTimeout := include "fugue-backup-observer.validateDuration" (list "runtime.attemptTimeout" .Values.runtime.attemptTimeout 1 60) -}}
+{{- $requestTimeout := include "fugue-backup-observer.validateDuration" (list "runtime.requestTimeout" .Values.runtime.requestTimeout 1 30) -}}
+{{- if ge (int (trimSuffix "s" $requestTimeout)) (int (trimSuffix "s" $attemptTimeout)) -}}
+{{- fail "runtime.requestTimeout must be less than runtime.attemptTimeout" -}}
+{{- end -}}
+{{- $shutdownTimeout := include "fugue-backup-observer.validateDuration" (list "runtime.shutdownTimeout" .Values.runtime.shutdownTimeout 1 60) -}}
+{{- $maxResponseBytes := toString .Values.runtime.maxResponseBytes -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,6}$" $maxResponseBytes) -}}
+{{- fail "runtime.maxResponseBytes must be a positive base-10 integer no greater than 1048576" -}}
+{{- end -}}
+{{- if gt (int $maxResponseBytes) 1048576 -}}
+{{- fail "runtime.maxResponseBytes must be a positive base-10 integer no greater than 1048576" -}}
+{{- end -}}
+{{- $terminationGracePeriodSeconds := add (int (trimSuffix "s" $shutdownTimeout)) 5 -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue-backup-observer.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "fugue-backup-observer.labels" . | nindent 4 }}
+  annotations:
+    fugue.io/backup-cell-key: {{ $cellKey | quote }}
+    fugue.io/backup-lkg-claim: {{ $lkgClaimName | quote }}
+    fugue.io/production-mutation: "forbidden"
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fugue-backup-observer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue-backup-observer.labels" . | nindent 8 }}
+      annotations:
+        fugue.io/backup-cell-key: {{ $cellKey | quote }}
+        fugue.io/backup-lkg-claim: {{ $lkgClaimName | quote }}
+        fugue.io/production-mutation: "forbidden"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      terminationGracePeriodSeconds: {{ $terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backup-observer
+          image: {{ printf "%s@%s" $repository $digest | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: FUGUE_BACKUP_OBSERVER_ENABLED
+              value: "true"
+            - name: FUGUE_BACKUP_OBSERVER_BIND_ADDR
+              value: "127.0.0.1:8092"
+            - name: FUGUE_BACKUP_OBSERVER_CELL_KEY
+              value: {{ $cellKey | quote }}
+            - name: FUGUE_BACKUP_OBSERVER_SPEC_FILE
+              value: "/run/fugue/backup-observer/spec/spec.json"
+            - name: FUGUE_BACKUP_OBSERVER_TOKEN_FILE
+              value: "/run/fugue/backup-observer/token/token"
+            - name: FUGUE_BACKUP_OBSERVER_LKG_FILE
+              value: "/var/lib/fugue-backup-observer/lkg.json"
+            - name: FUGUE_BACKUP_OBSERVER_API_BASE_URL
+              value: {{ $apiBaseURL | quote }}
+            - name: FUGUE_BACKUP_OBSERVER_RECONCILE_INTERVAL
+              value: {{ $reconcileInterval | quote }}
+            - name: FUGUE_BACKUP_OBSERVER_ATTEMPT_TIMEOUT
+              value: {{ $attemptTimeout | quote }}
+            - name: FUGUE_BACKUP_OBSERVER_REQUEST_TIMEOUT
+              value: {{ $requestTimeout | quote }}
+            - name: FUGUE_BACKUP_OBSERVER_SHUTDOWN_TIMEOUT
+              value: {{ $shutdownTimeout | quote }}
+            - name: FUGUE_BACKUP_OBSERVER_MAX_RESPONSE_BYTES
+              value: {{ $maxResponseBytes | quote }}
+          volumeMounts:
+            - name: desired-spec
+              mountPath: /run/fugue/backup-observer/spec
+              readOnly: true
+            - name: observer-token
+              mountPath: /run/fugue/backup-observer/token
+              readOnly: true
+            - name: observer-lkg
+              mountPath: /var/lib/fugue-backup-observer
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/fugue-backup-observer", "probe", "health"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/fugue-backup-observer", "probe", "health"]
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/fugue-backup-observer", "probe", "ready"]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 128Mi
+      volumes:
+        - name: desired-spec
+          configMap:
+            name: {{ $specMapName | quote }}
+            optional: false
+            defaultMode: 292
+            items:
+              - key: {{ $specMapKey | quote }}
+                path: spec.json
+        - name: observer-token
+          secret:
+            secretName: {{ $tokenSecretName | quote }}
+            optional: false
+            defaultMode: 288
+            items:
+              - key: {{ $tokenSecretKey | quote }}
+                path: token
+        - name: observer-lkg
+          persistentVolumeClaim:
+            claimName: {{ $lkgClaimName | quote }}
+            readOnly: false
+{{- end -}}

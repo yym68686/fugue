@@ -1,0 +1,102 @@
+name: build release-control image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile.release-control
+      - cmd/fugue-release-control/**
+      - deploy/helm/fugue-release-control/**
+      - internal/bundleauth/**
+      - internal/componentmanifest/**
+      - internal/compositecoordinator/**
+      - internal/model/**
+      - internal/platformsafety/**
+      - internal/releasecontract/**
+      - internal/releasecontrol/**
+      - scripts/test_release_control_image.sh
+      - .github/workflows/build-release-control-image.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - Dockerfile.release-control
+      - cmd/fugue-release-control/**
+      - deploy/helm/fugue-release-control/**
+      - internal/bundleauth/**
+      - internal/componentmanifest/**
+      - internal/compositecoordinator/**
+      - internal/model/**
+      - internal/platformsafety/**
+      - internal/releasecontract/**
+      - internal/releasecontrol/**
+      - scripts/test_release_control_image.sh
+      - .github/workflows/build-release-control-image.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-control-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-only:
+    name: build and probe (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Test the independent dependency closure
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-release-control ./internal/releasecontrol
+          deps="$(go list -deps ./cmd/fugue-release-control)"
+          if grep -Eq '^(database/sql|fugue/internal/(api|controller|store)|k8s.io/|github.com/jackc/pgx)' <<<"${deps}"; then
+            echo 'release-control dependency boundary widened' >&2
+            exit 1
+          fi
+
+      - name: Validate the deployment-disabled chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-release-control
+          go test ./deploy/helm/fugue-release-control
+          rendered="$(helm template release-control deploy/helm/fugue-release-control)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled release-control chart rendered Kubernetes resources' >&2
+            exit 1
+          fi
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build image locally without publishing
+        env:
+          IMAGE_REF: fugue-release-control:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.release-control \
+            --tag "${IMAGE_REF}" \
+            --load \
+            .
+
+      - name: Probe the local image
+        run: scripts/test_release_control_image.sh "fugue-release-control:${GITHUB_SHA}"

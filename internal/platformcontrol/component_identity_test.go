@@ -310,6 +310,93 @@ func TestValidatePlatformConsumerHeartbeatRejectsReplayAndRollback(t *testing.T)
 	}
 }
 
+func TestReleaseBoundHeartbeatAllowsOnlyFencedGenerationTransition(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 30, 7, 0, 0, 0, time.UTC)
+	initial := validPlatformConsumerHeartbeat(t, now)
+	previous := AdvancePlatformConsumerHeartbeatCursor(nil, initial, 4)
+	rollback := initial
+	rollback.Sequence++
+	rollback.IssuedAt = now.Add(time.Second)
+	rollback.Nonce = "nonce-value-rollback-0002"
+	rollback.ExpectedConsumerSetID = "expected-set-rollback"
+	rollback.FencingToken++
+	rollback.GenerationSequence--
+	rollback.DesiredGeneration = "generation-41"
+	rollback.ActualGeneration = "generation-41"
+	rollback.EvidenceHash = mustPlatformConsumerHeartbeatHash(t, rollback)
+	policy := PlatformConsumerHeartbeatValidationPolicy{RequireFencedReleaseTransition: true}
+	if err := ValidatePlatformConsumerHeartbeat(rollback, &previous, now.Add(time.Second), policy); err != nil {
+		t.Fatalf("fenced expected-set rollback was rejected: %v", err)
+	}
+
+	unfenced := rollback
+	unfenced.FencingToken = initial.FencingToken
+	unfenced.EvidenceHash = mustPlatformConsumerHeartbeatHash(t, unfenced)
+	if err := ValidatePlatformConsumerHeartbeat(unfenced, &previous, now.Add(time.Second), policy); !errors.Is(err, ErrPlatformConsumerHeartbeatRelease) {
+		t.Fatalf("unfenced generation transition must be rejected, got %v", err)
+	}
+
+	sameSet := rollback
+	sameSet.ExpectedConsumerSetID = initial.ExpectedConsumerSetID
+	sameSet.EvidenceHash = mustPlatformConsumerHeartbeatHash(t, sameSet)
+	if err := ValidatePlatformConsumerHeartbeat(sameSet, &previous, now.Add(time.Second), policy); !errors.Is(err, ErrPlatformConsumerHeartbeatGenerationBack) {
+		t.Fatalf("same expected-set generation rollback must be rejected, got %v", err)
+	}
+}
+
+func TestBindPlatformConsumerHeartbeatToArtifactReleaseUsesLedgerFence(t *testing.T) {
+	t.Parallel()
+
+	set := model.PlatformExpectedConsumerSet{
+		ID:                 "expected-image-plan-1",
+		ArtifactReleaseID:  "artifact-release-image-plan-1",
+		ArtifactKind:       model.PlatformArtifactKindImageReplicationPlan,
+		ScopeKey:           "node:worker-a",
+		ExpectedGeneration: "image-plan-1",
+	}
+	release := model.PlatformArtifactRelease{
+		ID:                set.ArtifactReleaseID,
+		ArtifactID:        "artifact-image-plan-1",
+		ArtifactKind:      set.ArtifactKind,
+		ScopeKey:          set.ScopeKey,
+		Generation:        set.ExpectedGeneration,
+		ReleaseChannel:    model.PlatformArtifactReleaseChannelShadow,
+		Status:            model.PlatformArtifactReleaseStatusActive,
+		FencingToken:      17,
+		VerificationState: model.PlatformArtifactVerificationStateServingUnverified,
+	}
+	heartbeat := PlatformConsumerHeartbeatEnvelope{FencingToken: release.FencingToken}
+	if _, err := BindPlatformConsumerHeartbeatToArtifactRelease(set, release, model.PlatformArtifactReleaseChannelShadow, heartbeat); err != nil {
+		t.Fatalf("bind exact release fence: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*model.PlatformArtifactRelease, *PlatformConsumerHeartbeatEnvelope){
+		"caller fence": func(_ *model.PlatformArtifactRelease, heartbeat *PlatformConsumerHeartbeatEnvelope) {
+			heartbeat.FencingToken++
+		},
+		"stale release": func(release *model.PlatformArtifactRelease, _ *PlatformConsumerHeartbeatEnvelope) {
+			release.Status = model.PlatformArtifactReleaseStatusSuperseded
+		},
+		"wrong channel": func(release *model.PlatformArtifactRelease, _ *PlatformConsumerHeartbeatEnvelope) {
+			release.ReleaseChannel = model.PlatformArtifactReleaseChannelFull
+		},
+		"failed verification": func(release *model.PlatformArtifactRelease, _ *PlatformConsumerHeartbeatEnvelope) {
+			release.VerificationState = model.PlatformArtifactVerificationStateFailed
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidateRelease := release
+			candidateHeartbeat := heartbeat
+			mutate(&candidateRelease, &candidateHeartbeat)
+			if _, err := BindPlatformConsumerHeartbeatToArtifactRelease(set, candidateRelease, model.PlatformArtifactReleaseChannelShadow, candidateHeartbeat); !errors.Is(err, ErrPlatformConsumerHeartbeatRelease) {
+				t.Fatalf("unsafe release binding passed: release=%+v heartbeat=%+v err=%v", candidateRelease, candidateHeartbeat, err)
+			}
+		})
+	}
+}
+
 func TestValidatePlatformConsumerHeartbeatRejectsBadTimeAndEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -414,6 +501,7 @@ func TestVerifyTrustedPlatformConsumerHeartbeatProducesVerifiedServerOwnedInstan
 		t.Fatalf("unexpected verified consumer instance: %+v", consumer)
 	}
 	if cursor.Sequence != 12 || cursor.GenerationSequence != 42 || cursor.FencingToken != 8 ||
+		cursor.ExpectedConsumerSetID != set.ID || cursor.DesiredGeneration != "generation-42" ||
 		len(cursor.RecentNonces) != 1 || cursor.RecentNonces[0] != "nonce-value-0001" {
 		t.Fatalf("unexpected trusted heartbeat cursor: %+v", cursor)
 	}
@@ -468,7 +556,8 @@ func TestPlatformConsumerHeartbeatCursorFromInstanceFailsClosedForCorruptVerifie
 		t.Fatalf("restore trusted heartbeat cursor: %v", err)
 	}
 	if cursor == nil || cursor.Sequence != 12 || cursor.GenerationSequence != 42 ||
-		cursor.FencingToken != 8 || len(cursor.RecentNonces) != 1 || cursor.RecentNonces[0] != "nonce-value-0001" {
+		cursor.FencingToken != 8 || cursor.ExpectedConsumerSetID != "expected-set-1" ||
+		len(cursor.RecentNonces) != 1 || cursor.RecentNonces[0] != "nonce-value-0001" {
 		t.Fatalf("unexpected restored cursor: %+v", cursor)
 	}
 }

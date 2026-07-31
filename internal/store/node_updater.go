@@ -168,6 +168,34 @@ func (s *Store) ListNodeUpdaters(tenantID string, platformAdmin bool) ([]model.N
 	return updaters, nil
 }
 
+// GetNodeUpdater returns one exact updater identity without inferring access
+// from tenant_id. Platform-node updaters intentionally persist a NULL tenant in
+// Postgres, so callers that have already authenticated the updater must use its
+// opaque ID rather than a tenant-filtered list scan.
+func (s *Store) GetNodeUpdater(updaterID string) (model.NodeUpdater, error) {
+	updaterID = strings.TrimSpace(updaterID)
+	if updaterID == "" {
+		return model.NodeUpdater{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGetNodeUpdater(updaterID)
+	}
+
+	var updater model.NodeUpdater
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findNodeUpdater(state, updaterID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		updater = state.NodeUpdaters[index]
+		return nil
+	})
+	if err != nil {
+		return model.NodeUpdater{}, err
+	}
+	return redactNodeUpdater(updater), nil
+}
+
 func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType string) (bool, error) {
 	taskType = normalizeNodeUpdateTaskType(taskType)
 	if taskType == "" {

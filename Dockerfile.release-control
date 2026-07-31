@@ -1,0 +1,35 @@
+# Digest pins the multi-architecture Go builder; update it deliberately with
+# the image provenance check rather than letting a lane move implicitly.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+
+RUN apk add --no-cache ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy only the release-control dependency closure. Unrelated subsystem source
+# changes therefore cannot invalidate or silently expand this image boundary.
+COPY cmd/fugue-release-control ./cmd/fugue-release-control
+COPY internal/bundleauth ./internal/bundleauth
+COPY internal/componentmanifest ./internal/componentmanifest
+COPY internal/compositecoordinator ./internal/compositecoordinator
+COPY internal/model ./internal/model
+COPY internal/platformsafety ./internal/platformsafety
+COPY internal/releasecontract ./internal/releasecontract
+COPY internal/releasecontrol ./internal/releasecontrol
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false -ldflags='-s -w' \
+    -o /out/fugue-release-control ./cmd/fugue-release-control
+
+FROM scratch
+LABEL org.opencontainers.image.title="fugue-release-control" \
+      org.opencontainers.image.description="Observation-only Fugue release-control component"
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/fugue-release-control /usr/local/bin/fugue-release-control
+USER 65532:65532
+EXPOSE 8091
+ENTRYPOINT ["/usr/local/bin/fugue-release-control"]

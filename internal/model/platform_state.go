@@ -16,11 +16,15 @@ const (
 	PlatformArtifactKindRuntimeContinuityPlan     = "runtime_continuity_plan"
 	PlatformArtifactKindNodeGuardianPolicy        = "node_guardian_policy"
 	PlatformArtifactKindReleaseGuardPolicy        = "release_guard_policy"
+	PlatformArtifactKindComponentReleasePlan      = "component_release_plan"
 	PlatformArtifactKindEdgeRankingPolicy         = "edge_ranking_policy"
 	PlatformArtifactKindTrafficSafetyPolicy       = "traffic_safety_policy"
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"
 	PlatformArtifactKindGatePolicyRegistry        = "gate_policy_registry"
 	PlatformArtifactKindAutomaticActionContracts  = "automatic_action_contracts"
+	PlatformArtifactKindImageReplicationPlan      = "image_replication_plan"
+	PlatformComponentPlanObserveScope             = "component_plan.observe"
+	PlatformComponentPlanObservationReason        = "release-control component plan shadow observation"
 
 	PlatformArtifactStatusDraft     = "draft"
 	PlatformArtifactStatusValidated = "validated"
@@ -52,6 +56,7 @@ const (
 	PlatformConsumerComponentNodeUpdater    = "node-updater"
 	PlatformConsumerComponentNodeGuardian   = "node-guardian"
 	PlatformConsumerComponentRuntimeAgent   = "runtime-agent"
+	PlatformConsumerComponentImageCache     = "image-cache"
 
 	PlatformConsumerProtocolVersionV1 = "v1"
 	PlatformConsumerSchemaVersionV1   = "v1"

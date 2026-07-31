@@ -67,7 +67,7 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 				}
 				consumers = append(consumers, expectedDNSConsumer(node, kind, scopeKey, generation, now))
 			}
-		case model.PlatformConsumerComponentNodeUpdater, model.PlatformConsumerComponentNodeGuardian:
+		case model.PlatformConsumerComponentNodeUpdater, model.PlatformConsumerComponentNodeGuardian, model.PlatformConsumerComponentImageCache:
 			for _, updater := range req.Topology.NodeUpdaters {
 				if !expectedNodeUpdaterMatchesScope(updater, req.Scope) {
 					continue
@@ -278,6 +278,8 @@ func expectedComponentsForArtifact(kind string) []string {
 		return []string{model.PlatformConsumerComponentRuntimeAgent}
 	case model.PlatformArtifactKindEdgeRankingPolicy, model.PlatformArtifactKindTrafficSafetyPolicy:
 		return []string{model.PlatformConsumerComponentEdgeWorker, model.PlatformConsumerComponentDNSServer}
+	case model.PlatformArtifactKindImageReplicationPlan:
+		return []string{model.PlatformConsumerComponentImageCache}
 	default:
 		return nil
 	}
@@ -300,6 +302,7 @@ func normalizeExpectedConsumerArtifactKind(kind string) string {
 		model.PlatformArtifactKindSubsystemFailureContracts,
 		model.PlatformArtifactKindGatePolicyRegistry,
 		model.PlatformArtifactKindAutomaticActionContracts,
+		model.PlatformArtifactKindImageReplicationPlan,
 	} {
 		if kind == known {
 			return kind

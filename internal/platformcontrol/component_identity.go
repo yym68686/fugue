@@ -42,6 +42,7 @@ var (
 	ErrPlatformConsumerHeartbeatFencingBack    = errors.New("platform consumer heartbeat fencing rollback")
 	ErrPlatformConsumerHeartbeatEvidence       = errors.New("platform consumer heartbeat evidence hash mismatch")
 	ErrPlatformConsumerHeartbeatExpectation    = errors.New("platform consumer heartbeat expected consumer mismatch")
+	ErrPlatformConsumerHeartbeatRelease        = errors.New("platform consumer heartbeat release binding mismatch")
 )
 
 type PlatformComponentIdentityKeyring struct {
@@ -90,17 +91,20 @@ type PlatformConsumerHeartbeatEnvelope struct {
 }
 
 type PlatformConsumerHeartbeatCursor struct {
-	Sequence           int64
-	IssuedAt           time.Time
-	GenerationSequence int64
-	FencingToken       int64
-	RecentNonces       []string
+	Sequence              int64
+	IssuedAt              time.Time
+	GenerationSequence    int64
+	FencingToken          int64
+	ExpectedConsumerSetID string
+	DesiredGeneration     string
+	RecentNonces          []string
 }
 
 type PlatformConsumerHeartbeatValidationPolicy struct {
-	MaxAge      time.Duration
-	FutureSkew  time.Duration
-	MinNonceLen int
+	MaxAge                         time.Duration
+	FutureSkew                     time.Duration
+	MinNonceLen                    int
+	RequireFencedReleaseTransition bool
 }
 
 func DerivePlatformComponentIdentityKeyring(
@@ -355,6 +359,41 @@ func BindPlatformConsumerHeartbeatToExpectedSet(
 	return bound, nil
 }
 
+// BindPlatformConsumerHeartbeatToArtifactRelease makes the release ledger,
+// rather than the component, authoritative for the fencing token. The caller
+// must load and lock the exact release referenced by the expected consumer set
+// before invoking this function.
+func BindPlatformConsumerHeartbeatToArtifactRelease(
+	set model.PlatformExpectedConsumerSet,
+	release model.PlatformArtifactRelease,
+	requiredChannel string,
+	heartbeat PlatformConsumerHeartbeatEnvelope,
+) (PlatformConsumerHeartbeatEnvelope, error) {
+	requiredChannel = strings.TrimSpace(strings.ToLower(requiredChannel))
+	setKind := normalizeExpectedConsumerArtifactKind(set.ArtifactKind)
+	releaseKind := normalizeExpectedConsumerArtifactKind(release.ArtifactKind)
+	if strings.TrimSpace(set.ArtifactReleaseID) == "" ||
+		strings.TrimSpace(set.ArtifactReleaseID) != strings.TrimSpace(release.ID) ||
+		strings.TrimSpace(release.ArtifactID) == "" ||
+		setKind == "" || releaseKind != setKind ||
+		strings.TrimSpace(strings.ToLower(release.ScopeKey)) != strings.TrimSpace(strings.ToLower(set.ScopeKey)) ||
+		strings.TrimSpace(release.Generation) != strings.TrimSpace(set.ExpectedGeneration) ||
+		strings.TrimSpace(strings.ToLower(release.Status)) != model.PlatformArtifactReleaseStatusActive ||
+		release.FencingToken <= 0 ||
+		(requiredChannel != "" && strings.TrimSpace(strings.ToLower(release.ReleaseChannel)) != requiredChannel) {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatRelease
+	}
+	if heartbeat.FencingToken != release.FencingToken {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatRelease
+	}
+	switch strings.TrimSpace(strings.ToLower(release.VerificationState)) {
+	case model.PlatformArtifactVerificationStateServingUnverified, model.PlatformArtifactVerificationStateVerified:
+	default:
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatRelease
+	}
+	return heartbeat, nil
+}
+
 func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHeartbeatEnvelope) (string, error) {
 	if strings.TrimSpace(heartbeat.ConsumerID) == "" ||
 		strings.TrimSpace(heartbeat.Component) == "" ||
@@ -460,11 +499,22 @@ func ValidatePlatformConsumerHeartbeat(
 		containsExactString(previous.RecentNonces, heartbeat.Nonce) {
 		return ErrPlatformConsumerHeartbeatReplay
 	}
-	if heartbeat.GenerationSequence < previous.GenerationSequence {
-		return ErrPlatformConsumerHeartbeatGenerationBack
-	}
 	if heartbeat.FencingToken < previous.FencingToken {
 		return ErrPlatformConsumerHeartbeatFencingBack
+	}
+	if policy.RequireFencedReleaseTransition {
+		generationChanged := heartbeat.GenerationSequence != previous.GenerationSequence ||
+			strings.TrimSpace(heartbeat.DesiredGeneration) != strings.TrimSpace(previous.DesiredGeneration)
+		if generationChanged && heartbeat.FencingToken <= previous.FencingToken {
+			return ErrPlatformConsumerHeartbeatRelease
+		}
+		if heartbeat.GenerationSequence < previous.GenerationSequence &&
+			(heartbeat.FencingToken <= previous.FencingToken ||
+				strings.TrimSpace(heartbeat.ExpectedConsumerSetID) == strings.TrimSpace(previous.ExpectedConsumerSetID)) {
+			return ErrPlatformConsumerHeartbeatGenerationBack
+		}
+	} else if heartbeat.GenerationSequence < previous.GenerationSequence {
+		return ErrPlatformConsumerHeartbeatGenerationBack
 	}
 	return nil
 }
@@ -549,11 +599,13 @@ func PlatformConsumerHeartbeatCursorFromInstance(
 		return nil, ErrPlatformConsumerHeartbeatInvalid
 	}
 	return &PlatformConsumerHeartbeatCursor{
-		Sequence:           consumer.Sequence,
-		IssuedAt:           consumer.IssuedAt.UTC(),
-		GenerationSequence: consumer.GenerationSequence,
-		FencingToken:       consumer.FencingToken,
-		RecentNonces:       []string{strings.TrimSpace(consumer.Nonce)},
+		Sequence:              consumer.Sequence,
+		IssuedAt:              consumer.IssuedAt.UTC(),
+		GenerationSequence:    consumer.GenerationSequence,
+		FencingToken:          consumer.FencingToken,
+		ExpectedConsumerSetID: strings.TrimSpace(consumer.ExpectedConsumerSetID),
+		DesiredGeneration:     strings.TrimSpace(consumer.DesiredGeneration),
+		RecentNonces:          []string{strings.TrimSpace(consumer.Nonce)},
 	}, nil
 }
 
@@ -577,11 +629,13 @@ func AdvancePlatformConsumerHeartbeatCursor(
 		nonces = append([]string(nil), nonces[len(nonces)-nonceHistory:]...)
 	}
 	return PlatformConsumerHeartbeatCursor{
-		Sequence:           heartbeat.Sequence,
-		IssuedAt:           heartbeat.IssuedAt.UTC(),
-		GenerationSequence: heartbeat.GenerationSequence,
-		FencingToken:       heartbeat.FencingToken,
-		RecentNonces:       nonces,
+		Sequence:              heartbeat.Sequence,
+		IssuedAt:              heartbeat.IssuedAt.UTC(),
+		GenerationSequence:    heartbeat.GenerationSequence,
+		FencingToken:          heartbeat.FencingToken,
+		ExpectedConsumerSetID: strings.TrimSpace(heartbeat.ExpectedConsumerSetID),
+		DesiredGeneration:     strings.TrimSpace(heartbeat.DesiredGeneration),
+		RecentNonces:          nonces,
 	}
 }
 
@@ -604,6 +658,16 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 		claims.ExpiresAtUnix <= 0 {
 		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
 	}
+	if claims.Component == model.PlatformConsumerComponentImageCache {
+		claims.NodeID = strings.ToLower(claims.NodeID)
+		expectedScope := "node:" + strings.ToLower(claims.NodeID)
+		if claims.ScopeKey != expectedScope ||
+			len(claims.ArtifactKinds) != 1 ||
+			claims.ArtifactKinds[0] != model.PlatformArtifactKindImageReplicationPlan ||
+			claims.CredentialID != claims.Component+":"+claims.NodeID {
+			return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
+		}
+	}
 	return claims, nil
 }
 
@@ -614,7 +678,8 @@ func knownPlatformConsumerComponent(component string) bool {
 		model.PlatformConsumerComponentCaddyEdgeFront,
 		model.PlatformConsumerComponentNodeUpdater,
 		model.PlatformConsumerComponentNodeGuardian,
-		model.PlatformConsumerComponentRuntimeAgent:
+		model.PlatformConsumerComponentRuntimeAgent,
+		model.PlatformConsumerComponentImageCache:
 		return true
 	default:
 		return false

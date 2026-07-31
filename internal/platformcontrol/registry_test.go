@@ -134,8 +134,8 @@ func TestConsumerAndLKGInventoriesCoverPlatformArtifactKinds(t *testing.T) {
 	t.Parallel()
 
 	consumers := ConsumerContracts()
-	if len(consumers) != 6 {
-		t.Fatalf("expected six platform consumer contracts, got %d", len(consumers))
+	if len(consumers) != 7 {
+		t.Fatalf("expected seven platform consumer contracts, got %d", len(consumers))
 	}
 	components := map[string]struct{}{}
 	for _, contract := range consumers {
@@ -173,11 +173,13 @@ func TestConsumerAndLKGInventoriesCoverPlatformArtifactKinds(t *testing.T) {
 		model.PlatformArtifactKindRuntimeContinuityPlan,
 		model.PlatformArtifactKindNodeGuardianPolicy,
 		model.PlatformArtifactKindReleaseGuardPolicy,
+		model.PlatformArtifactKindComponentReleasePlan,
 		model.PlatformArtifactKindEdgeRankingPolicy,
 		model.PlatformArtifactKindTrafficSafetyPolicy,
 		model.PlatformArtifactKindSubsystemFailureContracts,
 		model.PlatformArtifactKindGatePolicyRegistry,
 		model.PlatformArtifactKindAutomaticActionContracts,
+		model.PlatformArtifactKindImageReplicationPlan,
 	} {
 		if _, ok := policyKinds[kind]; !ok {
 			t.Fatalf("artifact kind %s has no LKG policy", kind)

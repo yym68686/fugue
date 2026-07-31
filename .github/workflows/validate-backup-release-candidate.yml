@@ -1,0 +1,78 @@
+name: validate backup release candidate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - cmd/fugue-backup-release-plan/**
+      - internal/backupadapter/**
+      - internal/backuprelease/**
+      - internal/componentmanifest/**
+      - deploy/helm/fugue-backup-observer/**
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-release-candidate.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - cmd/fugue-backup-release-plan/**
+      - internal/backupadapter/**
+      - internal/backuprelease/**
+      - internal/componentmanifest/**
+      - deploy/helm/fugue-backup-observer/**
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-release-candidate.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup candidate (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Verify candidate contract and dependency boundary
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-backup-release-plan ./internal/backupadapter ./internal/backuprelease ./internal/componentmanifest ./deploy/helm/fugue-backup-observer
+          go build -trimpath -buildvcs=false -o /tmp/fugue-backup-release-plan ./cmd/fugue-backup-release-plan
+          deps="$(go list -deps ./cmd/fugue-backup-release-plan)"
+          if grep -Eq '^(database/sql|os/exec|fugue/internal/(api|auth|controller|model|releasecontrol|store)(/|$)|k8s.io/client-go(/|$)|helm.sh/|github.com/(aws|google/go-containerregistry|jackc))' <<<"${deps}"; then
+            echo 'backup release planner dependency boundary widened' >&2
+            exit 1
+          fi
+
+      - name: Verify deterministic inert chart boundary
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-backup-observer
+          first="$(/tmp/fugue-backup-release-plan --digest-chart --chart "${GITHUB_WORKSPACE}/deploy/helm/fugue-backup-observer")"
+          second="$(/tmp/fugue-backup-release-plan --digest-chart --chart "${GITHUB_WORKSPACE}/deploy/helm/fugue-backup-observer")"
+          [[ "${first}" =~ ^sha256:[0-9a-f]{64}$ && "${first}" == "${second}" ]]
+          rendered="$(helm template backup-observer deploy/helm/fugue-backup-observer)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled backup-observer chart rendered Kubernetes resources' >&2
+            exit 1
+          fi

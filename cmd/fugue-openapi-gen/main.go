@@ -177,6 +177,18 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 
 	auth := "none"
 	for _, requirement := range security {
+		if _, ok := requirement["BackupMaterializerBearerAuth"]; ok {
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
+			}
+			auth = "backup-materializer"
+		}
+		if _, ok := requirement["BackupObserverBearerAuth"]; ok {
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
+			}
+			auth = "backup-observer"
+		}
 		if _, ok := requirement["PlatformComponentBearerAuth"]; ok {
 			if auth != "none" {
 				return "", errors.New("cannot combine bearer auth schemes on the same operation")
@@ -225,6 +237,10 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 			handlerExpr = "s.auth.RequireNodeUpdater(" + handlerExpr + ")"
 		case "platform-component":
 			handlerExpr = "s.auth.RequirePlatformComponent(" + handlerExpr + ")"
+		case "backup-observer":
+			handlerExpr = "s.auth.RequireBackupObserver(" + handlerExpr + ")"
+		case "backup-materializer":
+			handlerExpr = "s.requireBackupMaterializerEndpoint(" + handlerExpr + ")"
 		}
 		fmt.Fprintf(&b, "\tmux.Handle(%q, %s)\n", route.Pattern, handlerExpr)
 	}

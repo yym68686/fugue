@@ -257,6 +257,10 @@ fake_log() {
   printf '%s\n' "$*" >>"${FAKE_LOG}"
 }
 
+control_plane_release_domain_log() {
+  fake_log "domain-log:$*"
+}
+
 fake_signal_current_shell() {
   local signal_name="$1"
   python3 - "${signal_name}" <<'PY'
@@ -1241,6 +1245,7 @@ case_cleanup_identity_tamper() {
   FAKE_TAMPER_CLEANUP="true"
   [[ "$(run_release_status)" == "2" ]] || fail_test "cleanup identity tamper did not freeze the lane"
   assert_file_contains "${FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE}.trace" '"phase":"transaction","state":"succeeded"'
+  assert_log_count 1 "domain-log:private release workdir cleanup failed after transaction completion"
   assert_public_parent_and_preserved_recovery
   [[ -n "$(find "${RUNNER_TEMP}" -type l -print -quit)" ]] ||
     fail_test "cleanup identity tamper symlink was not retained for evidence"

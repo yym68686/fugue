@@ -1,0 +1,66 @@
+name: validate backup materializer dry-run guard chart
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - deploy/helm/fugue-backup-materializer-dry-run-guard/**
+      - internal/backupcontrol/**
+      - internal/backupmaterializer/contract/**
+      - internal/backupmaterializer/dryrunguard/**
+      - internal/backupmaterializer/materialization/**
+      - .github/workflows/validate-backup-materializer-dry-run-guard-chart.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - deploy/helm/fugue-backup-materializer-dry-run-guard/**
+      - internal/backupcontrol/**
+      - internal/backupmaterializer/contract/**
+      - internal/backupmaterializer/dryrunguard/**
+      - internal/backupmaterializer/materialization/**
+      - .github/workflows/validate-backup-materializer-dry-run-guard-chart.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-materializer-dry-run-guard-chart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup materializer dry-run guard chart (no install)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Verify default-off admission-only chart
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/fugue-backup-materializer-dry-run-guard
+          helm lint "${chart}"
+          rendered="$(helm template guard "${chart}")"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled backup materializer dry-run guard chart rendered Kubernetes resources' >&2
+            exit 1
+          fi
+          go test "./${chart}" -count=10
+          go test -race "./${chart}" -count=3
+          go vet "./${chart}"

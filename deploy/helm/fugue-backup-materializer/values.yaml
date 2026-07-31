@@ -1,0 +1,43 @@
+# This chart is inert until the release coordinator authorizes a bounded
+# shadow installation. The default renders no Kubernetes resources.
+enabled: false
+
+# Exactly one materializer owns one explicit backup cell and run. The chart
+# rejects any other replica count and derives all identities from that cell.
+replicaCount: 1
+
+image:
+  # Mutable tags are forbidden. The repository must select the dedicated
+  # materializer artifact, not the legacy API or backup observer image.
+  repository: ""
+  digest: ""
+
+inputAPI:
+  # HTTPS authority only: no credentials, path, query, or fragment. The
+  # materializer appends its fixed versioned observer-input route.
+  baseURL: ""
+  ca:
+    # The chart never creates trust material. This externally owned ConfigMap
+    # must contain the exact CA bundle for inputAPI.baseURL.
+    existingConfigMap:
+      name: ""
+      key: ca.crt
+
+cell:
+  # Canonical key: backup/<kind>/<16 lowercase hex cell id>.
+  key: ""
+  # Canonical backup run identifier bound to this one shadow materializer.
+  runID: ""
+
+runtime:
+  reconcileInterval: 30s
+  attemptTimeout: 20s
+  inputRequestTimeout: 5s
+  inputHandshakeTimeout: 5s
+  secretRequestTimeout: 5s
+  secretHandshakeTimeout: 5s
+  shutdownTimeout: 10s
+  inputMaxResponseBytes: "65536"
+  secretMaxResponseBytes: "131072"
+
+imagePullSecrets: []

@@ -1,0 +1,72 @@
+name: build image-plane image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile.image-cache
+      - cmd/fugue-image-cache/**
+      - internal/imagecacheusage/**
+      - scripts/test_image_plane_image.sh
+      - .github/workflows/build-image-plane-image.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - Dockerfile.image-cache
+      - cmd/fugue-image-cache/**
+      - internal/imagecacheusage/**
+      - scripts/test_image_plane_image.sh
+      - .github/workflows/build-image-plane-image.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-plane-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-only:
+    name: build and probe (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test the independent dependency closure
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-image-cache ./internal/imagecacheusage
+          deps="$(go list -deps ./cmd/fugue-image-cache)"
+          if grep -Eq '^(database/sql|fugue/internal/(api|controller|store)|k8s.io/|github.com/jackc/pgx)' <<<"${deps}"; then
+            echo 'image-plane dependency boundary widened' >&2
+            exit 1
+          fi
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build image locally without publishing
+        env:
+          IMAGE_REF: fugue-image-cache:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.image-cache \
+            --tag "${IMAGE_REF}" \
+            --load \
+            .
+
+      - name: Probe the local image
+        run: scripts/test_image_plane_image.sh "fugue-image-cache:${GITHUB_SHA}"

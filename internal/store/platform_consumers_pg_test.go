@@ -142,6 +142,78 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 	}
 }
 
+func TestPostgresImageCacheHeartbeatLocksAndBindsActiveRelease(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	now := time.Date(2026, 7, 30, 8, 30, 0, 0, time.UTC)
+	claims := imageCacheTrustedHeartbeatClaims(t, now, "worker-pg")
+	set := imageCacheTrustedHeartbeatExpectedSet(t, now, "worker-pg", "image-plan-pg-1", "release-image-plan-pg-1")
+	release := imageCacheTrustedHeartbeatRelease(set, "artifact-image-plan-pg-1", 11)
+	heartbeat := imageCacheTrustedHeartbeatEnvelope(t, claims, set, now, 1, 1, release.FencingToken, "nonce-image-cache-pg-0001")
+	verified, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(
+		claims,
+		set,
+		heartbeat,
+		nil,
+		now,
+		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{RequireFencedReleaseTransition: true},
+	)
+	if err != nil {
+		t.Fatalf("build verified image-cache consumer: %v", err)
+	}
+	verified.ID = platformConsumerInstanceID(verified.ConsumerID, verified.ArtifactKind, verified.ScopeKey)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
+		WithArgs(set.ID).
+		WillReturnRows(expectedConsumerSetRows(t, set))
+	mock.ExpectQuery(`(?s)FROM fugue_platform_artifact_releases\s+WHERE id = \$1\s+FOR SHARE`).
+		WithArgs(set.ArtifactReleaseID).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "artifact_id", "artifact_kind", "scope_key", "generation",
+			"release_channel", "status", "fencing_token", "verification_state",
+		}).AddRow(
+			release.ID,
+			release.ArtifactID,
+			release.ArtifactKind,
+			release.ScopeKey,
+			release.Generation,
+			release.ReleaseChannel,
+			release.Status,
+			release.FencingToken,
+			release.VerificationState,
+		))
+	mock.ExpectQuery(`(?s)FROM fugue_platform_consumer_instances\s+WHERE consumer_id = \$1 AND artifact_kind = \$2 AND scope_key = \$3\s+FOR UPDATE`).
+		WithArgs(verified.ConsumerID, verified.ArtifactKind, verified.ScopeKey).
+		WillReturnRows(sqlmock.NewRows(platformConsumerColumns()))
+	mock.ExpectQuery(`(?s)INSERT INTO fugue_platform_consumer_instances .*RETURNING`).
+		WillReturnRows(platformConsumerRows(t, verified))
+	mock.ExpectCommit()
+
+	created, err := s.AcceptTrustedPlatformConsumerHeartbeat(
+		claims,
+		set.ID,
+		heartbeat,
+		now,
+		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+	)
+	if err != nil {
+		t.Fatalf("accept Postgres image-cache heartbeat: %v", err)
+	}
+	if created.FencingToken != release.FencingToken || created.ExpectedConsumerSetID != set.ID || !created.IdentityVerified {
+		t.Fatalf("Postgres image-cache heartbeat was not release-bound: %+v", created)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
 func TestPostgresAcceptTrustedPlatformConsumerHeartbeatWithAuditCommitsAtomically(t *testing.T) {
 	t.Parallel()
 

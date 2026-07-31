@@ -1,0 +1,103 @@
+name: build image-plane agent image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile.image-plane-agent
+      - cmd/fugue-image-cache/env.go
+      - cmd/fugue-image-cache/http_lifecycle.go
+      - cmd/fugue-image-cache/platform_plan_shadow.go
+      - cmd/fugue-image-cache/platform_plan_shadow_test.go
+      - cmd/fugue-image-cache/shadow_agent.go
+      - cmd/fugue-image-cache/shadow_agent_main.go
+      - cmd/fugue-image-cache/shadow_agent_test.go
+      - cmd/fugue-image-cache/agent_image_boundary_test.go
+      - deploy/helm/fugue-image-plane/**
+      - scripts/test_image_plane_agent_image.sh
+      - .github/workflows/build-image-plane-agent-image.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - Dockerfile.image-plane-agent
+      - cmd/fugue-image-cache/env.go
+      - cmd/fugue-image-cache/http_lifecycle.go
+      - cmd/fugue-image-cache/platform_plan_shadow.go
+      - cmd/fugue-image-cache/platform_plan_shadow_test.go
+      - cmd/fugue-image-cache/shadow_agent.go
+      - cmd/fugue-image-cache/shadow_agent_main.go
+      - cmd/fugue-image-cache/shadow_agent_test.go
+      - cmd/fugue-image-cache/agent_image_boundary_test.go
+      - deploy/helm/fugue-image-plane/**
+      - scripts/test_image_plane_agent_image.sh
+      - .github/workflows/build-image-plane-agent-image.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-plane-agent-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-only:
+    name: build and probe agent (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+
+      - name: Test the agent-only dependency closure
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-image-cache -run 'TestImageCache(ProcessModeIsExplicit|PlatformPlanAgent)'
+          go build -tags=imageplaneagent -trimpath -buildvcs=false -o /tmp/fugue-image-plane-agent ./cmd/fugue-image-cache
+          deps="$(go list -tags=imageplaneagent -deps ./cmd/fugue-image-cache)"
+          if grep -Eq '^(database/sql|fugue/internal/|k8s.io/|github.com/google/go-containerregistry|github.com/jackc/pgx)' <<<"${deps}"; then
+            echo 'image-plane agent dependency boundary widened' >&2
+            exit 1
+          fi
+
+      - name: Validate the deployment-disabled chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/fugue-image-plane
+          go test ./deploy/helm/fugue-image-plane
+          rendered="$(helm template image-plane-shadow deploy/helm/fugue-image-plane)"
+          if [[ -n "$(tr -d '[:space:]' <<<"${rendered}")" ]]; then
+            echo 'disabled image-plane chart rendered Kubernetes resources' >&2
+            exit 1
+          fi
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build the agent image locally without publishing
+        env:
+          IMAGE_REF: fugue-image-plane-agent:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.image-plane-agent \
+            --tag "${IMAGE_REF}" \
+            --load \
+            .
+
+      - name: Probe the local agent image
+        run: scripts/test_image_plane_agent_image.sh "fugue-image-plane-agent:${GITHUB_SHA}"

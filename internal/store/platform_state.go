@@ -30,11 +30,13 @@ var validPlatformArtifactKinds = map[string]struct{}{
 	model.PlatformArtifactKindRuntimeContinuityPlan:     {},
 	model.PlatformArtifactKindNodeGuardianPolicy:        {},
 	model.PlatformArtifactKindReleaseGuardPolicy:        {},
+	model.PlatformArtifactKindComponentReleasePlan:      {},
 	model.PlatformArtifactKindEdgeRankingPolicy:         {},
 	model.PlatformArtifactKindTrafficSafetyPolicy:       {},
 	model.PlatformArtifactKindSubsystemFailureContracts: {},
 	model.PlatformArtifactKindGatePolicyRegistry:        {},
 	model.PlatformArtifactKindAutomaticActionContracts:  {},
+	model.PlatformArtifactKindImageReplicationPlan:      {},
 }
 
 func NormalizePlatformArtifactKind(raw string) string {
@@ -1711,6 +1713,22 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 	if !foundSet {
 		return model.PlatformConsumerInstance{}, ErrNotFound
 	}
+	if strings.EqualFold(strings.TrimSpace(claims.Component), model.PlatformConsumerComponentImageCache) {
+		release, err := activeImageReplicationPlanReleaseForExpectedSet(state, expectedSet)
+		if err != nil {
+			return model.PlatformConsumerInstance{}, err
+		}
+		heartbeat, err = platformcontrol.BindPlatformConsumerHeartbeatToArtifactRelease(
+			expectedSet,
+			release,
+			model.PlatformArtifactReleaseChannelShadow,
+			heartbeat,
+		)
+		if err != nil {
+			return model.PlatformConsumerInstance{}, err
+		}
+		policy.RequireFencedReleaseTransition = true
+	}
 	heartbeat.ExpectedConsumerSetID = firstNonEmptyStoreValue(heartbeat.ExpectedConsumerSetID, expectedSetID)
 	bound, err := platformcontrol.BindPlatformConsumerHeartbeatToExpectedSet(claims, expectedSet, heartbeat)
 	if err != nil {
@@ -1746,6 +1764,33 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 		state.PlatformConsumerInstances = append(state.PlatformConsumerInstances, consumer)
 	}
 	return consumer, nil
+}
+
+func activeImageReplicationPlanReleaseForExpectedSet(
+	state *model.State,
+	set model.PlatformExpectedConsumerSet,
+) (model.PlatformArtifactRelease, error) {
+	if state == nil ||
+		set.ArtifactKind != model.PlatformArtifactKindImageReplicationPlan ||
+		strings.TrimSpace(set.ArtifactReleaseID) == "" {
+		return model.PlatformArtifactRelease{}, platformcontrol.ErrPlatformConsumerHeartbeatRelease
+	}
+	var active model.PlatformArtifactRelease
+	matches := 0
+	for _, release := range state.PlatformArtifactReleases {
+		if release.ArtifactKind != set.ArtifactKind ||
+			release.ScopeKey != set.ScopeKey ||
+			release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
+			release.Status != model.PlatformArtifactReleaseStatusActive {
+			continue
+		}
+		active = release
+		matches++
+	}
+	if matches != 1 || active.ID != set.ArtifactReleaseID {
+		return model.PlatformArtifactRelease{}, platformcontrol.ErrPlatformConsumerHeartbeatRelease
+	}
+	return active, nil
 }
 
 func appendPlatformConsumerHeartbeatAuditEventToState(

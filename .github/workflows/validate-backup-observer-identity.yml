@@ -1,0 +1,72 @@
+name: validate backup observer identity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - internal/backupidentity/**
+      - internal/auth/auth.go
+      - internal/auth/backup_observer.go
+      - internal/auth/backup_observer_test.go
+      - cmd/fugue-api/backup_observer_identity.go
+      - cmd/fugue-api/backup_observer_identity_test.go
+      - cmd/fugue-api/main.go
+      - cmd/fugue-openapi-gen/**
+      - internal/apispec/spec.go
+      - internal/apispec/spec_gen.go
+      - openapi/openapi.yaml
+      - internal/componentmanifest/backup_observer_identity_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-observer-identity.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - internal/backupidentity/**
+      - internal/auth/auth.go
+      - internal/auth/backup_observer.go
+      - internal/auth/backup_observer_test.go
+      - cmd/fugue-api/backup_observer_identity.go
+      - cmd/fugue-api/backup_observer_identity_test.go
+      - cmd/fugue-api/main.go
+      - cmd/fugue-openapi-gen/**
+      - internal/apispec/spec.go
+      - internal/apispec/spec_gen.go
+      - openapi/openapi.yaml
+      - internal/componentmanifest/backup_observer_identity_workflow_test.go
+      - docs/architecture/component-ownership-v1.yaml
+      - .github/workflows/validate-backup-observer-identity.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-observer-identity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup observer identity (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify dedicated fail-closed identity boundary
+        run: |
+          set -euo pipefail
+          go test ./internal/backupidentity ./internal/auth ./cmd/fugue-api ./cmd/fugue-openapi-gen ./internal/apispec -run 'Test(BackupObserver|RequireBackupObserver|InferAuthKind|RenderRoutes|GeneratedArtifactsAreUpToDate|EmbeddedSpecIsValid)' -count=1
+          go test -race ./internal/backupidentity ./internal/auth -run 'Test(BackupObserver|RequireBackupObserver)' -count=5
+          go test ./internal/componentmanifest -run TestBackupObserverIdentityWorkflowIsReadOnly -count=1
+          go vet ./internal/backupidentity ./internal/auth ./cmd/fugue-api ./cmd/fugue-openapi-gen ./internal/apispec
+          go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check

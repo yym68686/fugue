@@ -1,0 +1,51 @@
+# The chart is inert until a release coordinator authorizes a bounded shadow
+# installation. The default renders no Kubernetes resources.
+enabled: false
+
+# Exactly one observer owns one explicit backup cell. The template rejects any
+# other replica count and derives a deterministic cell-scoped resource name.
+replicaCount: 1
+
+image:
+  # Mutable tags are forbidden. The repository must select the dedicated
+  # backup-observer artifact, not a legacy API or backup worker image.
+  repository: ""
+  digest: ""
+
+api:
+  # HTTPS-only observation bridge URL. Credentials, query strings, fragments,
+  # non-canonical paths, and plaintext are rejected by the template/runtime.
+  baseURL: ""
+
+cell:
+  # Canonical key: backup/<kind>/<16 lowercase hex cell id>.
+  key: ""
+
+spec:
+  # The chart never creates desired state. The external ConfigMap is projected
+  # as an atomic-writer volume so its key can rotate without subPath pinning.
+  existingConfigMap:
+    name: ""
+    key: spec.json
+
+token:
+  # The chart never creates credentials. The external Secret is projected with
+  # mode 0440 and the Pod fsGroup permits only the observer user/group access.
+  existingSecret:
+    name: ""
+    key: token
+
+lkg:
+  # The chart never creates or deletes recovery storage. A separately owned,
+  # cell-dedicated PVC must survive workload rollback and chart uninstall.
+  existingClaim:
+    name: ""
+
+runtime:
+  reconcileInterval: 30s
+  attemptTimeout: 20s
+  requestTimeout: 10s
+  shutdownTimeout: 10s
+  maxResponseBytes: "65536"
+
+imagePullSecrets: []

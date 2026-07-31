@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/bundleauth"
+	"fugue/internal/componentmanifest"
 	"fugue/internal/model"
 )
 
@@ -285,6 +286,20 @@ func evaluateArtifactPublication(
 			Message:   "gray release requires one bounded canary scope",
 		})
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindComponentReleasePlan &&
+		channel != model.PlatformArtifactReleaseChannelShadow {
+		violations = append(violations, Violation{
+			Invariant: InvariantShadowNoProductionImpact,
+			Message:   "component release plans are observation-only and may be published only to shadow",
+		})
+	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindImageReplicationPlan &&
+		channel != model.PlatformArtifactReleaseChannelShadow {
+		violations = append(violations, Violation{
+			Invariant: InvariantShadowNoProductionImpact,
+			Message:   "image replication plans remain migration-only and may be published only to shadow",
+		})
+	}
 	return Decision{Pass: len(violations) == 0, Violations: violations}
 }
 
@@ -312,7 +327,57 @@ func EvaluateArtifactIntegrity(artifact model.PlatformArtifact, keyring bundleau
 			Message:   "artifact provenance signature must be present and trusted: " + err.Error(),
 		})
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindComponentReleasePlan {
+		if err := componentmanifest.ValidateArtifactBinding(
+			artifact.Content,
+			artifact.Scope.ScopeType,
+			artifact.Scope.Key,
+			artifact.ScopeKey,
+			artifact.Generation,
+		); err != nil {
+			violations = append(violations, Violation{
+				Invariant: InvariantArtifactSchema,
+				Message:   "component release plan binding is invalid: " + err.Error(),
+			})
+		}
+	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindImageReplicationPlan {
+		if err := ValidateImageReplicationPlanBinding(artifact); err != nil {
+			violations = append(violations, Violation{
+				Invariant: InvariantArtifactSchema,
+				Message:   "image replication plan binding is invalid: " + err.Error(),
+			})
+		}
+	}
 	return Decision{Pass: len(violations) == 0, Violations: violations}
+}
+
+// ValidateImageReplicationPlanBinding keeps the signed artifact scope and the
+// versioned payload's node target inseparable. It is enforced both during API
+// validation and inside the safety kernel so a direct internal caller cannot
+// publish a structurally valid but unconsumable shadow plan.
+func ValidateImageReplicationPlanBinding(artifact model.PlatformArtifact) error {
+	if artifact.ArtifactKind != model.PlatformArtifactKindImageReplicationPlan {
+		return errors.New("artifact kind is not image_replication_plan")
+	}
+	apiVersion, versionOK := artifact.Content["apiVersion"].(string)
+	kind, kindOK := artifact.Content["kind"].(string)
+	spec, specOK := artifact.Content["spec"].(map[string]any)
+	nodeID, nodeOK := spec["nodeID"].(string)
+	images, imagesOK := spec["images"].([]any)
+	nodeID = strings.TrimSpace(nodeID)
+	expectedScopeKey := "node:" + nodeID
+	if !versionOK || strings.TrimSpace(apiVersion) != model.ImagePlaneAPIVersionV1 ||
+		!kindOK || strings.TrimSpace(kind) != model.ImageReplicationPlanKind ||
+		!specOK || !nodeOK || nodeID == "" || nodeID != strings.ToLower(nodeID) ||
+		strings.ContainsAny(nodeID, " /\t\r\n") || !imagesOK || images == nil ||
+		strings.TrimSpace(strings.ToLower(artifact.Scope.ScopeType)) != "node" ||
+		strings.TrimSpace(artifact.Scope.NodeID) != nodeID ||
+		strings.TrimSpace(artifact.Scope.Key) != expectedScopeKey ||
+		strings.TrimSpace(strings.ToLower(artifact.ScopeKey)) != expectedScopeKey {
+		return errors.New("v1 payload spec.nodeID/spec.images must match the exact lower-case node artifact scope")
+	}
+	return nil
 }
 
 func SignPlatformArtifact(artifact model.PlatformArtifact, keyring bundleauth.Keyring) (model.PlatformArtifact, error) {

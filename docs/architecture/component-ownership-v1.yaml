@@ -1,0 +1,227 @@
+apiVersion: component.fugue.dev/v1
+kind: ComponentOwnershipManifest
+migrationPhase: foundation
+legacyRelease: fugue
+
+# These paths are intentionally shared during the migration.  They are not
+# evidence that the target components may write each other's state.
+sharedSourceRoots:
+  - Makefile
+  - cmd/fugue-openapi-gen
+  - go.mod
+  - go.sum
+  - internal/apispec
+  - internal/auth
+  - internal/model
+  - internal/config
+  - internal/store/postgres.go
+  - openapi/openapi.yaml
+  - deploy/helm/fugue
+
+components:
+  - id: release-control
+    description: Durable release intents, evidence, lane leases, and recovery state.
+    runtimeKinds: [deployment, coordinator]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-component-plan
+      - cmd/fugue-release-control
+      - Dockerfile.release-control
+      - deploy/helm/fugue-release-control
+      - docs/architecture
+      - internal/componentmanifest
+      - internal/platformcontrol
+      - internal/releasecontrol
+      - scripts/test_release_control_image.sh
+      - scripts/upgrade_fugue_control_plane.sh
+      - .github/workflows/build-release-control-image.yml
+      - .github/workflows/deploy-control-plane.yml
+    artifactKinds: [release-control, component-release-plan]
+    releaseLane: release-control
+    coordinator: release-control
+    ownedState: [release-intent, release-ledger, lane-lease, release-evidence, component-release-plan]
+    contracts: [release-intent@v1, release-evidence@v1, component-release-plan@v1, component-plan-api@v1]
+    dependencies: []
+    failureBoundary: release-control
+    lkgPolicy: required
+
+  - id: control-plane
+    description: Public API, operation controller, and control-plane telemetry.
+    runtimeKinds: [deployment]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-api
+      - cmd/fugue-controller
+      - cmd/fugue-telemetry-agent
+      - internal/releaseflow
+    artifactKinds: [api, controller, telemetry]
+    releaseLane: control-plane
+    coordinator: release-control
+    ownedState: [app-spec, runtime-spec, operation-state, app-status]
+    contracts: [public-http@v1, runtime-control@v1, image-availability@v1]
+    dependencies: [image-plane, node-platform]
+    failureBoundary: control-plane
+    lkgPolicy: required
+
+  - id: image-plane
+    description: OCI graph integrity, image inventory, replication, and cache agents.
+    runtimeKinds: [deployment, daemonset]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - Dockerfile.image-cache
+      - Dockerfile.image-plane-agent
+      - .github/workflows/build-image-plane-agent-image.yml
+      - .github/workflows/build-image-plane-image.yml
+      - .github/workflows/validate-image-plane-release-candidate.yml
+      - cmd/fugue-image-cache
+      - cmd/fugue-image-plane-release-plan
+      - deploy/helm/fugue-image-plane
+      - internal/imagecacheusage
+      - internal/imageplanerelease
+      - internal/releaseimageconsumer
+      - scripts/test_image_plane_agent_image.sh
+      - scripts/test_image_plane_image.sh
+    artifactKinds: [image-cache, image-plane-agent, image-plane-release-candidate, image-replication-plan]
+    releaseLane: image-plane
+    coordinator: release-control
+    ownedState: [image-replication-spec, image-replication-observation-lkg, image-inventory, image-replica-status, image-gc-state]
+    contracts: [component-plan-status@v1, image-plane-release-candidate@v1, image-replication-plan@v1, image-availability@v1, image-evidence@v1, image-plane-host-state@v1]
+    dependencies: [node-platform]
+    failureBoundary: image-plane
+    lkgPolicy: required
+
+  - id: backup-storage
+    description: Backup policy, R2 object lifecycle, usage reconciliation, and restore checkpoints.
+    runtimeKinds: [deployment, cronjob]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - Dockerfile.backup-materializer
+      - Dockerfile.backup-materializer-validator
+      - Dockerfile.backup-observer
+      - .github/workflows/build-backup-materializer-image.yml
+      - .github/workflows/build-backup-materializer-validator-image.yml
+      - .github/workflows/build-backup-observer-image.yml
+      - .github/workflows/validate-backup-release-candidate.yml
+      - .github/workflows/validate-backup-observation-store.yml
+      - .github/workflows/validate-backup-observer-identity.yml
+      - .github/workflows/validate-backup-observation-api.yml
+      - .github/workflows/validate-backup-input-bundle.yml
+      - .github/workflows/validate-backup-materializer-dry-run-gateway-contract.yml
+      - .github/workflows/validate-backup-materializer-dry-run-guard-chart.yml
+      - .github/workflows/validate-backup-materializer-dry-run-guard.yml
+      - .github/workflows/validate-backup-materializer-identity.yml
+      - .github/workflows/validate-backup-materializer-review.yml
+      - .github/workflows/validate-backup-materializer-secret-dry-run-request.yml
+      - .github/workflows/validate-backup-materializer-secret-dry-run.yml
+      - cmd/fugue-backup-materializer
+      - cmd/fugue-backup-materializer-validator
+      - cmd/fugue-backup-observer
+      - cmd/fugue-backup-release-plan
+      - deploy/helm/fugue-backup-materializer
+      - deploy/helm/fugue-backup-materializer-dry-run-guard
+      - deploy/helm/fugue-backup-observer
+      - internal/api/backup.go
+      - internal/api/backup_materializer.go
+      - internal/api/backup_materializer_test.go
+      - internal/api/backup_observation.go
+      - internal/api/backup_observation_test.go
+      - internal/backupadapter
+      - internal/backupcontrol
+      - internal/backupidentity
+      - internal/backupmaterializer
+      - internal/backupmaterializeridentity
+      - internal/backupmaterializerreview
+      - internal/backupobserver
+      - internal/backuprelease
+      - internal/store/backup.go
+      - internal/store/backup_observation.go
+      - internal/store/backup_observation_test.go
+      - scripts/test_backup_materializer_image.sh
+      - scripts/test_backup_materializer_validator_image.sh
+      - scripts/test_backup_observer_image.sh
+    artifactKinds: [backup-worker, backup-observer, backup-materializer, backup-materializer-validator, backup-materializer-dry-run-guard, backup-run-observation, backup-observer-input-bundle, backup-release-candidate]
+    releaseLane: backup
+    coordinator: release-control
+    ownedState: [backup-policy, backup-run, backup-run-spec, backup-observer-input-bundle, backup-materializer-cell-status, backup-materializer-dry-run-admission, backup-run-observation-lkg, backup-artifact, restore-checkpoint]
+    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-materializer-agent@v1, backup-materializer-candidate-handoff@v1, backup-materializer-dry-run-admission@v1, backup-materializer-dry-run-gateway-contract@v1, backup-materializer-dry-run-guard@v1, backup-materializer-identity@v1, backup-materializer-http-auth@v1, backup-materializer-client@v1, backup-materializer-client-projection@v1, backup-materializer-composition@v1, backup-materializer-input-api@v1, backup-materializer-input-route@v1, backup-materializer-legacy-source@v1, backup-materializer-local-issuer@v1, backup-materializer-reconciler@v1, backup-materializer-secret-dry-run@v1, backup-materializer-secret-dry-run-cycle@v1, backup-materializer-secret-dry-run-projection@v1, backup-materializer-secret-dry-run-request@v1, backup-materializer-secret-plan@v1, backup-materializer-secret-reader@v1, backup-materializer-secret-reader-projection@v1, backup-materializer-secret-reconcile@v1, backup-materializer-store-source@v1, backup-materializer-token-review@v1, backup-materializer-validation-agent@v1, backup-materializer-validation-composition@v1, backup-materializer-validation-cycle@v1, backup-materializer-validation-process@v1, backup-materializer-validator-image@v1, backup-materializer-workload@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
+    dependencies: [control-plane]
+    failureBoundary: backup-storage
+    lkgPolicy: required
+
+  - id: node-platform
+    description: Node enrollment, updater tasks, host memory safety, and node-local storage.
+    runtimeKinds: [daemonset, binary]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-agent
+      - internal/api/node_updater.go
+      - internal/store/node_updater.go
+      - internal/store/node_updater_pg.go
+    artifactKinds: [node-agent, node-updater]
+    releaseLane: node-platform
+    coordinator: release-control
+    ownedState: [node-policy, node-task, node-heartbeat, image-cache-platform-credential-lkg, image-plane-shadow-host-directory]
+    contracts: [node-platform@v1, platform-component-identity@v1, image-plane-host-state@v1]
+    dependencies: []
+    failureBoundary: node-platform
+    lkgPolicy: required
+
+  - id: edge-dns
+    description: Edge workers, frontends, authoritative DNS, and route bundles.
+    runtimeKinds: [deployment, daemonset]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-edge
+      - cmd/fugue-edge-front
+      - cmd/fugue-dns
+      - internal/edgefront
+    artifactKinds: [edge, dns]
+    releaseLane: edge-dns
+    coordinator: release-control
+    ownedState: [route-desired, edge-health, dns-bundle]
+    contracts: [edge-route@v1, dns-answer@v1]
+    dependencies: [control-plane, image-plane]
+    failureBoundary: edge-dns
+    lkgPolicy: required
+
+  - id: operator-cli
+    description: Versioned operator CLI and generated client surface.
+    runtimeKinds: [binary]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue
+      - internal/cli
+    artifactKinds: [operator-cli]
+    releaseLane: cli
+    coordinator: release-control
+    ownedState: []
+    contracts: [public-http@v1]
+    dependencies: [control-plane]
+    failureBoundary: operator-cli
+    lkgPolicy: not-applicable
+
+sharedResources:
+  - id: legacy-fugue-helm-release
+    owner: release-control
+    conflictMode: exclusive
+    consumers: [control-plane, image-plane, backup-storage, node-platform, edge-dns]
+  - id: control-plane-postgres
+    owner: control-plane
+    conflictMode: exclusive
+    consumers: [backup-storage]
+  - id: registry
+    owner: image-plane
+    conflictMode: mediated
+    consumers: [control-plane, edge-dns]
+  - id: r2-backup-bucket
+    owner: backup-storage
+    conflictMode: mediated
+    consumers: []
+  - id: node-host
+    owner: node-platform
+    conflictMode: exclusive
+    consumers: []
+  - id: authoritative-dns
+    owner: edge-dns
+    conflictMode: exclusive
+    consumers: []

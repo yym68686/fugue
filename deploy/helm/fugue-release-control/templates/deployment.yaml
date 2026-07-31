@@ -1,0 +1,160 @@
+{{- if .Values.enabled -}}
+{{- if ne (toString .Values.replicaCount) "1" -}}
+{{- fail "replicaCount must be exactly 1 until release-control owns an independent leader lease" -}}
+{{- end -}}
+{{- $repository := trim (required "image.repository is required when release-control is enabled" .Values.image.repository) -}}
+{{- if or (contains "@" $repository) (contains "://" $repository) (not (regexMatch "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$" $repository)) -}}
+{{- fail "image.repository must be a fully qualified lowercase OCI repository without a tag or digest" -}}
+{{- end -}}
+{{- $digest := trim (required "image.digest is required when release-control is enabled" .Values.image.digest) -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail "image.digest must be an exact lowercase sha256 digest" -}}
+{{- end -}}
+{{- $apiBaseURL := trim (required "api.baseURL is required when release-control is enabled" .Values.api.baseURL) -}}
+{{- if not (regexMatch "^https?://[^/?#[:space:]@]+(?:/[^?#[:space:]]*)?$" $apiBaseURL) -}}
+{{- fail "api.baseURL must be an absolute HTTP(S) URL without credentials, query, or fragment" -}}
+{{- end -}}
+{{- $specSecretName := trim (required "spec.existingSecret.name is required when release-control is enabled" .Values.spec.existingSecret.name) -}}
+{{- $specSecretKey := trim (required "spec.existingSecret.key is required when release-control is enabled" .Values.spec.existingSecret.key) -}}
+{{- $tokenSecretName := trim (required "token.existingSecret.name is required when release-control is enabled" .Values.token.existingSecret.name) -}}
+{{- $tokenSecretKey := trim (required "token.existingSecret.key is required when release-control is enabled" .Values.token.existingSecret.key) -}}
+{{- if eq $specSecretName $tokenSecretName -}}
+{{- fail "spec and token must use different externally owned Secrets" -}}
+{{- end -}}
+{{- $reconcileInterval := include "fugue-release-control.validateDuration" (list "runtime.reconcileInterval" .Values.runtime.reconcileInterval 600) -}}
+{{- $attemptTimeout := include "fugue-release-control.validateDuration" (list "runtime.attemptTimeout" .Values.runtime.attemptTimeout 120) -}}
+{{- $requestTimeout := include "fugue-release-control.validateDuration" (list "runtime.requestTimeout" .Values.runtime.requestTimeout 30) -}}
+{{- $shutdownTimeout := include "fugue-release-control.validateDuration" (list "runtime.shutdownTimeout" .Values.runtime.shutdownTimeout 120) -}}
+{{- $terminationGracePeriodSeconds := add (int (trimSuffix "s" $shutdownTimeout)) 10 -}}
+{{- $maxResponseBytes := toString .Values.runtime.maxResponseBytes -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,6}$" $maxResponseBytes) -}}
+{{- fail "runtime.maxResponseBytes must be a positive base-10 integer no greater than 8388608" -}}
+{{- end -}}
+{{- if gt (int $maxResponseBytes) 8388608 -}}
+{{- fail "runtime.maxResponseBytes must be a positive base-10 integer no greater than 8388608" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue-release-control.fullname" . }}
+  labels:
+    {{- include "fugue-release-control.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fugue-release-control.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue-release-control.selectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ $terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: release-control
+          image: {{ printf "%s@%s" $repository $digest | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: health
+              containerPort: 8091
+              protocol: TCP
+          env:
+            - name: FUGUE_RELEASE_CONTROL_ENABLED
+              value: "true"
+            - name: FUGUE_RELEASE_CONTROL_BIND_ADDR
+              value: "0.0.0.0:8091"
+            - name: FUGUE_RELEASE_CONTROL_API_BASE_URL
+              value: {{ $apiBaseURL | quote }}
+            - name: FUGUE_RELEASE_CONTROL_SPEC_FILE
+              value: "/run/fugue/component-plan.json"
+            - name: FUGUE_RELEASE_CONTROL_TOKEN_FILE
+              value: "/run/secrets/release-control/token"
+            - name: FUGUE_RELEASE_CONTROL_RECONCILE_INTERVAL
+              value: {{ $reconcileInterval | quote }}
+            - name: FUGUE_RELEASE_CONTROL_ATTEMPT_TIMEOUT
+              value: {{ $attemptTimeout | quote }}
+            - name: FUGUE_RELEASE_CONTROL_REQUEST_TIMEOUT
+              value: {{ $requestTimeout | quote }}
+            - name: FUGUE_RELEASE_CONTROL_SHUTDOWN_TIMEOUT
+              value: {{ $shutdownTimeout | quote }}
+            - name: FUGUE_RELEASE_CONTROL_MAX_RESPONSE_BYTES
+              value: {{ $maxResponseBytes | quote }}
+          volumeMounts:
+            - name: desired-spec
+              mountPath: /run/fugue
+              readOnly: true
+            - name: observer-token
+              mountPath: /run/secrets/release-control
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: desired-spec
+          secret:
+            secretName: {{ $specSecretName | quote }}
+            optional: false
+            defaultMode: 288
+            items:
+              - key: {{ $specSecretKey | quote }}
+                path: component-plan.json
+        - name: observer-token
+          secret:
+            secretName: {{ $tokenSecretName | quote }}
+            optional: false
+            defaultMode: 288
+            items:
+              - key: {{ $tokenSecretKey | quote }}
+                path: token
+{{- end }}

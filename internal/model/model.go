@@ -123,10 +123,11 @@ const (
 	// uses this value to enqueue a safe self-update task for active nodes; a
 	// content-only change would otherwise leave existing agents on the old
 	// script indefinitely.
-	NodeUpdaterCurrentVersion = "v35"
+	NodeUpdaterCurrentVersion = "v37"
 
-	NodeUpdaterCapabilityRejoinK3SNode     = "rejoin-k3s-node"
-	NodeUpdaterCapabilitySafeK3SNodeRejoin = "safe-k3s-node-rejoin"
+	NodeUpdaterCapabilityRejoinK3SNode                = "rejoin-k3s-node"
+	NodeUpdaterCapabilitySafeK3SNodeRejoin            = "safe-k3s-node-rejoin"
+	NodeUpdaterCapabilityImageCachePlatformIdentityV1 = "image-cache-platform-identity-v1"
 
 	NodeUpdaterClusterRejoinStatusNotRequired     = "not_required"
 	NodeUpdaterClusterRejoinStatusCredentialReady = "credential_ready"
