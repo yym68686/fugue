@@ -48,7 +48,7 @@ dispatch = trigger.fetch("workflow_dispatch")
 inputs = dispatch.fetch("inputs")
 assert_equal(
   inputs.keys,
-  ["expected_sha", "image_cache_convergence", "convergence_source_run_id"],
+  ["expected_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"],
   "dispatch input set",
 )
 expected_sha = inputs.fetch("expected_sha")
@@ -63,6 +63,12 @@ convergence_source = inputs.fetch("convergence_source_run_id")
 assert_equal(convergence_source["required"], false, "convergence source required flag")
 assert_equal(convergence_source["type"], "string", "convergence source type")
 assert_equal(convergence_source["default"], "", "convergence source default")
+for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"]
+  handoff_input = inputs.fetch(name)
+  assert_equal(handoff_input["required"], false, "#{name} required flag")
+  assert_equal(handoff_input["type"], "string", "#{name} type")
+  assert_equal(handoff_input["default"], "", "#{name} default")
+end
 
 assert_equal(workflow["permissions"], {"contents" => "read"}, "top-level permissions")
 jobs = workflow.fetch("jobs")
@@ -70,6 +76,9 @@ jobs = workflow.fetch("jobs")
 guard = jobs.fetch("release-input-guard")
 assert_equal(needs(guard), [], "input guard dependencies")
 assert_equal(guard.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "input guard permissions")
+stage1_handoff = step(guard, "Download exact public data-plane Stage1 handoff")
+assert_equal(stage1_handoff.fetch("if"), "${{ inputs.public_data_plane_adoption_run_id != '' }}", "Stage1 handoff condition")
+assert_equal(stage1_handoff.fetch("with").fetch("run-id"), "${{ inputs.public_data_plane_adoption_run_id }}", "Stage1 handoff run")
 download_authorization = step(guard, "Download convergence successor authorization")
 assert_equal(download_authorization.fetch("if"), "${{ inputs.image_cache_convergence }}", "convergence authorization condition")
 assert_equal(
@@ -101,6 +110,10 @@ guard_step = step(guard, "Guard exact main commit authorization")
   "EVENT_REF" => "${{ github.ref }}",
   "EVENT_REF_NAME" => "${{ github.ref_name }}",
   "EVENT_REF_TYPE" => "${{ github.ref_type }}",
+  "PUBLIC_DATA_PLANE_ADOPTION_RUN_ID" => "${{ inputs.public_data_plane_adoption_run_id }}",
+  "PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST" => "${{ inputs.public_data_plane_adoption_baseline_digest }}",
+  "PUBLIC_DATA_PLANE_ADOPTION_BASELINE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json",
+  "PUBLIC_DATA_PLANE_ADOPTION_TRACE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json",
 }.each do |name, expected|
   assert_equal(guard_step.fetch("env").fetch(name), expected, "guard #{name} source")
 end
@@ -121,12 +134,20 @@ for fragment in [
   '"schema_version": 2',
   '"successor_run_id": successor_run_id',
   'if raw != canonical:',
+  'actions/runs/${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}',
+  '"${stage1_status}" == completed && "${stage1_conclusion}" == success',
+  'events[-1].get("phase") == "lease-released"',
+  'if [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]',
+  '"${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" =~ ^[1-9][0-9]*$',
+  '"${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$',
 ]
   fail_contract("input guard is missing #{fragment.inspect}") unless guard_step.fetch("run").include?(fragment)
 end
 
 baseline = jobs.fetch("release-baseline")
 assert_equal(needs(baseline), ["release-input-guard"], "release-baseline dependencies")
+assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
+step(baseline, "Verify Stage1 handoff before release planning")
 assert_equal(
   baseline.fetch("outputs").fetch("domain_base_sha"),
   "${{ steps.domain_baseline.outputs.domain_base_sha }}",
@@ -239,6 +260,7 @@ for fragment in [
   'git diff --exit-code -- go.mod go.sum',
   './cmd/fugue-release-domain-evidence',
   './cmd/fugue-release-domain-dispatch',
+  './cmd/fugue-public-data-plane-adoption',
   'chmod 0700',
   "stat -c '%a'",
 ]
@@ -791,6 +813,7 @@ assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}
 
 allowed_permissions = {
   "release-input-guard" => {"actions" => "read", "contents" => "read"},
+  "release-baseline" => {"actions" => "read", "contents" => "read"},
   "build" => {"actions" => "read", "contents" => "read", "packages" => "write"},
   "deploy" => {"actions" => "read", "contents" => "read"},
   "continue-release-convergence" => {"actions" => "write", "contents" => "read"},

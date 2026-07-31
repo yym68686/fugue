@@ -14881,5 +14881,7 @@ drain_control_plane_backup_before_schema_rollout
 rm -f "${BACKUP_LEASE_STATE}" "${BACKUP_PGDUMP_STATE}" "${BACKUP_DB_PROOF_STATE}" "${BACKUP_DB_QUERY_ARGS}" "${BACKUP_LAST_PATCH}"
 
 bash "${REPO_ROOT}/scripts/test_resolve_control_plane_live_images.sh"
+bash "${REPO_ROOT}/scripts/test_public_data_plane_helm_adoption.sh"
+bash "${REPO_ROOT}/scripts/test_public_data_plane_helm_adoption_recovery.sh"
 
 printf '[test_release_domain_safety] ok\n'

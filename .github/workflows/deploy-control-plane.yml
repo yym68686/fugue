@@ -17,6 +17,16 @@ on:
         required: false
         type: string
         default: ''
+      public_data_plane_adoption_run_id:
+        description: Exact successful Stage1 adoption run; empty for ordinary releases.
+        required: false
+        type: string
+        default: ''
+      public_data_plane_adoption_baseline_digest:
+        description: Exact Stage1 baseline digest; must be paired with the Stage1 run ID.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -32,6 +42,16 @@ jobs:
       actions: read
       contents: read
     steps:
+      - name: Download exact public data-plane Stage1 handoff
+        if: ${{ inputs.public_data_plane_adoption_run_id != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: public-data-plane-adoption-${{ inputs.public_data_plane_adoption_run_id }}-1
+          path: ${{ runner.temp }}/public-data-plane-stage1-handoff
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.public_data_plane_adoption_run_id }}
+
       - name: Download convergence successor authorization
         if: ${{ inputs.image_cache_convergence }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -55,6 +75,10 @@ jobs:
           EVENT_REF: ${{ github.ref }}
           EVENT_REF_NAME: ${{ github.ref_name }}
           EVENT_REF_TYPE: ${{ github.ref_type }}
+          PUBLIC_DATA_PLANE_ADOPTION_RUN_ID: ${{ inputs.public_data_plane_adoption_run_id }}
+          PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
+          PUBLIC_DATA_PLANE_ADOPTION_BASELINE: ${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json
+          PUBLIC_DATA_PLANE_ADOPTION_TRACE: ${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json
         run: |
           set -euo pipefail
           [[ "${EVENT_NAME}" == "workflow_dispatch" ]]
@@ -67,6 +91,34 @@ jobs:
           [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+
+          if [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]; then
+            [[ ! -e "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" && ! -L "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" ]]
+            [[ ! -e "${PUBLIC_DATA_PLANE_ADOPTION_TRACE}" && ! -L "${PUBLIC_DATA_PLANE_ADOPTION_TRACE}" ]]
+          else
+            [[ "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ -f "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" && ! -L "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" ]]
+            [[ -f "${PUBLIC_DATA_PLANE_ADOPTION_TRACE}" && ! -L "${PUBLIC_DATA_PLANE_ADOPTION_TRACE}" ]]
+            stage1_run="$(timeout --kill-after=2s 10s gh api \
+              "repos/${REPOSITORY}/actions/runs/${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" \
+              --jq '[.id,.run_attempt,.event,.head_sha,.status,.conclusion,.path] | @tsv')"
+            IFS=$'\t' read -r stage1_id stage1_attempt stage1_event stage1_sha stage1_status stage1_conclusion stage1_path stage1_extra <<<"${stage1_run}"
+            [[ -z "${stage1_extra:-}" && "${stage1_id}" == "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" ]]
+            [[ "${stage1_attempt}" == '1' && "${stage1_event}" == workflow_dispatch && "${stage1_sha}" == "${EXPECTED_SHA}" ]]
+            [[ "${stage1_status}" == completed && "${stage1_conclusion}" == success ]]
+            [[ "${stage1_path}" == '.github/workflows/adopt-public-data-plane-helm-baseline.yml' ]]
+            BASELINE="${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" TRACE="${PUBLIC_DATA_PLANE_ADOPTION_TRACE}" \
+              EXPECTED_DIGEST="${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" python3 - <<'PY'
+          import json, os
+          baseline = json.load(open(os.environ["BASELINE"], encoding="utf-8"))
+          trace = json.load(open(os.environ["TRACE"], encoding="utf-8"))
+          assert baseline.get("digest") == os.environ["EXPECTED_DIGEST"]
+          assert baseline.get("stage1PlanDigest") == trace.get("planDigest")
+          events = trace.get("events") or []
+          assert events and events[-1].get("phase") == "lease-released"
+          PY
+          fi
 
           case "${IMAGE_CACHE_CONVERGENCE}" in
             false)
@@ -180,6 +232,9 @@ jobs:
       - x64
       - fugue
       - control-plane
+    permissions:
+      actions: read
+      contents: read
     outputs:
       domain_base_sha: ${{ steps.domain_baseline.outputs.domain_base_sha }}
       baseline_ref_object_sha: ${{ steps.domain_baseline.outputs.baseline_ref_object_sha }}
@@ -207,6 +262,46 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Download Stage1 handoff for planner base
+        if: ${{ inputs.public_data_plane_adoption_run_id != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: public-data-plane-adoption-${{ inputs.public_data_plane_adoption_run_id }}-1
+          path: ${{ runner.temp }}/public-data-plane-stage1-planner
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.public_data_plane_adoption_run_id }}
+
+      - name: Setup Go for Stage1 handoff planner gate
+        if: ${{ inputs.public_data_plane_adoption_run_id != '' }}
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify Stage1 handoff before release planning
+        if: ${{ inputs.public_data_plane_adoption_run_id != '' }}
+        env:
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          EXPECTED_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
+        run: |
+          set -euo pipefail
+          handoff="${RUNNER_TEMP}/public-data-plane-stage1-planner"
+          tool="${RUNNER_TEMP}/fugue-public-data-plane-adoption-planner"
+          manifest="${RUNNER_TEMP}/public-data-plane-stage1-planner-current.yaml"
+          go build -trimpath -o "${tool}" ./cmd/fugue-public-data-plane-adoption
+          revision="$(helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" -o json | \
+            python3 -c 'import json,sys; value=json.load(sys.stdin).get("version"); assert isinstance(value,int) and value>0; print(value)')"
+          helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}" | \
+            "${tool}" canonicalize --ownership ./deploy/release-domains/ownership-v1.yaml --namespace "${FUGUE_NAMESPACE}" >"${manifest}"
+          BASELINE="${handoff}/stage1-baseline.json" EXPECTED="${EXPECTED_BASELINE_DIGEST}" python3 -c \
+            'import json,os; assert json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"]==os.environ["EXPECTED"]'
+          "${tool}" verify-stage2 \
+            --baseline "${handoff}/stage1-baseline.json" \
+            --trace "${handoff}/execution-trace.json" \
+            --current-revision "${revision}" --current-manifest "${manifest}"
 
       - name: Resolve release-domain baseline
         id: domain_baseline
@@ -559,6 +654,16 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - name: Download Stage1 handoff for deploy prewrite
+        if: ${{ inputs.public_data_plane_adoption_run_id != '' && needs.release-baseline.outputs.is_genesis != 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: public-data-plane-adoption-${{ inputs.public_data_plane_adoption_run_id }}-1
+          path: ${{ runner.temp }}/public-data-plane-stage1-prewrite
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.public_data_plane_adoption_run_id }}
+
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -606,15 +711,40 @@ jobs:
           git diff --exit-code -- go.mod go.sum
           go build -trimpath -o "${tools_dir}/fugue-release-domain-evidence" ./cmd/fugue-release-domain-evidence
           go build -trimpath -o "${tools_dir}/fugue-release-domain-dispatch" ./cmd/fugue-release-domain-dispatch
+          go build -trimpath -o "${tools_dir}/fugue-public-data-plane-adoption" ./cmd/fugue-public-data-plane-adoption
           chmod 0700 \
             "${tools_dir}/fugue-release-domain-evidence" \
-            "${tools_dir}/fugue-release-domain-dispatch"
+            "${tools_dir}/fugue-release-domain-dispatch" \
+            "${tools_dir}/fugue-public-data-plane-adoption"
           for tool in \
             "${tools_dir}/fugue-release-domain-evidence" \
-            "${tools_dir}/fugue-release-domain-dispatch"; do
+            "${tools_dir}/fugue-release-domain-dispatch" \
+            "${tools_dir}/fugue-public-data-plane-adoption"; do
             [[ -f "${tool}" && ! -L "${tool}" && -x "${tool}" ]]
             [[ "$(stat -c '%a' "${tool}")" == '700' ]]
           done
+
+      - name: Reverify Stage1 handoff at deploy prewrite
+        if: ${{ inputs.public_data_plane_adoption_run_id != '' && needs.release-baseline.outputs.is_genesis != 'true' }}
+        env:
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          EXPECTED_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
+        run: |
+          set -euo pipefail
+          handoff="${RUNNER_TEMP}/public-data-plane-stage1-prewrite"
+          tool="${RUNNER_TEMP}/fugue-release-tools/fugue-public-data-plane-adoption"
+          manifest="${RUNNER_TEMP}/public-data-plane-stage1-prewrite-current.yaml"
+          revision="$(helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" -o json | \
+            python3 -c 'import json,sys; value=json.load(sys.stdin).get("version"); assert isinstance(value,int) and value>0; print(value)')"
+          helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}" | \
+            "${tool}" canonicalize --ownership ./deploy/release-domains/ownership-v1.yaml --namespace "${FUGUE_NAMESPACE}" >"${manifest}"
+          BASELINE="${handoff}/stage1-baseline.json" EXPECTED="${EXPECTED_BASELINE_DIGEST}" python3 -c \
+            'import json,os; assert json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"]==os.environ["EXPECTED"]'
+          "${tool}" verify-stage2 \
+            --baseline "${handoff}/stage1-baseline.json" \
+            --trace "${handoff}/execution-trace.json" \
+            --current-revision "${revision}" --current-manifest "${manifest}"
 
       - name: Write genesis public release evidence
         id: genesis_evidence
@@ -1105,6 +1235,10 @@ jobs:
           FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || needs.build.outputs.build_edge == 'true' }}
           FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE: ${{ vars.FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE || 'auto' }}
           FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE: ${{ vars.FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE || 'guard' }}
+          FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_FILE: ${{ inputs.public_data_plane_adoption_run_id != '' && format('{0}/public-data-plane-stage1-prewrite/stage1-baseline.json', runner.temp) || '' }}
+          FUGUE_PUBLIC_DATA_PLANE_STAGE1_TRACE_FILE: ${{ inputs.public_data_plane_adoption_run_id != '' && format('{0}/public-data-plane-stage1-prewrite/execution-trace.json', runner.temp) || '' }}
+          FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
+          FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL: ${{ inputs.public_data_plane_adoption_run_id != '' && format('{0}/fugue-release-tools/fugue-public-data-plane-adoption', runner.temp) || '' }}
         uses: ./.github/actions/operational-domain-guarded-deploy
 
       - name: Remove stale release recovery proof

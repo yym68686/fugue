@@ -1905,11 +1905,34 @@ control_plane_release_domain_selected_uses_lease() {
   esac
 }
 
+control_plane_release_domain_verify_public_data_plane_stage1_handoff_prewrite() {
+  local baseline="${FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_FILE:-}"
+  local trace="${FUGUE_PUBLIC_DATA_PLANE_STAGE1_TRACE_FILE:-}"
+  local tool="${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL:-}"
+  local expected_digest="${FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_DIGEST:-}"
+  local revision=""
+  local manifest="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/public-data-plane-stage1-prewrite.manifest"
+
+  if [[ -z "${baseline}" && -z "${trace}" && -z "${tool}" && -z "${expected_digest}" ]]; then
+    return 0
+  fi
+  [[ -f "${baseline}" && ! -L "${baseline}" && -f "${trace}" && ! -L "${trace}" &&
+    -x "${tool}" && "${expected_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  BASELINE="${baseline}" EXPECTED="${expected_digest}" python3 -c \
+    'import json,os; assert json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"]==os.environ["EXPECTED"]' || return
+  revision="$(helm_current_revision)" || return
+  control_plane_release_domain_capture_live_canonical_manifest "${revision}" "${manifest}" || return
+  "${tool}" verify-stage2 \
+    --baseline "${baseline}" --trace "${trace}" \
+    --current-revision "${revision}" --current-manifest "${manifest}"
+}
+
 control_plane_release_domain_acquire_lease_and_fence() {
   control_plane_release_domain_selected_uses_lease || return 2
   CONTROL_PLANE_RELEASE_DOMAIN_USES_BACKUP_COORDINATION="true"
   acquire_control_plane_backup_coordination_lease || return
   CONTROL_PLANE_RELEASE_DOMAIN_LEASE_ACQUIRED="true"
+  control_plane_release_domain_verify_public_data_plane_stage1_handoff_prewrite || return
   # drain can call the legacy fail helper. Keep that nonlocal exit inside a
   # subshell so the selected transaction still owns cleanup/rollback.
   (drain_control_plane_backup_before_schema_rollout) || return
@@ -2138,6 +2161,12 @@ control_plane_release_domain_rollback_selected() {
 }
 
 control_plane_release_domain_prepare_common() {
+  if [[ -n "${FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_FILE:-}${FUGUE_PUBLIC_DATA_PLANE_STAGE1_TRACE_FILE:-}${FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_DIGEST:-}${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL:-}" ]]; then
+    case "${CONTROL_PLANE_RELEASE_SELECTED_DOMAIN}" in
+      control-plane|backup) ;;
+      *) return 1 ;;
+    esac
+  fi
   # Recompute both bounded gates after authorization and require their state
   # outputs to match the values already frozen into the rendered argv.
   control_plane_release_domain_run_budget_preflight verify || return

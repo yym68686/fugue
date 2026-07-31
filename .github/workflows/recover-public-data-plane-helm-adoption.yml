@@ -1,0 +1,99 @@
+name: recover-public-data-plane-helm-adoption
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact Stage1 source commit recorded by the durable recovery WAL.
+        required: true
+        type: string
+      expected_wal_digest:
+        description: Exact durable recovery WAL digest read during incident qualification.
+        required: true
+        type: string
+      origin_run_id:
+        description: Exact failed Stage1 Actions run recorded by the WAL.
+        required: true
+        type: string
+      confirm_recovery:
+        description: Explicitly authorize recovery/finalization; false performs no recovery job work.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fugue-production-cluster-mutation-v1
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: ${{ inputs.confirm_recovery }}
+    permissions:
+      actions: read
+      contents: read
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact recovery implementation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.expected_sha }}
+          fetch-depth: 0
+
+      - name: Verify exact recovery identity
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_WAL_DIGEST: ${{ inputs.expected_wal_digest }}
+          ORIGIN_RUN_ID: ${{ inputs.origin_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_WAL_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${ORIGIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_SHA}" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          origin="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/runs/${ORIGIN_RUN_ID}" \
+            --jq '[.id,.run_attempt,.event,.head_sha,.status,.conclusion,.path] | @tsv')"
+          IFS=$'\t' read -r run_id attempt event head_sha status conclusion path extra <<<"${origin}"
+          [[ -z "${extra:-}" && "${run_id}" == "${ORIGIN_RUN_ID}" && "${attempt}" == '1' ]]
+          [[ "${event}" == workflow_dispatch && "${head_sha}" == "${EXPECTED_SHA}" && "${status}" == completed ]]
+          [[ "${conclusion}" == failure || "${conclusion}" == cancelled || "${conclusion}" == timed_out ]]
+          [[ "${path}" == '.github/workflows/adopt-public-data-plane-helm-baseline.yml' ]]
+          [[ -z "${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_COORDINATION_LIBRARY:-}" ]]
+          [[ -z "${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY:-}" ]]
+
+      - name: Build typed recovery tools
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ./bin
+          go build -trimpath -o ./bin/fugue-public-data-plane-adoption ./cmd/fugue-public-data-plane-adoption
+          go build -trimpath -o ./bin/fugue-release-domain-evidence ./cmd/fugue-release-domain-evidence
+          bash -n ./scripts/recover_public_data_plane_helm_adoption.sh
+
+      - name: Recover or finalize the durable Stage1 transaction
+        env:
+          FUGUE_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          FUGUE_EXPECTED_WAL_DIGEST: ${{ inputs.expected_wal_digest }}
+          FUGUE_EXPECTED_ORIGIN_RUN_ID: ${{ inputs.origin_run_id }}
+          FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR: ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
+        run: ./scripts/recover_public_data_plane_helm_adoption.sh
+
+      - name: Publish recovered Stage1 handoff
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}/wal.json
+            ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}/stage1-baseline.json
+          if-no-files-found: error
+          retention-days: 30

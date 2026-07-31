@@ -2849,7 +2849,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "1abb6804602a81c774cdc8bf07a0df81e43f8c368044221daf8471a3df6b4df7")
+	assertWorkflowSourceDigest(t, data, "2dc2aa252ff16f317c270d32044ad1368b8e149b0acce8b597511b79275dac88")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2867,8 +2867,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                         "b2f72656d437b309270e295b75d0da0ac6d80d666b8c85436451574564fe3688",
+		"release-input-guard/Guard exact main commit authorization":                         "9c523e6af74cdb6d1b36af20b61665dc497f5ff365c868bfcf7d06f84a0bb6b2",
 		"release-baseline/Resolve release-domain baseline":                                  "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
+		"release-baseline/Verify Stage1 handoff before release planning":                    "2bfb32c59443ed2e64fc48440f89dd1a9caca6dbe1fd3772c2f4951cf82cfa8c",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
 		"release-gate/Prepare pinned ripgrep for release safety contracts":                  "fd3284573ed17f45090180e1d168e8c0f143e088586882168e5cf60637390761",
@@ -2879,7 +2880,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"build/Compute image build plan":                                                    "e545c87a2385902616eb8fa652954970e0de7e47ffe4c8fea46eb03cb71e5ea0",
 		"build/Publish verified control-plane image provenance":                             "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
 		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
-		"deploy/Build private release-domain tools":                                         "1017c0bb023803233350b68c1b434ca34c01e82d04bc0ad8a80b03f2c437ead2",
+		"deploy/Build private release-domain tools":                                         "7b03047d41fb32288f57dd634dce430d1ca7f337331e4464cbe00134eeb6591f",
+		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "fcb6549fff187c016af01420a99422ffc0ceb94dee7c45ef330c0e0471029a2e",
 		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
 		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
 		"deploy/Synchronize additive ManagedApp CRD schema":                                 "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",
@@ -2902,13 +2904,17 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			Keys: []string{"runs-on", "permissions", "steps"},
 			StepKeys: [][]string{
 				{"name", "if", "uses", "with"},
+				{"name", "if", "uses", "with"},
 				{"name", "env", "run"},
 			},
 		},
 		"release-baseline": {
-			Keys: []string{"needs", "outputs", "runs-on", "steps"},
+			Keys: []string{"needs", "outputs", "permissions", "runs-on", "steps"},
 			StepKeys: [][]string{
 				{"name", "uses", "with"},
+				{"name", "if", "uses", "with"},
+				{"name", "if", "uses", "with"},
+				{"name", "if", "env", "run"},
 				{"name", "id", "run"},
 				{"name", "id", "env", "run"},
 				{"name", "id", "env", "run"},
@@ -2944,8 +2950,10 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			StepKeys: [][]string{
 				{"name", "if", "run"},
 				{"name", "uses", "with"},
+				{"name", "if", "uses", "with"},
 				{"name", "uses", "with"},
 				{"name", "run"},
+				{"name", "if", "env", "run"},
 				{"name", "id", "if", "env", "run"},
 				{"name", "if", "env", "run"},
 				{"name", "if", "run"},
@@ -2993,7 +3001,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if workflow.On.WorkflowDispatch == nil {
 		t.Fatal("control-plane workflow must support workflow_dispatch")
 	}
-	if len(workflow.On.WorkflowDispatch.Inputs) != 3 {
+	if len(workflow.On.WorkflowDispatch.Inputs) != 5 {
 		t.Fatalf("workflow_dispatch input inventory drifted: %+v", workflow.On.WorkflowDispatch.Inputs)
 	}
 	expectedSHAInput, ok := workflow.On.WorkflowDispatch.Inputs["expected_sha"]
@@ -3029,6 +3037,19 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if convergenceSource.Required || convergenceSource.Type != "string" || convergenceSource.Default != "" {
 		t.Fatalf("convergence_source_run_id must be an optional empty-default string: %+v", convergenceSource)
 	}
+	for _, inputName := range []string{"public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"} {
+		inputNode, exists := workflow.On.WorkflowDispatch.Inputs[inputName]
+		if !exists {
+			t.Fatalf("workflow_dispatch must define %s", inputName)
+		}
+		var input releaseWorkflowDispatchInput
+		if err := inputNode.Decode(&input); err != nil {
+			t.Fatalf("decode %s input: %v", inputName, err)
+		}
+		if input.Required || input.Type != "string" || input.Default != "" {
+			t.Fatalf("%s must be an optional empty-default string: %+v", inputName, input)
+		}
+	}
 	workflowSource := string(data)
 	if strings.Contains(workflowSource, "existing_image_tag") || len(workflow.On.Push.Paths) != 0 {
 		t.Fatal("control-plane release must be dispatch-only without an image bypass")
@@ -3058,17 +3079,21 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	guard := workflowStepByName(t, inputGuard, "Guard exact main commit authorization")
 	for key, want := range map[string]string{
-		"EXPECTED_SHA":                   "${{ inputs.expected_sha }}",
-		"ACTUAL_SHA":                     "${{ github.sha }}",
-		"IMAGE_CACHE_CONVERGENCE":        "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
-		"CONVERGENCE_SOURCE_RUN_ID":      "${{ inputs.convergence_source_run_id }}",
-		"CONVERGENCE_AUTHORIZATION_FILE": "${{ runner.temp }}/fugue-release-convergence-authorization/successor.json",
-		"GH_TOKEN":                       "${{ github.token }}",
-		"REPOSITORY":                     "${{ github.repository }}",
-		"EVENT_NAME":                     "${{ github.event_name }}",
-		"EVENT_REF":                      "${{ github.ref }}",
-		"EVENT_REF_NAME":                 "${{ github.ref_name }}",
-		"EVENT_REF_TYPE":                 "${{ github.ref_type }}",
+		"EXPECTED_SHA":                      "${{ inputs.expected_sha }}",
+		"ACTUAL_SHA":                        "${{ github.sha }}",
+		"IMAGE_CACHE_CONVERGENCE":           "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
+		"CONVERGENCE_SOURCE_RUN_ID":         "${{ inputs.convergence_source_run_id }}",
+		"CONVERGENCE_AUTHORIZATION_FILE":    "${{ runner.temp }}/fugue-release-convergence-authorization/successor.json",
+		"GH_TOKEN":                          "${{ github.token }}",
+		"REPOSITORY":                        "${{ github.repository }}",
+		"EVENT_NAME":                        "${{ github.event_name }}",
+		"EVENT_REF":                         "${{ github.ref }}",
+		"EVENT_REF_NAME":                    "${{ github.ref_name }}",
+		"EVENT_REF_TYPE":                    "${{ github.ref_type }}",
+		"PUBLIC_DATA_PLANE_ADOPTION_RUN_ID": "${{ inputs.public_data_plane_adoption_run_id }}",
+		"PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST": "${{ inputs.public_data_plane_adoption_baseline_digest }}",
+		"PUBLIC_DATA_PLANE_ADOPTION_BASELINE":        "${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json",
+		"PUBLIC_DATA_PLANE_ADOPTION_TRACE":           "${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json",
 	} {
 		if got := guard.Env[key]; got != want {
 			t.Fatalf("release input guard env %s drifted: got %q want %q", key, got, want)
@@ -3081,6 +3106,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		`"pending_activation_artifacts": ["image_cache"]`, `"source_image_cache_artifact"`,
 		`"source_image_cache_artifacts_digest"`, `"schema_version": 2`,
 		`"successor_run_id": successor_run_id`,
+		`if [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]`,
+		`"${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" =~ ^[1-9][0-9]*$`,
+		`"${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$`,
 		"if raw != canonical:",
 	} {
 		if !strings.Contains(guard.Run, required) {
@@ -4666,6 +4694,10 @@ func TestControlPlaneReleaseConvergenceAuthorizationHarness(t *testing.T) {
 				"EXPECTED_SHA="+expectedSHA,
 				"ACTUAL_SHA="+expectedSHA,
 				"IMAGE_CACHE_CONVERGENCE="+test.convergence,
+				"PUBLIC_DATA_PLANE_ADOPTION_RUN_ID=",
+				"PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST=",
+				"PUBLIC_DATA_PLANE_ADOPTION_BASELINE="+filepath.Join(tempDir, "stage1-baseline.json"),
+				"PUBLIC_DATA_PLANE_ADOPTION_TRACE="+filepath.Join(tempDir, "stage1-trace.json"),
 				"CONVERGENCE_SOURCE_RUN_ID="+test.sourceID,
 				"CONVERGENCE_AUTHORIZATION_FILE="+proofPath,
 				"GH_TOKEN=test",
