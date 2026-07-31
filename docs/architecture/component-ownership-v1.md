@@ -1040,6 +1040,34 @@ dry-run controller. The package has no projected credential, TLS transport,
 reader, source implementation, process, image, chart, RBAC, Kubernetes SDK,
 datastore, release, or production wiring.
 
+`internal/backupmaterializer/validationagent` adds the separately default-off
+`backup-materializer-validation-agent@v1` supervisor around exactly one such
+cell. It immediately runs one bounded validation cycle and then waits one full
+interval after each completed attempt. A mutex prevents overlapping attempts,
+including concurrent callers, so a rotating source generation or one dry-run
+candidate can never be consumed twice by this agent.
+
+Its digest-bound snapshot mirrors no-op, LKG, blocked, retryable, candidate,
+validation-attempted, accepted, and existing-object-preserved state. An
+expected Kubernetes conflict, rejection, credential failure, or API failure
+remains the validated cell-local outcome supplied by the inner controller. An
+agent timeout, cancellation, contained cycle panic, arbitrary error, invalid status, or cross-cell
+status instead clears current readiness and evidence, increments only this
+cell's failure counter, and retains an independent deep copy of the last valid
+status for diagnosis and automatic recovery on the next cycle.
+
+The package supplies only read-only handlers for `GET /healthz`,
+`GET /readyz`, and `GET /v1/status`; it owns no listener or process. Disabled
+construction retains none of its inputs. Every snapshot remains
+`persisted=false`, `deleteAllowed=false`, `executionAllowed=false`, and
+`productionMutationAllowed=false`, including after an accepted server-side
+dry run. The validation agent imports neither the existing observation agent
+nor projected credentials, readers, source implementations, Kubernetes SDK,
+datastore, process, image, chart, RBAC, release, or production code. It is
+covered by the dry-run validation lane, while the existing materializer image
+lane is also triggered to prove the new package remains outside that image's
+exact dependency closure.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with

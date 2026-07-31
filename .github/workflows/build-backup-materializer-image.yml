@@ -9,6 +9,7 @@ on:
       - cmd/fugue-backup-materializer/**
       - internal/backupcontrol/**
       - internal/backupmaterializer/agent/**
+      - internal/backupmaterializer/validationagent/**
       - internal/backupmaterializer/client/**
       - internal/backupmaterializer/contract/**
       - internal/backupmaterializer/materialization/**
@@ -26,6 +27,7 @@ on:
       - cmd/fugue-backup-materializer/**
       - internal/backupcontrol/**
       - internal/backupmaterializer/agent/**
+      - internal/backupmaterializer/validationagent/**
       - internal/backupmaterializer/client/**
       - internal/backupmaterializer/contract/**
       - internal/backupmaterializer/materialization/**
