@@ -32,7 +32,12 @@ on:
         required: true
         type: string
       supersede_stuck_run_id:
-        description: Optional exact zero-job pending run ID for owner-authorized scheduler recovery
+        description: Optional exact zero-job queued run ID for owner-authorized pre-job ghost quarantine
+        required: false
+        default: ""
+        type: string
+      supersede_stuck_run_sha:
+        description: Exact historical main SHA paired with supersede_stuck_run_id
         required: false
         default: ""
         type: string
@@ -75,6 +80,7 @@ jobs:
           EXPECTED_RUNTIME_SHA: ${{ inputs.expected_runtime_sha }}
           EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
           SUPERSEDE_STUCK_RUN_ID: ${{ inputs.supersede_stuck_run_id }}
+          SUPERSEDE_STUCK_RUN_SHA: ${{ inputs.supersede_stuck_run_sha }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -99,56 +105,89 @@ jobs:
               --header 'X-GitHub-Api-Version: 2022-11-28' \
               "https://api.github.com/${path}"
           }
-          validate_superseded_run() {
-            [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]] || return 0
+          validate_supersede_source_policy() {
+            if [[ -z "${SUPERSEDE_STUCK_RUN_ID}" || -z "${SUPERSEDE_STUCK_RUN_SHA}" ]]; then
+              [[ -z "${SUPERSEDE_STUCK_RUN_ID}" && -z "${SUPERSEDE_STUCK_RUN_SHA}" ]]
+              return
+            fi
             [[ "${GITHUB_ACTOR}" == "${GITHUB_REPOSITORY_OWNER}" ]] || return 1
             [[ "${SUPERSEDE_STUCK_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || return 1
+            [[ "${SUPERSEDE_STUCK_RUN_SHA}" =~ ^[0-9a-f]{40}$ ]] || return 1
             [[ "${SUPERSEDE_STUCK_RUN_ID}" != "${GITHUB_RUN_ID}" ]] || return 1
+            [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || return 1
+            git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || return 1
+            git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || return 1
 
-            local current_run_json run_json jobs_json fields run_status run_conclusion
+            local historical_workflow_blob historical_test_blob
+            local historical_workflow_digest historical_test_digest marker extra
+            historical_workflow_blob="$(git rev-parse --verify \
+              "${SUPERSEDE_STUCK_RUN_SHA}:${workflow_path}")" || return 1
+            historical_test_blob="$(git rev-parse --verify \
+              "${SUPERSEDE_STUCK_RUN_SHA}:${test_path}")" || return 1
+            [[ "${historical_workflow_blob}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            [[ "${historical_test_blob}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            read -r historical_workflow_digest marker extra < <(
+              git cat-file blob "${historical_workflow_blob}" | sha256sum
+            ) || return 1
+            [[ "${historical_workflow_digest}" == '2a59067621f8d933b7c5a12638acb4f87103af556d3ee73561244dfb9abad7ea' ]] || return 1
+            [[ "${marker}" == '-' && -z "${extra:-}" ]] || return 1
+            read -r historical_test_digest marker extra < <(
+              git cat-file blob "${historical_test_blob}" | sha256sum
+            ) || return 1
+            [[ "${historical_test_digest}" == '4f8afcfce987f53224d0ac9ff08a54d5b2c3248457cd39922f56d082c1ca2dc0' ]] || return 1
+            [[ "${marker}" == '-' && -z "${extra:-}" ]] || return 1
+          }
+          validate_superseded_run() {
+            [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]] || return 0
+
+            local current_run_json run_json jobs_json
             current_run_json="$(github_api_get \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")" || return 1
-            for poll_attempt in 1 2 3 4 5 6 7 8 9 10; do
-              run_json="$(github_api_get \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}")" || return 1
-              jobs_json="$(github_api_get \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}/jobs?filter=all&per_page=100")" || return 1
-              fields="$(python3 -c '
+            run_json="$(github_api_get \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}")" || return 1
+            jobs_json="$(github_api_get \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}/jobs?filter=all&per_page=100")" || return 1
+            python3 -c '
           import json, sys
           run = json.loads(sys.argv[1])
           current = json.loads(sys.argv[2])
           jobs = json.loads(sys.argv[3])
-          expected_id, current_id, expected_sha = map(str, sys.argv[4:])
+          expected_id, current_id, expected_sha, historical_sha, owner = map(str, sys.argv[4:])
           if expected_id == current_id or str(run.get("id")) != expected_id:
               raise SystemExit("superseded run identity drifted")
           expected_path = ".github/workflows/promote-control-plane-release-lane-rp5.yml"
-          if str(current.get("id")) != current_id or current.get("path") != expected_path:
+          if (
+              str(current.get("id")) != current_id
+              or current.get("path") != expected_path
+              or current.get("head_sha") != expected_sha
+          ):
               raise SystemExit("current workflow identity drifted")
           if type(current.get("workflow_id")) is not int or run.get("workflow_id") != current.get("workflow_id"):
               raise SystemExit("superseded workflow identity drifted")
           if run.get("path") != expected_path:
               raise SystemExit("superseded workflow path drifted")
-          if run.get("head_sha") != expected_sha or run.get("event") != "workflow_dispatch":
+          if (
+              run.get("head_sha") != historical_sha
+              or run.get("head_branch") != "main"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("actor", {}).get("login") != owner
+          ):
               raise SystemExit("superseded source identity drifted")
           if run.get("run_attempt") != 1 or type(run.get("run_attempt")) is not int:
               raise SystemExit("superseded run attempt drifted")
           if jobs.get("total_count") != 0 or jobs.get("jobs") != []:
               raise SystemExit("superseded run has historical jobs")
-          state = (run.get("status"), run.get("conclusion"))
-          if state not in {("queued", None), ("completed", "cancelled")}:
+          if (run.get("status"), run.get("conclusion")) != ("queued", None):
               raise SystemExit("superseded run state drifted")
-          print(state[0] + "\t" + (state[1] or ""))
+          if type(run.get("created_at")) is not str or type(current.get("created_at")) is not str:
+              raise SystemExit("run creation evidence drifted")
+          if run["created_at"] >= current["created_at"]:
+              raise SystemExit("superseded run is not historical")
           ' "${run_json}" "${current_run_json}" "${jobs_json}" "${SUPERSEDE_STUCK_RUN_ID}" \
-                "${GITHUB_RUN_ID}" "${EXPECTED_SHA}")" || return 1
-              IFS=$'\t' read -r run_status run_conclusion extra <<<"${fields}" || return 1
-              [[ -z "${extra:-}" ]] || return 1
-              if [[ "${run_status}" == 'completed' && "${run_conclusion}" == 'cancelled' ]]; then
-                return 0
-              fi
-              [[ "${poll_attempt}" == '10' ]] || sleep 2
-            done
-            return 1
+              "${GITHUB_RUN_ID}" "${EXPECTED_SHA}" "${SUPERSEDE_STUCK_RUN_SHA}" \
+              "${GITHUB_REPOSITORY_OWNER}"
           }
+          validate_supersede_source_policy || exit 1
           validate_superseded_run || exit 1
           policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
           [[ "${policy_commit}" =~ ^[0-9a-f]{40}$ ]] || exit 1
@@ -342,6 +381,7 @@ jobs:
           EXPECTED_API_HEALTH_URL: ${{ inputs.expected_api_health_url }}
           EXPECTED_COREDNS_STATUS: ${{ inputs.expected_coredns_status }}
           SUPERSEDE_STUCK_RUN_ID: ${{ inputs.supersede_stuck_run_id }}
+          SUPERSEDE_STUCK_RUN_SHA: ${{ inputs.supersede_stuck_run_sha }}
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
         run: |
@@ -397,6 +437,7 @@ jobs:
               "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
               "terminal_mode": "frozen",
               "supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"],
+              "supersede_stuck_run_sha": os.environ["SUPERSEDE_STUCK_RUN_SHA"],
               "deploy_workflow_state": "disabled_manually",
               "api_health_url": os.environ["EXPECTED_API_HEALTH_URL"],
               "api_health": api,
@@ -459,6 +500,7 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           SUPERSEDE_STUCK_RUN_ID: ${{ inputs.supersede_stuck_run_id }}
+          SUPERSEDE_STUCK_RUN_SHA: ${{ inputs.supersede_stuck_run_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -466,13 +508,81 @@ jobs:
           [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
           [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          if [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]]; then
-            [[ "${GITHUB_ACTOR}" == "${GITHUB_REPOSITORY_OWNER}" ]] || exit 1
-            [[ "${SUPERSEDE_STUCK_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
-            [[ "${SUPERSEDE_STUCK_RUN_ID}" != "${GITHUB_RUN_ID}" ]] || exit 1
-          fi
           readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
           readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          if [[ -z "${SUPERSEDE_STUCK_RUN_ID}" || -z "${SUPERSEDE_STUCK_RUN_SHA}" ]]; then
+            [[ -z "${SUPERSEDE_STUCK_RUN_ID}" && -z "${SUPERSEDE_STUCK_RUN_SHA}" ]] || exit 1
+          else
+            [[ "${GITHUB_ACTOR}" == "${GITHUB_REPOSITORY_OWNER}" ]] || exit 1
+            [[ "${SUPERSEDE_STUCK_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+            [[ "${SUPERSEDE_STUCK_RUN_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            [[ "${SUPERSEDE_STUCK_RUN_ID}" != "${GITHUB_RUN_ID}" ]] || exit 1
+            [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || exit 1
+            git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || exit 1
+            git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
+            historical_workflow_blob="$(git rev-parse --verify \
+              "${SUPERSEDE_STUCK_RUN_SHA}:${workflow_path}")" || exit 1
+            historical_test_blob="$(git rev-parse --verify \
+              "${SUPERSEDE_STUCK_RUN_SHA}:${test_path}")" || exit 1
+            [[ "${historical_workflow_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            [[ "${historical_test_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            read -r historical_workflow_digest marker extra < <(
+              git cat-file blob "${historical_workflow_blob}" | sha256sum
+            ) || exit 1
+            [[ "${historical_workflow_digest}" == '2a59067621f8d933b7c5a12638acb4f87103af556d3ee73561244dfb9abad7ea' ]] || exit 1
+            [[ "${marker}" == '-' && -z "${extra:-}" ]] || exit 1
+            read -r historical_test_digest marker extra < <(
+              git cat-file blob "${historical_test_blob}" | sha256sum
+            ) || exit 1
+            [[ "${historical_test_digest}" == '4f8afcfce987f53224d0ac9ff08a54d5b2c3248457cd39922f56d082c1ca2dc0' ]] || exit 1
+            [[ "${marker}" == '-' && -z "${extra:-}" ]] || exit 1
+          fi
+          verify_superseded_run_is_quarantined() {
+            [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]] || return 0
+            local current_run_json run_json jobs_json
+            current_run_json="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")" || return 1
+            run_json="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}")" || return 1
+            jobs_json="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}/jobs?filter=all&per_page=100")" || return 1
+            python3 -c '
+          import json, sys
+          current, run, jobs = map(json.loads, sys.argv[1:4])
+          current_id, target_id, expected_sha, historical_sha, owner = sys.argv[4:]
+          expected_path = ".github/workflows/promote-control-plane-release-lane-rp5.yml"
+          if (
+              str(current.get("id")) != current_id
+              or current.get("path") != expected_path
+              or current.get("head_sha") != expected_sha
+              or type(current.get("workflow_id")) is not int
+          ):
+              raise SystemExit("current workflow identity drifted")
+          if (
+              str(run.get("id")) != target_id
+              or run.get("workflow_id") != current.get("workflow_id")
+              or run.get("path") != expected_path
+              or run.get("head_sha") != historical_sha
+              or run.get("head_branch") != "main"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("run_attempt") != 1
+              or type(run.get("run_attempt")) is not int
+              or run.get("actor", {}).get("login") != owner
+          ):
+              raise SystemExit("superseded workflow identity drifted")
+          if jobs.get("total_count") != 0 or jobs.get("jobs") != []:
+              raise SystemExit("superseded run has historical jobs")
+          if (run.get("status"), run.get("conclusion")) != ("queued", None):
+              raise SystemExit("superseded run left zero-job quarantine")
+          if type(run.get("created_at")) is not str or type(current.get("created_at")) is not str:
+              raise SystemExit("run creation evidence drifted")
+          if run["created_at"] >= current["created_at"]:
+              raise SystemExit("superseded run is not historical")
+          ' "${current_run_json}" "${run_json}" "${jobs_json}" "${GITHUB_RUN_ID}" \
+              "${SUPERSEDE_STUCK_RUN_ID}" "${EXPECTED_SHA}" "${SUPERSEDE_STUCK_RUN_SHA}" \
+              "${GITHUB_REPOSITORY_OWNER}"
+          }
+          verify_superseded_run_is_quarantined || exit 1
           policy_commit="$(git log --format='%H' -n 1 -- "${workflow_path}" "${test_path}")" || exit 1
           [[ "${policy_commit}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           git merge-base --is-ancestor "${policy_commit}" "${GITHUB_SHA}" || exit 1
@@ -521,6 +631,7 @@ jobs:
           EXPECTED_API_HEALTH_URL: ${{ inputs.expected_api_health_url }}
           EXPECTED_COREDNS_STATUS: ${{ inputs.expected_coredns_status }}
           SUPERSEDE_STUCK_RUN_ID: ${{ inputs.supersede_stuck_run_id }}
+          SUPERSEDE_STUCK_RUN_SHA: ${{ inputs.supersede_stuck_run_sha }}
         run: |
           set -euo pipefail
           readonly evidence_dir="${RUNNER_TEMP}/fugue-rp5-lane-qualification-consume"
@@ -550,6 +661,7 @@ jobs:
               "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
               "terminal_mode": "frozen",
               "supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"],
+              "supersede_stuck_run_sha": os.environ["SUPERSEDE_STUCK_RUN_SHA"],
               "workflow": "promote-control-plane-release-lane-rp5",
           }
           if value.get("schema_version") != 1 or any(value.get(k) != v for k, v in required.items()):
@@ -571,10 +683,13 @@ jobs:
           EXPECTED_BASELINE_OID: ${{ inputs.expected_baseline_oid }}
           EXPECTED_TERMINAL_OID: ${{ inputs.expected_terminal_oid }}
           SUPERSEDE_STUCK_RUN_ID: ${{ inputs.supersede_stuck_run_id }}
+          SUPERSEDE_STUCK_RUN_SHA: ${{ inputs.supersede_stuck_run_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           readonly workflow_id='deploy-control-plane.yml'
+          readonly promotion_workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
+          readonly promotion_test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
           main_head="$(timeout --kill-after=2s 10s gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
           baseline_oid="$(timeout --kill-after=2s 10s gh api \
@@ -584,10 +699,72 @@ jobs:
           [[ "${main_head}" == "${EXPECTED_SHA}" ]] || exit 1
           [[ "${baseline_oid}" == "${EXPECTED_BASELINE_OID}" ]] || exit 1
           [[ "${terminal_oid}" == "${EXPECTED_TERMINAL_OID}" ]] || exit 1
-          if [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]]; then
+          if [[ -z "${SUPERSEDE_STUCK_RUN_ID}" || -z "${SUPERSEDE_STUCK_RUN_SHA}" ]]; then
+            [[ -z "${SUPERSEDE_STUCK_RUN_ID}" && -z "${SUPERSEDE_STUCK_RUN_SHA}" ]] || exit 1
+          else
             [[ "${GITHUB_ACTOR}" == "${GITHUB_REPOSITORY_OWNER}" ]] || exit 1
             [[ "${SUPERSEDE_STUCK_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+            [[ "${SUPERSEDE_STUCK_RUN_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
             [[ "${SUPERSEDE_STUCK_RUN_ID}" != "${GITHUB_RUN_ID}" ]] || exit 1
+            [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || exit 1
+            git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || exit 1
+            git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
+            historical_workflow_blob="$(git rev-parse --verify \
+              "${SUPERSEDE_STUCK_RUN_SHA}:${promotion_workflow_path}")" || exit 1
+            historical_test_blob="$(git rev-parse --verify \
+              "${SUPERSEDE_STUCK_RUN_SHA}:${promotion_test_path}")" || exit 1
+            [[ "${historical_workflow_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            [[ "${historical_test_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            read -r historical_workflow_digest marker extra < <(
+              git cat-file blob "${historical_workflow_blob}" | sha256sum
+            ) || exit 1
+            [[ "${historical_workflow_digest}" == '2a59067621f8d933b7c5a12638acb4f87103af556d3ee73561244dfb9abad7ea' ]] || exit 1
+            [[ "${marker}" == '-' && -z "${extra:-}" ]] || exit 1
+            read -r historical_test_digest marker extra < <(
+              git cat-file blob "${historical_test_blob}" | sha256sum
+            ) || exit 1
+            [[ "${historical_test_digest}" == '4f8afcfce987f53224d0ac9ff08a54d5b2c3248457cd39922f56d082c1ca2dc0' ]] || exit 1
+            [[ "${marker}" == '-' && -z "${extra:-}" ]] || exit 1
+            current_run_json="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")" || exit 1
+            superseded_run_json="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}")" || exit 1
+            superseded_jobs_json="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${SUPERSEDE_STUCK_RUN_ID}/jobs?filter=all&per_page=100")" || exit 1
+            python3 -c '
+          import json, sys
+          current, run, jobs = map(json.loads, sys.argv[1:4])
+          current_id, target_id, expected_sha, historical_sha, owner = sys.argv[4:]
+          expected_path = ".github/workflows/promote-control-plane-release-lane-rp5.yml"
+          if (
+              str(current.get("id")) != current_id
+              or current.get("path") != expected_path
+              or current.get("head_sha") != expected_sha
+              or type(current.get("workflow_id")) is not int
+          ):
+              raise SystemExit("current workflow identity drifted before enable")
+          if (
+              str(run.get("id")) != target_id
+              or run.get("workflow_id") != current.get("workflow_id")
+              or run.get("path") != expected_path
+              or run.get("head_sha") != historical_sha
+              or run.get("head_branch") != "main"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("run_attempt") != 1
+              or type(run.get("run_attempt")) is not int
+              or run.get("actor", {}).get("login") != owner
+              or (run.get("status"), run.get("conclusion")) != ("queued", None)
+              or jobs.get("total_count") != 0
+              or jobs.get("jobs") != []
+          ):
+              raise SystemExit("superseded run left zero-job quarantine before enable")
+          if type(run.get("created_at")) is not str or type(current.get("created_at")) is not str:
+              raise SystemExit("run creation evidence drifted before enable")
+          if run["created_at"] >= current["created_at"]:
+              raise SystemExit("superseded run is not historical before enable")
+          ' "${current_run_json}" "${superseded_run_json}" "${superseded_jobs_json}" \
+                "${GITHUB_RUN_ID}" "${SUPERSEDE_STUCK_RUN_ID}" "${EXPECTED_SHA}" \
+                "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_REPOSITORY_OWNER}" || exit 1
           fi
           for run_status in queued in_progress waiting pending requested; do
             other_runs="$(timeout --kill-after=2s 10s gh api \
