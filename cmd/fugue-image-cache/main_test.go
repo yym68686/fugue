@@ -1049,6 +1049,17 @@ func TestCopyImageForcesLocalOnlyOnSourceAndDestination(t *testing.T) {
 	}
 }
 
+func newLocalOnlyRoundTripperTestClient(t *testing.T) (*http.Client, *http.Transport) {
+	t.Helper()
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("http.DefaultTransport type = %T, want *http.Transport", http.DefaultTransport)
+	}
+	transport := defaultTransport.Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: localOnlyRoundTripper{base: transport}}, transport
+}
+
 func TestLocalOnlyRoundTripperRejectsCrossHostRedirect(t *testing.T) {
 	t.Parallel()
 
@@ -1067,7 +1078,7 @@ func TestLocalOnlyRoundTripperRejectsCrossHostRedirect(t *testing.T) {
 	}))
 	t.Cleanup(redirect.Close)
 
-	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	client, _ := newLocalOnlyRoundTripperTestClient(t)
 	resp, err := client.Get(redirect.URL + "/v2/fugue-apps/demo/blobs/sha256:test")
 	if resp != nil {
 		resp.Body.Close()
@@ -1094,7 +1105,7 @@ func TestLocalOnlyRoundTripperRejectsSchemeRelativeCrossHostRedirect(t *testing.
 	}))
 	t.Cleanup(redirect.Close)
 
-	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	client, _ := newLocalOnlyRoundTripperTestClient(t)
 	resp, err := client.Get(redirect.URL + "/v2/fugue-apps/demo/blobs/sha256:test")
 	if resp != nil {
 		resp.Body.Close()
@@ -1119,7 +1130,7 @@ func TestLocalOnlyRoundTripperAllowsSameHostRedirect(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	client, _ := newLocalOnlyRoundTripperTestClient(t)
 	resp, err := client.Get(server.URL + "/start")
 	if err != nil {
 		t.Fatalf("same-host redirect: %v", err)
@@ -1139,13 +1150,54 @@ func TestLocalOnlyRoundTripperRejectsInvalidRedirectLocation(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := &http.Client{Transport: localOnlyRoundTripper{base: http.DefaultTransport}}
+	client, _ := newLocalOnlyRoundTripperTestClient(t)
 	resp, err := client.Get(server.URL + "/start")
 	if resp != nil {
 		resp.Body.Close()
 	}
 	if err == nil || !strings.Contains(err.Error(), "local-only registry redirect has invalid location") {
 		t.Fatalf("invalid redirect error = %v, want invalid-location rejection", err)
+	}
+}
+
+func TestLocalOnlyRoundTripperTransportCleanupIsIsolated(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+			return
+		}
+		w.Header().Set("X-Test-Remote-Addr", r.RemoteAddr)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	requestRemoteAddr := func(client *http.Client, path string) string {
+		t.Helper()
+		resp, err := client.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("GET %s status = %d, want %d", path, resp.StatusCode, http.StatusNoContent)
+		}
+		return resp.Header.Get("X-Test-Remote-Addr")
+	}
+
+	firstClient, firstTransport := newLocalOnlyRoundTripperTestClient(t)
+	secondClient, _ := newLocalOnlyRoundTripperTestClient(t)
+	firstRemoteAddr := requestRemoteAddr(firstClient, "/warm-first")
+	secondRemoteAddr := requestRemoteAddr(secondClient, "/warm-second")
+	if firstRemoteAddr == "" || secondRemoteAddr == "" || firstRemoteAddr == secondRemoteAddr {
+		t.Fatalf("expected independent warm connections, first=%q second=%q", firstRemoteAddr, secondRemoteAddr)
+	}
+
+	firstTransport.CloseIdleConnections()
+	if got := requestRemoteAddr(secondClient, "/start"); got != secondRemoteAddr {
+		t.Fatalf("closing first transport replaced second transport connection: got %q want %q", got, secondRemoteAddr)
 	}
 }
 
