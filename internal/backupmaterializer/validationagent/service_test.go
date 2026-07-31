@@ -358,13 +358,33 @@ func TestValidationAgentRunRecoversAndLogsOnlyFixedEvidence(t *testing.T) {
 	service := testService(t, fixture.cellKey, cycle, log.New(&logs, "validation ", 0))
 	service.interval = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
-	deadline := time.Now().Add(time.Second)
-	for cycle.Calls() < 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		// Close the cycle-return-to-status-to-cancellation gap against the
+		// same mutex that gates a new attempt. The cycle call count advances
+		// before succeedAttempt commits Ready; canceling on that count can
+		// legitimately turn attempt two into a parent-canceled failure. The
+		// mutex also prevents attempt three from starting after Ready is seen.
+		service.attemptMu.Lock()
+		ready := service.Snapshot().Ready
+		if ready {
+			cancel()
+			service.attemptMu.Unlock()
+			break
+		}
+		service.attemptMu.Unlock()
+		select {
+		case <-deadline.C:
+			t.Fatalf("run loop did not recover: calls=%d snapshot=%#v", cycle.Calls(), service.Snapshot())
+		case <-poll.C:
+		}
 	}
-	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("run loop: %v", err)
 	}
