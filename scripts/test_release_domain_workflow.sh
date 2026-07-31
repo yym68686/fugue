@@ -5,15 +5,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/deploy-control-plane.yml"
 OPERATIONAL_ACTION_FILE="${REPO_ROOT}/.github/actions/operational-domain-guarded-deploy/action.yml"
+ADOPTION_WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/adopt-public-data-plane-helm-baseline.yml"
+RECOVERY_WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/recover-public-data-plane-helm-adoption.yml"
 
-ruby - "${WORKFLOW_FILE}" "${OPERATIONAL_ACTION_FILE}" <<'RUBY'
+ruby - "${WORKFLOW_FILE}" "${OPERATIONAL_ACTION_FILE}" "${ADOPTION_WORKFLOW_FILE}" "${RECOVERY_WORKFLOW_FILE}" <<'RUBY'
 require "yaml"
 
 workflow_path = ARGV.fetch(0)
 operational_action_path = ARGV.fetch(1)
+adoption_workflow_path = ARGV.fetch(2)
+recovery_workflow_path = ARGV.fetch(3)
 source = File.read(workflow_path, encoding: "UTF-8")
 workflow = YAML.safe_load(source, aliases: false)
 operational_action = YAML.safe_load(File.read(operational_action_path, encoding: "UTF-8"), aliases: false)
+adoption_workflow = YAML.safe_load(File.read(adoption_workflow_path, encoding: "UTF-8"), aliases: false)
+recovery_workflow = YAML.safe_load(File.read(recovery_workflow_path, encoding: "UTF-8"), aliases: false)
 
 def fail_contract(message)
   warn "release-domain workflow contract: #{message}"
@@ -40,6 +46,57 @@ end
 def assert_equal(actual, expected, message)
   fail_contract("#{message}: got #{actual.inspect}, want #{expected.inspect}") unless actual == expected
 end
+
+def assert_setup_go_before_build(workflow, job_name, build_name, label)
+  job = workflow.fetch("jobs").fetch(job_name)
+  steps = job.fetch("steps")
+  setup_matches = steps.each_index.select { |index| steps.fetch(index)["name"] == "Setup Go" }
+  build_matches = steps.each_index.select { |index| steps.fetch(index)["name"] == build_name }
+  fail_contract("#{label} must contain exactly one Setup Go step") unless setup_matches.length == 1
+  fail_contract("#{label} must contain exactly one #{build_name.inspect} step") unless build_matches.length == 1
+  setup_index = setup_matches.fetch(0)
+  build_index = build_matches.fetch(0)
+  fail_contract("#{label} Setup Go must precede the build") unless setup_index < build_index
+  setup = steps.fetch(setup_index)
+  assert_equal(setup.keys, ["name", "uses", "with"], "#{label} Setup Go key inventory")
+  assert_equal(
+    setup.fetch("uses"),
+    "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+    "#{label} Setup Go action pin",
+  )
+  assert_equal(
+    setup.fetch("with"),
+    {"go-version-file" => "go.mod", "cache" => false},
+    "#{label} Setup Go inputs",
+  )
+end
+
+adoption_trigger = adoption_workflow["on"] || adoption_workflow[true]
+assert_equal(adoption_trigger.keys, ["workflow_dispatch"], "Stage1 trigger set")
+assert_equal(adoption_trigger.fetch("workflow_dispatch").fetch("inputs").keys, ["expected_sha", "dry_run"], "Stage1 input set")
+assert_equal(adoption_workflow.fetch("permissions"), {"contents" => "read"}, "Stage1 permissions")
+assert_equal(adoption_workflow.fetch("concurrency"), {"group" => "fugue-production-cluster-mutation-v1", "cancel-in-progress" => false}, "Stage1 concurrency")
+assert_equal(adoption_workflow.fetch("jobs").keys, ["adopt"], "Stage1 job set")
+assert_setup_go_before_build(adoption_workflow, "adopt", "Build typed adoption tools", "Stage1")
+stage1_upload = step(adoption_workflow.fetch("jobs").fetch("adopt"), "Publish immutable Stage1 handoff")
+assert_equal(stage1_upload.fetch("with").fetch("if-no-files-found"), "error", "Stage1 artifact missing-file policy")
+
+recovery_trigger = recovery_workflow["on"] || recovery_workflow[true]
+assert_equal(recovery_trigger.keys, ["workflow_dispatch"], "Stage1 recovery trigger set")
+assert_equal(
+  recovery_trigger.fetch("workflow_dispatch").fetch("inputs").keys,
+  ["expected_sha", "expected_wal_digest", "origin_run_id", "confirm_recovery"],
+  "Stage1 recovery input set",
+)
+assert_equal(recovery_workflow.fetch("permissions"), {"contents" => "read"}, "Stage1 recovery top-level permissions")
+assert_equal(recovery_workflow.fetch("concurrency"), {"group" => "fugue-production-cluster-mutation-v1", "cancel-in-progress" => false}, "Stage1 recovery concurrency")
+assert_equal(recovery_workflow.fetch("jobs").keys, ["recover"], "Stage1 recovery job set")
+recovery_job = recovery_workflow.fetch("jobs").fetch("recover")
+assert_equal(recovery_job.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "Stage1 recovery job permissions")
+assert_equal(recovery_job.fetch("if"), "${{ inputs.confirm_recovery }}", "Stage1 recovery default-off guard")
+assert_setup_go_before_build(recovery_workflow, "recover", "Build typed recovery tools", "Stage1 recovery")
+recovery_upload = step(recovery_job, "Publish recovered Stage1 handoff")
+assert_equal(recovery_upload.fetch("with").fetch("if-no-files-found"), "error", "Stage1 recovery artifact missing-file policy")
 
 trigger = workflow["on"] || workflow[true]
 fail_contract("workflow trigger is missing") unless trigger.is_a?(Hash)

@@ -11,6 +11,43 @@ import (
 
 const publicDataPlaneAdoptionWorkflow = "../../.github/workflows/adopt-public-data-plane-helm-baseline.yml"
 
+const pinnedPublicDataPlaneSetupGo = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
+
+func assertPublicDataPlaneSetupGoBeforeBuild(t *testing.T, data []byte, jobName, buildStepName string) {
+	t.Helper()
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := workflow.Jobs[jobName]
+	if !ok {
+		t.Fatalf("workflow is missing %q job", jobName)
+	}
+	setupIndex, buildIndex := -1, -1
+	for index, step := range job.Steps {
+		switch step.Name {
+		case "Setup Go":
+			if setupIndex >= 0 {
+				t.Fatal("workflow contains more than one Setup Go step")
+			}
+			setupIndex = index
+			if step.Uses != pinnedPublicDataPlaneSetupGo ||
+				!reflect.DeepEqual(step.With, map[string]string{"go-version-file": "go.mod", "cache": "false"}) ||
+				step.If != "" || step.Run != "" || len(step.Env) != 0 {
+				t.Fatalf("Setup Go contract drifted: %+v", step)
+			}
+		case buildStepName:
+			if buildIndex >= 0 {
+				t.Fatalf("workflow contains more than one %q step", buildStepName)
+			}
+			buildIndex = index
+		}
+	}
+	if setupIndex < 0 || buildIndex < 0 || setupIndex >= buildIndex {
+		t.Fatalf("Setup Go must precede %q: setup=%d build=%d", buildStepName, setupIndex, buildIndex)
+	}
+}
+
 func TestPublicDataPlaneAdoptionWorkflowIsDedicatedAndSerialized(t *testing.T) {
 	data, err := os.ReadFile(publicDataPlaneAdoptionWorkflow)
 	if err != nil {
@@ -69,6 +106,7 @@ func TestPublicDataPlaneAdoptionWorkflowIsDedicatedAndSerialized(t *testing.T) {
 	wantSteps := []string{
 		"Checkout exact candidate",
 		"Verify immutable workflow identity",
+		"Setup Go",
 		"Build typed adoption tools",
 		"Execute dedicated authoritative DNS Stage1",
 		"Publish immutable Stage1 handoff",
@@ -81,6 +119,7 @@ func TestPublicDataPlaneAdoptionWorkflowIsDedicatedAndSerialized(t *testing.T) {
 			t.Fatalf("adoption step %d = %q, want %q", index, step.Name, wantSteps[index])
 		}
 	}
+	assertPublicDataPlaneSetupGoBeforeBuild(t, data, "adopt", "Build typed adoption tools")
 	text := string(data)
 	for _, required := range []string{
 		"fetch-depth: 0", "FUGUE_EXPECTED_SHA", "FUGUE_PUBLIC_DATA_PLANE_ADOPTION_DRY_RUN",
@@ -132,6 +171,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		t.Fatal(err)
 	}
 	text := string(data)
+	assertPublicDataPlaneSetupGoBeforeBuild(t, data, "recover", "Build typed recovery tools")
 	for _, required := range []string{
 		"confirm_recovery:", "default: false", "if: ${{ inputs.confirm_recovery }}",
 		"expected_sha:", "expected_wal_digest:", "origin_run_id:",
