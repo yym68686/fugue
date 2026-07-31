@@ -78,7 +78,6 @@ func TestGuardPolicyOracleDeniesLiveCrossCellAndMalformedGatewayRequests(t *test
 	}
 	update := canonicalRequest(guard, "UPDATE")
 	update.OldObjectPresent = true
-	update.OldObjectNamespace = guard.Namespace
 	update.OldObjectName = guard.SecretName
 	decision, err = Evaluate(guard, update)
 	if err != nil || !decision.Applies || !decision.Allowed || decision.Reason != "dry-run-accepted" {
@@ -90,7 +89,6 @@ func TestGuardPolicyOracleDeniesLiveCrossCellAndMalformedGatewayRequests(t *test
 		"other request namespace": func(value *Request) { value.Namespace = "default" },
 		"other request name":      func(value *Request) { value.Name = "other" },
 		"subresource":             func(value *Request) { value.Subresource = "status" },
-		"other object namespace":  func(value *Request) { value.ObjectNamespace = "default" },
 		"other object name":       func(value *Request) { value.ObjectName = "other" },
 		"generated name":          func(value *Request) { value.ObjectGenerateName = "fugue-backup-" },
 		"create with old object":  func(value *Request) { value.OldObjectPresent = true },
@@ -106,15 +104,13 @@ func TestGuardPolicyOracleDeniesLiveCrossCellAndMalformedGatewayRequests(t *test
 		})
 	}
 	for name, mutate := range map[string]func(*Request){
-		"missing old object":  func(value *Request) { value.OldObjectPresent = false },
-		"other old namespace": func(value *Request) { value.OldObjectNamespace = "default" },
-		"other old name":      func(value *Request) { value.OldObjectName = "other" },
-		"live update":         func(value *Request) { value.DryRun = false },
+		"missing old object": func(value *Request) { value.OldObjectPresent = false },
+		"other old name":     func(value *Request) { value.OldObjectName = "other" },
+		"live update":        func(value *Request) { value.DryRun = false },
 	} {
 		t.Run("update/"+name, func(t *testing.T) {
 			request := canonicalRequest(guard, "UPDATE")
 			request.OldObjectPresent = true
-			request.OldObjectNamespace = guard.Namespace
 			request.OldObjectName = guard.SecretName
 			mutate(&request)
 			decision, err := Evaluate(guard, request)
@@ -292,7 +288,7 @@ func canonicalRequest(guard Guard, operation string) Request {
 	return Request{
 		Username: guard.ServiceAccountUsername, APIGroup: "", APIVersion: "v1", Resource: "secrets",
 		Operation: operation, Namespace: guard.Namespace, Name: guard.SecretName, DryRun: true,
-		ObjectNamespace: guard.Namespace, ObjectName: guard.SecretName,
+		ObjectName: guard.SecretName,
 	}
 }
 

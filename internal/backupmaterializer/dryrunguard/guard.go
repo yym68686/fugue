@@ -121,11 +121,9 @@ type Request struct {
 	Name               string
 	Subresource        string
 	DryRun             bool
-	ObjectNamespace    string
 	ObjectName         string
 	ObjectGenerateName string
 	OldObjectPresent   bool
-	OldObjectNamespace string
 	OldObjectName      string
 }
 
@@ -185,8 +183,8 @@ func buildExpected(cellKey string) (Guard, error) {
 		MatchConditions: []CELRule{{Name: "dedicated-gateway-identity", Expression: "request.userInfo.username == " + quotedUsername}},
 		Validations: []CELRule{
 			{Name: "server-side-dry-run-only", Expression: "request.dryRun == true", Message: "backup dry-run gateway requests must be server-side dry-run", Reason: "Forbidden"},
-			{Name: "exact-cell-secret-only", Expression: "request.namespace == " + quotedNamespace + " && request.name == " + quotedSecretName + " && request.subResource == \"\" && object.metadata.namespace == " + quotedNamespace + " && object.metadata.name == " + quotedSecretName + " && object.metadata.generateName == \"\"", Message: "backup dry-run gateway requests must target the exact cell Secret", Reason: "Forbidden"},
-			{Name: "create-update-evidence-only", Expression: "(request.operation == \"CREATE\" && oldObject == null) || (request.operation == \"UPDATE\" && oldObject != null && oldObject.metadata.namespace == " + quotedNamespace + " && oldObject.metadata.name == " + quotedSecretName + ")", Message: "backup dry-run gateway requests must carry canonical create or update evidence", Reason: "Forbidden"},
+			{Name: "exact-cell-secret-only", Expression: "request.namespace == " + quotedNamespace + " && request.name == " + quotedSecretName + " && request.subResource == \"\" && object.metadata.name == " + quotedSecretName + " && object.metadata.generateName == \"\"", Message: "backup dry-run gateway requests must target the exact cell Secret", Reason: "Forbidden"},
+			{Name: "create-update-evidence-only", Expression: "(request.operation == \"CREATE\" && oldObject == null) || (request.operation == \"UPDATE\" && oldObject != null && oldObject.metadata.name == " + quotedSecretName + ")", Message: "backup dry-run gateway requests must carry canonical create or update evidence", Reason: "Forbidden"},
 		},
 		ValidationActions: []string{ValidationAction}, DedicatedServiceAccount: true,
 		BoundProjectedTokenRequired: true, AdmissionReadyBeforeRBAC: true,
@@ -225,13 +223,13 @@ func Evaluate(guard Guard, request Request) (Decision, error) {
 		return Decision{Applies: true, Reason: "server-side-dry-run-required"}, nil
 	}
 	if request.Namespace != guard.Namespace || request.Name != guard.SecretName || request.Subresource != "" ||
-		request.ObjectNamespace != guard.Namespace || request.ObjectName != guard.SecretName || request.ObjectGenerateName != "" {
+		request.ObjectName != guard.SecretName || request.ObjectGenerateName != "" {
 		return Decision{Applies: true, Reason: "exact-cell-secret-required"}, nil
 	}
 	if request.Operation == "CREATE" && request.OldObjectPresent {
 		return Decision{Applies: true, Reason: "canonical-create-evidence-required"}, nil
 	}
-	if request.Operation == "UPDATE" && (!request.OldObjectPresent || request.OldObjectNamespace != guard.Namespace || request.OldObjectName != guard.SecretName) {
+	if request.Operation == "UPDATE" && (!request.OldObjectPresent || request.OldObjectName != guard.SecretName) {
 		return Decision{Applies: true, Reason: "canonical-update-evidence-required"}, nil
 	}
 	return Decision{Applies: true, Allowed: true, Reason: "dry-run-accepted"}, nil
