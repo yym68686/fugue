@@ -21,9 +21,12 @@ import (
 )
 
 const (
-	APIVersion = "backup-materializer-reconciler.fugue.dev/v1"
-	Kind       = "BackupObserverSecretReconcileStatus"
-	Policy     = "cell-local-idempotent-shadow-loop-v1"
+	APIVersion              = "backup-materializer-reconciler.fugue.dev/v1"
+	Kind                    = "BackupObserverSecretReconcileStatus"
+	Policy                  = "cell-local-idempotent-shadow-loop-v1"
+	PreparedCycleAPIVersion = "backup-materializer-candidate-handoff.fugue.dev/v1"
+	PreparedCycleKind       = "BackupObserverSecretPreparedCycle"
+	PreparedCyclePolicy     = "secret-free-status-private-candidate-v1"
 
 	CurrentUnavailable = "unavailable"
 
@@ -107,6 +110,32 @@ type Status struct {
 	Digest                    string              `json:"digest"`
 }
 
+// PreparedCycle is an explicit in-process handoff between the pure source
+// reconciler and a separately owned candidate validator. Its serialized and
+// formatted forms contain only the public Status and digests. A private plan
+// is retained only for a valid mutation candidate and is available solely
+// through CandidatePlan.
+type PreparedCycle struct {
+	APIVersion                string    `json:"apiVersion"`
+	Kind                      string    `json:"kind"`
+	Policy                    string    `json:"policy"`
+	CellKey                   string    `json:"cellKey"`
+	CellID                    string    `json:"cellId"`
+	StatusDigest              string    `json:"statusDigest"`
+	Status                    Status    `json:"status"`
+	CandidatePlanDigest       string    `json:"candidatePlanDigest,omitempty"`
+	CandidateAvailable        bool      `json:"candidateAvailable"`
+	IdempotencyKey            string    `json:"idempotencyKey"`
+	EvaluatedAt               time.Time `json:"evaluatedAt"`
+	DeleteAllowed             bool      `json:"deleteAllowed"`
+	ObservationOnly           bool      `json:"observationOnly"`
+	ExecutionAllowed          bool      `json:"executionAllowed"`
+	ProductionMutationAllowed bool      `json:"productionMutationAllowed"`
+	Digest                    string    `json:"digest"`
+
+	candidatePlan materialization.Plan
+}
+
 // New ignores and retains none of the cell, sources, or clock while disabled.
 // Enabled construction validates interfaces only and performs no source I/O.
 func New(config Config) (*Reconciler, error) {
@@ -148,32 +177,52 @@ func (reconciler *Reconciler) GoString() string { return reconciler.String() }
 // converted into secret-free, cell-local status. Context cancellation and
 // internal contract violations remain explicit errors for the outer process.
 func (reconciler *Reconciler) ReconcileOnce(ctx context.Context) (Status, error) {
+	status, _, err := reconciler.evaluateOnce(ctx)
+	return status, err
+}
+
+// PrepareOnce performs the same single source evaluation as ReconcileOnce and
+// seals a private candidate-plan handoff only when the resulting status is a
+// valid mutation candidate. It never invokes a writer or another capability.
+func (reconciler *Reconciler) PrepareOnce(ctx context.Context) (PreparedCycle, error) {
+	status, desiredPlan, err := reconciler.evaluateOnce(ctx)
+	if err != nil {
+		return PreparedCycle{}, err
+	}
+	prepared, err := prepareCycle(status, desiredPlan)
+	if err != nil {
+		return PreparedCycle{}, ErrInvariant
+	}
+	return prepared, nil
+}
+
+func (reconciler *Reconciler) evaluateOnce(ctx context.Context) (Status, *materialization.Plan, error) {
 	if reconciler == nil {
-		return Status{}, ErrConfig
+		return Status{}, nil, ErrConfig
 	}
 	if !reconciler.Enabled() {
-		return Status{}, ErrDisabled
+		return Status{}, nil, ErrDisabled
 	}
 	if ctx == nil {
-		return Status{}, ErrConfig
+		return Status{}, nil, ErrConfig
 	}
 	if err := ctx.Err(); err != nil {
-		return Status{}, err
+		return Status{}, nil, err
 	}
 	now := reconciler.now().UTC().Truncate(time.Second)
 	if now.IsZero() {
-		return Status{}, ErrConfig
+		return Status{}, nil, ErrConfig
 	}
 	current, err := reconciler.current.Observe(ctx)
 	if ctx.Err() != nil {
-		return Status{}, ctx.Err()
+		return Status{}, nil, ctx.Err()
 	}
 	if err != nil || reconcile.ValidateObservation(current) != nil || current.CellKey != reconciler.cellKey {
 		status := newCurrentUnavailableStatus(reconciler.cellKey, reconciler.cellID, now)
 		if ValidateStatus(status) != nil {
-			return Status{}, ErrInvariant
+			return Status{}, nil, ErrInvariant
 		}
-		return status, nil
+		return status, nil, nil
 	}
 
 	var desiredPlan *materialization.Plan
@@ -181,7 +230,7 @@ func (reconciler *Reconciler) ReconcileOnce(ctx context.Context) (Status, error)
 	if current.State != reconcile.StateForeign && current.State != reconcile.StateMalformed {
 		bundle, fetchErr := reconciler.desired.Fetch(ctx)
 		if ctx.Err() != nil {
-			return Status{}, ctx.Err()
+			return Status{}, nil, ctx.Err()
 		}
 		if fetchErr != nil {
 			desiredState = DesiredUnavailable
@@ -197,13 +246,127 @@ func (reconciler *Reconciler) ReconcileOnce(ctx context.Context) (Status, error)
 	}
 	decision, err := reconcile.Decide(reconciler.cellKey, desiredPlan, current, now)
 	if err != nil {
-		return Status{}, ErrInvariant
+		return Status{}, nil, ErrInvariant
 	}
 	status := statusFromDecision(reconciler.cellID, current, desiredState, decision)
 	if err := ValidateStatus(status); err != nil {
-		return Status{}, err
+		return Status{}, nil, err
 	}
-	return status, nil
+	return status, desiredPlan, nil
+}
+
+func ValidatePreparedCycle(prepared PreparedCycle) error {
+	identity, err := materialization.SecretIdentityForCell(prepared.CellKey)
+	if err != nil || prepared.APIVersion != PreparedCycleAPIVersion || prepared.Kind != PreparedCycleKind ||
+		prepared.Policy != PreparedCyclePolicy || prepared.CellID != identity.CellID || ValidateStatus(prepared.Status) != nil ||
+		prepared.Status.CellKey != prepared.CellKey || prepared.Status.Digest != prepared.StatusDigest ||
+		prepared.EvaluatedAt != prepared.Status.EvaluatedAt ||
+		prepared.CandidateAvailable != prepared.Status.MutationCandidate || prepared.DeleteAllowed ||
+		!prepared.ObservationOnly || prepared.ExecutionAllowed || prepared.ProductionMutationAllowed ||
+		prepared.IdempotencyKey != preparedCycleIdempotencyKey(prepared) ||
+		prepared.Digest != DigestPreparedCycle(prepared) {
+		return ErrInvariant
+	}
+	if prepared.CandidateAvailable {
+		if materialization.Validate(prepared.candidatePlan, prepared.EvaluatedAt) != nil ||
+			prepared.candidatePlan.CellKey != prepared.CellKey || prepared.CandidatePlanDigest == "" ||
+			prepared.CandidatePlanDigest != prepared.candidatePlan.Digest ||
+			prepared.CandidatePlanDigest != prepared.Status.DesiredPlanDigest || prepared.Status.Decision == nil ||
+			prepared.Status.Decision.DesiredPlanDigest != prepared.CandidatePlanDigest ||
+			(prepared.Status.Action != reconcile.ActionCreateIfAbsent &&
+				prepared.Status.Action != reconcile.ActionReplaceResourceVersionCAS) {
+			return ErrInvariant
+		}
+		return nil
+	}
+	if prepared.CandidatePlanDigest != "" || !reflect.DeepEqual(prepared.candidatePlan, materialization.Plan{}) {
+		return ErrInvariant
+	}
+	return nil
+}
+
+// CandidatePlan returns a copy of the private plan only after the complete
+// prepared-cycle contract validates and only for a mutation candidate. The
+// Plan itself keeps raw Secret data private and returns copies through Data.
+func (prepared PreparedCycle) CandidatePlan() (materialization.Plan, bool) {
+	if ValidatePreparedCycle(prepared) != nil || !prepared.CandidateAvailable {
+		return materialization.Plan{}, false
+	}
+	return prepared.candidatePlan, true
+}
+
+func DigestPreparedCycle(prepared PreparedCycle) string {
+	prepared.Digest = ""
+	document, err := json.Marshal(prepared)
+	if err != nil {
+		return ""
+	}
+	return digestBytes(document)
+}
+
+func (prepared PreparedCycle) String() string {
+	return fmt.Sprintf(
+		"BackupObserverSecretPreparedCycle{cell=%q action=%q candidate=%t executionAllowed=false digest=%q}",
+		prepared.CellKey, prepared.Status.Action, prepared.CandidateAvailable, prepared.Digest,
+	)
+}
+
+func (prepared PreparedCycle) GoString() string { return prepared.String() }
+
+func prepareCycle(status Status, desiredPlan *materialization.Plan) (PreparedCycle, error) {
+	if ValidateStatus(status) != nil {
+		return PreparedCycle{}, ErrInvariant
+	}
+	statusCopy := clonePreparedStatus(status)
+	prepared := PreparedCycle{
+		APIVersion: PreparedCycleAPIVersion, Kind: PreparedCycleKind, Policy: PreparedCyclePolicy,
+		CellKey: status.CellKey, CellID: status.CellID, StatusDigest: status.Digest, Status: statusCopy,
+		CandidateAvailable: status.MutationCandidate, EvaluatedAt: status.EvaluatedAt, ObservationOnly: true,
+	}
+	if status.MutationCandidate {
+		if desiredPlan == nil || materialization.Validate(*desiredPlan, status.EvaluatedAt) != nil ||
+			desiredPlan.CellKey != status.CellKey || desiredPlan.Digest != status.DesiredPlanDigest {
+			return PreparedCycle{}, ErrInvariant
+		}
+		prepared.CandidatePlanDigest = desiredPlan.Digest
+		prepared.candidatePlan = *desiredPlan
+	}
+	prepared.IdempotencyKey = preparedCycleIdempotencyKey(prepared)
+	prepared.Digest = DigestPreparedCycle(prepared)
+	if ValidatePreparedCycle(prepared) != nil {
+		return PreparedCycle{}, ErrInvariant
+	}
+	return prepared, nil
+}
+
+func clonePreparedStatus(status Status) Status {
+	cloned := status
+	if status.Decision != nil {
+		decision := *status.Decision
+		cloned.Decision = &decision
+	}
+	return cloned
+}
+
+func preparedCycleIdempotencyKey(prepared PreparedCycle) string {
+	if prepared.CellID == "" || !validDigest(prepared.StatusDigest) ||
+		(prepared.CandidatePlanDigest != "" && !validDigest(prepared.CandidatePlanDigest)) {
+		return ""
+	}
+	basis := struct {
+		CellKey             string `json:"cellKey"`
+		StatusDigest        string `json:"statusDigest"`
+		CandidatePlanDigest string `json:"candidatePlanDigest,omitempty"`
+	}{
+		CellKey: prepared.CellKey, StatusDigest: prepared.StatusDigest,
+		CandidatePlanDigest: prepared.CandidatePlanDigest,
+	}
+	document, err := json.Marshal(basis)
+	if err != nil {
+		return ""
+	}
+	return "backup-materializer-candidate-handoff/" + prepared.CellID + "/" +
+		strings.TrimPrefix(digestBytes(document), "sha256:")
 }
 
 func ValidateStatus(status Status) error {

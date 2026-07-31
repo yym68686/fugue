@@ -848,6 +848,24 @@ The package owns no HTTP, filesystem, Kubernetes, store, signer, writer,
 timer, goroutine, process, RBAC, workload, chart, or deployment capability.
 The concrete client and Secret reader satisfy its injected interfaces.
 
+The reconciler also owns the default-off
+`backup-materializer-candidate-handoff@v1` in-process `PreparedCycle`
+contract. `PrepareOnce` performs the same single current/desired source reads
+and pure decision as `ReconcileOnce`; it does not perform a second fetch. Only
+an unblocked create or CAS-replace candidate retains its exact private plan.
+No-op, LKG, blocked, malformed, foreign, invalid-source, and unavailable-source
+results retain the public status only.
+
+The serialized and formatted handoff contains the validated reconcile status,
+candidate plan digest, idempotency key, evaluation time, and permanently false
+delete/execution/production flags. Raw spec and observer token bytes stay in an
+unexported field and can be obtained only through `CandidatePlan`, which first
+revalidates the complete status/plan binding. A JSON round trip deliberately
+cannot recreate that private capability. The existing agent continues to call
+`ReconcileOnce`, so this atom neither connects the handoff to a writer nor
+changes the running process, image dependency closure, chart, RBAC, or
+production state.
+
 `internal/backupmaterializer/agent` and
 `cmd/fugue-backup-materializer` add the default-off
 `backup-materializer-agent@v1` process boundary around exactly one such cell.

@@ -426,6 +426,231 @@ func TestReconcileStatusIsSecretFreeAndIdempotentAcrossEvaluationTime(t *testing
 	}
 }
 
+func TestPrepareOnceHandsOffOnlyExactMutationCandidatePlan(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 2, 5, 30, 0, 0, time.UTC)
+	createAt := issuedAt.Add(30 * time.Second)
+	createBundle, createPlan := testGeneration(t, "run-create-handoff", testAppTarget(), issuedAt, createAt)
+	createCurrent := testAbsent(t, createPlan.CellKey)
+
+	oldIssuedAt := issuedAt.Add(time.Minute)
+	oldAt := oldIssuedAt.Add(30 * time.Second)
+	_, oldPlan := testGeneration(t, "run-old-handoff", testAppTarget(), oldIssuedAt, oldAt)
+	replaceIssuedAt := issuedAt.Add(3 * time.Minute)
+	replaceAt := replaceIssuedAt.Add(30 * time.Second)
+	replaceBundle, replacePlan := testGeneration(t, "run-replace-handoff", testAppTarget(), replaceIssuedAt, replaceAt)
+	replaceCurrent := testManaged(t, oldPlan, oldAt)
+
+	for _, fixture := range []struct {
+		name    string
+		at      time.Time
+		bundle  materializercontract.ObserverInputBundle
+		plan    materialization.Plan
+		current reconcile.Observation
+		action  reconcile.Action
+	}{
+		{name: "create", at: createAt, bundle: createBundle, plan: createPlan, current: createCurrent, action: reconcile.ActionCreateIfAbsent},
+		{name: "replace", at: replaceAt, bundle: replaceBundle, plan: replacePlan, current: replaceCurrent, action: reconcile.ActionReplaceResourceVersionCAS},
+	} {
+		fixture := fixture
+		t.Run(fixture.name, func(t *testing.T) {
+			desired := &desiredStub{bundle: fixture.bundle}
+			current := &currentStub{observation: fixture.current}
+			prepared, err := testReconciler(t, fixture.plan.CellKey, fixture.at, desired, current).
+				PrepareOnce(context.Background())
+			if err != nil || ValidatePreparedCycle(prepared) != nil || !prepared.CandidateAvailable ||
+				prepared.CandidatePlanDigest != fixture.plan.Digest || prepared.Status.Action != fixture.action ||
+				prepared.StatusDigest != prepared.Status.Digest || prepared.CellKey != fixture.plan.CellKey ||
+				prepared.EvaluatedAt != fixture.at || prepared.DeleteAllowed || !prepared.ObservationOnly ||
+				prepared.ExecutionAllowed || prepared.ProductionMutationAllowed || prepared.IdempotencyKey == "" ||
+				prepared.Digest == "" || desired.Calls() != 1 || current.Calls() != 1 {
+				t.Fatalf("prepared candidate drifted: prepared=%#v err=%v validation=%v desired=%d current=%d", prepared, err, ValidatePreparedCycle(prepared), desired.Calls(), current.Calls())
+			}
+			candidate, ok := prepared.CandidatePlan()
+			if !ok || candidate.Digest != fixture.plan.Digest || materialization.Validate(candidate, fixture.at) != nil {
+				t.Fatalf("candidate handoff failed: candidate=%#v ok=%t", candidate, ok)
+			}
+			candidate.Digest = "invalid"
+			again, ok := prepared.CandidatePlan()
+			if !ok || again.Digest != fixture.plan.Digest {
+				t.Fatal("returned candidate mutated prepared handoff")
+			}
+
+			wantStatus := testReconcileOnce(
+				t, fixture.plan.CellKey, fixture.at,
+				&desiredStub{bundle: fixture.bundle}, &currentStub{observation: fixture.current},
+			)
+			if !reflect.DeepEqual(prepared.Status, wantStatus) {
+				t.Fatalf("PrepareOnce status differs from ReconcileOnce: got=%#v want=%#v", prepared.Status, wantStatus)
+			}
+			assertPreparedCycleSecretFree(t, prepared, fixture.plan, fixture.at)
+
+			document, err := json.Marshal(prepared)
+			if err != nil {
+				t.Fatalf("marshal prepared cycle: %v", err)
+			}
+			var roundTripped PreparedCycle
+			if err := json.Unmarshal(document, &roundTripped); err != nil {
+				t.Fatalf("decode public prepared cycle: %v", err)
+			}
+			if ValidatePreparedCycle(roundTripped) == nil {
+				t.Fatal("serialized public status recreated private candidate capability")
+			}
+			if _, ok := roundTripped.CandidatePlan(); ok {
+				t.Fatal("serialized public status exposed candidate plan")
+			}
+		})
+	}
+}
+
+func TestPrepareOnceRetainsNoPrivatePlanForStableOrFailedCycles(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 2, 7, 0, 0, 0, time.UTC)
+	now := issuedAt.Add(30 * time.Second)
+	bundle, plan := testGeneration(t, "run-no-handoff", testAppTarget(), issuedAt, now)
+	managed := testManaged(t, plan, now)
+
+	t.Run("no-op", func(t *testing.T) {
+		desired := &desiredStub{bundle: bundle}
+		current := &currentStub{observation: managed}
+		prepared, err := testReconciler(t, plan.CellKey, now, desired, current).PrepareOnce(context.Background())
+		if err != nil || ValidatePreparedCycle(prepared) != nil || prepared.CandidateAvailable ||
+			prepared.CandidatePlanDigest != "" || prepared.Status.Action != reconcile.ActionNoop ||
+			!prepared.Status.Ready || !reflect.DeepEqual(prepared.candidatePlan, materialization.Plan{}) ||
+			desired.Calls() != 1 || current.Calls() != 1 {
+			t.Fatalf("no-op prepared cycle retained candidate: prepared=%#v err=%v", prepared, err)
+		}
+		if _, ok := prepared.CandidatePlan(); ok {
+			t.Fatal("no-op exposed a candidate plan")
+		}
+		assertPreparedCycleSecretFree(t, prepared, plan, now)
+	})
+
+	t.Run("current unavailable", func(t *testing.T) {
+		desired := &desiredStub{bundle: bundle}
+		current := &currentStub{err: errors.New("private Kubernetes failure")}
+		prepared, err := testReconciler(t, plan.CellKey, now, desired, current).PrepareOnce(context.Background())
+		if err != nil || ValidatePreparedCycle(prepared) != nil || prepared.CandidateAvailable ||
+			prepared.Status.CurrentState != CurrentUnavailable || !prepared.Status.Blocked ||
+			!prepared.Status.Retryable || desired.Calls() != 0 || current.Calls() != 1 ||
+			!reflect.DeepEqual(prepared.candidatePlan, materialization.Plan{}) {
+			t.Fatalf("failed observation retained candidate: prepared=%#v err=%v desired=%d current=%d", prepared, err, desired.Calls(), current.Calls())
+		}
+		if strings.Contains(fmt.Sprintf("%#v", prepared), "private") {
+			t.Fatalf("prepared failure leaked source detail: %#v", prepared)
+		}
+	})
+
+	disabled, err := New(Config{Enabled: false})
+	if err != nil {
+		t.Fatalf("construct disabled reconciler: %v", err)
+	}
+	if _, err := disabled.PrepareOnce(context.Background()); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("disabled PrepareOnce error = %v, want ErrDisabled", err)
+	}
+	if _, err := (*Reconciler)(nil).PrepareOnce(context.Background()); !errors.Is(err, ErrConfig) {
+		t.Fatalf("nil PrepareOnce error = %v, want ErrConfig", err)
+	}
+}
+
+func TestPreparedCycleContractRejectsCapabilityAndBindingDrift(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
+	now := issuedAt.Add(30 * time.Second)
+	bundle, plan := testGeneration(t, "run-handoff-contract", testAppTarget(), issuedAt, now)
+	valid, err := testReconciler(
+		t, plan.CellKey, now, &desiredStub{bundle: bundle}, &currentStub{observation: testAbsent(t, plan.CellKey)},
+	).PrepareOnce(context.Background())
+	if err != nil || ValidatePreparedCycle(valid) != nil {
+		t.Fatalf("build valid prepared cycle: err=%v validation=%v", err, ValidatePreparedCycle(valid))
+	}
+	tests := map[string]func(*PreparedCycle){
+		"API":             func(value *PreparedCycle) { value.APIVersion = "v2" },
+		"cell":            func(value *PreparedCycle) { value.CellKey = "backup/all/invalid" },
+		"status digest":   func(value *PreparedCycle) { value.StatusDigest = strings.Repeat("0", 64) },
+		"nested status":   func(value *PreparedCycle) { value.Status.Digest = "invalid" },
+		"candidate flag":  func(value *PreparedCycle) { value.CandidateAvailable = false },
+		"plan digest":     func(value *PreparedCycle) { value.CandidatePlanDigest = strings.Repeat("0", 64) },
+		"private plan":    func(value *PreparedCycle) { value.candidatePlan.Digest = "invalid" },
+		"evaluation time": func(value *PreparedCycle) { value.EvaluatedAt = value.EvaluatedAt.Add(time.Second) },
+		"delete":          func(value *PreparedCycle) { value.DeleteAllowed = true },
+		"not observation": func(value *PreparedCycle) { value.ObservationOnly = false },
+		"execution":       func(value *PreparedCycle) { value.ExecutionAllowed = true },
+		"production":      func(value *PreparedCycle) { value.ProductionMutationAllowed = true },
+		"idempotency":     func(value *PreparedCycle) { value.IdempotencyKey = "other" },
+		"digest":          func(value *PreparedCycle) { value.Digest = "invalid" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := clonePreparedCycle(valid)
+			mutate(&candidate)
+			if name != "digest" {
+				candidate.Digest = DigestPreparedCycle(candidate)
+			}
+			if err := ValidatePreparedCycle(candidate); !errors.Is(err, ErrInvariant) {
+				t.Fatalf("prepared cycle drift error = %v, want ErrInvariant", err)
+			}
+			if _, ok := candidate.CandidatePlan(); ok {
+				t.Fatal("invalid prepared cycle exposed candidate plan")
+			}
+		})
+	}
+
+	stable, err := prepareCycle(testReconcileOnce(t, plan.CellKey, now,
+		&desiredStub{bundle: bundle}, &currentStub{observation: testManaged(t, plan, now)}), &plan)
+	if err != nil || ValidatePreparedCycle(stable) != nil || stable.CandidateAvailable {
+		t.Fatalf("build stable prepared cycle: prepared=%#v err=%v", stable, err)
+	}
+	stable.candidatePlan = plan
+	stable.Digest = DigestPreparedCycle(stable)
+	if err := ValidatePreparedCycle(stable); !errors.Is(err, ErrInvariant) {
+		t.Fatalf("non-candidate retained private plan: %v", err)
+	}
+}
+
+func TestPrepareOnceIsDeterministicUnderConcurrentEvaluation(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	now := issuedAt.Add(30 * time.Second)
+	bundle, plan := testGeneration(t, "run-handoff-concurrent", testAppTarget(), issuedAt, now)
+	desired := &desiredStub{bundle: bundle}
+	current := &currentStub{observation: testAbsent(t, plan.CellKey)}
+	controller := testReconciler(t, plan.CellKey, now, desired, current)
+	want, err := controller.PrepareOnce(context.Background())
+	if err != nil {
+		t.Fatalf("baseline prepare: %v", err)
+	}
+	const readers = 32
+	results := make(chan PreparedCycle, readers)
+	errorsFound := make(chan error, readers)
+	var wait sync.WaitGroup
+	for range readers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			prepared, prepareErr := controller.PrepareOnce(context.Background())
+			results <- prepared
+			errorsFound <- prepareErr
+		}()
+	}
+	wait.Wait()
+	close(results)
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatalf("concurrent prepare error: %v", err)
+		}
+	}
+	for got := range results {
+		if !reflect.DeepEqual(got, want) || ValidatePreparedCycle(got) != nil {
+			t.Fatalf("concurrent prepared cycle drifted: got=%#v want=%#v", got, want)
+		}
+	}
+	if desired.Calls() != readers+1 || current.Calls() != readers+1 {
+		t.Fatalf("prepared source call count drifted: desired=%d current=%d", desired.Calls(), current.Calls())
+	}
+}
+
 func TestReconcileOnceIsDeterministicUnderConcurrentEvaluation(t *testing.T) {
 	t.Parallel()
 	issuedAt := time.Date(2026, 8, 2, 6, 0, 0, 0, time.UTC)
@@ -704,6 +929,32 @@ func cloneStatus(status Status) Status {
 		status.Decision = &decision
 	}
 	return status
+}
+
+func clonePreparedCycle(prepared PreparedCycle) PreparedCycle {
+	prepared.Status = cloneStatus(prepared.Status)
+	return prepared
+}
+
+func assertPreparedCycleSecretFree(t *testing.T, prepared PreparedCycle, plan materialization.Plan, now time.Time) {
+	t.Helper()
+	document, err := json.Marshal(prepared)
+	if err != nil {
+		t.Fatalf("marshal prepared cycle: %v", err)
+	}
+	data, err := plan.Data(now)
+	if err != nil {
+		t.Fatalf("read private candidate fixture: %v", err)
+	}
+	rendered := strings.Join([]string{string(document), fmt.Sprint(prepared), fmt.Sprintf("%#v", prepared)}, "\n")
+	for _, sensitive := range []string{string(data.SpecDocument), string(data.ObserverToken), "tenant-1"} {
+		if strings.Contains(rendered, sensitive) {
+			t.Fatalf("prepared cycle exposed private candidate input %q", sensitive)
+		}
+	}
+	if !strings.Contains(rendered, "executionAllowed=false") {
+		t.Fatalf("prepared cycle diagnostics omitted execution gate: %s", rendered)
+	}
 }
 
 func cloneStringMap(value map[string]string) map[string]string {
