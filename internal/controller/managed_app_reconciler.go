@@ -157,24 +157,17 @@ func (s *Service) appHasActiveOperation(app model.App) (bool, error) {
 }
 
 func (s *Service) observedManagedPostgresDesiredApp(ctx context.Context, app model.App) (model.App, bool, error) {
-	alignedSpec, changed, err := s.alignManagedPostgresRuntimeToObservedPrimary(ctx, app)
+	mutation, changed, err := s.managedPostgresPlacementMutationForObservedPrimary(ctx, app)
 	if err != nil || !changed {
 		return app, changed, err
 	}
 
-	alignedApp := app
-	alignedApp.Spec = alignedSpec
-	alignedApp, err = store.OverlayDesiredManagedPostgres(alignedApp)
-	if err != nil {
-		return app, false, fmt.Errorf("overlay observed managed postgres desired state for app %s: %w", app.ID, err)
-	}
-
-	updatedApp, err := s.Store.SyncObservedManagedPostgresSpec(app.ID, alignedSpec)
+	updatedApp, err := s.Store.SyncObservedManagedPostgresPlacement(mutation)
 	if err != nil {
 		if s.Logger != nil {
-			s.Logger.Printf("persist observed managed postgres desired state for app %s failed: %v", app.ID, err)
+			s.Logger.Printf("persist observed managed postgres placement for app %s failed: %v", app.ID, err)
 		}
-		return alignedApp, true, nil
+		return app, false, err
 	}
 	return updatedApp, true, nil
 }

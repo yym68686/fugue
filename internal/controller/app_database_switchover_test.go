@@ -151,10 +151,12 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 	t.Parallel()
 
 	const (
-		namespace     = "tenant-demo"
-		clusterName   = "demo-postgres"
-		targetPrimary = "demo-postgres-2"
-		primaryIP     = "10.42.0.22"
+		namespace      = "tenant-demo"
+		clusterName    = "demo-postgres"
+		targetPrimary  = "demo-postgres-2"
+		primaryIP      = "10.42.0.22"
+		primaryNode    = "node-target"
+		primaryRuntime = "runtime-target"
 	)
 
 	var podReady atomic.Bool
@@ -182,6 +184,7 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"metadata": map[string]any{"name": targetPrimary},
+				"spec":     map[string]any{"nodeName": primaryNode},
 				"status": map[string]any{
 					"phase": "Running",
 					"podIP": primaryIP,
@@ -189,6 +192,13 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 						"type":   "Ready",
 						"status": ready,
 					}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes/"+primaryNode:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name":   primaryNode,
+					"labels": map[string]any{runtimepkg.RuntimeIDLabelKey: primaryRuntime},
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/endpoints/"+clusterName+"-rw":
@@ -241,7 +251,7 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 		},
 	}
 
-	ready, detail, err := svc.observeManagedPostgresPrimaryReadiness(
+	placement, ready, detail, err := svc.observeManagedPostgresPrimaryReadiness(
 		context.Background(), client, namespace, clusterName, targetPrimary, postgres,
 	)
 	if err != nil || ready || !strings.Contains(detail, "Ready condition") {
@@ -252,7 +262,7 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 	}
 
 	podReady.Store(true)
-	ready, detail, err = svc.observeManagedPostgresPrimaryReadiness(
+	placement, ready, detail, err = svc.observeManagedPostgresPrimaryReadiness(
 		context.Background(), client, namespace, clusterName, targetPrimary, postgres,
 	)
 	if err != nil || ready || !strings.Contains(detail, "publish ready endpoint") {
@@ -263,14 +273,14 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 	}
 
 	endpointMatches.Store(true)
-	ready, detail, err = svc.observeManagedPostgresPrimaryReadiness(
+	placement, ready, detail, err = svc.observeManagedPostgresPrimaryReadiness(
 		context.Background(), client, namespace, clusterName, targetPrimary, postgres,
 	)
 	if err != nil || ready || !strings.Contains(detail, "database system is shutting down") {
 		t.Fatalf("transient SQL shutdown must remain pending: ready=%t detail=%q err=%v", ready, detail, err)
 	}
 
-	err = svc.waitForManagedPostgresPrimary(
+	_, err = svc.waitForManagedPostgresPrimary(
 		context.Background(), client, namespace, clusterName, targetPrimary, "", postgres,
 	)
 	if err == nil || !strings.Contains(err.Error(), "database system is shutting down") {
@@ -279,10 +289,15 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 
 	sqlReady.Store(true)
 	svc.Config.ManagedAppRolloutTimeout = time.Second
-	if err := svc.waitForManagedPostgresPrimary(
+	placement, err = svc.waitForManagedPostgresPrimary(
 		context.Background(), client, namespace, clusterName, targetPrimary, "", postgres,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("ready primary must pass the completion gate: %v", err)
+	}
+	if placement.RuntimeID != primaryRuntime || placement.NodeName != primaryNode ||
+		placement.PrimaryPod != targetPrimary || placement.PodIP != primaryIP {
+		t.Fatalf("completion gate returned non-atomic placement witness: %+v", placement)
 	}
 	if got := sqlCalls.Load(); got < 3 {
 		t.Fatalf("expected SQL readiness to be reprobed through convergence, calls=%d", got)
@@ -519,7 +534,7 @@ func TestRollbackManagedPostgresStageRestoresThroughForcedApply(t *testing.T) {
 	}
 }
 
-func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
+func TestDatabaseSwitchoverStagePreservesNodeAndFinalUsesWitness(t *testing.T) {
 	t.Parallel()
 
 	base := model.AppSpec{
@@ -532,17 +547,26 @@ func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
 		Password:                         "secret",
 		RuntimeID:                        "runtime_source",
 		FailoverTargetRuntimeID:          "runtime_target",
+		PrimaryNodeName:                  "node-source",
 		Instances:                        2,
 		SynchronousReplicas:              1,
 		PrimaryPlacementPendingRebalance: true,
 	}
 
-	got := databaseSwitchoverSpec(base, postgres, "runtime_target", "runtime_source")
-	if got.Postgres == nil {
-		t.Fatalf("expected postgres spec, got %+v", got)
+	stage := databaseSwitchoverStageSpec(base, postgres, "runtime_source", "runtime_target")
+	if stage.Postgres == nil {
+		t.Fatalf("expected postgres stage spec, got %+v", stage)
 	}
-	if got.Postgres.PrimaryPlacementPendingRebalance {
-		t.Fatalf("expected explicit switchover to clear pending placement hold, got %+v", got.Postgres)
+	if stage.Postgres.PrimaryNodeName != "node-source" {
+		t.Fatalf("stage changed durable source node pin: %+v", stage.Postgres)
+	}
+	final := databaseSwitchoverFinalPostgresSpec(postgres, "runtime_target", "runtime_source", "node-target")
+	if final.PrimaryNodeName != "node-target" || final.RuntimeID != "runtime_target" ||
+		final.FailoverTargetRuntimeID != "runtime_source" {
+		t.Fatalf("final spec did not bind the target placement witness: %+v", final)
+	}
+	if final.PrimaryPlacementPendingRebalance {
+		t.Fatalf("expected explicit switchover to clear pending placement hold, got %+v", final)
 	}
 }
 

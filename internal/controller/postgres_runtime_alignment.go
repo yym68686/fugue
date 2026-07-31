@@ -16,79 +16,124 @@ const (
 	kubeHostnameLabelKey      = "kubernetes.io/hostname"
 )
 
-func (s *Service) alignManagedPostgresRuntimeToObservedPrimary(ctx context.Context, app model.App) (model.AppSpec, bool, error) {
-	desired := cloneControllerAppSpec(&app.Spec)
-	if desired == nil {
-		return model.AppSpec{}, false, nil
-	}
+type managedPostgresPrimaryPlacement struct {
+	RuntimeID  string
+	NodeName   string
+	PrimaryPod string
+	PodIP      string
+}
 
-	postgres := store.OwnedManagedPostgresSpec(app)
-	if postgres == nil {
-		return *desired, false, nil
-	}
+func (placement managedPostgresPrimaryPlacement) complete() bool {
+	return strings.TrimSpace(placement.RuntimeID) != "" &&
+		strings.TrimSpace(placement.NodeName) != "" &&
+		strings.TrimSpace(placement.PrimaryPod) != "" &&
+		strings.TrimSpace(placement.PodIP) != ""
+}
 
+func managedPostgresPrimaryPlacementsEqual(left, right managedPostgresPrimaryPlacement) bool {
+	return strings.TrimSpace(left.RuntimeID) == strings.TrimSpace(right.RuntimeID) &&
+		strings.TrimSpace(left.NodeName) == strings.TrimSpace(right.NodeName) &&
+		strings.TrimSpace(left.PrimaryPod) == strings.TrimSpace(right.PrimaryPod) &&
+		strings.TrimSpace(left.PodIP) == strings.TrimSpace(right.PodIP)
+}
+
+func (s *Service) managedPostgresPlacementMutationForObservedPrimary(
+	ctx context.Context,
+	app model.App,
+) (store.ManagedPostgresPlacementMutation, bool, error) {
+	target, err := store.ManagedPostgresOperationTargetForApp(app, "")
+	if err != nil {
+		return store.ManagedPostgresPlacementMutation{}, false, err
+	}
+	if target == nil {
+		return store.ManagedPostgresPlacementMutation{}, false, nil
+	}
+	postgres := target.Postgres
 	desiredRuntimeID := strings.TrimSpace(postgres.RuntimeID)
 	if desiredRuntimeID == "" {
 		desiredRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}
 	if desiredRuntimeID == "" {
-		return *desired, false, nil
+		return store.ManagedPostgresPlacementMutation{}, false, nil
 	}
 
-	actualRuntimeID, detail, err := s.observedManagedPostgresPrimaryRuntimeID(ctx, app, *postgres)
+	placement, detail, err := s.observedManagedPostgresPrimaryPlacement(ctx, app, postgres)
 	if err != nil {
-		return *desired, false, err
+		return store.ManagedPostgresPlacementMutation{}, false, err
 	}
-	if actualRuntimeID == "" || actualRuntimeID == desiredRuntimeID {
-		return *desired, false, nil
-	}
-
-	if desired.Postgres == nil {
-		desired.Postgres = cloneControllerPostgresSpec(postgres)
-	} else {
-		desired.Postgres = cloneControllerPostgresSpec(desired.Postgres)
+	if !placement.complete() {
+		return store.ManagedPostgresPlacementMutation{}, false, nil
 	}
 
-	targetRuntimeID := strings.TrimSpace(postgres.FailoverTargetRuntimeID)
-	consumeFailover, err := s.shouldConsumeObservedManagedPostgresFailover(
-		desiredRuntimeID,
-		actualRuntimeID,
-		targetRuntimeID,
-	)
-	if err != nil {
-		return *desired, false, err
-	}
+	desired := *model.CloneAppPostgresSpec(&postgres)
+	actualRuntimeID := strings.TrimSpace(placement.RuntimeID)
 	switch {
-	case consumeFailover:
-		desired.Postgres.RuntimeID = actualRuntimeID
-		desired.Postgres.FailoverTargetRuntimeID = ""
-		desired.Postgres.Instances = 1
-		desired.Postgres.SynchronousReplicas = 0
-		desired.Postgres.PrimaryPlacementPendingRebalance = false
+	case actualRuntimeID == desiredRuntimeID:
+		if strings.TrimSpace(postgres.PrimaryNodeName) == strings.TrimSpace(placement.NodeName) {
+			return store.ManagedPostgresPlacementMutation{}, false, nil
+		}
+		desired.PrimaryNodeName = strings.TrimSpace(placement.NodeName)
 		if s.Logger != nil {
 			s.Logger.Printf(
-				"consuming managed postgres failover for app %s from runtime %s to %s based on %s",
-				app.ID,
-				desiredRuntimeID,
-				actualRuntimeID,
-				detail,
+				"correcting managed postgres primary node for app %s on runtime %s to %s based on %s",
+				app.ID, desiredRuntimeID, placement.NodeName, detail,
 			)
 		}
-		return *desired, true, nil
-	case postgres.Instances == 1 && targetRuntimeID == "":
-		desired.Postgres.RuntimeID = actualRuntimeID
-		if s.Logger != nil {
-			s.Logger.Printf(
-				"aligning single-instance managed postgres for app %s from runtime %s to %s based on %s",
-				app.ID,
-				desiredRuntimeID,
-				actualRuntimeID,
-				detail,
-			)
-		}
-		return *desired, true, nil
 	default:
-		return *desired, false, nil
+		consumeFailover, err := s.shouldConsumeObservedManagedPostgresFailover(
+			desiredRuntimeID,
+			actualRuntimeID,
+			strings.TrimSpace(postgres.FailoverTargetRuntimeID),
+		)
+		if err != nil {
+			return store.ManagedPostgresPlacementMutation{}, false, err
+		}
+		if !consumeFailover {
+			if s.Logger != nil {
+				s.Logger.Printf(
+					"rejecting managed postgres cross-runtime placement correction for app %s desired=%s observed=%s node=%s based on %s",
+					app.ID, desiredRuntimeID, actualRuntimeID, placement.NodeName, detail,
+				)
+			}
+			return store.ManagedPostgresPlacementMutation{}, false, nil
+		}
+		desired.RuntimeID = actualRuntimeID
+		desired.FailoverTargetRuntimeID = ""
+		desired.PrimaryNodeName = strings.TrimSpace(placement.NodeName)
+		desired.Instances = 1
+		desired.SynchronousReplicas = 0
+		desired.PrimaryPlacementPendingRebalance = false
+		if s.Logger != nil {
+			s.Logger.Printf(
+				"consuming managed postgres failover for app %s from runtime %s to %s node %s based on %s",
+				app.ID, desiredRuntimeID, actualRuntimeID, placement.NodeName, detail,
+			)
+		}
+	}
+
+	return managedPostgresPlacementMutation(app, *target, postgres, desired, placement), true, nil
+}
+
+func managedPostgresPlacementMutation(
+	app model.App,
+	target store.ManagedPostgresOperationTarget,
+	expected, desired model.AppPostgresSpec,
+	placement managedPostgresPrimaryPlacement,
+) store.ManagedPostgresPlacementMutation {
+	return store.ManagedPostgresPlacementMutation{
+		Witness: store.ManagedPostgresPlacementWitness{
+			AppID:       strings.TrimSpace(app.ID),
+			TenantID:    strings.TrimSpace(app.TenantID),
+			ProjectID:   strings.TrimSpace(app.ProjectID),
+			ServiceID:   strings.TrimSpace(target.ServiceID),
+			ServiceName: model.NormalizePostgresServiceName(expected.ServiceName, ""),
+			RuntimeID:   strings.TrimSpace(placement.RuntimeID),
+			NodeName:    strings.TrimSpace(placement.NodeName),
+			PrimaryPod:  strings.TrimSpace(placement.PrimaryPod),
+			PodIP:       strings.TrimSpace(placement.PodIP),
+		},
+		Expected: store.ManagedPostgresPlacementStateFromSpec(expected),
+		Desired:  store.ManagedPostgresPlacementStateFromSpec(desired),
 	}
 }
 
@@ -124,6 +169,68 @@ func (s *Service) runtimeUnavailable(runtimeID string) (bool, error) {
 		return false, fmt.Errorf("load runtime %s: %w", runtimeID, err)
 	}
 	return strings.EqualFold(strings.TrimSpace(runtimeObj.Status), model.RuntimeStatusOffline), nil
+}
+
+// observedManagedPostgresPrimaryPlacement returns only a complete live
+// placement witness. PVC affinity remains useful diagnostic evidence, but it
+// cannot identify the currently serving Pod/IP and is therefore never used to
+// authorize a desired-state mutation.
+func (s *Service) observedManagedPostgresPrimaryPlacement(
+	ctx context.Context,
+	app model.App,
+	spec model.AppPostgresSpec,
+) (managedPostgresPrimaryPlacement, string, error) {
+	if strings.TrimSpace(app.TenantID) == "" || strings.TrimSpace(spec.ServiceName) == "" {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	clusterName := model.NormalizePostgresServiceName(spec.ServiceName, "")
+	client, err := s.kubeClient()
+	if err != nil {
+		return managedPostgresPrimaryPlacement{}, "", fmt.Errorf("initialize kubernetes client: %w", err)
+	}
+
+	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
+	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
+	if err != nil {
+		return managedPostgresPrimaryPlacement{}, "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
+	}
+	if !found || !managedBackingServiceClusterReady(cluster, true) {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	primaryPod := strings.TrimSpace(cluster.Status.CurrentPrimary)
+	if primaryPod == "" {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	pod, found, err := client.getPod(ctx, namespace, primaryPod)
+	if err != nil {
+		return managedPostgresPrimaryPlacement{}, "", fmt.Errorf("read postgres pod %s/%s: %w", namespace, primaryPod, err)
+	}
+	if !found || pod.Metadata.DeletionTimestamp != "" || strings.TrimSpace(pod.Status.Phase) != "Running" ||
+		!managedPostgresPrimaryPodReady(pod) {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	nodeName := strings.TrimSpace(pod.Spec.NodeName)
+	if nodeName == "" {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	podIP, found, err := client.getPodIP(ctx, namespace, primaryPod)
+	if err != nil {
+		return managedPostgresPrimaryPlacement{}, "", fmt.Errorf("read postgres pod %s/%s IP: %w", namespace, primaryPod, err)
+	}
+	podIP = strings.TrimSpace(podIP)
+	if !found || podIP == "" {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	runtimeID, err := s.runtimeIDForNode(ctx, client, nodeName)
+	if err != nil {
+		return managedPostgresPrimaryPlacement{}, "", err
+	}
+	if strings.TrimSpace(runtimeID) == "" {
+		return managedPostgresPrimaryPlacement{}, "", nil
+	}
+	return managedPostgresPrimaryPlacement{
+		RuntimeID: runtimeID, NodeName: nodeName, PrimaryPod: primaryPod, PodIP: podIP,
+	}, "pod " + primaryPod + " on node " + nodeName + " at " + podIP, nil
 }
 
 func (s *Service) observedManagedPostgresPrimaryRuntimeID(ctx context.Context, app model.App, spec model.AppPostgresSpec) (string, string, error) {

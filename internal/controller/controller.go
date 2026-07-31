@@ -942,14 +942,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			originSource = model.CloneAppSource(op.DesiredOriginSource)
 		}
 		model.SetAppSourceState(&app, originSource, buildSource)
-		if alignedSpec, changed, err := s.alignManagedPostgresRuntimeToObservedPrimary(ctx, app); err != nil {
-			if s.Logger != nil {
-				s.Logger.Printf("skip managed postgres runtime alignment for app %s: %v", app.ID, err)
-			}
-		} else if changed {
-			app.Spec = alignedSpec
-			completionDesiredSpec = cloneControllerAppSpec(&alignedSpec)
-		}
+		// Live PostgreSQL placement is persisted only by the idle managed-app
+		// reconciliation path. An active deploy must not fold a separately
+		// observed placement into its generic completion transaction.
 	case model.OperationTypeScale:
 		if op.DesiredReplicas == nil {
 			return fmt.Errorf("scale operation %s missing desired replicas", op.ID)

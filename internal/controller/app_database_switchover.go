@@ -88,7 +88,7 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 			return fmt.Errorf("managed postgres for app %s is configured on runtime %s but the observed primary is elsewhere", app.ID, targetRuntimeID)
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing managed postgres standby on runtime %s", targetRuntimeID))
-		stageSpec := databaseSwitchoverSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID)
+		stageSpec := databaseSwitchoverStageSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID)
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			cause := fmt.Errorf("prepare managed postgres standby on %s: %w", targetRuntimeID, err)
 			return s.rollbackAppOwnedManagedPostgresStage(ctx, op, app, currentDatabase, cause)
@@ -126,27 +126,30 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 			return recoverableManagedPostgresTransitionError("switchover request", fmt.Errorf("request managed postgres switchover to %s: %w", targetPrimary, err))
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("managed postgres switchover to %s requested; waiting for observed primary", targetPrimary))
-		if err := s.waitForManagedPostgresPrimary(
-			ctx,
-			client,
-			namespace,
-			clusterName,
-			targetPrimary,
-			op.ID,
-			*currentDatabase,
-		); err != nil {
-			return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres switchover to %s: %w", targetPrimary, err))
-		}
 	} else {
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("observed managed postgres primary %s on target runtime; resuming finalization", targetPrimary))
 	}
 
-	finalSpec := databaseSwitchoverSpec(app.Spec, currentDatabase, targetRuntimeID, sourceRuntimeID)
+	placementBefore, err := s.waitForManagedPostgresPrimary(
+		ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase,
+	)
+	if err != nil {
+		return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres switchover to %s: %w", targetPrimary, err))
+	}
+	if strings.TrimSpace(placementBefore.RuntimeID) != targetRuntimeID {
+		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
+			"managed postgres SQL-ready primary %s is on runtime %s, want %s",
+			placementBefore.PrimaryPod, placementBefore.RuntimeID, targetRuntimeID,
+		))
+	}
+	finalPostgres := databaseSwitchoverFinalPostgresSpec(currentDatabase, targetRuntimeID, sourceRuntimeID, placementBefore.NodeName)
+	finalSpec := app.Spec
+	finalSpec.Postgres = &finalPostgres
 	finalBundle, err := s.applyManagedDesiredAppState(ctx, op.ID, app, finalSpec)
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("finalization", fmt.Errorf("finalize managed postgres runtime assignments: %w", err))
 	}
-	if err := s.waitForManagedPostgresPrimary(
+	placementAfter, err := s.waitForManagedPostgresPrimary(
 		ctx,
 		client,
 		namespace,
@@ -154,20 +157,27 @@ func (s *Service) executeManagedDatabaseSwitchoverOperation(
 		targetPrimary,
 		op.ID,
 		*currentDatabase,
-	); err != nil {
+	)
+	if err != nil {
 		return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for managed postgres to settle after switchover: %w", err))
+	}
+	if strings.TrimSpace(placementAfter.RuntimeID) != targetRuntimeID ||
+		!managedPostgresPrimaryPlacementsEqual(placementBefore, placementAfter) {
+		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
+			"managed postgres SQL-ready placement changed during finalization: before=%+v after=%+v",
+			placementBefore, placementAfter,
+		))
 	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return recoverableManagedPostgresTransitionError("completion", err)
 	}
 
 	message := fmt.Sprintf("managed postgres switched over from %s to %s", sourceRuntimeID, targetRuntimeID)
-	_, err = s.Store.CompleteManagedOperationWithResult(
+	_, err = s.Store.CompleteManagedPostgresSwitchoverWithPlacement(
 		op.ID,
 		finalBundle.ManifestPath,
 		message,
-		&finalSpec,
-		nil,
+		managedPostgresPlacementMutation(app, *target, *currentDatabase, finalPostgres, placementAfter),
 	)
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("completion", fmt.Errorf("complete database switchover operation %s: %w", op.ID, err))
@@ -221,28 +231,28 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 			return fmt.Errorf("managed postgres service %s is configured on runtime %s but the observed primary is elsewhere", target.ServiceID, targetRuntimeID)
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("preparing managed postgres service %s standby on runtime %s", target.ServiceID, targetRuntimeID))
-		stagePostgres := databaseSwitchoverPostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID)
-		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
+		stagePostgres := databaseSwitchoverStagePostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID)
+		stageApp, err := appWithBackingServicePostgres(target.ServiceID, app, stagePostgres)
 		if err != nil {
 			return fmt.Errorf("stage managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
 		}
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, stageApp, stageApp.Spec); err != nil {
 			cause := fmt.Errorf("prepare managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
-			return s.rollbackBoundManagedPostgresStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
+			return s.rollbackBoundManagedPostgresEphemeralStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
 		}
 
 		targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID)
 		if err != nil {
 			cause := fmt.Errorf("wait for managed postgres service %s standby on %s: %w", target.ServiceID, targetRuntimeID, err)
-			return s.rollbackBoundManagedPostgresStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
+			return s.rollbackBoundManagedPostgresEphemeralStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
 		}
 		if err := s.waitForManagedPostgresReplicationCatchup(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			cause := fmt.Errorf("wait for managed postgres service %s standby %s replication catch-up: %w", target.ServiceID, targetPrimary, err)
-			return s.rollbackBoundManagedPostgresStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
+			return s.rollbackBoundManagedPostgresEphemeralStage(ctx, op, app, target.ServiceID, currentDatabase, cause)
 		}
 
 		if err := s.ensureOperationStillActive(op.ID); err != nil {
-			return s.rollbackBoundManagedPostgresStage(ctx, op, app, target.ServiceID, currentDatabase, err)
+			return s.rollbackBoundManagedPostgresEphemeralStage(ctx, op, app, target.ServiceID, currentDatabase, err)
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("standby %s is ready; requesting managed postgres service %s switchover", targetPrimary, target.ServiceID))
 		if err := client.patchCloudNativePGClusterStatus(
@@ -256,15 +266,22 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 			return recoverableManagedPostgresTransitionError("switchover request", fmt.Errorf("request managed postgres service %s switchover to %s: %w", target.ServiceID, targetPrimary, err))
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("managed postgres service %s switchover to %s requested; waiting for observed primary", target.ServiceID, targetPrimary))
-		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
-			return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres service %s switchover to %s: %w", target.ServiceID, targetPrimary, err))
-		}
 	} else {
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("observed managed postgres service %s primary %s on target runtime; resuming finalization", target.ServiceID, targetPrimary))
 	}
 
-	finalPostgres := databaseSwitchoverPostgresSpec(currentDatabase, targetRuntimeID, sourceRuntimeID)
-	finalApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, finalPostgres)
+	placementBefore, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase)
+	if err != nil {
+		return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres service %s switchover to %s: %w", target.ServiceID, targetPrimary, err))
+	}
+	if strings.TrimSpace(placementBefore.RuntimeID) != targetRuntimeID {
+		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
+			"managed postgres service %s SQL-ready primary %s is on runtime %s, want %s",
+			target.ServiceID, placementBefore.PrimaryPod, placementBefore.RuntimeID, targetRuntimeID,
+		))
+	}
+	finalPostgres := databaseSwitchoverFinalPostgresSpec(currentDatabase, targetRuntimeID, sourceRuntimeID, placementBefore.NodeName)
+	finalApp, err := appWithBackingServicePostgres(target.ServiceID, app, finalPostgres)
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("finalization", fmt.Errorf("finalize managed postgres service %s runtime assignments: %w", target.ServiceID, err))
 	}
@@ -272,20 +289,27 @@ func (s *Service) executeBoundManagedDatabaseSwitchoverOperation(
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("finalization", fmt.Errorf("apply finalized managed postgres service %s state: %w", target.ServiceID, err))
 	}
-	if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
+	placementAfter, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase)
+	if err != nil {
 		return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for managed postgres service %s to settle after switchover: %w", target.ServiceID, err))
+	}
+	if strings.TrimSpace(placementAfter.RuntimeID) != targetRuntimeID ||
+		!managedPostgresPrimaryPlacementsEqual(placementBefore, placementAfter) {
+		return recoverableManagedPostgresTransitionError("placement witness", fmt.Errorf(
+			"managed postgres service %s SQL-ready placement changed during finalization: before=%+v after=%+v",
+			target.ServiceID, placementBefore, placementAfter,
+		))
 	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
 		return recoverableManagedPostgresTransitionError("completion", err)
 	}
 
 	message := fmt.Sprintf("managed postgres service %s switched over from %s to %s", target.ServiceID, sourceRuntimeID, targetRuntimeID)
-	_, err = s.Store.CompleteManagedOperationWithResult(
+	_, err = s.Store.CompleteManagedPostgresSwitchoverWithPlacement(
 		op.ID,
 		finalBundle.ManifestPath,
 		message,
-		&finalApp.Spec,
-		nil,
+		managedPostgresPlacementMutation(app, target, *currentDatabase, finalPostgres, placementAfter),
 	)
 	if err != nil {
 		return recoverableManagedPostgresTransitionError("completion", fmt.Errorf("complete database switchover operation %s: %w", op.ID, err))
@@ -323,6 +347,25 @@ func (s *Service) updateAppBackingServicePostgres(serviceID string, app model.Ap
 	return next, nil
 }
 
+func appWithBackingServicePostgres(serviceID string, app model.App, postgres model.AppPostgresSpec) (model.App, error) {
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return model.App{}, fmt.Errorf("managed postgres backing service id is required")
+	}
+	next := app
+	next.BackingServices = append([]model.BackingService(nil), app.BackingServices...)
+	for index := range next.BackingServices {
+		if strings.TrimSpace(next.BackingServices[index].ID) != serviceID {
+			continue
+		}
+		service := next.BackingServices[index]
+		service.Spec.Postgres = model.CloneAppPostgresSpec(&postgres)
+		next.BackingServices[index] = service
+		return next, nil
+	}
+	return model.App{}, fmt.Errorf("managed postgres backing service %s is not attached to app %s", serviceID, app.ID)
+}
+
 func (s *Service) rollbackAppOwnedManagedPostgresStage(
 	ctx context.Context,
 	op model.Operation,
@@ -350,6 +393,26 @@ func (s *Service) rollbackBoundManagedPostgresStage(
 		stableApp, err := s.updateAppBackingServicePostgres(serviceID, app, *model.CloneAppPostgresSpec(stablePostgres))
 		if err != nil {
 			return fmt.Errorf("restore managed postgres service %s persisted state: %w", serviceID, err)
+		}
+		if _, err := s.applyManagedDesiredAppState(rollbackCtx, op.ID, stableApp, stableApp.Spec); err != nil {
+			return fmt.Errorf("apply restored managed postgres service %s state: %w", serviceID, err)
+		}
+		return nil
+	})
+}
+
+func (s *Service) rollbackBoundManagedPostgresEphemeralStage(
+	ctx context.Context,
+	op model.Operation,
+	app model.App,
+	serviceID string,
+	stablePostgres *model.AppPostgresSpec,
+	cause error,
+) error {
+	return s.rollbackManagedPostgresStage(ctx, op, cause, func(rollbackCtx context.Context) error {
+		stableApp, err := appWithBackingServicePostgres(serviceID, app, *model.CloneAppPostgresSpec(stablePostgres))
+		if err != nil {
+			return fmt.Errorf("restore managed postgres service %s rendered state: %w", serviceID, err)
 		}
 		if _, err := s.applyManagedDesiredAppState(rollbackCtx, op.ID, stableApp, stableApp.Spec); err != nil {
 			return fmt.Errorf("apply restored managed postgres service %s state: %w", serviceID, err)
@@ -537,7 +600,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			return recoverableManagedPostgresTransitionError("localize switchover request", fmt.Errorf("request managed postgres localize switchover to %s: %w", targetPrimary, err))
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("managed postgres localization switchover to %s requested; waiting for observed primary", targetPrimary))
-		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
+		if _, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres localize switchover to %s: %w", targetPrimary, err))
 		}
 	}
@@ -554,7 +617,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			return recoverableManagedPostgresTransitionError("storage convergence", fmt.Errorf("wait for expanded managed postgres to settle: %w", err))
 		}
 	} else if targetPrimary != "" {
-		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
+		if _, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for localized managed postgres to settle: %w", err))
 		}
 	}
@@ -706,7 +769,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 			return recoverableManagedPostgresTransitionError("localize switchover request", fmt.Errorf("request managed postgres service %s localize switchover to %s: %w", target.ServiceID, targetPrimary, err))
 		}
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("managed postgres service %s localization switchover to %s requested; waiting for observed primary", target.ServiceID, targetPrimary))
-		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
+		if _, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			return recoverableManagedPostgresTransitionError("primary convergence", fmt.Errorf("wait for managed postgres service %s localize switchover to %s: %w", target.ServiceID, targetPrimary, err))
 		}
 	}
@@ -727,7 +790,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 			return recoverableManagedPostgresTransitionError("storage convergence", fmt.Errorf("wait for expanded managed postgres service %s to settle: %w", target.ServiceID, err))
 		}
 	} else if targetPrimary != "" {
-		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
+		if _, err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID, *currentDatabase); err != nil {
 			return recoverableManagedPostgresTransitionError("final convergence", fmt.Errorf("wait for localized managed postgres service %s to settle: %w", target.ServiceID, err))
 		}
 	}
@@ -864,20 +927,23 @@ func ensureDatabaseLocalizeStorageMigrationCapacity(postgres, current *model.App
 	}
 }
 
-func databaseSwitchoverSpec(
+func databaseSwitchoverStageSpec(
 	base model.AppSpec,
 	postgres *model.AppPostgresSpec,
 	primaryRuntimeID, failoverTargetRuntimeID string,
 ) model.AppSpec {
 	next := base
 	if postgres != nil {
-		postgresCopy := databaseSwitchoverPostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
+		postgresCopy := databaseSwitchoverStagePostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
 		next.Postgres = &postgresCopy
 	}
 	return next
 }
 
-func databaseSwitchoverPostgresSpec(
+// databaseSwitchoverStagePostgresSpec keeps the last durable primary-node pin
+// while the replica is prepared. Clearing or changing it before SQL-ready
+// cutover would let a partially staged operation alter the active primary.
+func databaseSwitchoverStagePostgresSpec(
 	postgres *model.AppPostgresSpec,
 	primaryRuntimeID, failoverTargetRuntimeID string,
 ) model.AppPostgresSpec {
@@ -891,6 +957,15 @@ func databaseSwitchoverPostgresSpec(
 	if postgresCopy.SynchronousReplicas < 1 {
 		postgresCopy.SynchronousReplicas = 1
 	}
+	return postgresCopy
+}
+
+func databaseSwitchoverFinalPostgresSpec(
+	postgres *model.AppPostgresSpec,
+	primaryRuntimeID, failoverTargetRuntimeID, primaryNodeName string,
+) model.AppPostgresSpec {
+	postgresCopy := databaseSwitchoverStagePostgresSpec(postgres, primaryRuntimeID, failoverTargetRuntimeID)
+	postgresCopy.PrimaryNodeName = strings.TrimSpace(primaryNodeName)
 	return postgresCopy
 }
 
@@ -934,7 +1009,7 @@ func databaseLocalizeStagePostgresSpec(
 		return databaseLocalizePostgresSpec(postgres, targetRuntimeID, targetNodeName, false, true)
 	}
 	if sourceRuntimeID != "" && targetRuntimeID != "" && sourceRuntimeID != targetRuntimeID {
-		postgresCopy := databaseSwitchoverPostgresSpec(postgres, sourceRuntimeID, targetRuntimeID)
+		postgresCopy := databaseSwitchoverStagePostgresSpec(postgres, sourceRuntimeID, targetRuntimeID)
 		postgresCopy.PrimaryNodeName = ""
 		postgresCopy.PrimaryPlacementPendingRebalance = true
 		return postgresCopy
@@ -1834,7 +1909,7 @@ func (s *Service) waitForManagedPostgresPrimary(
 	client *kubeClient,
 	namespace, clusterName, targetPrimary, operationID string,
 	postgres model.AppPostgresSpec,
-) error {
+) (managedPostgresPrimaryPlacement, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
 
@@ -1849,11 +1924,11 @@ func (s *Service) waitForManagedPostgresPrimary(
 	for {
 		if strings.TrimSpace(operationID) != "" {
 			if err := s.ensureOperationStillActive(operationID); err != nil {
-				return err
+				return managedPostgresPrimaryPlacement{}, err
 			}
 		}
 
-		ready, detail, err := s.observeManagedPostgresPrimaryReadiness(
+		placement, ready, detail, err := s.observeManagedPostgresPrimaryReadiness(
 			waitCtx,
 			client,
 			namespace,
@@ -1862,7 +1937,7 @@ func (s *Service) waitForManagedPostgresPrimary(
 			postgres,
 		)
 		if err != nil {
-			return err
+			return managedPostgresPrimaryPlacement{}, err
 		}
 		if ready {
 			s.updateManagedPostgresTransitionProgress(operationID, fmt.Sprintf(
@@ -1870,16 +1945,16 @@ func (s *Service) waitForManagedPostgresPrimary(
 				strings.TrimSpace(targetPrimary),
 				strings.TrimSpace(clusterName),
 			))
-			return nil
+			return placement, nil
 		}
 		lastMessage = detail
 
 		select {
 		case <-waitCtx.Done():
 			if lastMessage != "" {
-				return fmt.Errorf("%w (%s)", waitCtx.Err(), lastMessage)
+				return managedPostgresPrimaryPlacement{}, fmt.Errorf("%w (%s)", waitCtx.Err(), lastMessage)
 			}
-			return waitCtx.Err()
+			return managedPostgresPrimaryPlacement{}, waitCtx.Err()
 		case <-ticker.C:
 		}
 	}
@@ -1895,23 +1970,23 @@ func (s *Service) observeManagedPostgresPrimaryReadiness(
 	client *kubeClient,
 	namespace, clusterName, targetPrimary string,
 	postgres model.AppPostgresSpec,
-) (bool, string, error) {
+) (managedPostgresPrimaryPlacement, bool, string, error) {
 	namespace = strings.TrimSpace(namespace)
 	clusterName = strings.TrimSpace(clusterName)
 	targetPrimary = strings.TrimSpace(targetPrimary)
 	if clusterName == "" || targetPrimary == "" {
-		return false, "managed postgres readiness requires cluster and target primary", nil
+		return managedPostgresPrimaryPlacement{}, false, "managed postgres readiness requires cluster and target primary", nil
 	}
 
 	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
 	if err != nil {
-		return false, "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
+		return managedPostgresPrimaryPlacement{}, false, "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
 	}
 	if !found {
-		return false, fmt.Sprintf("waiting for cluster %s to exist", clusterName), nil
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for cluster %s to exist", clusterName), nil
 	}
 	if !managedBackingServiceClusterReady(cluster, true) {
-		return false, fmt.Sprintf(
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf(
 			"waiting for cluster %s readiness (%d/%d instances, current=%s target=%s)",
 			clusterName,
 			cluster.Status.ReadyInstances,
@@ -1921,7 +1996,7 @@ func (s *Service) observeManagedPostgresPrimaryReadiness(
 		), nil
 	}
 	if strings.TrimSpace(cluster.Status.CurrentPrimary) != targetPrimary {
-		return false, fmt.Sprintf(
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf(
 			"waiting for cluster %s primary to switch to %s (current=%s target=%s)",
 			clusterName,
 			targetPrimary,
@@ -1932,13 +2007,13 @@ func (s *Service) observeManagedPostgresPrimaryReadiness(
 
 	pod, found, err := client.getPod(ctx, namespace, targetPrimary)
 	if err != nil {
-		return false, "", fmt.Errorf("read managed postgres primary pod %s/%s: %w", namespace, targetPrimary, err)
+		return managedPostgresPrimaryPlacement{}, false, "", fmt.Errorf("read managed postgres primary pod %s/%s: %w", namespace, targetPrimary, err)
 	}
 	if !found {
-		return false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s to exist", namespace, targetPrimary), nil
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s to exist", namespace, targetPrimary), nil
 	}
 	if pod.Metadata.DeletionTimestamp != "" || strings.TrimSpace(pod.Status.Phase) != "Running" {
-		return false, fmt.Sprintf(
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf(
 			"waiting for managed postgres primary pod %s/%s to be Running (phase=%s deleting=%t)",
 			namespace,
 			targetPrimary,
@@ -1947,34 +2022,48 @@ func (s *Service) observeManagedPostgresPrimaryReadiness(
 		), nil
 	}
 	if !managedPostgresPrimaryPodReady(pod) {
-		return false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s Ready condition", namespace, targetPrimary), nil
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s Ready condition", namespace, targetPrimary), nil
+	}
+	nodeName := strings.TrimSpace(pod.Spec.NodeName)
+	if nodeName == "" {
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s node assignment", namespace, targetPrimary), nil
+	}
+	runtimeID, err := s.runtimeIDForNode(ctx, client, nodeName)
+	if err != nil {
+		return managedPostgresPrimaryPlacement{}, false, "", fmt.Errorf("resolve managed postgres primary pod %s/%s runtime from node %s: %w", namespace, targetPrimary, nodeName, err)
+	}
+	runtimeID = strings.TrimSpace(runtimeID)
+	if runtimeID == "" {
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting to resolve managed postgres primary node %s runtime", nodeName), nil
 	}
 	podIP, found, err := client.getPodIP(ctx, namespace, targetPrimary)
 	if err != nil {
-		return false, "", fmt.Errorf("read managed postgres primary pod %s/%s IP: %w", namespace, targetPrimary, err)
+		return managedPostgresPrimaryPlacement{}, false, "", fmt.Errorf("read managed postgres primary pod %s/%s IP: %w", namespace, targetPrimary, err)
 	}
 	podIP = strings.TrimSpace(podIP)
 	if !found {
-		return false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s IP", namespace, targetPrimary), nil
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s IP", namespace, targetPrimary), nil
 	}
 	if podIP == "" {
-		return false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s to receive an IP", namespace, targetPrimary), nil
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for managed postgres primary pod %s/%s to receive an IP", namespace, targetPrimary), nil
 	}
 
 	serviceName := model.PostgresRWServiceName(clusterName)
 	endpointReady, endpointDetail, err := managedPostgresRWEndpointContainsPod(ctx, client, namespace, serviceName, podIP)
 	if err != nil {
-		return false, "", err
+		return managedPostgresPrimaryPlacement{}, false, "", err
 	}
 	if !endpointReady {
-		return false, endpointDetail, nil
+		return managedPostgresPrimaryPlacement{}, false, endpointDetail, nil
 	}
 
 	serviceHost := managedPostgresRWServiceHost(namespace, serviceName)
 	if err := s.probeManagedPostgresPrimarySQL(ctx, serviceHost, podIP, postgres); err != nil {
-		return false, fmt.Sprintf("waiting for managed postgres read-write SQL through %s: %v", serviceHost, err), nil
+		return managedPostgresPrimaryPlacement{}, false, fmt.Sprintf("waiting for managed postgres read-write SQL through %s: %v", serviceHost, err), nil
 	}
-	return true, "", nil
+	return managedPostgresPrimaryPlacement{
+		RuntimeID: runtimeID, NodeName: nodeName, PrimaryPod: targetPrimary, PodIP: podIP,
+	}, true, "", nil
 }
 
 func managedPostgresPrimaryPodReady(pod kubePod) bool {
