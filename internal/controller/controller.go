@@ -36,6 +36,8 @@ type Service struct {
 	resolveManagedImageDigestRef    func(context.Context, string) (string, error)
 	resolveRemoteImageDigest        func(context.Context, string) (string, error)
 	verifyDestinationImageCache     destinationImageCacheVerifyFunc
+	managedPostgresPrimarySQLProbe  managedPostgresPrimarySQLProbeFunc
+	postgresPrimarySQLConnect       managedPostgresPrimarySQLConnectFunc
 	releaseGateMetricsQuerier       releaseflow.ReleaseGateMetricsQuerier
 	releaseGateHTTPClient           releaseflow.HTTPDoer
 	safeRolloutEdgeBundleObserver   safeRolloutEdgeBundleObserver

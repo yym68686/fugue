@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,8 +22,57 @@ import (
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 
+	"github.com/jackc/pgx/v5"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+type fakeManagedPostgresPrimarySQLRow struct {
+	inRecovery          bool
+	transactionReadOnly string
+	serverAddress       string
+	err                 error
+}
+
+func (r fakeManagedPostgresPrimarySQLRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != 3 {
+		return fmt.Errorf("unexpected readiness scan destination count %d", len(dest))
+	}
+	inRecovery, ok := dest[0].(*bool)
+	if !ok {
+		return fmt.Errorf("unexpected recovery scan destination %T", dest[0])
+	}
+	transactionReadOnly, ok := dest[1].(*string)
+	if !ok {
+		return fmt.Errorf("unexpected transaction mode scan destination %T", dest[1])
+	}
+	serverAddress, ok := dest[2].(*string)
+	if !ok {
+		return fmt.Errorf("unexpected server address scan destination %T", dest[2])
+	}
+	*inRecovery = r.inRecovery
+	*transactionReadOnly = r.transactionReadOnly
+	*serverAddress = r.serverAddress
+	return nil
+}
+
+type fakeManagedPostgresPrimarySQLConnection struct {
+	query  string
+	row    pgx.Row
+	closed bool
+}
+
+func (c *fakeManagedPostgresPrimarySQLConnection) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
+	c.query = query
+	return c.row
+}
+
+func (c *fakeManagedPostgresPrimarySQLConnection) Close(context.Context) error {
+	c.closed = true
+	return nil
+}
 
 func TestRecoverableManagedPostgresTransitionErrorPreservesCause(t *testing.T) {
 	t.Parallel()
@@ -93,6 +144,315 @@ func TestManagedPostgresPodDatabaseURLHandlesIPv6AndEscapesCredentials(t *testin
 	}
 	if parsed.Query().Get("sslmode") != "disable" || parsed.Query().Get("connect_timeout") != "5" {
 		t.Fatalf("unexpected database URL query %q", parsed.RawQuery)
+	}
+}
+
+func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace     = "tenant-demo"
+		clusterName   = "demo-postgres"
+		targetPrimary = "demo-postgres-2"
+		primaryIP     = "10.42.0.22"
+	)
+
+	var podReady atomic.Bool
+	var endpointMatches atomic.Bool
+	var sqlReady atomic.Bool
+	var sqlCalls atomic.Int32
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/postgresql.cnpg.io/v1/namespaces/"+namespace+"/clusters/"+clusterName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": clusterName},
+				"spec":     map[string]any{"instances": 2},
+				"status": map[string]any{
+					"readyInstances": 2,
+					"currentPrimary": targetPrimary,
+					"targetPrimary":  targetPrimary,
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/pods/"+targetPrimary:
+			ready := "False"
+			if podReady.Load() {
+				ready = "True"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": targetPrimary},
+				"status": map[string]any{
+					"phase": "Running",
+					"podIP": primaryIP,
+					"conditions": []map[string]any{{
+						"type":   "Ready",
+						"status": ready,
+					}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/endpoints/"+clusterName+"-rw":
+			endpointIP := "10.42.0.21"
+			if endpointMatches.Load() {
+				endpointIP = primaryIP
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"subsets": []map[string]any{{
+					"addresses": []map[string]any{{"ip": endpointIP}},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	postgres := model.AppPostgresSpec{
+		Database: "demo",
+		User:     "demo",
+		Password: "secret",
+	}
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 25 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		managedPostgresPrimarySQLProbe: func(_ context.Context, serviceHost, expectedPodIP string, got model.AppPostgresSpec) error {
+			sqlCalls.Add(1)
+			if serviceHost != clusterName+"-rw."+namespace+".svc" {
+				t.Fatalf("unexpected SQL service host %q", serviceHost)
+			}
+			if expectedPodIP != primaryIP {
+				t.Fatalf("unexpected SQL target Pod IP %q", expectedPodIP)
+			}
+			if got.Database != postgres.Database || got.User != postgres.User || got.Password != postgres.Password {
+				t.Fatalf("unexpected SQL probe credentials: %+v", got)
+			}
+			if !sqlReady.Load() {
+				return errors.New("database system is shutting down")
+			}
+			return nil
+		},
+	}
+
+	ready, detail, err := svc.observeManagedPostgresPrimaryReadiness(
+		context.Background(), client, namespace, clusterName, targetPrimary, postgres,
+	)
+	if err != nil || ready || !strings.Contains(detail, "Ready condition") {
+		t.Fatalf("unready primary pod must block completion: ready=%t detail=%q err=%v", ready, detail, err)
+	}
+	if got := sqlCalls.Load(); got != 0 {
+		t.Fatalf("SQL probe ran before Pod readiness: calls=%d", got)
+	}
+
+	podReady.Store(true)
+	ready, detail, err = svc.observeManagedPostgresPrimaryReadiness(
+		context.Background(), client, namespace, clusterName, targetPrimary, postgres,
+	)
+	if err != nil || ready || !strings.Contains(detail, "publish ready endpoint") {
+		t.Fatalf("stale -rw endpoint must block completion: ready=%t detail=%q err=%v", ready, detail, err)
+	}
+	if got := sqlCalls.Load(); got != 0 {
+		t.Fatalf("SQL probe ran before endpoint convergence: calls=%d", got)
+	}
+
+	endpointMatches.Store(true)
+	ready, detail, err = svc.observeManagedPostgresPrimaryReadiness(
+		context.Background(), client, namespace, clusterName, targetPrimary, postgres,
+	)
+	if err != nil || ready || !strings.Contains(detail, "database system is shutting down") {
+		t.Fatalf("transient SQL shutdown must remain pending: ready=%t detail=%q err=%v", ready, detail, err)
+	}
+
+	err = svc.waitForManagedPostgresPrimary(
+		context.Background(), client, namespace, clusterName, targetPrimary, "", postgres,
+	)
+	if err == nil || !strings.Contains(err.Error(), "database system is shutting down") {
+		t.Fatalf("wait gate completed while SQL was shutting down: %v", err)
+	}
+
+	sqlReady.Store(true)
+	svc.Config.ManagedAppRolloutTimeout = time.Second
+	if err := svc.waitForManagedPostgresPrimary(
+		context.Background(), client, namespace, clusterName, targetPrimary, "", postgres,
+	); err != nil {
+		t.Fatalf("ready primary must pass the completion gate: %v", err)
+	}
+	if got := sqlCalls.Load(); got < 3 {
+		t.Fatalf("expected SQL readiness to be reprobed through convergence, calls=%d", got)
+	}
+}
+
+func TestManagedPostgresEndpointSliceHonorsKubernetesReadinessSemantics(t *testing.T) {
+	t.Parallel()
+
+	ready := true
+	notReady := false
+	notServing := false
+	terminating := true
+	tests := []struct {
+		name     string
+		endpoint kubeEndpoint
+		want     bool
+	}{
+		{
+			name:     "nil conditions mean ready serving and non-terminating",
+			endpoint: kubeEndpoint{Addresses: []string{"10.42.0.22"}},
+			want:     true,
+		},
+		{
+			name: "explicitly not ready",
+			endpoint: func() kubeEndpoint {
+				endpoint := kubeEndpoint{Addresses: []string{"10.42.0.22"}}
+				endpoint.Conditions.Ready = &notReady
+				return endpoint
+			}(),
+		},
+		{
+			name: "explicitly not serving",
+			endpoint: func() kubeEndpoint {
+				endpoint := kubeEndpoint{Addresses: []string{"10.42.0.22"}}
+				endpoint.Conditions.Ready = &ready
+				endpoint.Conditions.Serving = &notServing
+				return endpoint
+			}(),
+		},
+		{
+			name: "terminating",
+			endpoint: func() kubeEndpoint {
+				endpoint := kubeEndpoint{Addresses: []string{"10.42.0.22"}}
+				endpoint.Conditions.Ready = &ready
+				endpoint.Conditions.Terminating = &terminating
+				return endpoint
+			}(),
+		},
+		{
+			name: "explicitly ready",
+			endpoint: func() kubeEndpoint {
+				endpoint := kubeEndpoint{Addresses: []string{"10.42.0.22"}}
+				endpoint.Conditions.Ready = &ready
+				return endpoint
+			}(),
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := managedPostgresEndpointSlicesContainIP([]kubeEndpointSlice{{Endpoints: []kubeEndpoint{test.endpoint}}}, "10.42.0.22")
+			if got != test.want {
+				t.Fatalf("EndpointSlice readiness = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestManagedPostgresServiceDatabaseURLUsesReadinessApplicationName(t *testing.T) {
+	t.Parallel()
+
+	raw := managedPostgresServiceDatabaseURL("demo-postgres-rw.tenant-demo.svc", model.AppPostgresSpec{
+		Database: "demo",
+		User:     "demo",
+		Password: "secret",
+	})
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse database URL: %v", err)
+	}
+	if parsed.Host != "demo-postgres-rw.tenant-demo.svc:5432" {
+		t.Fatalf("unexpected primary readiness host %q", parsed.Host)
+	}
+	if got := parsed.Query().Get("application_name"); got != "fugue-controller-primary-readiness" {
+		t.Fatalf("unexpected readiness application_name %q", got)
+	}
+}
+
+func TestProbeManagedPostgresPrimarySQLUsesDirectWritableSessionEvidence(t *testing.T) {
+	t.Parallel()
+
+	connection := &fakeManagedPostgresPrimarySQLConnection{
+		row: fakeManagedPostgresPrimarySQLRow{
+			serverAddress:       "10.42.0.22",
+			transactionReadOnly: "off",
+		},
+	}
+	var databaseURL string
+	svc := &Service{
+		postgresPrimarySQLConnect: func(_ context.Context, gotDatabaseURL string) (managedPostgresPrimarySQLConnection, error) {
+			databaseURL = gotDatabaseURL
+			return connection, nil
+		},
+	}
+	err := svc.probeManagedPostgresPrimarySQL(
+		context.Background(),
+		"demo-postgres-rw.tenant-demo.svc",
+		"10.42.0.22",
+		model.AppPostgresSpec{Database: "demo", User: "demo", Password: "secret"},
+	)
+	if err != nil {
+		t.Fatalf("writable direct pgx session must pass readiness: %v", err)
+	}
+	if !connection.closed {
+		t.Fatal("expected readiness probe to close its pgx connection")
+	}
+	if strings.TrimSpace(connection.query) != strings.TrimSpace(managedPostgresPrimaryReadinessQuery) {
+		t.Fatalf("unexpected readiness query %q", connection.query)
+	}
+	if !strings.Contains(connection.query, "host(inet_server_addr())") ||
+		!strings.Contains(connection.query, "current_setting('transaction_read_only')") {
+		t.Fatalf("readiness query must verify unmasked server identity and direct session write mode: %q", connection.query)
+	}
+	parsed, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatalf("parse readiness database URL: %v", err)
+	}
+	if parsed.Hostname() != "demo-postgres-rw.tenant-demo.svc" {
+		t.Fatalf("readiness probe did not connect through the -rw service: %q", parsed.Host)
+	}
+}
+
+func TestValidateManagedPostgresPrimarySQL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		serverAddress   string
+		expectedPodIP   string
+		transactionMode string
+		inRecovery      bool
+		wantError       string
+	}{
+		{name: "ready", serverAddress: "10.42.0.22", expectedPodIP: "10.42.0.22", transactionMode: "off"},
+		{name: "postgres ipv4 cidr", serverAddress: "10.42.0.22/32", expectedPodIP: "10.42.0.22", transactionMode: "off"},
+		{name: "canonical ipv6", serverAddress: "2001:db8::22", expectedPodIP: "2001:0db8:0:0:0:0:0:22", transactionMode: "OFF"},
+		{name: "postgres ipv6 cidr", serverAddress: "2001:db8::22/128", expectedPodIP: "2001:0db8:0:0:0:0:0:22", transactionMode: "off"},
+		{name: "wrong endpoint", serverAddress: "10.42.0.21", expectedPodIP: "10.42.0.22", transactionMode: "off", wantError: "instead of target primary"},
+		{name: "invalid server address", serverAddress: "10.42.0.22/not-a-mask", expectedPodIP: "10.42.0.22", transactionMode: "off", wantError: "instead of target primary"},
+		{name: "still standby", serverAddress: "10.42.0.22", expectedPodIP: "10.42.0.22", transactionMode: "off", inRecovery: true, wantError: "still in recovery"},
+		{name: "read only", serverAddress: "10.42.0.22", expectedPodIP: "10.42.0.22", transactionMode: "on", wantError: "transaction_read_only=on"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateManagedPostgresPrimarySQL(test.serverAddress, test.expectedPodIP, test.transactionMode, test.inRecovery)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("ready SQL validation failed: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("SQL validation error = %v, want substring %q", err, test.wantError)
+			}
+		})
 	}
 }
 
