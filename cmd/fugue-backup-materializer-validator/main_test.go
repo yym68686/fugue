@@ -468,6 +468,89 @@ func TestValidatorBinaryDependencyBoundary(t *testing.T) {
 	}
 }
 
+func TestValidatorImageHasExactScratchAndNoPublishBoundary(t *testing.T) {
+	t.Parallel()
+	document, err := os.ReadFile("../../Dockerfile.backup-materializer-validator")
+	if err != nil {
+		t.Fatalf("read validator Dockerfile: %v", err)
+	}
+	raw := string(document)
+	var sourceCopies []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "COPY ") && !strings.HasPrefix(line, "COPY --from=") {
+			sourceCopies = append(sourceCopies, line)
+		}
+	}
+	wantCopies := []string{
+		"COPY go.mod go.sum ./",
+		"COPY cmd/fugue-backup-materializer-validator ./cmd/fugue-backup-materializer-validator",
+		"COPY internal/backupcontrol ./internal/backupcontrol",
+		"COPY internal/backupmaterializer/client ./internal/backupmaterializer/client",
+		"COPY internal/backupmaterializer/contract ./internal/backupmaterializer/contract",
+		"COPY internal/backupmaterializer/dryrunreconciler ./internal/backupmaterializer/dryrunreconciler",
+		"COPY internal/backupmaterializer/materialization ./internal/backupmaterializer/materialization",
+		"COPY internal/backupmaterializer/reconcile ./internal/backupmaterializer/reconcile",
+		"COPY internal/backupmaterializer/reconciler ./internal/backupmaterializer/reconciler",
+		"COPY internal/backupmaterializer/secretreader ./internal/backupmaterializer/secretreader",
+		"COPY internal/backupmaterializer/secretwriter ./internal/backupmaterializer/secretwriter",
+		"COPY internal/backupmaterializer/validationagent ./internal/backupmaterializer/validationagent",
+		"COPY internal/backupmaterializer/validationcomposition ./internal/backupmaterializer/validationcomposition",
+		"COPY internal/backupmaterializer/validationcycle ./internal/backupmaterializer/validationcycle",
+	}
+	if !reflect.DeepEqual(sourceCopies, wantCopies) {
+		t.Fatalf("validator Docker source closure drifted: got=%v want=%v", sourceCopies, wantCopies)
+	}
+	for _, required := range []string{
+		"golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587",
+		"CGO_ENABLED=0", "-trimpath", "-buildvcs=false", "FROM scratch", "USER 65532:65532",
+		`ENTRYPOINT ["/usr/local/bin/fugue-backup-materializer-validator"]`,
+	} {
+		if !strings.Contains(raw, required) {
+			t.Fatalf("validator Dockerfile missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"COPY cmd/fugue-backup-materializer ./", "COPY internal/api", "COPY internal/auth",
+		"COPY internal/backupidentity", "COPY internal/backupmaterializer/agent",
+		"COPY internal/backupmaterializer/composition", "COPY internal/backupmaterializer/httpapi",
+		"COPY internal/backupmaterializer/legacysource", "COPY internal/backupmaterializer/localissuer",
+		"COPY internal/backupmaterializer/storesource", "COPY internal/backupmaterializeridentity",
+		"COPY internal/backupmaterializerreview", "COPY internal/model", "COPY internal/store",
+		"EXPOSE ", "apk add curl", "apk add bash", "/etc/ssl/certs/ca-certificates.crt",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("validator Dockerfile widened source/runtime boundary through %q", forbidden)
+		}
+	}
+
+	workflow, err := os.ReadFile("../../.github/workflows/build-backup-materializer-validator-image.yml")
+	if err != nil {
+		t.Fatalf("read validator image workflow: %v", err)
+	}
+	workflowRaw := string(workflow)
+	for _, required := range []string{
+		"permissions:\n  contents: read", "backup-materializer-validator-image-${{ github.ref }}",
+		"build and probe validator (no publish)", "--load", "scripts/test_backup_materializer_validator_image.sh",
+	} {
+		if !strings.Contains(workflowRaw, required) {
+			t.Fatalf("validator image workflow missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"workflow_dispatch:", "environment:", "docker/login-action", "docker/build-push-action",
+		"actions/upload-artifact", "docker push", "--push", "push: true", "helm ", "kubectl ",
+	} {
+		if strings.Contains(workflowRaw, forbidden) {
+			t.Fatalf("validator image workflow gained mutation/publish capability %q", forbidden)
+		}
+	}
+	info, err := os.Stat("../../scripts/test_backup_materializer_validator_image.sh")
+	if err != nil || info.Mode()&0o111 == 0 {
+		t.Fatalf("validator image probe is not executable: info=%v err=%v", info, err)
+	}
+}
+
 func validEnvironment() map[string]string {
 	return map[string]string{
 		"FUGUE_BACKUP_MATERIALIZER_VALIDATOR_ENABLED":                    "true",

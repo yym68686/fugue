@@ -1124,6 +1124,31 @@ lane proves the command remains outside that image. There is still no
 validator image, ServiceAccount, RBAC, Pod, chart, release, or production
 wiring.
 
+`Dockerfile.backup-materializer-validator`,
+`scripts/test_backup_materializer_validator_image.sh`, and the dedicated
+`backup-materializer-validator-image-${ref}` workflow add the independently
+compiled `backup-materializer-validator-image@v1` artifact lane. The build
+stage copies exactly the command's 16-package local dependency closure and
+uses the digest-pinned Go toolchain; legacy commands, API/store/model,
+signer/reviewer, Kubernetes SDK, release code, and backup execution are absent
+from its source layers.
+
+The runtime stage is scratch and contains only the stripped static binary. It
+runs as `65532:65532`, declares no port, includes no shell or global CA roots,
+and obtains any future trust only from the three explicit rotating
+projections. Its black-box probe starts the default-disabled image with no
+network, a read-only root, all capabilities dropped, no-new-privileges, and
+bounded PIDs/tmpfs. Deliberately invalid private configuration must remain
+unread, health must pass, readiness must fail, no port may be published, logs
+must remain secret-free, and SIGTERM must exit cleanly.
+
+The path-scoped workflow has only `contents: read`, pins every action, tests
+and races the exact closure, cross-compiles Linux amd64/arm64, loads the image
+only into the ephemeral runner, and invokes that probe. It contains no login,
+push, artifact upload, dispatch, Helm, Kubernetes, environment, release, or
+production capability. This atom creates no registry artifact,
+ServiceAccount, RBAC, volume, Pod, chart, or production enablement.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with

@@ -96,8 +96,10 @@ components:
     ownershipMode: transitional-shared
     sourceRoots:
       - Dockerfile.backup-materializer
+      - Dockerfile.backup-materializer-validator
       - Dockerfile.backup-observer
       - .github/workflows/build-backup-materializer-image.yml
+      - .github/workflows/build-backup-materializer-validator-image.yml
       - .github/workflows/build-backup-observer-image.yml
       - .github/workflows/validate-backup-release-candidate.yml
       - .github/workflows/validate-backup-observation-store.yml
@@ -130,12 +132,13 @@ components:
       - internal/store/backup_observation.go
       - internal/store/backup_observation_test.go
       - scripts/test_backup_materializer_image.sh
+      - scripts/test_backup_materializer_validator_image.sh
       - scripts/test_backup_observer_image.sh
-    artifactKinds: [backup-worker, backup-observer, backup-materializer, backup-run-observation, backup-observer-input-bundle, backup-release-candidate]
+    artifactKinds: [backup-worker, backup-observer, backup-materializer, backup-materializer-validator, backup-run-observation, backup-observer-input-bundle, backup-release-candidate]
     releaseLane: backup
     coordinator: release-control
     ownedState: [backup-policy, backup-run, backup-run-spec, backup-observer-input-bundle, backup-materializer-cell-status, backup-run-observation-lkg, backup-artifact, restore-checkpoint]
-    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-materializer-agent@v1, backup-materializer-candidate-handoff@v1, backup-materializer-identity@v1, backup-materializer-http-auth@v1, backup-materializer-client@v1, backup-materializer-client-projection@v1, backup-materializer-composition@v1, backup-materializer-input-api@v1, backup-materializer-input-route@v1, backup-materializer-legacy-source@v1, backup-materializer-local-issuer@v1, backup-materializer-reconciler@v1, backup-materializer-secret-dry-run@v1, backup-materializer-secret-dry-run-cycle@v1, backup-materializer-secret-dry-run-projection@v1, backup-materializer-secret-plan@v1, backup-materializer-secret-reader@v1, backup-materializer-secret-reader-projection@v1, backup-materializer-secret-reconcile@v1, backup-materializer-store-source@v1, backup-materializer-token-review@v1, backup-materializer-validation-agent@v1, backup-materializer-validation-composition@v1, backup-materializer-validation-cycle@v1, backup-materializer-validation-process@v1, backup-materializer-workload@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
+    contracts: [backup@v1, backup-observation-api@v1, backup-observer-identity@v1, backup-observer-input-bundle@v1, backup-materializer-agent@v1, backup-materializer-candidate-handoff@v1, backup-materializer-identity@v1, backup-materializer-http-auth@v1, backup-materializer-client@v1, backup-materializer-client-projection@v1, backup-materializer-composition@v1, backup-materializer-input-api@v1, backup-materializer-input-route@v1, backup-materializer-legacy-source@v1, backup-materializer-local-issuer@v1, backup-materializer-reconciler@v1, backup-materializer-secret-dry-run@v1, backup-materializer-secret-dry-run-cycle@v1, backup-materializer-secret-dry-run-projection@v1, backup-materializer-secret-plan@v1, backup-materializer-secret-reader@v1, backup-materializer-secret-reader-projection@v1, backup-materializer-secret-reconcile@v1, backup-materializer-store-source@v1, backup-materializer-token-review@v1, backup-materializer-validation-agent@v1, backup-materializer-validation-composition@v1, backup-materializer-validation-cycle@v1, backup-materializer-validation-process@v1, backup-materializer-validator-image@v1, backup-materializer-workload@v1, backup-run-spec-status@v1, backup-release-candidate@v2]
     dependencies: [control-plane]
     failureBoundary: backup-storage
     lkgPolicy: required
