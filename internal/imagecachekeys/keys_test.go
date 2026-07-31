@@ -34,6 +34,24 @@ func TestImageReferenceKeysNormalizeRepoColonDigestForm(t *testing.T) {
 	}
 }
 
+func TestSplitRepoTargetHandlesTaggedDigestReference(t *testing.T) {
+	t.Parallel()
+
+	const (
+		repo   = "fugue-apps/demo"
+		tag    = "build-a"
+		digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	gotRepo, gotTarget, ok := SplitRepoTarget(repo + ":" + tag + "@" + digest)
+	if !ok || gotRepo != repo || gotTarget != digest {
+		t.Fatalf("SplitRepoTarget tagged digest = (%q, %q, %t), want (%q, %q, true)", gotRepo, gotTarget, ok, repo, digest)
+	}
+	keys := keySet(ExactImageReferenceKeys("registry.example/"+repo+":"+tag+"@"+digest, ""))
+	if _, ok := keys[repo+"@"+digest]; !ok {
+		t.Fatalf("tagged digest keys missing canonical repository digest %q: %+v", repo+"@"+digest, keys)
+	}
+}
+
 func TestExactReferenceKeysDoNotProtectWholeRepository(t *testing.T) {
 	t.Parallel()
 

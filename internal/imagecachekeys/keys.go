@@ -150,6 +150,10 @@ func SplitRepoTarget(ref string) (string, string, bool) {
 		return "", "", false
 	}
 	if repo, target, ok := strings.Cut(ref, "@"); ok {
+		lastSlash := strings.LastIndex(repo, "/")
+		if lastColon := strings.LastIndex(repo, ":"); lastColon > lastSlash {
+			repo = repo[:lastColon]
+		}
 		return strings.Trim(repo, "/"), strings.TrimSpace(target), true
 	}
 	if idx := strings.LastIndex(ref, ":sha256:"); idx > 0 {

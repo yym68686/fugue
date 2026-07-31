@@ -935,3 +935,13 @@ func TestImageIntegrityManifestForReplicaRequiresExactFreshCompleteProof(t *test
 		})
 	}
 }
+
+func TestIntegrityManifestRepositoryMatchesTaggedDigestReference(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.cache.example:5000/fugue-apps/demo:build-a@" + integrityTestDigest
+	manifest := model.ImageCacheManifest{Repo: "fugue-apps/demo"}
+	if !integrityManifestMatchesImageRepository(imageRef, manifest) {
+		t.Fatalf("expected tagged digest reference %q to match manifest repository %q", imageRef, manifest.Repo)
+	}
+}

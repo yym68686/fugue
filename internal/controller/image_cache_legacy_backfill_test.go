@@ -11,6 +11,25 @@ import (
 	"fugue/internal/store"
 )
 
+func TestLegacyDistributedImageManifestForRefsMatchesTaggedDigestReference(t *testing.T) {
+	t.Parallel()
+
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	ref := "registry.push.example/fugue-apps/demo:build-a@" + digest
+	manifest := model.ImageCacheManifest{
+		Repo:            "fugue-apps/demo",
+		Target:          "build-a",
+		Digest:          digest,
+		ReferencedBlobs: []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		TotalBlobBytes:  100,
+		Present:         true,
+	}
+	group, ok := legacyDistributedImageManifestForRefs([]string{ref}, []model.ImageCacheManifest{manifest})
+	if !ok || group.repo != manifest.Repo || group.digest != digest || len(group.manifests) != 1 {
+		t.Fatalf("expected tagged digest ref to select its physical manifest, got group=%#v ok=%t", group, ok)
+	}
+}
+
 func TestReconcileLegacyDistributedImageMetadataBackfillsCurrentPhysicalImage(t *testing.T) {
 	t.Parallel()
 
