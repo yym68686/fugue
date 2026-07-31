@@ -21,7 +21,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "1085f025797aced99e8dd265af546bd02d5ca856b9f57e9027408f8d4950a47a")
+	assertWorkflowSourceDigest(t, data, "e733984519ba2294d5bb880d42b930f3d92c8c4937cb1c5cb5adb8ff5bb8167f")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -181,6 +181,8 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`validate_supersede_source_policy()`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}"`,
 		`git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}"`,
+		`supersede_delta="$(git diff --no-renames --name-status`,
+		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}:${workflow_path}"`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}:${test_path}"`,
 		`git cat-file blob "${historical_workflow_blob}" | sha256sum`,
@@ -224,6 +226,8 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`verify_superseded_run_is_quarantined()`,
 		`superseded run left zero-job quarantine`,
 		`git cat-file blob "${historical_workflow_blob}" | sha256sum`,
+		`supersede_delta="$(git diff --no-renames --name-status`,
+		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
 	} {
 		if !strings.Contains(promoteIdentity.Run, required) {
 			t.Fatalf("hosted lane promotion policy identity must contain %q", required)
@@ -287,6 +291,8 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"${baseline_oid}" == "${EXPECTED_BASELINE_OID}"`,
 		`"${terminal_oid}" == "${EXPECTED_TERMINAL_OID}"`,
 		`superseded run left zero-job quarantine before enable`,
+		`supersede_delta="$(git diff --no-renames --name-status`,
+		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
 		`for run_status in queued in_progress waiting pending requested`,
 		`str(identifier) not in {current, superseded}`,
 		`"${state_before}" == 'disabled_manually'`,
@@ -305,7 +311,8 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	source := string(data)
 	if strings.Count(source, "--method PUT") != 1 ||
 		strings.Count(source, "actions/workflows/${workflow_id}/enable") != 1 ||
-		strings.Count(source, "actions/upload-artifact@") != 1 {
+		strings.Count(source, "actions/upload-artifact@") != 1 ||
+		strings.Count(source, `supersede_delta="$(git diff --no-renames --name-status`) != 3 {
 		t.Fatal("lane promotion capability inventory drifted")
 	}
 	for _, forbidden := range []string{
@@ -499,6 +506,7 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 		owner           string
 		ancestorExit    string
 		untrustedPolicy bool
+		extraDelta      bool
 		wantPass        bool
 	}{
 		{name: "normal dispatch preserves empty recovery path", actor: "owner", owner: "owner", wantPass: true},
@@ -511,6 +519,7 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 		{name: "current run cannot supersede itself", target: currentRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner"},
 		{name: "current source cannot be quarantined", target: targetRun, targetSHA: expectedSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner"},
 		{name: "non-ancestor source rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", ancestorExit: "1"},
+		{name: "business file in source delta rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", extraDelta: true},
 		{name: "untrusted historical policy rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", untrustedPolicy: true},
 		{name: "historical job rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: `{"total_count":1,"jobs":[{"id":9}]}`, actor: "owner", owner: "owner"},
 		{name: "wrong source sha rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: strings.Replace(validRun, historicalSHA, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1), jobsJSON: validJobs, actor: "owner", owner: "owner"},
@@ -538,6 +547,14 @@ git() {
   fi
   if [[ "$1" == "merge-base" ]]; then
     return "${MOCK_ANCESTOR_EXIT:-0}"
+  fi
+  if [[ "$1" == "diff" ]]; then
+    printf 'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\n'
+    printf 'M\tinternal/platformsafety/release_lane_promotion_workflow_test.go\n'
+    if [[ "${MOCK_EXTRA_DELTA}" == "true" ]]; then
+      printf 'M\tinternal/api/server.go\n'
+    fi
+    return 0
   fi
   if [[ "$1" == "rev-parse" && "$*" == *"promote-control-plane-release-lane-rp5.yml"* ]]; then
     printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -597,6 +614,7 @@ github_api_get() {
 				"MOCK_JOBS_JSON="+test.jobsJSON,
 				"MOCK_ANCESTOR_EXIT="+ancestorExit,
 				"MOCK_UNTRUSTED_POLICY="+strconv.FormatBool(test.untrustedPolicy),
+				"MOCK_EXTRA_DELTA="+strconv.FormatBool(test.extraDelta),
 				"GITHUB_ACTOR="+test.actor,
 				"GITHUB_REPOSITORY_OWNER="+test.owner,
 				"GITHUB_REPOSITORY=example/fugue",
@@ -639,6 +657,7 @@ func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 		supersedeSHA  string
 		ghostState    string
 		ghostJobs     bool
+		extraDelta    bool
 		wantPass      bool
 		wantState     string
 		wantWrites    string
@@ -656,6 +675,7 @@ func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 		{name: "recovery rejects one-sided identity", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", wantPass: false, wantState: "disabled_manually"},
 		{name: "recovery rejects ghost leaving queue", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, ghostState: "completed", wantPass: false, wantState: "disabled_manually"},
 		{name: "recovery rejects ghost with historical jobs", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, ghostJobs: true, wantPass: false, wantState: "disabled_manually"},
+		{name: "recovery rejects extra source delta before enable", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, extraDelta: true, wantPass: false, wantState: "disabled_manually"},
 	}
 	for _, test := range tests {
 		test := test
@@ -683,6 +703,14 @@ if [[ "$1" == "cat-file" && "$2" == "-e" ]]; then
   exit 0
 fi
 if [[ "$1" == "merge-base" ]]; then
+  exit 0
+fi
+if [[ "$1" == "diff" ]]; then
+  printf 'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\n'
+  printf 'M\tinternal/platformsafety/release_lane_promotion_workflow_test.go\n'
+  if [[ "${MOCK_EXTRA_DELTA}" == "true" ]]; then
+    printf 'M\tinternal/api/server.go\n'
+  fi
   exit 0
 fi
 if [[ "$1" == "rev-parse" && "$*" == *"promote-control-plane-release-lane-rp5.yml"* ]]; then
@@ -806,6 +834,7 @@ exit 91
 				"MOCK_CURRENT_RUN_JSON="+currentRunJSON,
 				"MOCK_SUPERSEDED_RUN_JSON="+supersededRunJSON,
 				"MOCK_SUPERSEDED_JOBS_JSON="+ghostJobs,
+				"MOCK_EXTRA_DELTA="+strconv.FormatBool(test.extraDelta),
 				"GITHUB_REPOSITORY=example/fugue",
 				"GITHUB_ACTOR=owner",
 				"GITHUB_REPOSITORY_OWNER=owner",

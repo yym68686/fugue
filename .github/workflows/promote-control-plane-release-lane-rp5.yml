@@ -118,6 +118,11 @@ jobs:
             git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || return 1
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || return 1
 
+            local supersede_delta
+            supersede_delta="$(git diff --no-renames --name-status \
+              "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}")" || return 1
+            [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || return 1
+
             local historical_workflow_blob historical_test_blob
             local historical_workflow_digest historical_test_digest marker extra
             historical_workflow_blob="$(git rev-parse --verify \
@@ -520,6 +525,9 @@ jobs:
             [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || exit 1
             git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || exit 1
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
+            supersede_delta="$(git diff --no-renames --name-status \
+              "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}")" || exit 1
+            [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || exit 1
             historical_workflow_blob="$(git rev-parse --verify \
               "${SUPERSEDE_STUCK_RUN_SHA}:${workflow_path}")" || exit 1
             historical_test_blob="$(git rev-parse --verify \
@@ -709,6 +717,9 @@ jobs:
             [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || exit 1
             git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || exit 1
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
+            supersede_delta="$(git diff --no-renames --name-status \
+              "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}")" || exit 1
+            [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || exit 1
             historical_workflow_blob="$(git rev-parse --verify \
               "${SUPERSEDE_STUCK_RUN_SHA}:${promotion_workflow_path}")" || exit 1
             historical_test_blob="$(git rev-parse --verify \
