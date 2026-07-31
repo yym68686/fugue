@@ -7,6 +7,7 @@ on:
     paths:
       - Dockerfile.backup-materializer
       - cmd/fugue-backup-materializer/**
+      - cmd/fugue-backup-materializer-validator/**
       - internal/backupcontrol/**
       - internal/backupmaterializer/agent/**
       - internal/backupmaterializer/validationagent/**
@@ -26,6 +27,7 @@ on:
     paths:
       - Dockerfile.backup-materializer
       - cmd/fugue-backup-materializer/**
+      - cmd/fugue-backup-materializer-validator/**
       - internal/backupcontrol/**
       - internal/backupmaterializer/agent/**
       - internal/backupmaterializer/validationagent/**

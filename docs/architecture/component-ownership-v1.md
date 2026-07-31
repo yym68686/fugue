@@ -1097,6 +1097,33 @@ still has no command, listener, image, ServiceAccount, RBAC, Pod, chart,
 release, or production wiring; the existing materializer image lane proves it
 remains outside the old image dependency closure.
 
+`cmd/fugue-backup-materializer-validator` adds the separately compiled,
+default-off `backup-materializer-validation-process@v1` process boundary. It
+uses only the validation composition and a dedicated environment prefix; it
+does not modify or import the existing `fugue-backup-materializer` command.
+Disabled mode ignores every cell, run, endpoint, projection, and reconcile
+setting, starts no outbound request, and serves healthy-but-unready status on
+Pod loopback `127.0.0.1:8094` by default.
+
+Enabled configuration requires bounded input, reader, and dry-run request,
+handshake, and response limits inside one attempt deadline, then delegates all
+identity and capability-separation checks to the composition root. The command
+exposes no input or mutation route: only `GET /healthz`, `GET /readyz`, and
+`GET /v1/status` are reachable. A built-in probe connects directly to an
+explicit loopback IP without proxy, redirect, shell, or external HTTP client.
+
+The health server and validation loop share one cancellation boundary.
+SIGINT/SIGTERM stops new health traffic, drains the server, and waits for the
+serial control loop within a bounded shutdown deadline; unexpected server or
+loop termination fails the process closed with fixed errors. Its exact
+dependency closure excludes the legacy agent/composition, API/store/model,
+signer/reviewer, Kubernetes SDK, backup executor, object-store/registry client,
+and subprocess capability. The dry-run lane tests, races, and cross-compiles
+the binary for Linux amd64 and arm64 without publishing it, while the old image
+lane proves the command remains outside that image. There is still no
+validator image, ServiceAccount, RBAC, Pod, chart, release, or production
+wiring.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
