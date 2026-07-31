@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/imagecacheevidence"
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/imagecacheusage"
 	"fugue/internal/localpvsafety"
@@ -120,10 +121,11 @@ func (s *Server) handleAdminListImageCacheInventory(w http.ResponseWriter, r *ht
 		return
 	}
 	manifestFilter := model.ImageCacheManifestFilter{
-		NodeID:          filter.NodeID,
-		ClusterNodeName: filter.ClusterNodeName,
-		RuntimeID:       filter.RuntimeID,
-		PresentOnly:     true,
+		NodeID:            filter.NodeID,
+		ClusterNodeName:   filter.ClusterNodeName,
+		RuntimeID:         filter.RuntimeID,
+		PresentOnly:       true,
+		IncludeIncomplete: true,
 	}
 	if len(nodes) == 1 && manifestFilter.NodeID == "" && manifestFilter.ClusterNodeName == "" {
 		manifestFilter.NodeID = nodes[0].NodeID
@@ -426,8 +428,17 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 		if manifest.MediaType == "" {
 			manifest.MediaType = strings.TrimSpace(reported.ContentType)
 		}
-		manifest.ManifestSizeBytes = firstNonZeroInt64(manifest.ManifestSizeBytes, reported.SizeBytes)
-		manifest.TotalBlobBytes = firstNonZeroInt64(manifest.TotalBlobBytes, reported.ReferencedBlobBytes, reported.UniqueBlobBytesObserved)
+		manifest.GraphStatus = imagecacheevidence.NormalizeGraphStatus(manifest.GraphStatus)
+		if imagecacheevidence.GraphIsIncomplete(manifest.GraphStatus) {
+			manifest.GraphFailureReason = imagecacheevidence.NormalizeGraphFailureReason(manifest.GraphFailureReason)
+			manifest.ManifestSizeBytes = 0
+			manifest.TotalBlobBytes = 0
+			manifest.ReferencedBlobs = nil
+		} else {
+			manifest.GraphFailureReason = ""
+			manifest.ManifestSizeBytes = firstNonZeroInt64(manifest.ManifestSizeBytes, reported.SizeBytes)
+			manifest.TotalBlobBytes = firstNonZeroInt64(manifest.TotalBlobBytes, reported.ReferencedBlobBytes, reported.UniqueBlobBytesObserved)
+		}
 		if manifest.CreatedAtObserved == nil && strings.TrimSpace(reported.ModifiedAt) != "" {
 			if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(reported.ModifiedAt)); err == nil {
 				manifest.CreatedAtObserved = &parsed

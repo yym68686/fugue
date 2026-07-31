@@ -579,6 +579,8 @@ var postgresSchemaStatements = []string{
 		manifest_size_bytes BIGINT NOT NULL DEFAULT 0,
 		total_blob_bytes BIGINT NOT NULL DEFAULT 0,
 		referenced_blobs_json JSONB NULL,
+		graph_status TEXT NOT NULL DEFAULT 'complete',
+		graph_failure_reason TEXT NOT NULL DEFAULT '',
 		created_at_observed TIMESTAMPTZ NULL,
 		last_seen_at TIMESTAMPTZ NOT NULL,
 		pinned_locally BOOLEAN NOT NULL DEFAULT FALSE,
@@ -586,6 +588,8 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_image_cache_manifests ADD COLUMN IF NOT EXISTS graph_status TEXT NOT NULL DEFAULT 'complete'`,
+	`ALTER TABLE fugue_image_cache_manifests ADD COLUMN IF NOT EXISTS graph_failure_reason TEXT NOT NULL DEFAULT ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_image_cache_manifests_identity ON fugue_image_cache_manifests (node_id, cluster_node_name, repo, target, digest)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_image_cache_manifests_node_seen ON fugue_image_cache_manifests (node_id, cluster_node_name, last_seen_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_image_cache_manifests_ref ON fugue_image_cache_manifests (image_ref, digest)`,

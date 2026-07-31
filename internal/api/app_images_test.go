@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -764,6 +765,98 @@ func TestHandleGetAppImagesUsesKnownDigestEvidenceAcrossCacheNodes(t *testing.T)
 	}
 	if response.Versions[0].SizeBytes != 192 || response.MeasurementStatus != projectImageUsageMeasurementComplete {
 		t.Fatalf("expected complete same-digest evidence from either cache node, got %#v", response)
+	}
+}
+
+func TestHandleGetAppImagesMapsSortedUniqueGraphFailureReasonsWithoutCountingIncompleteBytes(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, _, _, newImageRef, _ := setupAppImagesTestServer(t)
+	server.imageStoreMode = "distributed"
+	now := time.Now().UTC()
+	digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		CanonicalDigest: digest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert distributed image metadata: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        newImageRef,
+		NodeID:          "node-complete",
+		ClusterNodeName: "worker-complete",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert distributed image location: %v", err)
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:          "node-complete",
+		ClusterNodeName: "worker-complete",
+		ObservedAt:      now,
+	}, []model.ImageCacheManifest{{
+		Repo:              "fugue-apps/example-demo-web",
+		Target:            "git-222222222222",
+		Digest:            digest,
+		ManifestSizeBytes: 12,
+		TotalBlobBytes:    180,
+		LastSeenAt:        now,
+		Present:           true,
+	}}); err != nil {
+		t.Fatalf("upsert complete cache inventory: %v", err)
+	}
+
+	for index, reason := range []string{"missing_child_manifest", "missing_blob", "missing_blob"} {
+		raw, err := json.Marshal(map[string]any{
+			"repo":                 "fugue-apps/example-demo-web",
+			"target":               "git-222222222222",
+			"digest":               digest,
+			"manifest_size_bytes":  999,
+			"total_blob_bytes":     999,
+			"referenced_blobs":     []string{"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+			"graph_status":         "incomplete",
+			"graph_failure_reason": reason,
+			"last_seen_at":         now,
+			"present":              true,
+		})
+		if err != nil {
+			t.Fatalf("encode incomplete manifest: %v", err)
+		}
+		var manifest model.ImageCacheManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			t.Fatalf("decode incomplete manifest: %v", err)
+		}
+		nodeID := "node-incomplete-" + string(rune('a'+index))
+		if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+			NodeID:          nodeID,
+			ClusterNodeName: "worker-incomplete-" + string(rune('a'+index)),
+			ObservedAt:      now,
+		}, []model.ImageCacheManifest{manifest}); err != nil {
+			t.Fatalf("upsert incomplete cache inventory %d: %v", index, err)
+		}
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Versions) != 1 {
+		t.Fatalf("expected current version, got %#v", response.Versions)
+	}
+	version := response.Versions[0]
+	wantReasons := []string{"missing_blob", "missing_child_manifest"}
+	if version.SizeBytes != 192 || version.SizeMeasurementStatus != projectImageUsageMeasurementPartial || !reflect.DeepEqual(version.SizeMeasurementReasons, wantReasons) {
+		t.Fatalf("incomplete graph evidence was counted or not attributed: %#v", version)
+	}
+	if response.MeasurementStatus != projectImageUsageMeasurementPartial || !reflect.DeepEqual(response.MeasurementReasons, wantReasons) {
+		t.Fatalf("graph failure reasons were not propagated in sorted unique form: %#v", response)
 	}
 }
 

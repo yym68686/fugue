@@ -2673,35 +2673,38 @@ type ImageCacheNodeInventoryFilter struct {
 }
 
 type ImageCacheManifest struct {
-	ID                string     `json:"id"`
-	NodeID            string     `json:"node_id,omitempty"`
-	ClusterNodeName   string     `json:"cluster_node_name,omitempty"`
-	RuntimeID         string     `json:"runtime_id,omitempty"`
-	ImageRef          string     `json:"image_ref,omitempty"`
-	Repo              string     `json:"repo"`
-	Target            string     `json:"target"`
-	Digest            string     `json:"digest,omitempty"`
-	MediaType         string     `json:"media_type,omitempty"`
-	ManifestSizeBytes int64      `json:"manifest_size_bytes,omitempty"`
-	TotalBlobBytes    int64      `json:"total_blob_bytes,omitempty"`
-	ReferencedBlobs   []string   `json:"referenced_blobs,omitempty"`
-	CreatedAtObserved *time.Time `json:"created_at_observed,omitempty"`
-	LastSeenAt        time.Time  `json:"last_seen_at"`
-	PinnedLocally     bool       `json:"pinned_locally,omitempty"`
-	Present           bool       `json:"present"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID                 string     `json:"id"`
+	NodeID             string     `json:"node_id,omitempty"`
+	ClusterNodeName    string     `json:"cluster_node_name,omitempty"`
+	RuntimeID          string     `json:"runtime_id,omitempty"`
+	ImageRef           string     `json:"image_ref,omitempty"`
+	Repo               string     `json:"repo"`
+	Target             string     `json:"target"`
+	Digest             string     `json:"digest,omitempty"`
+	MediaType          string     `json:"media_type,omitempty"`
+	ManifestSizeBytes  int64      `json:"manifest_size_bytes,omitempty"`
+	TotalBlobBytes     int64      `json:"total_blob_bytes,omitempty"`
+	ReferencedBlobs    []string   `json:"referenced_blobs,omitempty"`
+	GraphStatus        string     `json:"graph_status,omitempty"`
+	GraphFailureReason string     `json:"graph_failure_reason,omitempty"`
+	CreatedAtObserved  *time.Time `json:"created_at_observed,omitempty"`
+	LastSeenAt         time.Time  `json:"last_seen_at"`
+	PinnedLocally      bool       `json:"pinned_locally,omitempty"`
+	Present            bool       `json:"present"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type ImageCacheManifestFilter struct {
-	NodeID          string
-	ClusterNodeName string
-	RuntimeID       string
-	Repo            string
-	Target          string
-	Digest          string
-	SeenAfter       time.Time
-	PresentOnly     bool
+	NodeID            string
+	ClusterNodeName   string
+	RuntimeID         string
+	Repo              string
+	Target            string
+	Digest            string
+	SeenAfter         time.Time
+	PresentOnly       bool
+	IncludeIncomplete bool
 }
 
 type ImageCachePruneCandidate struct {

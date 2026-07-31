@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/imagecacheevidence"
 	"fugue/internal/imagecacheusage"
 
 	"github.com/google/go-containerregistry/pkg/crane"
@@ -1311,10 +1312,22 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 	for _, record := range records {
 		// Persisted metadata is only a restart journal. A manifest can remain
 		// while a config/layer or child manifest has disappeared, so a manifest
-		// HEAD is not an availability proof. Walk the complete local graph and
-		// omit incomplete records from the inventory snapshot.
+		// HEAD is not an availability proof. Walk the complete local graph. On a
+		// failure, retain only bounded identity/status evidence: never serialize
+		// the validation error, path, registry response, body, or graph bytes.
 		graph, err := c.checkLocalImageGraph(context.Background(), record.Repo, record.Target, false)
 		if err != nil {
+			entry := map[string]any{
+				"repo":         record.Repo,
+				"target":       record.Target,
+				"digest":       record.Digest,
+				"graph_status": imagecacheevidence.GraphStatusIncomplete,
+				"modified_at":  record.ModifiedAt.UTC().Format(time.RFC3339),
+			}
+			if reason := localImageGraphFailureReason(err); reason != "" {
+				entry["graph_failure_reason"] = reason
+			}
+			out = append(out, entry)
 			continue
 		}
 		entry := manifestEntry(record, blobByDigest)
@@ -1332,6 +1345,7 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 			"referenced_blobs":      entry.ReferencedBlobs,
 			"referenced_manifests":  entry.ReferencedManifests,
 			"referenced_blob_bytes": entry.ReferencedBlobBytes,
+			"graph_status":          imagecacheevidence.GraphStatusComplete,
 			"modified_at":           entry.ModifiedAt,
 		})
 	}
@@ -3201,6 +3215,35 @@ type localImageGraphResult struct {
 	ReferencedBlobBytes int64
 }
 
+// localImageObjectMissingError keeps the existing operator-facing error text
+// while giving inventory collection a non-string signal that a local object
+// was absent. The wrapped response body is never serialized into inventory.
+type localImageObjectMissingError struct {
+	err error
+}
+
+func (e *localImageObjectMissingError) Error() string { return e.err.Error() }
+func (e *localImageObjectMissingError) Unwrap() error { return e.err }
+
+// localImageGraphFailure attributes only the two bounded object-absence cases
+// exposed by inventory. Other validation failures remain incomplete without a
+// public reason rather than leaking internal paths, responses, or bodies.
+type localImageGraphFailure struct {
+	reason string
+	err    error
+}
+
+func (e *localImageGraphFailure) Error() string { return e.err.Error() }
+func (e *localImageGraphFailure) Unwrap() error { return e.err }
+
+func localImageGraphFailureReason(err error) string {
+	var failure *localImageGraphFailure
+	if !errors.As(err, &failure) {
+		return ""
+	}
+	return imagecacheevidence.NormalizeGraphFailureReason(failure.reason)
+}
+
 // checkLocalImageGraph verifies that a manifest and every object it references
 // are available from this cache's local registry.  verifyBlobDigests controls
 // the expensive content hash pass: management verify and replication use
@@ -3238,6 +3281,13 @@ func (c *imageCache) checkLocalImageGraph(ctx context.Context, repo, target stri
 		}
 		body, err := c.localManifestBody(ctx, repo, manifestTarget)
 		if err != nil {
+			var missing *localImageObjectMissingError
+			if !root && errors.As(err, &missing) {
+				return &localImageGraphFailure{
+					reason: imagecacheevidence.ReasonMissingChildManifest,
+					err:    err,
+				}
+			}
 			return err
 		}
 		if expectedSize != nil && int64(len(body)) != *expectedSize {
@@ -3285,7 +3335,15 @@ func (c *imageCache) checkLocalImageGraph(ctx context.Context, repo, target stri
 			}
 			actualSize, err := c.checkLocalImageBlob(ctx, repo, digest, expected, verifyBlobDigests)
 			if err != nil {
-				return fmt.Errorf("%s blob %s: %w", kind, digest, err)
+				wrapped := fmt.Errorf("%s blob %s: %w", kind, digest, err)
+				var missing *localImageObjectMissingError
+				if errors.As(err, &missing) {
+					return &localImageGraphFailure{
+						reason: imagecacheevidence.ReasonMissingBlob,
+						err:    wrapped,
+					}
+				}
+				return wrapped
 			}
 			seenBlobs[digest] = actualSize
 			result.ReferencedBlobBytes += actualSize
@@ -3367,7 +3425,11 @@ func (c *imageCache) localManifestBody(ctx context.Context, repo, target string)
 	rec := &memoryResponseWriter{header: http.Header{}}
 	c.registry.ServeHTTP(rec, req)
 	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
-		return nil, fmt.Errorf("local manifest %s status=%d body=%s", target, rec.statusCode(), strings.TrimSpace(rec.body.String()))
+		err := fmt.Errorf("local manifest %s status=%d body=%s", target, rec.statusCode(), strings.TrimSpace(rec.body.String()))
+		if rec.statusCode() == http.StatusNotFound {
+			return nil, &localImageObjectMissingError{err: err}
+		}
+		return nil, err
 	}
 	if rec.body.Len() == 0 || rec.body.Len() > maxProxiedManifestBytes {
 		return nil, fmt.Errorf("local manifest %s has invalid size %d", target, rec.body.Len())
@@ -3382,7 +3444,11 @@ func (c *imageCache) checkLocalImageBlob(ctx context.Context, repo, digest strin
 		rec := &memoryResponseWriter{header: http.Header{}}
 		c.registry.ServeHTTP(rec, req)
 		if rec.statusCode() < 200 || rec.statusCode() >= 300 {
-			return 0, fmt.Errorf("local status=%d", rec.statusCode())
+			err := fmt.Errorf("local status=%d", rec.statusCode())
+			if rec.statusCode() == http.StatusNotFound {
+				return 0, &localImageObjectMissingError{err: err}
+			}
+			return 0, err
 		}
 		actualSize := int64(-1)
 		if raw := strings.TrimSpace(rec.Header().Get("Content-Length")); raw != "" {
@@ -3413,7 +3479,11 @@ func (c *imageCache) checkLocalImageBlob(ctx context.Context, repo, digest strin
 	rec := &digestResponseWriter{header: http.Header{}, hasher: sha256.New()}
 	c.registry.ServeHTTP(rec, req)
 	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
-		return 0, fmt.Errorf("local status=%d", rec.statusCode())
+		err := fmt.Errorf("local status=%d", rec.statusCode())
+		if rec.statusCode() == http.StatusNotFound {
+			return 0, &localImageObjectMissingError{err: err}
+		}
+		return 0, err
 	}
 	if expectedSize != nil && rec.size != *expectedSize {
 		return 0, fmt.Errorf("size %d want %d", rec.size, *expectedSize)

@@ -20878,6 +20878,18 @@ components:
           type: array
           items:
             type: string
+        graph_status:
+          type: string
+          description: >-
+            Whether the node-local manifest graph was completely verified.
+            Legacy reports that omit this field are treated as complete.
+          enum: [complete, incomplete]
+        graph_failure_reason:
+          description: >-
+            Bounded, machine-readable attribution for an incomplete graph.
+            Raw filesystem paths, registry responses, and manifest bodies are
+            never reported through this field.
+          $ref: "#/components/schemas/ImageMeasurementReason"
         created_at_observed:
           type: string
           format: date-time

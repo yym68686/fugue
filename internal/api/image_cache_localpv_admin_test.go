@@ -107,6 +107,73 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	}
 }
 
+func TestImageCacheInventoryPreservesBoundedGraphFailureEvidenceWithoutPruneCandidates(t *testing.T) {
+	t.Parallel()
+
+	_, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Image Cache Graph Evidence Tenant")
+	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	report := performJSONRequest(t, server, http.MethodPost, "/v1/node-updater/image-cache/inventory", updaterToken, map[string]any{
+		"endpoint":             "http://worker-1:5000",
+		"cluster_node":         "worker-1",
+		"manifest_total_count": 1,
+		"manifests": []map[string]any{{
+			"repo":                       "fugue-apps/demo",
+			"target":                     "image-incomplete",
+			"digest":                     digest,
+			"graph_status":               "incomplete",
+			"graph_failure_reason":       "missing_blob",
+			"manifest_size_bytes":        999,
+			"total_blob_bytes":           999,
+			"referenced_blobs":           []string{"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			"unique_blob_bytes_observed": 999,
+			"present":                    true,
+		}},
+	})
+	if report.Code != http.StatusOK {
+		t.Fatalf("report incomplete inventory status=%d body=%s", report.Code, report.Body.String())
+	}
+
+	inventory := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/inventory?cluster_node_name=worker-1", adminSecret, nil)
+	if inventory.Code != http.StatusOK {
+		t.Fatalf("admin incomplete inventory status=%d body=%s", inventory.Code, inventory.Body.String())
+	}
+	var response struct {
+		Nodes     []model.ImageCacheNodeInventory `json:"nodes"`
+		Manifests []map[string]any                `json:"manifests"`
+	}
+	mustDecodeJSON(t, inventory, &response)
+	if len(response.Nodes) != 1 || response.Nodes[0].ManifestCount != 1 || len(response.Manifests) != 1 {
+		t.Fatalf("unexpected incomplete inventory response: %+v", response)
+	}
+	manifest := response.Manifests[0]
+	if manifest["graph_status"] != "incomplete" || manifest["graph_failure_reason"] != "missing_blob" {
+		t.Fatalf("graph failure evidence not preserved: %+v", manifest)
+	}
+	for _, field := range []string{"manifest_size_bytes", "total_blob_bytes"} {
+		if value, ok := manifest[field]; ok && value != float64(0) {
+			t.Fatalf("incomplete graph retained countable %s: %+v", field, manifest)
+		}
+	}
+	if refs, ok := manifest["referenced_blobs"].([]any); ok && len(refs) > 0 {
+		t.Fatalf("incomplete graph retained referenced blobs: %+v", manifest)
+	}
+
+	planRequest := performJSONRequest(t, server, http.MethodPost, "/v1/admin/image-cache/prune-plan", adminSecret, map[string]any{
+		"cluster_node_name": "worker-1",
+		"mode":              "dry-run",
+	})
+	if planRequest.Code != http.StatusCreated {
+		t.Fatalf("create prune plan status=%d body=%s", planRequest.Code, planRequest.Body.String())
+	}
+	var planResponse struct {
+		Plan model.ImageCachePrunePlan `json:"plan"`
+	}
+	mustDecodeJSON(t, planRequest, &planResponse)
+	if planResponse.Plan.CandidateManifestCount != 0 || planResponse.Plan.PlannedDeleteBytes != 0 {
+		t.Fatalf("incomplete evidence changed prune candidates: %+v", planResponse.Plan)
+	}
+}
+
 func TestImageCacheInventoryUnreferencedBlobsUseBlobListTotals(t *testing.T) {
 	t.Parallel()
 

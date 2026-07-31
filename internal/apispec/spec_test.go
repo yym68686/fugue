@@ -46,6 +46,37 @@ func TestEmbeddedSpecIsValid(t *testing.T) {
 	}
 }
 
+func TestImageCacheManifestGraphFailureEvidenceContract(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatalf("load embedded OpenAPI YAML: %v", err)
+	}
+	manifestRef := doc.Components.Schemas["ImageCacheManifest"]
+	if manifestRef == nil || manifestRef.Value == nil {
+		t.Fatal("missing ImageCacheManifest schema")
+	}
+	statusRef := manifestRef.Value.Properties["graph_status"]
+	if statusRef == nil || statusRef.Value == nil {
+		t.Fatal("ImageCacheManifest.graph_status must be documented")
+	}
+	wantStatus := map[any]bool{"complete": false, "incomplete": false}
+	for _, value := range statusRef.Value.Enum {
+		if _, ok := wantStatus[value]; ok {
+			wantStatus[value] = true
+		}
+	}
+	for value, found := range wantStatus {
+		if !found {
+			t.Errorf("ImageCacheManifest.graph_status is missing enum value %q", value)
+		}
+	}
+	reasonRef := manifestRef.Value.Properties["graph_failure_reason"]
+	if reasonRef == nil || reasonRef.Ref != "#/components/schemas/ImageMeasurementReason" {
+		t.Fatalf("ImageCacheManifest.graph_failure_reason must reuse ImageMeasurementReason, got %#v", reasonRef)
+	}
+}
+
 func TestStreamingOperationsDeclareEveryHandlerParameter(t *testing.T) {
 	loader := openapi3.NewLoader()
 	doc, err := loader.LoadFromData(YAML())

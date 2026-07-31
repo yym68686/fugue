@@ -862,7 +862,7 @@ func TestManagementVerifyRejectsRemoteFallbackWhenLocalGraphIsMissing(t *testing
 	}
 }
 
-func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
+func TestManagementManifestInventoryDistinguishesIncompleteAndCompleteImageGraph(t *testing.T) {
 	t.Parallel()
 
 	storeDir := t.TempDir()
@@ -884,9 +884,10 @@ func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("incomplete inventory: %v", err)
 	}
-	if len(inventory) != 0 {
-		t.Fatalf("manifest-only record was advertised: %+v", inventory)
+	if len(inventory) != 1 {
+		t.Fatalf("manifest-only inventory = %d, want one bounded incomplete record: %+v", len(inventory), inventory)
 	}
+	assertBoundedIncompleteManifestInventory(t, inventory[0], "missing_blob", storeDir)
 
 	writeTestImageCacheBlob(t, storeDir, []byte("{}"))
 	writeTestImageCacheBlob(t, storeDir, []byte("x"))
@@ -898,6 +899,12 @@ func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 		t.Fatalf("complete manifest inventory = %d, want 1: %+v", len(inventory), inventory)
 	}
 	for _, entry := range inventory {
+		if got := entry["graph_status"]; got != "complete" {
+			t.Fatalf("complete graph_status = %#v, want complete", got)
+		}
+		if _, ok := entry["graph_failure_reason"]; ok {
+			t.Fatalf("complete graph retained failure reason: %+v", entry)
+		}
 		if bytes, _ := entry["referenced_blob_bytes"].(int64); bytes != 3 {
 			t.Fatalf("referenced blob bytes = %v, want 3: %+v", entry["referenced_blob_bytes"], entry)
 		}
@@ -945,13 +952,68 @@ func TestManagementManifestInventoryReportsManifestBodyBytesForAliases(t *testin
 		if target != "image-alias" && target != manifestDigest {
 			t.Fatalf("unexpected manifest alias target %q: %+v", target, entry)
 		}
+		if got := entry["graph_status"]; got != "complete" {
+			t.Fatalf("manifest alias %q graph_status = %#v, want complete", target, got)
+		}
 		if got, _ := entry["size_bytes"].(int64); got != int64(len(manifest)) {
 			t.Fatalf("manifest alias %q size_bytes = %d, want OCI manifest body bytes %d", target, got, len(manifest))
 		}
 	}
 }
 
-func TestManagementManifestInventoryRejectsMissingChildBlob(t *testing.T) {
+func TestManagementManifestInventoryReportsMissingBlobWithoutGraphBytes(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		writeConfig   bool
+		writeLayer    bool
+		missingObject string
+	}{
+		{name: "config", writeLayer: true, missingObject: "config"},
+		{name: "layer", writeConfig: true, missingObject: "layer"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			storeDir := t.TempDir()
+			cache := &imageCache{
+				storeDir:    storeDir,
+				manifestDir: filepath.Join(storeDir, "_manifests"),
+				registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+			}
+			config := []byte("{}")
+			layer := []byte("layer")
+			configDigest := testImageCacheBlobDigest(config)
+			layerDigest := testImageCacheBlobDigest(layer)
+			if test.writeConfig {
+				writeTestImageCacheBlob(t, storeDir, config)
+			}
+			if test.writeLayer {
+				writeTestImageCacheBlob(t, storeDir, layer)
+			}
+			manifest := []byte(testImageCacheManifest(configDigest, layerDigest))
+			if err := cache.replayManifest(persistedManifest{Repo: "fugue-apps/demo", Target: "image-incomplete", ContentType: "application/vnd.oci.image.manifest.v1+json", Body: manifest}); err != nil {
+				t.Fatalf("replay manifest with missing %s: %v", test.missingObject, err)
+			}
+			if err := cache.persistManifest("fugue-apps/demo", "image-incomplete", "application/vnd.oci.image.manifest.v1+json", manifest); err != nil {
+				t.Fatalf("persist manifest with missing %s: %v", test.missingObject, err)
+			}
+
+			inventory, err := cache.managementManifestInventory()
+			if err != nil {
+				t.Fatalf("missing %s inventory: %v", test.missingObject, err)
+			}
+			if len(inventory) != 1 {
+				t.Fatalf("missing %s inventory records = %d, want one bounded incomplete record: %+v", test.missingObject, len(inventory), inventory)
+			}
+			assertBoundedIncompleteManifestInventory(t, inventory[0], "missing_blob", storeDir)
+		})
+	}
+}
+
+func TestManagementManifestInventoryReportsMissingChildManifestWithoutGraphBytes(t *testing.T) {
 	t.Parallel()
 
 	storeDir := t.TempDir()
@@ -960,8 +1022,8 @@ func TestManagementManifestInventoryRejectsMissingChildBlob(t *testing.T) {
 		manifestDir: filepath.Join(storeDir, "_manifests"),
 		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
 	}
-	configDigest := testImageCacheBlobDigest([]byte("{}"))
-	layerDigest := testImageCacheBlobDigest([]byte("x"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("x"))
 	child := []byte(testImageCacheManifest(configDigest, layerDigest))
 	childDigest := manifestBodyDigest(child)
 	parent := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":%d,"platform":{"os":"linux","architecture":"amd64"}}]}`, childDigest, len(child)))
@@ -977,12 +1039,98 @@ func TestManagementManifestInventoryRejectsMissingChildBlob(t *testing.T) {
 	if err := cache.persistManifest("fugue-apps/demo", "image-index", "application/vnd.docker.distribution.manifest.list.v2+json", parent); err != nil {
 		t.Fatalf("persist parent journal: %v", err)
 	}
+	if err := cache.deleteLocalManifest("fugue-apps/demo", childDigest); err != nil {
+		t.Fatalf("remove child manifest fixture: %v", err)
+	}
 	inventory, err := cache.managementManifestInventory()
 	if err != nil {
-		t.Fatalf("missing child blob inventory: %v", err)
+		t.Fatalf("missing child manifest inventory: %v", err)
 	}
-	if len(inventory) != 0 {
-		t.Fatalf("index with missing child blobs was advertised: %+v", inventory)
+	if len(inventory) != 1 {
+		t.Fatalf("missing child inventory records = %d, want one bounded incomplete parent: %+v", len(inventory), inventory)
+	}
+	assertBoundedIncompleteManifestInventory(t, inventory[0], "missing_child_manifest", storeDir)
+}
+
+func TestManagementManifestInventoryRedactsUnclassifiedGraphFailures(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	const secretResponse = "/var/lib/fugue/private: upstream body must not escape"
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		registry: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, secretResponse, http.StatusInternalServerError)
+		}),
+	}
+	manifest := []byte(testImageCacheManifest(
+		testImageCacheBlobDigest([]byte("{}")),
+		testImageCacheBlobDigest([]byte("layer")),
+	))
+	if err := cache.persistManifest("fugue-apps/demo", "image-error", "application/vnd.oci.image.manifest.v1+json", manifest); err != nil {
+		t.Fatalf("persist manifest fixture: %v", err)
+	}
+
+	inventory, err := cache.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("unclassified graph failure inventory: %v", err)
+	}
+	if len(inventory) != 1 {
+		t.Fatalf("unclassified graph failure records = %d, want one bounded record: %+v", len(inventory), inventory)
+	}
+	entry := inventory[0]
+	if entry["graph_status"] != "incomplete" {
+		t.Fatalf("graph_status = %#v, want incomplete", entry["graph_status"])
+	}
+	if _, ok := entry["graph_failure_reason"]; ok {
+		t.Fatalf("unclassified failure exposed a reason: %+v", entry)
+	}
+	for _, forbiddenKey := range []string{"error", "path", "size_bytes", "referenced_blobs", "referenced_blob_bytes"} {
+		if _, ok := entry[forbiddenKey]; ok {
+			t.Fatalf("unclassified failure leaked field %q: %+v", forbiddenKey, entry)
+		}
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("encode incomplete inventory: %v", err)
+	}
+	for _, forbidden := range []string{secretResponse, storeDir, "status=500", "body="} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("unclassified failure leaked %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func assertBoundedIncompleteManifestInventory(t *testing.T, entry map[string]any, wantReason string, forbiddenValues ...string) {
+	t.Helper()
+
+	wantKeys := map[string]struct{}{
+		"repo": {}, "target": {}, "digest": {},
+		"graph_status": {}, "graph_failure_reason": {}, "modified_at": {},
+	}
+	if len(entry) != len(wantKeys) {
+		t.Fatalf("incomplete inventory keys = %v, want only bounded identity/status fields", entry)
+	}
+	for key := range entry {
+		if _, ok := wantKeys[key]; !ok {
+			t.Fatalf("incomplete inventory leaked unexpected field %q: %+v", key, entry)
+		}
+	}
+	if got := entry["graph_status"]; got != "incomplete" {
+		t.Fatalf("graph_status = %#v, want incomplete", got)
+	}
+	if got := entry["graph_failure_reason"]; got != wantReason {
+		t.Fatalf("graph_failure_reason = %#v, want %q", got, wantReason)
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("encode incomplete inventory: %v", err)
+	}
+	for _, forbidden := range append(forbiddenValues, "MANIFEST_UNKNOWN", "status=", "body=") {
+		if forbidden != "" && strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("incomplete inventory leaked %q: %s", forbidden, encoded)
+		}
 	}
 }
 

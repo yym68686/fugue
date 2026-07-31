@@ -5,8 +5,74 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/imagecacheevidence"
 	"fugue/internal/model"
 )
+
+func TestImageCacheIncompleteGraphEvidenceIsOptInAndNeverCarriesBytes(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	now := time.Now().UTC()
+	node := model.ImageCacheNodeInventory{
+		NodeID:           "machine-1",
+		ClusterNodeName:  "worker-1",
+		ObservedAt:       now,
+		SnapshotComplete: true,
+	}
+	if _, err := s.UpsertImageCacheInventory(node, []model.ImageCacheManifest{
+		{
+			Repo:              "fugue-apps/demo",
+			Target:            "complete",
+			Digest:            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ManifestSizeBytes: 10,
+			TotalBlobBytes:    20,
+			Present:           true,
+		},
+		{
+			Repo:               "fugue-apps/demo",
+			Target:             "incomplete",
+			Digest:             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ManifestSizeBytes:  999,
+			TotalBlobBytes:     999,
+			ReferencedBlobs:    []string{"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+			GraphStatus:        imagecacheevidence.GraphStatusIncomplete,
+			GraphFailureReason: imagecacheevidence.ReasonMissingBlob,
+			Present:            true,
+		},
+	}); err != nil {
+		t.Fatalf("upsert image-cache inventory: %v", err)
+	}
+
+	defaultList, err := s.ListImageCacheManifests(model.ImageCacheManifestFilter{PresentOnly: true})
+	if err != nil {
+		t.Fatalf("list default manifests: %v", err)
+	}
+	if len(defaultList) != 1 || defaultList[0].Target != "complete" {
+		t.Fatalf("default consumers observed incomplete graph evidence: %+v", defaultList)
+	}
+
+	all, err := s.ListImageCacheManifests(model.ImageCacheManifestFilter{PresentOnly: true, IncludeIncomplete: true})
+	if err != nil {
+		t.Fatalf("list manifests with incomplete evidence: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("manifest count with incomplete evidence = %d, want 2: %+v", len(all), all)
+	}
+	for _, manifest := range all {
+		if manifest.Target != "incomplete" {
+			continue
+		}
+		if manifest.GraphFailureReason != imagecacheevidence.ReasonMissingBlob || manifest.ManifestSizeBytes != 0 || manifest.TotalBlobBytes != 0 || len(manifest.ReferencedBlobs) != 0 {
+			t.Fatalf("incomplete graph evidence retained countable bytes: %+v", manifest)
+		}
+		return
+	}
+	t.Fatal("incomplete graph evidence was not persisted")
+}
 
 func TestImageCacheInventoryUpsertAndStaleFilters(t *testing.T) {
 	t.Parallel()

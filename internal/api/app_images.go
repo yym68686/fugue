@@ -33,6 +33,8 @@ const (
 	projectImageUsageReasonMissingSizeEvidence     = "missing_size_evidence"
 	projectImageUsageReasonMissingManifestSize     = "missing_manifest_size_evidence"
 	projectImageUsageReasonMissingBlobSize         = "missing_blob_size_evidence"
+	projectImageUsageReasonMissingChildManifest    = "missing_child_manifest"
+	projectImageUsageReasonMissingBlob             = "missing_blob"
 	projectImageUsageReasonNoStorageEvidence       = "no_storage_evidence"
 	projectImageUsageReasonRegistryNotConfigured   = "registry_not_configured"
 	defaultProjectImageUsageCacheTTL               = 5 * time.Minute

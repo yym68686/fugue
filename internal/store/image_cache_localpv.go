@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/imagecacheevidence"
 	"fugue/internal/model"
 )
 
@@ -273,7 +274,16 @@ func normalizeImageCacheManifest(in model.ImageCacheManifest) model.ImageCacheMa
 	in.Target = strings.TrimSpace(in.Target)
 	in.Digest = strings.TrimSpace(in.Digest)
 	in.MediaType = strings.TrimSpace(in.MediaType)
-	in.ReferencedBlobs = normalizeStringList(in.ReferencedBlobs)
+	in.GraphStatus = imagecacheevidence.NormalizeGraphStatus(in.GraphStatus)
+	if imagecacheevidence.GraphIsIncomplete(in.GraphStatus) {
+		in.GraphFailureReason = imagecacheevidence.NormalizeGraphFailureReason(in.GraphFailureReason)
+		in.ManifestSizeBytes = 0
+		in.TotalBlobBytes = 0
+		in.ReferencedBlobs = nil
+	} else {
+		in.GraphFailureReason = ""
+		in.ReferencedBlobs = normalizeStringList(in.ReferencedBlobs)
+	}
 	return in
 }
 
@@ -383,6 +393,9 @@ func imageCacheNodeInventoryMatchesFilter(in model.ImageCacheNodeInventory, filt
 }
 
 func imageCacheManifestMatchesFilter(in model.ImageCacheManifest, filter model.ImageCacheManifestFilter) bool {
+	if !filter.IncludeIncomplete && imagecacheevidence.GraphIsIncomplete(in.GraphStatus) {
+		return false
+	}
 	if filter.NodeID != "" && strings.TrimSpace(in.NodeID) != filter.NodeID {
 		return false
 	}

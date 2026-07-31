@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/imagecacheevidence"
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/model"
 
@@ -31,19 +32,20 @@ type distributedImageUsageEvidence struct {
 }
 
 type distributedImageCandidateMeasurement struct {
-	locations        []model.ImageLocation
-	manifests        []model.ImageCacheManifest
-	manifest         model.ImageCacheManifest
-	hasManifest      bool
-	hadFreshEvidence bool
-	staleEvidence    bool
-	digest           string
-	sizeBytes        int64
-	hasSize          bool
-	complete         bool
-	digestConflict   bool
-	sizeConflict     bool
-	reasons          []string
+	locations           []model.ImageLocation
+	manifests           []model.ImageCacheManifest
+	manifest            model.ImageCacheManifest
+	hasManifest         bool
+	hadFreshEvidence    bool
+	staleEvidence       bool
+	digest              string
+	sizeBytes           int64
+	hasSize             bool
+	complete            bool
+	digestConflict      bool
+	sizeConflict        bool
+	graphFailureReasons []string
+	reasons             []string
 }
 
 type distributedImageManifestConflict struct {
@@ -114,7 +116,8 @@ func (s *Server) loadDistributedImageUsageEvidence(ctx context.Context, apps []m
 	}
 
 	manifests, err := s.store.ListImageCacheManifests(model.ImageCacheManifestFilter{
-		PresentOnly: true,
+		PresentOnly:       true,
+		IncludeIncomplete: true,
 	})
 	if err != nil {
 		return distributedImageUsageEvidence{}, err
@@ -309,7 +312,7 @@ func (s *Server) buildDistributedAppImageInventory(
 		candidate := candidatesByImageRef[imageRef]
 		measurement := distributedImageCandidateMeasurementFor(app, candidate, evidence)
 		measurements[imageRef] = measurement
-		hasEvidence := measurement.hasEvidence()
+		hasEvidence := measurement.hasEvidence() || measurement.hadFreshEvidence
 		if !hasEvidence && !candidate.Current {
 			continue
 		}
@@ -394,10 +397,22 @@ func distributedImageCandidateMeasurementFor(
 ) distributedImageCandidateMeasurement {
 	locations := distributedImageLocationsForCandidate(app.ID, candidate, evidence)
 	manifests := distributedImageManifestsForCandidate(candidate, evidence)
+	completeManifests := make([]model.ImageCacheManifest, 0, len(manifests))
+	graphFailureReasons := []string(nil)
+	for _, manifest := range manifests {
+		if imagecacheevidence.GraphIsIncomplete(manifest.GraphStatus) {
+			if reason := distributedImageGraphFailureMeasurementReason(manifest.GraphFailureReason); reason != "" {
+				graphFailureReasons = append(graphFailureReasons, reason)
+			}
+			continue
+		}
+		completeManifests = append(completeManifests, manifest)
+	}
 	measurement := distributedImageCandidateMeasurement{
-		locations:        locations,
-		manifests:        manifests,
-		hadFreshEvidence: len(locations) > 0 || len(manifests) > 0,
+		locations:           locations,
+		manifests:           completeManifests,
+		hadFreshEvidence:    len(locations) > 0 || len(manifests) > 0,
+		graphFailureReasons: mergeProjectImageMeasurementReasons(graphFailureReasons),
 		staleEvidence: len(distributedImageLocationsForCandidateFromIndex(
 			app.ID,
 			candidate,
@@ -407,6 +422,7 @@ func distributedImageCandidateMeasurementFor(
 			evidence.staleManifestsByKey,
 		)) > 0,
 	}
+	manifests = completeManifests
 	if image, ok := distributedImageForCandidate(app.ID, candidate, evidence); ok {
 		measurement.digest = strings.TrimSpace(image.CanonicalDigest)
 	}
@@ -489,8 +505,22 @@ func distributedImageCandidateMeasurementFor(
 			measurement.digest = ""
 		}
 	}
+	if len(measurement.graphFailureReasons) > 0 {
+		measurement.complete = false
+	}
 	measurement.reasons = distributedImageMeasurementReasons(measurement)
 	return measurement
+}
+
+func distributedImageGraphFailureMeasurementReason(reason string) string {
+	switch imagecacheevidence.NormalizeGraphFailureReason(reason) {
+	case imagecacheevidence.ReasonMissingChildManifest:
+		return projectImageUsageReasonMissingChildManifest
+	case imagecacheevidence.ReasonMissingBlob:
+		return projectImageUsageReasonMissingBlob
+	default:
+		return ""
+	}
 }
 
 func distributedImageForCandidate(appID string, candidate appImageCandidate, evidence distributedImageUsageEvidence) (model.Image, bool) {
@@ -614,26 +644,28 @@ func distributedMeasurementStatus(measurement distributedImageCandidateMeasureme
 }
 
 func distributedImageMeasurementReasons(measurement distributedImageCandidateMeasurement) []string {
-	reasons := []string{}
+	reasons := append([]string(nil), measurement.graphFailureReasons...)
 	if measurement.digestConflict {
 		reasons = append(reasons, projectImageUsageReasonDigestConflict)
 	}
 	if measurement.sizeConflict {
 		reasons = append(reasons, projectImageUsageReasonSizeConflict)
 	}
-	if len(reasons) > 0 {
+	if measurement.digestConflict || measurement.sizeConflict {
 		return mergeProjectImageMeasurementReasons(reasons)
 	}
 	if !measurement.hasManifest {
-		switch {
-		case len(measurement.locations) > 0 || measurement.hadFreshEvidence:
-			reasons = append(reasons, projectImageUsageReasonMissingManifestEvidence)
-		case measurement.staleEvidence:
-			reasons = append(reasons, projectImageUsageReasonStaleInventory)
-		default:
-			reasons = append(reasons, projectImageUsageReasonNoStorageEvidence)
+		if len(reasons) == 0 {
+			switch {
+			case len(measurement.locations) > 0 || measurement.hadFreshEvidence:
+				reasons = append(reasons, projectImageUsageReasonMissingManifestEvidence)
+			case measurement.staleEvidence:
+				reasons = append(reasons, projectImageUsageReasonStaleInventory)
+			default:
+				reasons = append(reasons, projectImageUsageReasonNoStorageEvidence)
+			}
 		}
-		return reasons
+		return mergeProjectImageMeasurementReasons(reasons)
 	}
 	if measurement.manifest.ManifestSizeBytes <= 0 {
 		reasons = append(reasons, projectImageUsageReasonMissingManifestSize)
