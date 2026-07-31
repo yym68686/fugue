@@ -66,7 +66,7 @@ func TestAuthorizeAndVerifyEverySingleDomain(t *testing.T) {
 			if strings.Contains(verifyOut.String(), testSecretSentinel) {
 				t.Fatal("verify stdout leaked raw material")
 			}
-			assertBundleModes(t, fixture.bundle, expectedBundleFiles(releasedomain.OutcomeSingle))
+			assertBundleModes(t, fixture.bundle, expectedBundleFiles(releasedomain.OutcomeSingle, false))
 			decision := mustReadFile(t, filepath.Join(fixture.bundle, decisionFilename))
 			for _, forbidden := range []string{testSecretSentinel, "apiVersion: v1", "helm\x00upgrade", "errors", "reason"} {
 				if bytes.Contains(decision, []byte(forbidden)) {
@@ -165,6 +165,43 @@ func TestOperationalReportActivatesAndVerifiesOneDomainBundle(t *testing.T) {
 		t.Fatalf("operational verify exit = %d, stderr = %s", got, stderr.String())
 	}
 	assertFixedResult(t, stdout.String(), "single", string(releasedomain.DomainControlPlane))
+}
+
+func TestObservedLiveOperationalReportPersistsAndReverifiesPrivateWitness(t *testing.T) {
+	fixture, reportPath, reportDigest, observedPath := newObservedLiveOperationalActivationFixture(t)
+	fixture.bundle = filepath.Join(fixture.root, "observed-live-authorization-bundle")
+	fixture.args = replaceFlagValue(t, fixture.args, "--bundle-dir", fixture.bundle)
+	fixture.args = append(
+		fixture.args,
+		"--operational-report", reportPath,
+		"--operational-report-digest", reportDigest,
+		"--activation-live-canonical-manifest", observedPath,
+	)
+
+	var stdout, stderr bytes.Buffer
+	if got := run(fixture.args, &stdout, &stderr); got != 0 {
+		t.Fatalf("observed-live authorize exit = %d, stderr = %s", got, stderr.String())
+	}
+	assertFixedResult(t, stdout.String(), "single", string(releasedomain.DomainControlPlane))
+	assertBundleModes(t, fixture.bundle, expectedBundleFiles(releasedomain.OutcomeSingle, true))
+	persistedObserved := mustReadFile(t, filepath.Join(fixture.bundle, observedLiveFilename))
+	if !bytes.Equal(persistedObserved, mustReadFile(t, observedPath)) {
+		t.Fatal("authorization bundle changed the private observed-live witness")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if got := run([]string{"verify", "--bundle-dir", fixture.bundle}, &stdout, &stderr); got != 0 {
+		t.Fatalf("observed-live verify exit = %d, stderr = %s", got, stderr.String())
+	}
+	assertFixedResult(t, stdout.String(), "single", string(releasedomain.DomainControlPlane))
+
+	persistedObserved[len(persistedObserved)-2] ^= 1
+	overwritePrivateFile(t, filepath.Join(fixture.bundle, observedLiveFilename), persistedObserved)
+	mutateDecision(t, fixture.bundle, func(decision *dispatchDecision) {
+		decision.Artifacts.ObservedLiveManifest = digestBytes(persistedObserved)
+	})
+	assertVerifyRejected(t, fixture.bundle)
 }
 
 func TestOperationalBuiltOnlyReportResolvesAndVerifiesZeroBundle(t *testing.T) {
@@ -836,6 +873,118 @@ func newOperationalActivationFixture(t *testing.T) (commandFixture, string, stri
 	return fixture, reportPath, report.Digest
 }
 
+func newObservedLiveOperationalActivationFixture(t *testing.T) (commandFixture, string, string, string) {
+	t.Helper()
+	fixture := newCommandFixture(t, nil, releasedomain.OutcomeUnknown)
+	changedBytes := testChangedEvidence(t, fixture.baseCommit, fixture.targetCommit, []releasedomain.ChangedFile{{
+		Status: releasedomain.ChangeModified,
+		Path:   "scripts/release_fugue_public_data_plane.sh",
+	}})
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--changed-evidence"), changedBytes)
+	ownershipBytes := mustReadFile(t, flagValue(t, fixture.args, "--ownership"))
+	ownership, err := releasedomain.LoadOwnership(bytes.NewReader(ownershipBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseManifest := canonicalTestManifest(
+		t,
+		ownership,
+		[]releasedomain.Domain{releasedomain.DomainControlPlane},
+		"base-observed-live",
+	)
+	targetManifest := canonicalTestManifest(
+		t,
+		ownership,
+		[]releasedomain.Domain{releasedomain.DomainControlPlane},
+		"target-observed-live",
+	)
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--base-canonical-manifest"), baseManifest)
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--target-canonical-manifest"), targetManifest)
+	overwritePrivateFile(t, flagValue(t, fixture.args, "--repeated-target-canonical-manifest"), targetManifest)
+	options, err := parseAuthorizeFlags(fixture.args[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := buildAuthorization(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifacts.plan.Result != releasedomain.OutcomeUnknown {
+		t.Fatalf("observed-live conservative fixture outcome = %s", artifacts.plan.Result)
+	}
+	changed, err := releasedomain.DecodeAndVerifyChangedFileEvidence(
+		bytes.NewReader(changedBytes),
+		fixture.baseCommit,
+		fixture.targetCommit,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildPlan, err := releasedomain.NewBuildArtifactPlan(
+		fixture.baseCommit,
+		fixture.targetCommit,
+		changed.Digest(),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedManifest := append([]byte(nil), baseManifest...)
+	activationPlan, activationEvidence, err := releasedomain.BuildImageActivationReportFromManifests(
+		releasedomain.ImageActivationPlanInput{
+			BuildPlan:               buildPlan,
+			ReleasePlan:             artifacts.plan,
+			Ownership:               ownershipBytes,
+			BaseManifest:            baseManifest,
+			ObservedLiveManifest:    observedManifest,
+			TargetManifest:          targetManifest,
+			ImmutableTargetManifest: targetManifest,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := releasedomain.ClassifyRendered(
+		baseManifest,
+		targetManifest,
+		ownership,
+		releasedomain.RenderedOptions{
+			DefaultNamespace: artifacts.plan.Digests.ClassificationContext.DefaultNamespace,
+			Bindings:         artifacts.plan.Digests.ClassificationContext.BindingMap(),
+		},
+	)
+	report, err := releasedomain.BuildOperationalDomainEvidenceFromObservedLiveActivation(
+		changed,
+		buildPlan,
+		activationPlan,
+		activationEvidence,
+		rendered,
+		artifacts.plan.Digests.BaseManifest,
+		digestBytes(observedManifest),
+		artifacts.plan.Digests.TargetManifest,
+		digestBytes(targetManifest),
+		artifacts.plan.Digests.Ownership,
+		artifacts.plan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.AuthorizationEligible ||
+		len(report.RenderedOnlyObservations) != 1 ||
+		report.RenderedOnlyObservations[0].CandidateDomain != releasedomain.DomainControlPlane {
+		t.Fatalf("observed-live report = %#v", report)
+	}
+	reportBytes, err := releasedomain.MarshalOperationalDomainEvidence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(fixture.root, "operational-observed-live.json")
+	observedPath := filepath.Join(fixture.root, "observed-live-manifest.yaml")
+	writePrivateFile(t, reportPath, reportBytes)
+	writePrivateFile(t, observedPath, observedManifest)
+	return fixture, reportPath, report.Digest, observedPath
+}
+
 func newOperationalBuiltOnlyZeroFixture(t *testing.T) (commandFixture, string, string) {
 	t.Helper()
 	fixture := newCommandFixture(t, nil, releasedomain.OutcomeUnknown)
@@ -1258,8 +1407,9 @@ func mustDecodeJSON(t *testing.T, data []byte, destination any) {
 }
 
 func TestExpectedBundleFileSetsDoNotDrift(t *testing.T) {
-	common := expectedBundleFiles(releasedomain.OutcomeZero)
-	single := expectedBundleFiles(releasedomain.OutcomeSingle)
+	common := expectedBundleFiles(releasedomain.OutcomeZero, false)
+	single := expectedBundleFiles(releasedomain.OutcomeSingle, false)
+	observed := expectedBundleFiles(releasedomain.OutcomeSingle, true)
 	if len(single) != len(common)+3 {
 		t.Fatalf("single/common bundle file counts = %d/%d", len(single), len(common))
 	}
@@ -1270,6 +1420,12 @@ func TestExpectedBundleFileSetsDoNotDrift(t *testing.T) {
 	}
 	if reflect.DeepEqual(single, common) {
 		t.Fatal("single and zero bundle sets unexpectedly equal")
+	}
+	if len(observed) != len(single)+1 {
+		t.Fatalf("observed/single bundle file counts = %d/%d", len(observed), len(single))
+	}
+	if _, ok := observed[observedLiveFilename]; !ok {
+		t.Fatal("observed-live bundle omits its private witness")
 	}
 }
 
