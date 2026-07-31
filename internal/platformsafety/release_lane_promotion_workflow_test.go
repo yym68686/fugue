@@ -1,6 +1,7 @@
 package platformsafety
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "9bb7165be4e3dc8cd5353cea22c4a2a8354003445b9a38a2fcd3c2ed2507f899")
+	assertWorkflowSourceDigest(t, data, "725e2effa0dfaffa796f857a73a5d648bf4bb6078619cc2e1ddc9de1f616ad69")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -184,6 +185,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'`,
 		`readonly trusted_supersede_policy_baseline_oid='321428db29d486539e6a4ee26e4405c1d209076d'`,
 		`git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}"`,
+		`git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}"`,
 		`supersede_delta="$(git diff --no-renames --name-status`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`,
 		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
@@ -237,6 +239,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`git cat-file blob "${historical_workflow_blob}" | sha256sum`,
 		`readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'`,
 		`git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}"`,
+		`git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}"`,
 		`supersede_delta="$(git diff --no-renames --name-status`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`,
 		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
@@ -309,6 +312,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`superseded run left zero-job quarantine before enable`,
 		`readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'`,
 		`git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}"`,
+		`git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}"`,
 		`supersede_delta="$(git diff --no-renames --name-status`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`,
 		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
@@ -332,6 +336,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		strings.Count(source, "actions/workflows/${workflow_id}/enable") != 1 ||
 		strings.Count(source, "actions/upload-artifact@") != 1 ||
 		strings.Count(source, `supersede_delta="$(git diff --no-renames --name-status`) != 3 ||
+		strings.Count(source, `git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}"`) != 3 ||
 		strings.Count(source, `"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`) != 3 ||
 		strings.Count(source, "3fa198cbf9733df54d14de65e44668e3f5f51679") != 5 ||
 		strings.Count(source, "321428db29d486539e6a4ee26e4405c1d209076d") != 3 {
@@ -528,6 +533,7 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 		owner           string
 		ancestorExit    string
 		anchorExit      string
+		lineageExit     string
 		untrustedPolicy bool
 		extraDelta      bool
 		wantPass        bool
@@ -543,6 +549,7 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 		{name: "current source cannot be quarantined", target: targetRun, targetSHA: expectedSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner"},
 		{name: "non-ancestor source rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", ancestorExit: "1"},
 		{name: "trusted anchor must be current ancestor", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", anchorExit: "1"},
+		{name: "ghost source must precede trusted anchor", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", lineageExit: "1"},
 		{name: "business file in source delta rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", extraDelta: true},
 		{name: "untrusted historical policy rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", untrustedPolicy: true},
 		{name: "historical job rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: `{"total_count":1,"jobs":[{"id":9}]}`, actor: "owner", owner: "owner"},
@@ -572,6 +579,9 @@ git() {
     return 0
   fi
 	  if [[ "$1" == "merge-base" ]]; then
+	    if [[ "$3" == "${SUPERSEDE_STUCK_RUN_SHA}" && "$4" == "${trusted_supersede_policy_anchor_sha}" ]]; then
+	      return "${MOCK_LINEAGE_EXIT:-0}"
+	    fi
 	    if [[ "$3" == "${trusted_supersede_policy_anchor_sha}" ]]; then
 	      return "${MOCK_ANCHOR_EXIT:-0}"
 	    fi
@@ -648,6 +658,7 @@ github_api_get() {
 				"MOCK_JOBS_JSON="+test.jobsJSON,
 				"MOCK_ANCESTOR_EXIT="+ancestorExit,
 				"MOCK_ANCHOR_EXIT="+anchorExit,
+				"MOCK_LINEAGE_EXIT="+test.lineageExit,
 				"MOCK_UNTRUSTED_POLICY="+strconv.FormatBool(test.untrustedPolicy),
 				"MOCK_EXTRA_DELTA="+strconv.FormatBool(test.extraDelta),
 				"GITHUB_ACTOR="+test.actor,
@@ -663,6 +674,239 @@ github_api_get() {
 			}
 			if !test.wantPass && err == nil {
 				t.Fatalf("superseded run validator accepted invalid case: output=%s", output)
+			}
+		})
+	}
+}
+
+func TestRP5ReleaseLanePromotionTrustedBaselineAnchorHarness(t *testing.T) {
+	t.Parallel()
+
+	authorize := rp5PromotionWorkflowStep(t, "qualify-control-plane-lane", "Verify exact read-only lane qualification authorization")
+	const startMarker = "validate_trusted_supersede_baseline() {\n"
+	const endMarker = "\nvalidate_superseded_run() {"
+	start := strings.Index(authorize.Run, startMarker)
+	if start < 0 {
+		t.Fatal("trusted supersede baseline validator start marker is absent")
+	}
+	endOffset := strings.Index(authorize.Run[start:], endMarker)
+	if endOffset < 0 {
+		t.Fatal("trusted supersede baseline validator end marker is absent")
+	}
+	validator := authorize.Run[start : start+endOffset]
+
+	const (
+		trustedAnchor   = "3fa198cbf9733df54d14de65e44668e3f5f51679"
+		trustedParent   = "45b553e707bd2b2209e3f3bff6f6b435d0c59e4d"
+		expectedBase    = "1111111111111111111111111111111111111111"
+		expectedRuntime = "2222222222222222222222222222222222222222"
+	)
+	canonicalMetadata := `{"previous_baseline_object_sha":"` + trustedParent +
+		`","runtime_sha":"` + trustedAnchor + `","schema_version":1}
+`
+	tests := []struct {
+		name                 string
+		recoveryID           string
+		carrierAncestorExit  string
+		runtimeAncestorExit  string
+		missingCarrier       bool
+		extraCarrierParent   bool
+		extraCarrierTreeFile bool
+		metadata             string
+		wantPass             bool
+	}{
+		{name: "normal dispatch skips trusted recovery baseline", wantPass: true},
+		{name: "valid deployed recovery anchor", recoveryID: "333", metadata: canonicalMetadata, wantPass: true},
+		{name: "trusted carrier must precede current baseline", recoveryID: "333", carrierAncestorExit: "1", metadata: canonicalMetadata},
+		{name: "trusted runtime must precede current runtime", recoveryID: "333", runtimeAncestorExit: "1", metadata: canonicalMetadata},
+		{name: "trusted carrier must exist", recoveryID: "333", missingCarrier: true, metadata: canonicalMetadata},
+		{name: "trusted carrier must have exactly one parent", recoveryID: "333", extraCarrierParent: true, metadata: canonicalMetadata},
+		{name: "trusted carrier tree must contain only metadata", recoveryID: "333", extraCarrierTreeFile: true, metadata: canonicalMetadata},
+		{name: "trusted metadata rejects wrong runtime", recoveryID: "333", metadata: strings.Replace(canonicalMetadata, trustedAnchor, expectedRuntime, 1)},
+		{name: "trusted metadata rejects wrong previous baseline", recoveryID: "333", metadata: strings.Replace(canonicalMetadata, trustedParent, expectedBase, 1)},
+		{name: "trusted metadata must be canonical", recoveryID: "333", metadata: `{"runtime_sha":"` + trustedAnchor + `","previous_baseline_object_sha":"` + trustedParent + `","schema_version":1}
+`},
+		{name: "trusted metadata rejects duplicate keys", recoveryID: "333", metadata: `{"previous_baseline_object_sha":"` + trustedParent + `","runtime_sha":"` + trustedAnchor + `","runtime_sha":"` + trustedAnchor + `","schema_version":1}
+`},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			command := exec.Command("bash", "-c", `set -euo pipefail
+readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'
+readonly trusted_supersede_policy_baseline_oid='321428db29d486539e6a4ee26e4405c1d209076d'
+git() {
+  if [[ "$1" == "cat-file" && "$2" == "-e" ]]; then
+    [[ "${MOCK_MISSING_CARRIER}" != "true" ]]
+    return
+  fi
+  if [[ "$1" == "merge-base" && "$2" == "--is-ancestor" ]]; then
+    if [[ "$3" == "${trusted_supersede_policy_baseline_oid}" ]]; then
+      return "${MOCK_CARRIER_ANCESTOR_EXIT}"
+    fi
+    if [[ "$3" == "${trusted_supersede_policy_anchor_sha}" ]]; then
+      return "${MOCK_RUNTIME_ANCESTOR_EXIT}"
+    fi
+    return 92
+  fi
+  if [[ "$1" == "rev-list" ]]; then
+    printf '%s %s' "${trusted_supersede_policy_baseline_oid}" '45b553e707bd2b2209e3f3bff6f6b435d0c59e4d'
+    if [[ "${MOCK_EXTRA_PARENT}" == "true" ]]; then
+      printf ' %s' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    fi
+    printf '\n'
+    return 0
+  fi
+  if [[ "$1" == "ls-tree" ]]; then
+    printf '100644 blob 3333333333333333333333333333333333333333\tfugue-runtime-baseline.json\n'
+    if [[ "${MOCK_EXTRA_TREE_FILE}" == "true" ]]; then
+      printf '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\textra.json\n'
+    fi
+    return 0
+  fi
+  if [[ "$1" == "cat-file" && "$2" == "blob" ]]; then
+    printf '%s' "${MOCK_METADATA}"
+    return 0
+  fi
+  return 91
+}
+`+validator+`
+validate_trusted_supersede_baseline
+`)
+			carrierAncestorExit := test.carrierAncestorExit
+			if carrierAncestorExit == "" {
+				carrierAncestorExit = "0"
+			}
+			runtimeAncestorExit := test.runtimeAncestorExit
+			if runtimeAncestorExit == "" {
+				runtimeAncestorExit = "0"
+			}
+			command.Env = append(os.Environ(),
+				"SUPERSEDE_STUCK_RUN_ID="+test.recoveryID,
+				"EXPECTED_BASELINE_OID="+expectedBase,
+				"EXPECTED_RUNTIME_SHA="+expectedRuntime,
+				"MOCK_CARRIER_ANCESTOR_EXIT="+carrierAncestorExit,
+				"MOCK_RUNTIME_ANCESTOR_EXIT="+runtimeAncestorExit,
+				"MOCK_MISSING_CARRIER="+strconv.FormatBool(test.missingCarrier),
+				"MOCK_EXTRA_PARENT="+strconv.FormatBool(test.extraCarrierParent),
+				"MOCK_EXTRA_TREE_FILE="+strconv.FormatBool(test.extraCarrierTreeFile),
+				"MOCK_METADATA="+test.metadata,
+			)
+			output, err := command.CombinedOutput()
+			if test.wantPass && err != nil {
+				t.Fatalf("trusted baseline validator rejected valid case: %v output=%s", err, output)
+			}
+			if !test.wantPass && err == nil {
+				t.Fatalf("trusted baseline validator accepted invalid case: output=%s", output)
+			}
+		})
+	}
+}
+
+func TestRP5ReleaseLanePromotionQualificationConsumerBindsTrustedAnchor(t *testing.T) {
+	t.Parallel()
+
+	consume := rp5PromotionWorkflowStep(t, "promote-deploy-lane", "Consume exact read-only qualification evidence")
+	const (
+		trustedAnchor   = "3fa198cbf9733df54d14de65e44668e3f5f51679"
+		trustedCarrier  = "321428db29d486539e6a4ee26e4405c1d209076d"
+		expectedSHA     = "1111111111111111111111111111111111111111"
+		expectedBase    = "2222222222222222222222222222222222222222"
+		expectedRuntime = "3333333333333333333333333333333333333333"
+		expectedTerm    = "4444444444444444444444444444444444444444"
+	)
+	tests := []struct {
+		name            string
+		inputID         string
+		inputSHA        string
+		evidenceID      string
+		evidenceSHA     string
+		evidenceAnchor  string
+		evidenceCarrier string
+		wantPass        bool
+	}{
+		{name: "normal dispatch binds empty recovery identity", wantPass: true},
+		{name: "valid recovery binds deployed anchor", inputID: "333", inputSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceID: "333", evidenceSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceAnchor: trustedAnchor, evidenceCarrier: trustedCarrier, wantPass: true},
+		{name: "one-sided recovery input fails closed", inputID: "333", evidenceID: "333"},
+		{name: "forged recovery anchor fails closed", inputID: "333", inputSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceID: "333", evidenceSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceAnchor: expectedSHA, evidenceCarrier: trustedCarrier},
+		{name: "forged recovery carrier fails closed", inputID: "333", inputSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceID: "333", evidenceSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceAnchor: trustedAnchor, evidenceCarrier: expectedBase},
+		{name: "normal dispatch rejects injected anchor", evidenceAnchor: trustedAnchor},
+		{name: "artifact cannot switch recovery identity", inputID: "333", inputSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceID: "334", evidenceSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evidenceAnchor: trustedAnchor, evidenceCarrier: trustedCarrier},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tempDir := t.TempDir()
+			evidenceDir := filepath.Join(tempDir, "fugue-rp5-lane-qualification-consume")
+			if err := os.Mkdir(evidenceDir, 0o700); err != nil {
+				t.Fatalf("create qualification evidence directory: %v", err)
+			}
+			payload := map[string]any{
+				"schema_version":                        1,
+				"workflow":                              "promote-control-plane-release-lane-rp5",
+				"repository":                            "example/fugue",
+				"run_id":                                "444",
+				"run_attempt":                           1,
+				"policy_sha":                            expectedSHA,
+				"runner_name":                           "ovhvpsuswest-fugue",
+				"runner_os":                             "Linux",
+				"runner_arch":                           "X64",
+				"baseline_ref_object":                   expectedBase,
+				"represented_runtime_sha":               expectedRuntime,
+				"terminal_ref_object":                   expectedTerm,
+				"terminal_mode":                         "frozen",
+				"supersede_stuck_run_id":                test.evidenceID,
+				"supersede_stuck_run_sha":               test.evidenceSHA,
+				"trusted_supersede_policy_anchor_sha":   test.evidenceAnchor,
+				"trusted_supersede_policy_baseline_oid": test.evidenceCarrier,
+				"deploy_workflow_state":                 "disabled_manually",
+				"api_health_url":                        "https://api.example.invalid/health",
+				"api_health":                            "ok",
+				"central_coredns":                       "1/1 2/2 2",
+				"helm_status":                           "deployed",
+				"helm_revision":                         803,
+				"workflow_mutation_attempted":           false,
+				"deploy_dispatch_attempted":             false,
+				"ref_mutation_attempted":                false,
+				"object_mutation_attempted":             false,
+				"cluster_mutation_attempted":            false,
+				"runtime_mutation_attempted":            false,
+				"production_write":                      false,
+				"recorded_at":                           "2026-07-31T00:00:00+00:00",
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal qualification evidence: %v", err)
+			}
+			raw = append(raw, '\n')
+			if err := os.WriteFile(filepath.Join(evidenceDir, "qualification.json"), raw, 0o600); err != nil {
+				t.Fatalf("write qualification evidence: %v", err)
+			}
+			command := exec.Command("bash", "-c", consume.Run)
+			command.Env = append(os.Environ(),
+				"RUNNER_TEMP="+tempDir,
+				"ARTIFACT_DIGEST=sha256:"+strings.Repeat("a", 64),
+				"EXPECTED_SHA="+expectedSHA,
+				"EXPECTED_RUNNER_NAME=ovhvpsuswest-fugue",
+				"EXPECTED_BASELINE_OID="+expectedBase,
+				"EXPECTED_RUNTIME_SHA="+expectedRuntime,
+				"EXPECTED_TERMINAL_OID="+expectedTerm,
+				"EXPECTED_API_HEALTH_URL=https://api.example.invalid/health",
+				"EXPECTED_COREDNS_STATUS=1/1 2/2 2",
+				"SUPERSEDE_STUCK_RUN_ID="+test.inputID,
+				"SUPERSEDE_STUCK_RUN_SHA="+test.inputSHA,
+				"GITHUB_REPOSITORY=example/fugue",
+				"GITHUB_RUN_ID=444",
+				"GITHUB_RUN_ATTEMPT=1",
+			)
+			output, err := command.CombinedOutput()
+			if test.wantPass && err != nil {
+				t.Fatalf("qualification consumer rejected valid case: %v output=%s", err, output)
+			}
+			if !test.wantPass && err == nil {
+				t.Fatalf("qualification consumer accepted invalid case: output=%s", output)
 			}
 		})
 	}
@@ -692,6 +936,8 @@ func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 		supersedeSHA  string
 		ghostState    string
 		ghostJobs     bool
+		anchorExit    string
+		lineageExit   string
 		extraDelta    bool
 		wantPass      bool
 		wantState     string
@@ -710,6 +956,8 @@ func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 		{name: "recovery rejects one-sided identity", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", wantPass: false, wantState: "disabled_manually"},
 		{name: "recovery rejects ghost leaving queue", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, ghostState: "completed", wantPass: false, wantState: "disabled_manually"},
 		{name: "recovery rejects ghost with historical jobs", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, ghostJobs: true, wantPass: false, wantState: "disabled_manually"},
+		{name: "recovery rejects anchor outside current history", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, anchorExit: "1", wantPass: false, wantState: "disabled_manually"},
+		{name: "recovery rejects ghost outside anchor history", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, lineageExit: "1", wantPass: false, wantState: "disabled_manually"},
 		{name: "recovery rejects extra source delta before enable", mutate: "false", putExit: "0", otherRuns: "999", supersede: "999", supersedeSHA: historicalSHA, extraDelta: true, wantPass: false, wantState: "disabled_manually"},
 	}
 	for _, test := range tests {
@@ -738,9 +986,16 @@ if [[ "$1" == "cat-file" && "$2" == "-e" ]]; then
   exit 0
 fi
 if [[ "$1" == "merge-base" ]]; then
+	if [[ "$3" == "${SUPERSEDE_STUCK_RUN_SHA}" && "$4" == '3fa198cbf9733df54d14de65e44668e3f5f51679' ]]; then
+		exit "${MOCK_LINEAGE_EXIT:-0}"
+	fi
+	if [[ "$3" == '3fa198cbf9733df54d14de65e44668e3f5f51679' ]]; then
+		exit "${MOCK_ANCHOR_EXIT:-0}"
+	fi
   exit 0
 fi
 if [[ "$1" == "diff" ]]; then
+	[[ "$4" == "${SUPERSEDE_STUCK_RUN_SHA}" && "$5" == '3fa198cbf9733df54d14de65e44668e3f5f51679' ]] || exit 92
   printf 'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\n'
   printf 'M\tinternal/platformsafety/release_lane_promotion_workflow_test.go\n'
   if [[ "${MOCK_EXTRA_DELTA}" == "true" ]]; then
@@ -869,6 +1124,8 @@ exit 91
 				"MOCK_CURRENT_RUN_JSON="+currentRunJSON,
 				"MOCK_SUPERSEDED_RUN_JSON="+supersededRunJSON,
 				"MOCK_SUPERSEDED_JOBS_JSON="+ghostJobs,
+				"MOCK_ANCHOR_EXIT="+test.anchorExit,
+				"MOCK_LINEAGE_EXIT="+test.lineageExit,
 				"MOCK_EXTRA_DELTA="+strconv.FormatBool(test.extraDelta),
 				"GITHUB_REPOSITORY=example/fugue",
 				"GITHUB_ACTOR=owner",

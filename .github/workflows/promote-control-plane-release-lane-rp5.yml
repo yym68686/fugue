@@ -121,6 +121,7 @@ jobs:
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || return 1
             git cat-file -e "${trusted_supersede_policy_anchor_sha}^{commit}" || return 1
             git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}" || return 1
+            git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}" || return 1
 
             local supersede_delta
             supersede_delta="$(git diff --no-renames --name-status \
@@ -585,6 +586,7 @@ jobs:
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
             git cat-file -e "${trusted_supersede_policy_anchor_sha}^{commit}" || exit 1
             git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}" || exit 1
+            git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}" || exit 1
             supersede_delta="$(git diff --no-renames --name-status \
               "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")" || exit 1
             [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || exit 1
@@ -787,6 +789,7 @@ jobs:
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
             git cat-file -e "${trusted_supersede_policy_anchor_sha}^{commit}" || exit 1
             git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}" || exit 1
+            git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}" || exit 1
             supersede_delta="$(git diff --no-renames --name-status \
               "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")" || exit 1
             [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || exit 1
