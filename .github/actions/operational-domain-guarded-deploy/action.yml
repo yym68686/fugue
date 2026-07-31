@@ -13,6 +13,7 @@ runs:
   using: composite
   steps:
     - name: Prepare operational-domain report-only evidence
+      id: prepare
       shell: bash
       env:
         FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE: prepare
@@ -20,7 +21,7 @@ runs:
 
     - name: Upload operational-domain report-only evidence
       id: operational-report-upload
-      if: always()
+      if: ${{ always() && steps.prepare.outcome == 'success' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: fugue-control-plane-operational-domain-evidence-${{ github.run_id }}-${{ github.run_attempt }}
@@ -32,7 +33,7 @@ runs:
 
     - name: Upload build-vs-activation report-only evidence
       id: image-activation-report-upload
-      if: always()
+      if: ${{ always() && steps.prepare.outcome == 'success' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: fugue-control-plane-build-activation-evidence-${{ github.run_id }}-${{ github.run_attempt }}

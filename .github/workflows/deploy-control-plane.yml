@@ -617,6 +617,7 @@ jobs:
           done
 
       - name: Write genesis public release evidence
+        id: genesis_evidence
         if: ${{ needs.release-baseline.outputs.is_genesis == 'true' }}
         env:
           DOMAIN_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
@@ -1111,7 +1112,7 @@ jobs:
         run: rm -f "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"
 
       - name: Upload release-domain public evidence
-        if: always()
+        if: ${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fugue-control-plane-release-domain-evidence-${{ github.run_id }}-${{ github.run_attempt }}

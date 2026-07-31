@@ -2,7 +2,6 @@ package releasedomain
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 )
 
@@ -96,7 +95,7 @@ func TestObservedLiveImageManifestSuppressesAlreadyActiveArtifactGap(t *testing.
 	}
 }
 
-func TestMaterializeObservedLiveImageManifestRejectsMissingWorkload(t *testing.T) {
+func TestMaterializeObservedLiveImageManifestKeepsMissingWorkloadFailClosed(t *testing.T) {
 	input := md1ActivationFixture(
 		t,
 		md1Deployment("fugue-api", "api", "registry.test/api:old"),
@@ -104,13 +103,32 @@ func TestMaterializeObservedLiveImageManifestRejectsMissingWorkload(t *testing.T
 		[]md1OwnershipRule{{name: "fugue-api", domain: DomainControlPlane}},
 		nil,
 	)
-	_, err := MaterializeObservedLiveImageManifest(
+	observed, err := MaterializeObservedLiveImageManifest(
 		input.BaseManifest,
 		[]byte("apiVersion: v1\nkind: List\nmetadata: {}\nitems: []\n"),
 		input.Ownership,
 		"fugue-system",
 	)
-	if err == nil || !strings.Contains(err.Error(), "observed live workload is missing") {
-		t.Fatalf("missing live workload was not rejected: %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(observed, input.BaseManifest) {
+		t.Fatalf("missing live workload did not retain the exact base image:\n%s", observed)
+	}
+	input.ObservedLiveManifest = observed
+	input.ImmutableTargetManifest, err = MaterializeObservedLiveRelativeTargetPublishedImageRefs(
+		input.BaseManifest, observed, input.TargetManifest, input.Ownership,
+		"fugue-system", input.BuildPlan.TargetCommit, input.BuildPlan, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, evidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Activations) != 0 || evidence.Complete || len(evidence.Unresolved) != 1 ||
+		evidence.Unresolved[0].LiveImageRef != "registry.test/api:old" {
+		t.Fatalf("missing observation incorrectly resolved target activation: plan=%#v evidence=%#v", plan, evidence)
 	}
 }

@@ -45,7 +45,12 @@ func MaterializeObservedLiveImageManifest(
 		}
 		observed, exists := observedByIdentity[key]
 		if !exists {
-			return nil, fmt.Errorf("observed live workload is missing for %s", base.Identity.String())
+			// A Helm revision can retain an optional or hook-like workload that
+			// has no current API object. Keep the Helm image in that case. This
+			// is fail closed for activation: only an image actually present in
+			// the observation can replace the base and prove a target is live.
+			materialized = append(materialized, base)
+			continue
 		}
 		observedContainers, observedIsWorkload, observedErr := workloadContainers(observed)
 		if observedErr != nil {
@@ -57,7 +62,10 @@ func MaterializeObservedLiveImageManifest(
 		for _, baseContainer := range sortedRenderedContainers(baseContainers) {
 			observedContainer, found := observedContainers[baseContainer.Name]
 			if !found {
-				return nil, fmt.Errorf("observed live workload container is missing for %s/%s", base.Identity.String(), baseContainer.Name)
+				// Preserve the base image for an unobserved container. A target
+				// change for it remains unresolved rather than borrowing evidence
+				// from another container or workload.
+				continue
 			}
 			if err := setRenderedContainerImage(base, baseContainer.Pointer, observedContainer.Image); err != nil {
 				return nil, err
