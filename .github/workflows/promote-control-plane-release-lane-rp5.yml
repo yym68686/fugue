@@ -96,6 +96,8 @@ jobs:
 
           readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
           readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'
+          readonly trusted_supersede_policy_baseline_oid='321428db29d486539e6a4ee26e4405c1d209076d'
           github_api_get() {
             local path="${1:?GitHub API path is required}"
             timeout --kill-after=2s 10s curl \
@@ -117,10 +119,12 @@ jobs:
             [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || return 1
             git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || return 1
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || return 1
+            git cat-file -e "${trusted_supersede_policy_anchor_sha}^{commit}" || return 1
+            git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}" || return 1
 
             local supersede_delta
             supersede_delta="$(git diff --no-renames --name-status \
-              "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}")" || return 1
+              "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")" || return 1
             [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || return 1
 
             local historical_workflow_blob historical_test_blob
@@ -141,6 +145,51 @@ jobs:
             ) || return 1
             [[ "${historical_test_digest}" == '4f8afcfce987f53224d0ac9ff08a54d5b2c3248457cd39922f56d082c1ca2dc0' ]] || return 1
             [[ "${marker}" == '-' && -z "${extra:-}" ]] || return 1
+          }
+          validate_trusted_supersede_baseline() {
+            [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]] || return 0
+
+            git cat-file -e "${trusted_supersede_policy_baseline_oid}^{commit}" || return 1
+            git merge-base --is-ancestor \
+              "${trusted_supersede_policy_baseline_oid}" "${EXPECTED_BASELINE_OID}" || return 1
+            git merge-base --is-ancestor \
+              "${trusted_supersede_policy_anchor_sha}" "${EXPECTED_RUNTIME_SHA}" || return 1
+
+            local trusted_identity trusted_commit trusted_parent trusted_tree
+            local metadata_mode metadata_type metadata_blob metadata_path extra
+            trusted_identity="$(git rev-list --parents -n 1 \
+              "${trusted_supersede_policy_baseline_oid}")" || return 1
+            read -r trusted_commit trusted_parent extra <<<"${trusted_identity}" || return 1
+            [[ "${trusted_commit}" == "${trusted_supersede_policy_baseline_oid}" ]] || return 1
+            [[ "${trusted_parent}" =~ ^[0-9a-f]{40}$ && -z "${extra:-}" ]] || return 1
+            trusted_tree="$(git ls-tree --full-tree \
+              "${trusted_supersede_policy_baseline_oid}")" || return 1
+            [[ "$(printf '%s\n' "${trusted_tree}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]] || return 1
+            read -r metadata_mode metadata_type metadata_blob metadata_path extra <<<"${trusted_tree}" || return 1
+            [[ -z "${extra:-}" && "${metadata_mode}" == '100644' && "${metadata_type}" == 'blob' ]] || return 1
+            [[ "${metadata_path}" == 'fugue-runtime-baseline.json' ]] || return 1
+            [[ "${metadata_blob}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            git cat-file blob "${metadata_blob}" | python3 -c '
+          import json, sys
+          raw = sys.stdin.buffer.read()
+          def unique_object(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError("duplicate baseline key")
+                  value[key] = item
+              return value
+          value = json.loads(raw, object_pairs_hook=unique_object)
+          expected = {
+              "previous_baseline_object_sha": sys.argv[2],
+              "runtime_sha": sys.argv[1],
+              "schema_version": 1,
+          }
+          if value != expected:
+              raise SystemExit("trusted supersede baseline identity drifted")
+          if raw != (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n").encode():
+              raise SystemExit("trusted supersede baseline metadata is not canonical")
+          ' "${trusted_supersede_policy_anchor_sha}" "${trusted_parent}" || return 1
           }
           validate_superseded_run() {
             [[ -n "${SUPERSEDE_STUCK_RUN_ID}" ]] || return 0
@@ -290,6 +339,7 @@ jobs:
           [[ -z "${extra:-}" && "${represented_runtime}" == "${EXPECTED_RUNTIME_SHA}" ]] || exit 1
           [[ "${represented_previous}" == "${baseline_parent}" ]] || exit 1
           git merge-base --is-ancestor "${EXPECTED_RUNTIME_SHA}" "${GITHUB_SHA}" || exit 1
+          validate_trusted_supersede_baseline || exit 1
 
           timeout --kill-after=5s 60s git fetch --no-tags origin \
             'refs/heads/fugue-control-plane-release-terminal-state' || exit 1
@@ -427,6 +477,11 @@ jobs:
             "${helm_status}" "${helm_revision}" <<'PY'
           import datetime, json, os, sys
           output, coredns, api, helm_status, helm_revision = sys.argv[1:]
+          supersede_id = os.environ["SUPERSEDE_STUCK_RUN_ID"]
+          supersede_sha = os.environ["SUPERSEDE_STUCK_RUN_SHA"]
+          if bool(supersede_id) != bool(supersede_sha):
+              raise SystemExit("supersede identity is one-sided")
+          recovery = bool(supersede_id)
           payload = {
               "schema_version": 1,
               "workflow": "promote-control-plane-release-lane-rp5",
@@ -441,8 +496,10 @@ jobs:
               "represented_runtime_sha": os.environ["EXPECTED_RUNTIME_SHA"],
               "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
               "terminal_mode": "frozen",
-              "supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"],
-              "supersede_stuck_run_sha": os.environ["SUPERSEDE_STUCK_RUN_SHA"],
+              "supersede_stuck_run_id": supersede_id,
+              "supersede_stuck_run_sha": supersede_sha,
+              "trusted_supersede_policy_anchor_sha": "3fa198cbf9733df54d14de65e44668e3f5f51679" if recovery else "",
+              "trusted_supersede_policy_baseline_oid": "321428db29d486539e6a4ee26e4405c1d209076d" if recovery else "",
               "deploy_workflow_state": "disabled_manually",
               "api_health_url": os.environ["EXPECTED_API_HEALTH_URL"],
               "api_health": api,
@@ -515,6 +572,7 @@ jobs:
           [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
           readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'
           if [[ -z "${SUPERSEDE_STUCK_RUN_ID}" || -z "${SUPERSEDE_STUCK_RUN_SHA}" ]]; then
             [[ -z "${SUPERSEDE_STUCK_RUN_ID}" && -z "${SUPERSEDE_STUCK_RUN_SHA}" ]] || exit 1
           else
@@ -525,8 +583,10 @@ jobs:
             [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || exit 1
             git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || exit 1
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
+            git cat-file -e "${trusted_supersede_policy_anchor_sha}^{commit}" || exit 1
+            git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}" || exit 1
             supersede_delta="$(git diff --no-renames --name-status \
-              "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}")" || exit 1
+              "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")" || exit 1
             [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || exit 1
             historical_workflow_blob="$(git rev-parse --verify \
               "${SUPERSEDE_STUCK_RUN_SHA}:${workflow_path}")" || exit 1
@@ -652,6 +712,11 @@ jobs:
           if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
               raise SystemExit("qualification is not canonical one-LF JSON")
           value = json.loads(raw)
+          supersede_id = os.environ["SUPERSEDE_STUCK_RUN_ID"]
+          supersede_sha = os.environ["SUPERSEDE_STUCK_RUN_SHA"]
+          if bool(supersede_id) != bool(supersede_sha):
+              raise SystemExit("supersede identity is one-sided")
+          recovery = bool(supersede_id)
           required = {
               "api_health": "ok",
               "api_health_url": os.environ["EXPECTED_API_HEALTH_URL"],
@@ -668,8 +733,10 @@ jobs:
               "runner_os": "Linux",
               "terminal_ref_object": os.environ["EXPECTED_TERMINAL_OID"],
               "terminal_mode": "frozen",
-              "supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"],
-              "supersede_stuck_run_sha": os.environ["SUPERSEDE_STUCK_RUN_SHA"],
+              "supersede_stuck_run_id": supersede_id,
+              "supersede_stuck_run_sha": supersede_sha,
+              "trusted_supersede_policy_anchor_sha": "3fa198cbf9733df54d14de65e44668e3f5f51679" if recovery else "",
+              "trusted_supersede_policy_baseline_oid": "321428db29d486539e6a4ee26e4405c1d209076d" if recovery else "",
               "workflow": "promote-control-plane-release-lane-rp5",
           }
           if value.get("schema_version") != 1 or any(value.get(k) != v for k, v in required.items()):
@@ -698,6 +765,7 @@ jobs:
           readonly workflow_id='deploy-control-plane.yml'
           readonly promotion_workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
           readonly promotion_test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+          readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'
           main_head="$(timeout --kill-after=2s 10s gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
           baseline_oid="$(timeout --kill-after=2s 10s gh api \
@@ -717,8 +785,10 @@ jobs:
             [[ "${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}" ]] || exit 1
             git cat-file -e "${SUPERSEDE_STUCK_RUN_SHA}^{commit}" || exit 1
             git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}" || exit 1
+            git cat-file -e "${trusted_supersede_policy_anchor_sha}^{commit}" || exit 1
+            git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}" || exit 1
             supersede_delta="$(git diff --no-renames --name-status \
-              "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}")" || exit 1
+              "${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")" || exit 1
             [[ "${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go' ]] || exit 1
             historical_workflow_blob="$(git rev-parse --verify \
               "${SUPERSEDE_STUCK_RUN_SHA}:${promotion_workflow_path}")" || exit 1

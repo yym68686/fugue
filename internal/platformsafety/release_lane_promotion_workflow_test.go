@@ -21,7 +21,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "e733984519ba2294d5bb880d42b930f3d92c8c4937cb1c5cb5adb8ff5bb8167f")
+	assertWorkflowSourceDigest(t, data, "9bb7165be4e3dc8cd5353cea22c4a2a8354003445b9a38a2fcd3c2ed2507f899")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -181,13 +181,22 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`validate_supersede_source_policy()`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}" != "${GITHUB_SHA}"`,
 		`git merge-base --is-ancestor "${SUPERSEDE_STUCK_RUN_SHA}" "${GITHUB_SHA}"`,
+		`readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'`,
+		`readonly trusted_supersede_policy_baseline_oid='321428db29d486539e6a4ee26e4405c1d209076d'`,
+		`git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}"`,
 		`supersede_delta="$(git diff --no-renames --name-status`,
+		`"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`,
 		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}:${workflow_path}"`,
 		`"${SUPERSEDE_STUCK_RUN_SHA}:${test_path}"`,
 		`git cat-file blob "${historical_workflow_blob}" | sha256sum`,
 		`2a59067621f8d933b7c5a12638acb4f87103af556d3ee73561244dfb9abad7ea`,
 		`4f8afcfce987f53224d0ac9ff08a54d5b2c3248457cd39922f56d082c1ca2dc0`,
+		`validate_trusted_supersede_baseline()`,
+		`"${trusted_supersede_policy_baseline_oid}" "${EXPECTED_BASELINE_OID}"`,
+		`"${trusted_supersede_policy_anchor_sha}" "${EXPECTED_RUNTIME_SHA}"`,
+		`trusted supersede baseline identity drifted`,
+		`validate_trusted_supersede_baseline || exit 1`,
 		`validate_superseded_run()`,
 		`"${GITHUB_ACTOR}" == "${GITHUB_REPOSITORY_OWNER}"`,
 		`"${SUPERSEDE_STUCK_RUN_ID}" != "${GITHUB_RUN_ID}"`,
@@ -226,7 +235,10 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`verify_superseded_run_is_quarantined()`,
 		`superseded run left zero-job quarantine`,
 		`git cat-file blob "${historical_workflow_blob}" | sha256sum`,
+		`readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'`,
+		`git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}"`,
 		`supersede_delta="$(git diff --no-renames --name-status`,
+		`"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`,
 		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
 	} {
 		if !strings.Contains(promoteIdentity.Run, required) {
@@ -245,8 +257,10 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`helm status "${FUGUE_RELEASE_NAME}"`,
 		`"api_health_url": os.environ["EXPECTED_API_HEALTH_URL"]`,
 		`"terminal_mode": "frozen"`,
-		`"supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"]`,
-		`"supersede_stuck_run_sha": os.environ["SUPERSEDE_STUCK_RUN_SHA"]`,
+		`"supersede_stuck_run_id": supersede_id`,
+		`"supersede_stuck_run_sha": supersede_sha`,
+		`"trusted_supersede_policy_anchor_sha": "3fa198cbf9733df54d14de65e44668e3f5f51679" if recovery else ""`,
+		`"trusted_supersede_policy_baseline_oid": "321428db29d486539e6a4ee26e4405c1d209076d" if recovery else ""`,
 		`"workflow_mutation_attempted": False`,
 		`"deploy_dispatch_attempted": False`,
 		`"cluster_mutation_attempted": False`,
@@ -273,8 +287,10 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"repository": os.environ["GITHUB_REPOSITORY"]`,
 		`"run_id": os.environ["GITHUB_RUN_ID"]`,
 		`"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])`,
-		`"supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"]`,
-		`"supersede_stuck_run_sha": os.environ["SUPERSEDE_STUCK_RUN_SHA"]`,
+		`"supersede_stuck_run_id": supersede_id`,
+		`"supersede_stuck_run_sha": supersede_sha`,
+		`"trusted_supersede_policy_anchor_sha": "3fa198cbf9733df54d14de65e44668e3f5f51679" if recovery else ""`,
+		`"trusted_supersede_policy_baseline_oid": "321428db29d486539e6a4ee26e4405c1d209076d" if recovery else ""`,
 	} {
 		if !strings.Contains(consume.Run, required) {
 			t.Fatalf("lane qualification consumer must contain %q", required)
@@ -291,7 +307,10 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"${baseline_oid}" == "${EXPECTED_BASELINE_OID}"`,
 		`"${terminal_oid}" == "${EXPECTED_TERMINAL_OID}"`,
 		`superseded run left zero-job quarantine before enable`,
+		`readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'`,
+		`git merge-base --is-ancestor "${trusted_supersede_policy_anchor_sha}" "${GITHUB_SHA}"`,
 		`supersede_delta="$(git diff --no-renames --name-status`,
+		`"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`,
 		`"${supersede_delta}" == $'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\nM\tinternal/platformsafety/release_lane_promotion_workflow_test.go'`,
 		`for run_status in queued in_progress waiting pending requested`,
 		`str(identifier) not in {current, superseded}`,
@@ -312,7 +331,10 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if strings.Count(source, "--method PUT") != 1 ||
 		strings.Count(source, "actions/workflows/${workflow_id}/enable") != 1 ||
 		strings.Count(source, "actions/upload-artifact@") != 1 ||
-		strings.Count(source, `supersede_delta="$(git diff --no-renames --name-status`) != 3 {
+		strings.Count(source, `supersede_delta="$(git diff --no-renames --name-status`) != 3 ||
+		strings.Count(source, `"${SUPERSEDE_STUCK_RUN_SHA}" "${trusted_supersede_policy_anchor_sha}")`) != 3 ||
+		strings.Count(source, "3fa198cbf9733df54d14de65e44668e3f5f51679") != 5 ||
+		strings.Count(source, "321428db29d486539e6a4ee26e4405c1d209076d") != 3 {
 		t.Fatal("lane promotion capability inventory drifted")
 	}
 	for _, forbidden := range []string{
@@ -505,6 +527,7 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 		actor           string
 		owner           string
 		ancestorExit    string
+		anchorExit      string
 		untrustedPolicy bool
 		extraDelta      bool
 		wantPass        bool
@@ -519,6 +542,7 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 		{name: "current run cannot supersede itself", target: currentRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner"},
 		{name: "current source cannot be quarantined", target: targetRun, targetSHA: expectedSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner"},
 		{name: "non-ancestor source rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", ancestorExit: "1"},
+		{name: "trusted anchor must be current ancestor", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", anchorExit: "1"},
 		{name: "business file in source delta rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", extraDelta: true},
 		{name: "untrusted historical policy rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", untrustedPolicy: true},
 		{name: "historical job rejects recovery", target: targetRun, targetSHA: historicalSHA, runJSON: validRun, jobsJSON: `{"total_count":1,"jobs":[{"id":9}]}`, actor: "owner", owner: "owner"},
@@ -541,14 +565,20 @@ func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
 			command := exec.Command("bash", "-c", `set -euo pipefail
 readonly workflow_path='.github/workflows/promote-control-plane-release-lane-rp5.yml'
 readonly test_path='internal/platformsafety/release_lane_promotion_workflow_test.go'
+readonly trusted_supersede_policy_anchor_sha='3fa198cbf9733df54d14de65e44668e3f5f51679'
+readonly trusted_supersede_policy_baseline_oid='321428db29d486539e6a4ee26e4405c1d209076d'
 git() {
   if [[ "$1" == "cat-file" && "$2" == "-e" ]]; then
     return 0
   fi
-  if [[ "$1" == "merge-base" ]]; then
-    return "${MOCK_ANCESTOR_EXIT:-0}"
-  fi
-  if [[ "$1" == "diff" ]]; then
+	  if [[ "$1" == "merge-base" ]]; then
+	    if [[ "$3" == "${trusted_supersede_policy_anchor_sha}" ]]; then
+	      return "${MOCK_ANCHOR_EXIT:-0}"
+	    fi
+	    return "${MOCK_ANCESTOR_EXIT:-0}"
+	  fi
+	  if [[ "$1" == "diff" ]]; then
+	    [[ "$4" == "${SUPERSEDE_STUCK_RUN_SHA}" && "$5" == "${trusted_supersede_policy_anchor_sha}" ]] || return 92
     printf 'M\t.github/workflows/promote-control-plane-release-lane-rp5.yml\n'
     printf 'M\tinternal/platformsafety/release_lane_promotion_workflow_test.go\n'
     if [[ "${MOCK_EXTRA_DELTA}" == "true" ]]; then
@@ -605,6 +635,10 @@ github_api_get() {
 			if ancestorExit == "" {
 				ancestorExit = "0"
 			}
+			anchorExit := test.anchorExit
+			if anchorExit == "" {
+				anchorExit = "0"
+			}
 			command.Env = append(os.Environ(),
 				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"SUPERSEDE_STUCK_RUN_ID="+test.target,
@@ -613,6 +647,7 @@ github_api_get() {
 				"MOCK_CURRENT_RUN_JSON="+validCurrentRun,
 				"MOCK_JOBS_JSON="+test.jobsJSON,
 				"MOCK_ANCESTOR_EXIT="+ancestorExit,
+				"MOCK_ANCHOR_EXIT="+anchorExit,
 				"MOCK_UNTRUSTED_POLICY="+strconv.FormatBool(test.untrustedPolicy),
 				"MOCK_EXTRA_DELTA="+strconv.FormatBool(test.extraDelta),
 				"GITHUB_ACTOR="+test.actor,
