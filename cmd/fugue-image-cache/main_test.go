@@ -907,6 +907,50 @@ func TestManagementManifestInventoryRequiresCompleteImageGraph(t *testing.T) {
 	}
 }
 
+func TestManagementManifestInventoryReportsManifestBodyBytesForAliases(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("x"))
+	manifest := []byte(testImageCacheManifest(configDigest, layerDigest))
+	manifestDigest := manifestBodyDigest(manifest)
+
+	put := httptest.NewRequest(
+		http.MethodPut,
+		"http://image-cache.test/v2/fugue-apps/demo/manifests/image-alias",
+		bytes.NewReader(manifest),
+	)
+	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+	putRec := httptest.NewRecorder()
+	cache.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("put manifest status = %d, want %d; body=%s", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+
+	inventory, err := cache.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("management manifest inventory: %v", err)
+	}
+	if len(inventory) != 2 {
+		t.Fatalf("manifest aliases = %d, want tag and digest aliases: %+v", len(inventory), inventory)
+	}
+	for _, entry := range inventory {
+		target, _ := entry["target"].(string)
+		if target != "image-alias" && target != manifestDigest {
+			t.Fatalf("unexpected manifest alias target %q: %+v", target, entry)
+		}
+		if got, _ := entry["size_bytes"].(int64); got != int64(len(manifest)) {
+			t.Fatalf("manifest alias %q size_bytes = %d, want OCI manifest body bytes %d", target, got, len(manifest))
+		}
+	}
+}
+
 func TestManagementManifestInventoryRejectsMissingChildBlob(t *testing.T) {
 	t.Parallel()
 

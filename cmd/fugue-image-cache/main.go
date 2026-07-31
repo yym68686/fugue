@@ -704,14 +704,20 @@ type imageCacheDiskStats struct {
 }
 
 type imageCacheManifestRecord struct {
-	Repo            string
-	Target          string
-	Digest          string
-	ContentType     string
-	Path            string
-	SizeBytes       int64
-	ModifiedAt      time.Time
-	ReferencedBlobs []string
+	Repo        string
+	Target      string
+	Digest      string
+	ContentType string
+	Path        string
+	// SizeBytes is the node-local journal file size used by prune accounting.
+	// ManifestBodySizeBytes is the logical OCI/Docker manifest size reported to
+	// usage consumers.  A journal JSON file includes metadata and base64
+	// expansion, and its size changes when the same body is stored under a tag
+	// versus its longer digest alias.
+	SizeBytes             int64
+	ManifestBodySizeBytes int64
+	ModifiedAt            time.Time
+	ReferencedBlobs       []string
 	// ReferencedManifests contains child manifest digests for an OCI/Docker
 	// index or manifest list.  A child must not be removed while a surviving
 	// parent still points at it: the registry would then accept the persisted
@@ -1312,6 +1318,7 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 			continue
 		}
 		entry := manifestEntry(record, blobByDigest)
+		entry.SizeBytes = record.ManifestBodySizeBytes
 		entry.Digest = graph.CanonicalDigest
 		entry.ReferencedBlobs = append([]string(nil), graph.ReferencedBlobs...)
 		entry.ReferencedManifests = append([]string(nil), graph.ReferencedManifests...)
@@ -1417,15 +1424,16 @@ func (c *imageCache) managementManifestRecords() ([]imageCacheManifestRecord, er
 		sort.Strings(referenced)
 		sort.Strings(referencedManifests)
 		out = append(out, imageCacheManifestRecord{
-			Repo:                strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
-			Target:              strings.TrimSpace(manifest.Target),
-			Digest:              normalizeImageCacheDigest(manifestBodyDigest(manifest.Body)),
-			ContentType:         strings.TrimSpace(manifest.ContentType),
-			Path:                path,
-			SizeBytes:           info.Size(),
-			ModifiedAt:          info.ModTime(),
-			ReferencedBlobs:     referenced,
-			ReferencedManifests: referencedManifests,
+			Repo:                  strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
+			Target:                strings.TrimSpace(manifest.Target),
+			Digest:                normalizeImageCacheDigest(manifestBodyDigest(manifest.Body)),
+			ContentType:           strings.TrimSpace(manifest.ContentType),
+			Path:                  path,
+			SizeBytes:             info.Size(),
+			ManifestBodySizeBytes: int64(len(manifest.Body)),
+			ModifiedAt:            info.ModTime(),
+			ReferencedBlobs:       referenced,
+			ReferencedManifests:   referencedManifests,
 		})
 	}
 	return out, nil
