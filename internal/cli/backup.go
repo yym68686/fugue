@@ -15,6 +15,98 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const backupListServerPageLimit = 500
+
+func cloneBackupListQuery(values url.Values) url.Values {
+	clone := make(url.Values, len(values)+2)
+	for key, entries := range values {
+		clone[key] = append([]string(nil), entries...)
+	}
+	return clone
+}
+
+func collectBackupList[T any](
+	values url.Values,
+	totalLimit int,
+	all bool,
+	kind string,
+	fetch func(url.Values) ([]T, *backupListPageInfo, error),
+	itemID func(T) string,
+) ([]T, error) {
+	if !all && totalLimit <= 0 {
+		return nil, fmt.Errorf("--limit must be greater than zero")
+	}
+
+	query := cloneBackupListQuery(values)
+	query.Del("cursor")
+	items := make([]T, 0)
+	seenItems := make(map[string]struct{})
+	seenCursors := make(map[string]struct{})
+	cursor := ""
+	for {
+		pageLimit := backupListServerPageLimit
+		if !all {
+			remaining := totalLimit - len(items)
+			if remaining <= 0 {
+				return items, nil
+			}
+			if remaining < pageLimit {
+				pageLimit = remaining
+			}
+		}
+		query.Set("limit", strconv.Itoa(pageLimit))
+		if cursor == "" {
+			query.Del("cursor")
+		} else {
+			query.Set("cursor", cursor)
+		}
+
+		pageItems, pageInfo, err := fetch(query)
+		if err != nil {
+			return nil, err
+		}
+		if len(pageItems) > pageLimit {
+			return nil, fmt.Errorf("backup %s list returned %d items for page limit %d", kind, len(pageItems), pageLimit)
+		}
+		for _, item := range pageItems {
+			id := strings.TrimSpace(itemID(item))
+			if id == "" {
+				return nil, fmt.Errorf("backup %s list returned an item without an id", kind)
+			}
+			if _, duplicate := seenItems[id]; duplicate {
+				return nil, fmt.Errorf("backup %s pagination repeated item %s", kind, id)
+			}
+			seenItems[id] = struct{}{}
+			items = append(items, item)
+		}
+		if !all && len(items) >= totalLimit {
+			return items[:totalLimit], nil
+		}
+
+		if pageInfo == nil {
+			if len(pageItems) == pageLimit {
+				return nil, fmt.Errorf("server omitted backup %s pagination metadata; cannot safely retrieve the remaining results", kind)
+			}
+			return items, nil
+		}
+		if pageInfo.Limit != pageLimit {
+			return nil, fmt.Errorf("backup %s pagination reported page limit %d, requested %d", kind, pageInfo.Limit, pageLimit)
+		}
+		if !pageInfo.HasNextPage {
+			return items, nil
+		}
+		nextCursor := strings.TrimSpace(pageInfo.NextCursor)
+		if nextCursor == "" || len(pageItems) == 0 {
+			return nil, fmt.Errorf("backup %s pagination reported another page without a usable cursor", kind)
+		}
+		if _, repeated := seenCursors[nextCursor]; repeated || nextCursor == cursor {
+			return nil, fmt.Errorf("backup %s pagination repeated a cursor", kind)
+		}
+		seenCursors[nextCursor] = struct{}{}
+		cursor = nextCursor
+	}
+}
+
 func (c *CLI) newBackupCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backup",
@@ -454,12 +546,16 @@ func (c *CLI) newBackupRunListCommand() *cobra.Command {
 		TargetType string
 		Status     string
 		Limit      int
+		All        bool
 	}{Limit: 20}
 	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List backup runs",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.All && cmd.Flags().Changed("limit") {
+				return fmt.Errorf("--all and --limit cannot be used together")
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
@@ -468,8 +564,12 @@ func (c *CLI) newBackupRunListCommand() *cobra.Command {
 			addNonEmptyQuery(values, "policy_id", opts.PolicyID)
 			addNonEmptyQuery(values, "target_type", opts.TargetType)
 			addNonEmptyQuery(values, "status", opts.Status)
-			values.Set("limit", strconv.Itoa(opts.Limit))
-			runs, err := client.ListBackupRuns(values)
+			runs, err := collectBackupList(values, opts.Limit, opts.All, "run", func(query url.Values) ([]model.BackupRun, *backupListPageInfo, error) {
+				page, listErr := client.ListBackupRunsPage(query)
+				return page.Runs, page.PageInfo, listErr
+			}, func(run model.BackupRun) string {
+				return run.ID
+			})
 			if err != nil {
 				return err
 			}
@@ -483,6 +583,7 @@ func (c *CLI) newBackupRunListCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.TargetType, "target", "", "Target type filter")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "Status filter")
 	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum runs")
+	cmd.Flags().BoolVar(&opts.All, "all", false, "List all runs")
 	return cmd
 }
 
@@ -624,12 +725,16 @@ func (c *CLI) newBackupArtifactListCommand() *cobra.Command {
 		TargetType     string
 		IncludeDeleted bool
 		Limit          int
+		All            bool
 	}{Limit: 20}
 	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List backup artifacts",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.All && cmd.Flags().Changed("limit") {
+				return fmt.Errorf("--all and --limit cannot be used together")
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
@@ -641,8 +746,12 @@ func (c *CLI) newBackupArtifactListCommand() *cobra.Command {
 			if opts.IncludeDeleted {
 				values.Set("include_deleted", "true")
 			}
-			values.Set("limit", strconv.Itoa(opts.Limit))
-			artifacts, err := client.ListBackupArtifacts(values)
+			artifacts, err := collectBackupList(values, opts.Limit, opts.All, "artifact", func(query url.Values) ([]model.BackupArtifact, *backupListPageInfo, error) {
+				page, listErr := client.ListBackupArtifactsPage(query)
+				return page.Artifacts, page.PageInfo, listErr
+			}, func(artifact model.BackupArtifact) string {
+				return artifact.ID
+			})
 			if err != nil {
 				return err
 			}
@@ -657,6 +766,7 @@ func (c *CLI) newBackupArtifactListCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.TargetType, "target", "", "Target type filter")
 	cmd.Flags().BoolVar(&opts.IncludeDeleted, "include-deleted", false, "Include deleted artifacts")
 	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum artifacts")
+	cmd.Flags().BoolVar(&opts.All, "all", false, "List all artifacts")
 	return cmd
 }
 
@@ -1051,11 +1161,18 @@ func (c *CLI) newAppBackupRunCommand() *cobra.Command {
 }
 
 func (c *CLI) newAppBackupListCommand() *cobra.Command {
-	return &cobra.Command{
+	opts := struct {
+		Limit int
+		All   bool
+	}{Limit: 100}
+	cmd := &cobra.Command{
 		Use:   "ls <app>",
 		Short: "List backup runs for an app",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.All && cmd.Flags().Changed("limit") {
+				return fmt.Errorf("--all and --limit cannot be used together")
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
@@ -1066,7 +1183,12 @@ func (c *CLI) newAppBackupListCommand() *cobra.Command {
 			}
 			values := url.Values{}
 			values.Set("app_id", app.ID)
-			runs, err := client.ListBackupRuns(values)
+			runs, err := collectBackupList(values, opts.Limit, opts.All, "run", func(query url.Values) ([]model.BackupRun, *backupListPageInfo, error) {
+				page, listErr := client.ListBackupRunsPage(query)
+				return page.Runs, page.PageInfo, listErr
+			}, func(run model.BackupRun) string {
+				return run.ID
+			})
 			if err != nil {
 				return err
 			}
@@ -1076,6 +1198,9 @@ func (c *CLI) newAppBackupListCommand() *cobra.Command {
 			return renderBackupRuns(c.stdout, runs, c.showIDs())
 		},
 	}
+	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum runs")
+	cmd.Flags().BoolVar(&opts.All, "all", false, "List all runs")
+	return cmd
 }
 
 func (c *CLI) newAppBackupShowCommand() *cobra.Command {

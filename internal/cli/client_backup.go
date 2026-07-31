@@ -20,6 +20,22 @@ type backupRunEnvelope struct {
 	Artifacts []model.BackupArtifact `json:"artifacts,omitempty"`
 }
 
+type backupListPageInfo struct {
+	HasNextPage bool   `json:"has_next_page"`
+	Limit       int    `json:"limit"`
+	NextCursor  string `json:"next_cursor,omitempty"`
+}
+
+type backupRunListPage struct {
+	Runs     []model.BackupRun
+	PageInfo *backupListPageInfo
+}
+
+type backupArtifactListPage struct {
+	Artifacts []model.BackupArtifact
+	PageInfo  *backupListPageInfo
+}
+
 type adminBackupStatusResponse struct {
 	Policies []model.BackupPolicy  `json:"policies"`
 	Runs     []model.BackupRun     `json:"runs"`
@@ -125,17 +141,23 @@ func (c *Client) GetBackupPolicy(id string) (model.BackupPolicy, error) {
 }
 
 func (c *Client) ListBackupRuns(values url.Values) ([]model.BackupRun, error) {
+	page, err := c.ListBackupRunsPage(values)
+	return page.Runs, err
+}
+
+func (c *Client) ListBackupRunsPage(values url.Values) (backupRunListPage, error) {
 	var resp struct {
-		Runs []model.BackupRun `json:"runs"`
+		Runs     []model.BackupRun   `json:"runs"`
+		PageInfo *backupListPageInfo `json:"page_info"`
 	}
 	relative := "/v1/backups/runs"
 	if len(values) > 0 {
 		relative += "?" + values.Encode()
 	}
 	if err := c.doJSON(http.MethodGet, relative, nil, &resp); err != nil {
-		return nil, err
+		return backupRunListPage{}, err
 	}
-	return resp.Runs, nil
+	return backupRunListPage{Runs: resp.Runs, PageInfo: resp.PageInfo}, nil
 }
 
 func (c *Client) CreateBackupRun(req map[string]any) (backupRunEnvelope, error) {
@@ -151,17 +173,23 @@ func (c *Client) GetBackupRun(id string) (backupRunEnvelope, error) {
 }
 
 func (c *Client) ListBackupArtifacts(values url.Values) ([]model.BackupArtifact, error) {
+	page, err := c.ListBackupArtifactsPage(values)
+	return page.Artifacts, err
+}
+
+func (c *Client) ListBackupArtifactsPage(values url.Values) (backupArtifactListPage, error) {
 	var resp struct {
 		Artifacts []model.BackupArtifact `json:"artifacts"`
+		PageInfo  *backupListPageInfo    `json:"page_info"`
 	}
 	relative := "/v1/backups/artifacts"
 	if len(values) > 0 {
 		relative += "?" + values.Encode()
 	}
 	if err := c.doJSON(http.MethodGet, relative, nil, &resp); err != nil {
-		return nil, err
+		return backupArtifactListPage{}, err
 	}
-	return resp.Artifacts, nil
+	return backupArtifactListPage{Artifacts: resp.Artifacts, PageInfo: resp.PageInfo}, nil
 }
 
 func (c *Client) GetBackupArtifact(id string) (model.BackupArtifact, error) {

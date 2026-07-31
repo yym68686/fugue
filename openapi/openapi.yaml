@@ -9220,8 +9220,18 @@ paths:
             type: string
         - in: query
           name: limit
+          description: Server page size. Use page_info.next_cursor to retrieve additional results.
           schema:
             type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - in: query
+          name: cursor
+          description: Opaque cursor returned by the preceding page. Cursors are bound to the authenticated caller and filter set.
+          schema:
+            type: string
+            maxLength: 1024
       responses:
         '200':
           description: Successful response
@@ -9316,8 +9326,18 @@ paths:
             type: boolean
         - in: query
           name: limit
+          description: Server page size. Use page_info.next_cursor to retrieve additional results.
           schema:
             type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - in: query
+          name: cursor
+          description: Opaque cursor returned by the preceding page. Cursors are bound to the authenticated caller and filter set.
+          schema:
+            type: string
+            maxLength: 1024
       responses:
         '200':
           description: Successful response
@@ -11599,11 +11619,14 @@ components:
     BackupRunListResponse:
       type: object
       additionalProperties: false
+      required: [runs, page_info]
       properties:
         runs:
           type: array
           items:
             $ref: "#/components/schemas/BackupRun"
+        page_info:
+          $ref: "#/components/schemas/BackupListPageInfo"
     BackupArtifactResponse:
       type: object
       additionalProperties: false
@@ -11613,11 +11636,28 @@ components:
     BackupArtifactListResponse:
       type: object
       additionalProperties: false
+      required: [artifacts, page_info]
       properties:
         artifacts:
           type: array
           items:
             $ref: "#/components/schemas/BackupArtifact"
+        page_info:
+          $ref: "#/components/schemas/BackupListPageInfo"
+    BackupListPageInfo:
+      type: object
+      additionalProperties: false
+      required: [limit, has_next_page]
+      properties:
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 500
+        has_next_page:
+          type: boolean
+        next_cursor:
+          type: string
     BackupRestorePlanResponse:
       type: object
       additionalProperties: false

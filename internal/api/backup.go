@@ -1004,7 +1004,7 @@ func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing backup.read scope")
 		return
 	}
-	runs, err := s.store.ListBackupRuns(store.BackupRunFilter{
+	filter := store.BackupRunFilter{
 		TenantID:      principal.TenantID,
 		ProjectID:     strings.TrimSpace(r.URL.Query().Get("project_id")),
 		AppID:         strings.TrimSpace(r.URL.Query().Get("app_id")),
@@ -1012,13 +1012,35 @@ func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
 		TargetType:    strings.TrimSpace(r.URL.Query().Get("target_type")),
 		Status:        strings.TrimSpace(r.URL.Query().Get("status")),
 		PlatformAdmin: principal.IsPlatformAdmin(),
-		Limit:         parseLimitQuery(r, 100),
+	}
+	pagination, err := readBackupListPagination(r, principal, "backup-runs", map[string]string{
+		"app_id":      filter.AppID,
+		"policy_id":   filter.PolicyID,
+		"project_id":  filter.ProjectID,
+		"status":      filter.Status,
+		"target_type": filter.TargetType,
 	})
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	filter.Cursor = pagination.Cursor
+	filter.Limit = pagination.Limit + 1
+	runs, err := s.store.ListBackupRuns(filter)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runs": runs})
+	hasNext := len(runs) > pagination.Limit
+	if hasNext {
+		runs = runs[:pagination.Limit]
+	}
+	pageInfo := buildBackupListPageInfo(pagination, hasNext, time.Time{}, "")
+	if hasNext {
+		last := runs[len(runs)-1]
+		pageInfo = buildBackupListPageInfo(pagination, true, last.CreatedAt, last.ID)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"runs": runs, "page_info": pageInfo})
 }
 
 func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
@@ -1215,7 +1237,7 @@ func (s *Server) handleListBackupArtifacts(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, http.StatusForbidden, "missing backup.read scope")
 		return
 	}
-	artifacts, err := s.store.ListBackupArtifacts(store.BackupArtifactFilter{
+	filter := store.BackupArtifactFilter{
 		TenantID:      principal.TenantID,
 		ProjectID:     strings.TrimSpace(r.URL.Query().Get("project_id")),
 		AppID:         strings.TrimSpace(r.URL.Query().Get("app_id")),
@@ -1224,13 +1246,36 @@ func (s *Server) handleListBackupArtifacts(w http.ResponseWriter, r *http.Reques
 		TargetType:    strings.TrimSpace(r.URL.Query().Get("target_type")),
 		ActiveOnly:    !parseBackupBoolQuery(r, "include_deleted"),
 		PlatformAdmin: principal.IsPlatformAdmin(),
-		Limit:         parseLimitQuery(r, 100),
+	}
+	pagination, err := readBackupListPagination(r, principal, "backup-artifacts", map[string]string{
+		"active_only": fmt.Sprintf("%t", filter.ActiveOnly),
+		"app_id":      filter.AppID,
+		"policy_id":   filter.PolicyID,
+		"project_id":  filter.ProjectID,
+		"run_id":      filter.RunID,
+		"target_type": filter.TargetType,
 	})
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	filter.Cursor = pagination.Cursor
+	filter.Limit = pagination.Limit + 1
+	artifacts, err := s.store.ListBackupArtifacts(filter)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"artifacts": artifacts})
+	hasNext := len(artifacts) > pagination.Limit
+	if hasNext {
+		artifacts = artifacts[:pagination.Limit]
+	}
+	pageInfo := buildBackupListPageInfo(pagination, hasNext, time.Time{}, "")
+	if hasNext {
+		last := artifacts[len(artifacts)-1]
+		pageInfo = buildBackupListPageInfo(pagination, true, last.CreatedAt, last.ID)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"artifacts": artifacts, "page_info": pageInfo})
 }
 
 func (s *Server) handleGetBackupArtifact(w http.ResponseWriter, r *http.Request) {

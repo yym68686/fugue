@@ -70,6 +70,14 @@ type BackupPolicyFilter struct {
 	Limit           int
 }
 
+// BackupListCursor identifies the final item returned by a backup list page.
+// Lists are ordered by CreatedAt DESC, ID DESC, so the next page contains only
+// items strictly older than this tuple.
+type BackupListCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
 type BackupRunFilter struct {
 	TenantID      string
 	ProjectID     string
@@ -78,6 +86,7 @@ type BackupRunFilter struct {
 	TargetType    string
 	Status        string
 	PlatformAdmin bool
+	Cursor        *BackupListCursor
 	Limit         int
 }
 
@@ -90,6 +99,7 @@ type BackupArtifactFilter struct {
 	TargetType    string
 	ActiveOnly    bool
 	PlatformAdmin bool
+	Cursor        *BackupListCursor
 	Limit         int
 }
 
@@ -1250,11 +1260,16 @@ func (s *Store) FinishBackupRun(id, leaseOwner string, finish BackupRunFinish) (
 
 func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error) {
 	filter.TargetType = normalizeBackupTargetTypeFilter(filter.TargetType)
+	cursor, err := normalizeBackupListCursor(filter.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	filter.Cursor = cursor
 	if s.usingDatabase() {
 		return s.pgListBackupRuns(filter)
 	}
 	runs := []model.BackupRun{}
-	err := s.withLockedState(false, func(state *model.State) error {
+	err = s.withLockedState(false, func(state *model.State) error {
 		for _, run := range state.BackupRuns {
 			run = model.NormalizeBackupRun(run)
 			if !backupRunVisible(run, filter.TenantID, filter.PlatformAdmin) {
@@ -1273,6 +1288,9 @@ func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error
 				continue
 			}
 			if filter.Status != "" && run.Status != filter.Status {
+				continue
+			}
+			if !backupListItemAfterCursor(run.CreatedAt, run.ID, filter.Cursor) {
 				continue
 			}
 			runs = append(runs, run)
@@ -1493,11 +1511,16 @@ func (s *Store) createBackupArtifact(artifact model.BackupArtifact, leaseOwner s
 
 func (s *Store) ListBackupArtifacts(filter BackupArtifactFilter) ([]model.BackupArtifact, error) {
 	filter.TargetType = normalizeBackupTargetTypeFilter(filter.TargetType)
+	cursor, err := normalizeBackupListCursor(filter.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	filter.Cursor = cursor
 	if s.usingDatabase() {
 		return s.pgListBackupArtifacts(filter)
 	}
 	artifacts := []model.BackupArtifact{}
-	err := s.withLockedState(false, func(state *model.State) error {
+	err = s.withLockedState(false, func(state *model.State) error {
 		for _, artifact := range state.BackupArtifacts {
 			artifact = model.NormalizeBackupArtifact(artifact)
 			if !backupArtifactVisible(artifact, filter.TenantID, filter.PlatformAdmin) {
@@ -1519,6 +1542,9 @@ func (s *Store) ListBackupArtifacts(filter BackupArtifactFilter) ([]model.Backup
 				continue
 			}
 			if filter.TargetType != "" && artifact.Target.Type != filter.TargetType {
+				continue
+			}
+			if !backupListItemAfterCursor(artifact.CreatedAt, artifact.ID, filter.Cursor) {
 				continue
 			}
 			artifacts = append(artifacts, artifact)
@@ -2797,11 +2823,44 @@ func sortBackupPolicies(policies []model.BackupPolicy) {
 }
 
 func sortBackupRuns(runs []model.BackupRun) {
-	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.After(runs[j].CreatedAt) })
+	sort.Slice(runs, func(i, j int) bool {
+		if runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
+			return runs[i].ID > runs[j].ID
+		}
+		return runs[i].CreatedAt.After(runs[j].CreatedAt)
+	})
 }
 
 func sortBackupArtifacts(artifacts []model.BackupArtifact) {
-	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].CreatedAt.After(artifacts[j].CreatedAt) })
+	sort.Slice(artifacts, func(i, j int) bool {
+		if artifacts[i].CreatedAt.Equal(artifacts[j].CreatedAt) {
+			return artifacts[i].ID > artifacts[j].ID
+		}
+		return artifacts[i].CreatedAt.After(artifacts[j].CreatedAt)
+	})
+}
+
+func normalizeBackupListCursor(cursor *BackupListCursor) (*BackupListCursor, error) {
+	if cursor == nil {
+		return nil, nil
+	}
+	normalized := *cursor
+	normalized.ID = strings.TrimSpace(normalized.ID)
+	if normalized.CreatedAt.IsZero() || normalized.ID == "" {
+		return nil, ErrInvalidInput
+	}
+	normalized.CreatedAt = normalized.CreatedAt.UTC()
+	return &normalized, nil
+}
+
+func backupListItemAfterCursor(createdAt time.Time, id string, cursor *BackupListCursor) bool {
+	if cursor == nil {
+		return true
+	}
+	if createdAt.Before(cursor.CreatedAt) {
+		return true
+	}
+	return createdAt.Equal(cursor.CreatedAt) && id < cursor.ID
 }
 
 func limitBackupPolicies(policies []model.BackupPolicy, limit int) []model.BackupPolicy {
@@ -4352,7 +4411,7 @@ func (s *Store) pgListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, err
 	if len(clauses) > 0 {
 		query += ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
-	query += ` ORDER BY created_at DESC`
+	query += ` ORDER BY created_at DESC, id DESC`
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = defaultBackupRunHistoryLimit
@@ -4565,7 +4624,7 @@ func (s *Store) pgListBackupArtifacts(filter BackupArtifactFilter) ([]model.Back
 	if len(clauses) > 0 {
 		query += ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
-	query += ` ORDER BY created_at DESC`
+	query += ` ORDER BY created_at DESC, id DESC`
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = defaultBackupArtifactHistoryLimit
@@ -5218,6 +5277,13 @@ func backupRunFilterClauses(filter BackupRunFilter) ([]string, []any) {
 		args = append(args, filter.Status)
 		clauses = append(clauses, fmt.Sprintf(`status = $%d`, len(args)))
 	}
+	if filter.Cursor != nil {
+		args = append(args, filter.Cursor.CreatedAt)
+		createdAtArg := len(args)
+		args = append(args, filter.Cursor.ID)
+		idArg := len(args)
+		clauses = append(clauses, fmt.Sprintf(`(created_at < $%d OR (created_at = $%d AND id < $%d))`, createdAtArg, createdAtArg, idArg))
+	}
 	return clauses, args
 }
 
@@ -5250,6 +5316,13 @@ func backupArtifactFilterClauses(filter BackupArtifactFilter) ([]string, []any) 
 	if filter.TargetType != "" {
 		args = append(args, filter.TargetType)
 		clauses = append(clauses, fmt.Sprintf(`target_type = $%d`, len(args)))
+	}
+	if filter.Cursor != nil {
+		args = append(args, filter.Cursor.CreatedAt)
+		createdAtArg := len(args)
+		args = append(args, filter.Cursor.ID)
+		idArg := len(args)
+		clauses = append(clauses, fmt.Sprintf(`(created_at < $%d OR (created_at = $%d AND id < $%d))`, createdAtArg, createdAtArg, idArg))
 	}
 	return clauses, args
 }
