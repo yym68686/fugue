@@ -10,6 +10,7 @@ on:
       - internal/backupcontrol/**
       - internal/backupmaterializer/agent/**
       - internal/backupmaterializer/validationagent/**
+      - internal/backupmaterializer/validationcomposition/**
       - internal/backupmaterializer/client/**
       - internal/backupmaterializer/contract/**
       - internal/backupmaterializer/materialization/**
@@ -28,6 +29,7 @@ on:
       - internal/backupcontrol/**
       - internal/backupmaterializer/agent/**
       - internal/backupmaterializer/validationagent/**
+      - internal/backupmaterializer/validationcomposition/**
       - internal/backupmaterializer/client/**
       - internal/backupmaterializer/contract/**
       - internal/backupmaterializer/materialization/**

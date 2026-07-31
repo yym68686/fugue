@@ -1051,10 +1051,11 @@ Its digest-bound snapshot mirrors no-op, LKG, blocked, retryable, candidate,
 validation-attempted, accepted, and existing-object-preserved state. An
 expected Kubernetes conflict, rejection, credential failure, or API failure
 remains the validated cell-local outcome supplied by the inner controller. An
-agent timeout, cancellation, contained cycle panic, arbitrary error, invalid status, or cross-cell
-status instead clears current readiness and evidence, increments only this
-cell's failure counter, and retains an independent deep copy of the last valid
-status for diagnosis and automatic recovery on the next cycle.
+agent timeout, cancellation, contained cycle panic, arbitrary error, invalid
+status, or cross-cell status instead clears current readiness and evidence,
+increments only this cell's failure counter, and retains an independent deep
+copy of the last valid status for diagnosis and automatic recovery on the next
+cycle.
 
 The package supplies only read-only handlers for `GET /healthz`,
 `GET /readyz`, and `GET /v1/status`; it owns no listener or process. Disabled
@@ -1067,6 +1068,34 @@ datastore, process, image, chart, RBAC, release, or production code. It is
 covered by the dry-run validation lane, while the existing materializer image
 lane is also triggered to prove the new package remains outside that image's
 exact dependency closure.
+
+`internal/backupmaterializer/validationcomposition` adds the default-off
+`backup-materializer-validation-composition@v1` composition root. When
+explicitly enabled for one cell and run, it constructs the rotating desired
+input client, GET-only current-Secret reader, dry-run-only Secret writer, pure
+prepared reconciler, dry-run controller, zero-or-one validation cycle, and
+validation agent. It returns only the narrow supervisor surface and starts no
+timer, goroutine, listener, or process.
+
+The root rejects identity drift before reading a projection. It requires the
+desired API authority to differ from the Kubernetes API authority, requires
+the reader and validator to name one exact Kubernetes API authority, and
+requires the input, reader, and validator projection roots to be canonical,
+pairwise distinct paths and distinct filesystem objects. One trusted clock is
+injected through the client, reconcile, validation, writer, and supervisor
+layers, replacing any nested clock. Each network timeout must fit inside the
+single global attempt timeout.
+
+Enabled construction validates the three local token and CA projections but
+makes zero network requests. Disabled construction performs no filesystem or
+network access and retains none of its inputs. End-to-end TLS tests prove the
+fixed current-read, desired-read, and `dryRun=All` request order, exact
+credential separation, conflict-as-cell-local-status behavior, and recovery
+on the next accepted validation. Every result remains non-persisted and
+non-executable. The root contains filesystem and TLS bootstrap capability, but
+still has no command, listener, image, ServiceAccount, RBAC, Pod, chart,
+release, or production wiring; the existing materializer image lane proves it
+remains outside the old image dependency closure.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
