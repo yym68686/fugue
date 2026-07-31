@@ -1159,9 +1159,10 @@ binding ready. The policy is scoped to that username and cell Secret, uses
 `matchPolicy: Equivalent`, `failurePolicy: Fail`, and `validationActions:
 [Deny]`, and accepts only `request.dryRun == true` with canonical create/update
 evidence. The admission request namespace is authoritative; CEL does not rely
-on optional object namespace metadata. Live requests, generated names,
-subresources, cross-cell targets, and malformed old-object evidence are
-denied.
+on optional object namespace metadata, and omitted `dryRun`, `subResource`, or
+`generateName` fields are handled with CEL presence checks. Live requests,
+generated names, subresources, cross-cell targets, and malformed old-object
+evidence are denied.
 
 This split is required because Kubernetes authorizes server-side dry-run with
 the same RBAC verbs as a real mutation, and a Role cannot constrain Secret

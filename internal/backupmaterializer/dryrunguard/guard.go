@@ -182,8 +182,8 @@ func buildExpected(cellKey string) (Guard, error) {
 		},
 		MatchConditions: []CELRule{{Name: "dedicated-gateway-identity", Expression: "request.userInfo.username == " + quotedUsername}},
 		Validations: []CELRule{
-			{Name: "server-side-dry-run-only", Expression: "request.dryRun == true", Message: "backup dry-run gateway requests must be server-side dry-run", Reason: "Forbidden"},
-			{Name: "exact-cell-secret-only", Expression: "request.namespace == " + quotedNamespace + " && request.name == " + quotedSecretName + " && request.subResource == \"\" && object.metadata.name == " + quotedSecretName + " && object.metadata.generateName == \"\"", Message: "backup dry-run gateway requests must target the exact cell Secret", Reason: "Forbidden"},
+			{Name: "server-side-dry-run-only", Expression: "has(request.dryRun) && request.dryRun == true", Message: "backup dry-run gateway requests must be server-side dry-run", Reason: "Forbidden"},
+			{Name: "exact-cell-secret-only", Expression: "request.namespace == " + quotedNamespace + " && request.name == " + quotedSecretName + " && (!has(request.subResource) || request.subResource == \"\") && object.metadata.name == " + quotedSecretName + " && (!has(object.metadata.generateName) || object.metadata.generateName == \"\")", Message: "backup dry-run gateway requests must target the exact cell Secret", Reason: "Forbidden"},
 			{Name: "create-update-evidence-only", Expression: "(request.operation == \"CREATE\" && oldObject == null) || (request.operation == \"UPDATE\" && oldObject != null && oldObject.metadata.name == " + quotedSecretName + ")", Message: "backup dry-run gateway requests must carry canonical create or update evidence", Reason: "Forbidden"},
 		},
 		ValidationActions: []string{ValidationAction}, DedicatedServiceAccount: true,

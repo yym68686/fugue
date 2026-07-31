@@ -57,7 +57,9 @@ func TestGuardSealsDedicatedIdentityExactSecretAndFailClosedPolicy(t *testing.T)
 		}
 	}
 	if !strings.Contains(guard.MatchConditions[0].Expression, guard.ServiceAccountUsername) ||
-		guard.Validations[0].Expression != "request.dryRun == true" ||
+		guard.Validations[0].Expression != "has(request.dryRun) && request.dryRun == true" ||
+		!strings.Contains(guard.Validations[1].Expression, "!has(request.subResource)") ||
+		!strings.Contains(guard.Validations[1].Expression, "!has(object.metadata.generateName)") ||
 		!strings.Contains(guard.Validations[1].Expression, guard.SecretName) ||
 		!strings.Contains(guard.Validations[2].Expression, "oldObject == null") ||
 		!strings.Contains(guard.Validations[2].Expression, "oldObject != null") {
