@@ -133,7 +133,6 @@ type managedAppStatusListCacheEntry struct {
 // resource is not applicable (for example a background app has no Service),
 // while a non-nil false is an authoritative absence.
 type managedAppRuntimeEvidence struct {
-	appObservationKey       string
 	namespacePresent        *bool
 	servicePresent          *bool
 	endpointPresent         *bool
@@ -918,12 +917,6 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		return app
 	}
 	complete := entry.ok
-	if complete && entry.evidence.appObservationKey != "" && entry.evidence.appObservationKey != managedAppRuntimeEvidenceObservationKey(app) {
-		complete = false
-		fresh = false
-		errorMessage = "cached runtime observation belongs to a different app revision"
-		s.refreshManagedAppStatusesAsync()
-	}
 	if !complete && strings.TrimSpace(errorMessage) == "" {
 		errorMessage = "live runtime observation is unavailable"
 	}
@@ -1050,66 +1043,6 @@ func managedAppStatusCacheKey(app model.App) string {
 	return tenantID + "/" + name
 }
 
-func managedAppRuntimeEvidenceObservationKey(app model.App) string {
-	type imageSource struct {
-		Type             string `json:"type,omitempty"`
-		ImageRef         string `json:"image_ref,omitempty"`
-		ResolvedImageRef string `json:"resolved_image_ref,omitempty"`
-	}
-	type observationInput struct {
-		ID               string      `json:"id"`
-		TenantID         string      `json:"tenant_id"`
-		Name             string      `json:"name"`
-		Image            string      `json:"image"`
-		Ports            []int       `json:"ports,omitempty"`
-		Replicas         int         `json:"replicas"`
-		RuntimeID        string      `json:"runtime_id"`
-		CurrentRuntimeID string      `json:"current_runtime_id"`
-		NetworkMode      string      `json:"network_mode,omitempty"`
-		SSHEnabled       bool        `json:"ssh_enabled"`
-		StoredPhase      string      `json:"stored_phase,omitempty"`
-		Source           imageSource `json:"source"`
-		BuildSource      imageSource `json:"build_source"`
-	}
-
-	storedPhase := app.Status.Phase
-	if app.StoredStatus != nil {
-		storedPhase = app.StoredStatus.Phase
-	}
-	source := imageSource{}
-	if app.Source != nil {
-		source = imageSource{
-			Type:             strings.TrimSpace(app.Source.Type),
-			ImageRef:         strings.TrimSpace(app.Source.ImageRef),
-			ResolvedImageRef: strings.TrimSpace(app.Source.ResolvedImageRef),
-		}
-	}
-	buildSource := imageSource{}
-	if build := model.AppBuildSource(app); build != nil {
-		buildSource = imageSource{
-			Type:             strings.TrimSpace(build.Type),
-			ImageRef:         strings.TrimSpace(build.ImageRef),
-			ResolvedImageRef: strings.TrimSpace(build.ResolvedImageRef),
-		}
-	}
-	payload, _ := json.Marshal(observationInput{
-		ID:               strings.TrimSpace(app.ID),
-		TenantID:         strings.TrimSpace(app.TenantID),
-		Name:             strings.TrimSpace(app.Name),
-		Image:            strings.TrimSpace(app.Spec.Image),
-		Ports:            append([]int(nil), app.Spec.Ports...),
-		Replicas:         app.Spec.Replicas,
-		RuntimeID:        strings.TrimSpace(app.Spec.RuntimeID),
-		CurrentRuntimeID: strings.TrimSpace(app.Status.CurrentRuntimeID),
-		NetworkMode:      model.NormalizeAppNetworkMode(app.Spec.NetworkMode),
-		SSHEnabled:       model.AppSSHEnabled(app.Spec),
-		StoredPhase:      strings.TrimSpace(storedPhase),
-		Source:           source,
-		BuildSource:      buildSource,
-	})
-	return string(payload)
-}
-
 func (s *Server) managedAppStatusClient() (*managedAppStatusClient, error) {
 	clientFactory := s.newManagedAppStatusClient
 	if clientFactory == nil {
@@ -1141,8 +1074,7 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	snapshot managedAppKubeSnapshot,
 ) (managedAppRuntimeEvidence, error) {
 	evidence := managedAppRuntimeEvidence{
-		appObservationKey: managedAppRuntimeEvidenceObservationKey(app),
-		evidenceSources:   []string{runtime.AppObservationSourceKubernetesAPI},
+		evidenceSources: []string{runtime.AppObservationSourceKubernetesAPI},
 	}
 	if found {
 		expectedName := strings.TrimSpace(runtime.ManagedAppResourceName(app))
