@@ -162,6 +162,17 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 			if baseContainerExists && baseContainer.Image == targetContainer.Image {
 				continue
 			}
+			if len(input.ObservedLiveManifest) != 0 && baseExists && baseContainerExists {
+				inactive, inactiveErr := disabledPublicEdgeWorkerImageChangeIsInactive(
+					spec, context, base, target, targetContainer,
+				)
+				if inactiveErr != nil {
+					return ImageActivationPlan{}, ImageActivationEvidence{}, inactiveErr
+				}
+				if inactive {
+					continue
+				}
+			}
 
 			forwardDigest, err := renderedObjectDigest(target)
 			if err != nil {

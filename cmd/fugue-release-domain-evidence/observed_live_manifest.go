@@ -48,7 +48,7 @@ func runObservedLiveManifest(args []string, _ io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, observedLiveInputError)
 		return 1
 	}
-	liveWorkloads, err := expandObservedKubernetesList(liveList)
+	liveWorkloads, err := expandObservedKubernetesList(liveList, options.defaultNamespace)
 	if err != nil {
 		fmt.Fprintln(stderr, observedLiveInputError)
 		return 1
@@ -126,7 +126,7 @@ func parseObservedLiveFlags(args []string) (observedLiveOptions, error) {
 	return options, nil
 }
 
-func expandObservedKubernetesList(data []byte) ([]byte, error) {
+func expandObservedKubernetesList(data []byte, defaultNamespace string) ([]byte, error) {
 	var document struct {
 		APIVersion string                     `json:"apiVersion"`
 		Kind       string                     `json:"kind"`
@@ -150,7 +150,11 @@ func expandObservedKubernetesList(data []byte) ([]byte, error) {
 		if len(item) < 2 || item[0] != '{' || item[len(item)-1] != '}' || !json.Valid(item) {
 			return nil, fmt.Errorf("Kubernetes workload list item %d is invalid", index)
 		}
-		minimal, err := minimizeObservedKubernetesWorkload(item)
+		marker, candidate, err := releasedomain.CaptureDisabledPublicEdgeWorkerObservation(item, defaultNamespace)
+		if err != nil {
+			return nil, fmt.Errorf("Kubernetes workload list item %d: %w", index, err)
+		}
+		minimal, err := minimizeObservedKubernetesWorkload(item, marker, candidate)
 		if err != nil {
 			return nil, fmt.Errorf("Kubernetes workload list item %d: %w", index, err)
 		}
@@ -166,12 +170,12 @@ func expandObservedKubernetesList(data []byte) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
-// minimizeObservedKubernetesWorkload deliberately discards API-server
-// defaults, status, managedFields, annotations, resources, and every other
-// non-image value. Those live fields are neither Helm source of truth nor
-// release authorization. Keeping only identity plus named container images
-// also bounds the observation before the canonical manifest parser sees it.
-func minimizeObservedKubernetesWorkload(data []byte) ([]byte, error) {
+// minimizeObservedKubernetesWorkload normally discards API-server defaults
+// and every non-image value. The exact disabled dynamic Edge worker is the one
+// exception: its full metadata/spec plus the separately validated zero-state
+// marker are retained privately so MaterializeObservedLiveImageManifest can
+// compare every Helm-rendered non-image field before accepting the witness.
+func minimizeObservedKubernetesWorkload(data []byte, disabledMarker string, disabledCandidate bool) ([]byte, error) {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(data, &object); err != nil {
 		return nil, fmt.Errorf("decode workload: %w", err)
@@ -243,7 +247,53 @@ func minimizeObservedKubernetesWorkload(data []byte) ([]byte, error) {
 		"kind":       kind,
 		"metadata":   map[string]any{"name": name, "namespace": namespace},
 	}
-	if kind == "CronJob" {
+	if disabledCandidate {
+		var labels map[string]any
+		if err := json.Unmarshal(metadata["labels"], &labels); err != nil || len(labels) == 0 {
+			return nil, fmt.Errorf("disabled public edge worker labels are invalid")
+		}
+		annotations := map[string]any{}
+		if raw, exists := metadata["annotations"]; exists {
+			if err := json.Unmarshal(raw, &annotations); err != nil {
+				return nil, fmt.Errorf("disabled public edge worker annotations are invalid")
+			}
+		}
+		for key := range annotations {
+			if releasedomain.IsDisabledPublicEdgeWorkerServerAnnotation(key) {
+				delete(annotations, key)
+			}
+		}
+		if _, reserved := annotations[releasedomain.DisabledPublicEdgeWorkerObservationAnnotation]; reserved {
+			return nil, fmt.Errorf("disabled public edge worker contains a reserved observation annotation")
+		}
+		annotations[releasedomain.DisabledPublicEdgeWorkerObservationAnnotation] = disabledMarker
+		minimal["metadata"] = map[string]any{
+			"name": name, "namespace": namespace, "labels": labels, "annotations": annotations,
+		}
+		var fullSpec any
+		decoder := json.NewDecoder(bytes.NewReader(object["spec"]))
+		decoder.UseNumber()
+		if err := decoder.Decode(&fullSpec); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			return nil, fmt.Errorf("disabled public edge worker spec is invalid")
+		}
+		if specMap, ok := fullSpec.(map[string]any); ok {
+			if template, ok := specMap["template"].(map[string]any); ok {
+				if templateMetadata, ok := template["metadata"].(map[string]any); ok {
+					if templateAnnotations, ok := templateMetadata["annotations"].(map[string]any); ok {
+						for key := range templateAnnotations {
+							if releasedomain.IsDisabledPublicEdgeWorkerRuntimeAnnotation(key) {
+								delete(templateAnnotations, key)
+							}
+						}
+						if len(templateAnnotations) == 0 {
+							delete(templateMetadata, "annotations")
+						}
+					}
+				}
+			}
+		}
+		minimal["spec"] = fullSpec
+	} else if kind == "CronJob" {
 		minimal["spec"] = map[string]any{"jobTemplate": map[string]any{"spec": map[string]any{
 			"template": map[string]any{"spec": minimalPodSpec},
 		}}}

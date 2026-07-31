@@ -9,9 +9,10 @@ import (
 
 // MaterializeObservedLiveImageManifest projects the currently observed
 // workload images onto the canonical Helm base manifest. The returned
-// manifest deliberately retains every non-image field from the Helm base, so
-// it can be used only as an image-activation witness and never as a substitute
-// for the Helm revision or rollback manifest.
+// manifest deliberately retains every non-image field from the Helm base,
+// apart from one reserved private annotation that binds a fully disabled
+// dynamic public Edge worker observation. It is never a substitute for the
+// Helm revision or rollback manifest.
 func MaterializeObservedLiveImageManifest(
 	baseManifest, observedWorkloads, ownership []byte,
 	defaultNamespace string,
@@ -59,6 +60,37 @@ func MaterializeObservedLiveImageManifest(
 		if !observedIsWorkload {
 			return nil, fmt.Errorf("observed live object is not a workload for %s", base.Identity.String())
 		}
+		if value, marked := observed.Annotations[DisabledPublicEdgeWorkerObservationAnnotation]; marked {
+			if _, baseMarked := base.Annotations[DisabledPublicEdgeWorkerObservationAnnotation]; baseMarked {
+				return nil, fmt.Errorf("Helm base contains reserved disabled public edge worker observation for %s", base.Identity.String())
+			}
+			baseSlot, baseCandidate := disabledPublicEdgeWorkerIdentity(base)
+			observedSlot, observedCandidate := disabledPublicEdgeWorkerIdentity(observed)
+			if !baseCandidate || !observedCandidate || baseSlot != observedSlot {
+				return nil, fmt.Errorf("disabled public edge worker observation is attached to an unsupported workload")
+			}
+			marker, markerErr := parseDisabledPublicEdgeWorkerObservation(value, false)
+			if markerErr != nil {
+				return nil, markerErr
+			}
+			if marker.IdentityDigest != disabledPublicEdgeWorkerIdentityDigest(observed.Identity, observed.Labels) {
+				return nil, fmt.Errorf("disabled public edge worker observation identity binding mismatch")
+			}
+			mismatch, matchErr := disabledPublicEdgeWorkerBaseMatchesLive(base, observed)
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			if mismatch != "" {
+				return nil, fmt.Errorf("disabled public edge worker live object differs from the Helm base at %s", mismatch)
+			}
+			marker.NonImageRenderedDigest, markerErr = disabledPublicEdgeWorkerNonImageDigest(base)
+			if markerErr != nil {
+				return nil, markerErr
+			}
+			if markerErr := setDisabledPublicEdgeWorkerObservation(&base, marker); markerErr != nil {
+				return nil, markerErr
+			}
+		}
 		for _, baseContainer := range sortedRenderedContainers(baseContainers) {
 			observedContainer, found := observedContainers[baseContainer.Name]
 			if !found {
@@ -85,7 +117,8 @@ func MaterializeObservedLiveImageManifest(
 
 // VerifyObservedLiveImageManifest proves that an observed-live witness is a
 // canonical, identity-preserving copy of the Helm base whose only possible
-// differences are image fields of containers already declared by that base.
+// differences are existing container image fields and the exact reserved
+// disabled-worker observation described by MaterializeObservedLiveImageManifest.
 func VerifyObservedLiveImageManifest(
 	baseManifest, observedLiveManifest, ownership []byte,
 	defaultNamespace string,
@@ -122,6 +155,31 @@ func VerifyObservedLiveImageManifest(
 			return fmt.Errorf("observed live image manifest is missing %s", base.Identity.String())
 		}
 		observed.Object = cloneManifestMap(observed.Object)
+		if _, baseMarked := base.Annotations[DisabledPublicEdgeWorkerObservationAnnotation]; baseMarked {
+			return fmt.Errorf("Helm base contains reserved disabled public edge worker observation for %s", base.Identity.String())
+		}
+		if value, marked := observed.Annotations[DisabledPublicEdgeWorkerObservationAnnotation]; marked {
+			baseSlot, baseCandidate := disabledPublicEdgeWorkerIdentity(base)
+			observedSlot, observedCandidate := disabledPublicEdgeWorkerIdentity(observed)
+			if !baseCandidate || !observedCandidate || baseSlot != observedSlot {
+				return fmt.Errorf("disabled public edge worker observation is attached to an unsupported workload")
+			}
+			marker, markerErr := parseDisabledPublicEdgeWorkerObservation(value, true)
+			if markerErr != nil {
+				return markerErr
+			}
+			if marker.IdentityDigest != disabledPublicEdgeWorkerIdentityDigest(observed.Identity, observed.Labels) {
+				return fmt.Errorf("disabled public edge worker observation identity binding mismatch")
+			}
+			digest, digestErr := disabledPublicEdgeWorkerNonImageDigest(base)
+			if digestErr != nil {
+				return digestErr
+			}
+			if marker.NonImageRenderedDigest != digest {
+				return fmt.Errorf("disabled public edge worker rendered binding mismatch")
+			}
+			removeDisabledPublicEdgeWorkerObservation(&observed)
+		}
 		baseContainers, baseIsWorkload, baseErr := workloadContainers(base)
 		if baseErr != nil {
 			return baseErr

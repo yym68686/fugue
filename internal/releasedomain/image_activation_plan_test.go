@@ -2,6 +2,7 @@ package releasedomain
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -276,6 +277,181 @@ func TestBuildImageActivationPlanKeepsAbsentCreateOutOfImageReplacement(t *testi
 	)
 	if _, err := BuildImageActivationPlanFromManifests(input); err == nil || !strings.Contains(err.Error(), "absent-create") {
 		t.Fatalf("absent-create boundary was not enforced: %v", err)
+	}
+}
+
+func TestDisabledDynamicPublicEdgeWorkerImageOnlyTargetStaysBuiltOnly(t *testing.T) {
+	input := disabledDynamicWorkerActivationInput(t, "dynamic", DomainAuthoritativeDNS)
+	observed := input.ObservedLiveManifest
+	input.ObservedLiveManifest = nil
+
+	withoutObserved, withoutEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutObserved.Activations) != 0 || withoutEvidence.Complete ||
+		len(withoutEvidence.Unresolved) != 1 ||
+		withoutEvidence.Unresolved[0].Reason != ImageActivationGapArtifactNotBuilt {
+		t.Fatalf("production regression was not reproduced: plan=%#v evidence=%#v", withoutObserved, withoutEvidence)
+	}
+
+	if !bytes.Contains(observed, []byte(DisabledPublicEdgeWorkerObservationAnnotation)) {
+		t.Fatalf("observed witness is missing disabled-worker reverse evidence:\n%s", observed)
+	}
+	input.ObservedLiveManifest = observed
+	plan, evidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Activations) != 0 || !evidence.Complete || len(evidence.Unresolved) != 0 ||
+		!reflect.DeepEqual(evidence.BuiltOnlyArtifacts, []string{"edge"}) {
+		t.Fatalf("disabled worker image drift was not kept built-only: plan=%#v evidence=%#v", plan, evidence)
+	}
+}
+
+func disabledDynamicWorkerActivationInput(t *testing.T, targetNodeClass string, domain Domain) ImageActivationPlanInput {
+	t.Helper()
+	name := "fugue-fugue-edge-dynamic-worker-b"
+	return disabledDynamicWorkerActivationInputForTarget(
+		t, disabledDynamicWorkerDaemonSet(name, "registry.example/edge@"+md0Digest("9"), targetNodeClass), domain,
+	)
+}
+
+func disabledDynamicWorkerActivationInputForTarget(t *testing.T, target string, domain Domain) ImageActivationPlanInput {
+	t.Helper()
+	name := "fugue-fugue-edge-dynamic-worker-b"
+	builtDigest := md0Digest("b")
+	input := md1ActivationFixture(
+		t, disabledDynamicWorkerDaemonSet(name, "registry.example/edge:live", "dynamic"), target,
+		[]md1OwnershipRule{{name: name, domain: domain, kind: "DaemonSet"}},
+		[]BuildArtifact{{
+			Name: "edge", SourceBaseCommit: md0BaseCommit, ArtifactDigest: builtDigest,
+			ProvenanceDigest: md0Digest("1"), PublishedImageRef: "registry.example/edge@" + builtDigest,
+		}},
+	)
+	liveWitness := disabledDynamicWorkerLiveWitness(t, name, "registry.example/edge:live")
+	var err error
+	input.ObservedLiveManifest, err = MaterializeObservedLiveImageManifest(
+		input.BaseManifest, liveWitness, input.Ownership, "fugue-system",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return input
+}
+
+func disabledDynamicWorkerLiveWitness(t *testing.T, name, image string) []byte {
+	t.Helper()
+	liveObject := disabledDynamicWorkerKubernetesObject(t, name, image)
+	liveJSON, err := json.Marshal(liveObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, candidate, err := CaptureDisabledPublicEdgeWorkerObservation(liveJSON, "fugue-system")
+	if err != nil || !candidate {
+		t.Fatalf("capture disabled worker observation: candidate=%v err=%v", candidate, err)
+	}
+	delete(liveObject, "status")
+	metadata := liveObject["metadata"].(map[string]any)
+	delete(metadata, "uid")
+	delete(metadata, "resourceVersion")
+	delete(metadata, "generation")
+	metadata["annotations"] = map[string]any{DisabledPublicEdgeWorkerObservationAnnotation: marker}
+	liveWitness, err := json.Marshal(liveObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return liveWitness
+}
+
+func disabledDynamicWorkerDaemonSet(name, image, nodeClass string) string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: %s
+  namespace: fugue-system
+  labels:
+    app.kubernetes.io/instance: fugue
+    app.kubernetes.io/component: edge-dynamic-worker-b
+    fugue.io/rollout-subsystem: public-data-plane
+    fugue.io/rollout-mode: node-local-blue-green-worker
+    fugue.io/downtime-class: online-required
+    fugue.io/edge-slot: b
+spec:
+  revisionHistoryLimit: 2
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: edge-dynamic-worker-b
+  template:
+    metadata:
+      labels:
+        app: edge-dynamic-worker-b
+    spec:
+      nodeSelector:
+        fugue.io/edge-workload: %s
+      containers:
+        - name: edge
+          image: %s
+          env:
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID
+              value: ""
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+        - name: caddy
+          image: caddy:2.10.2-alpine
+`, name, nodeClass, image)
+}
+
+func disabledDynamicWorkerKubernetesObject(t *testing.T, name, image string) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": name, "namespace": "fugue-system",
+			"uid": "7a8f8d52-1b9f-4dfa-bac0-8a9f1e043073", "resourceVersion": "4815162342",
+			"generation": float64(17),
+			"labels": map[string]any{
+				"app.kubernetes.io/instance": "fugue", "app.kubernetes.io/component": "edge-dynamic-worker-b",
+				"fugue.io/rollout-subsystem": "public-data-plane", "fugue.io/rollout-mode": "node-local-blue-green-worker",
+				"fugue.io/downtime-class": "online-required", "fugue.io/edge-slot": "b",
+			},
+		},
+		"spec": map[string]any{
+			"revisionHistoryLimit": float64(2), "updateStrategy": map[string]any{"type": "OnDelete"},
+			"selector": map[string]any{"matchLabels": map[string]any{"app": "edge-dynamic-worker-b"}},
+			"template": map[string]any{
+				"metadata": map[string]any{
+					"labels": map[string]any{"app": "edge-dynamic-worker-b"}, "creationTimestamp": nil,
+				},
+				"spec": map[string]any{
+					"nodeSelector": map[string]any{"fugue.io/edge-workload": "dynamic"},
+					"dnsPolicy":    "ClusterFirst", "restartPolicy": "Always", "schedulerName": "default-scheduler",
+					"securityContext": map[string]any{}, "terminationGracePeriodSeconds": float64(30),
+					"enableServiceLinks": true, "serviceAccountName": "default",
+					"containers": []any{map[string]any{
+						"name": "edge", "image": image, "terminationMessagePath": "/dev/termination-log",
+						"terminationMessagePolicy": "File", "resources": map[string]any{},
+						"env": []any{
+							map[string]any{"name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"},
+							map[string]any{"name": "POD_NAME", "valueFrom": map[string]any{
+								"fieldRef": map[string]any{"apiVersion": "v1", "fieldPath": "metadata.name"},
+							}},
+						},
+					}, map[string]any{
+						"name": "caddy", "image": "caddy:2.10.2-alpine", "terminationMessagePath": "/dev/termination-log",
+						"terminationMessagePolicy": "File", "resources": map[string]any{},
+					}},
+				},
+			},
+		},
+		"status": map[string]any{
+			"observedGeneration": float64(17),
+			// Kubernetes omits zero-valued DaemonSet counters from JSON.
+		},
 	}
 }
 

@@ -570,6 +570,110 @@ func TestTransactionEnvelopeRebuildsObservedLiveOperationalActivation(t *testing
 	}
 }
 
+func TestTransactionEnvelopeBindsDisabledWorkerObservedLiveWitness(t *testing.T) {
+	apiBase := md1Deployment("fugue-api", "api", "registry.example/api:live")
+	apiTarget := strings.Replace(apiBase,
+		"    metadata:\n      labels:",
+		"    metadata:\n      annotations:\n        fugue.pro/source-commit: "+md0TargetCommit+"\n      labels:",
+		1,
+	)
+	worker := disabledDynamicWorkerDaemonSet(
+		"fugue-fugue-edge-dynamic-worker-b", "registry.example/edge:live", "dynamic",
+	)
+	input := md1ActivationFixture(
+		t, apiBase+"---\n"+worker, apiTarget+"---\n"+worker,
+		[]md1OwnershipRule{
+			{name: "fugue-api", domain: DomainControlPlane},
+			{name: "fugue-fugue-edge-dynamic-worker-b", domain: DomainAuthoritativeDNS, kind: "DaemonSet"},
+		},
+		nil,
+	)
+	conservative := BuildPlan(PlanInput{
+		Files: FileClassification{Unknown: []Evidence{{
+			Source: "file", Subject: "fixture", Reason: "force operational resolution",
+		}}},
+		Rendered: input.ReleasePlan.Rendered,
+		Digests:  input.ReleasePlan.Digests,
+	})
+	if conservative.Result != OutcomeUnknown {
+		t.Fatalf("conservative fixture result=%s, want unknown", conservative.Result)
+	}
+	input.ReleasePlan = conservative
+	observedRaw := []byte(apiBase + "---\n" + string(disabledDynamicWorkerLiveWitness(
+		t, "fugue-fugue-edge-dynamic-worker-b", "registry.example/edge:live",
+	)))
+	var err error
+	input.ObservedLiveManifest, err = MaterializeObservedLiveImageManifest(
+		input.BaseManifest, observedRaw, input.Ownership, "fugue-system",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ImmutableTargetManifest, err = MaterializeObservedLiveRelativeTargetPublishedImageRefs(
+		input.BaseManifest, input.ObservedLiveManifest, input.TargetManifest, input.Ownership,
+		"fugue-system", input.BuildPlan.TargetCommit, input.BuildPlan, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.ImmutableTargetManifest, spec, RenderedOptions{
+		DefaultNamespace: "fugue-system", Bindings: input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{Status: ChangeModified, Path: "fixture"}},
+	}
+	report, err := BuildOperationalDomainEvidenceFromObservedLiveActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, digestBytesSHA256(input.ObservedLiveManifest),
+		input.ReleasePlan.Digests.TargetManifest, digestBytesSHA256(input.ImmutableTargetManifest),
+		input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := ResolveOperationalPlanWithObservedLiveManifest(
+		input.ReleasePlan, report, input.ObservedLiveManifest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := NewTransactionEnvelopeWithObservedLiveManifest(
+		activated, activated.PlanDigest, DomainControlPlane, input.ObservedLiveManifest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+		bytes.NewReader(encoded), activated.PlanDigest, DomainControlPlane, input.ObservedLiveManifest,
+	); err != nil {
+		t.Fatal(err)
+	}
+	tampered := bytes.Replace(
+		input.ObservedLiveManifest, []byte(`"numberAvailable":0`), []byte(`"numberAvailable":1`), 1,
+	)
+	if bytes.Equal(tampered, input.ObservedLiveManifest) {
+		t.Fatal("fixture did not contain the disabled-worker marker")
+	}
+	if _, err := DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+		bytes.NewReader(encoded), activated.PlanDigest, DomainControlPlane, tampered,
+	); err == nil {
+		t.Fatal("transaction accepted a different disabled-worker witness")
+	}
+}
+
 func TestDecodeTransactionEnvelopeRequiresEmptyUnknownEvidence(t *testing.T) {
 	plan, _, encoded := encodedTransactionEnvelope(t, DomainNodeLocal)
 	explicitEmpty := mutateTransactionEnvelopeJSON(t, encoded, func(root map[string]any) {

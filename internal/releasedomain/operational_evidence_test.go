@@ -1023,6 +1023,46 @@ func TestActivationOperationalEvidenceKeepsIncompleteAndRealMultipleFailClosed(t
 	})
 }
 
+func TestObservedLiveOperationalEvidenceDoesNotReintroduceDisabledWorkerGap(t *testing.T) {
+	input := disabledDynamicWorkerActivationInput(t, "dynamic", DomainAuthoritativeDNS)
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+		DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+		Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+	})
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{
+			Status: ChangeModified, Path: "internal/model/model.go",
+			ConsumerDomains: []Domain{DomainAuthoritativeDNS},
+		}},
+	}
+	report, err := BuildOperationalDomainEvidenceFromObservedLiveActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, digestBytesSHA256(input.ObservedLiveManifest),
+		input.ReleasePlan.Digests.TargetManifest, digestBytesSHA256(input.TargetManifest),
+		input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.ActivationWitness[0].Evidence.Complete ||
+		len(report.ActivationWitness[0].Evidence.Unresolved) != 0 ||
+		containsOperationalIssue(report.Issues, "image activation evidence is incomplete") {
+		t.Fatalf("operational evidence reintroduced disabled worker gap: %#v", report)
+	}
+	if !reflect.DeepEqual(report.ActivationWitness[0].Evidence.BuiltOnlyArtifacts, []string{"edge"}) {
+		t.Fatalf("operational built-only partition drifted: %#v", report.ActivationWitness[0].Evidence)
+	}
+}
+
 func TestActivateOperationalPlanRebuildsBlockedPlanAsSingleDomain(t *testing.T) {
 	changed, imagePlan, conservative := operationalEvidenceFixture(t,
 		[]ChangedFile{{
