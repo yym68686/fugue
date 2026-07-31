@@ -265,6 +265,13 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		payload := cloneBundleForSigning(out, validUntil, keyID)
 		return signPayload(payload, key)
 	}
+	appendPreDecisionIDEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
+		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
+			return ""
+		}
+		payload := cloneEdgeRouteBundleBeforeDecisionIDsForSigning(bundle, validUntil, keyID)
+		return signPayload(payload, key)
+	}
 	appendPreRequestBodyPolicyEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
 		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
 			return ""
@@ -310,6 +317,14 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		}
 		if previousSignature != "" {
 			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), previousSignature, typed.GeneratedAt, validUntil))
+		}
+		preDecisionIDSignature := appendPreDecisionIDEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
+		if preDecisionIDSignature != "" && preDecisionIDSignature != signature {
+			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, preDecisionIDSignature, typed.GeneratedAt, validUntil))
+		}
+		preDecisionIDPreviousSignature := appendPreDecisionIDEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
+		if preDecisionIDPreviousSignature != "" && preDecisionIDPreviousSignature != previousSignature {
+			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), preDecisionIDPreviousSignature, typed.GeneratedAt, validUntil))
 		}
 		preRequestBodyPolicySignature := appendPreRequestBodyPolicyEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
 		if preRequestBodyPolicySignature != "" && preRequestBodyPolicySignature != signature {
@@ -364,30 +379,27 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 	return out
 }
 
+func cloneEdgeRouteBundleBeforeDecisionIDsForSigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
+	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
+	for idx := range routes {
+		routes[idx].DecisionID = ""
+	}
+	return cloneEdgeRouteBundleWithRoutesForSigning(bundle, routes, validUntil, keyID)
+}
+
 func cloneEdgeRouteBundleBeforeRequestBodyPoliciesForSigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
 	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
 	for idx := range routes {
+		routes[idx].DecisionID = ""
 		routes[idx].RequestBodyPolicies = nil
 	}
-	return bundleSigningPayload{
-		SchemaVersion:      bundle.SchemaVersion,
-		Version:            bundle.Version,
-		Generation:         bundle.Generation,
-		PreviousGeneration: bundle.PreviousGeneration,
-		GeneratedAt:        bundle.GeneratedAt,
-		ValidUntil:         validUntil,
-		Issuer:             bundle.Issuer,
-		KeyID:              keyID,
-		EdgeID:             bundle.EdgeID,
-		EdgeGroupID:        bundle.EdgeGroupID,
-		Routes:             routes,
-		TLSAllowlist:       bundle.TLSAllowlist,
-	}
+	return cloneEdgeRouteBundleWithRoutesForSigning(bundle, routes, validUntil, keyID)
 }
 
 func cloneEdgeRouteBundleForLegacySigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
 	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
 	for idx := range routes {
+		routes[idx].DecisionID = ""
 		routes[idx].Upstreams = nil
 		routes[idx].RequestBodyPolicies = nil
 		routes[idx].ExcludedEdgeIDs = nil
@@ -395,6 +407,10 @@ func cloneEdgeRouteBundleForLegacySigning(bundle model.EdgeRouteBundle, validUnt
 		routes[idx].ExclusionReason = ""
 		routes[idx].ExclusionExpiresAt = nil
 	}
+	return cloneEdgeRouteBundleWithRoutesForSigning(bundle, routes, validUntil, keyID)
+}
+
+func cloneEdgeRouteBundleWithRoutesForSigning(bundle model.EdgeRouteBundle, routes []model.EdgeRouteBinding, validUntil time.Time, keyID string) bundleSigningPayload {
 	return bundleSigningPayload{
 		SchemaVersion:      bundle.SchemaVersion,
 		Version:            bundle.Version,

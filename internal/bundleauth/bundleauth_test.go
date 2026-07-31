@@ -27,6 +27,7 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 				TenantID:    "tenant_1",
 				RuntimeID:   "runtime_1",
 				EdgeGroupID: "edge-group-country-us",
+				DecisionID:  "decision_test",
 				ExcludedEdgeIDs: []string{
 					"edge-de-1",
 				},
@@ -80,15 +81,24 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 	}
 
 	signed := SignEdgeRouteBundleWithKeyring(bundle, keyring, time.Hour)
-	if len(signed.Signatures) < 3 {
-		t.Fatalf("expected current, pre-request-policy, and legacy route signatures, got %+v", signed.Signatures)
+	if len(signed.Signatures) < 4 {
+		t.Fatalf("expected current, pre-decision-id, pre-request-policy, and legacy route signatures, got %+v", signed.Signatures)
 	}
 	if err := VerifyEdgeRouteBundleWithKeyring(signed, keyring, now); err != nil {
 		t.Fatalf("verify signed bundle with current route model: %v", err)
 	}
 
-	preRequestPolicyDecoded := signed
-	preRequestPolicyDecoded.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
+	preDecisionIDDecoded := signed
+	preDecisionIDDecoded.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
+	for idx := range preDecisionIDDecoded.Routes {
+		preDecisionIDDecoded.Routes[idx].DecisionID = ""
+	}
+	if err := VerifyEdgeRouteBundleWithKeyring(preDecisionIDDecoded, keyring, now); err != nil {
+		t.Fatalf("verify signed bundle after pre-decision-id edge drops unknown decision IDs: %v", err)
+	}
+
+	preRequestPolicyDecoded := preDecisionIDDecoded
+	preRequestPolicyDecoded.Routes = append([]model.EdgeRouteBinding(nil), preDecisionIDDecoded.Routes...)
 	for idx := range preRequestPolicyDecoded.Routes {
 		preRequestPolicyDecoded.Routes[idx].RequestBodyPolicies = nil
 	}
