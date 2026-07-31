@@ -1240,6 +1240,29 @@ validates downstream integration. Neither lane can publish, dispatch, install,
 promote, or deploy, and this atom creates no gateway, listener, image,
 ServiceAccount, RBAC, Pod, chart, credential, or production change.
 
+`internal/backupmaterializer/dryrungatewaycontract` adds the pure, versioned
+`backup-materializer-dry-run-gateway-contract@v1` wire boundary. The private
+request envelope is the only intentional serialization path for the raw
+Secret document: it redundantly binds API version, cell identity, immutable
+request evidence, Secret digest, idempotency key, one-shot/no-retry policy,
+and the negative production-mutation capability into one canonical digest.
+Decoding accepts exactly one bounded canonical JSON value, validates every
+redundant binding, and restores the immutable request through the existing
+current-time, expected-cell ingress. Unknown or duplicate fields, whitespace
+variants, cross-cell forwarding, expired replay, recomputed semantic drift,
+and noncanonical Secret bodies fail closed.
+
+The success path uses the separately owned secret-free receipt, but validates
+it against the exact request rather than accepting an independently valid old
+receipt. Cell, action, plan, decision, request digest, idempotency key, and the
+original five-second window must all match. The package declares the future
+loopback route and media type but imports no context, network, HTTP,
+filesystem, credential, Kubernetes SDK, datastore, process, retry, or
+execution implementation. Its 92% covered independent CI lane is path-scoped,
+read-only, and can only test, race, vet, and inspect dependencies. There is no
+handler, client, listener, Service, image, token, workload, dispatch, publish,
+deploy, or production change in this atom.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
