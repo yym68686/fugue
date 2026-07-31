@@ -484,10 +484,34 @@ func TestPrepareOnceHandsOffOnlyExactMutationCandidatePlan(t *testing.T) {
 				t.Fatalf("PrepareOnce status differs from ReconcileOnce: got=%#v want=%#v", prepared.Status, wantStatus)
 			}
 			assertPreparedCycleSecretFree(t, prepared, fixture.plan, fixture.at)
+			evidence, err := prepared.Evidence()
+			if err != nil || ValidatePreparedCycleEvidence(evidence) != nil || evidence.Digest != prepared.Digest ||
+				DigestPreparedCycleEvidence(evidence) != prepared.Digest || evidence.CandidatePlanDigest != fixture.plan.Digest {
+				t.Fatalf("public evidence drifted: evidence=%#v err=%v validation=%v", evidence, err, ValidatePreparedCycleEvidence(evidence))
+			}
+			evidenceDocument, err := json.Marshal(evidence)
+			if err != nil {
+				t.Fatalf("marshal prepared evidence: %v", err)
+			}
+			var roundTrippedEvidence PreparedCycleEvidence
+			if err := json.Unmarshal(evidenceDocument, &roundTrippedEvidence); err != nil ||
+				ValidatePreparedCycleEvidence(roundTrippedEvidence) != nil {
+				t.Fatalf("public evidence did not survive serialization: evidence=%#v err=%v validation=%v", roundTrippedEvidence, err, ValidatePreparedCycleEvidence(roundTrippedEvidence))
+			}
+			if evidence.Status.Decision == nil {
+				t.Fatal("candidate evidence lost decision")
+			}
+			evidence.Status.Decision.Digest = "invalid"
+			if ValidatePreparedCycle(prepared) != nil {
+				t.Fatal("public evidence retained prepared decision pointer")
+			}
 
 			document, err := json.Marshal(prepared)
 			if err != nil {
 				t.Fatalf("marshal prepared cycle: %v", err)
+			}
+			if string(document) != string(evidenceDocument) {
+				t.Fatal("prepared cycle and public evidence canonical JSON diverged")
 			}
 			var roundTripped PreparedCycle
 			if err := json.Unmarshal(document, &roundTripped); err != nil {
@@ -605,6 +629,50 @@ func TestPreparedCycleContractRejectsCapabilityAndBindingDrift(t *testing.T) {
 	stable.Digest = DigestPreparedCycle(stable)
 	if err := ValidatePreparedCycle(stable); !errors.Is(err, ErrInvariant) {
 		t.Fatalf("non-candidate retained private plan: %v", err)
+	}
+}
+
+func TestPreparedCycleEvidenceRejectsPublicBindingDrift(t *testing.T) {
+	t.Parallel()
+	issuedAt := time.Date(2026, 8, 2, 8, 30, 0, 0, time.UTC)
+	now := issuedAt.Add(30 * time.Second)
+	bundle, plan := testGeneration(t, "run-handoff-evidence", testAppTarget(), issuedAt, now)
+	prepared, err := testReconciler(
+		t, plan.CellKey, now, &desiredStub{bundle: bundle}, &currentStub{observation: testAbsent(t, plan.CellKey)},
+	).PrepareOnce(context.Background())
+	if err != nil {
+		t.Fatalf("prepare evidence fixture: %v", err)
+	}
+	valid, err := prepared.Evidence()
+	if err != nil || ValidatePreparedCycleEvidence(valid) != nil {
+		t.Fatalf("build valid evidence: evidence=%#v err=%v", valid, err)
+	}
+	tests := map[string]func(*PreparedCycleEvidence){
+		"API":             func(value *PreparedCycleEvidence) { value.APIVersion = "v2" },
+		"cell":            func(value *PreparedCycleEvidence) { value.CellKey = "backup/all/invalid" },
+		"status digest":   func(value *PreparedCycleEvidence) { value.StatusDigest = strings.Repeat("0", 64) },
+		"nested status":   func(value *PreparedCycleEvidence) { value.Status.Digest = "invalid" },
+		"candidate flag":  func(value *PreparedCycleEvidence) { value.CandidateAvailable = false },
+		"plan digest":     func(value *PreparedCycleEvidence) { value.CandidatePlanDigest = strings.Repeat("0", 64) },
+		"evaluation time": func(value *PreparedCycleEvidence) { value.EvaluatedAt = value.EvaluatedAt.Add(time.Second) },
+		"delete":          func(value *PreparedCycleEvidence) { value.DeleteAllowed = true },
+		"not observation": func(value *PreparedCycleEvidence) { value.ObservationOnly = false },
+		"execution":       func(value *PreparedCycleEvidence) { value.ExecutionAllowed = true },
+		"production":      func(value *PreparedCycleEvidence) { value.ProductionMutationAllowed = true },
+		"idempotency":     func(value *PreparedCycleEvidence) { value.IdempotencyKey = "other" },
+		"digest":          func(value *PreparedCycleEvidence) { value.Digest = "invalid" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := clonePreparedEvidence(valid)
+			mutate(&candidate)
+			if name != "digest" {
+				candidate.Digest = DigestPreparedCycleEvidence(candidate)
+			}
+			if err := ValidatePreparedCycleEvidence(candidate); !errors.Is(err, ErrInvariant) {
+				t.Fatalf("evidence drift error = %v, want ErrInvariant", err)
+			}
+		})
 	}
 }
 
@@ -934,6 +1002,11 @@ func cloneStatus(status Status) Status {
 func clonePreparedCycle(prepared PreparedCycle) PreparedCycle {
 	prepared.Status = cloneStatus(prepared.Status)
 	return prepared
+}
+
+func clonePreparedEvidence(evidence PreparedCycleEvidence) PreparedCycleEvidence {
+	evidence.Status = cloneStatus(evidence.Status)
+	return evidence
 }
 
 func assertPreparedCycleSecretFree(t *testing.T, prepared PreparedCycle, plan materialization.Plan, now time.Time) {

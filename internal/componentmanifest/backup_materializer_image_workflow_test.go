@@ -99,6 +99,7 @@ func TestBackupMaterializerImageWorkflowIsPathScopedBuildOnly(t *testing.T) {
 		"internal/backupmaterializerreview/**",
 		"internal/backupmaterializer/dryrunreconciler/**",
 		"internal/backupmaterializer/secretwriter/**",
+		"internal/backupmaterializer/validationcycle/**",
 		"deploy/helm/fugue-backup-observer",
 		"deploy/helm/fugue-image-plane",
 		"deploy/helm/fugue-release-control",

@@ -65,6 +65,7 @@ func TestBackupMaterializerSecretDryRunWorkflowIsReadOnlyAndPathScoped(t *testin
 		"internal/backupmaterializer/reconcile/**",
 		"internal/backupmaterializer/reconciler/**",
 		"internal/backupmaterializer/secretwriter/**",
+		"internal/backupmaterializer/validationcycle/**",
 		"actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
 		"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
 		"go test ./internal/backupmaterializer/secretwriter/... -count=10",
@@ -74,6 +75,9 @@ func TestBackupMaterializerSecretDryRunWorkflowIsReadOnlyAndPathScoped(t *testin
 		"go test ./internal/backupmaterializer/dryrunreconciler -count=10",
 		"go test -race ./internal/backupmaterializer/dryrunreconciler -count=3",
 		"go list -deps ./internal/backupmaterializer/dryrunreconciler",
+		"go test ./internal/backupmaterializer/validationcycle -count=10",
+		"go test -race ./internal/backupmaterializer/validationcycle -count=3",
+		"go list -deps ./internal/backupmaterializer/validationcycle",
 		"validate backup materializer Secret dry-run (no publish)",
 	} {
 		if !strings.Contains(raw, required) {

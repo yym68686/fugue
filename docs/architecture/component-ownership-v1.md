@@ -860,11 +860,13 @@ The serialized and formatted handoff contains the validated reconcile status,
 candidate plan digest, idempotency key, evaluation time, and permanently false
 delete/execution/production flags. Raw spec and observer token bytes stay in an
 unexported field and can be obtained only through `CandidatePlan`, which first
-revalidates the complete status/plan binding. A JSON round trip deliberately
-cannot recreate that private capability. The existing agent continues to call
-`ReconcileOnce`, so this atom neither connects the handoff to a writer nor
-changes the running process, image dependency closure, chart, RBAC, or
-production state.
+revalidates the complete status/plan binding. `PreparedCycleEvidence` has the
+same canonical public digest but physically contains no plan, so downstream
+status can revalidate the source handoff without retaining its capability. A
+JSON round trip deliberately cannot recreate the private plan. The existing
+agent continues to call `ReconcileOnce`, so this atom neither connects the
+handoff to a writer nor changes the running process, image dependency closure,
+chart, RBAC, or production state.
 
 `internal/backupmaterializer/agent` and
 `cmd/fugue-backup-materializer` add the default-off
@@ -1019,6 +1021,24 @@ outcome. The package imports neither the projected writer bootstrap nor any
 reader, source, process, image, chart, RBAC, Kubernetes SDK, datastore or
 legacy control-plane code. It is not wired into the binary or workload, so no
 credential or production capability is active.
+
+`internal/backupmaterializer/validationcycle` adds the default-off
+`backup-materializer-validation-cycle@v1` zero-or-one composition. It invokes
+one injected `PrepareOnce`. Non-candidates require zero validator calls and
+preserve the source cycle's no-op, LKG, blocked, and retryable semantics. A
+candidate extracts its private plan exactly once, invokes one injected dry-run
+controller, and then drops the plan; the returned status contains only
+`PreparedCycleEvidence` and the secret-free validation status.
+
+The composite status independently revalidates both nested contracts and
+binds source status, candidate digest, action, outcome, attempt time, retry
+semantics, and existing-object preservation. Even an accepted admission dry
+run remains non-ready, non-converged, non-persisted, and unable to delete or
+execute. Source and validator errors are reduced to fixed invariant errors,
+while expected API failures remain the cell-local outcomes owned by the
+dry-run controller. The package has no projected credential, TLS transport,
+reader, source implementation, process, image, chart, RBAC, Kubernetes SDK,
+datastore, release, or production wiring.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

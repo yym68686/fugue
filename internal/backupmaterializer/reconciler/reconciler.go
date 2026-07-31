@@ -136,6 +136,28 @@ type PreparedCycle struct {
 	candidatePlan materialization.Plan
 }
 
+// PreparedCycleEvidence is the complete public projection of a PreparedCycle.
+// It has the same canonical JSON digest but physically cannot retain or return
+// the private candidate plan.
+type PreparedCycleEvidence struct {
+	APIVersion                string    `json:"apiVersion"`
+	Kind                      string    `json:"kind"`
+	Policy                    string    `json:"policy"`
+	CellKey                   string    `json:"cellKey"`
+	CellID                    string    `json:"cellId"`
+	StatusDigest              string    `json:"statusDigest"`
+	Status                    Status    `json:"status"`
+	CandidatePlanDigest       string    `json:"candidatePlanDigest,omitempty"`
+	CandidateAvailable        bool      `json:"candidateAvailable"`
+	IdempotencyKey            string    `json:"idempotencyKey"`
+	EvaluatedAt               time.Time `json:"evaluatedAt"`
+	DeleteAllowed             bool      `json:"deleteAllowed"`
+	ObservationOnly           bool      `json:"observationOnly"`
+	ExecutionAllowed          bool      `json:"executionAllowed"`
+	ProductionMutationAllowed bool      `json:"productionMutationAllowed"`
+	Digest                    string    `json:"digest"`
+}
+
 // New ignores and retains none of the cell, sources, or clock while disabled.
 // Enabled construction validates interfaces only and performs no source I/O.
 func New(config Config) (*Reconciler, error) {
@@ -256,15 +278,8 @@ func (reconciler *Reconciler) evaluateOnce(ctx context.Context) (Status, *materi
 }
 
 func ValidatePreparedCycle(prepared PreparedCycle) error {
-	identity, err := materialization.SecretIdentityForCell(prepared.CellKey)
-	if err != nil || prepared.APIVersion != PreparedCycleAPIVersion || prepared.Kind != PreparedCycleKind ||
-		prepared.Policy != PreparedCyclePolicy || prepared.CellID != identity.CellID || ValidateStatus(prepared.Status) != nil ||
-		prepared.Status.CellKey != prepared.CellKey || prepared.Status.Digest != prepared.StatusDigest ||
-		prepared.EvaluatedAt != prepared.Status.EvaluatedAt ||
-		prepared.CandidateAvailable != prepared.Status.MutationCandidate || prepared.DeleteAllowed ||
-		!prepared.ObservationOnly || prepared.ExecutionAllowed || prepared.ProductionMutationAllowed ||
-		prepared.IdempotencyKey != preparedCycleIdempotencyKey(prepared) ||
-		prepared.Digest != DigestPreparedCycle(prepared) {
+	evidence := preparedCycleEvidence(prepared)
+	if ValidatePreparedCycleEvidence(evidence) != nil || evidence.Digest != prepared.Digest {
 		return ErrInvariant
 	}
 	if prepared.CandidateAvailable {
@@ -285,6 +300,34 @@ func ValidatePreparedCycle(prepared PreparedCycle) error {
 	return nil
 }
 
+func ValidatePreparedCycleEvidence(evidence PreparedCycleEvidence) error {
+	identity, err := materialization.SecretIdentityForCell(evidence.CellKey)
+	if err != nil || evidence.APIVersion != PreparedCycleAPIVersion || evidence.Kind != PreparedCycleKind ||
+		evidence.Policy != PreparedCyclePolicy || evidence.CellID != identity.CellID || ValidateStatus(evidence.Status) != nil ||
+		evidence.Status.CellKey != evidence.CellKey || evidence.Status.Digest != evidence.StatusDigest ||
+		evidence.EvaluatedAt != evidence.Status.EvaluatedAt ||
+		evidence.CandidateAvailable != evidence.Status.MutationCandidate || evidence.DeleteAllowed ||
+		!evidence.ObservationOnly || evidence.ExecutionAllowed || evidence.ProductionMutationAllowed ||
+		evidence.IdempotencyKey != preparedCycleKey(evidence.CellKey, evidence.CellID, evidence.StatusDigest, evidence.CandidatePlanDigest) ||
+		evidence.Digest != DigestPreparedCycleEvidence(evidence) {
+		return ErrInvariant
+	}
+	if evidence.CandidateAvailable {
+		if !validDigest(evidence.CandidatePlanDigest) || evidence.Status.Decision == nil ||
+			evidence.CandidatePlanDigest != evidence.Status.DesiredPlanDigest ||
+			evidence.Status.Decision.DesiredPlanDigest != evidence.CandidatePlanDigest ||
+			(evidence.Status.Action != reconcile.ActionCreateIfAbsent &&
+				evidence.Status.Action != reconcile.ActionReplaceResourceVersionCAS) {
+			return ErrInvariant
+		}
+		return nil
+	}
+	if evidence.CandidatePlanDigest != "" {
+		return ErrInvariant
+	}
+	return nil
+}
+
 // CandidatePlan returns a copy of the private plan only after the complete
 // prepared-cycle contract validates and only for a mutation candidate. The
 // Plan itself keeps raw Secret data private and returns copies through Data.
@@ -295,9 +338,31 @@ func (prepared PreparedCycle) CandidatePlan() (materialization.Plan, bool) {
 	return prepared.candidatePlan, true
 }
 
+// Evidence returns a fully revalidatable public projection only after the
+// private handoff itself validates. The returned type has no plan capability.
+func (prepared PreparedCycle) Evidence() (PreparedCycleEvidence, error) {
+	if ValidatePreparedCycle(prepared) != nil {
+		return PreparedCycleEvidence{}, ErrInvariant
+	}
+	evidence := preparedCycleEvidence(prepared)
+	if ValidatePreparedCycleEvidence(evidence) != nil {
+		return PreparedCycleEvidence{}, ErrInvariant
+	}
+	return evidence, nil
+}
+
 func DigestPreparedCycle(prepared PreparedCycle) string {
 	prepared.Digest = ""
 	document, err := json.Marshal(prepared)
+	if err != nil {
+		return ""
+	}
+	return digestBytes(document)
+}
+
+func DigestPreparedCycleEvidence(evidence PreparedCycleEvidence) string {
+	evidence.Digest = ""
+	document, err := json.Marshal(evidence)
 	if err != nil {
 		return ""
 	}
@@ -312,6 +377,15 @@ func (prepared PreparedCycle) String() string {
 }
 
 func (prepared PreparedCycle) GoString() string { return prepared.String() }
+
+func (evidence PreparedCycleEvidence) String() string {
+	return fmt.Sprintf(
+		"BackupObserverSecretPreparedCycleEvidence{cell=%q action=%q candidate=%t executionAllowed=false digest=%q}",
+		evidence.CellKey, evidence.Status.Action, evidence.CandidateAvailable, evidence.Digest,
+	)
+}
+
+func (evidence PreparedCycleEvidence) GoString() string { return evidence.String() }
 
 func prepareCycle(status Status, desiredPlan *materialization.Plan) (PreparedCycle, error) {
 	if ValidateStatus(status) != nil {
@@ -331,7 +405,7 @@ func prepareCycle(status Status, desiredPlan *materialization.Plan) (PreparedCyc
 		prepared.CandidatePlanDigest = desiredPlan.Digest
 		prepared.candidatePlan = *desiredPlan
 	}
-	prepared.IdempotencyKey = preparedCycleIdempotencyKey(prepared)
+	prepared.IdempotencyKey = preparedCycleKey(prepared.CellKey, prepared.CellID, prepared.StatusDigest, prepared.CandidatePlanDigest)
 	prepared.Digest = DigestPreparedCycle(prepared)
 	if ValidatePreparedCycle(prepared) != nil {
 		return PreparedCycle{}, ErrInvariant
@@ -348,9 +422,21 @@ func clonePreparedStatus(status Status) Status {
 	return cloned
 }
 
-func preparedCycleIdempotencyKey(prepared PreparedCycle) string {
-	if prepared.CellID == "" || !validDigest(prepared.StatusDigest) ||
-		(prepared.CandidatePlanDigest != "" && !validDigest(prepared.CandidatePlanDigest)) {
+func preparedCycleEvidence(prepared PreparedCycle) PreparedCycleEvidence {
+	return PreparedCycleEvidence{
+		APIVersion: prepared.APIVersion, Kind: prepared.Kind, Policy: prepared.Policy,
+		CellKey: prepared.CellKey, CellID: prepared.CellID, StatusDigest: prepared.StatusDigest,
+		Status: clonePreparedStatus(prepared.Status), CandidatePlanDigest: prepared.CandidatePlanDigest,
+		CandidateAvailable: prepared.CandidateAvailable, IdempotencyKey: prepared.IdempotencyKey,
+		EvaluatedAt: prepared.EvaluatedAt, DeleteAllowed: prepared.DeleteAllowed,
+		ObservationOnly: prepared.ObservationOnly, ExecutionAllowed: prepared.ExecutionAllowed,
+		ProductionMutationAllowed: prepared.ProductionMutationAllowed, Digest: prepared.Digest,
+	}
+}
+
+func preparedCycleKey(cellKey, cellID, statusDigest, candidatePlanDigest string) string {
+	if cellKey == "" || cellID == "" || !validDigest(statusDigest) ||
+		(candidatePlanDigest != "" && !validDigest(candidatePlanDigest)) {
 		return ""
 	}
 	basis := struct {
@@ -358,14 +444,15 @@ func preparedCycleIdempotencyKey(prepared PreparedCycle) string {
 		StatusDigest        string `json:"statusDigest"`
 		CandidatePlanDigest string `json:"candidatePlanDigest,omitempty"`
 	}{
-		CellKey: prepared.CellKey, StatusDigest: prepared.StatusDigest,
-		CandidatePlanDigest: prepared.CandidatePlanDigest,
+		CellKey:             cellKey,
+		StatusDigest:        statusDigest,
+		CandidatePlanDigest: candidatePlanDigest,
 	}
 	document, err := json.Marshal(basis)
 	if err != nil {
 		return ""
 	}
-	return "backup-materializer-candidate-handoff/" + prepared.CellID + "/" +
+	return "backup-materializer-candidate-handoff/" + cellID + "/" +
 		strings.TrimPrefix(digestBytes(document), "sha256:")
 }
 
