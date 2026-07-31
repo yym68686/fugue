@@ -659,8 +659,84 @@ func distributedImageUsageSizeKey(candidate appImageCandidate, digest string) st
 
 func distributedImageCandidateKeys(candidate appImageCandidate, digest string) []string {
 	keys := append([]string{}, distributedImageUsageKeys(candidate.ImageRef, digest)...)
-	keys = append(keys, distributedImageUsageKeys(candidate.RuntimeImageRef, digest)...)
+	if distributedRuntimeImageRefMatchesCandidate(candidate.ImageRef, candidate.RuntimeImageRef) {
+		keys = append(keys, distributedImageUsageKeys(candidate.RuntimeImageRef, digest)...)
+	}
 	return uniqueDistributedImageKeys(keys)
+}
+
+type distributedImageReferenceIdentity struct {
+	repository string
+	tag        string
+	digest     string
+}
+
+// Historical operations can contain a DesiredSpec image from a different
+// generation than DesiredSource. Treat the runtime ref as an alias only when
+// both references themselves prove the same repository and tag or digest.
+func distributedRuntimeImageRefMatchesCandidate(imageRef, runtimeImageRef string) bool {
+	imageIdentity, imageOK := parseDistributedImageReferenceIdentity(imageRef)
+	runtimeIdentity, runtimeOK := parseDistributedImageReferenceIdentity(runtimeImageRef)
+	if !imageOK || !runtimeOK || imageIdentity.repository != runtimeIdentity.repository {
+		return false
+	}
+	if imageIdentity.digest != "" && runtimeIdentity.digest != "" {
+		return imageIdentity.digest == runtimeIdentity.digest
+	}
+	if imageIdentity.tag != "" && runtimeIdentity.tag != "" {
+		return imageIdentity.tag == runtimeIdentity.tag
+	}
+	return false
+}
+
+func parseDistributedImageReferenceIdentity(ref string) (distributedImageReferenceIdentity, bool) {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	ref = strings.TrimPrefix(ref, "http://")
+	ref = strings.TrimPrefix(ref, "https://")
+	if ref == "" || strings.ContainsAny(ref, " ,\t\r\n") {
+		return distributedImageReferenceIdentity{}, false
+	}
+	ref = imagecachekeys.StripRegistry(ref)
+	if ref == "" {
+		return distributedImageReferenceIdentity{}, false
+	}
+
+	identity := distributedImageReferenceIdentity{}
+	name := ref
+	if before, after, found := strings.Cut(name, "@"); found {
+		if strings.Contains(after, "@") {
+			return distributedImageReferenceIdentity{}, false
+		}
+		identity.digest = managedImageDigest(after)
+		if identity.digest == "" || identity.digest != strings.TrimSpace(after) {
+			return distributedImageReferenceIdentity{}, false
+		}
+		name = before
+	} else if index := strings.LastIndex(name, ":sha256:"); index > strings.LastIndex(name, "/") {
+		digest := name[index+1:]
+		identity.digest = managedImageDigest(digest)
+		if identity.digest == "" || identity.digest != digest {
+			return distributedImageReferenceIdentity{}, false
+		}
+		name = name[:index]
+	}
+
+	lastSlash := strings.LastIndex(name, "/")
+	if lastColon := strings.LastIndex(name, ":"); lastColon > lastSlash {
+		if lastColon+1 == len(name) {
+			return distributedImageReferenceIdentity{}, false
+		}
+		identity.tag = strings.TrimSpace(name[lastColon+1:])
+		name = name[:lastColon]
+	}
+	identity.repository = strings.Trim(name, "/")
+	if identity.repository == "" || strings.ContainsAny(identity.repository, "@:") || strings.ContainsAny(identity.tag, "@:/") {
+		return distributedImageReferenceIdentity{}, false
+	}
+	if identity.tag == "" && identity.digest == "" {
+		identity.tag = "latest"
+	}
+	return identity, true
 }
 
 func distributedImageUsageKeys(ref, digest string) []string {
