@@ -975,6 +975,33 @@ token/CA generation recovers without restart. This package remains outside the
 process dependency closure and image workflow, so it has no active credential,
 RBAC, Pod, Secret mutation, release, or production capability.
 
+`internal/backupmaterializer/dryrunreconciler` adds the default-off
+`backup-materializer-secret-dry-run-cycle@v1` status owner around the pure
+reconcile result and injected dry-run writer. It accepts only an
+`available` desired state whose validated reconcile status is an unblocked
+create-if-absent or UID/resourceVersion-CAS mutation candidate, plus the exact
+private plan whose digest that status names. No source is reread, so one
+validation attempt remains bound to the current observation, desired plan and
+decision that produced it.
+
+The component makes at most one validator call. An authenticated dry-run
+receipt becomes `accepted`; conflicts, admission rejection, credential or API
+unavailability, invalid responses, and stale intents become fixed cell-local
+outcomes without retaining error text. Retryable outcomes require a later
+fresh cycle, while rejection is fail-closed until policy or input changes. A
+replacement status always records that the existing object was preserved,
+because dry-run never reaches storage.
+
+Every result nests the secret-free reconcile status and, only on success, the
+secret-free dry-run receipt. Its idempotency key binds the upstream cycle and
+decision, while the status digest additionally binds the cell, action,
+outcome, attempt time and optional receipt. `persisted`, `deleteAllowed`,
+`executionAllowed`, and `productionMutationAllowed` remain false for every
+outcome. The package imports neither the projected writer bootstrap nor any
+reader, source, process, image, chart, RBAC, Kubernetes SDK, datastore or
+legacy control-plane code. It is not wired into the binary or workload, so no
+credential or production capability is active.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
