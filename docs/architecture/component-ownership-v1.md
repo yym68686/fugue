@@ -1128,7 +1128,7 @@ wiring.
 `scripts/test_backup_materializer_validator_image.sh`, and the dedicated
 `backup-materializer-validator-image-${ref}` workflow add the independently
 compiled `backup-materializer-validator-image@v1` artifact lane. The build
-stage copies exactly the command's 16-package local dependency closure and
+stage copies exactly the command's 17-package local dependency closure and
 uses the digest-pinned Go toolchain; legacy commands, API/store/model,
 signer/reviewer, Kubernetes SDK, release code, and backup execution are absent
 from its source layers.
@@ -1203,6 +1203,35 @@ while another principal remained outside the guard. The local cluster was
 removed afterward. The chart's independent CI lane can only lint, template,
 test, race, and vet; it cannot package, install, publish, dispatch, promote, or
 deploy. No production resource is created by this atom.
+
+`internal/backupmaterializer/secretdryrunrequest` adds the pure, versioned
+`backup-materializer-secret-dry-run-request@v1` handoff between the validator
+and a future cell-local dry-run gateway. It validates the current sealed plan
+and reconcile decision, then binds the exact canonical Secret body, POST or
+resourceVersion-CAS PUT path, fixed `dryRun=All` query, expected status, cell
+identity, manifest/plan/decision digests, CAS preconditions, and idempotency
+key into one immutable request. The request deadline remains anchored to the
+original five-second reconcile decision window; preparation, restoration, or
+forwarding cannot extend it, and retries remain forbidden.
+
+Default JSON and diagnostic formatting contain only secret-free evidence, and
+default JSON decoding fails closed. The raw spec and observer token remain in
+a private document that can be obtained only through an explicit,
+current-time, expected-cell `Open`, which returns a fresh copy. `Restore` is
+the sole future wire ingress and rejects recomputed
+digests if the body gains labels, annotations, data keys, live-mutation query,
+cross-cell identity, generated name, noncanonical JSON/Base64, or loses exact
+create/CAS semantics. The existing direct dry-run writer now consumes this
+same contract, preserving its public constants and result behavior while
+removing duplicate request encoding.
+
+The contract imports no context, filesystem, network, HTTP, credential,
+Kubernetes SDK, datastore, process, retry, or mutation implementation. Its
+independent path-scoped CI lane tests, races, vets, and seals the dependency
+closure with read-only permissions; the existing writer lane separately
+validates downstream integration. Neither lane can publish, dispatch, install,
+promote, or deploy, and this atom creates no gateway, listener, image,
+ServiceAccount, RBAC, Pod, chart, credential, or production change.
 
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one

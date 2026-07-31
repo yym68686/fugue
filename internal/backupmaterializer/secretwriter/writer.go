@@ -25,6 +25,7 @@ import (
 
 	"fugue/internal/backupmaterializer/materialization"
 	"fugue/internal/backupmaterializer/reconcile"
+	"fugue/internal/backupmaterializer/secretdryrunrequest"
 )
 
 const (
@@ -33,19 +34,19 @@ const (
 	Policy     = "single-secret-create-or-resource-version-cas-dry-run-v1"
 
 	RequestUserAgent = "fugue-backup-materializer-secret-dry-run/1"
-	FieldManager     = "fugue-backup-materializer"
-	DryRunRawQuery   = "dryRun=All&fieldManager=fugue-backup-materializer&fieldValidation=Strict"
+	FieldManager     = secretdryrunrequest.FieldManager
+	DryRunRawQuery   = secretdryrunrequest.DryRunRawQuery
 
 	DefaultRequestTimeout = 5 * time.Second
 	MaximumRequestTimeout = 30 * time.Second
 	DefaultMaxResponse    = int64(256 << 10)
 	MaximumResponse       = int64(1 << 20)
-	MaximumDecisionAge    = 5 * time.Second
-	MaximumRequestBytes   = int64(128 << 10)
+	MaximumDecisionAge    = secretdryrunrequest.MaximumDecisionAge
+	MaximumRequestBytes   = secretdryrunrequest.MaximumRequestBytes
 
 	minimumResponseBytes = int64(4 << 10)
 	maxBearerTokenBytes  = 16 << 10
-	secretCollectionPath = "/api/v1/namespaces/" + materialization.SecretNamespace + "/secrets"
+	secretCollectionPath = secretdryrunrequest.SecretCollectionPath
 )
 
 var (
@@ -219,10 +220,7 @@ func (writer *Writer) DryRun(
 		return Result{}, err
 	}
 	now := writer.now().UTC().Truncate(time.Second)
-	if !validIntent(writer, plan, decision, now) {
-		return Result{}, ErrIntent
-	}
-	document, method, endpoint, expectedStatus, err := buildRequest(writer, plan, decision, now)
+	sealedRequest, document, endpoint, err := buildRequest(writer, plan, decision, now)
 	if err != nil {
 		return Result{}, ErrIntent
 	}
@@ -235,7 +233,7 @@ func (writer *Writer) DryRun(
 		}
 		return Result{}, ErrCredentialUnavailable
 	}
-	request, err := http.NewRequestWithContext(requestCtx, method, endpoint, bytes.NewReader(document))
+	request, err := http.NewRequestWithContext(requestCtx, sealedRequest.Method, endpoint, bytes.NewReader(document))
 	if err != nil {
 		return Result{}, ErrConfig
 	}
@@ -260,7 +258,7 @@ func (writer *Writer) DryRun(
 		return Result{}, ErrUnavailable
 	}
 	defer response.Body.Close()
-	if response.StatusCode != expectedStatus {
+	if response.StatusCode != sealedRequest.ExpectedStatus {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return Result{}, classifyStatus(response.StatusCode)
 	}
@@ -289,8 +287,8 @@ func (writer *Writer) DryRun(
 		Action:                    decision.Action,
 		PlanDigest:                plan.Digest,
 		DecisionDigest:            decision.Digest,
-		RequestDigest:             digestBytes(document),
-		IdempotencyKey:            dryRunIdempotencyKey(plan.CellID, decision.Digest),
+		RequestDigest:             sealedRequest.RequestDigest,
+		IdempotencyKey:            sealedRequest.IdempotencyKey,
 		ValidatedAt:               now,
 		Accepted:                  true,
 		ServerSideDryRun:          true,
@@ -327,63 +325,7 @@ func ValidateResult(result Result) error {
 // network or execution capability and does not replace Writer's freshness
 // check.
 func ValidateTransportRequest(method, path, rawQuery, expectedCellKey string, document []byte) error {
-	identity, err := materialization.SecretIdentityForCell(expectedCellKey)
-	if err != nil || rawQuery != DryRunRawQuery || len(document) == 0 || int64(len(document)) > MaximumRequestBytes {
-		return ErrIntent
-	}
-	var request secretDocument
-	decoder := json.NewDecoder(bytes.NewReader(document))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		return ErrIntent
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ErrIntent
-	}
-	canonicalDocument, err := json.Marshal(request)
-	if err != nil || !bytes.Equal(canonicalDocument, document) {
-		return ErrIntent
-	}
-	metadata := request.Metadata
-	if request.APIVersion != "v1" || request.Kind != "Secret" || request.Type != reconcile.SecretTypeOpaque ||
-		request.Immutable == nil || *request.Immutable || len(request.StringData) != 0 ||
-		metadata.Name != identity.SecretName || metadata.Namespace != identity.Namespace || metadata.GenerateName != "" ||
-		metadata.SelfLink != "" || metadata.Generation != 0 || len(metadata.CreationTimestamp) != 0 ||
-		len(metadata.DeletionTimestamp) != 0 || metadata.DeletionGracePeriodSeconds != nil ||
-		len(metadata.OwnerReferences) != 0 || len(metadata.Finalizers) != 0 || len(metadata.ManagedFields) != 0 ||
-		len(request.Data) != 2 {
-		return ErrIntent
-	}
-	uid := metadata.UID
-	resourceVersion := metadata.ResourceVersion
-	switch method {
-	case http.MethodPost:
-		if path != secretCollectionPath || uid != "" || resourceVersion != "" {
-			return ErrIntent
-		}
-		uid = "transport-validation"
-		resourceVersion = "1"
-	case http.MethodPut:
-		if path != secretCollectionPath+"/"+identity.SecretName || uid == "" || resourceVersion == "" {
-			return ErrIntent
-		}
-	default:
-		return ErrIntent
-	}
-	data := make(map[string][]byte, len(request.Data))
-	for key, encoded := range request.Data {
-		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
-		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
-			return ErrIntent
-		}
-		data[key] = decoded
-	}
-	observation, err := reconcile.ObserveExisting(expectedCellKey, reconcile.SecretEvidence{
-		Namespace: identity.Namespace, SecretName: identity.SecretName, UID: uid, ResourceVersion: resourceVersion,
-		SecretType: request.Type, Labels: request.Metadata.Labels, Annotations: request.Metadata.Annotations,
-		Data: data, Immutable: false, DeletionPending: false, OwnerReferenceCount: 0,
-	})
-	if err != nil || observation.State != reconcile.StateManaged {
+	if secretdryrunrequest.ValidateTransportRequest(method, path, rawQuery, expectedCellKey, document) != nil {
 		return ErrIntent
 	}
 	return nil
@@ -438,66 +380,31 @@ type secretMetadata struct {
 	ManagedFields              []json.RawMessage `json:"managedFields,omitempty"`
 }
 
-func validIntent(writer *Writer, plan materialization.Plan, decision reconcile.Decision, now time.Time) bool {
-	if writer == nil || !canonicalTime(now) || reconcile.ValidateDecision(decision) != nil ||
-		materialization.Validate(plan, now) != nil || plan.CellKey != writer.expectedCell ||
-		plan.CellID != writer.expectedCellID || plan.SecretName != writer.expectedName ||
-		decision.Namespace != plan.Namespace || decision.SecretName != plan.SecretName ||
-		decision.CellKey != plan.CellKey || decision.CellID != plan.CellID ||
-		decision.DesiredPlanDigest != plan.Digest || !decision.MutationCandidate || decision.Blocked ||
-		decision.ExecutionAllowed || decision.ProductionMutationAllowed || decision.DeleteAllowed ||
-		decision.DecidedAt.After(now) || now.Sub(decision.DecidedAt) > MaximumDecisionAge {
-		return false
-	}
-	return decision.Action == reconcile.ActionCreateIfAbsent || decision.Action == reconcile.ActionReplaceResourceVersionCAS
-}
-
 func buildRequest(
 	writer *Writer,
 	plan materialization.Plan,
 	decision reconcile.Decision,
 	now time.Time,
-) ([]byte, string, string, int, error) {
-	manifest, err := reconcile.BuildManifest(plan, now)
+) (secretdryrunrequest.Evidence, []byte, string, error) {
+	if writer == nil {
+		return secretdryrunrequest.Evidence{}, nil, "", ErrIntent
+	}
+	prepared, err := secretdryrunrequest.Prepare(writer.expectedCell, plan, decision, now)
 	if err != nil {
-		return nil, "", "", 0, ErrIntent
+		return secretdryrunrequest.Evidence{}, nil, "", ErrIntent
 	}
-	data, err := plan.Data(now)
+	evidence, document, err := prepared.Open(writer.expectedCell, now)
 	if err != nil {
-		return nil, "", "", 0, ErrIntent
+		return secretdryrunrequest.Evidence{}, nil, "", ErrIntent
 	}
-	immutable := false
-	document := secretDocument{
-		APIVersion: "v1",
-		Kind:       "Secret",
-		Metadata: secretMetadata{
-			Name:        manifest.SecretName,
-			Namespace:   manifest.Namespace,
-			Labels:      cloneStringMap(manifest.Labels),
-			Annotations: cloneStringMap(manifest.Annotations),
-		},
-		Immutable: &immutable,
-		Type:      manifest.SecretType,
-		Data: map[string]string{
-			data.SpecKey:  base64.StdEncoding.EncodeToString(data.SpecDocument),
-			data.TokenKey: base64.StdEncoding.EncodeToString(data.ObserverToken),
-		},
-	}
-	method := http.MethodPost
 	endpoint := writer.collectionURL
-	expectedStatus := http.StatusCreated
-	if decision.Action == reconcile.ActionReplaceResourceVersionCAS {
-		document.Metadata.UID = decision.ExpectedUID
-		document.Metadata.ResourceVersion = decision.ExpectedResourceVersion
-		method = http.MethodPut
+	if evidence.Method == http.MethodPut {
 		endpoint = writer.itemURL
-		expectedStatus = http.StatusOK
 	}
-	encoded, err := json.Marshal(document)
-	if err != nil || len(encoded) == 0 || int64(len(encoded)) > MaximumRequestBytes {
-		return nil, "", "", 0, ErrIntent
+	if endpoint == "" {
+		return secretdryrunrequest.Evidence{}, nil, "", ErrIntent
 	}
-	return encoded, method, endpoint, expectedStatus, nil
+	return evidence, document, endpoint, nil
 }
 
 func validDryRunResponse(document []byte, plan materialization.Plan, decision reconcile.Decision, now time.Time) bool {
@@ -657,14 +564,6 @@ func containsRequired(actual, required map[string]string) bool {
 		}
 	}
 	return true
-}
-
-func cloneStringMap(value map[string]string) map[string]string {
-	cloned := make(map[string]string, len(value))
-	for key, item := range value {
-		cloned[key] = item
-	}
-	return cloned
 }
 
 func dryRunIdempotencyKey(cellID, decisionDigest string) string {

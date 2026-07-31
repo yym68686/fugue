@@ -455,6 +455,7 @@ func TestValidatorBinaryDependencyBoundary(t *testing.T) {
 		"fugue/internal/backupmaterializer/materialization",
 		"fugue/internal/backupmaterializer/reconcile",
 		"fugue/internal/backupmaterializer/reconciler",
+		"fugue/internal/backupmaterializer/secretdryrunrequest",
 		"fugue/internal/backupmaterializer/secretreader",
 		"fugue/internal/backupmaterializer/secretreader/projected",
 		"fugue/internal/backupmaterializer/secretwriter",
@@ -492,6 +493,7 @@ func TestValidatorImageHasExactScratchAndNoPublishBoundary(t *testing.T) {
 		"COPY internal/backupmaterializer/materialization ./internal/backupmaterializer/materialization",
 		"COPY internal/backupmaterializer/reconcile ./internal/backupmaterializer/reconcile",
 		"COPY internal/backupmaterializer/reconciler ./internal/backupmaterializer/reconciler",
+		"COPY internal/backupmaterializer/secretdryrunrequest ./internal/backupmaterializer/secretdryrunrequest",
 		"COPY internal/backupmaterializer/secretreader ./internal/backupmaterializer/secretreader",
 		"COPY internal/backupmaterializer/secretwriter ./internal/backupmaterializer/secretwriter",
 		"COPY internal/backupmaterializer/validationagent ./internal/backupmaterializer/validationagent",
@@ -531,6 +533,7 @@ func TestValidatorImageHasExactScratchAndNoPublishBoundary(t *testing.T) {
 	workflowRaw := string(workflow)
 	for _, required := range []string{
 		"permissions:\n  contents: read", "backup-materializer-validator-image-${{ github.ref }}",
+		"internal/backupmaterializer/secretdryrunrequest/**",
 		"build and probe validator (no publish)", "--load", "scripts/test_backup_materializer_validator_image.sh",
 	} {
 		if !strings.Contains(workflowRaw, required) {

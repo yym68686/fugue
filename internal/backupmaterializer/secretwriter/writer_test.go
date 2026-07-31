@@ -435,22 +435,29 @@ func TestValidateTransportRequestAcceptsOnlyCanonicalSealedWriterOutput(t *testi
 	desired := testPlan(t, "run-transport-desired", now)
 	create := testCreateDecision(t, previous, now)
 	replace := testReplaceDecision(t, previous, desired, now)
-	writer := &Writer{
-		collectionURL: "https://kubernetes.example.test" + secretCollectionPath + "?" + DryRunRawQuery,
-		itemURL:       "https://kubernetes.example.test" + secretCollectionPath + "/" + desired.SecretName + "?" + DryRunRawQuery,
+	identity, err := materialization.SecretIdentityForCell(previous.CellKey)
+	if err != nil {
+		t.Fatalf("resolve writer identity: %v", err)
 	}
-	createDocument, createMethod, _, _, err := buildRequest(writer, previous, create, now)
+	writer := &Writer{
+		collectionURL:  "https://kubernetes.example.test" + secretCollectionPath + "?" + DryRunRawQuery,
+		itemURL:        "https://kubernetes.example.test" + secretCollectionPath + "/" + desired.SecretName + "?" + DryRunRawQuery,
+		expectedCell:   identity.CellKey,
+		expectedCellID: identity.CellID,
+		expectedName:   identity.SecretName,
+	}
+	createRequest, createDocument, _, err := buildRequest(writer, previous, create, now)
 	if err != nil {
 		t.Fatalf("build canonical create request: %v", err)
 	}
-	replaceDocument, replaceMethod, _, _, err := buildRequest(writer, desired, replace, now)
+	replaceRequest, replaceDocument, _, err := buildRequest(writer, desired, replace, now)
 	if err != nil {
 		t.Fatalf("build canonical replace request: %v", err)
 	}
-	if err := ValidateTransportRequest(createMethod, secretCollectionPath, DryRunRawQuery, previous.CellKey, createDocument); err != nil {
+	if err := ValidateTransportRequest(createRequest.Method, secretCollectionPath, DryRunRawQuery, previous.CellKey, createDocument); err != nil {
 		t.Fatalf("canonical create rejected: %v", err)
 	}
-	if err := ValidateTransportRequest(replaceMethod, secretCollectionPath+"/"+desired.SecretName, DryRunRawQuery, desired.CellKey, replaceDocument); err != nil {
+	if err := ValidateTransportRequest(replaceRequest.Method, secretCollectionPath+"/"+desired.SecretName, DryRunRawQuery, desired.CellKey, replaceDocument); err != nil {
 		t.Fatalf("canonical replace rejected: %v", err)
 	}
 
@@ -491,7 +498,7 @@ func TestValidateTransportRequestAcceptsOnlyCanonicalSealedWriterOutput(t *testi
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			method := createMethod
+			method := createRequest.Method
 			if test.method != "" {
 				method = test.method
 			}
@@ -537,7 +544,7 @@ func TestValidateTransportRequestAcceptsOnlyCanonicalSealedWriterOutput(t *testi
 	if err != nil {
 		t.Fatalf("encode replace without CAS: %v", err)
 	}
-	if err := ValidateTransportRequest(replaceMethod, secretCollectionPath+"/"+desired.SecretName, DryRunRawQuery, desired.CellKey, withoutCAS); !errors.Is(err, ErrIntent) {
+	if err := ValidateTransportRequest(replaceRequest.Method, secretCollectionPath+"/"+desired.SecretName, DryRunRawQuery, desired.CellKey, withoutCAS); !errors.Is(err, ErrIntent) {
 		t.Fatalf("replace without CAS accepted: %v", err)
 	}
 }
@@ -673,7 +680,7 @@ func TestSecretWriterProductionDependencyBoundary(t *testing.T) {
 	direct := strings.Fields(string(directOutput))
 	sort.Strings(direct)
 	wantDirect := []string{
-		"bytes", "context", "crypto/sha256", "encoding/base64", "encoding/hex", "encoding/json", "errors", "fmt", "fugue/internal/backupmaterializer/materialization", "fugue/internal/backupmaterializer/reconcile", "io", "mime", "net/http", "net/url", "reflect", "strconv", "strings", "time",
+		"bytes", "context", "crypto/sha256", "encoding/base64", "encoding/hex", "encoding/json", "errors", "fmt", "fugue/internal/backupmaterializer/materialization", "fugue/internal/backupmaterializer/reconcile", "fugue/internal/backupmaterializer/secretdryrunrequest", "io", "mime", "net/http", "net/url", "reflect", "strconv", "strings", "time",
 	}
 	sort.Strings(wantDirect)
 	if !reflect.DeepEqual(direct, wantDirect) {
@@ -831,6 +838,14 @@ func testManagedObservation(t *testing.T, plan materialization.Plan, now time.Ti
 		t.Fatalf("observe managed: %v", err)
 	}
 	return observation
+}
+
+func cloneStringMap(value map[string]string) map[string]string {
+	cloned := make(map[string]string, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
 }
 
 func testPlan(t *testing.T, runID string, now time.Time) materialization.Plan {

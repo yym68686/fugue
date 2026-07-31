@@ -19,6 +19,7 @@ COPY internal/backupmaterializer/dryrunreconciler ./internal/backupmaterializer/
 COPY internal/backupmaterializer/materialization ./internal/backupmaterializer/materialization
 COPY internal/backupmaterializer/reconcile ./internal/backupmaterializer/reconcile
 COPY internal/backupmaterializer/reconciler ./internal/backupmaterializer/reconciler
+COPY internal/backupmaterializer/secretdryrunrequest ./internal/backupmaterializer/secretdryrunrequest
 COPY internal/backupmaterializer/secretreader ./internal/backupmaterializer/secretreader
 COPY internal/backupmaterializer/secretwriter ./internal/backupmaterializer/secretwriter
 COPY internal/backupmaterializer/validationagent ./internal/backupmaterializer/validationagent

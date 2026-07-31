@@ -14,6 +14,7 @@ on:
       - internal/backupmaterializer/materialization/**
       - internal/backupmaterializer/reconcile/**
       - internal/backupmaterializer/reconciler/**
+      - internal/backupmaterializer/secretdryrunrequest/**
       - internal/backupmaterializer/secretreader/**
       - internal/backupmaterializer/secretwriter/**
       - internal/backupmaterializer/validationagent/**
@@ -34,6 +35,7 @@ on:
       - internal/backupmaterializer/materialization/**
       - internal/backupmaterializer/reconcile/**
       - internal/backupmaterializer/reconciler/**
+      - internal/backupmaterializer/secretdryrunrequest/**
       - internal/backupmaterializer/secretreader/**
       - internal/backupmaterializer/secretwriter/**
       - internal/backupmaterializer/validationagent/**
@@ -78,6 +80,7 @@ jobs:
             ./internal/backupmaterializer/materialization \
             ./internal/backupmaterializer/reconcile \
             ./internal/backupmaterializer/reconciler \
+            ./internal/backupmaterializer/secretdryrunrequest \
             ./internal/backupmaterializer/secretreader \
             ./internal/backupmaterializer/secretreader/projected \
             ./internal/backupmaterializer/secretwriter \
@@ -97,7 +100,7 @@ jobs:
             exit 1
           fi
           local_deps="$(grep '^fugue/' <<<"${deps}" | sort -u)"
-          expected_local_deps=$'fugue/cmd/fugue-backup-materializer-validator\nfugue/internal/backupcontrol\nfugue/internal/backupmaterializer/client\nfugue/internal/backupmaterializer/client/projected\nfugue/internal/backupmaterializer/contract\nfugue/internal/backupmaterializer/dryrunreconciler\nfugue/internal/backupmaterializer/materialization\nfugue/internal/backupmaterializer/reconcile\nfugue/internal/backupmaterializer/reconciler\nfugue/internal/backupmaterializer/secretreader\nfugue/internal/backupmaterializer/secretreader/projected\nfugue/internal/backupmaterializer/secretwriter\nfugue/internal/backupmaterializer/secretwriter/projected\nfugue/internal/backupmaterializer/validationagent\nfugue/internal/backupmaterializer/validationcomposition\nfugue/internal/backupmaterializer/validationcycle'
+          expected_local_deps=$'fugue/cmd/fugue-backup-materializer-validator\nfugue/internal/backupcontrol\nfugue/internal/backupmaterializer/client\nfugue/internal/backupmaterializer/client/projected\nfugue/internal/backupmaterializer/contract\nfugue/internal/backupmaterializer/dryrunreconciler\nfugue/internal/backupmaterializer/materialization\nfugue/internal/backupmaterializer/reconcile\nfugue/internal/backupmaterializer/reconciler\nfugue/internal/backupmaterializer/secretdryrunrequest\nfugue/internal/backupmaterializer/secretreader\nfugue/internal/backupmaterializer/secretreader/projected\nfugue/internal/backupmaterializer/secretwriter\nfugue/internal/backupmaterializer/secretwriter/projected\nfugue/internal/backupmaterializer/validationagent\nfugue/internal/backupmaterializer/validationcomposition\nfugue/internal/backupmaterializer/validationcycle'
           if [[ "${local_deps}" != "${expected_local_deps}" ]]; then
             printf 'backup materializer validator image local dependency closure drifted:\n%s\n' "${local_deps}" >&2
             exit 1

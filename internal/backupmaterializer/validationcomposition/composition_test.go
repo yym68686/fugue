@@ -430,6 +430,7 @@ func TestValidationCompositionDependencyBoundary(t *testing.T) {
 		"fugue/internal/backupmaterializer/materialization",
 		"fugue/internal/backupmaterializer/reconcile",
 		"fugue/internal/backupmaterializer/reconciler",
+		"fugue/internal/backupmaterializer/secretdryrunrequest",
 		"fugue/internal/backupmaterializer/secretreader",
 		"fugue/internal/backupmaterializer/secretreader/projected",
 		"fugue/internal/backupmaterializer/secretwriter",

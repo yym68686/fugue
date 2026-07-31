@@ -459,6 +459,7 @@ func TestDryRunReconcilerProductionDependencyBoundary(t *testing.T) {
 		"fugue/internal/backupmaterializer/materialization",
 		"fugue/internal/backupmaterializer/reconcile",
 		"fugue/internal/backupmaterializer/reconciler",
+		"fugue/internal/backupmaterializer/secretdryrunrequest",
 		"fugue/internal/backupmaterializer/secretwriter",
 	}
 	if !reflect.DeepEqual(local, wantLocal) {

@@ -525,6 +525,7 @@ func TestValidationCycleProductionDependencyBoundary(t *testing.T) {
 		"fugue/internal/backupmaterializer/materialization",
 		"fugue/internal/backupmaterializer/reconcile",
 		"fugue/internal/backupmaterializer/reconciler",
+		"fugue/internal/backupmaterializer/secretdryrunrequest",
 		"fugue/internal/backupmaterializer/secretwriter",
 		"fugue/internal/backupmaterializer/validationcycle",
 	}

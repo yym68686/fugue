@@ -510,6 +510,7 @@ func TestProjectedWriterProductionDependencyBoundary(t *testing.T) {
 		"fugue/internal/backupmaterializer/contract",
 		"fugue/internal/backupmaterializer/materialization",
 		"fugue/internal/backupmaterializer/reconcile",
+		"fugue/internal/backupmaterializer/secretdryrunrequest",
 		"fugue/internal/backupmaterializer/secretwriter",
 		"fugue/internal/backupmaterializer/secretwriter/projected",
 	}
