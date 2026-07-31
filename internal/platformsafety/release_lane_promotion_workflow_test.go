@@ -20,11 +20,15 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "2a59067621f8d933b7c5a12638acb4f87103af556d3ee73561244dfb9abad7ea")
+	assertWorkflowSourceDigest(t, data, "a1d7afe03f6115d83e6d090c5474226ffd1945066b566ff546b241dbfe96052b")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
-		Jobs        map[string]struct {
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress string `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+		Jobs map[string]struct {
 			Needs           workflowNeeds         `yaml:"needs"`
 			RunsOn          yaml.Node             `yaml:"runs-on"`
 			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
@@ -67,11 +71,12 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		"expected_runtime_sha",
 		"expected_sha",
 		"expected_terminal_oid",
+		"supersede_stuck_run_id",
 	}
 	if got := sortedMapKeys(dispatch.Inputs); !reflect.DeepEqual(got, wantInputs) {
 		t.Fatalf("lane promotion inputs = %v, want %v", got, wantInputs)
 	}
-	for _, name := range wantInputs {
+	for _, name := range wantInputs[:len(wantInputs)-1] {
 		var input releaseWorkflowDispatchInput
 		node := dispatch.Inputs[name]
 		if err := node.Decode(&input); err != nil {
@@ -80,6 +85,18 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		if !input.Required || input.Type != "string" || input.Default != nil {
 			t.Fatalf("%s must be a required string without default: %+v", name, input)
 		}
+	}
+	var supersedeInput releaseWorkflowDispatchInput
+	supersedeNode := dispatch.Inputs["supersede_stuck_run_id"]
+	if err := supersedeNode.Decode(&supersedeInput); err != nil {
+		t.Fatalf("decode supersede_stuck_run_id input: %v", err)
+	}
+	if supersedeInput.Required || supersedeInput.Type != "string" || supersedeInput.Default != "" {
+		t.Fatalf("supersede_stuck_run_id must be an optional empty-default string: %+v", supersedeInput)
+	}
+	if workflow.Concurrency.Group != "fugue-control-plane-release-lane-promotion-rp5" ||
+		workflow.Concurrency.CancelInProgress != "${{ inputs.supersede_stuck_run_id != '' && github.actor == github.repository_owner }}" {
+		t.Fatalf("lane promotion concurrency recovery boundary drifted: %+v", workflow.Concurrency)
 	}
 	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 2 {
 		t.Fatalf("lane promotion top-level boundary drifted: %+v", workflow)
@@ -157,6 +174,12 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`curl \`,
 		`--header "Authorization: Bearer ${GITHUB_TOKEN}"`,
 		`--header 'X-GitHub-Api-Version: 2022-11-28'`,
+		`validate_superseded_run()`,
+		`"${GITHUB_ACTOR}" == "${GITHUB_REPOSITORY_OWNER}"`,
+		`"${SUPERSEDE_STUCK_RUN_ID}" != "${GITHUB_RUN_ID}"`,
+		`/jobs?filter=all&per_page=100`,
+		`superseded run has historical jobs`,
+		`("completed", "cancelled")`,
 		`"${RUNNER_NAME}" == "${EXPECTED_RUNNER_NAME}"`,
 		`"${RUNNER_OS}" == 'Linux'`,
 		`"${RUNNER_ARCH}" == 'X64'`,
@@ -172,7 +195,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"${represented_previous}" == "${baseline_parent}"`,
 		`git merge-base --is-ancestor "${EXPECTED_RUNTIME_SHA}" "${GITHUB_SHA}"`,
 		`for run_status in queued in_progress waiting pending requested`,
-		`if identifier != current:`,
+		`if identifier != current and str(identifier) != superseded:`,
 	} {
 		if !strings.Contains(authorize.Run, required) {
 			t.Fatalf("lane qualification authorization must contain %q", required)
@@ -203,6 +226,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`helm status "${FUGUE_RELEASE_NAME}"`,
 		`"api_health_url": os.environ["EXPECTED_API_HEALTH_URL"]`,
 		`"terminal_mode": "frozen"`,
+		`"supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"]`,
 		`"workflow_mutation_attempted": False`,
 		`"deploy_dispatch_attempted": False`,
 		`"cluster_mutation_attempted": False`,
@@ -229,6 +253,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"repository": os.environ["GITHUB_REPOSITORY"]`,
 		`"run_id": os.environ["GITHUB_RUN_ID"]`,
 		`"run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])`,
+		`"supersede_stuck_run_id": os.environ["SUPERSEDE_STUCK_RUN_ID"]`,
 	} {
 		if !strings.Contains(consume.Run, required) {
 			t.Fatalf("lane qualification consumer must contain %q", required)
@@ -245,7 +270,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		`"${baseline_oid}" == "${EXPECTED_BASELINE_OID}"`,
 		`"${terminal_oid}" == "${EXPECTED_TERMINAL_OID}"`,
 		`for run_status in queued in_progress waiting pending requested`,
-		`select(.id != ${GITHUB_RUN_ID})`,
+		`str(identifier) not in {current, superseded}`,
 		`"${state_before}" == 'disabled_manually'`,
 		`--method PUT`,
 		`actions/workflows/${workflow_id}/enable`,
@@ -371,7 +396,7 @@ func TestRP5ReleaseLanePromotionSelfHostedGitHubClientUsesCurl(t *testing.T) {
 
 	authorize := rp5PromotionWorkflowStep(t, "qualify-control-plane-lane", "Verify exact read-only lane qualification authorization")
 	const startMarker = "github_api_get() {\n"
-	const endMarker = "\n}\npolicy_commit="
+	const endMarker = "\n}\nvalidate_superseded_run()"
 	start := strings.Index(authorize.Run, startMarker)
 	if start < 0 {
 		t.Fatal("self-hosted GitHub API client start marker is absent")
@@ -421,6 +446,95 @@ printf '%s\n' '{"object":{"sha":"1111111111111111111111111111111111111111"}}'
 	}
 }
 
+func TestRP5ReleaseLanePromotionSupersedeValidationHarness(t *testing.T) {
+	t.Parallel()
+
+	authorize := rp5PromotionWorkflowStep(t, "qualify-control-plane-lane", "Verify exact read-only lane qualification authorization")
+	const startMarker = "validate_superseded_run() {\n"
+	const endMarker = "\n}\nvalidate_superseded_run || exit 1"
+	start := strings.Index(authorize.Run, startMarker)
+	if start < 0 {
+		t.Fatal("superseded run validator start marker is absent")
+	}
+	endOffset := strings.Index(authorize.Run[start:], endMarker)
+	if endOffset < 0 {
+		t.Fatal("superseded run validator end marker is absent")
+	}
+	validator := authorize.Run[start : start+endOffset+2]
+
+	const (
+		expectedSHA = "1111111111111111111111111111111111111111"
+		currentRun  = "444"
+		targetRun   = "333"
+	)
+	validCurrentRun := `{"id":444,"workflow_id":77,"path":".github/workflows/promote-control-plane-release-lane-rp5.yml"}`
+	validRun := `{"id":333,"workflow_id":77,"run_attempt":1,"event":"workflow_dispatch","head_sha":"` + expectedSHA + `","path":".github/workflows/promote-control-plane-release-lane-rp5.yml","status":"completed","conclusion":"cancelled"}`
+	validJobs := `{"total_count":0,"jobs":[]}`
+	tests := []struct {
+		name     string
+		target   string
+		runJSON  string
+		jobsJSON string
+		actor    string
+		owner    string
+		wantPass bool
+	}{
+		{name: "normal dispatch preserves empty recovery path", actor: "owner", owner: "owner", wantPass: true},
+		{name: "valid zero-job cancelled recovery", target: targetRun, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: true},
+		{name: "forged nonnumeric run id", target: "not-a-run", runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+		{name: "non-owner recovery", target: targetRun, runJSON: validRun, jobsJSON: validJobs, actor: "collaborator", owner: "owner", wantPass: false},
+		{name: "current run cannot supersede itself", target: currentRun, runJSON: validRun, jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+		{name: "historical job rejects recovery", target: targetRun, runJSON: validRun, jobsJSON: `{"total_count":1,"jobs":[{"id":9}]}`, actor: "owner", owner: "owner", wantPass: false},
+		{name: "wrong source sha rejects recovery", target: targetRun, runJSON: strings.Replace(validRun, expectedSHA, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1), jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+		{name: "wrong completed state rejects recovery", target: targetRun, runJSON: strings.Replace(validRun, `"conclusion":"cancelled"`, `"conclusion":"success"`, 1), jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+		{name: "still queued after settlement window rejects recovery", target: targetRun, runJSON: strings.Replace(validRun, `"status":"completed","conclusion":"cancelled"`, `"status":"queued","conclusion":null`, 1), jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+		{name: "wrong workflow path rejects recovery", target: targetRun, runJSON: strings.Replace(validRun, "promote-control-plane-release-lane-rp5.yml", "deploy-control-plane.yml", 1), jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+		{name: "wrong workflow identity rejects recovery", target: targetRun, runJSON: strings.Replace(validRun, `"workflow_id":77`, `"workflow_id":88`, 1), jobsJSON: validJobs, actor: "owner", owner: "owner", wantPass: false},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			tempDir := t.TempDir()
+			mockBin := filepath.Join(tempDir, "bin")
+			if err := os.Mkdir(mockBin, 0o700); err != nil {
+				t.Fatalf("create mock bin: %v", err)
+			}
+			writeRP5PromotionExecutable(t, filepath.Join(mockBin, "sleep"), "#!/usr/bin/env bash\nexit 0\n")
+			command := exec.Command("bash", "-c", `set -euo pipefail
+github_api_get() {
+  if [[ "$1" == *"/jobs?"* ]]; then
+    printf '%s\n' "${MOCK_JOBS_JSON}"
+  elif [[ "$1" == *"/actions/runs/${GITHUB_RUN_ID}" ]]; then
+    printf '%s\n' "${MOCK_CURRENT_RUN_JSON}"
+  else
+    printf '%s\n' "${MOCK_RUN_JSON}"
+  fi
+}
+`+validator+"\nvalidate_superseded_run")
+			command.Env = append(os.Environ(),
+				"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"SUPERSEDE_STUCK_RUN_ID="+test.target,
+				"MOCK_RUN_JSON="+test.runJSON,
+				"MOCK_CURRENT_RUN_JSON="+validCurrentRun,
+				"MOCK_JOBS_JSON="+test.jobsJSON,
+				"GITHUB_ACTOR="+test.actor,
+				"GITHUB_REPOSITORY_OWNER="+test.owner,
+				"GITHUB_REPOSITORY=example/fugue",
+				"GITHUB_RUN_ID="+currentRun,
+				"EXPECTED_SHA="+expectedSHA,
+			)
+			output, err := command.CombinedOutput()
+			if test.wantPass && err != nil {
+				t.Fatalf("superseded run validator rejected valid case: %v output=%s", err, output)
+			}
+			if !test.wantPass && err == nil {
+				t.Fatalf("superseded run validator accepted invalid case: output=%s", output)
+			}
+		})
+	}
+}
+
 func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 	t.Parallel()
 
@@ -440,6 +554,7 @@ func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 		baselineDrift bool
 		terminalDrift bool
 		otherRuns     string
+		supersede     string
 		wantPass      bool
 		wantState     string
 		wantWrites    string
@@ -452,6 +567,8 @@ func TestRP5ReleaseLanePromotionEnableSettlementHarness(t *testing.T) {
 		{name: "baseline drift blocks before enable", mutate: "false", putExit: "0", baselineDrift: true, wantPass: false, wantState: "disabled_manually"},
 		{name: "terminal drift blocks before enable", mutate: "false", putExit: "0", terminalDrift: true, wantPass: false, wantState: "disabled_manually"},
 		{name: "active run blocks before enable", mutate: "false", putExit: "0", otherRuns: "999", wantPass: false, wantState: "disabled_manually"},
+		{name: "recovery ignores only exact superseded run", mutate: "true", putExit: "0", otherRuns: "999", supersede: "999", wantPass: true, wantState: "active", wantWrites: "PUT\n"},
+		{name: "recovery rejects a different active run", mutate: "false", putExit: "0", otherRuns: "998", supersede: "999", wantPass: false, wantState: "disabled_manually"},
 	}
 	for _, test := range tests {
 		test := test
@@ -495,7 +612,11 @@ if [[ "$*" == *"git/ref/heads/fugue-control-plane-release-terminal-state"* ]]; t
   exit 0
 fi
 if [[ "$*" == *"actions/runs?status="* ]]; then
-  printf '%s' "${OTHER_RUNS}"
+  if [[ -n "${OTHER_RUNS}" ]]; then
+    printf '{"workflow_runs":[{"id":%s}]}' "${OTHER_RUNS}"
+  else
+    printf '%s' '{"workflow_runs":[]}'
+  fi
   exit 0
 fi
 if [[ "$*" == *"actions/workflows/deploy-control-plane.yml"* ]]; then
@@ -531,7 +652,10 @@ exit 91
 				"OBSERVED_TERMINAL_OID="+observedTerminal,
 				"OTHER_RUNS="+test.otherRuns,
 				"GITHUB_REPOSITORY=example/fugue",
+				"GITHUB_ACTOR=owner",
+				"GITHUB_REPOSITORY_OWNER=owner",
 				"GITHUB_RUN_ID=444",
+				"SUPERSEDE_STUCK_RUN_ID="+test.supersede,
 				"GITHUB_STEP_SUMMARY="+filepath.Join(tempDir, "summary"),
 				"GH_TOKEN=test",
 			)
