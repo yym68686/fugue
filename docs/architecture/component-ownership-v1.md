@@ -1149,6 +1149,32 @@ push, artifact upload, dispatch, Helm, Kubernetes, environment, release, or
 production capability. This atom creates no registry artifact,
 ServiceAccount, RBAC, volume, Pod, chart, or production enablement.
 
+`internal/backupmaterializer/dryrunguard` adds the pure
+`backup-materializer-dry-run-guard@v1` contract before any validator workload
+receives Kubernetes mutation-shaped authorization. The validator itself will
+not hold that credential. A future cell-local dry-run gateway gets a distinct
+ServiceAccount and may receive only Secret `create` plus name-scoped `update`;
+the API server must first report an exact `ValidatingAdmissionPolicy` and
+binding ready. The policy is scoped to that username and cell Secret, uses
+`matchPolicy: Equivalent`, `failurePolicy: Fail`, and `validationActions:
+[Deny]`, and accepts only `request.dryRun == true` with canonical create/update
+evidence. Live requests, generated names, subresources, cross-cell targets,
+and malformed old-object evidence are denied.
+
+This split is required because Kubernetes authorizes server-side dry-run with
+the same RBAC verbs as a real mutation, and a Role cannot constrain Secret
+`create` by `resourceNames`. The admission guard therefore seals the gap while
+the separate gateway keeps the write-shaped token out of the validator's
+failure boundary. The contract requires Kubernetes 1.30 or newer, where
+Validating Admission Policy is stable, a bound projected token with default
+automount disabled, and admission readiness before RBAC. Its local policy
+oracle exhaustively denies live and cross-cell requests, while rebuilding all
+fields from the cell key prevents a recomputed digest from blessing widened
+rules. The independent path-scoped CI lane has only `contents: read` and no
+image, artifact, dispatch, Helm, Kubernetes, release, or production
+capability. This atom creates no ServiceAccount, Role, admission object,
+credential, process, Pod, chart, or production change.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with

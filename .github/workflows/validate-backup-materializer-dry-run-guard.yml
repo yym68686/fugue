@@ -1,0 +1,63 @@
+name: validate backup materializer dry-run guard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - internal/backupcontrol/**
+      - internal/backupmaterializer/contract/**
+      - internal/backupmaterializer/materialization/**
+      - internal/backupmaterializer/dryrunguard/**
+      - .github/workflows/validate-backup-materializer-dry-run-guard.yml
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - internal/backupcontrol/**
+      - internal/backupmaterializer/contract/**
+      - internal/backupmaterializer/materialization/**
+      - internal/backupmaterializer/dryrunguard/**
+      - .github/workflows/validate-backup-materializer-dry-run-guard.yml
+      - go.mod
+      - go.sum
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-materializer-dry-run-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-only:
+    name: validate backup materializer dry-run guard (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify fail-closed guard and pure dependency boundary
+        run: |
+          set -euo pipefail
+          go test ./internal/backupmaterializer/dryrunguard -count=10
+          go test -race ./internal/backupmaterializer/dryrunguard -count=3
+          go vet ./internal/backupmaterializer/dryrunguard
+          deps="$(go list -deps ./internal/backupmaterializer/dryrunguard)"
+          if grep -Eq '^(database/sql|net/http|os/exec|k8s.io/|github.com/(aws|google/go-containerregistry|jackc))' <<<"${deps}"; then
+            echo 'backup materializer dry-run guard dependency boundary widened' >&2
+            exit 1
+          fi
+          local_deps="$(grep '^fugue/' <<<"${deps}" | sort -u)"
+          expected_local_deps=$'fugue/internal/backupcontrol\nfugue/internal/backupmaterializer/contract\nfugue/internal/backupmaterializer/dryrunguard\nfugue/internal/backupmaterializer/materialization'
+          if [[ "${local_deps}" != "${expected_local_deps}" ]]; then
+            printf 'backup materializer dry-run guard local dependency closure drifted:\n%s\n' "${local_deps}" >&2
+            exit 1
+          fi
