@@ -47,6 +47,7 @@ type activationPlanOptions struct {
 	planPath            string
 	planDigest          string
 	baseManifestPath    string
+	observedLivePath    string
 	targetManifestPath  string
 	trustedBase         string
 	trustedTarget       string
@@ -96,6 +97,14 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, activationPlanInputError)
 		return 1
 	}
+	var observedLiveManifest []byte
+	if options.observedLivePath != "" {
+		observedLiveManifest, _, err = readBoundedRegularFile(options.observedLivePath, canonicalManifestInputLimit, true)
+		if err != nil {
+			fmt.Fprintln(stderr, activationPlanInputError)
+			return 1
+		}
+	}
 
 	artifacts := append([]releasedomain.BuildArtifact(nil), options.artifacts...)
 	for index := range artifacts {
@@ -111,8 +120,12 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 		writeActivationPlanBuildError(stderr, err)
 		return 1
 	}
-	immutableTargetManifest, err := releasedomain.MaterializeLiveRelativeTargetPublishedImageRefs(
-		baseManifest, targetManifest, ownership, plan.Digests.ClassificationContext.DefaultNamespace,
+	activationLiveManifest := baseManifest
+	if len(observedLiveManifest) != 0 {
+		activationLiveManifest = observedLiveManifest
+	}
+	immutableTargetManifest, err := releasedomain.MaterializeObservedLiveRelativeTargetPublishedImageRefs(
+		baseManifest, activationLiveManifest, targetManifest, ownership, plan.Digests.ClassificationContext.DefaultNamespace,
 		options.trustedTarget, buildPlan, plan,
 	)
 	if err != nil {
@@ -121,7 +134,8 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 	}
 	activationPlan, activationEvidence, err := releasedomain.BuildImageActivationReportFromManifests(releasedomain.ImageActivationPlanInput{
 		BuildPlan: buildPlan, ReleasePlan: plan, Ownership: ownership,
-		BaseManifest: baseManifest, TargetManifest: targetManifest,
+		BaseManifest: baseManifest, ObservedLiveManifest: observedLiveManifest,
+		TargetManifest:          targetManifest,
 		ImmutableTargetManifest: immutableTargetManifest,
 	})
 	if err != nil {
@@ -155,7 +169,7 @@ func runImageActivationPlans(args []string, _ io.Writer, stderr io.Writer) int {
 	}
 	if err := writeActivationPlanDirectory(
 		options.outputDirectory, buildBytes, activationBytes, evidenceBytes,
-		decompositionBytes, immutableTargetManifest,
+		decompositionBytes, immutableTargetManifest, observedLiveManifest,
 	); err != nil {
 		fmt.Fprintln(stderr, activationPlanOutputError)
 		return 1
@@ -218,7 +232,8 @@ func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error)
 	allowed := map[string]bool{
 		"changed-evidence": false, "ownership": false, "plan": false,
 		"plan-digest": false, "base-manifest": false, "target-manifest": false,
-		"trusted-base": false, "trusted-target": false, "provenance-digest": false,
+		"observed-live-manifest": false,
+		"trusted-base":           false, "trusted-target": false, "provenance-digest": false,
 		"output-dir": false, "artifact": true,
 	}
 	seen := map[string]struct{}{}
@@ -253,6 +268,7 @@ func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error)
 	flags.StringVar(&options.planPath, "plan", "", "verified conservative release-domain plan")
 	flags.StringVar(&options.planDigest, "plan-digest", "", "independently trusted release-domain plan digest")
 	flags.StringVar(&options.baseManifestPath, "base-manifest", "", "private canonical live manifest")
+	flags.StringVar(&options.observedLivePath, "observed-live-manifest", "", "private canonical image-only observed live manifest")
 	flags.StringVar(&options.targetManifestPath, "target-manifest", "", "private canonical target manifest")
 	flags.StringVar(&options.trustedBase, "trusted-base", "", "trusted exact base commit")
 	flags.StringVar(&options.trustedTarget, "trusted-target", "", "trusted exact target commit")
@@ -281,12 +297,16 @@ func parseImageActivationPlanFlags(args []string) (activationPlanOptions, error)
 	if !filepath.IsAbs(options.outputDirectory) || filepath.Clean(options.outputDirectory) != options.outputDirectory {
 		return activationPlanOptions{}, fmt.Errorf("--output-dir must be an absolute normalized path")
 	}
+	if options.observedLivePath != "" && strings.TrimSpace(options.observedLivePath) != options.observedLivePath {
+		return activationPlanOptions{}, fmt.Errorf("--observed-live-manifest must not contain surrounding whitespace")
+	}
 	return options, nil
 }
 
 func writeActivationPlanDirectory(
 	output string,
 	buildPlan, activationPlan, activationEvidence, decompositionEvidence, immutableTargetManifest []byte,
+	observedLiveManifest []byte,
 ) (resultErr error) {
 	parentPath := filepath.Dir(output)
 	parentInfo, err := os.Lstat(parentPath)
@@ -324,6 +344,11 @@ func writeActivationPlanDirectory(
 	}
 	if err := writePrivateAtomicFile(filepath.Join(temporary, "immutable-target-manifest.yaml"), immutableTargetManifest); err != nil {
 		return err
+	}
+	if len(observedLiveManifest) != 0 {
+		if err := writePrivateAtomicFile(filepath.Join(temporary, "observed-live-manifest.yaml"), observedLiveManifest); err != nil {
+			return err
+		}
 	}
 	directory, err := os.Open(temporary)
 	if err != nil {

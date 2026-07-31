@@ -18,6 +18,7 @@ type ImageActivationPlanInput struct {
 	ReleasePlan             Plan
 	Ownership               []byte
 	BaseManifest            []byte
+	ObservedLiveManifest    []byte
 	TargetManifest          []byte
 	ImmutableTargetManifest []byte
 }
@@ -77,10 +78,23 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 	if err := spec.ValidateBindings(context.BindingMap()); err != nil {
 		return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("validate ownership bindings: %w", err)
 	}
+	activationLiveManifest := input.BaseManifest
+	if len(input.ObservedLiveManifest) != 0 {
+		if err := VerifyObservedLiveImageManifest(
+			input.BaseManifest,
+			input.ObservedLiveManifest,
+			input.Ownership,
+			context.DefaultNamespace,
+		); err != nil {
+			return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("verify observed live image manifest: %w", err)
+		}
+		activationLiveManifest = input.ObservedLiveManifest
+	}
 	activationTargetManifest := input.TargetManifest
 	if len(input.ImmutableTargetManifest) != 0 {
-		expected, err := MaterializeLiveRelativeTargetPublishedImageRefs(
+		expected, err := MaterializeObservedLiveRelativeTargetPublishedImageRefs(
 			input.BaseManifest,
+			activationLiveManifest,
 			input.TargetManifest,
 			input.Ownership,
 			context.DefaultNamespace,
@@ -97,7 +111,7 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 		activationTargetManifest = input.ImmutableTargetManifest
 	}
 
-	baseObjects, baseUnknown := decodeManifest(input.BaseManifest, spec, context.DefaultNamespace, "base")
+	baseObjects, baseUnknown := decodeManifest(activationLiveManifest, spec, context.DefaultNamespace, "activation live")
 	targetObjects, targetUnknown := decodeManifest(activationTargetManifest, spec, context.DefaultNamespace, "target")
 	if len(baseUnknown) != 0 || len(targetUnknown) != 0 {
 		return ImageActivationPlan{}, ImageActivationEvidence{}, fmt.Errorf("rendered manifests contain incomplete object evidence")
@@ -239,7 +253,7 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 		input.BuildPlan.BaseCommit,
 		input.BuildPlan.TargetCommit,
 		input.BuildPlan.Digest,
-		input.ReleasePlan.Digests.BaseManifest,
+		digestBytesSHA256(activationLiveManifest),
 		activations,
 	)
 	if err != nil {

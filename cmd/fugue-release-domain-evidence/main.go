@@ -74,6 +74,9 @@ func main() {
 	if len(args) > 0 && args[0] == "image-activation-plans" {
 		os.Exit(runImageActivationPlans(args[1:], os.Stdout, os.Stderr))
 	}
+	if len(args) > 0 && args[0] == "observed-live-manifest" {
+		os.Exit(runObservedLiveManifest(args[1:], os.Stdout, os.Stderr))
+	}
 	if len(args) > 0 && args[0] == "image-activation-convergence" {
 		os.Exit(runImageActivationConvergence(args[1:], os.Stdout, os.Stderr))
 	}

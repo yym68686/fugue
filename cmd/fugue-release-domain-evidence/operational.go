@@ -157,6 +157,7 @@ type operationalReportOptions struct {
 	activationEvidencePath          string
 	ownershipPath                   string
 	baseManifestPath                string
+	observedLiveManifestPath        string
 	targetManifestPath              string
 	immutableTargetManifestPath     string
 	planPath                        string
@@ -270,6 +271,14 @@ func buildActivationOperationalReport(
 	if err != nil {
 		return releasedomain.OperationalDomainEvidence{}, nil, err
 	}
+	var observedLive []byte
+	var observedLiveResolved string
+	if options.observedLiveManifestPath != "" {
+		observedLive, observedLiveResolved, err = read(options.observedLiveManifestPath)
+		if err != nil {
+			return releasedomain.OperationalDomainEvidence{}, nil, err
+		}
+	}
 	buildDigest, err := operationalContractDigest(buildBytes)
 	if err != nil {
 		return releasedomain.OperationalDomainEvidence{}, nil, err
@@ -296,7 +305,8 @@ func buildActivationOperationalReport(
 	}
 	rebuiltPlan, rebuiltEvidence, err := releasedomain.BuildImageActivationReportFromManifests(releasedomain.ImageActivationPlanInput{
 		BuildPlan: buildPlan, ReleasePlan: plan, Ownership: ownership,
-		BaseManifest: baseManifest, TargetManifest: targetManifest, ImmutableTargetManifest: immutableTarget,
+		BaseManifest: baseManifest, ObservedLiveManifest: observedLive,
+		TargetManifest: targetManifest, ImmutableTargetManifest: immutableTarget,
 	})
 	if err != nil || !reflect.DeepEqual(rebuiltPlan, activationPlan) || !reflect.DeepEqual(rebuiltEvidence, activationEvidence) {
 		return releasedomain.OperationalDomainEvidence{}, nil, fmt.Errorf("image activation artifact rederivation mismatch")
@@ -311,17 +321,33 @@ func buildActivationOperationalReport(
 	})
 	buildReport := releasedomain.BuildOperationalDomainEvidenceFromRenderedOnlyActivation
 	if options.authorizedImageCacheConvergence {
+		if len(observedLive) != 0 {
+			return releasedomain.OperationalDomainEvidence{}, nil, fmt.Errorf("observed live activation cannot use image-cache convergence policy")
+		}
 		buildReport = releasedomain.BuildOperationalDomainEvidenceFromAuthorizedImageCacheConvergence
 	}
-	report, err := buildReport(
-		changed, buildPlan, activationPlan, activationEvidence, activationRendered,
-		digestOperationalInput(baseManifest), digestOperationalInput(targetManifest),
-		digestOperationalInput(immutableTarget), digestOperationalInput(ownership), plan,
-	)
+	var report releasedomain.OperationalDomainEvidence
+	if len(observedLive) != 0 {
+		report, err = releasedomain.BuildOperationalDomainEvidenceFromObservedLiveActivation(
+			changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+			digestOperationalInput(baseManifest), digestOperationalInput(observedLive),
+			digestOperationalInput(targetManifest), digestOperationalInput(immutableTarget),
+			digestOperationalInput(ownership), plan,
+		)
+	} else {
+		report, err = buildReport(
+			changed, buildPlan, activationPlan, activationEvidence, activationRendered,
+			digestOperationalInput(baseManifest), digestOperationalInput(targetManifest),
+			digestOperationalInput(immutableTarget), digestOperationalInput(ownership), plan,
+		)
+	}
 	if err != nil {
 		return releasedomain.OperationalDomainEvidence{}, nil, err
 	}
 	resolved = append(resolved, buildResolved, activationResolved, evidenceResolved, ownershipResolved, baseResolved, targetResolved, immutableResolved)
+	if observedLiveResolved != "" {
+		resolved = append(resolved, observedLiveResolved)
+	}
 	return report, resolved, nil
 }
 
@@ -348,6 +374,7 @@ func parseOperationalReportFlags(args []string) (operationalReportOptions, error
 		"image-activation-evidence":          {},
 		"ownership":                          {},
 		"base-manifest":                      {},
+		"observed-live-manifest":             {},
 		"target-manifest":                    {},
 		"immutable-target-manifest":          {},
 		"plan":                               {},
@@ -388,6 +415,7 @@ func parseOperationalReportFlags(args []string) (operationalReportOptions, error
 	flags.StringVar(&options.activationEvidencePath, "image-activation-evidence", "", "exact image activation completeness evidence")
 	flags.StringVar(&options.ownershipPath, "ownership", "", "exact release ownership policy")
 	flags.StringVar(&options.baseManifestPath, "base-manifest", "", "exact live base manifest")
+	flags.StringVar(&options.observedLiveManifestPath, "observed-live-manifest", "", "exact image-only observed live manifest")
 	flags.StringVar(&options.targetManifestPath, "target-manifest", "", "exact pre-materialization target manifest")
 	flags.StringVar(&options.immutableTargetManifestPath, "immutable-target-manifest", "", "exact immutable activation target manifest")
 	flags.StringVar(&options.planPath, "plan", "", "existing release-domain plan")
@@ -435,11 +463,23 @@ func parseOperationalReportFlags(args []string) (operationalReportOptions, error
 				return operationalReportOptions{}, fmt.Errorf("%s is required without surrounding whitespace", name)
 			}
 		}
-	} else if strings.TrimSpace(options.imagePlanPath) == "" || strings.TrimSpace(options.imagePlanPath) != options.imagePlanPath {
-		return operationalReportOptions{}, fmt.Errorf("--image-plan is required without surrounding whitespace")
+		if options.observedLiveManifestPath != "" &&
+			(strings.TrimSpace(options.observedLiveManifestPath) != options.observedLiveManifestPath) {
+			return operationalReportOptions{}, fmt.Errorf("--observed-live-manifest must not contain surrounding whitespace")
+		}
+	} else {
+		if strings.TrimSpace(options.imagePlanPath) == "" || strings.TrimSpace(options.imagePlanPath) != options.imagePlanPath {
+			return operationalReportOptions{}, fmt.Errorf("--image-plan is required without surrounding whitespace")
+		}
+		if options.observedLiveManifestPath != "" {
+			return operationalReportOptions{}, fmt.Errorf("--observed-live-manifest requires activation evidence")
+		}
 	}
 	if options.authorizedImageCacheConvergence && !activationMode {
 		return operationalReportOptions{}, fmt.Errorf("--authorized-image-cache-convergence requires activation evidence")
+	}
+	if options.authorizedImageCacheConvergence && options.observedLiveManifestPath != "" {
+		return operationalReportOptions{}, fmt.Errorf("--authorized-image-cache-convergence does not accept observed live evidence")
 	}
 	if options.outputPath == "-" {
 		return operationalReportOptions{}, fmt.Errorf("--output must be a file path")

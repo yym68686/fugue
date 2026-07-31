@@ -780,6 +780,99 @@ func TestActivationOperationalEvidenceAuthorizesRenderedOnlyCandidateOnlyWithV4(
 	}
 }
 
+func TestObservedLiveActivationAuthorizesHelmStateAdoptionOnlyWithExactWitness(t *testing.T) {
+	targetDigest := md0Digest("b")
+	input := md1ActivationFixture(
+		t,
+		md1DaemonSet("fugue-dns", "dns", "registry.example/edge:helm-old"),
+		md1DaemonSet("fugue-dns", "dns", "registry.example/edge@"+targetDigest),
+		[]md1OwnershipRule{{name: "fugue-dns", domain: DomainAuthoritativeDNS, kind: "DaemonSet"}},
+		nil,
+	)
+	input.ReleasePlan = BuildPlan(PlanInput{
+		Files: FileClassification{Unknown: []Evidence{{
+			Source: "file", Subject: "scripts/release_fugue_public_data_plane.sh",
+			Reason: "fixture keeps the source classification conservative",
+		}}},
+		Rendered: input.ReleasePlan.Rendered,
+		Digests:  input.ReleasePlan.Digests,
+	})
+	if input.ReleasePlan.Result != OutcomeUnknown {
+		t.Fatalf("conservative result = %s, want unknown", input.ReleasePlan.Result)
+	}
+	observed, err := MaterializeObservedLiveImageManifest(
+		input.BaseManifest,
+		[]byte(md1DaemonSet("fugue-dns", "dns", "registry.example/edge@"+targetDigest)),
+		input.Ownership,
+		"fugue-system",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ObservedLiveManifest = observed
+	input.ImmutableTargetManifest, err = MaterializeObservedLiveRelativeTargetPublishedImageRefs(
+		input.BaseManifest, observed, input.TargetManifest, input.Ownership,
+		"fugue-system", input.BuildPlan.TargetCommit, input.BuildPlan, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activationPlan.Activations) != 0 || !activationEvidence.Complete {
+		t.Fatalf("already-active image was not complete: plan=%#v evidence=%#v", activationPlan, activationEvidence)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(
+		input.BaseManifest,
+		input.ImmutableTargetManifest,
+		spec,
+		RenderedOptions{
+			DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+			Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+		},
+	)
+	changed := ChangedFileEvidence{
+		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
+		changes: []ChangedFile{{Status: ChangeModified, Path: "scripts/release_fugue_public_data_plane.sh"}},
+	}
+	report, err := BuildOperationalDomainEvidenceFromObservedLiveActivation(
+		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,
+		input.ReleasePlan.Digests.BaseManifest, digestBytesSHA256(observed),
+		input.ReleasePlan.Digests.TargetManifest, digestBytesSHA256(input.ImmutableTargetManifest),
+		input.ReleasePlan.Digests.Ownership, input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Policy != OperationalObservedLiveActivationPolicy || !report.AuthorizationEligible ||
+		report.ActivationWitness[0].ObservedLiveManifestDigest != digestBytesSHA256(observed) ||
+		activationPlan.LiveStateDigest != digestBytesSHA256(observed) {
+		t.Fatalf("observed-live report binding drifted: %#v", report)
+	}
+	if _, err := ResolveOperationalPlan(input.ReleasePlan, report); err == nil {
+		t.Fatal("v5 report resolved without its observed-live manifest")
+	}
+	tampered := append([]byte(nil), observed...)
+	tampered[len(tampered)-2] ^= 1
+	if _, err := ResolveOperationalPlanWithObservedLiveManifest(input.ReleasePlan, report, tampered); err == nil {
+		t.Fatal("v5 report resolved with a different observed-live manifest")
+	}
+	resolved, err := ResolveOperationalPlanWithObservedLiveManifest(input.ReleasePlan, report, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Result != OutcomeSingle || resolved.SelectedDomain != DomainAuthoritativeDNS ||
+		!equalDomains(resolved.Domains, []Domain{DomainAuthoritativeDNS}) {
+		t.Fatalf("observed-live Helm state adoption resolved incorrectly: %#v", resolved)
+	}
+}
+
 func TestRenderedOnlyV4KeepsZeroMultipleAndIncompleteEvidenceFailClosed(t *testing.T) {
 	t.Run("zero", func(t *testing.T) {
 		changed, input, activationPlan, activationEvidence, _ := renderedOnlyOperationalActivationFixture(t)

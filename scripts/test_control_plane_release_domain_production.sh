@@ -29,6 +29,18 @@ fake_tool_log() {
 case "$(basename "$0")" in
   fake-release-evidence)
     fake_tool_log "evidence:$*"
+    if [[ "${1:-}" == "observed-live-manifest" ]]; then
+      output="$(fake_flag_value --output "$@")" || exit 2
+      input="$(fake_flag_value --base-manifest "$@")" || exit 2
+      live_workloads="$(fake_flag_value --live-workloads "$@")" || exit 2
+      if grep -Fq '"drift":true' "${live_workloads}"; then
+        printf 'drift\n' >"${output}" || exit 1
+      else
+        cp "${input}" "${output}" || exit 1
+      fi
+      chmod 600 "${output}" || exit 1
+      exit 0
+    fi
     if [[ "${1:-}" == "image-activation-plans" ]]; then
       output_dir="$(fake_flag_value --output-dir "$@")" || exit 2
       mkdir "${output_dir}" || exit 1
@@ -38,6 +50,12 @@ case "$(basename "$0")" in
       printf '{}\n' >"${output_dir}/image-activation-evidence.json" || exit 1
       printf '{}\n' >"${output_dir}/image-activation-plan.json" || exit 1
       printf '%s\n' 'immutable-target-manifest' >"${output_dir}/immutable-target-manifest.yaml" || exit 1
+      observed_input=""
+      if observed_input="$(fake_flag_value --observed-live-manifest "$@" 2>/dev/null)"; then
+        cp "${observed_input}" "${output_dir}/observed-live-manifest.yaml" || exit 1
+      else
+        printf 'base\n' >"${output_dir}/observed-live-manifest.yaml" || exit 1
+      fi
       chmod 600 "${output_dir}"/* || exit 1
       exit 0
     fi
@@ -291,6 +309,24 @@ control_plane_release_verify_repository_snapshot() {
     fake_log "argv-input-tampered"
   fi
   [[ "${FAKE_REPOSITORY_VERIFY_FAIL_AT:-0}" != "${FAKE_REPOSITORY_VERIFY_COUNT}" ]]
+}
+
+release_bounded_kubectl() {
+  local timeout="$1"
+  local label="$2"
+  local count=0
+  shift 2
+  : "${timeout}" "${label}" "$*"
+  if [[ -f "${FAKE_OBSERVED_COUNT_FILE}" ]]; then
+    count="$(<"${FAKE_OBSERVED_COUNT_FILE}")"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "${count}" >"${FAKE_OBSERVED_COUNT_FILE}"
+  if [[ "${FAKE_OBSERVED_DRIFT_AT:-0}" == "${count}" ]]; then
+    printf '%s\n' '{"apiVersion":"v1","kind":"List","metadata":{"drift":true},"items":[]}'
+  else
+    printf '%s\n' '{"apiVersion":"v1","kind":"List","metadata":{},"items":[]}'
+  fi
 }
 
 control_plane_release_run_private_canonical_render_set() {
@@ -610,9 +646,10 @@ setup_case() {
 
   FAKE_LOG="${CASE_DIR}/operations.log"
   FAKE_VERIFY_COUNT_FILE="${CASE_DIR}/verify.count"
+  FAKE_OBSERVED_COUNT_FILE="${CASE_DIR}/observed.count"
   : >"${FAKE_LOG}"
   chmod 600 "${FAKE_LOG}"
-  export FAKE_LOG FAKE_VERIFY_COUNT_FILE
+  export FAKE_LOG FAKE_VERIFY_COUNT_FILE FAKE_OBSERVED_COUNT_FILE
 
   RUNNER_TEMP="${CASE_DIR}/runner"
   FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE="${CASE_DIR}/public/evidence.json"
@@ -629,6 +666,7 @@ setup_case() {
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-evidence.json"
   printf '{}\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/image-activation-plan.json"
   printf '%s\n' 'immutable-target-manifest' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/immutable-target-manifest.yaml"
+  printf 'base\n' >"${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}/observed-live-manifest.yaml"
   chmod 600 "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"/*
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
   FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
@@ -676,9 +714,11 @@ setup_case() {
   FAKE_REPOSITORY_VERIFY_FAIL_AT=0
   FAKE_TAMPER_ARGV_INPUT_AT=0
   FAKE_REPOSITORY_VERIFY_COUNT=0
+  FAKE_OBSERVED_DRIFT_AT=0
   export FAKE_OUTCOME FAKE_DOMAIN FAKE_PLAN_DIGEST FAKE_VERIFY_FAIL_AT FAKE_PUBLIC_FAIL
 	export FAKE_TAMPER_CLEANUP FAKE_OPERATIONAL_REPORT_ELIGIBLE
 	export FAKE_OPERATIONAL_REPORT_OUTCOME
+  export FAKE_OBSERVED_DRIFT_AT
 
   FUGUE_RELEASE_NAME="fugue"
   FUGUE_RELEASE_FULLNAME="fugue"
@@ -768,6 +808,7 @@ if sorted(os.listdir(activation)) != [
     "image-activation-evidence.json",
     "image-activation-plan.json",
     "immutable-target-manifest.yaml",
+    "observed-live-manifest.yaml",
 ]:
     raise SystemExit(1)
 for name in os.listdir(activation):
@@ -1476,6 +1517,40 @@ case_operational_apply_activates_complete_single_domain() {
 	assert_public_parent_and_cleanup
 }
 
+case_operational_apply_rejects_observed_live_prewrite_drift() {
+	setup_case
+	trap cleanup_case EXIT
+	FAKE_OUTCOME="unknown"
+	FAKE_DOMAIN="authoritative-dns"
+	FAKE_OPERATIONAL_REPORT_ELIGIBLE="true"
+	export FAKE_OUTCOME FAKE_DOMAIN FAKE_OPERATIONAL_REPORT_ELIGIBLE
+	rm -f "${FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE}"
+	rm -rf "${FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR}"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="prepare"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST=""
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL=""
+	[[ "$(run_release_status)" == "0" ]] ||
+	  fail_test "observed-live prepare did not reach the upload boundary"
+
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE="apply"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_ID="1234"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_DIGEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	FUGUE_RELEASE_DOMAIN_OPERATIONAL_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/1234"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_ID="5678"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_DIGEST="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_ARTIFACT_URL="https://github.com/example/fugue/actions/runs/123/artifacts/5678"
+	FAKE_OBSERVED_DRIFT_AT=3
+	export FAKE_OBSERVED_DRIFT_AT
+	[[ "$(run_release_status)" == "1" ]] ||
+	  fail_test "observed-live drift immediately before mutation was accepted"
+	assert_log_count 0 "helm-upgrade:"
+	assert_file_contains "${FAKE_LOG}" "--activation-live-canonical-manifest"
+}
+
 case_operational_apply_activates_verified_zero() {
 	setup_case
 	trap cleanup_case EXIT
@@ -1583,6 +1658,7 @@ run_case build-activation-apply-upload-proof case_build_activation_apply_require
 run_case operational-apply-report-drift case_operational_apply_rejects_report_drift
 run_case build-activation-apply-report-drift case_operational_apply_rejects_build_activation_drift
 run_case operational-apply-activation case_operational_apply_activates_complete_single_domain
+run_case operational-apply-observed-live-drift case_operational_apply_rejects_observed_live_prewrite_drift
 run_case operational-apply-zero case_operational_apply_activates_verified_zero
 run_case operational-apply-zero-unverified case_operational_apply_rejects_unverified_zero
 run_case operational-report-build-binding case_operational_report_binds_build_target_before_dispatch

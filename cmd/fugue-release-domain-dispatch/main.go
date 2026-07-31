@@ -116,23 +116,24 @@ func (value *explicitFalseFlag) Set(raw string) error {
 func (value *explicitFalseFlag) IsBoolFlag() bool { return true }
 
 type authorizeOptions struct {
-	ownershipPath           string
-	changedEvidencePath     string
-	trustedBaseCommit       string
-	trustedTargetCommit     string
-	baseManifestPath        string
-	targetManifestPath      string
-	repeatedManifestPath    string
-	argvSnapshotPath        string
-	bundleDir               string
-	releaseName             string
-	releaseNamespace        string
-	baseRevision            string
-	targetRevision          string
-	bindings                bindingFlags
-	ignoreHooks             explicitFalseFlag
-	operationalReportPath   string
-	operationalReportDigest string
+	ownershipPath              string
+	changedEvidencePath        string
+	trustedBaseCommit          string
+	trustedTargetCommit        string
+	baseManifestPath           string
+	targetManifestPath         string
+	repeatedManifestPath       string
+	argvSnapshotPath           string
+	bundleDir                  string
+	releaseName                string
+	releaseNamespace           string
+	baseRevision               string
+	targetRevision             string
+	bindings                   bindingFlags
+	ignoreHooks                explicitFalseFlag
+	operationalReportPath      string
+	operationalReportDigest    string
+	activationLiveManifestPath string
 }
 
 type artifactDigests struct {
@@ -291,6 +292,7 @@ func parseAuthorizeFlags(args []string) (authorizeOptions, error) {
 		"release-namespace": false, "base-revision": false, "target-revision": false,
 		"binding": true, "ignore-helm-test-hooks": false,
 		"operational-report": false, "operational-report-digest": false,
+		"activation-live-canonical-manifest": false,
 	}); err != nil {
 		return authorizeOptions{}, err
 	}
@@ -313,6 +315,7 @@ func parseAuthorizeFlags(args []string) (authorizeOptions, error) {
 	flags.Var(&options.ignoreHooks, "ignore-helm-test-hooks", "must be explicitly false; manifests must contain no hooks")
 	flags.StringVar(&options.operationalReportPath, "operational-report", "", "uploaded and byte-matched operational-domain report")
 	flags.StringVar(&options.operationalReportDigest, "operational-report-digest", "", "expected embedded operational-domain report digest")
+	flags.StringVar(&options.activationLiveManifestPath, "activation-live-canonical-manifest", "", "exact private observed-live image manifest")
 	if err := flags.Parse(args); err != nil {
 		return authorizeOptions{}, err
 	}
@@ -363,6 +366,13 @@ func parseAuthorizeFlags(args []string) (authorizeOptions, error) {
 		if err := validateCanonicalDigest(options.operationalReportDigest); err != nil {
 			return authorizeOptions{}, fmt.Errorf("--operational-report-digest: %w", err)
 		}
+		if options.activationLiveManifestPath != "" {
+			if err := validateRequiredString("--activation-live-canonical-manifest", options.activationLiveManifestPath); err != nil {
+				return authorizeOptions{}, err
+			}
+		}
+	} else if options.activationLiveManifestPath != "" {
+		return authorizeOptions{}, fmt.Errorf("--activation-live-canonical-manifest requires an operational report")
 	}
 	for name, value := range map[string]string{
 		"releaseName":      options.releaseName,
@@ -492,7 +502,28 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 		if report.BaseCommit != options.trustedBaseCommit || report.TargetCommit != options.trustedTargetCommit {
 			return authorizationArtifacts{}, fmt.Errorf("operational-domain report revision binding mismatch")
 		}
-		plan, err = releasedomain.ResolveOperationalPlan(plan, report)
+		if report.Policy == releasedomain.OperationalObservedLiveActivationPolicy {
+			if options.activationLiveManifestPath == "" {
+				return authorizationArtifacts{}, fmt.Errorf("observed-live operational report requires its canonical live manifest")
+			}
+			observedLiveManifest, readErr := readSecureSource(options.activationLiveManifestPath, maxManifestBytes, true)
+			if readErr != nil {
+				return authorizationArtifacts{}, fmt.Errorf("read activation live canonical manifest: %w", readErr)
+			}
+			if verifyErr := releasedomain.VerifyObservedLiveImageManifest(
+				baseManifest, observedLiveManifest, ownership, options.releaseNamespace,
+			); verifyErr != nil {
+				return authorizationArtifacts{}, fmt.Errorf("verify activation live canonical manifest: %w", verifyErr)
+			}
+			plan, err = releasedomain.ResolveOperationalPlanWithObservedLiveManifest(
+				plan, report, observedLiveManifest,
+			)
+		} else {
+			if options.activationLiveManifestPath != "" {
+				return authorizationArtifacts{}, fmt.Errorf("legacy operational report must not include an activation live manifest")
+			}
+			plan, err = releasedomain.ResolveOperationalPlan(plan, report)
+		}
 		if err != nil {
 			return authorizationArtifacts{}, fmt.Errorf("resolve operational-domain plan: %w", err)
 		}
