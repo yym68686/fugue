@@ -1,0 +1,67 @@
+{{- if not (kindIs "bool" .Values.enabled) -}}
+{{- fail "enabled must be exactly a boolean" -}}
+{{- end -}}
+{{- if .Values.enabled -}}
+{{- $_ := include "fugue-backup-materializer-dry-run-guard.validate" . -}}
+{{- $name := include "fugue-backup-materializer-dry-run-guard.fullname" . -}}
+{{- $secretName := include "fugue-backup-materializer-dry-run-guard.secretName" . -}}
+{{- $username := include "fugue-backup-materializer-dry-run-guard.username" . -}}
+{{- $namespace := "fugue-system" -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fugue-backup-materializer-dry-run-guard.labels" . | nindent 4 }}
+  annotations:
+    {{- include "fugue-backup-materializer-dry-run-guard.annotations" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $namespace }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+        scope: Namespaced
+  matchConditions:
+    - name: dedicated-gateway-identity
+      expression: {{ printf "request.userInfo.username == %q" $username | quote }}
+  validations:
+    - expression: "has(request.dryRun) && request.dryRun == true"
+      message: "backup dry-run gateway requests must be server-side dry-run"
+      reason: Forbidden
+    - expression: {{ printf "request.namespace == %q && request.name == %q && (!has(request.subResource) || request.subResource == \"\") && object.metadata.name == %q && (!has(object.metadata.generateName) || object.metadata.generateName == \"\")" $namespace $secretName $secretName | quote }}
+      message: "backup dry-run gateway requests must target the exact cell Secret"
+      reason: Forbidden
+    - expression: {{ printf "(request.operation == \"CREATE\" && oldObject == null) || (request.operation == \"UPDATE\" && oldObject != null && oldObject.metadata.name == %q)" $secretName | quote }}
+      message: "backup dry-run gateway requests must carry canonical create or update evidence"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fugue-backup-materializer-dry-run-guard.labels" . | nindent 4 }}
+  annotations:
+    {{- include "fugue-backup-materializer-dry-run-guard.annotations" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+  matchResources:
+    matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $namespace }}
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+        scope: Namespaced
+{{- end -}}

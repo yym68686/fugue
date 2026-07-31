@@ -94,6 +94,32 @@ func TestPlanRepositoryBackupObserverChartIsShadowOnly(t *testing.T) {
 	}
 }
 
+func TestPlanRepositoryBackupDryRunGuardChartIsShadowOnly(t *testing.T) {
+	manifest := loadRepositoryManifest(t)
+	for _, changedPath := range []string{
+		".github/workflows/validate-backup-materializer-dry-run-guard-chart.yml",
+		"deploy/helm/fugue-backup-materializer-dry-run-guard/templates/guard.yaml",
+		"internal/backupmaterializer/dryrunguard/guard.go",
+	} {
+		plan, err := PlanChanges(manifest, []string{changedPath})
+		if err != nil {
+			t.Fatalf("PlanChanges(%q) error = %v", changedPath, err)
+		}
+		if got, want := impactIDs(plan.ImpactedComponents), []string{"backup-storage"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) impacted components = %v, want %v", changedPath, got, want)
+		}
+		if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
+			t.Fatalf("PlanChanges(%q) = mode %q legacy=%v, want shadow/legacy", changedPath, plan.DispatchMode, plan.RequiresLegacyRelease)
+		}
+		if got, want := resourceIDs(plan.SharedResources), []string{"control-plane-postgres", "legacy-fugue-helm-release", "r2-backup-bucket"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("PlanChanges(%q) shared resources = %v, want %v", changedPath, got, want)
+		}
+		if err := plan.VerifyDigest(); err != nil {
+			t.Fatalf("PlanChanges(%q) digest: %v", changedPath, err)
+		}
+	}
+}
+
 func TestPlanRepositorySharedChangeFailsSafeToLegacy(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	for _, changedPath := range []string{"internal/model/model.go", "internal/auth/auth.go", "cmd/fugue-openapi-gen/main.go"} {

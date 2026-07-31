@@ -1,0 +1,8 @@
+# Disabled rendering is deliberately empty and remains valid on clusters that
+# do not expose ValidatingAdmissionPolicy. Enabling requires Kubernetes 1.30+
+# and both admissionregistration.k8s.io/v1 policy API resources.
+enabled: false
+
+cell:
+  # Canonical form: backup/<owned-kind>/<16 lowercase hex chars>.
+  key: ""

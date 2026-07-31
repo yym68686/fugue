@@ -1178,6 +1178,32 @@ image, artifact, dispatch, Helm, Kubernetes, release, or production
 capability. This atom creates no ServiceAccount, Role, admission object,
 credential, process, Pod, chart, or production change.
 
+`deploy/helm/fugue-backup-materializer-dry-run-guard` adds the default-off,
+admission-only `backup-materializer-dry-run-admission@v1` chart. Disabled
+rendering is empty even on an old cluster. Enabled rendering is allowed only
+in `fugue-system`, on Kubernetes 1.30 or newer, after Helm discovery proves
+both `admissionregistration.k8s.io/v1` policy kinds. It creates exactly one
+release-independent `ValidatingAdmissionPolicy` and one binding for the cell;
+there is no ServiceAccount, Role, RoleBinding, Secret, ConfigMap, Service,
+workload, token, image, or executable. Both objects duplicate the exact
+namespaced core/v1 Secret CREATE/UPDATE match rule and namespace selector;
+the policy additionally enforces the dedicated username, optional-field-safe
+dry-run predicate, exact request/new/old object names, and fail-closed Deny
+behavior from the pure contract.
+
+Typed chart tests compare every Kubernetes v1 policy/binding field and CEL
+expression to the rebuilt guard, reject old Kubernetes or missing discovery,
+and prove cell identities are distinct while rendering is byte-identical
+across Helm release names. A local ephemeral k3s `v1.35.4+k3s1` API server—the
+same version recorded for production—reported zero type-check warnings. With
+an intentionally broad test-only Secret CREATE/UPDATE Role, exact create and
+update dry-runs succeeded without persistence; live, cross-cell, and
+generated-name requests were denied without persistence or CEL runtime errors,
+while another principal remained outside the guard. The local cluster was
+removed afterward. The chart's independent CI lane can only lint, template,
+test, race, and vet; it cannot package, install, publish, dispatch, promote, or
+deploy. No production resource is created by this atom.
+
 `internal/backupmaterializerreview` now supplies the separately owned
 `backup-materializer-token-review@v1` network adapter. It performs exactly one
 `POST` to the Kubernetes `authentication.k8s.io/v1/tokenreviews` endpoint with
