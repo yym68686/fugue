@@ -8,12 +8,16 @@ source "${SCRIPT_DIR}/lib/release_image_ref.sh"
 
 HELM_VALUES_ATTEMPTED=false
 HELM_VALUES_FILE=""
+HELM_SOURCE_TAG_RESULT=""
 KUBECTL_SNAPSHOT_FILE=""
+PUBLIC_EDGE_SNAPSHOT_ATTEMPTED=false
+PUBLIC_EDGE_SNAPSHOT_FILE=""
 OUTPUT_BUFFER_FILE=""
 
 cleanup_resolver_files() {
   [[ -z "${HELM_VALUES_FILE}" ]] || rm -f "${HELM_VALUES_FILE}"
   [[ -z "${KUBECTL_SNAPSHOT_FILE}" ]] || rm -f "${KUBECTL_SNAPSHOT_FILE}"
+  [[ -z "${PUBLIC_EDGE_SNAPSHOT_FILE}" ]] || rm -f "${PUBLIC_EDGE_SNAPSHOT_FILE}"
   [[ -z "${OUTPUT_BUFFER_FILE}" ]] || rm -f "${OUTPUT_BUFFER_FILE}"
 }
 trap cleanup_resolver_files EXIT
@@ -250,6 +254,40 @@ if not isinstance(value, dict):
   fi
 }
 
+load_public_edge_snapshot() {
+  local kubectl_cmd="${KUBECTL_CMD:-kubectl}"
+  local selector="app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},fugue.io/rollout-subsystem=public-data-plane"
+
+  if [[ "${PUBLIC_EDGE_SNAPSHOT_ATTEMPTED}" == "true" ]]; then
+    [[ -n "${PUBLIC_EDGE_SNAPSHOT_FILE}" && -s "${PUBLIC_EDGE_SNAPSHOT_FILE}" ]]
+    return
+  fi
+  PUBLIC_EDGE_SNAPSHOT_ATTEMPTED=true
+  PUBLIC_EDGE_SNAPSHOT_FILE="$(mktemp "${TMPDIR:-/tmp}/fugue-public-edge-snapshot.XXXXXX")"
+  chmod 600 "${PUBLIC_EDGE_SNAPSHOT_FILE}"
+  if ! ${kubectl_cmd} -n "${FUGUE_NAMESPACE}" get daemonsets,configmaps \
+    -l "${selector}" -o json >"${PUBLIC_EDGE_SNAPSHOT_FILE}"; then
+    printf 'failed to read the public edge DaemonSet and release-record snapshot\n' >&2
+    rm -f "${PUBLIC_EDGE_SNAPSHOT_FILE}"
+    PUBLIC_EDGE_SNAPSHOT_FILE=""
+    return 1
+  fi
+  if ! python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    value = json.load(handle)
+if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+    raise SystemExit(1)
+' "${PUBLIC_EDGE_SNAPSHOT_FILE}"; then
+    printf 'public edge DaemonSet and release-record snapshot is not a Kubernetes List\n' >&2
+    rm -f "${PUBLIC_EDGE_SNAPSHOT_FILE}"
+    PUBLIC_EDGE_SNAPSHOT_FILE=""
+    return 1
+  fi
+}
+
 helm_effective_image_record() {
   local selector="$1"
   local source_name="${2:-}"
@@ -468,14 +506,336 @@ print("\t".join(image[field] for field in fields))
 ' "${HELM_VALUES_FILE}" "${selector}" "${source_name}" "${FUGUE_RELEASE_FULLNAME}"
 }
 
+public_edge_release_source_tag() {
+  local source_name="$1"
+  local expected_repository="$2"
+  local expected_digest="$3"
+  local configured_repository="${FUGUE_EDGE_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-edge}"
+  local target_sha="${GITHUB_SHA:-}"
+  local record_sha record_evidence evidence_line inactive_sha
+
+  release_image_ref_valid_repository "${configured_repository}" || {
+    printf 'configured public edge image repository is invalid\n' >&2
+    return 1
+  }
+  [[ "${expected_repository}" == "${configured_repository}" ]] || {
+    printf 'live public edge digest-only image repository is outside the configured release repository\n' >&2
+    return 1
+  }
+  [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'current release target is not one exact lowercase commit SHA\n' >&2
+    return 1
+  }
+  [[ -n "${PUBLIC_EDGE_SNAPSHOT_FILE}" && -s "${PUBLIC_EDGE_SNAPSHOT_FILE}" ]] || {
+    printf 'public edge release evidence snapshot is unavailable\n' >&2
+    return 1
+  }
+
+  record_evidence="$(python3 - "${PUBLIC_EDGE_SNAPSHOT_FILE}" "${FUGUE_NAMESPACE}" \
+    "${FUGUE_RELEASE_NAME}" "${FUGUE_RELEASE_FULLNAME}" "${source_name}" \
+    "${expected_repository}" "${expected_digest}" <<'PY'
+import datetime
+import json
+import re
+import sys
+
+snapshot_path, namespace, release_name, fullname, source_name, expected_repository, expected_digest = sys.argv[1:8]
+
+def fail(message):
+    raise SystemExit(f"public edge release evidence is invalid: {message}")
+
+def metadata_identity(metadata, context):
+    if not isinstance(metadata, dict):
+        fail(f"{context} metadata is not an object")
+    if metadata.get("namespace") != namespace:
+        fail(f"{context} namespace does not match")
+    if metadata.get("deletionTimestamp") not in (None, ""):
+        fail(f"{context} is deleting")
+    uid = metadata.get("uid")
+    resource_version = metadata.get("resourceVersion")
+    if not isinstance(uid, str) or not uid or not isinstance(resource_version, str) or not resource_version:
+        fail(f"{context} UID/resourceVersion is missing")
+    owners = metadata.get("ownerReferences") or []
+    if not isinstance(owners, list) or owners:
+        fail(f"{context} has an unexpected Kubernetes owner")
+    return uid, resource_version
+
+def ready_daemonset(item, context):
+    metadata = item.get("metadata")
+    uid, resource_version = metadata_identity(metadata, context)
+    labels = metadata.get("labels") or {}
+    if not isinstance(labels, dict):
+        fail(f"{context} labels are invalid")
+    required = {
+        "app.kubernetes.io/instance": release_name,
+        "app.kubernetes.io/managed-by": "Helm",
+        "fugue.io/rollout-subsystem": "public-data-plane",
+    }
+    for key, value in required.items():
+        if labels.get(key) != value:
+            fail(f"{context} owner label {key} does not match")
+    if not isinstance(labels.get("helm.sh/chart"), str) or not labels.get("helm.sh/chart"):
+        fail(f"{context} Helm chart owner label is missing")
+    generation = metadata.get("generation")
+    status = item.get("status") or {}
+    if not isinstance(generation, int) or generation <= 0 or not isinstance(status, dict):
+        fail(f"{context} generation/status is invalid")
+    def count(name):
+        value = status.get(name, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            fail(f"{context} {name} is not a non-negative integer")
+        return value
+    desired = count("desiredNumberScheduled")
+    current = count("currentNumberScheduled")
+    ready = count("numberReady")
+    available = count("numberAvailable")
+    updated = count("updatedNumberScheduled")
+    misscheduled = count("numberMisscheduled")
+    unavailable = count("numberUnavailable")
+    if (
+        status.get("observedGeneration") != generation
+        or current != desired
+        or ready != desired
+        or available != desired
+        or misscheduled != 0
+        or unavailable != 0
+    ):
+        fail(f"{context} is not fully observed and ready")
+    return labels, desired, updated, (uid, resource_version)
+
+with open(snapshot_path, "r", encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+if not isinstance(snapshot, dict) or snapshot.get("kind") not in (None, "List"):
+    fail("snapshot is not a Kubernetes List")
+items = snapshot.get("items")
+if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+    fail("snapshot items are invalid")
+
+record_name = f"{fullname}-public-data-plane-release"
+records = [
+    item for item in items
+    if item.get("apiVersion") == "v1"
+    and item.get("kind") == "ConfigMap"
+    and (item.get("metadata") or {}).get("name") == record_name
+]
+if len(records) != 1:
+    fail(f"expected exactly one {record_name} ConfigMap; found {len(records)}")
+record = records[0]
+record_metadata = record.get("metadata")
+metadata_identity(record_metadata, "release record")
+expected_record_labels = {
+    "app.kubernetes.io/instance": release_name,
+    "app.kubernetes.io/component": "public-data-plane-release",
+    "fugue.io/rollout-subsystem": "public-data-plane",
+}
+if record_metadata.get("labels") != expected_record_labels:
+    fail("release record labels are not exact")
+data = record.get("data")
+core_data_keys = {
+    "release_id", "mode", "active_slots", "daemonsets", "edge_resources",
+    "caddy_resources", "git_sha", "recorded_at",
+}
+runtime_extension_keys = {
+    "runtime_cgroup_memory_max", "runtime_cgroup_patched_at", "runtime_cgroup_patched_nodes",
+}
+if not isinstance(data, dict) or any(not isinstance(value, str) for value in data.values()):
+    fail("release record data schema is not exact")
+extra_data_keys = set(data) - core_data_keys
+if not core_data_keys.issubset(data) or extra_data_keys not in (set(), runtime_extension_keys):
+    fail("release record data schema is not exact")
+if extra_data_keys:
+    if not re.fullmatch(r"[1-9][0-9]*", data["runtime_cgroup_memory_max"]):
+        fail("release record runtime cgroup memory maximum is invalid")
+    try:
+        patched_at = datetime.datetime.fromisoformat(data["runtime_cgroup_patched_at"].replace("Z", "+00:00"))
+    except ValueError:
+        fail("release record runtime cgroup patch time is invalid")
+    if patched_at.tzinfo is None:
+        fail("release record runtime cgroup patch time has no timezone")
+    patched_nodes = data["runtime_cgroup_patched_nodes"].split(",")
+    if (
+        not patched_nodes
+        or patched_nodes != sorted(set(patched_nodes))
+        or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", node) for node in patched_nodes)
+    ):
+        fail("release record runtime cgroup patched-node cohort is invalid")
+if data["mode"] != "node-local-blue-green":
+    fail("release record mode is not node-local-blue-green")
+git_sha = data["git_sha"]
+if not re.fullmatch(r"[0-9a-f]{40}", git_sha):
+    fail("release record git_sha is not one exact lowercase commit SHA")
+release_id = data["release_id"]
+if not re.fullmatch(rf"pdp-[0-9]{{8}}T[0-9]{{6}}Z-{git_sha}", release_id):
+    fail("release record ID is not bound to git_sha")
+try:
+    recorded_at = datetime.datetime.fromisoformat(data["recorded_at"].replace("Z", "+00:00"))
+except ValueError:
+    fail("release record recorded_at is invalid")
+if recorded_at.tzinfo is None:
+    fail("release record recorded_at has no timezone")
+for field in ("edge_resources", "caddy_resources"):
+    try:
+        value = json.loads(data[field])
+    except (TypeError, ValueError):
+        fail(f"release record {field} is invalid JSON")
+    if not isinstance(value, dict):
+        fail(f"release record {field} is not an object")
+try:
+    active_slots = json.loads(data["active_slots"])
+except (TypeError, ValueError):
+    fail("release record active_slots is invalid JSON")
+if (
+    not isinstance(active_slots, dict)
+    or not active_slots
+    or any(not isinstance(base, str) or not base or slot not in {"a", "b"} for base, slot in active_slots.items())
+):
+    fail("release record active_slots is invalid")
+record_bases = data["daemonsets"].split(",") if data["daemonsets"] else []
+if not record_bases or any(not base or base.strip() != base for base in record_bases) or len(record_bases) != len(set(record_bases)):
+    fail("release record daemonset bases are invalid")
+
+daemonsets = {}
+identity_cohort = set()
+for item in items:
+    if item.get("apiVersion") != "apps/v1" or item.get("kind") != "DaemonSet":
+        continue
+    metadata = item.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    if (
+        labels.get("app.kubernetes.io/instance") != release_name
+        or labels.get("fugue.io/rollout-subsystem") != "public-data-plane"
+    ):
+        continue
+    mode = labels.get("fugue.io/rollout-mode")
+    if mode not in {"node-local-blue-green-front", "node-local-blue-green-worker"}:
+        continue
+    name = metadata.get("name")
+    if not isinstance(name, str) or not name or name in daemonsets:
+        fail("public edge snapshot has an empty or duplicate DaemonSet name")
+    labels, desired, updated, identity = ready_daemonset(item, name)
+    if identity in identity_cohort:
+        fail("public edge DaemonSet UID/resourceVersion cohort is not unique")
+    identity_cohort.add(identity)
+    daemonsets[name] = (item, labels, desired, updated)
+
+bases = {}
+for name, (item, labels, desired, updated) in daemonsets.items():
+    mode = labels.get("fugue.io/rollout-mode")
+    component = labels.get("app.kubernetes.io/component")
+    if not name.startswith(f"{fullname}-edge-"):
+        fail(f"public edge DaemonSet {name} is outside the release fullname")
+    if mode == "node-local-blue-green-front":
+        if not name.endswith("-front") or component != name[len(fullname) + 1:]:
+            fail(f"public edge front {name} name/component binding is invalid")
+        base = name[:-len("-front")]
+        bases.setdefault(base, {})["front"] = (item, labels, desired, updated)
+        continue
+    match = re.fullmatch(r"(.+)-worker-([ab])", name)
+    if not match or component != name[len(fullname) + 1:]:
+        fail(f"public edge worker {name} name/component binding is invalid")
+    base, slot = match.groups()
+    if labels.get("fugue.io/edge-slot") != slot:
+        fail(f"public edge worker {name} slot label is invalid")
+    bases.setdefault(base, {})[slot] = (item, labels, desired, updated)
+
+if set(record_bases) != set(bases):
+    fail("release record daemonset bases do not match the blue-green cohort")
+for base, members in bases.items():
+    if set(members) != {"front", "a", "b"}:
+        fail(f"public edge base {base} is incomplete")
+serving_bases = {base for base, members in bases.items() if members["front"][2] > 0}
+if set(active_slots) != serving_bases:
+    fail("release record active_slots do not exactly cover serving groups")
+
+active_names = set()
+active_digests = set()
+inactive_release_shas = set()
+for base in sorted(serving_bases):
+    slot = active_slots[base]
+    active_name = f"{base}-worker-{slot}"
+    active_names.add(active_name)
+    item = bases[base][slot][0]
+    annotations = (((item.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("annotations") or {}
+    if not isinstance(annotations, dict):
+        fail(f"active public edge worker {active_name} annotations are invalid")
+    if annotations.get("fugue.io/public-data-plane-release-id") != release_id:
+        fail(f"active public edge worker {active_name} release ID drifted")
+    if annotations.get("fugue.io/public-data-plane-release-mode") != "node-local-blue-green-worker":
+        fail(f"active public edge worker {active_name} release mode drifted")
+    if bases[base][slot][2] <= 0 or bases[base][slot][3] != bases[base][slot][2]:
+        fail(f"active public edge worker {active_name} is not fully updated")
+    containers = (((item.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers")
+    if not isinstance(containers, list):
+        fail(f"active public edge worker {active_name} containers are invalid")
+    images = [container.get("image") for container in containers if isinstance(container, dict) and container.get("name") == "edge"]
+    if len(images) != 1 or images[0] != f"{expected_repository}@{expected_digest}":
+        fail(f"active public edge worker {active_name} image does not match the release cohort")
+    active_digests.add(images[0])
+    inactive_slot = "b" if slot == "a" else "a"
+    inactive_name = f"{base}-worker-{inactive_slot}"
+    inactive_item = bases[base][inactive_slot][0]
+    inactive_annotations = (((inactive_item.get("spec") or {}).get("template") or {}).get("metadata") or {}).get("annotations") or {}
+    if not isinstance(inactive_annotations, dict):
+        fail(f"inactive public edge worker {inactive_name} annotations are invalid")
+    inactive_release_id = inactive_annotations.get("fugue.io/public-data-plane-release-id")
+    inactive_match = re.fullmatch(r"pdp-[0-9]{8}T[0-9]{6}Z-([0-9a-f]{40})", str(inactive_release_id or ""))
+    if not inactive_match or inactive_release_id == release_id:
+        fail(f"inactive public edge worker {inactive_name} is not bound to its own old release")
+    if inactive_annotations.get("fugue.io/public-data-plane-release-mode") != "node-local-blue-green-worker":
+        fail(f"inactive public edge worker {inactive_name} release mode drifted")
+    inactive_updated = bases[base][inactive_slot][3]
+    if inactive_updated not in (0, bases[base][inactive_slot][2]):
+        fail(f"inactive public edge worker {inactive_name} updated count is invalid")
+    inactive_release_shas.add(inactive_match.group(1))
+if len(active_digests) != 1:
+    fail("active public edge groups do not serve one digest cohort")
+if source_name not in active_names:
+    fail(f"digest-only workload {source_name} is not an active public edge worker")
+
+print(git_sha)
+for inactive_sha in sorted(inactive_release_shas):
+    print(inactive_sha)
+PY
+)" || return 1
+
+  record_sha="$(printf '%s\n' "${record_evidence}" | sed -n '1p')"
+  while IFS= read -r evidence_line; do
+    inactive_sha="${evidence_line}"
+    [[ -n "${inactive_sha}" ]] || continue
+    git -C "${SCRIPT_DIR}/.." cat-file -e "${inactive_sha}^{commit}" 2>/dev/null || {
+      printf 'inactive public edge release commit is unavailable\n' >&2
+      return 1
+    }
+    git -C "${SCRIPT_DIR}/.." merge-base --is-ancestor "${inactive_sha}" "${record_sha}" || {
+      printf 'inactive public edge release is not an ancestor of the active release\n' >&2
+      return 1
+    }
+  done < <(python3 -c 'import sys; print("\n".join(sys.stdin.read().splitlines()[1:]))' <<<"${record_evidence}")
+
+  git -C "${SCRIPT_DIR}/.." cat-file -e "${target_sha}^{commit}" 2>/dev/null || {
+    printf 'current release target commit is unavailable\n' >&2
+    return 1
+  }
+  git -C "${SCRIPT_DIR}/.." cat-file -e "${record_sha}^{commit}" 2>/dev/null || {
+    printf 'public edge release-record commit is unavailable\n' >&2
+    return 1
+  }
+  git -C "${SCRIPT_DIR}/.." merge-base --is-ancestor "${record_sha}" "${target_sha}" || {
+    printf 'public edge release-record commit is not an ancestor of the current target\n' >&2
+    return 1
+  }
+  printf '%s' "${record_sha}"
+}
+
 helm_source_tag_for_digest_ref() {
   local image_ref="$1"
   local selector="$2"
   local source_name="${3:-}"
-  local record repository source_tag digest
+  local record repository source_tag digest release_source_tag
   local expected_repository="${RELEASE_IMAGE_REF_REPOSITORY}"
   local expected_digest="${RELEASE_IMAGE_REF_DIGEST}"
 
+  HELM_SOURCE_TAG_RESULT=""
   record="$(helm_effective_image_record "${selector}" "${source_name}")" || return 1
   IFS=$'\t' read -r repository source_tag digest <<<"${record}"
   release_image_ref_valid_repository "${repository}" || {
@@ -486,19 +846,46 @@ helm_source_tag_for_digest_ref() {
     printf 'Helm source tag is missing or invalid for digest-only image %s\n' "${image_ref}" >&2
     return 1
   }
-  [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-    printf 'Helm digest is missing or invalid for digest-only image %s\n' "${image_ref}" >&2
-    return 1
-  }
   [[ "${repository}" == "${expected_repository}" ]] || {
     printf 'Helm repository does not match live digest-only image %s\n' "${image_ref}" >&2
     return 1
   }
-  [[ "${digest}" == "${expected_digest}" ]] || {
-    printf 'Helm digest does not match live digest-only image %s\n' "${image_ref}" >&2
+  if [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ && "${digest}" == "${expected_digest}" ]]; then
+    HELM_SOURCE_TAG_RESULT="${source_tag}"
+    return 0
+  fi
+  if [[ "${selector}" != "edge_public" ]]; then
+    if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      printf 'Helm digest is missing or invalid for digest-only image %s\n' "${image_ref}" >&2
+    else
+      printf 'Helm digest does not match live digest-only image %s\n' "${image_ref}" >&2
+    fi
+    return 1
+  fi
+  if [[ -n "${digest}" ]]; then
+    printf 'Helm carries a conflicting non-empty digest for public edge image %s\n' "${image_ref}" >&2
+    return 1
+  fi
+  [[ "${source_tag}" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'Helm public edge source tag is not one exact lowercase commit SHA\n' >&2
     return 1
   }
-  printf '%s' "${source_tag}"
+  load_public_edge_snapshot || return 1
+  release_source_tag="$(public_edge_release_source_tag \
+    "${source_name}" "${expected_repository}" "${expected_digest}")" || return 1
+  [[ "${source_tag}" != "${release_source_tag}" ]] || {
+    printf 'Helm public edge source tag is not strictly older than the active release\n' >&2
+    return 1
+  }
+  git -C "${SCRIPT_DIR}/.." cat-file -e "${source_tag}^{commit}" 2>/dev/null || {
+    printf 'Helm public edge source-tag commit is unavailable\n' >&2
+    return 1
+  }
+  git -C "${SCRIPT_DIR}/.." merge-base --is-ancestor "${source_tag}" "${release_source_tag}" || {
+    printf 'Helm public edge source tag is not an old-slot ancestor of the active release\n' >&2
+    return 1
+  }
+  HELM_SOURCE_TAG_RESULT="${release_source_tag}"
 }
 
 resolve_helm_image_baseline() {
@@ -548,7 +935,8 @@ resolve_image_ref() {
       # reads the same one-shot snapshot instead of re-running Helm in a
       # subshell.
       load_helm_values_snapshot || return 1
-      source_tag="$(helm_source_tag_for_digest_ref "${image_ref}" "${helm_selector}" "${source_name}")" || return 1
+      helm_source_tag_for_digest_ref "${image_ref}" "${helm_selector}" "${source_name}" || return 1
+      source_tag="${HELM_SOURCE_TAG_RESULT}"
       if [[ -n "${observed_source_tag}" && "${observed_source_tag}" != "${source_tag}" ]]; then
         printf 'live source tag disagrees with Helm values for digest-only image %s\n' "${image_ref}" >&2
         return 1
@@ -566,17 +954,7 @@ resolve_image_ref() {
 }
 
 public_edge_cohort_records() {
-  local namespace="${FUGUE_NAMESPACE}"
-  local kubectl_cmd="${KUBECTL_CMD}"
-  : >"${KUBECTL_SNAPSHOT_FILE}"
-  if ! ${kubectl_cmd} -n "${namespace}" get ds -o json >"${KUBECTL_SNAPSHOT_FILE}"; then
-    printf 'failed to read the public edge DaemonSet cohort\n' >&2
-    return 1
-  fi
-  [[ -s "${KUBECTL_SNAPSHOT_FILE}" ]] || {
-    printf 'public edge DaemonSet cohort returned empty output\n' >&2
-    return 1
-  }
+  load_public_edge_snapshot || return 1
   python3 -c '
 import json
 import re
@@ -603,6 +981,10 @@ for item in items:
     if not isinstance(item, dict):
         print("public edge cohort contains a non-object DaemonSet", file=sys.stderr)
         raise SystemExit(1)
+    if item.get("kind") == "ConfigMap":
+        continue
+    if item.get("kind") not in (None, "DaemonSet") or item.get("apiVersion") not in (None, "apps/v1"):
+        continue
     metadata = item.get("metadata") or {}
     labels = metadata.get("labels") or {}
     if not isinstance(metadata, dict) or not isinstance(labels, dict):
@@ -660,7 +1042,7 @@ for item in items:
 
 for name, image in sorted(records):
     print(f"{name}\t{image}")
-' "${KUBECTL_SNAPSHOT_FILE}" "${FUGUE_RELEASE_NAME}" "${FUGUE_RELEASE_FULLNAME}"
+' "${PUBLIC_EDGE_SNAPSHOT_FILE}" "${FUGUE_RELEASE_NAME}" "${FUGUE_RELEASE_FULLNAME}"
 }
 
 output_image_ref() {
@@ -768,6 +1150,7 @@ PUBLIC_COHORT_DIGESTS=""
 PUBLIC_COHORT_SOURCE_TAGS=""
 PUBLIC_COHORT_COUNT=0
 EDGE_SOURCE_SEEN_IN_COHORT=false
+load_public_edge_snapshot || exit 1
 public_cohort_records="$(public_edge_cohort_records)" || exit 1
 while IFS=$'\t' read -r cohort_name cohort_ref; do
   [[ -n "${cohort_name}" ]] || continue

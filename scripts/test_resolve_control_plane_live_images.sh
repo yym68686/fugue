@@ -74,6 +74,24 @@ import sys
 fixture, target = sys.argv[1:3]
 with open(fixture, "r", encoding="utf-8") as handle:
     objects = json.load(handle)
+if target == "daemonsets,configmaps" and target not in objects and "ds" in objects:
+    daemonsets = objects["ds"] or {}
+    if isinstance(daemonsets, dict) and "__raw_nul_json__" in daemonsets:
+        raw = json.dumps({"apiVersion": "v1", "kind": "List", "items": daemonsets["__raw_nul_json__"].get("items") or []}, separators=(",", ":")).encode("utf-8")
+        sys.stdout.buffer.write(b"{\x00" + raw[1:])
+        raise SystemExit(0)
+    if isinstance(daemonsets, dict) and "__error__" in daemonsets:
+        print(str(daemonsets["__error__"]), file=sys.stderr)
+        raise SystemExit(13)
+    if isinstance(daemonsets, dict) and "__raw__" in daemonsets:
+        print(str(daemonsets["__raw__"]))
+        raise SystemExit(0)
+    items = list(daemonsets.get("items") or []) if isinstance(daemonsets, dict) else []
+    for key, item in objects.items():
+        if key.startswith("configmap/") and isinstance(item, dict):
+            items.append(item)
+    print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}, separators=(",", ":")))
+    raise SystemExit(0)
 if target not in objects:
     raise SystemExit(0)
 value = objects[target]
@@ -139,7 +157,7 @@ run_resolver() {
     FUGUE_RELEASE_FULLNAME=fugue-fugue \
     FUGUE_IMAGE_TAG="${RESOLVER_FALLBACK_TAG-fallback-target}" \
     FUGUE_RESOLVE_HELM_IMAGE_BASELINES="${FUGUE_RESOLVE_HELM_IMAGE_BASELINES:-false}" \
-    GITHUB_SHA= \
+    GITHUB_SHA="${RESOLVER_GITHUB_SHA:-}" \
     FAKE_KUBE_OBJECTS_FILE="${objects_file}" \
     FAKE_KUBECTL_CALLS_FILE="${output_file}.kubectl-calls" \
     FAKE_HELM_VALUES_FILE="${values_file}" \
@@ -623,6 +641,341 @@ grep -Fqx 'fugue-fugue-edge-empty-worker-b|edge-source' <<<"${cohort_sources}" |
 if grep -Fq 'SECRET-MUST-NOT-LEAK' "${DIGEST_OUTPUT}" "${DIGEST_STDOUT}" "${DIGEST_STDERR}"; then
   fail "Helm values secret leaked through resolver outputs or logs"
 fi
+
+PUBLIC_TARGET_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+PUBLIC_RELEASE_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD^^)"
+PUBLIC_INACTIVE_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD^^^)"
+PUBLIC_HELM_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD^^^^)"
+PUBLIC_NONANCESTOR_SHA="$(
+  GIT_AUTHOR_NAME=fugue-test GIT_AUTHOR_EMAIL=fugue-test@example.invalid \
+  GIT_COMMITTER_NAME=fugue-test GIT_COMMITTER_EMAIL=fugue-test@example.invalid \
+    git -C "${REPO_ROOT}" commit-tree "$(git -C "${REPO_ROOT}" rev-parse HEAD^{tree})" \
+      -m 'resolver non-ancestor fixture'
+)"
+PUBLIC_RECORD_OBJECTS="${TMP_ROOT}/public-record-objects.json"
+PUBLIC_RECORD_VALUES="${TMP_ROOT}/public-record-values.json"
+python3 - "${PUBLIC_RECORD_OBJECTS}" "${PUBLIC_RECORD_VALUES}" \
+  "${PUBLIC_RELEASE_SHA}" "${PUBLIC_INACTIVE_SHA}" "${PUBLIC_HELM_SHA}" \
+  "${DIGEST_F}" "${DIGEST_E}" <<'PY'
+import json
+import sys
+
+objects_path, values_path, release_sha, inactive_sha, helm_sha, release_digest, old_digest = sys.argv[1:8]
+namespace = "fugue-system"
+release_name = "fugue"
+fullname = "fugue-fugue"
+repository = "ghcr.io/acme/edge"
+release_id = f"pdp-20260731T132527Z-{release_sha}"
+old_release_id = f"pdp-20260701T000000Z-{inactive_sha}"
+
+def labels(component, mode, slot=None):
+    value = {
+        "app.kubernetes.io/name": "fugue",
+        "app.kubernetes.io/instance": release_name,
+        "app.kubernetes.io/managed-by": "Helm",
+        "helm.sh/chart": "fugue-0.1.0",
+        "app.kubernetes.io/component": component,
+        "fugue.io/rollout-subsystem": "public-data-plane",
+        "fugue.io/rollout-mode": mode,
+        "fugue.io/downtime-class": "online-required",
+    }
+    if slot:
+        value["fugue.io/edge-slot"] = slot
+    return value
+
+def status(generation, desired=1, updated=True):
+    value = {
+        "observedGeneration": generation,
+        "desiredNumberScheduled": desired,
+        "currentNumberScheduled": desired,
+        "numberReady": desired,
+        "numberMisscheduled": 0,
+    }
+    if desired:
+        value["numberAvailable"] = desired
+        value["numberUnavailable"] = 0
+    if updated and desired:
+        value["updatedNumberScheduled"] = desired
+    return value
+
+def daemonset(base, member, index):
+    desired = 0 if base.endswith("-dynamic") else 1
+    if member == "front":
+        name = f"{base}-front"
+        component = name[len(fullname) + 1:]
+        mode = "node-local-blue-green-front"
+        container_name = "edge-front"
+        image = f"{repository}:{inactive_sha}"
+        annotations = {}
+        slot = None
+        updated = desired > 0
+    else:
+        slot = member
+        name = f"{base}-worker-{slot}"
+        component = name[len(fullname) + 1:]
+        mode = "node-local-blue-green-worker"
+        container_name = "edge"
+        active = slot == "b" and desired > 0
+        image = f"{repository}@{release_digest if active else old_digest}"
+        annotations = {
+            "fugue.io/public-data-plane-release-id": release_id if active else old_release_id,
+            "fugue.io/public-data-plane-release-mode": "node-local-blue-green-worker",
+        }
+        updated = active
+    generation = index + 10
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "DaemonSet",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": f"uid-{index}",
+            "resourceVersion": str(1000 + index),
+            "generation": generation,
+            "labels": labels(component, mode, slot),
+        },
+        "spec": {"template": {"metadata": {"annotations": annotations}, "spec": {"containers": [{"name": container_name, "image": image}]}}},
+        "status": status(generation, desired, updated),
+    }
+
+bases = [f"{fullname}-edge", f"{fullname}-edge-country-de", f"{fullname}-edge-dynamic"]
+items = []
+index = 0
+for base in bases:
+    for member in ("front", "a", "b"):
+        items.append(daemonset(base, member, index))
+        index += 1
+record = {
+    "apiVersion": "v1",
+    "kind": "ConfigMap",
+    "metadata": {
+        "name": f"{fullname}-public-data-plane-release",
+        "namespace": namespace,
+        "uid": "uid-release-record",
+        "resourceVersion": "2000",
+        "labels": {
+            "app.kubernetes.io/instance": release_name,
+            "app.kubernetes.io/component": "public-data-plane-release",
+            "fugue.io/rollout-subsystem": "public-data-plane",
+        },
+    },
+    "data": {
+        "release_id": release_id,
+        "mode": "node-local-blue-green",
+        "active_slots": json.dumps({base: "b" for base in bases if not base.endswith("-dynamic")}, separators=(",", ":"), sort_keys=True),
+        "daemonsets": ",".join(bases),
+        "edge_resources": "{}",
+        "caddy_resources": "{}",
+        "git_sha": release_sha,
+        "recorded_at": "2026-07-31T13:26:24Z",
+        "runtime_cgroup_memory_max": "1073741824",
+        "runtime_cgroup_patched_at": "2026-05-28T23:36:05Z",
+        "runtime_cgroup_patched_nodes": "ovhvps,ovhvpseu",
+    },
+}
+objects = {
+    "deploy/fugue-fugue-api": {"spec": {"template": {"spec": {"containers": [{"name": "api", "image": "ghcr.io/acme/api:api-live"}]}}}},
+    "deploy/fugue-fugue-controller": {"spec": {"template": {"spec": {"containers": [{"name": "controller", "image": "ghcr.io/acme/controller:controller-live", "env": []}]}}}},
+    "deploy/fugue-fugue-telemetry-agent": {"spec": {"template": {"spec": {"containers": [{"name": "telemetry-agent", "image": "ghcr.io/acme/telemetry:telemetry-live"}]}}}},
+    "ds/fugue-fugue-image-cache": {"spec": {"template": {"spec": {"containers": [{"name": "image-cache", "image": "ghcr.io/acme/cache:cache-live"}]}}}},
+    "ds/fugue-fugue-edge-worker-a": next(item for item in items if item["metadata"]["name"] == "fugue-fugue-edge-worker-a"),
+    "ds": {"items": items},
+    "configmap/fugue-fugue-public-data-plane-release": record,
+}
+values = {
+    "edge": {
+        "image": {"repository": repository, "tag": inactive_sha, "digest": old_digest},
+        "blueGreen": {
+            "front": {"image": {"repository": "", "tag": "", "digest": ""}},
+            "slots": {
+                "a": {"image": {"repository": "", "tag": "", "digest": ""}},
+                "b": {"image": {"repository": "", "tag": helm_sha, "digest": ""}},
+            },
+        },
+        "dynamic": {"blueGreen": {"slots": {"b": {"image": {"repository": repository, "tag": inactive_sha, "digest": old_digest}}}}},
+        "groups": [{
+            "name": "country_de",
+            "image": {"repository": repository, "tag": inactive_sha, "digest": old_digest},
+            "blueGreen": {},
+        }],
+    },
+}
+with open(objects_path, "w", encoding="utf-8") as handle:
+    json.dump(objects, handle)
+with open(values_path, "w", encoding="utf-8") as handle:
+    json.dump(values, handle)
+PY
+
+PUBLIC_RECORD_OUTPUT="${TMP_ROOT}/public-record-output"
+FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/edge \
+RESOLVER_GITHUB_SHA="${PUBLIC_TARGET_SHA}" \
+run_resolver "${PUBLIC_RECORD_OBJECTS}" "${PUBLIC_RECORD_VALUES}" "${PUBLIC_RECORD_OUTPUT}" \
+  "${TMP_ROOT}/public-record-stdout" "${TMP_ROOT}/public-record-stderr" "${TMP_ROOT}/public-record-calls"
+assert_eq "$(output_value "${PUBLIC_RECORD_OUTPUT}" edge_image_source_tag)" "${PUBLIC_INACTIVE_SHA}" \
+  "inactive old worker remains bound to its exact Helm source"
+public_record_sources="$(multiline_output_value "${PUBLIC_RECORD_OUTPUT}" public_cohort_image_source_tags)"
+grep -Fqx "fugue-fugue-edge-worker-a|${PUBLIC_INACTIVE_SHA}" <<<"${public_record_sources}" ||
+  fail "inactive old A must not consume the active release record"
+grep -Fqx "fugue-fugue-edge-worker-b|${PUBLIC_RELEASE_SHA}" <<<"${public_record_sources}" ||
+  fail "active digest-only B must consume the exact release-record source"
+grep -Fqx "fugue-fugue-edge-country-de-worker-b|${PUBLIC_RELEASE_SHA}" <<<"${public_record_sources}" ||
+  fail "every active serving group must consume the same release-record source"
+assert_eq "$(kubectl_call_count "${PUBLIC_RECORD_OUTPUT}" daemonsets,configmaps)" "1" \
+  "public DaemonSets and release record share one Kubernetes snapshot"
+[[ "${PUBLIC_HELM_SHA}" != "${PUBLIC_INACTIVE_SHA}" && \
+  "${PUBLIC_HELM_SHA}" != "${PUBLIC_RELEASE_SHA}" && \
+  "${PUBLIC_INACTIVE_SHA}" != "${PUBLIC_RELEASE_SHA}" ]] ||
+  fail "public production-shape fixture must use three distinct ordered revisions"
+git -C "${REPO_ROOT}" merge-base --is-ancestor "${PUBLIC_HELM_SHA}" "${PUBLIC_RELEASE_SHA}" ||
+  fail "public production-shape Helm revision must precede the release record"
+git -C "${REPO_ROOT}" merge-base --is-ancestor "${PUBLIC_INACTIVE_SHA}" "${PUBLIC_RELEASE_SHA}" ||
+  fail "public production-shape inactive revision must precede the release record"
+
+for public_record_failure in forged_sha nonancestor_sha wrong_active_slot partial_active_slots mixed_digest release_id_drift partial_runtime_extension extra_record_key negative_disabled_count string_disabled_count; do
+  FAILURE_PUBLIC_OBJECTS="${TMP_ROOT}/public-record-${public_record_failure}-objects.json"
+  python3 - "${PUBLIC_RECORD_OBJECTS}" "${FAILURE_PUBLIC_OBJECTS}" "${public_record_failure}" \
+    "${PUBLIC_NONANCESTOR_SHA}" "${DIGEST_D}" <<'PY'
+import copy
+import json
+import sys
+
+source, target, mode, nonancestor_sha, mixed_digest = sys.argv[1:6]
+with open(source, "r", encoding="utf-8") as handle:
+    objects = json.load(handle)
+record = objects["configmap/fugue-fugue-public-data-plane-release"]
+data = record["data"]
+items = objects["ds"]["items"]
+if mode in {"forged_sha", "nonancestor_sha"}:
+    sha = "f" * 40 if mode == "forged_sha" else nonancestor_sha
+    data["git_sha"] = sha
+    data["release_id"] = f"pdp-20260731T132527Z-{sha}"
+    for item in items:
+        if (item["metadata"]["labels"].get("fugue.io/edge-slot") == "b"):
+            item["spec"]["template"]["metadata"]["annotations"]["fugue.io/public-data-plane-release-id"] = data["release_id"]
+elif mode == "wrong_active_slot":
+    slots = json.loads(data["active_slots"])
+    slots["fugue-fugue-edge"] = "a"
+    data["active_slots"] = json.dumps(slots, separators=(",", ":"), sort_keys=True)
+elif mode == "partial_active_slots":
+    slots = json.loads(data["active_slots"])
+    slots.pop("fugue-fugue-edge-country-de")
+    data["active_slots"] = json.dumps(slots, separators=(",", ":"), sort_keys=True)
+elif mode == "mixed_digest":
+    for item in items:
+        if item["metadata"]["name"] == "fugue-fugue-edge-country-de-worker-b":
+            item["spec"]["template"]["spec"]["containers"][0]["image"] = "ghcr.io/acme/edge@" + mixed_digest
+elif mode == "release_id_drift":
+    for item in items:
+        if item["metadata"]["name"] == "fugue-fugue-edge-country-de-worker-b":
+            item["spec"]["template"]["metadata"]["annotations"]["fugue.io/public-data-plane-release-id"] = "pdp-20260730T000000Z-" + "e" * 40
+elif mode == "partial_runtime_extension":
+    data.pop("runtime_cgroup_patched_nodes")
+elif mode == "extra_record_key":
+    data["untrusted_source_tag"] = "attacker-controlled"
+elif mode in {"negative_disabled_count", "string_disabled_count"}:
+    dynamic_front = next(item for item in items if item["metadata"]["name"] == "fugue-fugue-edge-dynamic-front")
+    dynamic_front["status"]["numberAvailable"] = -1 if mode == "negative_disabled_count" else "0"
+else:
+    raise SystemExit(2)
+objects["ds/fugue-fugue-edge-worker-a"] = copy.deepcopy(next(
+    item for item in items if item["metadata"]["name"] == "fugue-fugue-edge-worker-a"
+))
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(objects, handle)
+PY
+  FAILURE_PUBLIC_OUTPUT="${TMP_ROOT}/public-record-${public_record_failure}-output"
+  if FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/edge \
+    RESOLVER_GITHUB_SHA="${PUBLIC_TARGET_SHA}" \
+    run_resolver "${FAILURE_PUBLIC_OBJECTS}" "${PUBLIC_RECORD_VALUES}" "${FAILURE_PUBLIC_OUTPUT}" \
+      "${TMP_ROOT}/public-record-${public_record_failure}-stdout" \
+      "${TMP_ROOT}/public-record-${public_record_failure}-stderr" \
+      "${TMP_ROOT}/public-record-${public_record_failure}-calls"; then
+    fail "public release-record evidence ${public_record_failure} must fail closed"
+  fi
+  assert_eq "$(wc -c <"${FAILURE_PUBLIC_OUTPUT}" | tr -d ' ')" "0" \
+    "public release-record ${public_record_failure} failure emits no partial output"
+done
+
+PUBLIC_CONFLICT_VALUES="${TMP_ROOT}/public-record-conflict-values.json"
+python3 - "${PUBLIC_RECORD_VALUES}" "${PUBLIC_CONFLICT_VALUES}" "${DIGEST_A}" <<'PY'
+import json
+import sys
+
+source, target, digest = sys.argv[1:4]
+with open(source, "r", encoding="utf-8") as handle:
+    values = json.load(handle)
+values["edge"]["blueGreen"]["slots"]["b"]["image"]["digest"] = digest
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(values, handle)
+PY
+if FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/edge \
+  RESOLVER_GITHUB_SHA="${PUBLIC_TARGET_SHA}" \
+  run_resolver "${PUBLIC_RECORD_OBJECTS}" "${PUBLIC_CONFLICT_VALUES}" \
+    "${TMP_ROOT}/public-record-conflict-output" "${TMP_ROOT}/public-record-conflict-stdout" \
+    "${TMP_ROOT}/public-record-conflict-stderr" "${TMP_ROOT}/public-record-conflict-calls"; then
+  fail "a conflicting non-empty Helm digest must not use public release-record evidence"
+fi
+
+for helm_history_case in current_release later_than_release nonancestor missing_commit; do
+  PUBLIC_FALSE_OLD_VALUES="${TMP_ROOT}/public-record-${helm_history_case}-values.json"
+  case "${helm_history_case}" in
+    current_release) false_old_tag="${PUBLIC_RELEASE_SHA}" ;;
+    later_than_release) false_old_tag="${PUBLIC_TARGET_SHA}" ;;
+    nonancestor) false_old_tag="${PUBLIC_NONANCESTOR_SHA}" ;;
+    missing_commit) false_old_tag="ffffffffffffffffffffffffffffffffffffffff" ;;
+  esac
+  python3 - "${PUBLIC_RECORD_VALUES}" "${PUBLIC_FALSE_OLD_VALUES}" "${false_old_tag}" <<'PY'
+import json
+import sys
+
+source, target, source_tag = sys.argv[1:4]
+with open(source, "r", encoding="utf-8") as handle:
+    values = json.load(handle)
+values["edge"]["blueGreen"]["slots"]["b"]["image"]["tag"] = source_tag
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(values, handle)
+PY
+  if FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/edge \
+    RESOLVER_GITHUB_SHA="${PUBLIC_TARGET_SHA}" \
+    run_resolver "${PUBLIC_RECORD_OBJECTS}" "${PUBLIC_FALSE_OLD_VALUES}" \
+      "${TMP_ROOT}/public-record-${helm_history_case}-output" \
+      "${TMP_ROOT}/public-record-${helm_history_case}-stdout" \
+      "${TMP_ROOT}/public-record-${helm_history_case}-stderr" \
+      "${TMP_ROOT}/public-record-${helm_history_case}-calls"; then
+    fail "unsafe Helm public-edge history ${helm_history_case} must fail closed"
+  fi
+done
+
+PUBLIC_DRIFT_OBJECTS="${TMP_ROOT}/public-record-cross-read-objects.json"
+python3 - "${PUBLIC_RECORD_OBJECTS}" "${PUBLIC_DRIFT_OBJECTS}" <<'PY'
+import copy
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, "r", encoding="utf-8") as handle:
+    objects = json.load(handle)
+first = {"apiVersion": "v1", "kind": "List", "items": copy.deepcopy(objects["ds"]["items"]) + [copy.deepcopy(objects["configmap/fugue-fugue-public-data-plane-release"])]}
+second = copy.deepcopy(first)
+record = next(item for item in second["items"] if item.get("kind") == "ConfigMap")
+record["metadata"]["uid"] = "uid-release-record-drifted"
+record["metadata"]["resourceVersion"] = "9999"
+record["data"]["active_slots"] = "{}"
+objects["daemonsets,configmaps"] = {"__sequence__": [first, second]}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(objects, handle)
+PY
+PUBLIC_DRIFT_OUTPUT="${TMP_ROOT}/public-record-cross-read-output"
+FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/edge \
+RESOLVER_GITHUB_SHA="${PUBLIC_TARGET_SHA}" \
+run_resolver "${PUBLIC_DRIFT_OBJECTS}" "${PUBLIC_RECORD_VALUES}" "${PUBLIC_DRIFT_OUTPUT}" \
+  "${TMP_ROOT}/public-record-cross-read-stdout" "${TMP_ROOT}/public-record-cross-read-stderr" \
+  "${TMP_ROOT}/public-record-cross-read-calls"
+assert_eq "$(kubectl_call_count "${PUBLIC_DRIFT_OUTPUT}" daemonsets,configmaps)" "1" \
+  "release-record UID/RV/content cannot drift across multiple reads"
+grep -Fqx "fugue-fugue-edge-worker-b|${PUBLIC_RELEASE_SHA}" \
+  <<<"$(multiline_output_value "${PUBLIC_DRIFT_OUTPUT}" public_cohort_image_source_tags)" ||
+  fail "the one-shot public release snapshot must not mix a later ConfigMap revision"
 
 for edge_snapshot_case in missing mismatch; do
   EDGE_SNAPSHOT_OBJECTS="${TMP_ROOT}/edge-snapshot-${edge_snapshot_case}-objects.json"

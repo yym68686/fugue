@@ -7697,8 +7697,9 @@ for argument in "$@"; do
   fi
   previous="${argument}"
 done
-if [[ "${target}" == "ds" ]]; then
-  printf '{"items":[]}\n'
+printf '%s\n' "${target}" >>"${FUGUE_RESOLVE_TEST_KUBECTL_CALLS}"
+if [[ "${target}" == "ds" || "${target}" == "daemonsets,configmaps" ]]; then
+  printf '{"apiVersion":"v1","kind":"List","items":[]}\n'
   exit 0
 fi
 cat <<'JSON'
@@ -7717,8 +7718,13 @@ SH
 chmod +x "${RESOLVE_TEST_DIR}/kubectl"
 PATH="${RESOLVE_TEST_DIR}:${PATH}" \
   GITHUB_OUTPUT="${RESOLVE_TEST_OUTPUT}" \
+  FUGUE_RESOLVE_TEST_KUBECTL_CALLS="${RESOLVE_TEST_DIR}/kubectl-calls" \
   FUGUE_IMAGE_TAG=fallback-target \
   "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh" >/dev/null
+assert_eq "$(grep -Fxc 'daemonsets,configmaps' "${RESOLVE_TEST_DIR}/kubectl-calls")" "1" \
+  "release baseline resolver reads one combined public edge snapshot"
+assert_eq "$(grep -Fxc 'ds' "${RESOLVE_TEST_DIR}/kubectl-calls" || true)" "0" \
+  "release baseline resolver does not re-read the legacy public edge list"
 release_baseline_tags="$(
   awk -v key="release_baseline_tags" '
     index($0, key "<<") == 1 { delimiter = substr($0, length(key) + 3); capture = 1; next }
