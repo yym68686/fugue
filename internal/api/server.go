@@ -105,6 +105,8 @@ type Server struct {
 	newClusterNodeClient             func() (*clusterNodeClient, error)
 	newManagedAppStatusClient        func() (*managedAppStatusClient, error)
 	managedAppStatusCache            managedAppStatusCache
+	edgeRouteDecisionMu              sync.Mutex
+	edgeRouteDecisionLast            map[string]string
 	consoleGalleryCache              expiringResponseCache[consoleGalleryResponse]
 	billingImageStorageRefresh       billingImageStorageRefreshScheduler
 	sourceUploadSlots                chan struct{}

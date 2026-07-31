@@ -113,9 +113,12 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 			EdgeGroupID:          "edge-group-us",
 			RuntimeEdgeGroupID:   "edge-group-us",
 			RouteGeneration:      "routegen_123",
+			DecisionID:           "decision_123",
+			StatusReason:         "runtime invariant violation: image_missing",
 			DeploymentGeneration: "deploygen_123",
 			UpstreamScope:        "cluster_service",
 		},
+		BundleVersion: "routegen_bundle_123",
 	}
 
 	fields := edgeProxyObservationRequestFactFields(observed, config.EdgeConfig{EdgeID: "edge_123"}, "lkg_123")
@@ -128,6 +131,9 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	if fields["lkg_generation"] != "lkg_123" {
 		t.Fatalf("missing LKG generation: %+v", fields)
 	}
+	if fields["decision_id"] != "decision_123" || fields["bundle_version"] != "routegen_bundle_123" || fields["status_reason"] != "runtime invariant violation: image_missing" {
+		t.Fatalf("missing route decision binding: %+v", fields)
+	}
 	summary := fmt.Sprint(fields["summary_json"])
 	if strings.Contains(summary, "token=") || strings.Contains(summary, "Authorization") || strings.Contains(summary, "upstream_url") {
 		t.Fatalf("summary leaked sensitive data: %s", summary)
@@ -139,6 +145,9 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 		t.Fatalf("summary missing origin phase details: %s", summary)
 	}
 	if !strings.Contains(summary, `"route_generation":"routegen_123"`) ||
+		!strings.Contains(summary, `"decision_id":"decision_123"`) ||
+		!strings.Contains(summary, `"bundle_version":"routegen_bundle_123"`) ||
+		!strings.Contains(summary, `"status_reason":"runtime invariant violation: image_missing"`) ||
 		!strings.Contains(summary, `"lkg_generation":"lkg_123"`) ||
 		!strings.Contains(summary, `"origin_resolution_mode":"cluster_service"`) {
 		t.Fatalf("summary missing route/LKG observability details: %s", summary)
@@ -3896,6 +3905,7 @@ func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
 	bundle := testBundle("routegen_disabled")
 	bundle.Routes[0].Status = model.EdgeRouteStatusDisabled
 	bundle.Routes[0].StatusReason = "app is disabled"
+	bundle.Routes[0].DecisionID = "decision_disabled"
 
 	service := NewService(config.EdgeConfig{
 		APIURL:    "https://api.example.invalid",
@@ -3909,6 +3919,15 @@ func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
 	service.ProxyHandler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected disabled route to return 503, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.String() != "app is disabled\n" {
+		t.Fatalf("observability changed 503 response body: %q", recorder.Body.String())
+	}
+	if got := recorder.Header().Get(edgeRouteDecisionIDHeader); got != "decision_disabled" {
+		t.Fatalf("missing decision header: %q", got)
+	}
+	if got := recorder.Header().Get(edgeRouteBundleVersionHeader); got != "routegen_disabled" {
+		t.Fatalf("missing bundle version header: %q", got)
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{

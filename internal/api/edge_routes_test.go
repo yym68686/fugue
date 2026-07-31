@@ -1213,6 +1213,7 @@ func TestEdgeRouteBundleVersionIgnoresNonContentMetadata(t *testing.T) {
 	metadataOnly.EdgeID = "edge-b"
 	metadataOnly.EdgeGroupID = "edge-group-country-us"
 	metadataOnly.Routes[0].RouteGeneration = "routegen_new"
+	metadataOnly.Routes[0].DecisionID = "decision_new"
 	metadataOnly.Routes[0].CreatedAt = createdAt.Add(24 * time.Hour)
 	metadataOnly.Routes[0].UpdatedAt = updatedAt.Add(24 * time.Hour)
 

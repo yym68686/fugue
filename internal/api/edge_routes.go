@@ -138,7 +138,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
 	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
-	apps = s.overlayManagedAppStatusesForEdgeRoutesCached(apps, runtimeByID)
+	apps, observationProvenanceByAppID := s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
 		appByID[strings.TrimSpace(app.ID)] = app
@@ -261,6 +261,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		}
 	}
 	routes = dedupeEdgeRouteBindings(routes)
+	routes = finalizeEdgeRouteDecisions(routes, appByID, observationProvenanceByAppID)
 
 	sort.Slice(routes, func(i, j int) bool {
 		if routes[i].Hostname != routes[j].Hostname {
@@ -303,6 +304,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		return model.EdgeRouteBundle{}, err
 	}
 	bundle = signEdgeRouteBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())
+	s.logEdgeRouteDecisionChanges(bundle, appByID, observationProvenanceByAppID)
 	return bundle, nil
 }
 

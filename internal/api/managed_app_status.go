@@ -106,6 +106,7 @@ type managedAppStatusCache struct {
 	byApp                map[string]managedAppStatusCacheEntry
 	list                 managedAppStatusListCacheEntry
 	listRefreshNotBefore time.Time
+	observationSequence  uint64
 	group                singleflight.Group
 }
 
@@ -117,6 +118,7 @@ type managedAppStatusCacheEntry struct {
 	evidence    managedAppRuntimeEvidence
 	refreshedAt time.Time
 	expiresAt   time.Time
+	sequence    managedAppObservationSequence
 }
 
 type managedAppStatusListCacheEntry struct {
@@ -126,6 +128,15 @@ type managedAppStatusListCacheEntry struct {
 	clusterID   string
 	refreshedAt time.Time
 	expiresAt   time.Time
+	sequence    managedAppObservationSequence
+}
+
+type managedAppObservationSequence struct {
+	refreshStarted   uint64
+	managedAppsRead  uint64
+	kubeSnapshotRead uint64
+	durableAppsRead  uint64
+	refreshCompleted uint64
 }
 
 // managedAppRuntimeEvidence contains only authoritative results from the same
@@ -133,17 +144,32 @@ type managedAppStatusListCacheEntry struct {
 // resource is not applicable (for example a background app has no Service),
 // while a non-nil false is an authoritative absence.
 type managedAppRuntimeEvidence struct {
-	appObservationKey       string
-	namespacePresent        *bool
-	servicePresent          *bool
-	endpointPresent         *bool
-	endpointReady           *bool
-	physicalReplicas        *int
-	physicalDesiredReplicas *int
-	imagePresent            *bool
-	imageRef                string
-	invariantViolations     []string
-	evidenceSources         []string
+	appObservationKey            string
+	namespacePresent             *bool
+	servicePresent               *bool
+	endpointPresent              *bool
+	endpointReady                *bool
+	physicalReplicas             *int
+	physicalDesiredReplicas      *int
+	imagePresent                 *bool
+	imageRef                     string
+	invariantViolations          []string
+	evidenceSources              []string
+	managedGeneration            int64
+	managedObservedGeneration    int64
+	managedImageDigest           string
+	managedDesiredReplicas       int
+	managedReadyReplicas         int
+	deploymentGeneration         int64
+	deploymentObservedGeneration int64
+	deploymentImageDigest        string
+	deploymentReplicas           int
+	deploymentUpdatedReplicas    int
+	deploymentReadyReplicas      int
+	deploymentAvailableReplicas  int
+	imageLocationStatus          string
+	imageLocationSource          string
+	imageLocationObservedAt      time.Time
 }
 
 type managedAppKubeSnapshot struct {
@@ -242,6 +268,17 @@ func (c *managedAppStatusCache) refreshBackoffDuration() time.Duration {
 		return defaultManagedAppStatusRefreshBackoff
 	}
 	return c.refreshBackoff
+}
+
+func (c *managedAppStatusCache) nextObservationSequence() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	c.observationSequence++
+	sequence := c.observationSequence
+	c.mu.Unlock()
+	return sequence
 }
 
 func (c *managedAppStatusCache) getApp(key string) (managedAppStatusCacheEntry, bool, bool) {
@@ -352,6 +389,7 @@ func (c *managedAppStatusCache) setList(entry managedAppStatusListCacheEntry) {
 			evidence:    entry.evidence[appID],
 			refreshedAt: entry.refreshedAt,
 			expiresAt:   entry.expiresAt,
+			sequence:    entry.sequence,
 		}
 		delete(missing, appID)
 	}
@@ -363,6 +401,7 @@ func (c *managedAppStatusCache) setList(entry managedAppStatusListCacheEntry) {
 			evidence:    entry.evidence[appID],
 			refreshedAt: entry.refreshedAt,
 			expiresAt:   entry.expiresAt,
+			sequence:    entry.sequence,
 		}
 	}
 	c.mu.Unlock()
@@ -865,6 +904,7 @@ func (s *Server) overlayManagedAppStatusCached(app model.App) model.App {
 			evidence:    list.evidence[strings.TrimSpace(app.ID)],
 			refreshedAt: list.refreshedAt,
 			expiresAt:   list.expiresAt,
+			sequence:    list.sequence,
 		}
 		if managed, found := list.items[strings.TrimSpace(app.ID)]; found {
 			entry.managed = managed
@@ -894,8 +934,13 @@ func (s *Server) overlayManagedAppStatusesCached(apps []model.App) []model.App {
 }
 
 func (s *Server) overlayManagedAppStatusesForEdgeRoutesCached(apps []model.App, runtimeByID map[string]model.Runtime) []model.App {
+	overlaid, _ := s.overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps, runtimeByID)
+	return overlaid
+}
+
+func (s *Server) overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps []model.App, runtimeByID map[string]model.Runtime) ([]model.App, map[string]managedAppObservationProvenance) {
 	if len(apps) == 0 {
-		return apps
+		return apps, nil
 	}
 	cached, ok, expired := s.managedAppStatusCache.getObservedList()
 	if ok {
@@ -907,10 +952,10 @@ func (s *Server) overlayManagedAppStatusesForEdgeRoutesCached(apps []model.App, 
 		// Marking that short refresh window stale makes edge routes flap on every
 		// cache cycle even though the underlying evidence has not aged out.
 		fresh := appObservationTimestampFresh(cached.refreshedAt, time.Now().UTC())
-		return s.applyManagedAppListObservation(apps, cached, runtimeByID, fresh, "")
+		return s.applyManagedAppListObservation(apps, cached, runtimeByID, fresh, ""), managedAppListObservationProvenance(apps, cached, expired, fresh)
 	}
 	s.refreshManagedAppStatusesAsync()
-	return s.applyUnknownManagedAppObservation(apps, runtimeByID, "live runtime observation is pending")
+	return s.applyUnknownManagedAppObservation(apps, runtimeByID, "live runtime observation is pending"), managedAppUnknownObservationProvenance(apps)
 }
 
 func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatusCacheEntry, runtimeByID map[string]model.Runtime, fresh bool, errorMessage string) model.App {
@@ -963,6 +1008,7 @@ func (s *Server) applyManagedAppListObservation(apps []model.App, entry managedA
 			evidence:    evidence,
 			refreshedAt: entry.refreshedAt,
 			expiresAt:   entry.expiresAt,
+			sequence:    entry.sequence,
 		}, runtimeByID, fresh, errorMessage))
 	}
 	return out
@@ -1145,6 +1191,11 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		evidenceSources:   []string{runtime.AppObservationSourceKubernetesAPI},
 	}
 	if found {
+		evidence.managedGeneration = managed.Metadata.Generation
+		evidence.managedObservedGeneration = managed.Status.ObservedGeneration
+		evidence.managedImageDigest = edgeObservationDigest(managed.Spec.AppSpec.Image)
+		evidence.managedDesiredReplicas = managed.Status.DesiredReplicas
+		evidence.managedReadyReplicas = managed.Status.ReadyReplicas
 		expectedName := strings.TrimSpace(runtime.ManagedAppResourceName(app))
 		expectedNamespace := strings.TrimSpace(runtime.NamespaceForTenant(app.TenantID))
 		if observedName := strings.TrimSpace(managed.Metadata.Name); observedName != expectedName {
@@ -1218,6 +1269,13 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		physicalDesired := 0
 		physicalReady := 0
 		if deploymentExists {
+			evidence.deploymentGeneration = deployment.Metadata.Generation
+			evidence.deploymentObservedGeneration = deployment.Status.ObservedGeneration
+			evidence.deploymentImageDigest = edgeObservationDigest(firstDeploymentContainerImage(deployment))
+			evidence.deploymentReplicas = deployment.Status.Replicas
+			evidence.deploymentUpdatedReplicas = deployment.Status.UpdatedReplicas
+			evidence.deploymentReadyReplicas = deployment.Status.ReadyReplicas
+			evidence.deploymentAvailableReplicas = deployment.Status.AvailableReplicas
 			if deployment.Spec.Replicas != nil {
 				physicalDesired = *deployment.Spec.Replicas
 			}
@@ -1256,11 +1314,14 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 					observedRuntimeID = runtimeID
 				}
 			}
-			present, err := s.currentManagedImagePresence(app, imageRef, observedRuntimeID)
+			present, locationObservation, err := s.currentManagedImagePresenceWithObservation(app, imageRef, observedRuntimeID)
 			if err != nil {
 				return managedAppRuntimeEvidence{}, err
 			}
 			evidence.imagePresent = present
+			evidence.imageLocationStatus = locationObservation.status
+			evidence.imageLocationSource = locationObservation.source
+			evidence.imageLocationObservedAt = locationObservation.observedAt
 			evidence.evidenceSources = append(evidence.evidenceSources, "image_location_store")
 		}
 		if deployment, deploymentExists := snapshot.deployments[deploymentKey]; deploymentExists &&
@@ -1349,13 +1410,24 @@ func firstDeploymentContainerImage(deployment kubeDeploymentRuntimeEvidence) str
 	return ""
 }
 
+type managedImageLocationObservation struct {
+	status     string
+	source     string
+	observedAt time.Time
+}
+
 func (s *Server) currentManagedImagePresence(app model.App, imageRef, runtimeID string) (*bool, error) {
+	present, _, err := s.currentManagedImagePresenceWithObservation(app, imageRef, runtimeID)
+	return present, err
+}
+
+func (s *Server) currentManagedImagePresenceWithObservation(app model.App, imageRef, runtimeID string) (*bool, managedImageLocationObservation, error) {
 	// Image-location rows without a runtime identity cannot be tied to the
 	// current migration target (and may have been written by the source
 	// cluster). They are diagnostic history, not observed runtime evidence.
 	runtimeID = strings.TrimSpace(runtimeID)
 	if runtimeID == "" {
-		return nil, nil
+		return nil, managedImageLocationObservation{}, nil
 	}
 	refs := []string{strings.TrimSpace(imageRef)}
 	if app.Source != nil {
@@ -1365,6 +1437,8 @@ func (s *Server) currentManagedImagePresence(app model.App, imageRef, runtimeID 
 	cutoff := time.Now().UTC().Add(-defaultImageCacheInventoryTTL)
 	hasFreshNegative := false
 	hasFreshPending := false
+	pendingObservation := managedImageLocationObservation{}
+	negativeObservation := managedImageLocationObservation{}
 	for _, ref := range refs {
 		ref = strings.TrimSpace(ref)
 		if ref == "" {
@@ -1388,7 +1462,7 @@ func (s *Server) currentManagedImagePresence(app model.App, imageRef, runtimeID 
 				RuntimeID: runtimeID,
 			})
 			if err != nil {
-				return nil, fmt.Errorf("list current image locations: %w", err)
+				return nil, managedImageLocationObservation{}, fmt.Errorf("list current image locations: %w", err)
 			}
 			for _, location := range locations {
 				observedAt := location.UpdatedAt.UTC()
@@ -1401,30 +1475,45 @@ func (s *Server) currentManagedImagePresence(app model.App, imageRef, runtimeID 
 				switch status {
 				case model.ImageLocationStatusPresent:
 					present := true
-					return &present, nil
+					return &present, managedImageLocationObservation{status: status, source: "image_location_store", observedAt: observedAt}, nil
 				case model.ImageLocationStatusPulling:
 					hasFreshPending = true
+					if pendingObservation.observedAt.IsZero() || observedAt.After(pendingObservation.observedAt) {
+						pendingObservation = managedImageLocationObservation{status: status, source: "image_location_store", observedAt: observedAt}
+					}
 				case model.ImageLocationStatusMissing, model.ImageLocationStatusFailed:
 					hasFreshNegative = true
+					if negativeObservation.observedAt.IsZero() || observedAt.After(negativeObservation.observedAt) {
+						negativeObservation = managedImageLocationObservation{status: status, source: "image_location_store", observedAt: observedAt}
+					}
 				}
 			}
 		}
 	}
 	if hasFreshPending {
-		return nil, nil
+		return nil, pendingObservation, nil
 	}
 	if hasFreshNegative {
 		present := false
-		return &present, nil
+		return &present, negativeObservation, nil
 	}
 	// No current physical report is unknown evidence, not proof that an image
 	// is missing.  This distinction keeps historical inventory gaps from
 	// turning healthy apps red while still failing closed on a fresh explicit
 	// missing/failed report.
-	return nil, nil
+	return nil, managedImageLocationObservation{source: "image_location_store"}, nil
 }
 
-func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (managedAppStatusCacheEntry, error) {
+func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (entry managedAppStatusCacheEntry, err error) {
+	sequence := managedAppObservationSequence{refreshStarted: s.managedAppStatusCache.nextObservationSequence()}
+	s.logManagedAppRefreshEvent("by_app", "start", "started", sequence.refreshStarted, nil)
+	defer func() {
+		if sequence.refreshCompleted == 0 {
+			failedSequence := s.managedAppStatusCache.nextObservationSequence()
+			s.logManagedAppRefreshEvent("by_app", "end", "error", failedSequence, err)
+		}
+	}()
+	sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
 	client, err := s.managedAppStatusClient()
 	if err != nil {
 		return managedAppStatusCacheEntry{}, err
@@ -1451,6 +1540,7 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 			return managedAppStatusCacheEntry{}, err
 		}
 	}
+	sequence.managedAppsRead = s.managedAppStatusCache.nextObservationSequence()
 	confirmedClusterID, err := client.getClusterID(refreshCtx)
 	if err != nil {
 		return managedAppStatusCacheEntry{}, err
@@ -1464,6 +1554,7 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 		if snapshotErr != nil {
 			return managedAppStatusCacheEntry{}, snapshotErr
 		}
+		sequence.kubeSnapshotRead = s.managedAppStatusCache.nextObservationSequence()
 		finalClusterID, finalErr := client.getClusterID(refreshCtx)
 		if finalErr != nil {
 			return managedAppStatusCacheEntry{}, finalErr
@@ -1478,7 +1569,8 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 	}
 
 	now := time.Now().UTC()
-	entry := managedAppStatusCacheEntry{
+	sequence.refreshCompleted = s.managedAppStatusCache.nextObservationSequence()
+	entry = managedAppStatusCacheEntry{
 		managed:     managed,
 		found:       found,
 		ok:          true,
@@ -1486,8 +1578,10 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 		evidence:    evidence,
 		refreshedAt: now,
 		expiresAt:   now.Add(s.managedAppStatusCache.cacheTTL()),
+		sequence:    sequence,
 	}
 	s.managedAppStatusCache.setApp(managedAppStatusCacheKey(app), entry)
+	s.logManagedAppRefreshEvent("by_app", "end", "success", sequence.refreshCompleted, nil)
 	return entry, nil
 }
 
@@ -1516,7 +1610,19 @@ func (s *Server) fetchManagedAppInventory(ctx context.Context) (managedAppStatus
 	return s.fetchManagedAppInventoryWithClusterIdentity(ctx, false)
 }
 
-func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context, requireClusterIdentity bool) (managedAppStatusListCacheEntry, error) {
+func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context, requireClusterIdentity bool) (entry managedAppStatusListCacheEntry, err error) {
+	cacheLayer := "inventory"
+	if requireClusterIdentity {
+		cacheLayer = "list"
+	}
+	sequence := managedAppObservationSequence{refreshStarted: s.managedAppStatusCache.nextObservationSequence()}
+	s.logManagedAppRefreshEvent(cacheLayer, "start", "started", sequence.refreshStarted, nil)
+	defer func() {
+		if sequence.refreshCompleted == 0 {
+			failedSequence := s.managedAppStatusCache.nextObservationSequence()
+			s.logManagedAppRefreshEvent(cacheLayer, "end", "error", failedSequence, err)
+		}
+	}()
 	client, err := s.managedAppStatusClient()
 	if err != nil {
 		return managedAppStatusListCacheEntry{}, err
@@ -1542,6 +1648,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 	if err != nil {
 		return managedAppStatusListCacheEntry{}, err
 	}
+	sequence.managedAppsRead = s.managedAppStatusCache.nextObservationSequence()
 	if requireClusterIdentity {
 		confirmedClusterID, err := client.getClusterID(refreshCtx)
 		if err != nil {
@@ -1557,6 +1664,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		if snapshotErr != nil {
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}
+		sequence.kubeSnapshotRead = s.managedAppStatusCache.nextObservationSequence()
 		finalClusterID, finalErr := client.getClusterID(refreshCtx)
 		if finalErr != nil {
 			return managedAppStatusListCacheEntry{}, finalErr
@@ -1570,6 +1678,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			if err != nil {
 				return managedAppStatusListCacheEntry{}, fmt.Errorf("list apps for runtime evidence: %w", err)
 			}
+			sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
 		}
 		appsByID := make(map[string]model.App, len(apps))
 		for _, app := range apps {
@@ -1606,13 +1715,15 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 	}
 
 	now := time.Now().UTC()
-	entry := managedAppStatusListCacheEntry{
+	sequence.refreshCompleted = s.managedAppStatusCache.nextObservationSequence()
+	entry = managedAppStatusListCacheEntry{
 		items:       items,
 		evidence:    evidenceByAppID,
 		ok:          true,
 		clusterID:   clusterID,
 		refreshedAt: now,
 		expiresAt:   now.Add(s.managedAppStatusCache.cacheTTL()),
+		sequence:    sequence,
 	}
 	// Only a cluster-identified inventory may populate the observed-status
 	// cache.  The backing-service inventory path intentionally predates the
@@ -1623,6 +1734,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 	if requireClusterIdentity {
 		s.managedAppStatusCache.setList(entry)
 	}
+	s.logManagedAppRefreshEvent(cacheLayer, "end", "success", sequence.refreshCompleted, nil)
 	return entry, nil
 }
 

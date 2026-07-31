@@ -243,6 +243,7 @@ type EdgeRouteBinding struct {
 	Streaming            bool                    `json:"streaming"`
 	Status               string                  `json:"status"`
 	StatusReason         string                  `json:"status_reason,omitempty"`
+	DecisionID           string                  `json:"decision_id,omitempty"`
 	RouteGeneration      string                  `json:"route_generation"`
 	CreatedAt            time.Time               `json:"created_at"`
 	UpdatedAt            time.Time               `json:"updated_at"`

@@ -42,6 +42,8 @@ const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
 const edgeClientRemoteAddrHeader = "X-Fugue-Edge-Client-Remote-Addr"
 const edgeRequestIDHeader = "X-Fugue-Edge-Request-Id"
 const edgeTraceIDHeader = "X-Fugue-Trace-Id"
+const edgeRouteDecisionIDHeader = "X-Fugue-Route-Decision-Id"
+const edgeRouteBundleVersionHeader = "X-Fugue-Route-Bundle-Version"
 const edgeStatusClientClosedRequest = 499
 
 const edgeRequestBodyCopyBufferSize = 32 * 1024
@@ -274,6 +276,7 @@ type edgeProxyObservation struct {
 	ReceivedAt              time.Time
 	Host                    string
 	Route                   model.EdgeRouteBinding
+	BundleVersion           string
 	ReleaseID               string
 	ReleaseRole             string
 	TrafficWeight           int
@@ -771,16 +774,22 @@ func (s *Service) routeForHost(host string) (model.EdgeRouteBinding, bool, bool)
 }
 
 func (s *Service) routeForRequest(host, requestPath string) (model.EdgeRouteBinding, bool, bool) {
+	route, ok, fallback, _ := s.routeForRequestWithBundle(host, requestPath)
+	return route, ok, fallback
+}
+
+func (s *Service) routeForRequestWithBundle(host, requestPath string) (model.EdgeRouteBinding, bool, bool, string) {
 	host = normalizeRouteHost(host)
 	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
 	if host == "" {
-		return model.EdgeRouteBinding{}, false, false
+		return model.EdgeRouteBinding{}, false, false, ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.bundle == nil {
-		return model.EdgeRouteBinding{}, false, false
+		return model.EdgeRouteBinding{}, false, false, ""
 	}
+	bundleVersion := strings.TrimSpace(s.bundle.Version)
 
 	localEdgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
 	bestPrefixLen := -1
@@ -828,15 +837,15 @@ func (s *Service) routeForRequest(host, requestPath string) (model.EdgeRouteBind
 		}
 	}
 	if currentActive.Hostname != "" {
-		return currentActive, true, false
+		return currentActive, true, false, bundleVersion
 	}
 	if fallbackActive.Hostname != "" {
-		return fallbackActive, true, true
+		return fallbackActive, true, true, bundleVersion
 	}
 	if inactive.Hostname != "" {
-		return inactive, true, inactiveFallbackHit
+		return inactive, true, inactiveFallbackHit, bundleVersion
 	}
-	return model.EdgeRouteBinding{}, false, false
+	return model.EdgeRouteBinding{}, false, false, bundleVersion
 }
 
 func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBinding, host, traceID, edgeRequestID string) (model.EdgeRouteBinding, model.EdgeRouteUpstream) {
@@ -968,7 +977,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	defer atomic.AddInt64(&s.activeProxyRequests, -1)
 	startedAt := time.Now()
 	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
-	route, ok, fallbackHit := s.routeForRequest(host, r.URL.Path)
+	route, ok, fallbackHit, bundleVersion := s.routeForRequestWithBundle(host, r.URL.Path)
 	edgeRequestID := edgeRequestIDForProxy(r)
 	traceID := edgeTraceIDForProxy(r)
 	selectedRoute := route
@@ -986,6 +995,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		ReceivedAt:       startedAt.UTC(),
 		Host:             host,
 		Route:            selectedRoute,
+		BundleVersion:    bundleVersion,
 		ReleaseID:        strings.TrimSpace(selectedUpstream.ReleaseID),
 		ReleaseRole:      strings.TrimSpace(selectedUpstream.Role),
 		TrafficWeight:    selectedUpstream.Weight,
@@ -1035,6 +1045,12 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !strings.EqualFold(strings.TrimSpace(selectedRoute.Status), model.EdgeRouteStatusActive) {
+		if decisionID := strings.TrimSpace(selectedRoute.DecisionID); decisionID != "" {
+			w.Header().Set(edgeRouteDecisionIDHeader, decisionID)
+		}
+		if bundleVersion != "" {
+			w.Header().Set(edgeRouteBundleVersionHeader, bundleVersion)
+		}
 		observed.StatusCode = http.StatusServiceUnavailable
 		message := strings.TrimSpace(selectedRoute.StatusReason)
 		if message == "" {
@@ -4351,7 +4367,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		requestBodyMissing = observed.RequestBytes - observed.RequestBodyReadBytes
 	}
 	s.Logger.Printf(
-		"edge_proxy_request received_at=%s edge_request_id=%s trace_id=%s request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d body_read_block_ms=%d file_write_ms=%d first_body_byte_ms=%d last_body_byte_ms=%d max_read_gap_ms=%d read_calls=%d avg_bps=%d min_window_bps=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t request_source=%s",
+		"edge_proxy_request received_at=%s edge_request_id=%s trace_id=%s request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s decision_id=%s bundle_version=%s status_reason=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d body_read_block_ms=%d file_write_ms=%d first_body_byte_ms=%d last_body_byte_ms=%d max_read_gap_ms=%d read_calls=%d avg_bps=%d min_window_bps=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t request_source=%s",
 		observed.ReceivedAt.Format(time.RFC3339Nano),
 		logSafeValue(observed.EdgeRequestID),
 		logSafeValue(observed.TraceID),
@@ -4365,6 +4381,9 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		edgeGroupRegion(runtimeEdgeGroupID),
 		runtimeEdgeGroupID,
 		strings.TrimSpace(observed.Route.RouteGeneration),
+		strings.TrimSpace(observed.Route.DecisionID),
+		strings.TrimSpace(observed.BundleVersion),
+		logSafeValue(observed.Route.StatusReason),
 		strings.TrimSpace(observed.Route.FallbackReason),
 		logSafeValue(observed.ClientIP),
 		logSafeValue(observed.ClientRemoteAddr),

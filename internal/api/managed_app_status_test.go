@@ -175,6 +175,78 @@ func TestOverlayManagedAppStatusesPublishesCompleteRuntimeEvidence(t *testing.T)
 	if status.PhysicalReplicas == nil || *status.PhysicalReplicas != 1 || status.Generation != 3 || status.ObservedGeneration != 3 {
 		t.Fatalf("missing physical/generation evidence: %#v", status)
 	}
+	cached, ok, _ := apiServer.managedAppStatusCache.getList()
+	if !ok {
+		t.Fatal("expected successful refresh to populate list cache")
+	}
+	assertManagedAppFullRefreshSequence(t, cached.sequence)
+}
+
+func TestFetchManagedAppInventorySequenceOmitsUnperformedStages(t *testing.T) {
+	t.Parallel()
+
+	server := newManagedAppTestServer(t, map[string]any{"items": []map[string]any{}})
+	defer server.Close()
+	apiServer := &Server{
+		log:                   log.New(io.Discard, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+	entry, err := apiServer.fetchManagedAppInventory(context.Background())
+	if err != nil {
+		t.Fatalf("fetch inventory: %v", err)
+	}
+	sequence := entry.sequence
+	if !(sequence.refreshStarted > 0 && sequence.refreshStarted < sequence.managedAppsRead && sequence.managedAppsRead < sequence.refreshCompleted) {
+		t.Fatalf("inventory sequence is not ordered: %+v", sequence)
+	}
+	if sequence.kubeSnapshotRead != 0 || sequence.durableAppsRead != 0 {
+		t.Fatalf("inventory refresh fabricated unperformed stages: %+v", sequence)
+	}
+}
+
+func TestFailedManagedAppInventoryRefreshDoesNotFabricateCompletion(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	var logs strings.Builder
+	apiServer := &Server{
+		log:                   log.New(&logs, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{client: server.Client(), baseURL: server.URL, bearerToken: "test"}, nil
+		},
+	}
+	entry, err := apiServer.fetchManagedAppInventory(context.Background())
+	if err == nil {
+		t.Fatal("expected inventory refresh failure")
+	}
+	if entry.sequence != (managedAppObservationSequence{}) {
+		t.Fatalf("failed refresh returned fabricated completion sequence: %+v", entry.sequence)
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, `"phase":"start"`) || !strings.Contains(logOutput, `"phase":"end"`) || !strings.Contains(logOutput, `"result":"error"`) {
+		t.Fatalf("failed refresh did not record start/error boundary: %s", logOutput)
+	}
+	if strings.Contains(logOutput, `"result":"success"`) {
+		t.Fatalf("failed refresh was logged as completed: %s", logOutput)
+	}
+}
+
+func assertManagedAppFullRefreshSequence(t *testing.T, sequence managedAppObservationSequence) {
+	t.Helper()
+	if !(sequence.refreshStarted > 0 &&
+		sequence.refreshStarted < sequence.managedAppsRead &&
+		sequence.managedAppsRead < sequence.kubeSnapshotRead &&
+		sequence.kubeSnapshotRead < sequence.durableAppsRead &&
+		sequence.durableAppsRead < sequence.refreshCompleted) {
+		t.Fatalf("managed app refresh sequence is not ordered: %+v", sequence)
+	}
 }
 
 func TestOverlayManagedAppStatusesUsesEndpointSlicesWhenLegacyEndpointsAreUnavailable(t *testing.T) {

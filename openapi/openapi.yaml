@@ -13598,6 +13598,9 @@ components:
           enum: [active, disabled, unavailable, runtime-missing]
         status_reason:
           type: string
+        decision_id:
+          type: string
+          description: Stable, secret-safe identifier for the evidence-backed route decision.
         route_generation:
           type: string
         created_at:
