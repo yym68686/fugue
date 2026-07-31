@@ -453,6 +453,123 @@ func TestTransactionEnvelopeRebuildsRenderedOnlyOperationalActivation(t *testing
 	}
 }
 
+func TestTransactionEnvelopeRebuildsObservedLiveOperationalActivation(t *testing.T) {
+	changed, input, _, _, _ := renderedOnlyOperationalActivationFixture(t)
+	observed, err := MaterializeObservedLiveImageManifest(
+		input.BaseManifest,
+		input.BaseManifest,
+		input.Ownership,
+		input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ObservedLiveManifest = observed
+	input.ImmutableTargetManifest, err = MaterializeObservedLiveRelativeTargetPublishedImageRefs(
+		input.BaseManifest,
+		observed,
+		input.TargetManifest,
+		input.Ownership,
+		input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+		input.BuildPlan.TargetCommit,
+		input.BuildPlan,
+		input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationPlan, activationEvidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := ClassifyRendered(
+		input.BaseManifest,
+		input.ImmutableTargetManifest,
+		spec,
+		RenderedOptions{
+			DefaultNamespace: input.ReleasePlan.Digests.ClassificationContext.DefaultNamespace,
+			Bindings:         input.ReleasePlan.Digests.ClassificationContext.BindingMap(),
+		},
+	)
+	report, err := BuildOperationalDomainEvidenceFromObservedLiveActivation(
+		changed,
+		input.BuildPlan,
+		activationPlan,
+		activationEvidence,
+		rendered,
+		input.ReleasePlan.Digests.BaseManifest,
+		digestBytesSHA256(observed),
+		input.ReleasePlan.Digests.TargetManifest,
+		digestBytesSHA256(input.ImmutableTargetManifest),
+		input.ReleasePlan.Digests.Ownership,
+		input.ReleasePlan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := ResolveOperationalPlanWithObservedLiveManifest(
+		input.ReleasePlan,
+		report,
+		observed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewTransactionEnvelope(
+		activated,
+		activated.PlanDigest,
+		DomainControlPlane,
+	); err == nil {
+		t.Fatal("observed-live transaction envelope was built without its private witness")
+	}
+	envelope, err := NewTransactionEnvelopeWithObservedLiveManifest(
+		activated,
+		activated.PlanDigest,
+		DomainControlPlane,
+		observed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeAndVerifyTransactionEnvelope(
+		bytes.NewReader(encoded),
+		activated.PlanDigest,
+		DomainControlPlane,
+	); err == nil {
+		t.Fatal("observed-live transaction envelope decoded without its private witness")
+	}
+	authorization, err := DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+		bytes.NewReader(encoded),
+		activated.PlanDigest,
+		DomainControlPlane,
+		observed,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authorization.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	tampered := append([]byte(nil), observed...)
+	tampered[len(tampered)-2] ^= 1
+	if _, err := DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+		bytes.NewReader(encoded),
+		activated.PlanDigest,
+		DomainControlPlane,
+		tampered,
+	); err == nil {
+		t.Fatal("observed-live transaction envelope decoded with a different witness")
+	}
+}
+
 func TestDecodeTransactionEnvelopeRequiresEmptyUnknownEvidence(t *testing.T) {
 	plan, _, encoded := encodedTransactionEnvelope(t, DomainNodeLocal)
 	explicitEmpty := mutateTransactionEnvelopeJSON(t, encoded, func(root map[string]any) {

@@ -35,10 +35,11 @@ type TransactionEnvelope struct {
 // ExecutionAuthorization accepted by the transaction runner. The untrusted
 // Plan is intentionally not exposed.
 type TransactionAuthorization struct {
-	domain     Domain
-	planDigest string
-	plan       Plan
-	seal       [sha256.Size]byte
+	domain                     Domain
+	planDigest                 string
+	plan                       Plan
+	observedLiveManifestDigest string
+	seal                       [sha256.Size]byte
 }
 
 // Domain returns the single release domain authorized by the envelope.
@@ -60,11 +61,20 @@ func (authorization TransactionAuthorization) Verify() error {
 	if _, err := ParseDomain(string(authorization.domain)); err != nil {
 		return fmt.Errorf("authorization domain: %w", err)
 	}
-	expected := transactionAuthorizationSeal(authorization.planDigest, authorization.domain)
+	expected := transactionAuthorizationSeal(
+		authorization.planDigest,
+		authorization.domain,
+		authorization.observedLiveManifestDigest,
+	)
 	if subtle.ConstantTimeCompare(authorization.seal[:], expected[:]) != 1 {
 		return fmt.Errorf("transaction authorization seal mismatch")
 	}
-	if _, err := rebuildExecutableTransactionPlan(authorization.plan, authorization.planDigest, authorization.domain); err != nil {
+	if _, err := rebuildExecutableTransactionPlan(
+		authorization.plan,
+		authorization.planDigest,
+		authorization.domain,
+		authorization.observedLiveManifestDigest,
+	); err != nil {
 		return fmt.Errorf("transaction authorization plan: %w", err)
 	}
 	return nil
@@ -74,6 +84,37 @@ func (authorization TransactionAuthorization) Verify() error {
 // semantically reproducible single-domain Plan. expectedPlanDigest is an
 // independent input; copying the Plan's self-declared digest is insufficient.
 func NewTransactionEnvelope(plan Plan, expectedPlanDigest string, expectedDomain Domain) (TransactionEnvelope, error) {
+	return newTransactionEnvelope(plan, expectedPlanDigest, expectedDomain, "")
+}
+
+// NewTransactionEnvelopeWithObservedLiveManifest constructs a transaction
+// envelope for a v5 operational plan only after the caller supplies the exact
+// private observed-live witness used to resolve that plan. The envelope keeps
+// only the plan's digest-bound report; the returned authorization retains the
+// witness digest, never the raw manifest bytes.
+func NewTransactionEnvelopeWithObservedLiveManifest(
+	plan Plan,
+	expectedPlanDigest string,
+	expectedDomain Domain,
+	observedLiveManifest []byte,
+) (TransactionEnvelope, error) {
+	if len(observedLiveManifest) == 0 {
+		return TransactionEnvelope{}, fmt.Errorf("transaction observed live manifest is required")
+	}
+	return newTransactionEnvelope(
+		plan,
+		expectedPlanDigest,
+		expectedDomain,
+		digestBytesSHA256(observedLiveManifest),
+	)
+}
+
+func newTransactionEnvelope(
+	plan Plan,
+	expectedPlanDigest string,
+	expectedDomain Domain,
+	observedLiveManifestDigest string,
+) (TransactionEnvelope, error) {
 	if err := validateCanonicalPlanDigest(expectedPlanDigest, "expected plan digest"); err != nil {
 		return TransactionEnvelope{}, err
 	}
@@ -81,7 +122,12 @@ func NewTransactionEnvelope(plan Plan, expectedPlanDigest string, expectedDomain
 		return TransactionEnvelope{}, fmt.Errorf("expected transaction domain: %w", err)
 	}
 
-	rebuilt, err := rebuildExecutableTransactionPlan(plan, expectedPlanDigest, expectedDomain)
+	rebuilt, err := rebuildExecutableTransactionPlan(
+		plan,
+		expectedPlanDigest,
+		expectedDomain,
+		observedLiveManifestDigest,
+	)
 	if err != nil {
 		return TransactionEnvelope{}, err
 	}
@@ -99,6 +145,36 @@ func NewTransactionEnvelope(plan Plan, expectedPlanDigest string, expectedDomain
 // the envelope. It returns only an opaque authorization, never the untrusted
 // plan or any caller-controlled derived outcome.
 func DecodeAndVerifyTransactionEnvelope(reader io.Reader, trustedPlanDigest string, trustedExpectedDomain Domain) (TransactionAuthorization, error) {
+	return decodeAndVerifyTransactionEnvelope(reader, trustedPlanDigest, trustedExpectedDomain, "")
+}
+
+// DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest verifies a v5
+// transaction envelope against the exact private observed-live witness. The
+// witness digest is sealed into the opaque authorization so every subsequent
+// Verify call reconstructs the same operational decision.
+func DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+	reader io.Reader,
+	trustedPlanDigest string,
+	trustedExpectedDomain Domain,
+	observedLiveManifest []byte,
+) (TransactionAuthorization, error) {
+	if len(observedLiveManifest) == 0 {
+		return TransactionAuthorization{}, fmt.Errorf("transaction observed live manifest is required")
+	}
+	return decodeAndVerifyTransactionEnvelope(
+		reader,
+		trustedPlanDigest,
+		trustedExpectedDomain,
+		digestBytesSHA256(observedLiveManifest),
+	)
+}
+
+func decodeAndVerifyTransactionEnvelope(
+	reader io.Reader,
+	trustedPlanDigest string,
+	trustedExpectedDomain Domain,
+	observedLiveManifestDigest string,
+) (TransactionAuthorization, error) {
 	if err := validateCanonicalPlanDigest(trustedPlanDigest, "trusted plan digest"); err != nil {
 		return TransactionAuthorization{}, err
 	}
@@ -151,11 +227,16 @@ func DecodeAndVerifyTransactionEnvelope(reader io.Reader, trustedPlanDigest stri
 		return TransactionAuthorization{}, fmt.Errorf("trusted expected domain mismatch")
 	}
 
-	rebuilt, err := rebuildExecutableTransactionPlan(envelope.Plan, trustedPlanDigest, trustedExpectedDomain)
+	rebuilt, err := rebuildExecutableTransactionPlan(
+		envelope.Plan,
+		trustedPlanDigest,
+		trustedExpectedDomain,
+		observedLiveManifestDigest,
+	)
 	if err != nil {
 		return TransactionAuthorization{}, err
 	}
-	authorization := newTransactionAuthorization(rebuilt)
+	authorization := newTransactionAuthorization(rebuilt, observedLiveManifestDigest)
 	if err := authorization.Verify(); err != nil {
 		return TransactionAuthorization{}, err
 	}
@@ -177,7 +258,12 @@ func validateStrictTransactionEnvelopeJSON(data []byte) error {
 	return nil
 }
 
-func rebuildExecutableTransactionPlan(plan Plan, expectedPlanDigest string, expectedDomain Domain) (Plan, error) {
+func rebuildExecutableTransactionPlan(
+	plan Plan,
+	expectedPlanDigest string,
+	expectedDomain Domain,
+	observedLiveManifestDigest string,
+) (Plan, error) {
 	operational := len(plan.OperationalEvidence) == 1
 	if len(plan.OperationalEvidence) > 1 {
 		return Plan{}, fmt.Errorf("transaction plan contains multiple operational activation reports")
@@ -227,10 +313,27 @@ func rebuildExecutableTransactionPlan(plan Plan, expectedPlanDigest string, expe
 	})
 	if operational {
 		var err error
-		rebuilt, err = ActivateOperationalPlan(rebuilt, plan.OperationalEvidence[0])
+		report := plan.OperationalEvidence[0]
+		if report.Policy == OperationalObservedLiveActivationPolicy {
+			if observedLiveManifestDigest == "" {
+				return Plan{}, fmt.Errorf("reconstruct observed-live operational activation: private manifest digest is required")
+			}
+			rebuilt, err = activateOperationalPlanWithObservedLiveDigest(
+				rebuilt,
+				report,
+				observedLiveManifestDigest,
+			)
+		} else {
+			if observedLiveManifestDigest != "" {
+				return Plan{}, fmt.Errorf("legacy operational activation does not accept an observed live manifest")
+			}
+			rebuilt, err = ActivateOperationalPlan(rebuilt, report)
+		}
 		if err != nil {
 			return Plan{}, fmt.Errorf("reconstruct operational activation: %w", err)
 		}
+	} else if observedLiveManifestDigest != "" {
+		return Plan{}, fmt.Errorf("non-operational transaction does not accept an observed live manifest")
 	}
 	if rebuilt.Result != OutcomeSingle || rebuilt.SelectedDomain != expectedDomain || rebuilt.PlanDigest != expectedPlanDigest {
 		return Plan{}, fmt.Errorf("reconstructed transaction plan does not authorize the expected domain")
@@ -269,15 +372,27 @@ func validateCanonicalPlanDigest(digest, label string) error {
 	return nil
 }
 
-func newTransactionAuthorization(plan Plan) TransactionAuthorization {
+func newTransactionAuthorization(plan Plan, observedLiveManifestDigest string) TransactionAuthorization {
 	return TransactionAuthorization{
-		domain:     plan.SelectedDomain,
-		planDigest: plan.PlanDigest,
-		plan:       plan,
-		seal:       transactionAuthorizationSeal(plan.PlanDigest, plan.SelectedDomain),
+		domain:                     plan.SelectedDomain,
+		planDigest:                 plan.PlanDigest,
+		plan:                       plan,
+		observedLiveManifestDigest: observedLiveManifestDigest,
+		seal: transactionAuthorizationSeal(
+			plan.PlanDigest,
+			plan.SelectedDomain,
+			observedLiveManifestDigest,
+		),
 	}
 }
 
-func transactionAuthorizationSeal(planDigest string, domain Domain) [sha256.Size]byte {
-	return sha256.Sum256([]byte("fugue-release-domain-transaction-authorization-v1\x00" + planDigest + "\x00" + string(domain)))
+func transactionAuthorizationSeal(
+	planDigest string,
+	domain Domain,
+	observedLiveManifestDigest string,
+) [sha256.Size]byte {
+	return sha256.Sum256([]byte(
+		"fugue-release-domain-transaction-authorization-v2\x00" +
+			planDigest + "\x00" + string(domain) + "\x00" + observedLiveManifestDigest,
+	))
 }

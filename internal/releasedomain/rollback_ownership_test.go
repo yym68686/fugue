@@ -299,7 +299,11 @@ func TestExecutionBindingRequiresAdjacentCanonicalHelmRevisions(t *testing.T) {
 	input.Transaction.plan.Digests.Target = input.Binding.TargetRevision
 	input.Transaction.plan.PlanDigest = computePlanDigest(input.Transaction.plan)
 	input.Transaction.planDigest = input.Transaction.plan.PlanDigest
-	input.Transaction.seal = transactionAuthorizationSeal(input.Transaction.planDigest, input.Transaction.domain)
+	input.Transaction.seal = transactionAuthorizationSeal(
+		input.Transaction.planDigest,
+		input.Transaction.domain,
+		input.Transaction.observedLiveManifestDigest,
+	)
 	if _, err := VerifyRollbackOwnership(input); err != nil {
 		t.Fatalf("maximum adjacent revision pair was rejected: %v", err)
 	}

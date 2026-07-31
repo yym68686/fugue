@@ -33,6 +33,7 @@ const (
 	envelopeFilename         = "transaction-envelope.json"
 	executionBindingFilename = "execution-binding.json"
 	rollbackEvidenceFilename = "rollback-ownership-evidence.json"
+	observedLiveFilename     = "observed-live-manifest.yaml"
 
 	maxOwnershipBytes       = 4 << 20
 	maxChangedEvidenceBytes = 32 << 20
@@ -147,6 +148,7 @@ type artifactDigests struct {
 	TransactionEnvelope       string `json:"transactionEnvelope"`
 	ExecutionBinding          string `json:"executionBinding"`
 	RollbackOwnershipEvidence string `json:"rollbackOwnershipEvidence"`
+	ObservedLiveManifest      string `json:"observedLiveManifest"`
 }
 
 type dispatchDecision struct {
@@ -173,6 +175,7 @@ type authorizationArtifacts struct {
 	envelopeJSON     []byte
 	bindingJSON      []byte
 	rollbackJSON     []byte
+	observedLive     []byte
 }
 
 type verifiedAuthorizationBundle struct {
@@ -488,6 +491,7 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 	if err != nil {
 		return authorizationArtifacts{}, fmt.Errorf("build release-domain plan: %w", err)
 	}
+	var observedLiveManifest []byte
 	if options.operationalReportPath != "" {
 		reportJSON, err := readSecureSource(options.operationalReportPath, maxOperationalReport, false)
 		if err != nil {
@@ -506,7 +510,8 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 			if options.activationLiveManifestPath == "" {
 				return authorizationArtifacts{}, fmt.Errorf("observed-live operational report requires its canonical live manifest")
 			}
-			observedLiveManifest, readErr := readSecureSource(options.activationLiveManifestPath, maxManifestBytes, true)
+			var readErr error
+			observedLiveManifest, readErr = readSecureSource(options.activationLiveManifestPath, maxManifestBytes, true)
 			if readErr != nil {
 				return authorizationArtifacts{}, fmt.Errorf("read activation live canonical manifest: %w", readErr)
 			}
@@ -545,6 +550,7 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 		targetManifest:   targetManifest,
 		repeatedManifest: repeatedManifest,
 		argvSnapshot:     argvSnapshot,
+		observedLive:     observedLiveManifest,
 	}
 	artifacts.decision = dispatchDecision{
 		APIVersion:          decisionAPIVersion,
@@ -564,11 +570,24 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 			UpgradeArgvSnapshot:    digestBytes(argvSnapshot),
 		},
 	}
+	if len(observedLiveManifest) != 0 {
+		artifacts.decision.Artifacts.ObservedLiveManifest = digestBytes(observedLiveManifest)
+	}
 
 	if plan.Result != releasedomain.OutcomeSingle {
 		return artifacts, nil
 	}
-	envelope, err := releasedomain.NewTransactionEnvelope(plan, plan.PlanDigest, plan.SelectedDomain)
+	var envelope releasedomain.TransactionEnvelope
+	if len(observedLiveManifest) != 0 {
+		envelope, err = releasedomain.NewTransactionEnvelopeWithObservedLiveManifest(
+			plan,
+			plan.PlanDigest,
+			plan.SelectedDomain,
+			observedLiveManifest,
+		)
+	} else {
+		envelope, err = releasedomain.NewTransactionEnvelope(plan, plan.PlanDigest, plan.SelectedDomain)
+	}
 	if err != nil {
 		return authorizationArtifacts{}, fmt.Errorf("construct transaction envelope: %w", err)
 	}
@@ -579,7 +598,21 @@ func buildAuthorization(options authorizeOptions) (authorizationArtifacts, error
 	if len(envelopeJSON) > maxEnvelopeBytes {
 		return authorizationArtifacts{}, fmt.Errorf("encoded transaction envelope exceeds %d-byte limit", maxEnvelopeBytes)
 	}
-	transaction, err := releasedomain.DecodeAndVerifyTransactionEnvelope(bytes.NewReader(envelopeJSON), plan.PlanDigest, plan.SelectedDomain)
+	var transaction releasedomain.TransactionAuthorization
+	if len(observedLiveManifest) != 0 {
+		transaction, err = releasedomain.DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+			bytes.NewReader(envelopeJSON),
+			plan.PlanDigest,
+			plan.SelectedDomain,
+			observedLiveManifest,
+		)
+	} else {
+		transaction, err = releasedomain.DecodeAndVerifyTransactionEnvelope(
+			bytes.NewReader(envelopeJSON),
+			plan.PlanDigest,
+			plan.SelectedDomain,
+		)
+	}
 	if err != nil {
 		return authorizationArtifacts{}, fmt.Errorf("verify transaction envelope: %w", err)
 	}
@@ -646,6 +679,12 @@ func publishAuthorizationBundle(path string, artifacts authorizationArtifacts) (
 		{name: argvSnapshotFilename, data: artifacts.argvSnapshot},
 		{name: planFilename, data: artifacts.planJSON},
 	}
+	if len(artifacts.observedLive) != 0 {
+		files = append(files, struct {
+			name string
+			data []byte
+		}{name: observedLiveFilename, data: artifacts.observedLive})
+	}
 	if artifacts.plan.Result == releasedomain.OutcomeSingle {
 		files = append(files,
 			struct {
@@ -678,7 +717,10 @@ func publishAuthorizationBundle(path string, artifacts authorizationArtifacts) (
 	if err := bundle.writeAtomic(decisionFilename, decisionJSON); err != nil {
 		return fmt.Errorf("publish decision: %w", err)
 	}
-	if err := bundle.verifyStable(expectedBundleFiles(artifacts.plan.Result)); err != nil {
+	if err := bundle.verifyStable(expectedBundleFiles(
+		artifacts.plan.Result,
+		len(artifacts.observedLive) != 0,
+	)); err != nil {
 		return fmt.Errorf("verify published authorization bundle: %w", err)
 	}
 	return nil
@@ -719,7 +761,8 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 		return dispatchDecision{}, fmt.Errorf("validate decision: %w", err)
 	}
 	outcome := releasedomain.Outcome(decision.Outcome)
-	if err := bundle.verifyNames(expectedBundleFiles(outcome)); err != nil {
+	hasObservedLive := decision.Artifacts.ObservedLiveManifest != ""
+	if err := bundle.verifyNames(expectedBundleFiles(outcome, hasObservedLive)); err != nil {
 		return dispatchDecision{}, err
 	}
 
@@ -751,6 +794,13 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 	if err != nil {
 		return dispatchDecision{}, err
 	}
+	var observedLiveManifest []byte
+	if hasObservedLive {
+		observedLiveManifest, err = bundle.read(observedLiveFilename, maxManifestBytes)
+		if err != nil {
+			return dispatchDecision{}, err
+		}
+	}
 	common := map[string][]byte{
 		"plan":                     planJSON,
 		"ownership":                ownership,
@@ -769,6 +819,10 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 		"repeated target manifest": decision.Artifacts.RepeatedTargetManifest,
 		"upgrade argv snapshot":    decision.Artifacts.UpgradeArgvSnapshot,
 	}
+	if hasObservedLive {
+		common["observed live manifest"] = observedLiveManifest
+		expectedCommon["observed live manifest"] = decision.Artifacts.ObservedLiveManifest
+	}
 	for name, data := range common {
 		if digestBytes(data) != expectedCommon[name] {
 			return dispatchDecision{}, fmt.Errorf("%s artifact digest mismatch", name)
@@ -784,6 +838,21 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 	}
 	if plan.Digests.ClassificationContext.IgnoreHelmTestHooks {
 		return dispatchDecision{}, fmt.Errorf("persisted plan does not enforce canonical no-hooks manifests")
+	}
+	usesObservedLive := len(plan.OperationalEvidence) == 1 &&
+		plan.OperationalEvidence[0].Policy == releasedomain.OperationalObservedLiveActivationPolicy
+	if usesObservedLive != hasObservedLive {
+		return dispatchDecision{}, fmt.Errorf("persisted plan observed-live witness set differs from decision")
+	}
+	if usesObservedLive {
+		if err := releasedomain.VerifyObservedLiveImageManifest(
+			baseManifest,
+			observedLiveManifest,
+			ownership,
+			plan.Digests.ClassificationContext.DefaultNamespace,
+		); err != nil {
+			return dispatchDecision{}, fmt.Errorf("verify persisted observed live manifest: %w", err)
+		}
 	}
 	rebuilt, err := releasedomain.BuildPlanFromArtifacts(releasedomain.PlanArtifactInput{
 		Ownership:                 ownership,
@@ -807,7 +876,15 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 		return dispatchDecision{}, fmt.Errorf("persisted plan contains multiple operational activation reports")
 	}
 	if len(plan.OperationalEvidence) == 1 {
-		rebuilt, err = releasedomain.ResolveOperationalPlan(rebuilt, plan.OperationalEvidence[0])
+		if usesObservedLive {
+			rebuilt, err = releasedomain.ResolveOperationalPlanWithObservedLiveManifest(
+				rebuilt,
+				plan.OperationalEvidence[0],
+				observedLiveManifest,
+			)
+		} else {
+			rebuilt, err = releasedomain.ResolveOperationalPlan(rebuilt, plan.OperationalEvidence[0])
+		}
 		if err != nil {
 			return dispatchDecision{}, fmt.Errorf("rebuild operational-domain resolution: %w", err)
 		}
@@ -821,7 +898,7 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 	}
 
 	if outcome != releasedomain.OutcomeSingle {
-		if err := bundle.verifyStable(expectedBundleFiles(outcome)); err != nil {
+		if err := bundle.verifyStable(expectedBundleFiles(outcome, hasObservedLive)); err != nil {
 			return dispatchDecision{}, err
 		}
 		if details != nil {
@@ -859,7 +936,21 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 	if err != nil {
 		return dispatchDecision{}, err
 	}
-	transaction, err := releasedomain.DecodeAndVerifyTransactionEnvelope(bytes.NewReader(envelopeJSON), decision.PlanDigest, domain)
+	var transaction releasedomain.TransactionAuthorization
+	if hasObservedLive {
+		transaction, err = releasedomain.DecodeAndVerifyTransactionEnvelopeWithObservedLiveManifest(
+			bytes.NewReader(envelopeJSON),
+			decision.PlanDigest,
+			domain,
+			observedLiveManifest,
+		)
+	} else {
+		transaction, err = releasedomain.DecodeAndVerifyTransactionEnvelope(
+			bytes.NewReader(envelopeJSON),
+			decision.PlanDigest,
+			domain,
+		)
+	}
 	if err != nil {
 		return dispatchDecision{}, fmt.Errorf("verify transaction envelope: %w", err)
 	}
@@ -891,7 +982,7 @@ func verifyAuthorizationBundleInto(path string, details *verifiedAuthorizationBu
 	if execution.Domain() != domain || execution.PlanDigest() != decision.PlanDigest || !reflect.DeepEqual(execution.Binding(), binding) || !reflect.DeepEqual(execution.Evidence(), persistedRollback) {
 		return dispatchDecision{}, fmt.Errorf("reconstructed execution authorization differs from persisted bundle")
 	}
-	if err := bundle.verifyStable(expectedBundleFiles(outcome)); err != nil {
+	if err := bundle.verifyStable(expectedBundleFiles(outcome, hasObservedLive)); err != nil {
 		return dispatchDecision{}, err
 	}
 	if details != nil {
@@ -947,6 +1038,11 @@ func validateDecision(decision dispatchDecision) error {
 			return fmt.Errorf("common artifact digest: %w", err)
 		}
 	}
+	if decision.Artifacts.ObservedLiveManifest != "" {
+		if err := validateCanonicalDigest(decision.Artifacts.ObservedLiveManifest); err != nil {
+			return fmt.Errorf("observed live manifest artifact digest: %w", err)
+		}
+	}
 	execution := []string{
 		decision.Artifacts.TransactionEnvelope,
 		decision.Artifacts.ExecutionBinding,
@@ -964,7 +1060,7 @@ func validateDecision(decision dispatchDecision) error {
 	return nil
 }
 
-func expectedBundleFiles(outcome releasedomain.Outcome) map[string]struct{} {
+func expectedBundleFiles(outcome releasedomain.Outcome, observedLive bool) map[string]struct{} {
 	files := map[string]struct{}{
 		decisionFilename:         {},
 		planFilename:             {},
@@ -974,6 +1070,9 @@ func expectedBundleFiles(outcome releasedomain.Outcome) map[string]struct{} {
 		targetManifestFilename:   {},
 		repeatedManifestFilename: {},
 		argvSnapshotFilename:     {},
+	}
+	if observedLive {
+		files[observedLiveFilename] = struct{}{}
 	}
 	if outcome == releasedomain.OutcomeSingle {
 		files[envelopeFilename] = struct{}{}

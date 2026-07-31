@@ -970,7 +970,7 @@ func buildRenderedOnlyOperationalObservation(
 // zero-write result: built artifacts are all absent from the target, or the
 // empty build plan proves the immutable target already equals live state.
 func ResolveOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
-	return resolveOperationalPlan(conservative, report, nil)
+	return resolveOperationalPlan(conservative, report, "")
 }
 
 // ResolveOperationalPlanWithObservedLiveManifest is the only resolver for a
@@ -984,13 +984,17 @@ func ResolveOperationalPlanWithObservedLiveManifest(
 	if len(observedLiveManifest) == 0 {
 		return Plan{}, fmt.Errorf("operational activation observed live manifest is required")
 	}
-	return resolveOperationalPlan(conservative, report, observedLiveManifest)
+	return resolveOperationalPlan(
+		conservative,
+		report,
+		digestBytesSHA256(observedLiveManifest),
+	)
 }
 
 func resolveOperationalPlan(
 	conservative Plan,
 	report OperationalDomainEvidence,
-	observedLiveManifest []byte,
+	observedLiveManifestDigest string,
 ) (Plan, error) {
 	if err := VerifyPlanDigest(conservative); err != nil {
 		return Plan{}, fmt.Errorf("operational activation conservative plan: %w", err)
@@ -1003,12 +1007,12 @@ func resolveOperationalPlan(
 	}
 	if report.Policy == OperationalObservedLiveActivationPolicy {
 		witness := report.ActivationWitness[0]
-		if len(observedLiveManifest) == 0 ||
-			digestBytesSHA256(observedLiveManifest) != witness.ObservedLiveManifestDigest ||
+		if observedLiveManifestDigest == "" ||
+			observedLiveManifestDigest != witness.ObservedLiveManifestDigest ||
 			witness.Plan.LiveStateDigest != witness.ObservedLiveManifestDigest {
 			return Plan{}, fmt.Errorf("operational activation observed live manifest binding mismatch")
 		}
-	} else if len(observedLiveManifest) != 0 {
+	} else if observedLiveManifestDigest != "" {
 		return Plan{}, fmt.Errorf("legacy operational activation does not accept an observed live manifest")
 	}
 	authorizedDomain, domainEligible := operationalAuthorizationCandidate(report)
@@ -1097,6 +1101,26 @@ func resolveOperationalPlan(
 // which never creates an execution authorization for zero outcomes.
 func ActivateOperationalPlan(conservative Plan, report OperationalDomainEvidence) (Plan, error) {
 	resolved, err := ResolveOperationalPlan(conservative, report)
+	if err != nil {
+		return Plan{}, err
+	}
+	if resolved.Result != OutcomeSingle {
+		return Plan{}, fmt.Errorf("operational activation requires a single-domain result")
+	}
+	return resolved, nil
+}
+
+// activateOperationalPlanWithObservedLiveDigest is reserved for an already
+// verified private transaction witness. Callers must first prove the exact
+// manifest bytes and retain their digest in the transaction authorization;
+// accepting a digest copied only from an untrusted report would bypass the v5
+// observed-live boundary.
+func activateOperationalPlanWithObservedLiveDigest(
+	conservative Plan,
+	report OperationalDomainEvidence,
+	observedLiveManifestDigest string,
+) (Plan, error) {
+	resolved, err := resolveOperationalPlan(conservative, report, observedLiveManifestDigest)
 	if err != nil {
 		return Plan{}, err
 	}
