@@ -53,9 +53,10 @@ const (
 )
 
 var (
-	errBackupTargetNotAuthorized  = errors.New("tenant-scoped backup target does not belong to tenant")
-	errBackupBackendNotAuthorized = errors.New("tenant-scoped backup backend does not belong to tenant")
-	errManagedPostgresSuspended   = errors.New(managedPostgresSuspendedBackupMessage)
+	errBackupTargetNotAuthorized   = errors.New("tenant-scoped backup target does not belong to tenant")
+	errBackupTargetRuntimeMismatch = errors.New("backup_target_runtime_mismatch")
+	errBackupBackendNotAuthorized  = errors.New("tenant-scoped backup backend does not belong to tenant")
+	errManagedPostgresSuspended    = errors.New(managedPostgresSuspendedBackupMessage)
 )
 
 type backupBackendRequest struct {
@@ -594,7 +595,7 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 		return
 	}
 	for _, policy := range policies {
-		run, err := s.store.CreateBackupRun(model.BackupRun{
+		candidate := model.BackupRun{
 			PolicyID:        policy.ID,
 			TenantID:        policy.TenantID,
 			ProjectID:       policy.ProjectID,
@@ -606,7 +607,15 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 			Status:          model.BackupRunStatusPending,
 			RequestedByType: "system",
 			RequestedByID:   "backup-scheduler",
-		})
+		}
+		candidate, err = s.rebindAppDatabaseBackupTarget(candidate)
+		if err != nil {
+			if s.log != nil {
+				s.log.Printf("backup scheduler rebind policy=%s failed: %v", policy.ID, err)
+			}
+			continue
+		}
+		run, err := s.store.CreateBackupRun(candidate)
 		if errors.Is(err, store.ErrConflict) {
 			continue
 		}
@@ -918,8 +927,14 @@ func (s *Server) handlePatchBackupPolicy(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
+	storedTarget := model.NormalizeBackupTarget(current.Target)
+	current, err = s.rebindAppDatabaseBackupPolicyTarget(current)
+	if err != nil {
+		s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
+		return
+	}
 	if err := s.authorizeTenantBackupPolicy(principal, current); err != nil {
-		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+		s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
 		return
 	}
 	var req backupPolicyRequest
@@ -932,6 +947,13 @@ func (s *Server) handlePatchBackupPolicy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if backupPolicyRequestOnlyEnabled(req) {
+		if storedTarget != current.Target {
+			current, err = s.store.UpsertBackupPolicy(current)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+		}
 		if *req.Enabled && strings.TrimSpace(current.BackendID) != "" {
 			if _, ok := s.backupBackendIDForScope(w, principal, current.TenantID, current.BackendID); !ok {
 				return
@@ -1035,8 +1057,14 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if run.PolicyID == "" && requestedTargetType != "" {
+			var err error
+			run, err = s.rebindAppDatabaseBackupTarget(run)
+			if err != nil {
+				s.writeBackupTargetAuthorizationError(w, err, "backup target is not available to this tenant")
+				return
+			}
 			if err := s.validateTenantBackupTarget(principal.TenantID, "", "", run.Target); err != nil {
-				httpx.WriteError(w, http.StatusForbidden, "backup target is not available to this tenant")
+				s.writeBackupTargetAuthorizationError(w, err, "backup target is not available to this tenant")
 				return
 			}
 		}
@@ -1046,10 +1074,6 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 				s.writeStoreError(w, err)
 				return
 			}
-			if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
-				httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
-				return
-			}
 			if run.BackendID == "" && policy.BackendID != "" {
 				run.BackendID = policy.BackendID
 			}
@@ -1057,6 +1081,16 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 			run.ProjectID = policy.ProjectID
 			run.AppID = policy.AppID
 			run.Target = policy.Target
+			run, err = s.rebindAppDatabaseBackupTarget(run)
+			if err != nil {
+				s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
+				return
+			}
+			policy.Target = run.Target
+			if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
+				s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
+				return
+			}
 		}
 	}
 	if principal.IsPlatformAdmin() && run.PolicyID != "" {
@@ -1077,6 +1111,11 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 	if principal.IsPlatformAdmin() {
 		var err error
 		run, err = s.applyDefaultControlPlaneBackupPolicy(run)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		run, err = s.rebindAppDatabaseBackupTarget(run)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -1558,9 +1597,11 @@ func resolveAppBackupTarget(w http.ResponseWriter, app model.App, target model.B
 		httpx.WriteError(w, http.StatusBadRequest, "app has no managed postgres backup target")
 		return model.BackupTarget{}, false
 	}
-	target.Database = firstNonEmptyString(target.Database, postgres.Database)
-	target.RuntimeID = firstNonEmptyString(target.RuntimeID, postgres.RuntimeID, app.Spec.RuntimeID)
-	target.ServiceName = firstNonEmptyString(target.ServiceName, postgres.ServiceName)
+	// Managed database placement is Fugue-owned execution state. Never retain a
+	// caller's stale runtime/service/database over the app's current placement.
+	target.Database = firstNonEmptyString(postgres.Database, target.Database)
+	target.RuntimeID = firstNonEmptyString(postgres.RuntimeID, app.Spec.RuntimeID, target.RuntimeID)
+	target.ServiceName = firstNonEmptyString(postgres.ServiceName, target.ServiceName)
 	return target, true
 }
 
@@ -1614,8 +1655,20 @@ func (s *Server) handleCreateAppBackupRun(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available for this app")
 		return
 	}
+	rebound, err := s.rebindAppDatabaseBackupTarget(model.BackupRun{
+		PolicyID:  policy.ID,
+		TenantID:  policy.TenantID,
+		ProjectID: policy.ProjectID,
+		AppID:     policy.AppID,
+		Target:    policy.Target,
+	})
+	if err != nil {
+		s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
+		return
+	}
+	policy.Target = rebound.Target
 	if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
-		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+		s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
 		return
 	}
 	if managedPostgresBackupTargetSuspended(app, policy.Target) {
@@ -1666,8 +1719,13 @@ func (s *Server) backupPolicyUpsertFromRequest(w http.ResponseWriter, principal 
 			s.writeStoreError(w, err)
 			return model.BackupPolicy{}, false
 		}
+		policy, err = s.rebindAppDatabaseBackupPolicyTarget(policy)
+		if err != nil {
+			s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
+			return model.BackupPolicy{}, false
+		}
 		if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
-			httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+			s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
 			return model.BackupPolicy{}, false
 		}
 		current = &policy
@@ -1704,8 +1762,13 @@ func (s *Server) backupPolicyUpsertFromRequest(w http.ResponseWriter, principal 
 			if candidate.TenantID != policy.TenantID || candidate.ProjectID != policy.ProjectID || candidate.AppID != policy.AppID || candidate.Slug != policy.Slug {
 				continue
 			}
+			candidate, err = s.rebindAppDatabaseBackupPolicyTarget(candidate)
+			if err != nil {
+				s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
+				return model.BackupPolicy{}, false
+			}
 			if err := s.authorizeTenantBackupPolicy(principal, candidate); err != nil {
-				httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+				s.writeBackupTargetAuthorizationError(w, err, "backup policy is not available to this tenant")
 				return model.BackupPolicy{}, false
 			}
 			current = &candidate
@@ -1812,8 +1875,25 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 	if req.Version != "" || current == nil {
 		policy.Version = strings.TrimSpace(req.Version)
 	}
+	if policy.Target.Type == model.BackupTargetAppDatabase && firstNonEmptyString(policy.AppID, policy.Target.AppID) != "" {
+		requestedRuntimeID := ""
+		if model.NormalizeBackupTargetType(req.Target.Type) == model.BackupTargetAppDatabase {
+			requestedRuntimeID = strings.TrimSpace(req.Target.RuntimeID)
+		}
+		rebound, err := s.rebindAppDatabaseBackupPolicyTarget(policy)
+		if err != nil {
+			s.writeBackupTargetAuthorizationError(w, err, "backup target is not available to this tenant")
+			return model.BackupPolicy{}, false
+		}
+		currentRuntimeID := strings.TrimSpace(rebound.Target.RuntimeID)
+		if requestedRuntimeID != "" && currentRuntimeID != "" && requestedRuntimeID != currentRuntimeID {
+			s.writeBackupTargetAuthorizationError(w, backupTargetRuntimeMismatchError(requestedRuntimeID, currentRuntimeID), "backup target is not available to this tenant")
+			return model.BackupPolicy{}, false
+		}
+		policy = rebound
+	}
 	if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
-		httpx.WriteError(w, http.StatusForbidden, "backup target is not available to this tenant")
+		s.writeBackupTargetAuthorizationError(w, err, "backup target is not available to this tenant")
 		return model.BackupPolicy{}, false
 	}
 	if policy.BackendID != "" {
@@ -1871,6 +1951,21 @@ func (s *Server) authorizeTenantBackupPolicy(principal model.Principal, policy m
 		return errBackupTargetNotAuthorized
 	}
 	return s.validateTenantBackupTarget(tenantID, policy.ProjectID, policy.AppID, policy.Target)
+}
+
+func (s *Server) writeBackupTargetAuthorizationError(w http.ResponseWriter, err error, forbiddenMessage string) {
+	switch {
+	case errors.Is(err, errBackupTargetRuntimeMismatch):
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, errBackupTargetNotAuthorized), errors.Is(err, store.ErrNotFound):
+		httpx.WriteError(w, http.StatusForbidden, forbiddenMessage)
+	default:
+		s.writeStoreError(w, err)
+	}
+}
+
+func backupTargetRuntimeMismatchError(targetRuntimeID, currentRuntimeID string) error {
+	return fmt.Errorf("%w: target runtime %q does not match current managed postgres runtime %q", errBackupTargetRuntimeMismatch, strings.TrimSpace(targetRuntimeID), strings.TrimSpace(currentRuntimeID))
 }
 
 func backupPolicyTargetsApp(policy model.BackupPolicy, app model.App) bool {
@@ -1977,6 +2072,15 @@ func (s *Server) validateTenantBackupTarget(tenantID, projectID, appID string, t
 		effectiveApp = &app
 	}
 	if target.RuntimeID != "" {
+		if effectiveApp != nil && target.Type == model.BackupTargetAppDatabase && !backupTargetRuntimeMatchesApp(*effectiveApp, target) {
+			currentRuntimeID := ""
+			if postgres := store.OwnedManagedPostgresSpec(*effectiveApp); postgres != nil {
+				currentRuntimeID = firstNonEmptyString(postgres.RuntimeID, effectiveApp.Spec.RuntimeID)
+			}
+			if currentRuntimeID != "" {
+				return backupTargetRuntimeMismatchError(target.RuntimeID, currentRuntimeID)
+			}
+		}
 		visible, err := s.store.RuntimeVisibleToTenant(target.RuntimeID, tenantID, false)
 		appReferenced := effectiveApp != nil && backupTargetRuntimeMatchesApp(*effectiveApp, target)
 		if err != nil {
@@ -2419,7 +2523,7 @@ func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
 	}
 	delay := backupRetryDelay(run.RetryCount + 1)
 	nextRetryAt := time.Now().UTC().Add(delay)
-	retryRun, err := s.store.CreateBackupRun(model.BackupRun{
+	candidate := model.BackupRun{
 		PolicyID:        run.PolicyID,
 		TenantID:        run.TenantID,
 		ProjectID:       run.ProjectID,
@@ -2434,7 +2538,15 @@ func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
 		RequestedByType: "system",
 		RequestedByID:   "backup-retry",
 		NextRetryAt:     &nextRetryAt,
-	})
+	}
+	candidate, err := s.rebindAppDatabaseBackupTarget(candidate)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("backup retry rebind for run %s failed: %v", run.ID, err)
+		}
+		return
+	}
+	retryRun, err := s.store.CreateBackupRun(candidate)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("backup retry enqueue for run %s failed: %v", run.ID, err)
@@ -2472,7 +2584,7 @@ func (s *Server) runBackup(ctx context.Context, run model.BackupRun) ([]model.Ba
 	}
 	if strings.TrimSpace(run.TenantID) != "" {
 		if err := s.validateTenantBackupTarget(run.TenantID, run.ProjectID, run.AppID, run.Target); err != nil {
-			return nil, errBackupTargetNotAuthorized
+			return nil, err
 		}
 		if err := s.validateTenantBackupBackend(run.TenantID, run.BackendID); err != nil {
 			return nil, errBackupBackendNotAuthorized
@@ -2543,6 +2655,22 @@ func (s *Server) rebindAppDatabaseBackupTarget(run model.BackupRun) (model.Backu
 	target.Database = firstNonEmptyString(postgres.Database, target.Database)
 	run.Target = model.NormalizeBackupTarget(target)
 	return run, nil
+}
+
+func (s *Server) rebindAppDatabaseBackupPolicyTarget(policy model.BackupPolicy) (model.BackupPolicy, error) {
+	policy = model.NormalizeBackupPolicy(policy)
+	run, err := s.rebindAppDatabaseBackupTarget(model.BackupRun{
+		PolicyID:  policy.ID,
+		TenantID:  policy.TenantID,
+		ProjectID: policy.ProjectID,
+		AppID:     policy.AppID,
+		Target:    policy.Target,
+	})
+	if err != nil {
+		return policy, err
+	}
+	policy.Target = run.Target
+	return model.NormalizeBackupPolicy(policy), nil
 }
 
 func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.BackupRun) (artifacts []model.BackupArtifact, retErr error) {

@@ -907,6 +907,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 	var created model.BackupRun
 	err := s.withLockedState(true, func(state *model.State) error {
 		now := time.Now().UTC()
+		policyTargetChanged := false
 		if run.PolicyID != "" {
 			index := findBackupPolicy(state, run.PolicyID)
 			if index < 0 {
@@ -931,9 +932,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 			if run.BackendID == "" {
 				run.BackendID = policy.BackendID
 			}
-			if run.Target.Type == "" || run.Target.Type == model.BackupTargetControlPlaneDatabase && policy.Target.Type != "" {
-				run.Target = policy.Target
-			}
+			run.Target, policyTargetChanged = backupRunTargetForPolicy(policy, run)
 			if run.Version == "" {
 				run.Version = policy.Version
 			}
@@ -979,6 +978,9 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 		if run.PolicyID != "" {
 			if index := findBackupPolicy(state, run.PolicyID); index >= 0 {
 				policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
+				if policyTargetChanged {
+					policy.Target = run.Target
+				}
 				policy.LastRunID = run.ID
 				policy.LastRunAt = &now
 				policy.NextRunAt = policyNextRunAt
@@ -2361,6 +2363,38 @@ func backupTargetHasActiveRun(runs []model.BackupRun, target model.BackupTarget)
 		}
 	}
 	return false
+}
+
+// backupRunTargetForPolicy keeps a policy's stable authorization identity
+// authoritative while allowing the API scheduler to refresh the volatile
+// placement of an app-owned database. A caller cannot use a policy-backed run
+// to change target type or tenant/project/app ownership.
+func backupRunTargetForPolicy(policy model.BackupPolicy, run model.BackupRun) (model.BackupTarget, bool) {
+	policy = model.NormalizeBackupPolicy(policy)
+	run = model.NormalizeBackupRun(run)
+	current := model.NormalizeBackupTarget(policy.Target)
+	proposed := model.NormalizeBackupTarget(run.Target)
+	if current.Type != model.BackupTargetAppDatabase || proposed.Type != model.BackupTargetAppDatabase {
+		return current, false
+	}
+
+	current.TenantID = firstNonEmpty(current.TenantID, policy.TenantID)
+	current.ProjectID = firstNonEmpty(current.ProjectID, policy.ProjectID)
+	current.AppID = firstNonEmpty(current.AppID, policy.AppID)
+	proposed.TenantID = firstNonEmpty(proposed.TenantID, run.TenantID)
+	proposed.ProjectID = firstNonEmpty(proposed.ProjectID, run.ProjectID)
+	proposed.AppID = firstNonEmpty(proposed.AppID, run.AppID)
+	if current.TenantID != proposed.TenantID || current.ProjectID != proposed.ProjectID || current.AppID != proposed.AppID || proposed.RuntimeID == "" {
+		return current, false
+	}
+
+	rebound := current
+	rebound.RuntimeID = proposed.RuntimeID
+	rebound.ServiceName = firstNonEmpty(proposed.ServiceName, current.ServiceName)
+	rebound.Database = firstNonEmpty(proposed.Database, current.Database)
+	rebound.Name = firstNonEmpty(current.Name, proposed.Name)
+	rebound = model.NormalizeBackupTarget(rebound)
+	return rebound, !backupTargetsEqual(current, rebound)
 }
 
 func managedPostgresBackupRunAppID(run model.BackupRun) string {
@@ -4036,6 +4070,7 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 	}
 	defer tx.Rollback()
 	policySchedule := model.BackupDefaultSchedule
+	policyTargetChanged := false
 	var now time.Time
 	if run.PolicyID != "" {
 		policy, err := scanBackupPolicy(tx.QueryRowContext(ctx, backupPolicySelectSQL()+` WHERE id = $1 FOR UPDATE`, run.PolicyID))
@@ -4061,7 +4096,7 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 		if run.BackendID == "" {
 			run.BackendID = policy.BackendID
 		}
-		run.Target = policy.Target
+		run.Target, policyTargetChanged = backupRunTargetForPolicy(policy, run)
 		if run.Version == "" {
 			run.Version = policy.Version
 		}
@@ -4117,6 +4152,23 @@ RETURNING `+backupRunReturningColumns(), run.ID, run.PolicyID, nullIfEmpty(run.T
 		return model.BackupRun{}, mapDBErr(err)
 	}
 	if run.PolicyID != "" {
+		if policyTargetChanged {
+			targetJSON, err := marshalJSON(run.Target)
+			if err != nil {
+				return model.BackupRun{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `
+UPDATE fugue_backup_policies
+SET target_type = $2,
+	target_tenant_id = NULLIF($3, ''),
+	target_project_id = NULLIF($4, ''),
+	target_app_id = NULLIF($5, ''),
+	target_json = $6,
+	updated_at = $7
+WHERE id = $1`, run.PolicyID, run.Target.Type, run.Target.TenantID, run.Target.ProjectID, run.Target.AppID, targetJSON, now); err != nil {
+				return model.BackupRun{}, mapDBErr(err)
+			}
+		}
 		next, err := nextBackupRunAfter(policySchedule, now)
 		if err != nil {
 			return model.BackupRun{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
