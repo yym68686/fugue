@@ -150,14 +150,152 @@ func expandObservedKubernetesList(data []byte) ([]byte, error) {
 		if len(item) < 2 || item[0] != '{' || item[len(item)-1] != '}' || !json.Valid(item) {
 			return nil, fmt.Errorf("Kubernetes workload list item %d is invalid", index)
 		}
+		minimal, err := minimizeObservedKubernetesWorkload(item)
+		if err != nil {
+			return nil, fmt.Errorf("Kubernetes workload list item %d: %w", index, err)
+		}
 		if index != 0 {
 			output.WriteString("\n---\n")
 		}
-		output.Write(item)
+		output.Write(minimal)
 		output.WriteByte('\n')
 		if output.Len() > observedLiveInputLimit {
 			return nil, fmt.Errorf("expanded Kubernetes workload list exceeds limit")
 		}
 	}
 	return output.Bytes(), nil
+}
+
+// minimizeObservedKubernetesWorkload deliberately discards API-server
+// defaults, status, managedFields, annotations, resources, and every other
+// non-image value. Those live fields are neither Helm source of truth nor
+// release authorization. Keeping only identity plus named container images
+// also bounds the observation before the canonical manifest parser sees it.
+func minimizeObservedKubernetesWorkload(data []byte) ([]byte, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return nil, fmt.Errorf("decode workload: %w", err)
+	}
+	var apiVersion, kind string
+	if err := json.Unmarshal(object["apiVersion"], &apiVersion); err != nil || apiVersion == "" {
+		return nil, fmt.Errorf("workload apiVersion is invalid")
+	}
+	if err := json.Unmarshal(object["kind"], &kind); err != nil || kind == "" {
+		return nil, fmt.Errorf("workload kind is invalid")
+	}
+	expectedVersion := map[string]string{
+		"Deployment": "apps/v1", "DaemonSet": "apps/v1", "StatefulSet": "apps/v1",
+		"CronJob": "batch/v1",
+	}[kind]
+	if expectedVersion == "" || apiVersion != expectedVersion {
+		return nil, fmt.Errorf("workload identity is unsupported")
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(object["metadata"], &metadata); err != nil {
+		return nil, fmt.Errorf("workload metadata is invalid")
+	}
+	var name, namespace string
+	if err := json.Unmarshal(metadata["name"], &name); err != nil || name == "" {
+		return nil, fmt.Errorf("workload name is invalid")
+	}
+	if err := json.Unmarshal(metadata["namespace"], &namespace); err != nil || namespace == "" {
+		return nil, fmt.Errorf("workload namespace is invalid")
+	}
+
+	var spec map[string]json.RawMessage
+	if err := json.Unmarshal(object["spec"], &spec); err != nil {
+		return nil, fmt.Errorf("workload spec is invalid")
+	}
+	var podSpec map[string]json.RawMessage
+	if kind == "CronJob" {
+		jobTemplate, err := observedNestedJSONMap(spec, "jobTemplate")
+		if err != nil {
+			return nil, err
+		}
+		jobSpec, err := observedNestedJSONMap(jobTemplate, "spec")
+		if err != nil {
+			return nil, err
+		}
+		template, err := observedNestedJSONMap(jobSpec, "template")
+		if err != nil {
+			return nil, err
+		}
+		podSpec, err = observedNestedJSONMap(template, "spec")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		template, err := observedNestedJSONMap(spec, "template")
+		if err != nil {
+			return nil, err
+		}
+		podSpec, err = observedNestedJSONMap(template, "spec")
+		if err != nil {
+			return nil, err
+		}
+	}
+	minimalPodSpec, err := minimizeObservedPodSpec(podSpec)
+	if err != nil {
+		return nil, err
+	}
+	minimal := map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+	}
+	if kind == "CronJob" {
+		minimal["spec"] = map[string]any{"jobTemplate": map[string]any{"spec": map[string]any{
+			"template": map[string]any{"spec": minimalPodSpec},
+		}}}
+	} else {
+		minimal["spec"] = map[string]any{"template": map[string]any{"spec": minimalPodSpec}}
+	}
+	encoded, err := json.Marshal(minimal)
+	if err != nil {
+		return nil, fmt.Errorf("encode minimized workload: %w", err)
+	}
+	return encoded, nil
+}
+
+func observedNestedJSONMap(parent map[string]json.RawMessage, field string) (map[string]json.RawMessage, error) {
+	var child map[string]json.RawMessage
+	if err := json.Unmarshal(parent[field], &child); err != nil {
+		return nil, fmt.Errorf("workload %s is invalid", field)
+	}
+	return child, nil
+}
+
+func minimizeObservedPodSpec(podSpec map[string]json.RawMessage) (map[string]any, error) {
+	result := map[string]any{}
+	for _, field := range []string{"containers", "initContainers"} {
+		raw, exists := podSpec[field]
+		if !exists {
+			if field == "containers" {
+				return nil, fmt.Errorf("workload containers are missing")
+			}
+			continue
+		}
+		var containers []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &containers); err != nil || len(containers) == 0 {
+			return nil, fmt.Errorf("workload %s are invalid", field)
+		}
+		minimalContainers := make([]any, 0, len(containers))
+		seen := map[string]struct{}{}
+		for _, container := range containers {
+			var name, image string
+			if err := json.Unmarshal(container["name"], &name); err != nil || name == "" {
+				return nil, fmt.Errorf("workload %s name is invalid", field)
+			}
+			if err := json.Unmarshal(container["image"], &image); err != nil || image == "" {
+				return nil, fmt.Errorf("workload %s image is invalid", field)
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return nil, fmt.Errorf("workload container name is duplicated")
+			}
+			seen[name] = struct{}{}
+			minimalContainers = append(minimalContainers, map[string]any{"name": name, "image": image})
+		}
+		result[field] = minimalContainers
+	}
+	return result, nil
 }

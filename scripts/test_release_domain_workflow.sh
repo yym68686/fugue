@@ -338,7 +338,7 @@ genesis_reachable = {
   "Setup Go" => "",
   "Build private release-domain tools" => "",
   "Write genesis public release evidence" => "${{ needs.release-baseline.outputs.is_genesis == 'true' }}",
-  "Upload release-domain public evidence" => "always()",
+  "Upload release-domain public evidence" => "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}",
 }
 Array(deploy["steps"]).each do |candidate|
   name = candidate.fetch("name")
@@ -359,6 +359,8 @@ upgrade = step(deploy, "Upgrade Fugue control plane through uploaded operational
 assert_equal(upgrade["id"], "guarded_deploy", "guarded deploy step id")
 assert_equal(upgrade["uses"], "./.github/actions/operational-domain-guarded-deploy", "guarded deploy action")
 fail_contract("guarded deploy workflow step must not define a run body") if upgrade.key?("run")
+genesis_evidence = step(deploy, "Write genesis public release evidence")
+assert_equal(genesis_evidence["id"], "genesis_evidence", "genesis evidence id")
 upgrade_env = upgrade.fetch("env")
 {
   "FUGUE_RELEASE_DOMAIN_BASE_SHA" => "${{ needs.release-baseline.outputs.domain_base_sha }}",
@@ -390,7 +392,11 @@ upgrade_env = upgrade.fetch("env")
 end
 
 public_upload = step(deploy, "Upload release-domain public evidence")
-assert_equal(public_upload["if"], "always()", "public evidence upload condition")
+assert_equal(
+  public_upload["if"],
+  "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}",
+  "public evidence upload condition",
+)
 assert_equal(public_upload["continue-on-error"], nil, "public evidence upload continue-on-error")
 assert_equal(
   public_upload.fetch("with").fetch("path"),
@@ -429,11 +435,16 @@ assert_equal(
   "operational action step order",
 )
 prepare = action_step(operational_action, "Prepare operational-domain report-only evidence")
+assert_equal(prepare["id"], "prepare", "prepare id")
 assert_equal(prepare.fetch("env").fetch("FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE"), "prepare", "prepare phase")
 assert_equal(prepare.fetch("run"), "./scripts/upgrade_fugue_control_plane.sh", "prepare entrypoint")
 operational_upload = action_step(operational_action, "Upload operational-domain report-only evidence")
 assert_equal(operational_upload["id"], "operational-report-upload", "operational upload id")
-assert_equal(operational_upload["if"], "always()", "operational report upload condition")
+assert_equal(
+  operational_upload["if"],
+  "${{ always() && steps.prepare.outcome == 'success' }}",
+  "operational report upload condition",
+)
 assert_equal(operational_upload["continue-on-error"], nil, "operational report upload continue-on-error")
 assert_equal(
   operational_upload["uses"],
@@ -451,7 +462,11 @@ assert_equal(operational_upload.fetch("with").fetch("include-hidden-files"), fal
 assert_equal(operational_upload.fetch("with").fetch("overwrite"), false, "operational report overwrite policy")
 activation_upload = action_step(operational_action, "Upload build-vs-activation report-only evidence")
 assert_equal(activation_upload["id"], "image-activation-report-upload", "build-activation upload id")
-assert_equal(activation_upload["if"], "always()", "build-activation upload condition")
+assert_equal(
+  activation_upload["if"],
+  "${{ always() && steps.prepare.outcome == 'success' }}",
+  "build-activation upload condition",
+)
 assert_equal(activation_upload["continue-on-error"], nil, "build-activation upload continue-on-error")
 assert_equal(
   activation_upload["uses"],

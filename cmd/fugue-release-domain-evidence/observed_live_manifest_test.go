@@ -46,6 +46,8 @@ objectRules:
 		"kind":       "DaemonSet",
 		"metadata": map[string]any{
 			"name": "fugue-dns", "namespace": "fugue-system",
+			"generateName":  "api-server-default-must-be-ignored-",
+			"managedFields": []any{map[string]any{"manager": "k3s", "fieldsV1": map[string]any{"f:spec": map[string]any{}}}},
 		},
 		"spec": map[string]any{
 			"selector": map[string]any{"matchLabels": map[string]any{"app": "fugue-dns"}},
@@ -53,9 +55,11 @@ objectRules:
 				"metadata": map[string]any{"labels": map[string]any{"app": "fugue-dns"}},
 				"spec": map[string]any{"containers": []any{map[string]any{
 					"name": "dns", "image": "registry.test/edge@" + activationTestDigest("a"),
+					"resources": map[string]any{"requests": map[string]any{"cpu": "10m"}},
 				}}},
 			},
 		},
+		"status": map[string]any{"numberReady": 1},
 	}
 	liveList, err := json.Marshal(map[string]any{
 		"apiVersion": "v1",

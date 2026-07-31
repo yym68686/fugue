@@ -2849,7 +2849,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "f1ff610527bcc8adfc12788c7eb53e6962c232149e2dee87d0608d2844b5bbd0")
+	assertWorkflowSourceDigest(t, data, "1abb6804602a81c774cdc8bf07a0df81e43f8c368044221daf8471a3df6b4df7")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2859,7 +2859,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read operational-domain guarded deploy action: %v", err)
 	}
-	assertWorkflowSourceDigest(t, actionData, "b9c982fac6dbec36707e52c5467a70291b7402f8a3409cdd8c2611d1a52b7944")
+	assertWorkflowSourceDigest(t, actionData, "d05affeb474fa28d4442930114ba0fd7e1ac4b82b527a8750b3b7fdd309fedef")
 	var operationalAction compositeReleaseAction
 	if err := yaml.Unmarshal(actionData, &operationalAction); err != nil {
 		t.Fatalf("parse operational-domain guarded deploy action: %v", err)
@@ -2946,7 +2946,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "uses", "with"},
 				{"name", "uses", "with"},
 				{"name", "run"},
-				{"name", "if", "env", "run"},
+				{"name", "id", "if", "env", "run"},
 				{"name", "if", "env", "run"},
 				{"name", "if", "run"},
 				{"name", "if", "run"},
@@ -3393,6 +3393,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatal("deploy must preload and verify both command dependency graphs before building evidence")
 	}
 	genesisEvidence := workflowStepByName(t, deploy, "Write genesis public release evidence")
+	if got, want := genesisEvidence.ID, "genesis_evidence"; got != want {
+		t.Fatalf("genesis evidence id drifted: got %q want %q", got, want)
+	}
 	if got, want := genesisEvidence.If, "${{ needs.release-baseline.outputs.is_genesis == 'true' }}"; got != want {
 		t.Fatalf("genesis evidence condition drifted: got %q want %q", got, want)
 	}
@@ -3513,7 +3516,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"Setup Go":                              "",
 		"Build private release-domain tools":    "",
 		"Write genesis public release evidence": "${{ needs.release-baseline.outputs.is_genesis == 'true' }}",
-		"Upload release-domain public evidence": "always()",
+		"Upload release-domain public evidence": "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}",
 	}
 	for _, candidate := range deploy.Steps {
 		if want, allowed := genesisReachable[candidate.Name]; allowed {
@@ -3630,6 +3633,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("operational deploy action order drifted: got %q want %q", gotActionSteps, wantActionSteps)
 	}
 	prepare := workflowStepByName(t, releaseWorkflowJob{Steps: operationalAction.Runs.Steps}, "Prepare operational-domain report-only evidence")
+	if got, want := prepare.ID, "prepare"; got != want {
+		t.Fatalf("operational prepare id drifted: got %q want %q", got, want)
+	}
 	if got, want := prepare.Env["FUGUE_RELEASE_DOMAIN_OPERATIONAL_PHASE"], "prepare"; got != want {
 		t.Fatalf("operational prepare phase drifted: got %q want %q", got, want)
 	}
@@ -3640,7 +3646,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := operationalUpload.ID, "operational-report-upload"; got != want {
 		t.Fatalf("operational report upload id drifted: got %q want %q", got, want)
 	}
-	if got, want := operationalUpload.If, "always()"; got != want {
+	if got, want := operationalUpload.If, "${{ always() && steps.prepare.outcome == 'success' }}"; got != want {
 		t.Fatalf("operational report upload condition drifted: got %q want %q", got, want)
 	}
 	if operationalUpload.ContinueOnError {
@@ -3664,7 +3670,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := activationUpload.ID, "image-activation-report-upload"; got != want {
 		t.Fatalf("build-activation report upload id drifted: got %q want %q", got, want)
 	}
-	if got, want := activationUpload.If, "always()"; got != want {
+	if got, want := activationUpload.If, "${{ always() && steps.prepare.outcome == 'success' }}"; got != want {
 		t.Fatalf("build-activation report upload condition drifted: got %q want %q", got, want)
 	}
 	if activationUpload.ContinueOnError {
@@ -3718,7 +3724,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 
 	publicUpload := workflowStepByName(t, deploy, "Upload release-domain public evidence")
-	if got, want := publicUpload.If, "always()"; got != want {
+	if got, want := publicUpload.If, "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}"; got != want {
 		t.Fatalf("public evidence must always be uploaded: got %q want %q", got, want)
 	}
 	if publicUpload.ContinueOnError {
