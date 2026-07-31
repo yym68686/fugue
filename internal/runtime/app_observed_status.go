@@ -153,7 +153,7 @@ func CalculateAppObservedStatus(app model.App, evidence AppRuntimeObservation) m
 	// controller has not yet acknowledged the current generation. Generation
 	// lag makes the overall phase unknown, but must not hide a zero-replica,
 	// missing-image, or missing-endpoint signal from operators.
-	status.InvariantViolations = append(status.InvariantViolations, observedStatusInvariantViolations(status, app)...)
+	status.InvariantViolations = observedStatusInvariantViolations(status, app)
 
 	if managed.Metadata.Generation <= 0 || managed.Status.ObservedGeneration < managed.Metadata.Generation {
 		status.Phase = "unknown"

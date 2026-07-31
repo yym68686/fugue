@@ -317,6 +317,40 @@ func TestCalculateAppObservedStatusFailsClosedOnRuntimeInvariants(t *testing.T) 
 	}
 }
 
+func TestCalculateAppObservedStatusDoesNotDuplicateEvidenceInvariants(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec:   model.AppSpec{Image: "registry.example/app:v2", RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	managed := ManagedAppObject{
+		Metadata: ManagedAppMeta{Generation: 2},
+		Status: ManagedAppStatus{
+			Phase:              ManagedAppPhaseReady,
+			ReadyReplicas:      1,
+			ObservedGeneration: 2,
+		},
+	}
+	status := CalculateAppObservedStatus(app, AppRuntimeObservation{
+		ManagedApp:          managed,
+		Found:               true,
+		Complete:            true,
+		Fresh:               true,
+		ObservedAt:          time.Now().UTC(),
+		ClusterID:           "cluster-uid",
+		ImagePresent:        boolPointer(false),
+		InvariantViolations: []string{"current_image_mismatch"},
+	})
+	counts := make(map[string]int)
+	for _, violation := range status.InvariantViolations {
+		counts[violation]++
+	}
+	if counts["current_image_mismatch"] != 1 || counts["image_missing"] != 1 {
+		t.Fatalf("runtime invariants must be unique, got %+v", status.InvariantViolations)
+	}
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func intPointer(value int) *int { return &value }
