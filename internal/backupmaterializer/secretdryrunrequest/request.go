@@ -1,7 +1,7 @@
 // Package secretdryrunrequest seals one exact, short-lived Kubernetes Secret
-// server-side-dry-run request. It is a pure versioned handoff: it owns no
-// credential, filesystem, network, Kubernetes client, process, retry, or live
-// mutation capability.
+// server-side-dry-run request and its secret-free acceptance receipt. It is a
+// pure versioned handoff: it owns no credential, filesystem, network,
+// Kubernetes client, process, retry, or live mutation capability.
 package secretdryrunrequest
 
 import (
@@ -161,7 +161,7 @@ func Prepare(expectedCellKey string, plan materialization.Plan, decision reconci
 		return Request{}, ErrRequest
 	}
 	evidence.RequestDigest = digestBytes(encoded)
-	evidence.IdempotencyKey = idempotencyKey(identity.CellID, decision.Digest)
+	evidence.IdempotencyKey = IdempotencyKey(identity.CellID, decision.Digest)
 	evidence.Digest = DigestEvidence(evidence)
 	return Restore(evidence, encoded, expectedCellKey, now)
 }
@@ -279,7 +279,7 @@ func validateEvidence(evidence Evidence, expectedCellKey string, now time.Time) 
 		evidence.CellKey != identity.CellKey || evidence.CellID != identity.CellID || evidence.RunID == "" ||
 		!validDigest(evidence.PlanDigest) || !validDigest(evidence.ManifestDigest) || !validDigest(evidence.DecisionDigest) ||
 		!validDigest(evidence.RequestDigest) || evidence.RawQuery != DryRunRawQuery ||
-		evidence.IdempotencyKey != idempotencyKey(evidence.CellID, evidence.DecisionDigest) ||
+		evidence.IdempotencyKey != IdempotencyKey(evidence.CellID, evidence.DecisionDigest) ||
 		!canonicalTime(evidence.DecidedAt) || !canonicalTime(evidence.PreparedAt) || !canonicalTime(evidence.ExpiresAt) ||
 		evidence.DecidedAt.After(evidence.PreparedAt) || evidence.PreparedAt.Sub(evidence.DecidedAt) > MaximumDecisionAge ||
 		evidence.ExpiresAt != evidence.DecidedAt.Add(MaximumDecisionAge) || evidence.ExpiresAt.Before(evidence.PreparedAt) ||
@@ -417,7 +417,9 @@ func exactOwnedAnnotations(annotations map[string]string) bool {
 	return true
 }
 
-func idempotencyKey(cellID, decisionDigest string) string {
+// IdempotencyKey returns the exact cross-process key for one cell/decision.
+// It contains no Secret value and grants no replay or execution capability.
+func IdempotencyKey(cellID, decisionDigest string) string {
 	if cellID == "" || !validDigest(decisionDigest) {
 		return ""
 	}

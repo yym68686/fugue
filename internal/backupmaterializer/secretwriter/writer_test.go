@@ -22,6 +22,7 @@ import (
 	materializercontract "fugue/internal/backupmaterializer/contract"
 	"fugue/internal/backupmaterializer/materialization"
 	"fugue/internal/backupmaterializer/reconcile"
+	"fugue/internal/backupmaterializer/secretdryrunrequest"
 )
 
 const testWorkloadToken = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature"
@@ -566,7 +567,7 @@ func TestWriterAndResultRejectNilAndPublicContractDrift(t *testing.T) {
 		APIVersion: APIVersion, Kind: Kind, Policy: Policy, Namespace: plan.Namespace, SecretName: plan.SecretName,
 		CellKey: plan.CellKey, CellID: plan.CellID, Action: decision.Action, PlanDigest: plan.Digest,
 		DecisionDigest: decision.Digest, RequestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		IdempotencyKey: dryRunIdempotencyKey(plan.CellID, decision.Digest), ValidatedAt: now,
+		IdempotencyKey: secretdryrunrequest.IdempotencyKey(plan.CellID, decision.Digest), ValidatedAt: now,
 		Accepted: true, ServerSideDryRun: true,
 	}
 	valid.Digest = DigestResult(valid)
@@ -680,7 +681,7 @@ func TestSecretWriterProductionDependencyBoundary(t *testing.T) {
 	direct := strings.Fields(string(directOutput))
 	sort.Strings(direct)
 	wantDirect := []string{
-		"bytes", "context", "crypto/sha256", "encoding/base64", "encoding/hex", "encoding/json", "errors", "fmt", "fugue/internal/backupmaterializer/materialization", "fugue/internal/backupmaterializer/reconcile", "fugue/internal/backupmaterializer/secretdryrunrequest", "io", "mime", "net/http", "net/url", "reflect", "strconv", "strings", "time",
+		"bytes", "context", "encoding/base64", "encoding/json", "errors", "fugue/internal/backupmaterializer/materialization", "fugue/internal/backupmaterializer/reconcile", "fugue/internal/backupmaterializer/secretdryrunrequest", "io", "mime", "net/http", "net/url", "reflect", "strconv", "strings", "time",
 	}
 	sort.Strings(wantDirect)
 	if !reflect.DeepEqual(direct, wantDirect) {

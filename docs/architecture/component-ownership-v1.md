@@ -1225,6 +1225,13 @@ create/CAS semantics. The existing direct dry-run writer now consumes this
 same contract, preserving its public constants and result behavior while
 removing duplicate request encoding.
 
+The successful `BackupObserverSecretDryRunResult` schema, validation, digest,
+and redacted formatting also belong to this pure package. `secretwriter.Result`
+is now a source-compatible alias and maps pure receipt failures back to its
+existing fixed `ErrResponse`; JSON bytes and downstream cycle semantics are
+unchanged. A future gateway handler/client can therefore exchange the request
+and receipt contracts without importing the Kubernetes credential/HTTP writer.
+
 The contract imports no context, filesystem, network, HTTP, credential,
 Kubernetes SDK, datastore, process, retry, or mutation implementation. Its
 independent path-scoped CI lane tests, races, vets, and seals the dependency

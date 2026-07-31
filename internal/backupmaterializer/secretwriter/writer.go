@@ -8,12 +8,9 @@ package secretwriter
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -29,9 +26,9 @@ import (
 )
 
 const (
-	APIVersion = "backup-materializer-secret-dry-run.fugue.dev/v1"
-	Kind       = "BackupObserverSecretDryRunResult"
-	Policy     = "single-secret-create-or-resource-version-cas-dry-run-v1"
+	APIVersion = secretdryrunrequest.ReceiptAPIVersion
+	Kind       = secretdryrunrequest.ReceiptKind
+	Policy     = secretdryrunrequest.ReceiptPolicy
 
 	RequestUserAgent = "fugue-backup-materializer-secret-dry-run/1"
 	FieldManager     = secretdryrunrequest.FieldManager
@@ -99,32 +96,9 @@ type Writer struct {
 	now            func() time.Time
 }
 
-// Result is a secret-free receipt that the API server accepted the exact
-// request through admission, validation, and conflict checks without storage.
-// Kubernetes-generated response fields are intentionally omitted because
-// dry-run values are not stable evidence of a future persisted object.
-type Result struct {
-	APIVersion                string           `json:"apiVersion"`
-	Kind                      string           `json:"kind"`
-	Policy                    string           `json:"policy"`
-	Namespace                 string           `json:"namespace"`
-	SecretName                string           `json:"secretName"`
-	CellKey                   string           `json:"cellKey"`
-	CellID                    string           `json:"cellId"`
-	Action                    reconcile.Action `json:"action"`
-	PlanDigest                string           `json:"planDigest"`
-	DecisionDigest            string           `json:"decisionDigest"`
-	RequestDigest             string           `json:"requestDigest"`
-	IdempotencyKey            string           `json:"idempotencyKey"`
-	ValidatedAt               time.Time        `json:"validatedAt"`
-	Accepted                  bool             `json:"accepted"`
-	ServerSideDryRun          bool             `json:"serverSideDryRun"`
-	Persisted                 bool             `json:"persisted"`
-	DeleteAllowed             bool             `json:"deleteAllowed"`
-	ExecutionAllowed          bool             `json:"executionAllowed"`
-	ProductionMutationAllowed bool             `json:"productionMutationAllowed"`
-	Digest                    string           `json:"digest"`
-}
+// Result remains an alias for source compatibility while the versioned,
+// secret-free receipt belongs to the pure request/response contract package.
+type Result = secretdryrunrequest.Receipt
 
 // New performs no filesystem or network operation. Disabled construction
 // ignores and retains none of the supplied endpoint, identity, credential,
@@ -305,14 +279,7 @@ func (writer *Writer) DryRun(
 }
 
 func ValidateResult(result Result) error {
-	identity, err := materialization.SecretIdentityForCell(result.CellKey)
-	if err != nil || result.APIVersion != APIVersion || result.Kind != Kind || result.Policy != Policy ||
-		result.Namespace != identity.Namespace || result.SecretName != identity.SecretName || result.CellID != identity.CellID ||
-		(result.Action != reconcile.ActionCreateIfAbsent && result.Action != reconcile.ActionReplaceResourceVersionCAS) ||
-		!validDigest(result.PlanDigest) || !validDigest(result.DecisionDigest) || !validDigest(result.RequestDigest) ||
-		result.IdempotencyKey != dryRunIdempotencyKey(result.CellID, result.DecisionDigest) ||
-		!canonicalTime(result.ValidatedAt) || !result.Accepted || !result.ServerSideDryRun || result.Persisted ||
-		result.DeleteAllowed || result.ExecutionAllowed || result.ProductionMutationAllowed || result.Digest != DigestResult(result) {
+	if secretdryrunrequest.ValidateReceipt(result) != nil {
 		return ErrResponse
 	}
 	return nil
@@ -332,25 +299,8 @@ func ValidateTransportRequest(method, path, rawQuery, expectedCellKey string, do
 }
 
 func DigestResult(result Result) string {
-	result.Digest = ""
-	document, err := json.Marshal(result)
-	if err != nil {
-		return ""
-	}
-	return digestBytes(document)
+	return secretdryrunrequest.DigestReceipt(result)
 }
-
-func (result Result) String() string {
-	return fmt.Sprintf(
-		"BackupObserverSecretDryRunResult{cell=%q action=%q accepted=%t persisted=false executionAllowed=false digest=%q}",
-		result.CellKey,
-		result.Action,
-		result.Accepted,
-		result.Digest,
-	)
-}
-
-func (result Result) GoString() string { return result.String() }
 
 type secretDocument struct {
 	APIVersion string            `json:"apiVersion"`
@@ -564,30 +514,6 @@ func containsRequired(actual, required map[string]string) bool {
 		}
 	}
 	return true
-}
-
-func dryRunIdempotencyKey(cellID, decisionDigest string) string {
-	if cellID == "" || !validDigest(decisionDigest) {
-		return ""
-	}
-	return "backup-materializer-secret-dry-run/" + cellID + "/" + strings.TrimPrefix(decisionDigest, "sha256:")
-}
-
-func validDigest(value string) bool {
-	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+sha256.Size*2 {
-		return false
-	}
-	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
-	return err == nil && strings.ToLower(value) == value
-}
-
-func digestBytes(value []byte) string {
-	digest := sha256.Sum256(value)
-	return "sha256:" + hex.EncodeToString(digest[:])
-}
-
-func canonicalTime(value time.Time) bool {
-	return !value.IsZero() && value.Location() == time.UTC && value.Nanosecond() == 0
 }
 
 func nilInterface(value any) bool {
