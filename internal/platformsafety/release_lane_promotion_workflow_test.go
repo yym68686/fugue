@@ -20,7 +20,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 	if err != nil {
 		t.Fatalf("read RP5 lane promotion workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "a1d7afe03f6115d83e6d090c5474226ffd1945066b566ff546b241dbfe96052b")
+	assertWorkflowSourceDigest(t, data, "3f08dcb886ca346f9bcbb053334c013fc7e7cea465fe6b1676beb7124f98f26e")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -95,7 +95,7 @@ func TestRP5ReleaseLanePromotionIsOneShotReadOnlyQualificationAndEnable(t *testi
 		t.Fatalf("supersede_stuck_run_id must be an optional empty-default string: %+v", supersedeInput)
 	}
 	if workflow.Concurrency.Group != "fugue-control-plane-release-lane-promotion-rp5" ||
-		workflow.Concurrency.CancelInProgress != "${{ inputs.supersede_stuck_run_id != '' && github.actor == github.repository_owner }}" {
+		workflow.Concurrency.CancelInProgress != "false" {
 		t.Fatalf("lane promotion concurrency recovery boundary drifted: %+v", workflow.Concurrency)
 	}
 	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 2 {

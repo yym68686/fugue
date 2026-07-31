@@ -41,7 +41,7 @@ permissions: {}
 
 concurrency:
   group: fugue-control-plane-release-lane-promotion-rp5
-  cancel-in-progress: ${{ inputs.supersede_stuck_run_id != '' && github.actor == github.repository_owner }}
+  cancel-in-progress: false
 
 jobs:
   qualify-control-plane-lane:
