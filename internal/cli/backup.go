@@ -975,8 +975,8 @@ func (c *CLI) newAppBackupStatusCommand() *cobra.Command {
 			}
 			if c.shouldRedact() {
 				// Keep the CLI safe even when it talks to an older server that
-				// returned a raw app object from the backup-status endpoint.
-				status.App = redactAppForOutput(status.App)
+				// returned raw structured or diagnostic backup-status fields.
+				status = sanitizeAppBackupStatusForOutput(status)
 			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, status)

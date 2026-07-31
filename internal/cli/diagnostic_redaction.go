@@ -7,31 +7,63 @@ import (
 )
 
 var (
-	redactAuthorizationHeaderPattern = regexp.MustCompile(`(?im)(authorization\s*[:=]\s*bearer\s+)([^\s,;]+)`)
+	redactAuthorizationHeaderPattern = regexp.MustCompile(`(?im)((?:proxy-)?authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?([^\s,;]+)`)
+	redactAPIHeaderPattern           = regexp.MustCompile(`(?im)((?:x-api-key|x-auth-token|x-access-token|api-key)\s*[:=]\s*)([^\s,;]+)`)
 	redactCookieHeaderPattern        = regexp.MustCompile(`(?im)(cookie\s*[:=]\s*)([^\r\n]+)`)
 	redactSetCookiePattern           = regexp.MustCompile(`(?im)(set-cookie\s*:\s*[^=;,\r\n]+)=([^;\r\n]+)`)
-	redactJSONSecretPattern          = regexp.MustCompile(`(?i)("(?:(?:access|refresh)_token|token|api[_-]?key|secret|password|authorization|cookie|session(?:_id)?)"\s*:\s*")([^"]*)(")`)
-	redactQuerySecretPattern         = regexp.MustCompile(`(?i)\b((?:access|refresh)_token|token|api[_-]?key|secret|password|session(?:_id)?)=([^&\s]+)`)
+	redactJSONSecretPattern          = regexp.MustCompile(`(?i)("(?:(?:access|refresh|auth|id)_token|token|api[_-]?key|(?:client|webhook|signing)_secret|(?:aws_)?secret_access_key|private_key|secret|password|authorization|cookie|session(?:_id)?)"\s*:\s*")([^"]*)(")`)
+	redactQuerySecretPattern         = regexp.MustCompile(`(?i)\b((?:access|refresh|auth|id)_token|token|api[_-]?key|(?:client|webhook)_secret|(?:aws_)?secret_access_key|password|session(?:_id)?)=([^&\s]+)`)
+	redactURLUserInfoPattern         = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://[^\s/@:]+:)([^@\s/]+)(@)`)
+	redactCredentialAssignment       = regexp.MustCompile(`(?im)(^|[\s;,])([a-z][a-z0-9_.-]*)(\s*[:=]\s*)([^\s,;]+)`)
 )
 
 func redactDiagnosticString(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return raw
 	}
-	redacted := redactDiagnosticScalarString(raw)
-	if structured, ok := redactDiagnosticJSONText(redacted); ok {
+	if structured, ok := redactDiagnosticJSONText(raw); ok {
 		return structured
 	}
-	return redacted
+	if structured, ok := redactDiagnosticEmbeddedJSONText(raw); ok {
+		return structured
+	}
+	return redactDiagnosticScalarString(raw)
 }
 
 func redactDiagnosticScalarString(raw string) string {
 	redacted := redactAuthorizationHeaderPattern.ReplaceAllString(raw, `${1}[redacted]`)
+	redacted = redactAPIHeaderPattern.ReplaceAllString(redacted, `${1}[redacted]`)
 	redacted = redactCookieHeaderPattern.ReplaceAllString(redacted, `${1}[redacted]`)
 	redacted = redactSetCookiePattern.ReplaceAllString(redacted, `${1}=[redacted]`)
 	redacted = redactJSONSecretPattern.ReplaceAllString(redacted, `${1}[redacted]${3}`)
 	redacted = redactQuerySecretPattern.ReplaceAllString(redacted, `${1}=[redacted]`)
+	redacted = redactURLUserInfoPattern.ReplaceAllString(redacted, `${1}[redacted]${3}`)
+	redacted = redactCredentialAssignments(redacted)
 	return redacted
+}
+
+func redactCredentialAssignments(raw string) string {
+	return redactCredentialAssignment.ReplaceAllStringFunc(raw, func(match string) string {
+		parts := redactCredentialAssignment.FindStringSubmatch(match)
+		if len(parts) != 5 || !diagnosticKeyLooksSensitive(parts[2]) {
+			return match
+		}
+		return parts[1] + parts[2] + parts[3] + redactedSecretValue
+	})
+}
+
+func redactDiagnosticEmbeddedJSONText(raw string) (string, bool) {
+	for index := 0; index < len(raw); index++ {
+		if raw[index] != '{' && raw[index] != '[' {
+			continue
+		}
+		structured, ok := redactDiagnosticJSONText(strings.TrimSpace(raw[index:]))
+		if !ok {
+			continue
+		}
+		return redactDiagnosticScalarString(raw[:index]) + structured, true
+	}
+	return "", false
 }
 
 func redactDiagnosticJSONText(raw string) (string, bool) {
@@ -170,9 +202,14 @@ func redactDiagnosticStringMap(values map[string]string) map[string]string {
 }
 
 func diagnosticKeyLooksSensitive(key string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(key))
-	normalized = strings.ReplaceAll(normalized, "-", "")
-	normalized = strings.ReplaceAll(normalized, "_", "")
+	normalized := normalizeDiagnosticSecretKey(key)
+	switch normalized {
+	case "session", "sessionid", "databaseurl", "dsn", "connectionstring", "connectionurl", "postgresurl", "postgresqlurl":
+		return true
+	}
+	if diagnosticKeyIsNonSecretMetadata(normalized) {
+		return false
+	}
 	for _, needle := range []string{
 		"authorization",
 		"accesstoken",
@@ -188,6 +225,8 @@ func diagnosticKeyLooksSensitive(key string) bool {
 		"connectionurl",
 		"postgresurl",
 		"postgresqlurl",
+		"privatekey",
+		"signingkey",
 		"sessionid",
 		"session",
 	} {
@@ -198,10 +237,45 @@ func diagnosticKeyLooksSensitive(key string) bool {
 	return false
 }
 
-func diagnosticKeyRedactsChildren(key string) bool {
+func normalizeDiagnosticSecretKey(key string) string {
 	normalized := strings.ToLower(strings.TrimSpace(key))
 	normalized = strings.ReplaceAll(normalized, "-", "")
 	normalized = strings.ReplaceAll(normalized, "_", "")
+	normalized = strings.ReplaceAll(normalized, ".", "")
+	return normalized
+}
+
+func diagnosticKeyIsNonSecretMetadata(normalized string) bool {
+	for _, suffix := range []string{
+		"id",
+		"ids",
+		"identifier",
+		"identifiers",
+		"name",
+		"names",
+		"ref",
+		"refs",
+		"reference",
+		"references",
+		"prefix",
+		"hash",
+		"digest",
+		"fingerprint",
+		"type",
+		"types",
+		"endpoint",
+		"path",
+		"version",
+	} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func diagnosticKeyRedactsChildren(key string) bool {
+	normalized := normalizeDiagnosticSecretKey(key)
 	switch normalized {
 	case "env", "environment", "environmentvariables":
 		return true
