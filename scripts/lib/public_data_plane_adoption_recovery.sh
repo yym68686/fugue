@@ -63,8 +63,164 @@ for name, content in data.items():
     path.chmod(0o600)
 (root / "configmap-resource-version").write_text(metadata["resourceVersion"], encoding="utf-8")
 (root / "configmap-resource-version").chmod(0o600)
+(root / "configmap-uid").write_text(metadata["uid"], encoding="utf-8")
+(root / "configmap-uid").chmod(0o600)
 PY
 }
+
+public_data_plane_adoption_delete_configmap_cas() (
+  set -euo pipefail
+  local cm_name="$1" uid="$2" resource_version="$3"
+  local kubeconfig="${KUBECONFIG:?explicit KUBECONFIG is required for ConfigMap CAS deletion}"
+  local api_path proxy_root proxy_dir proxy_socket proxy_log body response reconcile classification curl_path
+  local proxy_pid="" curl_rc=0 http_code="" reconcile_rc=0 reconcile_http="" attempt
+
+  [[ "${RELEASE_NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#RELEASE_NAMESPACE} -le 63 ]]
+  [[ "${cm_name}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#cm_name} -le 253 ]]
+  [[ "${uid}" =~ ^[A-Za-z0-9_-]+$ && ${#uid} -le 253 ]]
+  [[ "${resource_version}" =~ ^[A-Za-z0-9._:-]+$ && ${#resource_version} -le 253 ]]
+  [[ "${kubeconfig}" == /* && -f "${kubeconfig}" && ! -L "${kubeconfig}" && -r "${kubeconfig}" ]]
+  KUBECONFIG_PATH="${kubeconfig}" python3 - <<'PY'
+import os, pathlib, stat
+path=pathlib.Path(os.environ["KUBECONFIG_PATH"]); info=path.stat()
+assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) & 0o077 == 0
+assert 0 < info.st_size <= 1024 * 1024
+PY
+  curl_path="$(command -v curl)"
+  [[ "${curl_path}" == /* && -x "${curl_path}" ]]
+
+  api_path="/api/v1/namespaces/${RELEASE_NAMESPACE}/configmaps/${cm_name}"
+  proxy_root="${RUNNER_TEMP:-/tmp}"
+  [[ "${proxy_root}" == /* && -d "${proxy_root}" ]]
+  proxy_dir="$(mktemp -d "${proxy_root}/fugue-pdp-cas.XXXXXX")"
+  chmod 0700 "${proxy_dir}"
+  proxy_socket="${proxy_dir}/proxy.sock"
+  SOCKET_PATH="${proxy_socket}" python3 -c 'import os; assert len(os.fsencode(os.environ["SOCKET_PATH"])) <= 100'
+  proxy_log="${proxy_dir}/proxy.log"
+  body="${proxy_dir}/delete-options.json"
+  response="${proxy_dir}/delete-response.json"
+  reconcile="${proxy_dir}/reconcile.json"
+  classification="${proxy_dir}/classification"
+  : >"${proxy_log}"; : >"${response}"; : >"${reconcile}"
+  chmod 0600 "${proxy_log}" "${response}" "${reconcile}"
+
+  cleanup_proxy() {
+    local stop_attempt
+    if [[ -n "${proxy_pid}" ]]; then
+      kill -TERM "${proxy_pid}" >/dev/null 2>&1 || true
+      for stop_attempt in $(seq 1 50); do
+        kill -0 "${proxy_pid}" >/dev/null 2>&1 || break
+        sleep 0.1
+      done
+      if kill -0 "${proxy_pid}" >/dev/null 2>&1; then
+        kill -KILL "${proxy_pid}" >/dev/null 2>&1 || true
+      fi
+      wait "${proxy_pid}" >/dev/null 2>&1 || true
+      proxy_pid=""
+    fi
+    rm -rf -- "${proxy_dir}"
+  }
+  trap cleanup_proxy EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  UID_VALUE="${uid}" RV_VALUE="${resource_version}" OUTPUT="${body}" python3 - <<'PY'
+import json, os, pathlib
+value={"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":os.environ["UID_VALUE"],"resourceVersion":os.environ["RV_VALUE"]}}
+path=pathlib.Path(os.environ["OUTPUT"]); path.write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8"); path.chmod(0o600)
+PY
+
+  HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+    NO_PROXY='*' no_proxy='*' KUBECONFIG="${kubeconfig}" ${KUBECTL} proxy \
+    --unix-socket="${proxy_socket}" --api-prefix=/ \
+    --accept-hosts='^localhost$' --accept-paths="^${api_path}$" \
+    --reject-methods='^(HEAD|POST|PUT|PATCH|OPTIONS|CONNECT|TRACE)$' \
+    --www='' >"${proxy_log}" 2>&1 &
+  proxy_pid=$!
+  for attempt in $(seq 1 50); do
+    [[ -S "${proxy_socket}" ]] && break
+    kill -0 "${proxy_pid}" >/dev/null 2>&1 || return 1
+    sleep 0.1
+  done
+  [[ -S "${proxy_socket}" && ! -L "${proxy_socket}" ]]
+  chmod 0700 "${proxy_socket}"
+  SOCKET_PATH="${proxy_socket}" python3 - <<'PY'
+import os, pathlib, stat
+info=pathlib.Path(os.environ["SOCKET_PATH"]).stat()
+assert stat.S_ISSOCK(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+PY
+
+  if http_code="$(HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+    NO_PROXY='*' no_proxy='*' "${curl_path}" --disable --noproxy '*' --silent --show-error \
+    --connect-timeout 5 --max-time 15 --max-filesize 1048576 \
+    --unix-socket "${proxy_socket}" --request DELETE \
+    --header 'Content-Type: application/json' --data-binary "@${body}" \
+    --output "${response}" --write-out '%{http_code}' "http://localhost${api_path}")"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+  [[ "${http_code}" =~ ^[0-9]{3}$ ]]
+
+  RESPONSE="${response}" HTTP_CODE="${http_code}" CURL_RC="${curl_rc}" OUTPUT="${classification}" python3 - <<'PY'
+import json, os, pathlib
+def unique(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value: raise ValueError("duplicate JSON key")
+        value[key]=item
+    return value
+path=pathlib.Path(os.environ["RESPONSE"]); raw=path.read_bytes(); assert len(raw) <= 1024*1024
+code=int(os.environ["HTTP_CODE"]); curl_rc=int(os.environ["CURL_RC"]); classification=""
+if not raw:
+    assert curl_rc != 0 and code == 0
+    classification="ambiguous"
+else:
+    value=json.loads(raw, object_pairs_hook=unique)
+    assert isinstance(value,dict) and value.get("apiVersion")=="v1" and value.get("kind")=="Status"
+    assert type(value.get("code")) is int and value["code"]==code
+    if 200 <= code <= 299:
+        assert curl_rc==0 and value.get("status")=="Success"
+        classification="success"
+    elif code==404:
+        assert curl_rc==0 and value.get("status")=="Failure" and value.get("reason")=="NotFound"
+        classification="not-found"
+    elif code==409:
+        raise SystemExit(1)
+    elif 500 <= code <= 599:
+        assert curl_rc==0 and value.get("status")=="Failure"
+        classification="ambiguous"
+    else:
+        raise SystemExit(1)
+out=pathlib.Path(os.environ["OUTPUT"]); out.write_text(classification+"\n",encoding="utf-8"); out.chmod(0o600)
+PY
+
+  if reconcile_http="$(HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+    NO_PROXY='*' no_proxy='*' "${curl_path}" --disable --noproxy '*' --silent --show-error \
+    --connect-timeout 5 --max-time 15 --max-filesize 1048576 \
+    --unix-socket "${proxy_socket}" --request GET --header 'Accept: application/json' \
+    --output "${reconcile}" --write-out '%{http_code}' "http://localhost${api_path}")"; then
+    reconcile_rc=0
+  else
+    reconcile_rc=$?
+  fi
+  RECONCILE="${reconcile}" HTTP_CODE="${reconcile_http}" CURL_RC="${reconcile_rc}" python3 - <<'PY'
+import json, os, pathlib
+def unique(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value: raise ValueError("duplicate JSON key")
+        value[key]=item
+    return value
+assert int(os.environ["CURL_RC"])==0 and os.environ["HTTP_CODE"]=="404"
+path=pathlib.Path(os.environ["RECONCILE"]); raw=path.read_bytes(); assert 0 < len(raw) <= 1024*1024
+value=json.loads(raw,object_pairs_hook=unique)
+assert isinstance(value,dict) and value.get("apiVersion")=="v1" and value.get("kind")=="Status"
+assert value.get("status")=="Failure" and value.get("reason")=="NotFound" and value.get("code")==404
+PY
+  [[ "$(cat "${classification}")" =~ ^(success|not-found|ambiguous)$ ]]
+)
 
 public_data_plane_adoption_persist_recovery_wal() {
   local cm_name transaction restore wal payload created readback
@@ -160,7 +316,7 @@ PY
 }
 
 public_data_plane_adoption_delete_terminal_wal() {
-  local cm_name current rv sealed_digest final_digest
+  local cm_name current uid rv sealed_digest final_digest
   cm_name="$(public_data_plane_adoption_recovery_cm_name)"
   [[ -f "${EVIDENCE_DIR}/terminal-wal.json" && ! -L "${EVIDENCE_DIR}/terminal-wal.json" ]] || return 1
   sealed_digest="$(shasum -a 256 "${EVIDENCE_DIR}/terminal-wal.json" | awk '{print $1}')" || return 1
@@ -178,7 +334,8 @@ with open(os.environ["WAL"], encoding="utf-8") as source: value=json.load(source
 assert value["phase"] in {"baseline-finalized", "restore-succeeded", "aborted-before-apply"}
 PY
   rv="$(cat "${EVIDENCE_DIR}/wal-terminal/configmap-resource-version")"
-  ${KUBECTL} -n "${RELEASE_NAMESPACE}" delete "configmap/${cm_name}" --resource-version="${rv}" --wait=false >/dev/null || return 1
+  uid="$(cat "${EVIDENCE_DIR}/wal-terminal/configmap-uid")"
+  public_data_plane_adoption_delete_configmap_cas "${cm_name}" "${uid}" "${rv}" || return 1
   "${ADOPTION_TOOL}" wal-verify \
     --transaction "${EVIDENCE_DIR}/transaction.json" \
     --restore "${EVIDENCE_DIR}/restore.json" \
@@ -188,9 +345,13 @@ PY
 }
 
 public_data_plane_adoption_seal_terminal_wal() {
-  local expected_phase="$1" cm_name current
+  local expected_phase="$1" lease_state="${2:-held}" cm_name current
   cm_name="$(public_data_plane_adoption_recovery_cm_name)"
-  public_data_plane_adoption_verify_owned_lease || return 1
+  case "${lease_state}" in
+    held) public_data_plane_adoption_verify_owned_lease || return 1 ;;
+    released) verify_released_recovery_lease || return 1 ;;
+    *) return 1 ;;
+  esac
   current="$(${KUBECTL} -n "${RELEASE_NAMESPACE}" get "configmap/${cm_name}" -o json)" || return 1
   rm -rf "${EVIDENCE_DIR}/wal-terminal-seal"
   RELEASE_NAME="${RELEASE_NAME}" public_data_plane_adoption_extract_recovery_configmap \
@@ -210,7 +371,7 @@ PY
 }
 
 public_data_plane_adoption_delete_unarmed_wal() {
-  local expected_recovery="${1:-false}" cm_name current rv
+  local expected_recovery="${1:-false}" cm_name current uid rv
   cm_name="$(public_data_plane_adoption_recovery_cm_name)"
   public_data_plane_adoption_verify_owned_lease "${expected_recovery}" || return 1
   current="$(${KUBECTL} -n "${RELEASE_NAMESPACE}" get "configmap/${cm_name}" -o json)" || return 1
@@ -226,5 +387,6 @@ with open(os.environ["WAL"], encoding="utf-8") as source: value=json.load(source
 assert value["phase"] == "lease-acquired"
 PY
   rv="$(cat "${EVIDENCE_DIR}/wal-unarmed/configmap-resource-version")"
-  ${KUBECTL} -n "${RELEASE_NAMESPACE}" delete "configmap/${cm_name}" --resource-version="${rv}" --wait=false >/dev/null
+  uid="$(cat "${EVIDENCE_DIR}/wal-unarmed/configmap-uid")"
+  public_data_plane_adoption_delete_configmap_cas "${cm_name}" "${uid}" "${rv}"
 }

@@ -7,7 +7,7 @@ WAL_DIGEST="sha256:$(printf '1%.0s' {1..64})"
 BASELINE_DIGEST="sha256:$(printf '2%.0s' {1..64})"
 TOKEN="0123456789abcdef0123456789abcdef"
 TOKEN_DIGEST="sha256:$(printf '%s' "${TOKEN}" | shasum -a 256 | awk '{print $1}')"
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+TMP="$(mktemp -d)"; trap '[[ "${KEEP_RECOVERY_TEST_TMP:-false}" == true ]] || rm -rf "${TMP}" "${CAS_SOCKET_ROOT:-}"' EXIT
 fail(){ echo "recovery-test: $*" >&2; exit 1; }
 count(){ local want="$1" value="$2" file="$3"; local got; got="$(grep -c -- "${value}" "${file}" 2>/dev/null || true)"; [[ "${got}" == "${want}" ]] || fail "${value}: got ${got}, want ${want}"; }
 
@@ -75,6 +75,7 @@ MOCK
     control_plane_backup_coordination_now(){ printf '2026-08-01T00:00:02Z\n'; }
     trim_field(){ printf '%s' "$1"; }
     bounded_kubectl(){ shift; echo coord:release >>"${TEST_LOG}"; "${KUBECTL}" "$@"; }
+    verify_released_recovery_lease(){ :; }
     control_plane_stale_release_old_process_absent(){ echo coord:origin-process-absent >>"${TEST_LOG}"; }
 MOCK
   cat >"${dir}/recovery.sh" <<'MOCK'
@@ -147,6 +148,7 @@ for file in "${TMP}"/*/log; do count 0 'helm:upgrade' "${file}"; done
 
 roundtrip="${TMP}/wal-newline-roundtrip"
 mkdir -p "${roundtrip}/bin" "${roundtrip}/evidence"
+: >"${roundtrip}/log"
 cat >"${roundtrip}/configmap.json" <<'JSON'
 {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"fugue-public-data-plane-adoption-recovery","namespace":"fugue-system","uid":"cm-uid","resourceVersion":"7","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"public-data-plane-adoption-recovery","fugue.io/recovery-policy":"public-data-plane-helm-adoption-v1"}},"data":{"wal.json":"{\"phase\":\"lease-acquired\"}\n","transaction.json":"{}\n","restore.json":"{}\n"}}
 JSON
@@ -187,6 +189,7 @@ value["metadata"]["resourceVersion"] = str(int(value["metadata"]["resourceVersio
 path.write_text(json.dumps(value,separators=(",",":"))+"\n")
 PY
 elif [[ " $* " == *" delete configmap/"* ]]; then
+  [[ " $* " != *" --resource-version="* ]] || { echo 'unknown flag: --resource-version' >&2; exit 1; }
   : >"${TEST_DELETED}"
 else
   exit 91
@@ -203,18 +206,26 @@ chmod +x "${roundtrip}/bin/kubectl"
   EVIDENCE_DIR="${roundtrip}/evidence"
   ADOPTION_TOOL="${roundtrip}/bin/adoption"
   KUBECTL="${roundtrip}/bin/kubectl"
-  TEST_TOKEN="${TOKEN}" TEST_CONFIGMAP="${roundtrip}/configmap.json" TEST_DELETED="${roundtrip}/deleted"
+  TEST_TOKEN="${TOKEN}" TEST_CONFIGMAP="${roundtrip}/configmap.json" TEST_DELETED="${roundtrip}/deleted" TEST_LOG="${roundtrip}/log"
   export RELEASE_FULLNAME RELEASE_NAME RELEASE_NAMESPACE FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE
   export FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER
-  export CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN EVIDENCE_DIR ADOPTION_TOOL KUBECTL TEST_TOKEN TEST_CONFIGMAP TEST_DELETED
+  export CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN EVIDENCE_DIR ADOPTION_TOOL KUBECTL TEST_TOKEN TEST_CONFIGMAP TEST_DELETED TEST_LOG
   # shellcheck source=scripts/lib/public_data_plane_adoption_recovery.sh
   source "${ROOT}/scripts/lib/public_data_plane_adoption_recovery.sh"
+  public_data_plane_adoption_delete_configmap_cas(){
+    [[ "$1" == fugue-public-data-plane-adoption-recovery && "$2" == cm-uid && "$3" =~ ^[0-9]+$ ]]
+    printf 'cas-delete:%s:%s:%s\n' "$1" "$2" "$3" >>"${TEST_LOG:-/dev/null}"
+    : >"${TEST_DELETED}"
+  }
+  public_data_plane_adoption_delete_unarmed_wal true
   public_data_plane_adoption_advance_recovery_wal fence-armed
   cp "${EVIDENCE_DIR}/recovery-wal.json" "${EVIDENCE_DIR}/fence-armed-wal.json"
   public_data_plane_adoption_advance_recovery_wal aborted-before-apply
   public_data_plane_adoption_seal_terminal_wal aborted-before-apply
   public_data_plane_adoption_delete_terminal_wal
 )
+count 1 'cas-delete:fugue-public-data-plane-adoption-recovery:cm-uid:7' "${roundtrip}/log"
+count 1 'cas-delete:fugue-public-data-plane-adoption-recovery:cm-uid:9' "${roundtrip}/log"
 STATE="${roundtrip}/configmap.json" FIRST="${roundtrip}/evidence/fence-armed-wal.json" WAL="${roundtrip}/evidence/recovery-wal.json" TERMINAL="${roundtrip}/evidence/terminal-wal.json" DELETED="${roundtrip}/deleted" python3 - <<'PY'
 import json, os, pathlib
 stored=json.loads(pathlib.Path(os.environ["STATE"]).read_text())["data"]["wal.json"]
@@ -223,6 +234,194 @@ first=pathlib.Path(os.environ["FIRST"]).read_text(); terminal=pathlib.Path(os.en
 assert first.endswith("\n") and json.loads(first)["phase"] == "fence-armed"
 assert stored == local == terminal and stored.endswith("\n") and json.loads(stored)["phase"] == "aborted-before-apply"
 assert pathlib.Path(os.environ["DELETED"]).exists()
+PY
+
+cas_real="${TMP}/real-unix-proxy-cas"
+CAS_SOCKET_ROOT="$(mktemp -d /tmp/fugue-pdp-cas-test.XXXXXX)"
+mkdir -p "${cas_real}"
+chmod 0700 "${cas_real}" "${CAS_SOCKET_ROOT}"
+REAL_KUBECTL="$(command -v kubectl)"; REAL_OPENSSL="$(command -v openssl)"
+[[ "${REAL_KUBECTL}" == /* && "${REAL_OPENSSL}" == /* ]] || fail "real kubectl/openssl are required for the CAS proxy harness"
+"${REAL_OPENSSL}" req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj /CN=localhost \
+  -keyout "${cas_real}/server.key" -out "${cas_real}/server.crt" >/dev/null 2>&1
+chmod 0600 "${cas_real}/server.key" "${cas_real}/server.crt"
+cat >"${cas_real}/server.py" <<'PY'
+import http.server,json,os,pathlib,ssl,sys
+mode,output,portfile,cert,key=sys.argv[1:]
+requests=[]; state={"exists":True,"uid":"cm-uid","rv":"7"}
+if mode=="uid-drift": state["uid"]="actual-uid"
+if mode=="rv-drift": state["rv"]="8"
+def write_capture(): pathlib.Path(output).write_text(json.dumps(requests,separators=(",",":"))+"\n")
+class H(http.server.BaseHTTPRequestHandler):
+ def record(self,body):
+  try: parsed=json.loads(body) if body else None
+  except Exception: parsed="invalid"
+  requests.append({"method":self.command,"path":self.path,"contentType":self.headers.get("Content-Type"),"bodyLength":len(body),"bodyText":body.decode(errors="replace"),"body":parsed}); write_capture()
+ def send_json(self,code,value):
+  body=json.dumps(value,separators=(",",":")).encode(); self.send_response(code); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+ def status(self,code,reason,status="Failure"):
+  return {"apiVersion":"v1","kind":"Status","status":status,"reason":reason,"code":code}
+ def do_DELETE(self):
+  body=self.rfile.read(int(self.headers.get("Content-Length","0"))); self.record(body)
+  if mode=="raw-drop": state["exists"]=False; self.send_json(200,self.status(200,"","Success")); return
+  try: value=json.loads(body); pre=value["preconditions"]
+  except Exception: self.send_json(400,self.status(400,"BadRequest")); return
+  if value.get("apiVersion")!="v1" or value.get("kind")!="DeleteOptions" or pre.get("uid")!=state["uid"] or pre.get("resourceVersion")!=state["rv"] or mode=="conflict":
+   self.send_json(409,self.status(409,"Conflict")); return
+  if mode=="notfound" or mode=="notfound-exists":
+   if mode=="notfound": state["exists"]=False
+   self.send_json(404,self.status(404,"NotFound")); return
+  if mode=="new-uid": state.update(exists=True,uid="replacement-uid",rv="9")
+  elif mode not in {"exists","five-hundred-exists","timeout-exists"}: state["exists"]=False
+  if mode=="ambiguous": self.connection.shutdown(2); self.connection.close(); return
+  if mode=="invalid-json":
+   payload=b'{invalid'; self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload); return
+  if mode in {"five-hundred-absent","five-hundred-exists"}: self.send_json(500,self.status(500,"InternalError")); return
+  self.send_json(200,self.status(200,"","Success"))
+ def do_GET(self):
+  self.record(b"")
+  if not state["exists"]: self.send_json(404,self.status(404,"NotFound")); return
+  self.send_json(200,{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"recovery-cm","namespace":"fugue-system","uid":state["uid"],"resourceVersion":state["rv"]}})
+ def log_message(self,*args): pass
+server=http.server.ThreadingHTTPServer(("127.0.0.1",0),H); context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(cert,key); server.socket=context.wrap_socket(server.socket,server_side=True)
+pathlib.Path(portfile).write_text(str(server.server_address[1])); server.serve_forever()
+PY
+
+start_cas_server(){
+  local mode="$1" dir="$2"
+  python3 "${cas_real}/server.py" "${mode}" "${dir}/capture.json" "${dir}/port" "${cas_real}/server.crt" "${cas_real}/server.key" &
+  CAS_SERVER_PID=$!
+  for _ in $(seq 1 100); do [[ -s "${dir}/port" ]] && break; sleep 0.02; done
+  [[ -s "${dir}/port" ]]
+  cat >"${dir}/kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: fake
+  cluster:
+    server: https://127.0.0.1:$(cat "${dir}/port")
+    insecure-skip-tls-verify: true
+contexts:
+- name: fake
+  context: {cluster: fake, user: fake}
+current-context: fake
+users:
+- name: fake
+  user: {token: fake-token}
+EOF
+  chmod 0600 "${dir}/kubeconfig"
+}
+stop_cas_server(){
+  kill "${CAS_SERVER_PID}" >/dev/null 2>&1 || true
+  wait "${CAS_SERVER_PID}" >/dev/null 2>&1 || true
+  CAS_SERVER_PID=""
+}
+REAL_CURL_BIN="$(command -v curl)"
+run_cas_case(){
+  local mode="$1" want="$2" uid="${3:-cm-uid}" rv="${4:-7}" curl_mode="${5:-real}" dir status
+  dir="${cas_real}/${mode}"
+  mkdir -p "${dir}/evidence"; chmod 0700 "${dir}" "${dir}/evidence"
+  if [[ "${curl_mode}" == lost-response || "${curl_mode}" == timeout-response ]]; then
+    mkdir -p "${dir}/bin"
+    cat >"${dir}/bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+method=''; output=''; args=()
+while (( $# )); do
+  case "$1" in
+    --request) method="$2"; args+=("$1" "$2"); shift 2 ;;
+    --output) output="$2"; args+=("$1" "$2"); shift 2 ;;
+    --write-out)
+      if [[ "${method}" == DELETE ]]; then args+=("$1" ''); else args+=("$1" "$2"); fi
+      shift 2
+      ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+if [[ "${method}" == DELETE ]]; then
+  "${REAL_CURL}" "${args[@]}" >/dev/null
+  : >"${output}"
+  printf '000'
+  exit "${MOCK_CURL_EXIT}"
+fi
+exec "${REAL_CURL}" "${args[@]}"
+MOCK
+    chmod +x "${dir}/bin/curl"
+  fi
+  start_cas_server "${mode}" "${dir}"
+  set +e
+  (
+    set -euo pipefail
+    PATH="${dir}/bin:${PATH}" REAL_CURL="${REAL_CURL_BIN}" \
+      MOCK_CURL_EXIT="$([[ "${curl_mode}" == timeout-response ]] && printf 28 || printf 52)" \
+      RELEASE_NAMESPACE=fugue-system EVIDENCE_DIR="${dir}/evidence" KUBECTL="${REAL_KUBECTL}" \
+      KUBECONFIG="${dir}/kubeconfig" RUNNER_TEMP="${CAS_SOCKET_ROOT}"
+    export PATH REAL_CURL MOCK_CURL_EXIT RELEASE_NAMESPACE EVIDENCE_DIR KUBECTL KUBECONFIG RUNNER_TEMP
+    # shellcheck source=scripts/lib/public_data_plane_adoption_recovery.sh
+    source "${ROOT}/scripts/lib/public_data_plane_adoption_recovery.sh"
+    public_data_plane_adoption_delete_configmap_cas recovery-cm "${uid}" "${rv}"
+  ) >"${dir}/out" 2>"${dir}/err"
+  status=$?
+  set -e
+  stop_cas_server
+  [[ ( "${want}" == success && "${status}" == 0 ) || ( "${want}" == failure && "${status}" != 0 ) ]] || { cat "${dir}/err" >&2; fail "CAS case ${mode}: status=${status} want=${want}"; }
+  MODE="${mode}" CAPTURE="${dir}/capture.json" WANT="${want}" python3 - <<'PY'
+import json,os
+rows=json.load(open(os.environ["CAPTURE"])); deletes=[x for x in rows if x["method"]=="DELETE"]
+assert len(deletes)==1
+body=deletes[0]; assert body["path"]=="/api/v1/namespaces/fugue-system/configmaps/recovery-cm"
+assert body["contentType"]=="application/json" and body["bodyLength"]>0
+assert body["bodyText"]=='{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"resourceVersion":"7","uid":"cm-uid"}}\n'
+assert body["body"]=={"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"resourceVersion":"7","uid":"cm-uid"}}
+PY
+  [[ -z "$(find "${CAS_SOCKET_ROOT}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "CAS case ${mode} leaked proxy state"
+}
+
+run_cas_case success success
+run_cas_case ambiguous failure
+run_cas_case lost-response success cm-uid 7 lost-response
+run_cas_case timeout-exists failure cm-uid 7 timeout-response
+run_cas_case five-hundred-absent success
+run_cas_case notfound success
+run_cas_case conflict failure
+run_cas_case uid-drift failure
+run_cas_case rv-drift failure
+run_cas_case new-uid failure
+run_cas_case exists failure
+run_cas_case five-hundred-exists failure
+run_cas_case notfound-exists failure
+run_cas_case invalid-json failure
+
+proxy_failure="${cas_real}/proxy-failure"
+mkdir -p "${proxy_failure}/evidence" "${proxy_failure}/bin"
+cp "${cas_real}/success/kubeconfig" "${proxy_failure}/kubeconfig"
+cat >"${proxy_failure}/bin/kubectl" <<'MOCK'
+#!/usr/bin/env bash
+exit 42
+MOCK
+chmod +x "${proxy_failure}/bin/kubectl"
+set +e
+(
+  RELEASE_NAMESPACE=fugue-system EVIDENCE_DIR="${proxy_failure}/evidence" \
+    KUBECTL="${proxy_failure}/bin/kubectl" KUBECONFIG="${proxy_failure}/kubeconfig" \
+    RUNNER_TEMP="${CAS_SOCKET_ROOT}" \
+    bash -c 'source "$1"; public_data_plane_adoption_delete_configmap_cas recovery-cm cm-uid 7' \
+    bash "${ROOT}/scripts/lib/public_data_plane_adoption_recovery.sh"
+) >"${proxy_failure}/out" 2>"${proxy_failure}/err"
+proxy_failure_status=$?
+set -e
+[[ "${proxy_failure_status}" != 0 ]] || fail "CAS proxy startup failure was accepted"
+[[ -z "$(find "${CAS_SOCKET_ROOT}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "CAS proxy startup failure leaked proxy state"
+
+raw_drop="${cas_real}/raw-drop"; mkdir -p "${raw_drop}"; start_cas_server raw-drop "${raw_drop}"
+printf '%s\n' '{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"cm-uid","resourceVersion":"7"}}' | \
+  KUBECONFIG="${raw_drop}/kubeconfig" "${REAL_KUBECTL}" delete \
+    --raw=/api/v1/namespaces/fugue-system/configmaps/recovery-cm -f - >/dev/null
+stop_cas_server
+CAPTURE="${raw_drop}/capture.json" python3 - <<'PY'
+import json,os
+rows=json.load(open(os.environ["CAPTURE"])); assert len(rows)==1 and rows[0]["method"]=="DELETE"
+assert rows[0]["bodyLength"]==0 and rows[0]["body"] is None
 PY
 
 production_shape="${TMP}/production-shape-aborted"
@@ -346,6 +545,16 @@ else
 fi
 MOCK
 chmod +x "${production_shape}/bin/kubectl"
+cat >"${production_shape}/recovery.sh" <<EOF
+# shellcheck source=scripts/lib/public_data_plane_adoption_recovery.sh
+source "${ROOT}/scripts/lib/public_data_plane_adoption_recovery.sh"
+public_data_plane_adoption_delete_configmap_cas(){
+  [[ "\$1" == fugue-fugue-public-data-plane-adoption-recovery && "\$2" == cm-uid && "\$3" =~ ^[0-9]+\$ ]]
+  printf 'cas-delete:%s:%s:%s\\n' "\$1" "\$2" "\$3" >>"\${TEST_LOG}"
+  : >"\${TEST_DELETED}"
+}
+EOF
+chmod 0600 "${production_shape}/recovery.sh"
 set +e
 env -u FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS \
   -u FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS \
@@ -362,6 +571,7 @@ env -u FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS \
   FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${production_shape}/bin/evidence" \
   FUGUE_RELEASE_DOMAIN_OWNERSHIP_FILE="${production_shape}/ownership.yaml" \
   FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR="${production_shape}/evidence" \
+  FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${production_shape}/recovery.sh" \
   HELM="${production_shape}/bin/helm" KUBECTL="${production_shape}/bin/kubectl" \
   bash "${SUBJECT}" >"${production_shape}/out" 2>"${production_shape}/err"
 production_status=$?
@@ -411,6 +621,7 @@ PY
   FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${production_fence}/bin/evidence" \
   FUGUE_RELEASE_DOMAIN_OWNERSHIP_FILE="${production_fence}/ownership.yaml" \
   FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR="${production_fence}/evidence" \
+  FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${production_shape}/recovery.sh" \
   HELM="${production_fence}/bin/helm" KUBECTL="${production_fence}/bin/kubectl" \
   bash "${SUBJECT}" >"${production_fence}/out" 2>"${production_fence}/err"
 )
@@ -423,6 +634,111 @@ import json, pathlib, os
 value=json.load(open(os.environ["STATE"])); stored=value["data"]["wal.json"]; terminal=pathlib.Path(os.environ["TERMINAL"]).read_text()
 assert stored == terminal and json.loads(terminal)["phase"] == "aborted-before-apply"
 PY
+
+production_residue="${TMP}/production-shape-released-residue"
+mkdir -p "${production_residue}/bin" "${production_residue}/evidence"
+cp "${production_shape}/bin/"* "${production_residue}/bin/"
+cp "${production_shape}/ownership.yaml" "${production_residue}/ownership.yaml"
+cp "${production_shape}/lease.initial.json" "${production_residue}/lease.json"
+cp "${production_shape}/configmap.initial.json" "${production_residue}/configmap.json"
+: >"${production_residue}/log"
+STATE="${production_residue}/lease.json" python3 - <<'PY'
+import json, pathlib, os
+path=pathlib.Path(os.environ["STATE"]); value=json.loads(path.read_text())
+value["metadata"]["resourceVersion"]="10"; value["metadata"]["annotations"]={}
+value["spec"]["holderIdentity"]=""; value["spec"]["renewTime"]="2026-08-01T00:00:03Z"
+path.write_text(json.dumps(value,separators=(",",":"))+"\n")
+PY
+(
+  unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS
+  unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS
+  PATH="${production_residue}/bin:${PATH}" TEST_LOG="${production_residue}/log" \
+  TEST_PHASE=aborted-before-apply TEST_HELM_BASE=true TEST_LIVE_EXACT=true \
+  TEST_WAL_DIGEST="${WAL_DIGEST}" TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" \
+  TEST_APPLY_ATTEMPTS=0 TEST_RESTORE_ATTEMPTS=0 TEST_TOKEN="${TOKEN}" TEST_TOKEN_DIGEST="${TOKEN_DIGEST}" \
+  TEST_HEAD_SHA="${HEAD_SHA}" TEST_LEASE_STATE="${production_residue}/lease.json" \
+  TEST_LEASE_READ_COUNT="${production_residue}/lease-read-count" TEST_LEASE_DRIFT_MODE=none TEST_PATCH_RV_DRIFT=false \
+  TEST_CONFIGMAP_STATE="${production_residue}/configmap.json" TEST_DELETED="${production_residue}/deleted" \
+  REPO_ROOT="${ROOT}" FUGUE_RECOVERY_SHA="${HEAD_SHA}" FUGUE_EXPECTED_SOURCE_SHA="${HEAD_SHA}" \
+  FUGUE_EXPECTED_WAL_DIGEST="${WAL_DIGEST}" FUGUE_EXPECTED_ORIGIN_RUN_ID=123 \
+  FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL="${production_residue}/bin/adoption" \
+  FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${production_residue}/bin/evidence" \
+  FUGUE_RELEASE_DOMAIN_OWNERSHIP_FILE="${production_residue}/ownership.yaml" \
+  FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR="${production_residue}/evidence" \
+  FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${production_shape}/recovery.sh" \
+  HELM="${production_residue}/bin/helm" KUBECTL="${production_residue}/bin/kubectl" \
+  bash "${SUBJECT}" >"${production_residue}/out" 2>"${production_residue}/err"
+)
+count 0 'patch daemonset' "${production_residue}/log"
+count 0 'patch lease/' "${production_residue}/log"
+count 0 'tool:wal-advance' "${production_residue}/log"
+count 1 'cas-delete:fugue-fugue-public-data-plane-adoption-recovery:cm-uid:7' "${production_residue}/log"
+[[ -f "${production_residue}/deleted" ]] || fail "released-Lease terminal residue was not CAS deleted"
+STATE="${production_residue}/configmap.json" TERMINAL="${production_residue}/evidence/terminal-wal.json" python3 - <<'PY'
+import json, pathlib, os
+stored=json.load(open(os.environ["STATE"]))["data"]["wal.json"]; terminal=pathlib.Path(os.environ["TERMINAL"]).read_text()
+assert stored == terminal and json.loads(terminal)["phase"] == "aborted-before-apply"
+PY
+
+production_residue_nonterminal="${TMP}/production-shape-released-nonterminal"
+cp -R "${production_residue}" "${production_residue_nonterminal}"
+rm -rf "${production_residue_nonterminal}/evidence"; mkdir "${production_residue_nonterminal}/evidence"
+rm -f "${production_residue_nonterminal}/deleted" "${production_residue_nonterminal}/lease-read-count"
+: >"${production_residue_nonterminal}/log"
+STATE="${production_residue_nonterminal}/configmap.json" python3 - <<'PY'
+import json,pathlib,os
+path=pathlib.Path(os.environ["STATE"]); value=json.loads(path.read_text()); wal=json.loads(value["data"]["wal.json"])
+wal["phase"]="fence-armed"; value["data"]["wal.json"]=json.dumps(wal,separators=(",",":"))+"\n"
+path.write_text(json.dumps(value,separators=(",",":"))+"\n")
+PY
+set +e
+PATH="${production_residue_nonterminal}/bin:${PATH}" TEST_LOG="${production_residue_nonterminal}/log" \
+TEST_PHASE=fence-armed TEST_HELM_BASE=true TEST_LIVE_EXACT=true TEST_WAL_DIGEST="${WAL_DIGEST}" \
+TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" TEST_APPLY_ATTEMPTS=0 TEST_RESTORE_ATTEMPTS=0 \
+TEST_TOKEN="${TOKEN}" TEST_TOKEN_DIGEST="${TOKEN_DIGEST}" TEST_HEAD_SHA="${HEAD_SHA}" \
+TEST_LEASE_STATE="${production_residue_nonterminal}/lease.json" TEST_LEASE_READ_COUNT="${production_residue_nonterminal}/lease-read-count" \
+TEST_LEASE_DRIFT_MODE=none TEST_PATCH_RV_DRIFT=false TEST_CONFIGMAP_STATE="${production_residue_nonterminal}/configmap.json" \
+TEST_DELETED="${production_residue_nonterminal}/deleted" REPO_ROOT="${ROOT}" FUGUE_RECOVERY_SHA="${HEAD_SHA}" \
+FUGUE_EXPECTED_SOURCE_SHA="${HEAD_SHA}" FUGUE_EXPECTED_WAL_DIGEST="${WAL_DIGEST}" FUGUE_EXPECTED_ORIGIN_RUN_ID=123 \
+FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL="${production_residue_nonterminal}/bin/adoption" \
+FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${production_residue_nonterminal}/bin/evidence" \
+FUGUE_RELEASE_DOMAIN_OWNERSHIP_FILE="${production_residue_nonterminal}/ownership.yaml" \
+FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR="${production_residue_nonterminal}/evidence" \
+FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${production_shape}/recovery.sh" \
+HELM="${production_residue_nonterminal}/bin/helm" KUBECTL="${production_residue_nonterminal}/bin/kubectl" \
+bash "${SUBJECT}" >"${production_residue_nonterminal}/out" 2>"${production_residue_nonterminal}/err"
+residue_nonterminal_status=$?
+set -e
+[[ "${residue_nonterminal_status}" != 0 && ! -f "${production_residue_nonterminal}/deleted" ]] || fail "released Lease accepted a nonterminal WAL"
+count 0 'patch lease/' "${production_residue_nonterminal}/log"
+count 0 'cas-delete:' "${production_residue_nonterminal}/log"
+
+production_residue_drift="${TMP}/production-shape-released-drift"
+cp -R "${production_residue}" "${production_residue_drift}"
+rm -rf "${production_residue_drift}/evidence"; mkdir "${production_residue_drift}/evidence"
+rm -f "${production_residue_drift}/deleted" "${production_residue_drift}/lease-read-count"
+: >"${production_residue_drift}/log"
+set +e
+PATH="${production_residue_drift}/bin:${PATH}" TEST_LOG="${production_residue_drift}/log" \
+TEST_PHASE=aborted-before-apply TEST_HELM_BASE=true TEST_LIVE_EXACT=true TEST_WAL_DIGEST="${WAL_DIGEST}" \
+TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" TEST_APPLY_ATTEMPTS=0 TEST_RESTORE_ATTEMPTS=0 \
+TEST_TOKEN="${TOKEN}" TEST_TOKEN_DIGEST="${TOKEN_DIGEST}" TEST_HEAD_SHA="${HEAD_SHA}" \
+TEST_LEASE_STATE="${production_residue_drift}/lease.json" TEST_LEASE_READ_COUNT="${production_residue_drift}/lease-read-count" \
+TEST_LEASE_DRIFT_MODE=duration TEST_PATCH_RV_DRIFT=false TEST_CONFIGMAP_STATE="${production_residue_drift}/configmap.json" \
+TEST_DELETED="${production_residue_drift}/deleted" REPO_ROOT="${ROOT}" FUGUE_RECOVERY_SHA="${HEAD_SHA}" \
+FUGUE_EXPECTED_SOURCE_SHA="${HEAD_SHA}" FUGUE_EXPECTED_WAL_DIGEST="${WAL_DIGEST}" FUGUE_EXPECTED_ORIGIN_RUN_ID=123 \
+FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL="${production_residue_drift}/bin/adoption" \
+FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${production_residue_drift}/bin/evidence" \
+FUGUE_RELEASE_DOMAIN_OWNERSHIP_FILE="${production_residue_drift}/ownership.yaml" \
+FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR="${production_residue_drift}/evidence" \
+FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${production_shape}/recovery.sh" \
+HELM="${production_residue_drift}/bin/helm" KUBECTL="${production_residue_drift}/bin/kubectl" \
+bash "${SUBJECT}" >"${production_residue_drift}/out" 2>"${production_residue_drift}/err"
+residue_drift_status=$?
+set -e
+[[ "${residue_drift_status}" != 0 && ! -f "${production_residue_drift}/deleted" ]] || fail "released Lease drift was not fail-closed"
+count 0 'patch lease/' "${production_residue_drift}/log"
+count 0 'cas-delete:' "${production_residue_drift}/log"
 
 production_failure_case() {
   local scenario="$1" duration_mode="$2" drift_mode="${3:-none}" patch_rv_drift="${4:-false}" caller_mode="${5:-none}"
@@ -466,6 +782,7 @@ PY
     FUGUE_EXPECTED_WAL_DIGEST="${WAL_DIGEST}" FUGUE_EXPECTED_ORIGIN_RUN_ID=123 \
     FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL="${dir}/bin/adoption" FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL="${dir}/bin/evidence" \
     FUGUE_RELEASE_DOMAIN_OWNERSHIP_FILE="${dir}/ownership.yaml" FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR="${dir}/evidence" \
+    FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${production_shape}/recovery.sh" \
     HELM="${dir}/bin/helm" KUBECTL="${dir}/bin/kubectl" bash "${SUBJECT}" >"${dir}/out" 2>"${dir}/err"
   )
   status=$?; set -e

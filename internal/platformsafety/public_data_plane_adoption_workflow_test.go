@@ -231,7 +231,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA", "git diff --name-status --no-renames",
 		"ref: ${{ github.sha }}", "ACTUAL_REF: ${{ github.ref }}", "repos/${REPOSITORY}/git/ref/heads/main",
 		"git merge-base --is-ancestor", "git rev-list --count", "git rev-list --min-parents=2",
-		`"${commit_count}" -le 4`,
+		`"${commit_count}" -le 5`,
 		"curl", "--config \"${curl_config}\"", "curl.config", "path.chmod(0o600)",
 		"object_pairs_hook=unique_object", "duplicate JSON key",
 		"--connect-timeout 5", "--max-time 15", "API_URL: ${{ github.api_url }}",
@@ -286,6 +286,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"FUGUE_EXPECTED_WAL_DIGEST", "FUGUE_EXPECTED_ORIGIN_RUN_ID",
 		"originRunId",
 		"control_plane_stale_release_old_process_absent",
+		"bind_released_recovery_lease_identity", "verify_released_recovery_lease",
 	} {
 		if !strings.Contains(recoveryText, required) {
 			t.Fatalf("recovery script is missing %q", required)
@@ -300,6 +301,30 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		if strings.Contains(recoveryText, forbidden) {
 			t.Fatalf("recovery script contains an unbound coordination fallback/call %q", forbidden)
 		}
+	}
+	library, err := os.ReadFile("../../scripts/lib/public_data_plane_adoption_recovery.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryText := string(library)
+	for _, required := range []string{
+		"public_data_plane_adoption_delete_configmap_cas", "configmap-uid", "explicit KUBECONFIG is required",
+		"--unix-socket=", "--accept-paths=", "DeleteOptions", "resourceVersion",
+		"--data-binary", "--request DELETE", "--request GET", "--max-time 15", "--disable --noproxy '*'",
+	} {
+		if !strings.Contains(libraryText, required) {
+			t.Fatalf("recovery library is missing exact ConfigMap CAS evidence %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"--resource-version=", `delete "configmap/`, "delete --raw", "--disable-filter",
+	} {
+		if strings.Contains(libraryText, forbidden) {
+			t.Fatalf("recovery library contains unsafe ConfigMap deletion capability %q", forbidden)
+		}
+	}
+	if strings.Count(libraryText, "--request DELETE") != 1 || strings.Count(libraryText, "--request GET") != 1 {
+		t.Fatal("recovery ConfigMap CAS must issue exactly one DELETE and one read-only reconcile GET")
 	}
 }
 
@@ -379,6 +404,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		if mode == "valid" {
 			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
 			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
+			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery five")
 			recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 		} else if mode == "branch" {
 			source = runPublicDataPlaneRecoveryGit(t, dir, "commit-tree", sourceTree, "-m", "unrelated source")
@@ -393,6 +419,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery five")
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery six")
 		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 	case "extra-file":
 		if err := os.WriteFile(filepath.Join(dir, "unexpected.txt"), []byte("forbidden\n"), 0o600); err != nil {
@@ -406,7 +433,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 	}
 	switch mode {
 	case "valid":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "4" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "5" {
 			t.Fatalf("valid recovery fixture count=%s", count)
 		}
 	case "branch":
@@ -420,7 +447,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 			t.Fatal("merge fixture has no merge commit")
 		}
 	case "over-commit":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "5" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "6" {
 			t.Fatalf("over-commit fixture count=%s", count)
 		}
 	case "extra-file":

@@ -15,6 +15,8 @@ EXPECTED_SHA="${FUGUE_EXPECTED_SHA:-}"
 DRY_RUN="${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_DRY_RUN:-false}"
 KUBECTL="${KUBECTL:-kubectl}"
 HELM="${HELM:-helm}"
+KUBECONFIG="${KUBECONFIG:-${HOME:?}/.kube/config}"
+export KUBECONFIG
 SECRET_HMAC_KEY_FILE="${EVIDENCE_DIR}/.secret-render-hmac.key"
 
 lease_acquired=false
