@@ -10803,6 +10803,61 @@ cleanup_tmp_artifacts() {
   return "${exit_status}"
 }
 
+edge_activation_signing_secret_name_is_canonical() {
+  local value="${1:-}"
+  local label=""
+  local -a labels=()
+
+  [[ -n "${value}" && "${value}" == "$(trim_field "${value}")" && ${#value} -le 253 ]] || return 1
+  [[ "${value}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]] || return 1
+  IFS='.' read -r -a labels <<<"${value}"
+  (( ${#labels[@]} > 0 )) || return 1
+  for label in "${labels[@]}"; do
+    (( ${#label} >= 1 && ${#label} <= 63 )) || return 1
+  done
+}
+
+configure_edge_activation_helm_values() {
+  local enabled="${FUGUE_EDGE_ACTIVATION_ENABLED:-false}"
+  local secret_name="${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME:-}"
+
+  case "${enabled}" in
+    false)
+      [[ -z "${secret_name}" ]] ||
+        fail "FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME must be empty when edge activation is disabled"
+      ;;
+    true)
+      edge_activation_signing_secret_name_is_canonical "${secret_name}" ||
+        fail "FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME must be a canonical Kubernetes DNS subdomain when edge activation is enabled"
+      ;;
+    *)
+      fail "FUGUE_EDGE_ACTIVATION_ENABLED must be true or false"
+      ;;
+  esac
+
+  if [[ "${CONTROL_PLANE_EDGE_ACTIVATION_HELM_VALUES_SEALED:-false}" == "true" ]]; then
+    [[ "${enabled}" == "${CONTROL_PLANE_EDGE_ACTIVATION_ENABLED}" &&
+      "${secret_name}" == "${CONTROL_PLANE_EDGE_ACTIVATION_SIGNING_SECRET_NAME}" ]] ||
+      fail "edge activation Helm inputs drifted after configuration was sealed"
+  else
+    CONTROL_PLANE_EDGE_ACTIVATION_ENABLED="${enabled}"
+    CONTROL_PLANE_EDGE_ACTIVATION_SIGNING_SECRET_NAME="${secret_name}"
+    CONTROL_PLANE_EDGE_ACTIVATION_HELM_VALUES_SEALED="true"
+  fi
+  FUGUE_EDGE_ACTIVATION_ENABLED="${enabled}"
+  FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME="${secret_name}"
+}
+
+append_edge_activation_upgrade_values() {
+  configure_edge_activation_helm_values
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+
+edgeActivation:
+  enabled: ${CONTROL_PLANE_EDGE_ACTIVATION_ENABLED}
+  signingSecretName: $(yaml_quote "${CONTROL_PLANE_EDGE_ACTIVATION_SIGNING_SECRET_NAME}")
+EOF
+}
+
 write_upgrade_override_values() {
   UPGRADE_OVERRIDE_VALUES_FILE="$(mktemp -t fugue-upgrade-values.XXXXXX.yaml)"
   cat >"${UPGRADE_OVERRIDE_VALUES_FILE}" <<'EOF'
@@ -10990,6 +11045,7 @@ cloudnative-pg:
                 app.kubernetes.io/name: cloudnative-pg
                 app.kubernetes.io/instance: fugue
 EOF
+  append_edge_activation_upgrade_values
   append_control_plane_singleton_values
   append_registry_upgrade_values
   append_headscale_upgrade_values
@@ -19922,6 +19978,7 @@ main() {
   require_env FUGUE_API_IMAGE_TAG
   require_env FUGUE_CONTROLLER_IMAGE_REPOSITORY
   require_env FUGUE_CONTROLLER_IMAGE_TAG
+  configure_edge_activation_helm_values
   FUGUE_OBSERVABILITY_ENABLED="${FUGUE_OBSERVABILITY_ENABLED:-false}"
   FUGUE_OBSERVABILITY_RETENTION="${FUGUE_OBSERVABILITY_RETENTION:-24h}"
   FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME="${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME:-}"

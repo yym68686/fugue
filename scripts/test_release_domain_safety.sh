@@ -3716,6 +3716,7 @@ run_helm_upgrade_argv_builder_regressions
 run_release_command_group_regressions
 bash "${REPO_ROOT}/scripts/test_control_plane_release_render.sh"
 bash "${REPO_ROOT}/scripts/test_control_plane_release_main_wiring.sh"
+bash "${REPO_ROOT}/scripts/test_edge_activation_helm_wiring.sh"
 if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
       "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e5b-dig" ]]; then
   printf '[test_release_domain_safety] E5B DNS targeted regressions ok\n'

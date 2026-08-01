@@ -15,6 +15,77 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
+func TestEdgeActivationSigningProjectionIsDefaultOffAndAPIScoped(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(args ...string) string {
+		commandArgs := []string{
+			"template", "fugue", chartDir,
+			"--set-string", "configSecret.existingSecretName=fugue-config-existing",
+			"--set-string", "platformComponentIdentity.existingSecretName=fugue-platform-identity-existing",
+		}
+		commandArgs = append(commandArgs, args...)
+		cmd := exec.Command("helm", commandArgs...)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template failed: %v\n%s", err, output)
+		}
+		return string(output)
+	}
+
+	baseline := render()
+	disabled := render(
+		"--set", "edgeActivation.enabled=false",
+		"--set-string", "edgeActivation.signingSecretName=",
+	)
+	if baseline != disabled {
+		t.Fatal("explicit default-off edge activation changed the rendered chart")
+	}
+	baselineAPI := manifestDocumentForKindAndName(baseline, "Deployment", "fugue-fugue-api")
+	if strings.Contains(baselineAPI, "edge-activation-plan-signing-key") ||
+		strings.Contains(baselineAPI, "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR") {
+		t.Fatalf("edge activation signing projection must default off:\n%s", baselineAPI)
+	}
+
+	const secretName = "fugue-fugue-edge-activation-signing-v1"
+	enabled := render(
+		"--set", "edgeActivation.enabled=true",
+		"--set-string", "edgeActivation.signingSecretName="+secretName,
+	)
+	enabledAPI := manifestDocumentForKindAndName(enabled, "Deployment", "fugue-fugue-api")
+	for _, want := range []string{
+		"name: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR\n              value: /var/run/secrets/fugue-edge-activation",
+		"name: edge-activation-plan-signing-key\n              mountPath: /var/run/secrets/fugue-edge-activation\n              readOnly: true",
+		"secretName: \"" + secretName + "\"",
+		"defaultMode: 0400",
+		"key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY\n                path: plan-signing-key",
+		"key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID\n                path: key-id",
+		"key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION\n                path: key-generation",
+	} {
+		if !strings.Contains(enabledAPI, want) {
+			t.Fatalf("enabled API projection missing %q:\n%s", want, enabledAPI)
+		}
+	}
+	if strings.Replace(enabled, enabledAPI, baselineAPI, 1) != baseline {
+		t.Fatal("edge activation Helm values changed an object other than the API Deployment")
+	}
+
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "edgeActivation.enabled=true",
+	)
+	cmd.Dir = chartDir
+	if output, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(output), "edgeActivation.enabled requires edgeActivation.signingSecretName") {
+		t.Fatalf("enabled activation without a Secret name did not fail closed: err=%v\n%s", err, output)
+	}
+}
+
 func TestEdgeExclusionClearDefaultsOffAndIsAPIScoped(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

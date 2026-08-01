@@ -2849,7 +2849,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "895a84f2a73981560cac080a436945783951e9c7f87446f3eebf5a688079bf1a")
+	assertWorkflowSourceDigest(t, data, "f0c839002ee6e19ba21adfc97fa3ac6c67992e5d83d7a9147b83410682c51892")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -3613,6 +3613,23 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	if got, want := upgrade.Env["FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE"], "${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || needs.build.outputs.build_edge == 'true' }}"; got != want {
 		t.Fatalf("public data-plane auto release must depend only on explicit policy or an edge build: got %q want %q", got, want)
+	}
+	for key, want := range map[string]string{
+		"FUGUE_EDGE_ACTIVATION_ENABLED":             "${{ vars.FUGUE_EDGE_ACTIVATION_ENABLED || 'false' }}",
+		"FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME": "${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME || '' }}",
+	} {
+		if got := upgrade.Env[key]; got != want {
+			t.Fatalf("edge activation Helm wiring %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY",
+		"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID",
+		"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION",
+	} {
+		if _, exists := upgrade.Env[forbidden]; exists {
+			t.Fatalf("edge activation key material must not enter the deploy workflow environment: %s", forbidden)
+		}
 	}
 	for key, want := range map[string]string{
 		"FUGUE_RELEASE_DOMAIN_BASE_SHA":                        "${{ needs.release-baseline.outputs.domain_base_sha }}",

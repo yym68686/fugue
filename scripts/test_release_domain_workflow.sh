@@ -485,8 +485,17 @@ upgrade_env = upgrade.fetch("env")
   "FUGUE_RELEASE_DOMAIN_EDGE_IMAGE_DIGEST" => "${{ needs.build.outputs.edge_image_digest }}",
   "FUGUE_RELEASE_DOMAIN_APP_SSH_IMAGE_DIGEST" => "${{ needs.build.outputs.app_ssh_image_digest }}",
   "FUGUE_APP_SSH_IMAGE_REPOSITORY" => "${{ needs.build.outputs.app_ssh_image_repository }}",
+  "FUGUE_EDGE_ACTIVATION_ENABLED" => "${{ vars.FUGUE_EDGE_ACTIVATION_ENABLED || 'false' }}",
+  "FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME" => "${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME || '' }}",
 }.each do |name, expected|
   assert_equal(upgrade_env[name], expected, "upgrade #{name}")
+end
+[
+  "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY",
+  "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID",
+  "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION",
+].each do |name|
+  fail_contract("deploy workflow must not receive activation key material through #{name}") if upgrade_env.key?(name)
 end
 
 public_upload = step(deploy, "Upload release-domain public evidence")
