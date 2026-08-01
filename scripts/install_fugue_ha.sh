@@ -2400,7 +2400,7 @@ controller:
       memory: 256Mi
     limits:
       cpu: "1"
-      memory: 512Mi
+      memory: 768Mi
   nodeSelector:
     "node-role.kubernetes.io/control-plane": "true"
   tolerations:

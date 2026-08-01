@@ -316,7 +316,7 @@ controller:
       memory: 256Mi
     limits:
       cpu: "1"
-      memory: 512Mi
+      memory: 768Mi
   extraEnv: []
 
 runtime:

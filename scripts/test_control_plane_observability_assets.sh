@@ -68,4 +68,61 @@ assert_contains "${INSTALL_SCRIPT}" "ensure_host_time_sync_on_aliases"
 assert_contains "${INSTALL_SCRIPT}" "/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf"
 assert_contains "${INSTALL_SCRIPT}" "PollIntervalMaxSec=64s"
 
+python3 - "${REPO_ROOT}/deploy/helm/fugue/values.yaml" "${INSTALL_SCRIPT}" "${UPGRADE_SCRIPT}" <<'PY'
+from pathlib import Path
+import sys
+
+paths = tuple(Path(value) for value in sys.argv[1:])
+resource_contract = (
+    '  resources:\n'
+    '    requests:\n'
+    '      cpu: 100m\n'
+    '      memory: 256Mi\n'
+    '    limits:\n'
+    '      cpu: "1"\n'
+    '      memory: 768Mi\n'
+)
+old_resource_contract = resource_contract.replace('memory: 768Mi\n', 'memory: 512Mi\n')
+strategy_contract = (
+    '  strategy:\n'
+    '    rollingUpdate:\n'
+    '      maxUnavailable: 0\n'
+    '      maxSurge: 2\n'
+)
+
+def controller_block(path: Path) -> str:
+    body = path.read_text()
+    marker = '\ncontroller:\n'
+    if body.count(marker) != 1:
+        raise SystemExit(f'{path}: expected exactly one top-level controller block')
+    start = body.index(marker) + 1
+    end = len(body)
+    for offset, line in enumerate(body[start:].splitlines(keepends=True)):
+        if offset == 0:
+            continue
+        if line.strip() and not line[0].isspace():
+            end = start + sum(len(value) for value in body[start:].splitlines(keepends=True)[:offset])
+            break
+    return body[start:end]
+
+blocks = {path: controller_block(path) for path in paths}
+for path, block in blocks.items():
+    if block.count(resource_contract) != 1:
+        raise SystemExit(f'{path}: controller resource contract is not exact 100m/256Mi/1/768Mi')
+    if old_resource_contract in block:
+        raise SystemExit(f'{path}: controller retained the former 512Mi memory limit')
+
+values_block = blocks[paths[0]]
+upgrade_block = blocks[paths[2]]
+if values_block.count(strategy_contract) != 1 or upgrade_block.count(strategy_contract) != 1:
+    raise SystemExit('controller surge-first strategy drifted from maxUnavailable=0/maxSurge=2')
+if '  strategy:\n' in blocks[paths[1]]:
+    raise SystemExit('legacy install must inherit the chart controller rollout strategy instead of overriding it')
+
+for replacement in ('memory: 512Mi\n', 'memory: 769Mi\n'):
+    near_miss = values_block.replace('memory: 768Mi\n', replacement, 1)
+    if resource_contract in near_miss:
+        raise SystemExit(f'controller resource contract accepted near miss {replacement.strip()}')
+PY
+
 printf 'control-plane observability asset tests passed\n'

@@ -924,15 +924,38 @@ func TestDefaultControlPlaneResourceEnvelopeKeepsK3SHeadroom(t *testing.T) {
 	if controllerDoc == "" {
 		t.Fatalf("rendered manifest missing fugue-fugue-controller deployment:\n%s", manifest)
 	}
-	for _, want := range []string{
+	controllerContract := []string{
 		"replicas: 2",
+		"maxUnavailable: 0",
+		"maxSurge: 2",
 		"cpu: 100m",
 		"memory: 256Mi",
 		`cpu: "1"`,
-		"memory: 512Mi",
-	} {
+		"memory: 768Mi",
+	}
+	controllerMatchesContract := func(doc string) bool {
+		if strings.Contains(doc, "memory: 512Mi") {
+			return false
+		}
+		for _, want := range controllerContract {
+			if !strings.Contains(doc, want) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, want := range controllerContract {
 		if !strings.Contains(controllerDoc, want) {
 			t.Fatalf("controller deployment should have resource boundaries; missing %q:\n%s", want, controllerDoc)
+		}
+	}
+	if !controllerMatchesContract(controllerDoc) {
+		t.Fatalf("controller deployment should match the exact resource and rollout contract:\n%s", controllerDoc)
+	}
+	for _, nearMiss := range []string{"512Mi", "769Mi"} {
+		mutated := strings.Replace(controllerDoc, "memory: 768Mi", "memory: "+nearMiss, 1)
+		if controllerMatchesContract(mutated) {
+			t.Fatalf("controller memory contract accepted near-miss limit %s:\n%s", nearMiss, mutated)
 		}
 	}
 }
