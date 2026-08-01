@@ -99,8 +99,8 @@ recovery_identity = step(recovery_job, "Verify exact recovery identity")
 recovery_execute = step(recovery_job, "Recover or finalize the durable Stage1 transaction")
 recovery_upload = step(recovery_job, "Publish recovered Stage1 handoff")
 assert_equal(recovery_identity.fetch("id"), "identity", "Stage1 recovery identity outcome ID")
-fail_contract("Stage1 recovery lineage bound must allow exactly three recovery commits") unless recovery_identity.fetch("run").include?('"${commit_count}" -le 3')
-fail_contract("Stage1 recovery lineage retains the obsolete two-commit bound") if recovery_identity.fetch("run").include?('"${commit_count}" -le 2')
+fail_contract("Stage1 recovery lineage bound must allow exactly four recovery commits") unless recovery_identity.fetch("run").include?('"${commit_count}" -le 4')
+fail_contract("Stage1 recovery lineage retains an obsolete narrower bound") if recovery_identity.fetch("run").match?(/"\$\{commit_count\}" -le [123]/)
 assert_equal(recovery_execute.fetch("id"), "recover", "Stage1 recovery execution outcome ID")
 assert_equal(
   recovery_upload.fetch("if"),

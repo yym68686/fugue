@@ -120,7 +120,7 @@ jobs:
           git cat-file -e "${RECOVERY_SHA}^{commit}"
           git merge-base --is-ancestor "${EXPECTED_SOURCE_SHA}" "${RECOVERY_SHA}"
           commit_count="$(git rev-list --count "${EXPECTED_SOURCE_SHA}..${RECOVERY_SHA}")"
-          [[ "${commit_count}" =~ ^[1-9][0-9]*$ && "${commit_count}" -le 3 ]] || exit 1
+          [[ "${commit_count}" =~ ^[1-9][0-9]*$ && "${commit_count}" -le 4 ]] || exit 1
           [[ -z "$(git rev-list --min-parents=2 "${EXPECTED_SOURCE_SHA}..${RECOVERY_SHA}")" ]] || exit 1
           expected_delta=$'M\t.github/workflows/recover-public-data-plane-helm-adoption.yml\nM\tinternal/platformsafety/public_data_plane_adoption_workflow_test.go\nM\tinternal/releasedomain/public_data_plane_adoption.go\nM\tinternal/releasedomain/public_data_plane_adoption_test.go\nM\tscripts/adopt_public_data_plane_helm_baseline.sh\nM\tscripts/lib/public_data_plane_adoption_recovery.sh\nM\tscripts/recover_public_data_plane_helm_adoption.sh\nM\tscripts/test_public_data_plane_helm_adoption.sh\nM\tscripts/test_public_data_plane_helm_adoption_recovery.sh\nM\tscripts/test_release_domain_workflow.sh'
           [[ "$(git diff --name-status --no-renames "${EXPECTED_SOURCE_SHA}" "${RECOVERY_SHA}")" == "${expected_delta}" ]] || exit 1

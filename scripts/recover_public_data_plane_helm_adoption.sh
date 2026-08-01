@@ -19,9 +19,102 @@ HELM="${HELM:-helm}"
 FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME:-${RELEASE_FULLNAME}-control-plane-db-backup}"
 FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE:-${RELEASE_NAMESPACE}}"
 FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
+CALLER_LEASE_DURATION_SET="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS+x}"
+CALLER_LEASE_RENEW_SET="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS+x}"
 
 log() { printf '[fugue-public-data-plane-adoption-recovery] %s\n' "$*" >&2; }
 fail() { log "ERROR: $*"; return 1; }
+
+bind_recovery_lease_duration() {
+  local lease_json="$1" owner="$2" token="$3" expected_recovery="$4" duration
+  [[ "${expected_recovery}" == true || "${expected_recovery}" == false ]] || return 1
+  duration="$(LEASE_JSON="${lease_json}" EXPECTED_OWNER="${owner}" EXPECTED_TOKEN="${token}" \
+    EXPECTED_RECOVERY="${expected_recovery}" python3 - <<'PY'
+import json, os
+value=json.loads(os.environ["LEASE_JSON"])
+metadata=value.get("metadata") or {}; annotations=metadata.get("annotations") or {}; spec=value.get("spec") or {}
+duration=spec.get("leaseDurationSeconds")
+assert metadata.get("uid") and metadata.get("resourceVersion") and not metadata.get("deletionTimestamp")
+assert spec.get("holderIdentity") == os.environ["EXPECTED_OWNER"]
+assert annotations.get("fugue.pro/coordination-token") == os.environ["EXPECTED_TOKEN"]
+if os.environ["EXPECTED_RECOVERY"] == "true":
+    assert annotations.get("fugue.pro/recovery-required") == "true"
+else:
+    assert "fugue.pro/recovery-required" not in annotations
+assert type(duration) is int and 1 <= duration <= 2147483647
+print(duration)
+PY
+)" || return 1
+  [[ "${duration}" =~ ^[1-9][0-9]*$ ]] || return 1
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS="${duration}"
+  PUBLIC_DATA_PLANE_ADOPTION_BOUND_LEASE_DURATION_SECONDS="${duration}"
+  readonly FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS
+  readonly PUBLIC_DATA_PLANE_ADOPTION_BOUND_LEASE_DURATION_SECONDS
+}
+
+release_bound_recovery_lease() {
+  local expected_recovery="${1:-true}" lease_json now patch released_json
+  [[ "${expected_recovery}" == true || "${expected_recovery}" == false ]] || return 1
+  if ! stop_control_plane_backup_coordination_lease_renewer; then
+    log "refusing to release the shared Lease before the renewer and its command group are reaped"
+    return 1
+  fi
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == true ]] || return 0
+  lease_json="$(control_plane_backup_coordination_lease_json)" || return 1
+  [[ -n "$(trim_field "${lease_json}")" ]] || return 1
+  now="$(control_plane_backup_coordination_now)" || return 1
+  patch="$(LEASE_JSON="${lease_json}" LEASE_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
+    LEASE_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
+    LEASE_DURATION="${PUBLIC_DATA_PLANE_ADOPTION_BOUND_LEASE_DURATION_SECONDS}" LEASE_NOW="${now}" \
+    EXPECTED_RECOVERY="${expected_recovery}" python3 - <<'PY'
+import json, os
+value=json.loads(os.environ["LEASE_JSON"])
+metadata=value.get("metadata") or {}; annotations=dict(metadata.get("annotations") or {}); spec=value.get("spec") or {}
+duration=spec.get("leaseDurationSeconds"); expected_duration=int(os.environ["LEASE_DURATION"])
+resource_version=metadata.get("resourceVersion"); owner=os.environ["LEASE_OWNER"]; token=os.environ["LEASE_TOKEN"]
+assert metadata.get("uid") and isinstance(resource_version, str) and resource_version
+assert not metadata.get("deletionTimestamp")
+assert spec.get("holderIdentity") == owner
+assert annotations.get("fugue.pro/coordination-token") == token
+if os.environ["EXPECTED_RECOVERY"] == "true":
+    assert annotations.get("fugue.pro/recovery-required") == "true"
+else:
+    assert "fugue.pro/recovery-required" not in annotations
+assert type(duration) is int and duration == expected_duration
+annotations.pop("fugue.pro/coordination-token")
+annotations.pop("fugue.pro/recovery-required", None)
+print(json.dumps([
+  {"op":"test","path":"/metadata/resourceVersion","value":resource_version},
+  {"op":"test","path":"/spec/holderIdentity","value":owner},
+  {"op":"test","path":"/metadata/annotations/fugue.pro~1coordination-token","value":token},
+  {"op":"test","path":"/spec/leaseDurationSeconds","value":expected_duration},
+  {"op":"add","path":"/metadata/annotations","value":annotations},
+  {"op":"add","path":"/spec/holderIdentity","value":""},
+  {"op":"add","path":"/spec/leaseDurationSeconds","value":expected_duration},
+  {"op":"add","path":"/spec/renewTime","value":os.environ["LEASE_NOW"]},
+],separators=(",",":")))
+PY
+)" || return 1
+  released_json="$(bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+    patch "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+    --type=json -p "${patch}" -o json)" || return 1
+  RELEASED_LEASE_JSON="${released_json}" PREWRITE_LEASE_JSON="${lease_json}" \
+    EXPECTED_DURATION="${PUBLIC_DATA_PLANE_ADOPTION_BOUND_LEASE_DURATION_SECONDS}" python3 - <<'PY'
+import json, os
+value=json.loads(os.environ["RELEASED_LEASE_JSON"])
+prewrite=json.loads(os.environ["PREWRITE_LEASE_JSON"])
+metadata=value.get("metadata") or {}; annotations=metadata.get("annotations") or {}; spec=value.get("spec") or {}
+assert metadata.get("uid") == (prewrite.get("metadata") or {}).get("uid")
+assert metadata.get("resourceVersion") and not metadata.get("deletionTimestamp")
+assert not str(spec.get("holderIdentity") or "")
+assert "fugue.pro/coordination-token" not in annotations
+assert "fugue.pro/recovery-required" not in annotations
+assert type(spec.get("leaseDurationSeconds")) is int
+assert spec["leaseDurationSeconds"] == int(os.environ["EXPECTED_DURATION"])
+PY
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=false
+}
 
 capture_snapshot() {
   local output="$1"
@@ -136,6 +229,8 @@ verify_aborted_before_apply_state() {
 }
 
 main() {
+  [[ -z "${CALLER_LEASE_DURATION_SET}" ]] || fail "recovery Lease duration must come from the durable live Lease"
+  [[ -z "${CALLER_LEASE_RENEW_SET}" ]] || fail "recovery does not accept a caller-supplied Lease renew interval"
   [[ "${RECOVERY_SHA}" =~ ^[0-9a-f]{40}$ && "$(git -C "${REPO_ROOT}" rev-parse HEAD)" == "${RECOVERY_SHA}" ]] || fail "exact recovery implementation SHA mismatch"
   [[ "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail "exact Stage1 source SHA is required"
   [[ "${EXPECTED_WAL_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "exact WAL digest is required"
@@ -193,12 +288,13 @@ PY
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER="${owner}"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN="${token}"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  bind_recovery_lease_duration "${lease_json}" "${owner}" "${token}" "${recovery_required}" || fail "durable recovery Lease duration is invalid"
   cp "${EVIDENCE_DIR}/wal.json" "${EVIDENCE_DIR}/recovery-wal.json"
 
   case "${phase}" in
     lease-acquired)
       public_data_plane_adoption_delete_unarmed_wal "${recovery_required}"
-      release_control_plane_backup_coordination_lease
+      release_bound_recovery_lease "${recovery_required}"
       log "unarmed recovery WAL cleared; no Helm apply was attempted"
       return 0
       ;;
@@ -250,7 +346,7 @@ PY
   esac
   [[ -n "${terminal_phase}" ]] || fail "recovery did not reach a terminal WAL phase"
   public_data_plane_adoption_seal_terminal_wal "${terminal_phase}" || fail "terminal recovery WAL could not be sealed"
-  release_control_plane_backup_coordination_lease
+  release_bound_recovery_lease
   public_data_plane_adoption_delete_terminal_wal
   log "recovery completed without a second Helm apply"
 }

@@ -231,7 +231,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA", "git diff --name-status --no-renames",
 		"ref: ${{ github.sha }}", "ACTUAL_REF: ${{ github.ref }}", "repos/${REPOSITORY}/git/ref/heads/main",
 		"git merge-base --is-ancestor", "git rev-list --count", "git rev-list --min-parents=2",
-		`"${commit_count}" -le 3`,
+		`"${commit_count}" -le 4`,
 		"curl", "--config \"${curl_config}\"", "curl.config", "path.chmod(0o600)",
 		"object_pairs_hook=unique_object", "duplicate JSON key",
 		"--connect-timeout 5", "--max-time 15", "API_URL: ${{ github.api_url }}",
@@ -279,6 +279,9 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"restore-succeeded-awaiting-helm-compensation", "verify-recovery-base",
 		"aborted-before-apply", "verify_aborted_before_apply_state",
 		"canonicalize-secret-free",
+		"bind_recovery_lease_duration", "release_bound_recovery_lease",
+		"/spec/leaseDurationSeconds", "2147483647",
+		"CALLER_LEASE_DURATION_SET", "CALLER_LEASE_RENEW_SET",
 		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA",
 		"FUGUE_EXPECTED_WAL_DIGEST", "FUGUE_EXPECTED_ORIGIN_RUN_ID",
 		"originRunId",
@@ -286,6 +289,16 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 	} {
 		if !strings.Contains(recoveryText, required) {
 			t.Fatalf("recovery script is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS:-120`,
+		`FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS:-30`,
+		"start_control_plane_backup_coordination_lease_renewer",
+		"release_control_plane_backup_coordination_lease",
+	} {
+		if strings.Contains(recoveryText, forbidden) {
+			t.Fatalf("recovery script contains an unbound coordination fallback/call %q", forbidden)
 		}
 	}
 }
@@ -365,6 +378,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 		if mode == "valid" {
 			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
+			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
 			recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 		} else if mode == "branch" {
 			source = runPublicDataPlaneRecoveryGit(t, dir, "commit-tree", sourceTree, "-m", "unrelated source")
@@ -378,6 +392,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery two")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery five")
 		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 	case "extra-file":
 		if err := os.WriteFile(filepath.Join(dir, "unexpected.txt"), []byte("forbidden\n"), 0o600); err != nil {
@@ -391,7 +406,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 	}
 	switch mode {
 	case "valid":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "3" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "4" {
 			t.Fatalf("valid recovery fixture count=%s", count)
 		}
 	case "branch":
@@ -405,7 +420,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 			t.Fatal("merge fixture has no merge commit")
 		}
 	case "over-commit":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "4" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "5" {
 			t.Fatalf("over-commit fixture count=%s", count)
 		}
 	case "extra-file":
