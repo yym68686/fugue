@@ -25,7 +25,21 @@ sub="$1"; shift
 printf 'tool:%s %s\n' "${sub}" "$*" >>"${TEST_LOG}"
 arg() { local want="$1"; shift; while (( $# )); do if [[ "$1" == "${want}" ]]; then printf '%s' "$2"; return; fi; shift; done; return 1; }
 case "${sub}" in
-  canonicalize|post-render) cat ;;
+  canonicalize-secret-free)
+    witness="$(arg --secret-witness-output "$@" || true)"
+    [[ -z "${witness}" ]] || printf '{}\n' >"${witness}"
+    sed 's/super-secret-bytes/[secret-redacted]/g'
+    ;;
+  secret-lookup-witness)
+    cat >/dev/null
+    count_file="${TEST_STATE}/lookup-count"; count=0; [[ -f "${count_file}" ]] && count="$(cat "${count_file}")"; count=$((count+1)); printf '%s' "${count}" >"${count_file}"
+    if [[ "${TEST_SCENARIO}" == lookup-uid-drift && "${count}" -ge 2 ]]; then printf '{"drift":true}\n'; else printf '{}\n'; fi
+    ;;
+  post-render)
+    witness="$(arg --secret-witness-output "$@")"
+    printf '{}\n' >"${witness}"
+    sed 's/super-secret-bytes/[secret-redacted]/g'
+    ;;
   transaction-post-render)
     if [[ "${TEST_SCENARIO}" == apply-render-drift || "${TEST_SCENARIO}" == target-output-drift || "${TEST_SCENARIO}" == transaction-swap ]]; then exit 1; fi
     cat
@@ -102,7 +116,14 @@ case "$1" in
       *) exit 98 ;;
     esac
     ;;
-  template) printf 'rendered-manifest\n' ;;
+  template)
+    [[ " $* " == *" --dry-run=server "* ]] || { printf 'server-render-mutation-attempt\n' >>"${TEST_LOG}"; exit 1; }
+    post_renderer=""
+    while (( $# )); do [[ "$1" == --post-renderer ]] && { post_renderer="$2"; break; }; shift; done
+    [[ -n "${post_renderer}" ]]
+    if [[ "${TEST_SCENARIO}" == server-render-fail ]]; then exit 1; fi
+    printf 'rendered-manifest super-secret-bytes\n' | "${post_renderer}"
+    ;;
   upgrade)
     printf 'upgrade\n' >>"${TEST_LOG}"
     if [[ "${TEST_SCENARIO}" == apply-fail || "${TEST_SCENARIO}" == restore-patch-fail || "${TEST_SCENARIO}" == restore-verify-fail ]]; then exit 1; fi
@@ -123,6 +144,8 @@ set -euo pipefail
 printf 'kubectl:%s\n' "$*" >>"${TEST_LOG}"
 if [[ " $* " == *" get daemonsets.apps,configmaps "* ]]; then
   printf '{"apiVersion":"v1","kind":"List","items":[]}\n'
+elif [[ " $* " == *" get secrets "* ]]; then
+  printf '{"apiVersion":"v1","kind":"List","items":[],"raw":"super-secret-bytes"}\n'
 elif [[ " $* " == *" patch daemonset "* ]]; then
   count_file="${TEST_STATE}/patch-count"; count=0; [[ -f "${count_file}" ]] && count="$(cat "${count_file}")"; count=$((count+1)); printf '%s' "${count}" >"${count_file}"
   [[ "${TEST_SCENARIO}" != restore-patch-fail || "${count}" -lt 2 ]]
@@ -165,11 +188,15 @@ run_case() {
     FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY="${dir}/recovery.sh" \
     FUGUE_PUBLIC_DATA_PLANE_ADOPTION_DRY_RUN="${dry_run}" \
     FUGUE_PUBLIC_DATA_PLANE_ADOPTION_FINALIZE_ATTEMPTS=1 FUGUE_PUBLIC_DATA_PLANE_ADOPTION_FINALIZE_DELAY_SECONDS=0 \
+    RUNNER_TEMP="${dir}" \
     HELM="${dir}/bin/helm" KUBECTL="${dir}/bin/kubectl" \
     bash "${SCRIPT_UNDER_TEST}" >"${dir}/stdout" 2>"${dir}/stderr"
   status=$?
   set -e
   [[ "${status}" == "${expected_status}" ]] || { cat "${dir}/stderr" >&2; fail "${scenario}: status=${status}, want ${expected_status}"; }
+  if find "${dir}" -name '.secret-render-hmac.key' -print -quit | grep -q .; then
+    fail "${scenario}: ephemeral secret render HMAC key survived cleanup"
+  fi
   printf '%s' "${dir}"
 }
 
@@ -177,6 +204,19 @@ dir="$(run_case dry-run 0 true)"
 assert_count 0 'coord:acquire' "${dir}/log"
 assert_count 0 '^upgrade$' "${dir}/log"
 assert_count 0 'patch daemonset' "${dir}/log"
+assert_count 2 'helm:template .*--dry-run=server' "${dir}/log"
+assert_count 0 'server-render-mutation-attempt' "${dir}/log"
+if grep -R -q -- 'super-secret-bytes' "${dir}/evidence" "${dir}/log" "${dir}/stdout" "${dir}/stderr"; then
+  fail "dry-run evidence/log output leaked Secret payload bytes"
+fi
+
+dir="$(run_case server-render-fail 1 true)"
+assert_count 0 'coord:acquire' "${dir}/log"
+assert_count 0 '^upgrade$' "${dir}/log"
+
+dir="$(run_case lookup-uid-drift 1 true)"
+assert_count 0 'coord:acquire' "${dir}/log"
+assert_count 0 '^upgrade$' "${dir}/log"
 
 dir="$(run_case prewrite-fail 1)"
 assert_count 1 'coord:acquire' "${dir}/log"

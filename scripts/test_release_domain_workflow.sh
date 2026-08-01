@@ -204,7 +204,10 @@ end
 baseline = jobs.fetch("release-baseline")
 assert_equal(needs(baseline), ["release-input-guard"], "release-baseline dependencies")
 assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
-step(baseline, "Verify Stage1 handoff before release planning")
+stage1_planner_gate = step(baseline, "Verify Stage1 handoff before release planning")
+for fragment in ["canonicalize-secret-free", "verify-stage2"]
+  fail_contract("Stage1 planner gate is missing #{fragment.inspect}") unless stage1_planner_gate.fetch("run").include?(fragment)
+end
 assert_equal(
   baseline.fetch("outputs").fetch("domain_base_sha"),
   "${{ steps.domain_baseline.outputs.domain_base_sha }}",
@@ -287,6 +290,10 @@ build_provenance = step(build, "Publish verified control-plane image provenance"
 end
 
 deploy = jobs.fetch("deploy")
+stage1_deploy_gate = step(deploy, "Reverify Stage1 handoff at deploy prewrite")
+for fragment in ["canonicalize-secret-free", "verify-stage2"]
+  fail_contract("Stage1 deploy gate is missing #{fragment.inspect}") unless stage1_deploy_gate.fetch("run").include?(fragment)
+end
 assert_equal(
   needs(deploy),
   ["release-input-guard", "release-baseline", "release-gate", "build"],

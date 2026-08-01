@@ -1912,6 +1912,7 @@ control_plane_release_domain_verify_public_data_plane_stage1_handoff_prewrite() 
   local expected_digest="${FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_DIGEST:-}"
   local revision=""
   local manifest="${CONTROL_PLANE_RELEASE_DOMAIN_WORK_DIR}/public-data-plane-stage1-prewrite.manifest"
+  local read_timeout="${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}"
 
   if [[ -z "${baseline}" && -z "${trace}" && -z "${tool}" && -z "${expected_digest}" ]]; then
     return 0
@@ -1921,7 +1922,13 @@ control_plane_release_domain_verify_public_data_plane_stage1_handoff_prewrite() 
   BASELINE="${baseline}" EXPECTED="${expected_digest}" python3 -c \
     'import json,os; assert json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"]==os.environ["EXPECTED"]' || return
   revision="$(helm_current_revision)" || return
-  control_plane_release_domain_capture_live_canonical_manifest "${revision}" "${manifest}" || return
+  [[ "${read_timeout}" =~ ^[1-9][0-9]*$ ]] || return 1
+  timeout --kill-after=5s "${read_timeout}s" \
+    helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}" |
+    timeout --kill-after=5s "${read_timeout}s" "${tool}" canonicalize-secret-free \
+      --ownership "${CONTROL_PLANE_RELEASE_DOMAIN_OWNERSHIP_FILE}" \
+      --namespace "${FUGUE_NAMESPACE}" >"${manifest}" || return
+  chmod 600 "${manifest}" || return
   "${tool}" verify-stage2 \
     --baseline "${baseline}" --trace "${trace}" \
     --current-revision "${revision}" --current-manifest "${manifest}"

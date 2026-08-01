@@ -154,6 +154,9 @@ func TestPublicDataPlaneAdoptionScriptHasOneHelmBoundaryAndNoWholeReleaseReversa
 		"acquire_control_plane_backup_coordination_lease",
 		"arm_control_plane_release_recovery_fence",
 		"verify-prewrite", "transaction-post-render", "restore-patches", "verify-restore", "finalize",
+		"--dry-run=server", "secret-lookup-witness", "canonicalize-secret-free",
+		"--secret-hmac-key-file", "secret-lookup-witness.json", "prewrite-secret-lookup-witness.json",
+		"trap cleanup EXIT", "trap 'exit 143' TERM", `rm -f -- "${SECRET_HMAC_KEY_FILE}"`,
 		"public_data_plane_adoption_persist_recovery_wal",
 		"public_data_plane_adoption_advance_recovery_wal",
 		"prewrite-base.yaml", "prewrite-values.yaml", "prewrite-target.yaml",
@@ -161,6 +164,13 @@ func TestPublicDataPlaneAdoptionScriptHasOneHelmBoundaryAndNoWholeReleaseReversa
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Stage1 script is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"controlPlanePostgres.existingSecretName=", "controlPlanePostgres.password=", "--set-string controlPlanePostgres",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Stage1 script injects a Secret value/ownership override %q", forbidden)
 		}
 	}
 }
@@ -198,6 +208,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 	}
 	for _, required := range []string{
 		"restore-succeeded-awaiting-helm-compensation", "verify-recovery-base",
+		"canonicalize-secret-free",
 		"FUGUE_EXPECTED_WAL_DIGEST", "FUGUE_EXPECTED_ORIGIN_RUN_ID",
 		"originRunId",
 		"control_plane_stale_release_old_process_absent",

@@ -295,7 +295,7 @@ jobs:
           revision="$(helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" -o json | \
             python3 -c 'import json,sys; value=json.load(sys.stdin).get("version"); assert isinstance(value,int) and value>0; print(value)')"
           helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}" | \
-            "${tool}" canonicalize --ownership ./deploy/release-domains/ownership-v1.yaml --namespace "${FUGUE_NAMESPACE}" >"${manifest}"
+            "${tool}" canonicalize-secret-free --ownership ./deploy/release-domains/ownership-v1.yaml --namespace "${FUGUE_NAMESPACE}" >"${manifest}"
           BASELINE="${handoff}/stage1-baseline.json" EXPECTED="${EXPECTED_BASELINE_DIGEST}" python3 -c \
             'import json,os; assert json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"]==os.environ["EXPECTED"]'
           "${tool}" verify-stage2 \
@@ -738,7 +738,7 @@ jobs:
           revision="$(helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" -o json | \
             python3 -c 'import json,sys; value=json.load(sys.stdin).get("version"); assert isinstance(value,int) and value>0; print(value)')"
           helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}" | \
-            "${tool}" canonicalize --ownership ./deploy/release-domains/ownership-v1.yaml --namespace "${FUGUE_NAMESPACE}" >"${manifest}"
+            "${tool}" canonicalize-secret-free --ownership ./deploy/release-domains/ownership-v1.yaml --namespace "${FUGUE_NAMESPACE}" >"${manifest}"
           BASELINE="${handoff}/stage1-baseline.json" EXPECTED="${EXPECTED_BASELINE_DIGEST}" python3 -c \
             'import json,os; assert json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"]==os.environ["EXPECTED"]'
           "${tool}" verify-stage2 \

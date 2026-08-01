@@ -15,6 +15,7 @@ EXPECTED_SHA="${FUGUE_EXPECTED_SHA:-}"
 DRY_RUN="${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_DRY_RUN:-false}"
 KUBECTL="${KUBECTL:-kubectl}"
 HELM="${HELM:-helm}"
+SECRET_HMAC_KEY_FILE="${EVIDENCE_DIR}/.secret-render-hmac.key"
 
 lease_acquired=false
 wal_persisted=false
@@ -81,21 +82,83 @@ PY
 canonical_helm_manifest() {
   local revision="$1"
   local output="$2"
+  local witness="$3"
+  local output_temporary="${output}.tmp"
+  local witness_temporary="${witness}.tmp"
+  rm -f -- "${output_temporary}" "${witness_temporary}"
   "${HELM}" get manifest "${RELEASE_NAME}" -n "${RELEASE_NAMESPACE}" --revision "${revision}" |
-    "${ADOPTION_TOOL}" canonicalize --ownership "${OWNERSHIP_FILE}" --namespace "${RELEASE_NAMESPACE}" >"${output}"
-  chmod 0600 "${output}"
+    "${ADOPTION_TOOL}" canonicalize-secret-free \
+      --ownership "${OWNERSHIP_FILE}" --namespace "${RELEASE_NAMESPACE}" \
+      --secret-hmac-key-file "${SECRET_HMAC_KEY_FILE}" \
+      --secret-witness-output "${witness_temporary}" >"${output_temporary}"
+  chmod 0600 "${output_temporary}" "${witness_temporary}"
+  mv -f -- "${output_temporary}" "${output}"
+  mv -f -- "${witness_temporary}" "${witness}"
 }
 
 render_target() {
   local values="$1"
   local output="$2"
-  "${HELM}" template "${RELEASE_NAME}" "${CHART_PATH}" \
+  local witness="$3"
+  local expected_lookup="$4"
+  local output_temporary="${output}.tmp"
+  local witness_temporary="${witness}.tmp"
+  local post_renderer="${output}.post-renderer.sh"
+  local lookup_before="${output}.lookup-before.json"
+  local lookup_after="${output}.lookup-after.json"
+  rm -f -- "${output_temporary}" "${witness_temporary}" "${post_renderer}" "${lookup_before}" "${lookup_after}"
+  capture_secret_lookup_witness "${lookup_before}"
+  cmp -s "${expected_lookup}" "${lookup_before}" || {
+    rm -f -- "${lookup_before}"
+    fail "Secret lookup identity drifted before server render"
+    return 1
+  }
+  cat >"${post_renderer}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec $(printf '%q' "${ADOPTION_TOOL}") post-render \
+  --ownership $(printf '%q' "${OWNERSHIP_FILE}") \
+  --intent $(printf '%q' "${EVIDENCE_DIR}/intent.json") \
+  --namespace $(printf '%q' "${RELEASE_NAMESPACE}") \
+  --secret-hmac-key-file $(printf '%q' "${SECRET_HMAC_KEY_FILE}") \
+  --secret-witness-output $(printf '%q' "${witness_temporary}")
+EOF
+  chmod 0700 "${post_renderer}"
+  if ! "${HELM}" template "${RELEASE_NAME}" "${CHART_PATH}" \
     --namespace "${RELEASE_NAMESPACE}" --is-upgrade --no-hooks \
-    -f "${values}" |
-    "${ADOPTION_TOOL}" post-render \
-      --ownership "${OWNERSHIP_FILE}" --intent "${EVIDENCE_DIR}/intent.json" \
-      --namespace "${RELEASE_NAMESPACE}" >"${output}"
-  chmod 0600 "${output}"
+    --dry-run=server --post-renderer "${post_renderer}" \
+    -f "${values}" >"${output_temporary}"; then
+    rm -f -- "${output_temporary}" "${witness_temporary}" "${post_renderer}" "${lookup_before}" "${lookup_after}"
+    return 1
+  fi
+  capture_secret_lookup_witness "${lookup_after}"
+  if ! cmp -s "${expected_lookup}" "${lookup_after}"; then
+    rm -f -- "${output_temporary}" "${witness_temporary}" "${post_renderer}" "${lookup_before}" "${lookup_after}"
+    fail "Secret lookup identity drifted during server render"
+    return 1
+  fi
+  rm -f -- "${post_renderer}" "${lookup_before}" "${lookup_after}"
+  chmod 0600 "${output_temporary}" "${witness_temporary}"
+  mv -f -- "${output_temporary}" "${output}"
+  mv -f -- "${witness_temporary}" "${witness}"
+}
+
+capture_secret_lookup_witness() {
+  local output="$1"
+  local temporary="${output}.tmp"
+  local config_name="${RELEASE_FULLNAME}-config"
+  local postgres_name="${RELEASE_FULLNAME}-control-plane-postgres-app"
+  local platform_name="${RELEASE_FULLNAME}-platform-component-identity"
+  rm -f -- "${temporary}"
+  "${KUBECTL}" -n "${RELEASE_NAMESPACE}" get secrets \
+    "${config_name}" "${postgres_name}" "${platform_name}" -o json |
+    "${ADOPTION_TOOL}" secret-lookup-witness \
+      --release "${RELEASE_NAME}" --namespace "${RELEASE_NAMESPACE}" \
+      --config-secret "${config_name}" \
+      --control-plane-postgres-secret "${postgres_name}" \
+      --platform-identity-secret "${platform_name}" >"${temporary}"
+  chmod 0600 "${temporary}"
+  mv -f -- "${temporary}" "${output}"
 }
 
 capture_observed() {
@@ -161,7 +224,7 @@ PY
     local recovery_revision=""
     recovery_revision="$(helm_revision 2>/dev/null || true)"
     if [[ -n "${recovery_revision}" ]] &&
-      canonical_helm_manifest "${recovery_revision}" "${EVIDENCE_DIR}/restore-helm-manifest.yaml" 2>/dev/null &&
+      canonical_helm_manifest "${recovery_revision}" "${EVIDENCE_DIR}/restore-helm-manifest.yaml" "${EVIDENCE_DIR}/restore-secret-render-witness.json" 2>/dev/null &&
       "${ADOPTION_TOOL}" verify-recovery-base \
         --transaction "${EVIDENCE_DIR}/transaction.json" \
         --current-revision "${recovery_revision}" \
@@ -199,6 +262,7 @@ cleanup() {
           stop_control_plane_backup_coordination_lease_renewer
         fi
         log "unarmed WAL cleanup failed; preserving the owned Lease for explicit recovery"
+        rm -f -- "${SECRET_HMAC_KEY_FILE}"
         exit 1
       fi
     fi
@@ -206,6 +270,7 @@ cleanup() {
     trace_phase lease-released
     lease_released=true
   fi
+  rm -f -- "${SECRET_HMAC_KEY_FILE}"
   exit "${status}"
 }
 
@@ -221,6 +286,10 @@ main() {
   command -v "${HELM}" >/dev/null
   command -v "${KUBECTL%% *}" >/dev/null
   require_private_directory "${EVIDENCE_DIR}"
+  rm -f -- "${SECRET_HMAC_KEY_FILE}"
+  (umask 077; head -c 32 /dev/urandom >"${SECRET_HMAC_KEY_FILE}")
+  [[ -f "${SECRET_HMAC_KEY_FILE}" && ! -L "${SECRET_HMAC_KEY_FILE}" && "$(wc -c <"${SECRET_HMAC_KEY_FILE}" | tr -d ' ')" == 32 ]] ||
+    fail "ephemeral secret render HMAC key is invalid"
   cp -- "${OWNERSHIP_FILE}" "${EVIDENCE_DIR}/ownership.yaml"
   chmod 0600 "${EVIDENCE_DIR}/ownership.yaml"
 
@@ -230,7 +299,8 @@ main() {
   export BASE_REVISION TARGET_REVISION
 
   capture_snapshot "${EVIDENCE_DIR}/snapshot.json"
-  canonical_helm_manifest "${BASE_REVISION}" "${EVIDENCE_DIR}/base.yaml"
+  capture_secret_lookup_witness "${EVIDENCE_DIR}/secret-lookup-witness.json"
+  canonical_helm_manifest "${BASE_REVISION}" "${EVIDENCE_DIR}/base.yaml" "${EVIDENCE_DIR}/base-secret-render-witness.json"
   "${HELM}" get values "${RELEASE_NAME}" -n "${RELEASE_NAMESPACE}" --all -o yaml >"${EVIDENCE_DIR}/values.yaml"
   chmod 0600 "${EVIDENCE_DIR}/values.yaml"
 
@@ -261,8 +331,8 @@ main() {
   )
   "${ADOPTION_TOOL}" intent "${common[@]}" >"${EVIDENCE_DIR}/intent.json"
   chmod 0600 "${EVIDENCE_DIR}/intent.json"
-  render_target "${EVIDENCE_DIR}/values.yaml" "${EVIDENCE_DIR}/target.yaml"
-  render_target "${EVIDENCE_DIR}/values.yaml" "${EVIDENCE_DIR}/repeated-target.yaml"
+  render_target "${EVIDENCE_DIR}/values.yaml" "${EVIDENCE_DIR}/target.yaml" "${EVIDENCE_DIR}/target-secret-render-witness.json" "${EVIDENCE_DIR}/secret-lookup-witness.json"
+  render_target "${EVIDENCE_DIR}/values.yaml" "${EVIDENCE_DIR}/repeated-target.yaml" "${EVIDENCE_DIR}/repeated-target-secret-render-witness.json" "${EVIDENCE_DIR}/secret-lookup-witness.json"
   cmp -s "${EVIDENCE_DIR}/target.yaml" "${EVIDENCE_DIR}/repeated-target.yaml" || fail "target render is not deterministic"
   capture_observed "${EVIDENCE_DIR}/base.yaml" "${EVIDENCE_DIR}/snapshot.json" "${EVIDENCE_DIR}/observed.yaml"
   "${ADOPTION_TOOL}" authorize "${common[@]}" >/dev/null
@@ -301,12 +371,13 @@ main() {
   trace_phase lease-acquired
 
   [[ "$(helm_revision)" == "${BASE_REVISION}" ]] || fail "live Helm revision drifted before prewrite"
-  canonical_helm_manifest "${BASE_REVISION}" "${EVIDENCE_DIR}/prewrite-base.yaml"
+  capture_secret_lookup_witness "${EVIDENCE_DIR}/prewrite-secret-lookup-witness.json"
+  canonical_helm_manifest "${BASE_REVISION}" "${EVIDENCE_DIR}/prewrite-base.yaml" "${EVIDENCE_DIR}/prewrite-base-secret-render-witness.json"
   "${HELM}" get values "${RELEASE_NAME}" -n "${RELEASE_NAMESPACE}" --all -o yaml >"${EVIDENCE_DIR}/prewrite-values.yaml"
   chmod 0600 "${EVIDENCE_DIR}/prewrite-values.yaml"
   capture_snapshot "${EVIDENCE_DIR}/prewrite-snapshot.json"
-  render_target "${EVIDENCE_DIR}/prewrite-values.yaml" "${EVIDENCE_DIR}/prewrite-target.yaml"
-  render_target "${EVIDENCE_DIR}/prewrite-values.yaml" "${EVIDENCE_DIR}/prewrite-repeated-target.yaml"
+  render_target "${EVIDENCE_DIR}/prewrite-values.yaml" "${EVIDENCE_DIR}/prewrite-target.yaml" "${EVIDENCE_DIR}/prewrite-target-secret-render-witness.json" "${EVIDENCE_DIR}/prewrite-secret-lookup-witness.json"
+  render_target "${EVIDENCE_DIR}/prewrite-values.yaml" "${EVIDENCE_DIR}/prewrite-repeated-target.yaml" "${EVIDENCE_DIR}/prewrite-repeated-target-secret-render-witness.json" "${EVIDENCE_DIR}/prewrite-secret-lookup-witness.json"
   capture_observed \
     "${EVIDENCE_DIR}/prewrite-base.yaml" \
     "${EVIDENCE_DIR}/prewrite-snapshot.json" \
@@ -328,7 +399,8 @@ set -euo pipefail
 exec $(printf '%q' "${ADOPTION_TOOL}") transaction-post-render \\
   --ownership $(printf '%q' "${OWNERSHIP_FILE}") \\
   --transaction $(printf '%q' "${EVIDENCE_DIR}/transaction.json") \\
-  --namespace $(printf '%q' "${RELEASE_NAMESPACE}")
+  --namespace $(printf '%q' "${RELEASE_NAMESPACE}") \\
+  --secret-hmac-key-file $(printf '%q' "${SECRET_HMAC_KEY_FILE}")
 EOF
   chmod 0700 "${EVIDENCE_DIR}/post-renderer.sh"
 
@@ -348,7 +420,7 @@ EOF
 
   local final_revision
   final_revision="$(helm_revision)"
-  canonical_helm_manifest "${final_revision}" "${EVIDENCE_DIR}/final-manifest.yaml"
+  canonical_helm_manifest "${final_revision}" "${EVIDENCE_DIR}/final-manifest.yaml" "${EVIDENCE_DIR}/final-secret-render-witness.json"
   local finalize_attempt finalized=false
   for finalize_attempt in $(seq 1 "${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_FINALIZE_ATTEMPTS:-30}"); do
     if capture_snapshot "${EVIDENCE_DIR}/final-snapshot.json" &&

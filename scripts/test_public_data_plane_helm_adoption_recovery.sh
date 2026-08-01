@@ -22,7 +22,7 @@ sub="$1"; shift; echo "tool:${sub}" >>"${TEST_LOG}"
 arg(){ local key="$1"; shift; while (( $# )); do [[ "$1" == "${key}" ]] && { echo "$2"; return; }; shift; done; }
 case "${sub}" in
  wal-verify|verify-recovery-candidate|verify-restore) : ;;
- canonicalize) cat ;;
+ canonicalize-secret-free) cat ;;
  verify-recovery-base) [[ "${TEST_HELM_BASE}" == true ]] ;;
  restore-patches) printf '[{"name":"a","patch":[]},{"name":"b","patch":[]},{"name":"c","patch":[]}]\n' ;;
  finalize) dir="$(arg --evidence-dir "$@")"; printf '{"digest":"%s"}\n' "${TEST_BASELINE_DIGEST}" >"${dir}/stage1-baseline.json" ;;

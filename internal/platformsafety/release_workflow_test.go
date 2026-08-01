@@ -2849,7 +2849,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "2dc2aa252ff16f317c270d32044ad1368b8e149b0acce8b597511b79275dac88")
+	assertWorkflowSourceDigest(t, data, "895a84f2a73981560cac080a436945783951e9c7f87446f3eebf5a688079bf1a")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2869,7 +2869,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
 		"release-input-guard/Guard exact main commit authorization":                         "9c523e6af74cdb6d1b36af20b61665dc497f5ff365c868bfcf7d06f84a0bb6b2",
 		"release-baseline/Resolve release-domain baseline":                                  "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
-		"release-baseline/Verify Stage1 handoff before release planning":                    "2bfb32c59443ed2e64fc48440f89dd1a9caca6dbe1fd3772c2f4951cf82cfa8c",
+		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
 		"release-gate/Prepare pinned ripgrep for release safety contracts":                  "fd3284573ed17f45090180e1d168e8c0f143e088586882168e5cf60637390761",
@@ -2881,7 +2881,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"build/Publish verified control-plane image provenance":                             "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
 		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
 		"deploy/Build private release-domain tools":                                         "7b03047d41fb32288f57dd634dce430d1ca7f337331e4464cbe00134eeb6591f",
-		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "fcb6549fff187c016af01420a99422ffc0ceb94dee7c45ef330c0e0471029a2e",
+		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
 		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
 		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
 		"deploy/Synchronize additive ManagedApp CRD schema":                                 "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",

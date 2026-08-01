@@ -14883,5 +14883,6 @@ rm -f "${BACKUP_LEASE_STATE}" "${BACKUP_PGDUMP_STATE}" "${BACKUP_DB_PROOF_STATE}
 bash "${REPO_ROOT}/scripts/test_resolve_control_plane_live_images.sh"
 bash "${REPO_ROOT}/scripts/test_public_data_plane_helm_adoption.sh"
 bash "${REPO_ROOT}/scripts/test_public_data_plane_helm_adoption_recovery.sh"
+bash "${REPO_ROOT}/scripts/test_public_data_plane_server_render.sh"
 
 printf '[test_release_domain_safety] ok\n'

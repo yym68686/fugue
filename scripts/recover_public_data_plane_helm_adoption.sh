@@ -49,7 +49,7 @@ helm_revision() {
 
 canonical_helm_manifest() {
   "${HELM}" get manifest "${RELEASE_NAME}" -n "${RELEASE_NAMESPACE}" --revision "$1" |
-    "${ADOPTION_TOOL}" canonicalize --ownership "${OWNERSHIP_FILE}" --namespace "${RELEASE_NAMESPACE}" >"$2"
+    "${ADOPTION_TOOL}" canonicalize-secret-free --ownership "${OWNERSHIP_FILE}" --namespace "${RELEASE_NAMESPACE}" >"$2"
   chmod 0600 "$2"
 }
 

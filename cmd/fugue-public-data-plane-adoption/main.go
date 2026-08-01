@@ -57,6 +57,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "canonicalize":
 		err = runCanonicalize(args[1:], stdin, stdout)
+	case "canonicalize-secret-free":
+		err = runCanonicalizeSecretFree(args[1:], stdin, stdout)
+	case "secret-lookup-witness":
+		err = runSecretLookupWitness(args[1:], stdin, stdout)
 	case "intent":
 		err = runIntent(args[1:], stdout)
 	case "post-render":
@@ -126,6 +130,85 @@ func runCanonicalize(args []string, stdin io.Reader, stdout io.Writer) error {
 	return err
 }
 
+func runCanonicalizeSecretFree(args []string, stdin io.Reader, stdout io.Writer) error {
+	flags := flag.NewFlagSet("canonicalize-secret-free", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var ownershipPath, namespace, keyPath, witnessPath string
+	flags.StringVar(&ownershipPath, "ownership", "", "ownership file")
+	flags.StringVar(&namespace, "namespace", "", "namespace")
+	flags.StringVar(&keyPath, "secret-hmac-key-file", "", "ephemeral secret render HMAC key")
+	flags.StringVar(&witnessPath, "secret-witness-output", "", "private secret render witness output")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || ownershipPath == "" || namespace == "" ||
+		(keyPath == "") != (witnessPath == "") {
+		return fmt.Errorf("flags are invalid")
+	}
+	ownership, err := readLimitedFile(ownershipPath)
+	if err != nil {
+		return err
+	}
+	spec, err := releasedomain.LoadOwnership(bytes.NewReader(ownership))
+	if err != nil {
+		return fmt.Errorf("ownership is invalid")
+	}
+	rendered, err := io.ReadAll(io.LimitReader(stdin, maxInputBytes+1))
+	if err != nil || len(rendered) > maxInputBytes {
+		return fmt.Errorf("rendered manifest is invalid")
+	}
+	var key []byte
+	if keyPath != "" {
+		key, err = readSecretHMACKey(keyPath)
+		if err != nil {
+			return err
+		}
+	}
+	canonical, witness, err := releasedomain.CanonicalizePublicDataPlaneSecretFreeManifest(rendered, spec, namespace, key)
+	if err != nil {
+		return fmt.Errorf("secret-free canonicalization failed: %w", err)
+	}
+	if witnessPath != "" {
+		if err := writePrivateJSON(witnessPath, witness); err != nil {
+			return fmt.Errorf("secret render witness cannot be written")
+		}
+	}
+	_, err = stdout.Write(canonical)
+	return err
+}
+
+func runSecretLookupWitness(args []string, stdin io.Reader, stdout io.Writer) error {
+	flags := flag.NewFlagSet("secret-lookup-witness", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var releaseName, namespace, configName, postgresName, platformName string
+	flags.StringVar(&releaseName, "release", "", "Helm release name")
+	flags.StringVar(&namespace, "namespace", "", "Helm release namespace")
+	flags.StringVar(&configName, "config-secret", "", "generated config Secret name")
+	flags.StringVar(&postgresName, "control-plane-postgres-secret", "", "generated control-plane postgres Secret name")
+	flags.StringVar(&platformName, "platform-identity-secret", "", "generated platform identity Secret name")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return fmt.Errorf("flags are invalid")
+	}
+	raw, err := io.ReadAll(io.LimitReader(stdin, maxInputBytes+1))
+	if err != nil || len(raw) > maxInputBytes {
+		return fmt.Errorf("secret lookup snapshot is invalid")
+	}
+	witness, err := releasedomain.BuildPublicDataPlaneSecretLookupWitness(
+		raw, releaseName, namespace, releasedomain.PublicDataPlaneSecretLookupNames{
+			Config: configName, ControlPlaneDB: postgresName, PlatformIdentity: platformName,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, witness)
+}
+
+func readSecretHMACKey(path string) ([]byte, error) {
+	key, err := readLimitedFile(path)
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("secret render HMAC key is invalid")
+	}
+	return key, nil
+}
+
 func addCommon(flags *flag.FlagSet, options *commonFlags) {
 	flags.StringVar(&options.evidenceDir, "evidence-dir", "", "private evidence directory")
 	flags.StringVar(&options.releaseName, "release", "", "Helm release name")
@@ -183,11 +266,13 @@ func runIntent(args []string, stdout io.Writer) error {
 func runPostRender(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags := flag.NewFlagSet("post-render", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var ownershipPath, intentPath, namespace string
+	var ownershipPath, intentPath, namespace, keyPath, witnessPath string
 	flags.StringVar(&ownershipPath, "ownership", "", "ownership file")
 	flags.StringVar(&intentPath, "intent", "", "intent file")
 	flags.StringVar(&namespace, "namespace", "", "namespace")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || ownershipPath == "" || intentPath == "" || namespace == "" {
+	flags.StringVar(&keyPath, "secret-hmac-key-file", "", "ephemeral secret render HMAC key")
+	flags.StringVar(&witnessPath, "secret-witness-output", "", "private secret render witness output")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || ownershipPath == "" || intentPath == "" || namespace == "" || keyPath == "" || witnessPath == "" {
 		return fmt.Errorf("flags are invalid")
 	}
 	ownership, err := readLimitedFile(ownershipPath)
@@ -202,9 +287,24 @@ func runPostRender(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil || len(rendered) > maxInputBytes {
 		return fmt.Errorf("rendered manifest is invalid")
 	}
+	key, err := readSecretHMACKey(keyPath)
+	if err != nil {
+		return err
+	}
+	spec, err := releasedomain.LoadOwnership(bytes.NewReader(ownership))
+	if err != nil {
+		return fmt.Errorf("ownership is invalid")
+	}
+	_, witness, err := releasedomain.CanonicalizePublicDataPlaneSecretFreeManifest(rendered, spec, namespace, key)
+	if err != nil {
+		return fmt.Errorf("post-render secret witness failed: %w", err)
+	}
 	target, err := releasedomain.RenderPublicDataPlaneAdoptionTarget(rendered, ownership, namespace, intent)
 	if err != nil {
 		return fmt.Errorf("post-render failed: %w", err)
+	}
+	if err := writePrivateJSON(witnessPath, witness); err != nil {
+		return fmt.Errorf("secret render witness cannot be written")
 	}
 	_, err = stdout.Write(target)
 	return err
@@ -213,11 +313,12 @@ func runPostRender(args []string, stdin io.Reader, stdout io.Writer) error {
 func runTransactionPostRender(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags := flag.NewFlagSet("transaction-post-render", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var ownershipPath, transactionPath, namespace string
+	var ownershipPath, transactionPath, namespace, keyPath string
 	flags.StringVar(&ownershipPath, "ownership", "", "ownership file")
 	flags.StringVar(&transactionPath, "transaction", "", "transaction envelope")
 	flags.StringVar(&namespace, "namespace", "", "namespace")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || ownershipPath == "" || transactionPath == "" || namespace == "" {
+	flags.StringVar(&keyPath, "secret-hmac-key-file", "", "ephemeral secret render HMAC key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || ownershipPath == "" || transactionPath == "" || namespace == "" || keyPath == "" {
 		return fmt.Errorf("flags are invalid")
 	}
 	ownership, err := readLimitedFile(ownershipPath)
@@ -232,8 +333,12 @@ func runTransactionPostRender(args []string, stdin io.Reader, stdout io.Writer) 
 	if err != nil || len(rendered) > maxInputBytes {
 		return fmt.Errorf("rendered manifest is invalid")
 	}
+	key, err := readSecretHMACKey(keyPath)
+	if err != nil {
+		return err
+	}
 	target, err := releasedomain.RenderPublicDataPlaneAdoptionTransactionTarget(
-		rendered, ownership, namespace, envelope,
+		rendered, ownership, namespace, envelope, key,
 	)
 	if err != nil {
 		return fmt.Errorf("transaction post-render failed: %w", err)
@@ -398,6 +503,17 @@ func runFinalize(args []string, stdout io.Writer) error {
 	}
 	ownership, err := readEvidence(evidenceDir, "ownership.yaml")
 	if err != nil {
+		return err
+	}
+	secretWitnessRaw, err := readEvidence(evidenceDir, "final-secret-render-witness.json")
+	if err != nil {
+		return err
+	}
+	secretWitness, err := releasedomain.DecodePublicDataPlaneSecretRenderWitness(secretWitnessRaw, true)
+	if err != nil {
+		return err
+	}
+	if err := releasedomain.VerifyPublicDataPlaneSecretRenderWitnessForPlan(envelope.Plan, secretWitness); err != nil {
 		return err
 	}
 	baseline, err := releasedomain.FinalizePublicDataPlaneAdoptionBaseline(
@@ -671,11 +787,29 @@ func loadInputSet(options commonFlags, prefix string) (releasedomain.PublicDataP
 	if err != nil {
 		return releasedomain.PublicDataPlaneAdoptionInput{}, err
 	}
+	lookupWitness, err := read(prefix + "secret-lookup-witness.json")
+	if err != nil {
+		return releasedomain.PublicDataPlaneAdoptionInput{}, err
+	}
+	baseSecretWitness, err := read(prefix + "base-secret-render-witness.json")
+	if err != nil {
+		return releasedomain.PublicDataPlaneAdoptionInput{}, err
+	}
+	targetSecretWitness, err := read(prefix + "target-secret-render-witness.json")
+	if err != nil {
+		return releasedomain.PublicDataPlaneAdoptionInput{}, err
+	}
+	repeatedSecretWitness, err := read(prefix + "repeated-target-secret-render-witness.json")
+	if err != nil {
+		return releasedomain.PublicDataPlaneAdoptionInput{}, err
+	}
 	return releasedomain.PublicDataPlaneAdoptionInput{
 		Ownership: ownership, Values: values, BaseManifest: base, TargetManifest: target, RepeatedTarget: repeated,
 		ObservedLive: observed, KubernetesSnapshot: snapshot, SourceCommit: options.source,
 		ReleaseName: options.releaseName, ReleaseNamespace: options.namespace, ReleaseFullname: options.fullname,
 		BaseRevision: options.baseRev, TargetRevision: options.targetRev, Bindings: options.bindings,
+		SecretLookupWitness: lookupWitness, BaseSecretRenderWitness: baseSecretWitness,
+		TargetSecretRenderWitness: targetSecretWitness, RepeatedSecretRenderWitness: repeatedSecretWitness,
 	}, nil
 }
 

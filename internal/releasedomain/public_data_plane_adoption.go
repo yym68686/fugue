@@ -106,27 +106,30 @@ type PublicDataPlaneStage2Handoff struct {
 // PublicDataPlaneAdoptionPlan binds the exact Helm revision pair, immutable
 // manifests, observed-live witness, and one-shot Kubernetes snapshot.
 type PublicDataPlaneAdoptionPlan struct {
-	APIVersion            string                        `json:"apiVersion"`
-	Kind                  string                        `json:"kind"`
-	Policy                string                        `json:"policy"`
-	ExpectedDomain        Domain                        `json:"expectedDomain"`
-	SourceCommit          string                        `json:"sourceCommit"`
-	ReleaseName           string                        `json:"releaseName"`
-	ReleaseNamespace      string                        `json:"releaseNamespace"`
-	BaseRevision          string                        `json:"baseRevision"`
-	TargetRevision        string                        `json:"targetRevision"`
-	OwnershipDigest       string                        `json:"ownershipDigest"`
-	ValuesDigest          string                        `json:"valuesDigest"`
-	BaseManifestDigest    string                        `json:"baseManifestDigest"`
-	TargetManifestDigest  string                        `json:"targetManifestDigest"`
-	RepeatedTargetDigest  string                        `json:"repeatedTargetManifestDigest"`
-	ObservedLiveDigest    string                        `json:"observedLiveDigest"`
-	SnapshotDigest        string                        `json:"snapshotDigest"`
-	RestoreSnapshotDigest string                        `json:"restoreSnapshotDigest"`
-	Intent                PublicDataPlaneAdoptionIntent `json:"intent"`
-	Rendered              RenderedClassification        `json:"rendered"`
-	Stage2                PublicDataPlaneStage2Handoff  `json:"stage2"`
-	Digest                string                        `json:"digest"`
+	APIVersion                string                        `json:"apiVersion"`
+	Kind                      string                        `json:"kind"`
+	Policy                    string                        `json:"policy"`
+	ExpectedDomain            Domain                        `json:"expectedDomain"`
+	SourceCommit              string                        `json:"sourceCommit"`
+	ReleaseName               string                        `json:"releaseName"`
+	ReleaseNamespace          string                        `json:"releaseNamespace"`
+	BaseRevision              string                        `json:"baseRevision"`
+	TargetRevision            string                        `json:"targetRevision"`
+	OwnershipDigest           string                        `json:"ownershipDigest"`
+	ValuesDigest              string                        `json:"valuesDigest"`
+	SecretLookupWitnessDigest string                        `json:"secretLookupWitnessDigest"`
+	SecretRenderWitnessDigest string                        `json:"secretRenderWitnessDigest"`
+	SecretPayloadHMAC         string                        `json:"secretPayloadHmac"`
+	BaseManifestDigest        string                        `json:"baseManifestDigest"`
+	TargetManifestDigest      string                        `json:"targetManifestDigest"`
+	RepeatedTargetDigest      string                        `json:"repeatedTargetManifestDigest"`
+	ObservedLiveDigest        string                        `json:"observedLiveDigest"`
+	SnapshotDigest            string                        `json:"snapshotDigest"`
+	RestoreSnapshotDigest     string                        `json:"restoreSnapshotDigest"`
+	Intent                    PublicDataPlaneAdoptionIntent `json:"intent"`
+	Rendered                  RenderedClassification        `json:"rendered"`
+	Stage2                    PublicDataPlaneStage2Handoff  `json:"stage2"`
+	Digest                    string                        `json:"digest"`
 }
 
 type PublicDataPlaneAdoptionTransactionEnvelope struct {
@@ -198,20 +201,24 @@ type PublicDataPlaneAdoptionRecoveryWAL struct {
 }
 
 type PublicDataPlaneAdoptionInput struct {
-	Ownership          []byte
-	Values             []byte
-	BaseManifest       []byte
-	TargetManifest     []byte
-	RepeatedTarget     []byte
-	ObservedLive       []byte
-	KubernetesSnapshot []byte
-	SourceCommit       string
-	ReleaseName        string
-	ReleaseNamespace   string
-	ReleaseFullname    string
-	BaseRevision       string
-	TargetRevision     string
-	Bindings           map[string]string
+	Ownership                   []byte
+	Values                      []byte
+	BaseManifest                []byte
+	TargetManifest              []byte
+	RepeatedTarget              []byte
+	ObservedLive                []byte
+	KubernetesSnapshot          []byte
+	SecretLookupWitness         []byte
+	BaseSecretRenderWitness     []byte
+	TargetSecretRenderWitness   []byte
+	RepeatedSecretRenderWitness []byte
+	SourceCommit                string
+	ReleaseName                 string
+	ReleaseNamespace            string
+	ReleaseFullname             string
+	BaseRevision                string
+	TargetRevision              string
+	Bindings                    map[string]string
 }
 
 type publicDataPlaneSnapshot struct {
@@ -344,6 +351,41 @@ func BuildPublicDataPlaneAdoptionPlan(input PublicDataPlaneAdoptionInput) (Publi
 	if len(bytes.TrimSpace(input.Values)) == 0 || len(input.Values) > maxRenderedManifestBytes {
 		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption Helm values are invalid")
 	}
+	lookupWitness, err := DecodePublicDataPlaneSecretLookupWitness(input.SecretLookupWitness)
+	if err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption secret lookup witness: %w", err)
+	}
+	baseSecretWitness, err := DecodePublicDataPlaneSecretRenderWitness(input.BaseSecretRenderWitness, true)
+	if err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption base secret render witness: %w", err)
+	}
+	targetSecretWitness, err := DecodePublicDataPlaneSecretRenderWitness(input.TargetSecretRenderWitness, true)
+	if err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption target secret render witness: %w", err)
+	}
+	repeatedSecretWitness, err := DecodePublicDataPlaneSecretRenderWitness(input.RepeatedSecretRenderWitness, true)
+	if err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption repeated secret render witness: %w", err)
+	}
+	if lookupWitness.ReleaseName != input.ReleaseName || lookupWitness.ReleaseNamespace != input.ReleaseNamespace ||
+		baseSecretWitness.ReleaseNamespace != input.ReleaseNamespace {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption secret witness release identity mismatch")
+	}
+	expectedSecretNames := []string{
+		input.ReleaseFullname + "-config", input.ReleaseFullname + "-control-plane-postgres-app",
+		input.ReleaseFullname + "-platform-component-identity",
+	}
+	sort.Strings(expectedSecretNames)
+	for index, member := range lookupWitness.Members {
+		if member.Name != expectedSecretNames[index] {
+			return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption secret witness object set is not the generated chart set")
+		}
+	}
+	if err := VerifyPublicDataPlaneSecretWitnessBinding(
+		lookupWitness, baseSecretWitness, targetSecretWitness, repeatedSecretWitness,
+	); err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption secret witness binding: %w", err)
+	}
 	spec, err := LoadOwnership(bytes.NewReader(input.Ownership))
 	if err != nil {
 		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption ownership: %w", err)
@@ -394,12 +436,15 @@ func BuildPublicDataPlaneAdoptionPlan(input PublicDataPlaneAdoptionInput) (Publi
 		SourceCommit: input.SourceCommit, ReleaseName: input.ReleaseName,
 		ReleaseNamespace: input.ReleaseNamespace, BaseRevision: input.BaseRevision,
 		TargetRevision: input.TargetRevision, OwnershipDigest: digestBytesSHA256(input.Ownership),
-		ValuesDigest:         digestBytesSHA256(input.Values),
-		BaseManifestDigest:   digestBytesSHA256(input.BaseManifest),
-		TargetManifestDigest: digestBytesSHA256(input.TargetManifest),
-		RepeatedTargetDigest: digestBytesSHA256(input.RepeatedTarget),
-		ObservedLiveDigest:   digestBytesSHA256(input.ObservedLive),
-		SnapshotDigest:       intent.SnapshotDigest, RestoreSnapshotDigest: digestBytesSHA256(restore),
+		ValuesDigest:              digestBytesSHA256(input.Values),
+		SecretLookupWitnessDigest: lookupWitness.Digest,
+		SecretRenderWitnessDigest: baseSecretWitness.Digest,
+		SecretPayloadHMAC:         baseSecretWitness.PayloadHMAC,
+		BaseManifestDigest:        digestBytesSHA256(input.BaseManifest),
+		TargetManifestDigest:      digestBytesSHA256(input.TargetManifest),
+		RepeatedTargetDigest:      digestBytesSHA256(input.RepeatedTarget),
+		ObservedLiveDigest:        digestBytesSHA256(input.ObservedLive),
+		SnapshotDigest:            intent.SnapshotDigest, RestoreSnapshotDigest: digestBytesSHA256(restore),
 		Intent: intent, Rendered: rendered,
 	}
 	plan.Stage2 = PublicDataPlaneStage2Handoff{
@@ -434,6 +479,7 @@ func VerifyPublicDataPlaneAdoptionPlan(plan PublicDataPlaneAdoptionPlan) error {
 	}
 	for label, digest := range map[string]string{
 		"ownership": plan.OwnershipDigest, "values": plan.ValuesDigest, "base manifest": plan.BaseManifestDigest,
+		"secret lookup witness": plan.SecretLookupWitnessDigest, "secret render witness": plan.SecretRenderWitnessDigest,
 		"target manifest": plan.TargetManifestDigest, "repeated target manifest": plan.RepeatedTargetDigest,
 		"observed live": plan.ObservedLiveDigest, "snapshot": plan.SnapshotDigest,
 		"restore snapshot": plan.RestoreSnapshotDigest, "plan": plan.Digest,
@@ -441,6 +487,16 @@ func VerifyPublicDataPlaneAdoptionPlan(plan PublicDataPlaneAdoptionPlan) error {
 		if err := validateCanonicalSHA256Digest(digest, "public data-plane adoption "+label+" digest"); err != nil {
 			return err
 		}
+	}
+	if len(plan.SecretPayloadHMAC) != len("hmac-sha256:")+64 || !strings.HasPrefix(plan.SecretPayloadHMAC, "hmac-sha256:") {
+		return fmt.Errorf("public data-plane adoption secret payload HMAC is invalid")
+	}
+	hmacHex := strings.TrimPrefix(plan.SecretPayloadHMAC, "hmac-sha256:")
+	if hmacHex != strings.ToLower(hmacHex) {
+		return fmt.Errorf("public data-plane adoption secret payload HMAC is invalid")
+	}
+	if _, err := hex.DecodeString(hmacHex); err != nil {
+		return fmt.Errorf("public data-plane adoption secret payload HMAC is invalid")
 	}
 	if plan.TargetManifestDigest != plan.RepeatedTargetDigest || plan.Stage2.RequiredBaseRevision != plan.TargetRevision ||
 		plan.Stage2.RequiredBaseManifestDigest != plan.TargetManifestDigest ||
@@ -796,10 +852,16 @@ func RenderPublicDataPlaneAdoptionTarget(
 	if err != nil {
 		return nil, fmt.Errorf("public data-plane adoption ownership: %w", err)
 	}
-	canonical, err := CanonicalizeRenderedManifest(rendered, spec, namespace)
+	canonical, _, err := CanonicalizePublicDataPlaneSecretFreeManifest(rendered, spec, namespace, nil)
 	if err != nil {
 		return nil, err
 	}
+	return renderPublicDataPlaneAdoptionTargetCanonical(canonical, spec, namespace, intent)
+}
+
+func renderPublicDataPlaneAdoptionTargetCanonical(
+	canonical []byte, spec *OwnershipSpec, namespace string, intent PublicDataPlaneAdoptionIntent,
+) ([]byte, error) {
 	objects, unknown := decodeManifest(canonical, spec, namespace, "adoption-post-render")
 	if len(unknown) != 0 {
 		return nil, manifestEvidenceError(unknown)
@@ -837,6 +899,7 @@ func RenderPublicDataPlaneAdoptionTransactionTarget(
 	rendered, ownership []byte,
 	namespace string,
 	envelope PublicDataPlaneAdoptionTransactionEnvelope,
+	secretHMACKey []byte,
 ) ([]byte, error) {
 	if err := VerifyPublicDataPlaneAdoptionTransaction(envelope); err != nil {
 		return nil, err
@@ -851,21 +914,33 @@ func RenderPublicDataPlaneAdoptionTransactionTarget(
 	if err != nil {
 		return nil, err
 	}
-	canonical, err := CanonicalizeRenderedManifest(rendered, spec, namespace)
+	secretFree, secretWitness, err := CanonicalizePublicDataPlaneSecretFreeManifest(rendered, spec, namespace, secretHMACKey)
 	if err != nil {
 		return nil, err
 	}
-	if digestBytesSHA256(canonical) != envelope.Plan.BaseManifestDigest {
+	if digestBytesSHA256(secretFree) != envelope.Plan.BaseManifestDigest ||
+		secretWitness.Digest != envelope.Plan.SecretRenderWitnessDigest ||
+		secretWitness.PayloadHMAC != envelope.Plan.SecretPayloadHMAC {
 		return nil, fmt.Errorf("public data-plane adoption transaction Helm input drifted")
 	}
-	target, err := RenderPublicDataPlaneAdoptionTarget(canonical, ownership, namespace, envelope.Plan.Intent)
+	rawCanonical, err := CanonicalizeRenderedManifest(rendered, spec, namespace)
 	if err != nil {
 		return nil, err
 	}
-	if digestBytesSHA256(target) != envelope.Plan.TargetManifestDigest {
+	rawTarget, err := renderPublicDataPlaneAdoptionTargetCanonical(rawCanonical, spec, namespace, envelope.Plan.Intent)
+	if err != nil {
+		return nil, err
+	}
+	target, targetWitness, err := CanonicalizePublicDataPlaneSecretFreeManifest(rawTarget, spec, namespace, secretHMACKey)
+	if err != nil {
+		return nil, err
+	}
+	if digestBytesSHA256(target) != envelope.Plan.TargetManifestDigest ||
+		targetWitness.Digest != envelope.Plan.SecretRenderWitnessDigest ||
+		targetWitness.PayloadHMAC != envelope.Plan.SecretPayloadHMAC {
 		return nil, fmt.Errorf("public data-plane adoption transaction Helm output drifted")
 	}
-	return target, nil
+	return rawTarget, nil
 }
 
 // VerifyPublicDataPlaneAdoptionPrewrite re-derives the complete plan from one

@@ -2,21 +2,27 @@ package releasedomain
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
 
 type publicDataPlaneAdoptionFixture struct {
-	input       PublicDataPlaneAdoptionInput
-	ownership   []byte
-	base        []byte
-	target      []byte
-	observed    []byte
-	snapshot    []byte
-	snapshotDoc map[string]any
+	input          PublicDataPlaneAdoptionInput
+	ownership      []byte
+	base           []byte
+	target         []byte
+	observed       []byte
+	snapshot       []byte
+	snapshotDoc    map[string]any
+	secretHMACKey  []byte
+	rawBase        []byte
+	rawTarget      []byte
+	lookupSnapshot []byte
 }
 
 func TestPublicDataPlaneAdoptionStage1AndStage2Handoff(t *testing.T) {
@@ -117,15 +123,15 @@ func TestPublicDataPlaneAdoptionTransactionPostRendererBindsActualHelmInputAndOu
 		t.Fatal(err)
 	}
 	target, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		fixture.base, fixture.ownership, "fugue-system", envelope,
+		fixture.rawBase, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
 	)
-	if err != nil || !bytes.Equal(target, fixture.target) {
+	if err != nil || !bytes.Equal(target, fixture.rawTarget) {
 		t.Fatalf("transaction post-render failed: %v", err)
 	}
 
-	driftedInput := bytes.Replace(fixture.base, []byte("caddy:2.10.2-alpine"), []byte("caddy:2.10.3-alpine"), 1)
+	driftedInput := bytes.Replace(fixture.rawBase, []byte("caddy:2.10.2-alpine"), []byte("caddy:2.10.3-alpine"), 1)
 	if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		driftedInput, fixture.ownership, "fugue-system", envelope,
+		driftedInput, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
 	); err == nil {
 		t.Fatal("transaction post-render accepted apply-time base render drift")
 	}
@@ -139,7 +145,7 @@ func TestPublicDataPlaneAdoptionTransactionPostRendererBindsActualHelmInputAndOu
 		t.Fatalf("test envelope should be structurally valid: %v", err)
 	}
 	if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		fixture.base, fixture.ownership, "fugue-system", wrongOutput,
+		fixture.rawBase, fixture.ownership, "fugue-system", wrongOutput, fixture.secretHMACKey,
 	); err == nil {
 		t.Fatal("transaction post-render accepted target output digest drift")
 	}
@@ -155,7 +161,7 @@ func TestPublicDataPlaneAdoptionTransactionPostRendererBindsActualHelmInputAndOu
 		t.Fatalf("test swapped intent should be structurally valid: %v", err)
 	}
 	if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		fixture.base, fixture.ownership, "fugue-system", swappedIntent,
+		fixture.rawBase, fixture.ownership, "fugue-system", swappedIntent, fixture.secretHMACKey,
 	); err == nil {
 		t.Fatal("transaction post-render accepted an intent swapped out of the authorized output")
 	}
@@ -424,12 +430,67 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 		}
 		baseItems = append(baseItems, copy)
 	}
+	secretPayloads := map[string]map[string]string{
+		fullname + "-config": {
+			"FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY": "workload-signing-secret",
+			"FUGUE_BUNDLE_SIGNING_KEY":            "bundle-signing-secret",
+			"FUGUE_EDGE_TLS_ASK_TOKEN":            "edge-tls-secret",
+		},
+		fullname + "-control-plane-postgres-app": {
+			"username": "fugue", "password": "postgres-secret",
+		},
+		fullname + "-platform-component-identity": {
+			"FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY":             "platform-signing-secret",
+			"FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID":          "platform-key-id",
+			"FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY":    "",
+			"FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID": "",
+			"FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS":         "",
+		},
+	}
+	secretNames := make([]string, 0, len(secretPayloads))
+	for name := range secretPayloads {
+		secretNames = append(secretNames, name)
+	}
+	sort.Strings(secretNames)
+	liveSecrets := make([]any, 0, len(secretNames))
+	for _, name := range secretNames {
+		typeName := "Opaque"
+		if strings.HasSuffix(name, "control-plane-postgres-app") {
+			typeName = "kubernetes.io/basic-auth"
+		}
+		stringData := map[string]any{}
+		data := map[string]any{}
+		for key, value := range secretPayloads[name] {
+			stringData[key] = value
+			data[key] = base64.StdEncoding.EncodeToString([]byte(value))
+		}
+		baseItems = append(baseItems, map[string]any{
+			"apiVersion": "v1", "kind": "Secret", "type": typeName,
+			"metadata": map[string]any{"name": name, "namespace": namespace,
+				"labels": map[string]any{"app.kubernetes.io/instance": releaseName, "app.kubernetes.io/managed-by": "Helm"}},
+			"stringData": stringData,
+		})
+		liveSecrets = append(liveSecrets, map[string]any{
+			"apiVersion": "v1", "kind": "Secret", "type": typeName,
+			"metadata": map[string]any{
+				"name": name, "namespace": namespace, "uid": name + "-uid", "resourceVersion": name + "-rv",
+				"labels":      map[string]any{"app.kubernetes.io/instance": releaseName, "app.kubernetes.io/managed-by": "Helm"},
+				"annotations": map[string]any{"meta.helm.sh/release-name": releaseName, "meta.helm.sh/release-namespace": namespace},
+			},
+			"data": data,
+		})
+	}
 	baseRaw := mustJSON(t, map[string]any{"apiVersion": "v1", "kind": "List", "items": baseItems})
 	spec, err := LoadOwnership(bytes.NewReader(ownership))
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := CanonicalizeRenderedManifest(baseRaw, spec, namespace)
+	secretHMACKey := bytes.Repeat([]byte{0x42}, 32)
+	base, baseSecretWitness, err := CanonicalizePublicDataPlaneSecretFreeManifest(baseRaw, spec, namespace, secretHMACKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawBase, err := CanonicalizeRenderedManifest(baseRaw, spec, namespace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,6 +499,25 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 		t.Fatal(err)
 	}
 	target, err := RenderPublicDataPlaneAdoptionTarget(base, ownership, namespace, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawTarget, err := renderPublicDataPlaneAdoptionTargetCanonical(rawBase, spec, namespace, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, targetSecretWitness, err := CanonicalizePublicDataPlaneSecretFreeManifest(rawTarget, spec, namespace, secretHMACKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookupSnapshot := mustJSON(t, map[string]any{"apiVersion": "v1", "kind": "List", "items": liveSecrets})
+	lookupWitness, err := BuildPublicDataPlaneSecretLookupWitness(
+		lookupSnapshot,
+		releaseName, namespace, PublicDataPlaneSecretLookupNames{
+			Config: fullname + "-config", ControlPlaneDB: fullname + "-control-plane-postgres-app",
+			PlatformIdentity: fullname + "-platform-component-identity",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,10 +556,14 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 		ObservedLive: observed, KubernetesSnapshot: snapshot, SourceCommit: recordSHA,
 		ReleaseName: releaseName, ReleaseNamespace: namespace, ReleaseFullname: fullname,
 		BaseRevision: "806", TargetRevision: "807", Bindings: map[string]string{},
+		SecretLookupWitness: mustJSON(t, lookupWitness), BaseSecretRenderWitness: mustJSON(t, baseSecretWitness),
+		TargetSecretRenderWitness: mustJSON(t, targetSecretWitness), RepeatedSecretRenderWitness: mustJSON(t, targetSecretWitness),
 	}
 	return &publicDataPlaneAdoptionFixture{
 		input: input, ownership: ownership, base: base, target: target, observed: observed,
-		snapshot: snapshot, snapshotDoc: snapshotDoc,
+		snapshot: snapshot, snapshotDoc: snapshotDoc, secretHMACKey: secretHMACKey,
+		rawBase: rawBase, rawTarget: rawTarget,
+		lookupSnapshot: lookupSnapshot,
 	}
 }
 
