@@ -78,6 +78,17 @@ type PublicDataPlaneAdoptionPatch struct {
 	ImageRef     string `json:"imageRef"`
 }
 
+// PublicDataPlaneAdoptionChecksumReconciliation binds one historical rollout
+// checksum to the deterministic value emitted by the current server render.
+// Stage1 restores the historical value so the Helm transaction changes only
+// the authorized edge image pointers.
+type PublicDataPlaneAdoptionChecksumReconciliation struct {
+	WorkloadName  string `json:"workloadName"`
+	Annotation    string `json:"annotation"`
+	BaseValue     string `json:"baseValue"`
+	RenderedValue string `json:"renderedValue"`
+}
+
 // PublicDataPlaneAdoptionIntent is derived only from one Kubernetes List
 // snapshot and the public release record inside that same list.
 type PublicDataPlaneAdoptionIntent struct {
@@ -106,30 +117,33 @@ type PublicDataPlaneStage2Handoff struct {
 // PublicDataPlaneAdoptionPlan binds the exact Helm revision pair, immutable
 // manifests, observed-live witness, and one-shot Kubernetes snapshot.
 type PublicDataPlaneAdoptionPlan struct {
-	APIVersion                string                        `json:"apiVersion"`
-	Kind                      string                        `json:"kind"`
-	Policy                    string                        `json:"policy"`
-	ExpectedDomain            Domain                        `json:"expectedDomain"`
-	SourceCommit              string                        `json:"sourceCommit"`
-	ReleaseName               string                        `json:"releaseName"`
-	ReleaseNamespace          string                        `json:"releaseNamespace"`
-	BaseRevision              string                        `json:"baseRevision"`
-	TargetRevision            string                        `json:"targetRevision"`
-	OwnershipDigest           string                        `json:"ownershipDigest"`
-	ValuesDigest              string                        `json:"valuesDigest"`
-	SecretLookupWitnessDigest string                        `json:"secretLookupWitnessDigest"`
-	SecretRenderWitnessDigest string                        `json:"secretRenderWitnessDigest"`
-	SecretPayloadHMAC         string                        `json:"secretPayloadHmac"`
-	BaseManifestDigest        string                        `json:"baseManifestDigest"`
-	TargetManifestDigest      string                        `json:"targetManifestDigest"`
-	RepeatedTargetDigest      string                        `json:"repeatedTargetManifestDigest"`
-	ObservedLiveDigest        string                        `json:"observedLiveDigest"`
-	SnapshotDigest            string                        `json:"snapshotDigest"`
-	RestoreSnapshotDigest     string                        `json:"restoreSnapshotDigest"`
-	Intent                    PublicDataPlaneAdoptionIntent `json:"intent"`
-	Rendered                  RenderedClassification        `json:"rendered"`
-	Stage2                    PublicDataPlaneStage2Handoff  `json:"stage2"`
-	Digest                    string                        `json:"digest"`
+	APIVersion                         string                                          `json:"apiVersion"`
+	Kind                               string                                          `json:"kind"`
+	Policy                             string                                          `json:"policy"`
+	ExpectedDomain                     Domain                                          `json:"expectedDomain"`
+	SourceCommit                       string                                          `json:"sourceCommit"`
+	ReleaseName                        string                                          `json:"releaseName"`
+	ReleaseNamespace                   string                                          `json:"releaseNamespace"`
+	BaseRevision                       string                                          `json:"baseRevision"`
+	TargetRevision                     string                                          `json:"targetRevision"`
+	OwnershipDigest                    string                                          `json:"ownershipDigest"`
+	ValuesDigest                       string                                          `json:"valuesDigest"`
+	SecretLookupWitnessDigest          string                                          `json:"secretLookupWitnessDigest"`
+	SecretRenderWitnessDigest          string                                          `json:"secretRenderWitnessDigest"`
+	SecretPayloadHMAC                  string                                          `json:"secretPayloadHmac"`
+	BaseManifestDigest                 string                                          `json:"baseManifestDigest"`
+	ServerRenderedTargetDigest         string                                          `json:"serverRenderedTargetManifestDigest"`
+	RepeatedServerRenderedTargetDigest string                                          `json:"repeatedServerRenderedTargetManifestDigest"`
+	TargetManifestDigest               string                                          `json:"targetManifestDigest"`
+	RepeatedTargetDigest               string                                          `json:"repeatedTargetManifestDigest"`
+	ObservedLiveDigest                 string                                          `json:"observedLiveDigest"`
+	SnapshotDigest                     string                                          `json:"snapshotDigest"`
+	RestoreSnapshotDigest              string                                          `json:"restoreSnapshotDigest"`
+	Intent                             PublicDataPlaneAdoptionIntent                   `json:"intent"`
+	ChecksumReconciliations            []PublicDataPlaneAdoptionChecksumReconciliation `json:"checksumReconciliations"`
+	Rendered                           RenderedClassification                          `json:"rendered"`
+	Stage2                             PublicDataPlaneStage2Handoff                    `json:"stage2"`
+	Digest                             string                                          `json:"digest"`
 }
 
 type PublicDataPlaneAdoptionTransactionEnvelope struct {
@@ -420,14 +434,32 @@ func BuildPublicDataPlaneAdoptionPlan(input PublicDataPlaneAdoptionInput) (Publi
 	if err != nil {
 		return PublicDataPlaneAdoptionPlan{}, nil, err
 	}
-	if err := verifyPublicDataPlaneAdoptionManifests(input, intent, spec); err != nil {
+	normalizedTarget, reconciliations, err := normalizePublicDataPlaneAdoptionChecksums(
+		input.BaseManifest, input.TargetManifest, spec, input.ReleaseNamespace, input.Bindings, intent,
+	)
+	if err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, err
+	}
+	normalizedRepeated, repeatedReconciliations, err := normalizePublicDataPlaneAdoptionChecksums(
+		input.BaseManifest, input.RepeatedTarget, spec, input.ReleaseNamespace, input.Bindings, intent,
+	)
+	if err != nil {
+		return PublicDataPlaneAdoptionPlan{}, nil, err
+	}
+	if !bytes.Equal(normalizedTarget, normalizedRepeated) || !reflect.DeepEqual(reconciliations, repeatedReconciliations) {
+		return PublicDataPlaneAdoptionPlan{}, nil, fmt.Errorf("public data-plane adoption repeated checksum reconciliation differs")
+	}
+	normalizedInput := input
+	normalizedInput.TargetManifest = normalizedTarget
+	normalizedInput.RepeatedTarget = normalizedRepeated
+	if err := verifyPublicDataPlaneAdoptionManifests(normalizedInput, intent, spec); err != nil {
 		return PublicDataPlaneAdoptionPlan{}, nil, err
 	}
 	restore, err := marshalPublicDataPlaneRestoreSnapshot(parsedSnapshot)
 	if err != nil {
 		return PublicDataPlaneAdoptionPlan{}, nil, err
 	}
-	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
+	rendered := ClassifyRendered(input.BaseManifest, normalizedTarget, spec, RenderedOptions{
 		DefaultNamespace: input.ReleaseNamespace, Bindings: input.Bindings, IgnoreHelmTestHooks: false,
 	})
 	plan := PublicDataPlaneAdoptionPlan{
@@ -436,16 +468,18 @@ func BuildPublicDataPlaneAdoptionPlan(input PublicDataPlaneAdoptionInput) (Publi
 		SourceCommit: input.SourceCommit, ReleaseName: input.ReleaseName,
 		ReleaseNamespace: input.ReleaseNamespace, BaseRevision: input.BaseRevision,
 		TargetRevision: input.TargetRevision, OwnershipDigest: digestBytesSHA256(input.Ownership),
-		ValuesDigest:              digestBytesSHA256(input.Values),
-		SecretLookupWitnessDigest: lookupWitness.Digest,
-		SecretRenderWitnessDigest: baseSecretWitness.Digest,
-		SecretPayloadHMAC:         baseSecretWitness.PayloadHMAC,
-		BaseManifestDigest:        digestBytesSHA256(input.BaseManifest),
-		TargetManifestDigest:      digestBytesSHA256(input.TargetManifest),
-		RepeatedTargetDigest:      digestBytesSHA256(input.RepeatedTarget),
-		ObservedLiveDigest:        digestBytesSHA256(input.ObservedLive),
-		SnapshotDigest:            intent.SnapshotDigest, RestoreSnapshotDigest: digestBytesSHA256(restore),
-		Intent: intent, Rendered: rendered,
+		ValuesDigest:                       digestBytesSHA256(input.Values),
+		SecretLookupWitnessDigest:          lookupWitness.Digest,
+		SecretRenderWitnessDigest:          baseSecretWitness.Digest,
+		SecretPayloadHMAC:                  baseSecretWitness.PayloadHMAC,
+		BaseManifestDigest:                 digestBytesSHA256(input.BaseManifest),
+		ServerRenderedTargetDigest:         digestBytesSHA256(input.TargetManifest),
+		RepeatedServerRenderedTargetDigest: digestBytesSHA256(input.RepeatedTarget),
+		TargetManifestDigest:               digestBytesSHA256(normalizedTarget),
+		RepeatedTargetDigest:               digestBytesSHA256(normalizedRepeated),
+		ObservedLiveDigest:                 digestBytesSHA256(input.ObservedLive),
+		SnapshotDigest:                     intent.SnapshotDigest, RestoreSnapshotDigest: digestBytesSHA256(restore),
+		Intent: intent, ChecksumReconciliations: reconciliations, Rendered: rendered,
 	}
 	plan.Stage2 = PublicDataPlaneStage2Handoff{
 		RequiredBaseRevision: input.TargetRevision, RequiredBaseManifestDigest: plan.TargetManifestDigest,
@@ -480,7 +514,9 @@ func VerifyPublicDataPlaneAdoptionPlan(plan PublicDataPlaneAdoptionPlan) error {
 	for label, digest := range map[string]string{
 		"ownership": plan.OwnershipDigest, "values": plan.ValuesDigest, "base manifest": plan.BaseManifestDigest,
 		"secret lookup witness": plan.SecretLookupWitnessDigest, "secret render witness": plan.SecretRenderWitnessDigest,
-		"target manifest": plan.TargetManifestDigest, "repeated target manifest": plan.RepeatedTargetDigest,
+		"server-rendered target manifest":          plan.ServerRenderedTargetDigest,
+		"repeated server-rendered target manifest": plan.RepeatedServerRenderedTargetDigest,
+		"target manifest":                          plan.TargetManifestDigest, "repeated target manifest": plan.RepeatedTargetDigest,
 		"observed live": plan.ObservedLiveDigest, "snapshot": plan.SnapshotDigest,
 		"restore snapshot": plan.RestoreSnapshotDigest, "plan": plan.Digest,
 	} {
@@ -498,10 +534,15 @@ func VerifyPublicDataPlaneAdoptionPlan(plan PublicDataPlaneAdoptionPlan) error {
 	if _, err := hex.DecodeString(hmacHex); err != nil {
 		return fmt.Errorf("public data-plane adoption secret payload HMAC is invalid")
 	}
-	if plan.TargetManifestDigest != plan.RepeatedTargetDigest || plan.Stage2.RequiredBaseRevision != plan.TargetRevision ||
+	if plan.ServerRenderedTargetDigest != plan.RepeatedServerRenderedTargetDigest ||
+		plan.ServerRenderedTargetDigest == plan.TargetManifestDigest ||
+		plan.TargetManifestDigest != plan.RepeatedTargetDigest || plan.Stage2.RequiredBaseRevision != plan.TargetRevision ||
 		plan.Stage2.RequiredBaseManifestDigest != plan.TargetManifestDigest ||
 		plan.Stage2.Stage1PlanDigest != plan.Digest {
 		return fmt.Errorf("public data-plane adoption Stage2 handoff mismatch")
+	}
+	if err := verifyPublicDataPlaneChecksumReconciliations(plan.Intent, plan.ChecksumReconciliations); err != nil {
+		return err
 	}
 	if !isExactTransactionDomain(plan.Rendered.Domains, DomainAuthoritativeDNS) || len(plan.Rendered.Unknown) != 0 ||
 		len(plan.Rendered.Evidence) == 0 {
@@ -834,6 +875,181 @@ func VerifyPublicDataPlaneAdoptionRecoveryWAL(wal PublicDataPlaneAdoptionRecover
 	return nil
 }
 
+const (
+	publicDataPlaneFrontChecksumAnnotation  = "checksum/edge-blue-green-front"
+	publicDataPlaneWorkerChecksumAnnotation = "checksum/edge-blue-green-worker"
+)
+
+func expectedPublicDataPlaneChecksumAnnotations(intent PublicDataPlaneAdoptionIntent) map[string]string {
+	expected := make(map[string]string, len(intent.Groups)*3)
+	for _, group := range intent.Groups {
+		expected[group.Front.Name] = publicDataPlaneFrontChecksumAnnotation
+		expected[group.WorkerA.Name] = publicDataPlaneWorkerChecksumAnnotation
+		expected[group.WorkerB.Name] = publicDataPlaneWorkerChecksumAnnotation
+	}
+	return expected
+}
+
+func validPublicDataPlaneChecksum(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func verifyPublicDataPlaneChecksumReconciliations(
+	intent PublicDataPlaneAdoptionIntent,
+	reconciliations []PublicDataPlaneAdoptionChecksumReconciliation,
+) error {
+	expected := expectedPublicDataPlaneChecksumAnnotations(intent)
+	for _, group := range intent.Groups {
+		if group.Front.Name != group.Base+"-front" || group.Front.Slot != "" ||
+			group.WorkerA.Name != group.Base+"-worker-a" || group.WorkerA.Slot != "a" ||
+			group.WorkerB.Name != group.Base+"-worker-b" || group.WorkerB.Slot != "b" {
+			return fmt.Errorf("public data-plane adoption checksum cohort identity is invalid")
+		}
+	}
+	if len(expected) != len(intent.Groups)*3 || len(reconciliations) != len(expected) || len(reconciliations) == 0 {
+		return fmt.Errorf("public data-plane adoption checksum reconciliation set is incomplete")
+	}
+	seen := make(map[string]struct{}, len(reconciliations))
+	previous := ""
+	for _, reconciliation := range reconciliations {
+		annotation, ok := expected[reconciliation.WorkloadName]
+		if !ok || reconciliation.Annotation != annotation ||
+			!validContractText(reconciliation.WorkloadName, 253) ||
+			!validPublicDataPlaneChecksum(reconciliation.BaseValue) ||
+			!validPublicDataPlaneChecksum(reconciliation.RenderedValue) ||
+			reconciliation.BaseValue == reconciliation.RenderedValue {
+			return fmt.Errorf("public data-plane adoption checksum reconciliation is invalid")
+		}
+		if previous != "" && previous >= reconciliation.WorkloadName {
+			return fmt.Errorf("public data-plane adoption checksum reconciliations are not canonical")
+		}
+		if _, duplicate := seen[reconciliation.WorkloadName]; duplicate {
+			return fmt.Errorf("public data-plane adoption checksum reconciliation is duplicated")
+		}
+		seen[reconciliation.WorkloadName] = struct{}{}
+		previous = reconciliation.WorkloadName
+	}
+	return nil
+}
+
+func publicDataPlaneMutableTemplateAnnotations(object manifestObject) (map[string]any, error) {
+	metadata, ok := nestedManifestMap(object.Object, "spec", "template", "metadata")
+	if !ok {
+		return nil, fmt.Errorf("public data-plane adoption template metadata is missing")
+	}
+	annotations, ok := metadata["annotations"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("public data-plane adoption template annotations are invalid")
+	}
+	return annotations, nil
+}
+
+func normalizePublicDataPlaneAdoptionChecksums(
+	base, serverTarget []byte,
+	spec *OwnershipSpec,
+	namespace string,
+	bindings map[string]string,
+	intent PublicDataPlaneAdoptionIntent,
+) ([]byte, []PublicDataPlaneAdoptionChecksumReconciliation, error) {
+	baseObjects, baseUnknown := decodeManifest(base, spec, namespace, "adoption-checksum-base")
+	targetObjects, targetUnknown := decodeManifest(serverTarget, spec, namespace, "adoption-checksum-target")
+	if len(baseUnknown)+len(targetUnknown) != 0 {
+		return nil, nil, fmt.Errorf("public data-plane adoption checksum manifests are incomplete")
+	}
+	baseIndex, baseDuplicates := indexManifestObjects(baseObjects, "adoption-checksum-base")
+	targetIndex, targetDuplicates := indexManifestObjects(targetObjects, "adoption-checksum-target")
+	if len(baseDuplicates)+len(targetDuplicates) != 0 || len(baseIndex) != len(targetIndex) {
+		return nil, nil, fmt.Errorf("public data-plane adoption checksum manifest object set drifted")
+	}
+
+	expected := expectedPublicDataPlaneChecksumAnnotations(intent)
+	reconciliations := make([]PublicDataPlaneAdoptionChecksumReconciliation, 0, len(expected))
+	for name, annotation := range expected {
+		key := identityKey(ObjectIdentity{
+			APIGroup: "apps", Version: "v1", Kind: "DaemonSet", Namespace: namespace, Name: name,
+		})
+		baseObject, baseOK := baseIndex[key]
+		targetObject, targetOK := targetIndex[key]
+		if !baseOK || !targetOK {
+			return nil, nil, fmt.Errorf("public data-plane adoption checksum workload %s is missing", name)
+		}
+		baseAnnotations, err := publicDataPlaneMutableTemplateAnnotations(baseObject)
+		if err != nil {
+			return nil, nil, err
+		}
+		targetAnnotations, err := publicDataPlaneMutableTemplateAnnotations(targetObject)
+		if err != nil {
+			return nil, nil, err
+		}
+		baseValue, baseString := baseAnnotations[annotation].(string)
+		renderedValue, renderedString := targetAnnotations[annotation].(string)
+		if !baseString || !renderedString || !validPublicDataPlaneChecksum(baseValue) ||
+			!validPublicDataPlaneChecksum(renderedValue) || baseValue == renderedValue {
+			return nil, nil, fmt.Errorf("public data-plane adoption checksum %s/%s is not an exact historical representation drift", name, annotation)
+		}
+		targetAnnotations[annotation] = baseValue
+		targetIndex[key] = targetObject
+		reconciliations = append(reconciliations, PublicDataPlaneAdoptionChecksumReconciliation{
+			WorkloadName: name, Annotation: annotation, BaseValue: baseValue, RenderedValue: renderedValue,
+		})
+	}
+	sort.Slice(reconciliations, func(i, j int) bool {
+		return reconciliations[i].WorkloadName < reconciliations[j].WorkloadName
+	})
+	if err := verifyPublicDataPlaneChecksumReconciliations(intent, reconciliations); err != nil {
+		return nil, nil, err
+	}
+	normalized, err := encodePublicDataPlaneManifestObjects(targetIndex)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := verifyPublicDataPlaneAdoptionOnlyImageDelta(base, normalized, spec, namespace, bindings, intent); err != nil {
+		return nil, nil, err
+	}
+	return normalized, reconciliations, nil
+}
+
+func restorePublicDataPlaneAdoptionChecksums(
+	canonical []byte,
+	spec *OwnershipSpec,
+	namespace string,
+	reconciliations []PublicDataPlaneAdoptionChecksumReconciliation,
+) ([]byte, error) {
+	objects, unknown := decodeManifest(canonical, spec, namespace, "adoption-checksum-restore")
+	if len(unknown) != 0 {
+		return nil, manifestEvidenceError(unknown)
+	}
+	indexed, duplicates := indexManifestObjects(objects, "adoption-checksum-restore")
+	if len(duplicates) != 0 {
+		return nil, manifestEvidenceError(duplicates)
+	}
+	for _, reconciliation := range reconciliations {
+		key := identityKey(ObjectIdentity{
+			APIGroup: "apps", Version: "v1", Kind: "DaemonSet",
+			Namespace: namespace, Name: reconciliation.WorkloadName,
+		})
+		object, ok := indexed[key]
+		if !ok {
+			return nil, fmt.Errorf("public data-plane adoption checksum workload %s is missing", reconciliation.WorkloadName)
+		}
+		annotations, err := publicDataPlaneMutableTemplateAnnotations(object)
+		if err != nil {
+			return nil, err
+		}
+		value, ok := annotations[reconciliation.Annotation].(string)
+		if !ok || value != reconciliation.RenderedValue {
+			return nil, fmt.Errorf("public data-plane adoption rendered checksum drifted for %s", reconciliation.WorkloadName)
+		}
+		annotations[reconciliation.Annotation] = reconciliation.BaseValue
+		indexed[key] = object
+	}
+	return encodePublicDataPlaneManifestObjects(indexed)
+}
+
 // RenderPublicDataPlaneAdoptionTarget is the Stage1 post-renderer. It changes
 // only the edge container selected by the signed adoption intent and returns
 // the same canonical representation consumed by the release classifier.
@@ -918,7 +1134,22 @@ func RenderPublicDataPlaneAdoptionTransactionTarget(
 	if err != nil {
 		return nil, err
 	}
-	if digestBytesSHA256(secretFree) != envelope.Plan.BaseManifestDigest ||
+	serverTarget, err := renderPublicDataPlaneAdoptionTargetCanonical(
+		secretFree, spec, namespace, envelope.Plan.Intent,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if digestBytesSHA256(serverTarget) != envelope.Plan.ServerRenderedTargetDigest {
+		return nil, fmt.Errorf("public data-plane adoption transaction server-rendered target drifted")
+	}
+	reconciledBase, err := restorePublicDataPlaneAdoptionChecksums(
+		secretFree, spec, namespace, envelope.Plan.ChecksumReconciliations,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if digestBytesSHA256(reconciledBase) != envelope.Plan.BaseManifestDigest ||
 		secretWitness.Digest != envelope.Plan.SecretRenderWitnessDigest ||
 		secretWitness.PayloadHMAC != envelope.Plan.SecretPayloadHMAC {
 		return nil, fmt.Errorf("public data-plane adoption transaction Helm input drifted")
@@ -927,7 +1158,13 @@ func RenderPublicDataPlaneAdoptionTransactionTarget(
 	if err != nil {
 		return nil, err
 	}
-	rawTarget, err := renderPublicDataPlaneAdoptionTargetCanonical(rawCanonical, spec, namespace, envelope.Plan.Intent)
+	reconciledRaw, err := restorePublicDataPlaneAdoptionChecksums(
+		rawCanonical, spec, namespace, envelope.Plan.ChecksumReconciliations,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rawTarget, err := renderPublicDataPlaneAdoptionTargetCanonical(reconciledRaw, spec, namespace, envelope.Plan.Intent)
 	if err != nil {
 		return nil, err
 	}
@@ -1216,21 +1453,23 @@ func NewPublicDataPlaneStage2Baseline(plan PublicDataPlaneAdoptionPlan) (PublicD
 	return baseline, nil
 }
 
-func verifyPublicDataPlaneAdoptionManifests(
-	input PublicDataPlaneAdoptionInput,
-	intent PublicDataPlaneAdoptionIntent,
+func verifyPublicDataPlaneAdoptionOnlyImageDelta(
+	baseManifest, targetManifest []byte,
 	spec *OwnershipSpec,
+	namespace string,
+	bindings map[string]string,
+	intent PublicDataPlaneAdoptionIntent,
 ) error {
-	rendered := ClassifyRendered(input.BaseManifest, input.TargetManifest, spec, RenderedOptions{
-		DefaultNamespace: input.ReleaseNamespace, Bindings: input.Bindings,
+	rendered := ClassifyRendered(baseManifest, targetManifest, spec, RenderedOptions{
+		DefaultNamespace: namespace, Bindings: bindings,
 	})
 	if !isExactTransactionDomain(rendered.Domains, DomainAuthoritativeDNS) || len(rendered.Unknown) != 0 ||
 		len(rendered.Evidence) == 0 {
 		return fmt.Errorf("public data-plane adoption target is not exact authoritative-dns")
 	}
-	allowed := map[string]string{}
+	allowed := map[string]struct{}{}
 	for _, patch := range intent.Patches {
-		allowed[patch.WorkloadName] = patch.ImageRef
+		allowed[patch.WorkloadName] = struct{}{}
 	}
 	for _, evidence := range rendered.Evidence {
 		if evidence.Ignored || !isExactTransactionDomain(evidence.Domains, DomainAuthoritativeDNS) ||
@@ -1238,13 +1477,69 @@ func verifyPublicDataPlaneAdoptionManifests(
 			return fmt.Errorf("public data-plane adoption target changes a non-edge-image field")
 		}
 		const prefix = "apps/v1 DaemonSet "
-		if !strings.HasPrefix(evidence.Subject, prefix+input.ReleaseNamespace+"/") {
+		if !strings.HasPrefix(evidence.Subject, prefix+namespace+"/") {
 			return fmt.Errorf("public data-plane adoption target changes an unexpected object")
 		}
-		name := strings.TrimPrefix(evidence.Subject, prefix+input.ReleaseNamespace+"/")
+		name := strings.TrimPrefix(evidence.Subject, prefix+namespace+"/")
 		if _, ok := allowed[name]; !ok {
 			return fmt.Errorf("public data-plane adoption target changes an unrecorded worker")
 		}
+		delete(allowed, name)
+	}
+	if len(allowed) != 0 || len(rendered.Evidence) != len(intent.Patches) {
+		return fmt.Errorf("public data-plane adoption target image patch set is incomplete")
+	}
+
+	baseObjects, baseUnknown := decodeManifest(baseManifest, spec, namespace, "adoption-image-base")
+	targetObjects, targetUnknown := decodeManifest(targetManifest, spec, namespace, "adoption-image-target")
+	baseIndex, baseDuplicates := indexManifestObjects(baseObjects, "adoption-image-base")
+	targetIndex, targetDuplicates := indexManifestObjects(targetObjects, "adoption-image-target")
+	if len(baseUnknown)+len(targetUnknown)+len(baseDuplicates)+len(targetDuplicates) != 0 || len(baseIndex) != len(targetIndex) {
+		return fmt.Errorf("public data-plane adoption image manifests are incomplete")
+	}
+	for _, patch := range intent.Patches {
+		key := identityKey(ObjectIdentity{
+			APIGroup: "apps", Version: "v1", Kind: "DaemonSet", Namespace: namespace, Name: patch.WorkloadName,
+		})
+		baseObject, baseOK := baseIndex[key]
+		targetObject, targetOK := targetIndex[key]
+		if !baseOK || !targetOK {
+			return fmt.Errorf("public data-plane adoption image worker %s is missing", patch.WorkloadName)
+		}
+		baseContainers, baseShape := publicDataPlaneNestedSlice(baseObject.Object, "spec", "template", "spec", "containers")
+		targetContainers, targetShape := publicDataPlaneNestedSlice(targetObject.Object, "spec", "template", "spec", "containers")
+		if !baseShape || !targetShape || len(baseContainers) != 2 || len(targetContainers) != 2 {
+			return fmt.Errorf("public data-plane adoption image worker %s container shape is invalid", patch.WorkloadName)
+		}
+		baseEdge, baseEdgeOK := baseContainers[0].(map[string]any)
+		targetEdge, targetEdgeOK := targetContainers[0].(map[string]any)
+		if !baseEdgeOK || !targetEdgeOK || baseEdge["name"] != patch.Container || targetEdge["name"] != patch.Container ||
+			targetEdge["image"] != patch.ImageRef {
+			return fmt.Errorf("public data-plane adoption image worker %s edge pointer is invalid", patch.WorkloadName)
+		}
+		targetEdge["image"] = baseEdge["image"]
+		targetIndex[key] = targetObject
+	}
+	reversed, err := encodePublicDataPlaneManifestObjects(targetIndex)
+	if err != nil || !bytes.Equal(reversed, baseManifest) {
+		return fmt.Errorf("public data-plane adoption target is not byte-equivalent after reversing exact edge images")
+	}
+	return nil
+}
+
+func verifyPublicDataPlaneAdoptionManifests(
+	input PublicDataPlaneAdoptionInput,
+	intent PublicDataPlaneAdoptionIntent,
+	spec *OwnershipSpec,
+) error {
+	if err := verifyPublicDataPlaneAdoptionOnlyImageDelta(
+		input.BaseManifest, input.TargetManifest, spec, input.ReleaseNamespace, input.Bindings, intent,
+	); err != nil {
+		return err
+	}
+	allowed := map[string]string{}
+	for _, patch := range intent.Patches {
+		allowed[patch.WorkloadName] = patch.ImageRef
 	}
 	baseObjects, baseUnknown := decodeManifest(input.BaseManifest, spec, input.ReleaseNamespace, "adoption-base")
 	targetObjects, targetUnknown := decodeManifest(input.TargetManifest, spec, input.ReleaseNamespace, "adoption-target")

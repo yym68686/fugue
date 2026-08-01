@@ -12,17 +12,19 @@ import (
 )
 
 type publicDataPlaneAdoptionFixture struct {
-	input          PublicDataPlaneAdoptionInput
-	ownership      []byte
-	base           []byte
-	target         []byte
-	observed       []byte
-	snapshot       []byte
-	snapshotDoc    map[string]any
-	secretHMACKey  []byte
-	rawBase        []byte
-	rawTarget      []byte
-	lookupSnapshot []byte
+	input           PublicDataPlaneAdoptionInput
+	ownership       []byte
+	base            []byte
+	target          []byte
+	observed        []byte
+	snapshot        []byte
+	snapshotDoc     map[string]any
+	secretHMACKey   []byte
+	rawBase         []byte
+	rawRenderedBase []byte
+	rawTarget       []byte
+	serverTarget    []byte
+	lookupSnapshot  []byte
 }
 
 func TestPublicDataPlaneAdoptionStage1AndStage2Handoff(t *testing.T) {
@@ -123,13 +125,13 @@ func TestPublicDataPlaneAdoptionTransactionPostRendererBindsActualHelmInputAndOu
 		t.Fatal(err)
 	}
 	target, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		fixture.rawBase, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
+		fixture.rawRenderedBase, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
 	)
 	if err != nil || !bytes.Equal(target, fixture.rawTarget) {
 		t.Fatalf("transaction post-render failed: %v", err)
 	}
 
-	driftedInput := bytes.Replace(fixture.rawBase, []byte("caddy:2.10.2-alpine"), []byte("caddy:2.10.3-alpine"), 1)
+	driftedInput := bytes.Replace(fixture.rawRenderedBase, []byte("caddy:2.10.2-alpine"), []byte("caddy:2.10.3-alpine"), 1)
 	if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
 		driftedInput, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
 	); err == nil {
@@ -145,7 +147,7 @@ func TestPublicDataPlaneAdoptionTransactionPostRendererBindsActualHelmInputAndOu
 		t.Fatalf("test envelope should be structurally valid: %v", err)
 	}
 	if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		fixture.rawBase, fixture.ownership, "fugue-system", wrongOutput, fixture.secretHMACKey,
+		fixture.rawRenderedBase, fixture.ownership, "fugue-system", wrongOutput, fixture.secretHMACKey,
 	); err == nil {
 		t.Fatal("transaction post-render accepted target output digest drift")
 	}
@@ -161,10 +163,100 @@ func TestPublicDataPlaneAdoptionTransactionPostRendererBindsActualHelmInputAndOu
 		t.Fatalf("test swapped intent should be structurally valid: %v", err)
 	}
 	if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
-		fixture.rawBase, fixture.ownership, "fugue-system", swappedIntent, fixture.secretHMACKey,
+		fixture.rawRenderedBase, fixture.ownership, "fugue-system", swappedIntent, fixture.secretHMACKey,
 	); err == nil {
 		t.Fatal("transaction post-render accepted an intent swapped out of the authorized output")
 	}
+}
+
+func TestPublicDataPlaneAdoptionReconcilesOnlyExactHistoricalChecksums(t *testing.T) {
+	fixture := newPublicDataPlaneAdoptionFixture(t)
+	plan, _, err := BuildPublicDataPlaneAdoptionPlan(fixture.input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.ChecksumReconciliations) != 9 {
+		t.Fatalf("checksum reconciliation count = %d, want 9", len(plan.ChecksumReconciliations))
+	}
+	if plan.ServerRenderedTargetDigest != digestBytesSHA256(fixture.serverTarget) ||
+		plan.TargetManifestDigest != digestBytesSHA256(fixture.target) ||
+		plan.ServerRenderedTargetDigest == plan.TargetManifestDigest {
+		t.Fatalf("server/final target binding is incorrect: %#v", plan)
+	}
+	for _, reconciliation := range plan.ChecksumReconciliations {
+		if publicDataPlaneRenderedChecksums()[reconciliation.WorkloadName] != reconciliation.RenderedValue {
+			t.Fatalf("rendered checksum is not the captured live shape: %#v", reconciliation)
+		}
+	}
+
+	envelope, err := NewPublicDataPlaneAdoptionTransaction(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := RenderPublicDataPlaneAdoptionTransactionTarget(
+		fixture.rawRenderedBase, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
+	)
+	if err != nil || !bytes.Equal(output, fixture.rawTarget) {
+		t.Fatalf("transaction did not restore exact base checksums: %v", err)
+	}
+
+	tests := map[string]func(*testing.T, *publicDataPlaneAdoptionFixture){
+		"missing front checksum": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
+			fixture.input.TargetManifest = mutatePublicDataPlaneCanonicalObject(t, fixture, fixture.serverTarget, "fugue-fugue-edge-front", func(object map[string]any) {
+				annotations := object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+				delete(annotations, publicDataPlaneFrontChecksumAnnotation)
+			})
+			fixture.input.RepeatedTarget = fixture.input.TargetManifest
+		},
+		"malformed worker checksum": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
+			fixture.input.TargetManifest = mutatePublicDataPlaneCanonicalObject(t, fixture, fixture.serverTarget, "fugue-fugue-edge-worker-a", func(object map[string]any) {
+				annotations := object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+				annotations[publicDataPlaneWorkerChecksumAnnotation] = "not-a-sha256"
+			})
+			fixture.input.RepeatedTarget = fixture.input.TargetManifest
+		},
+		"extra annotation": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
+			fixture.input.TargetManifest = mutatePublicDataPlaneCanonicalObject(t, fixture, fixture.serverTarget, "fugue-fugue-edge-dynamic-worker-b", func(object map[string]any) {
+				annotations := object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+				annotations["example.invalid/config-drift"] = strings.Repeat("d", 64)
+			})
+			fixture.input.RepeatedTarget = fixture.input.TargetManifest
+		},
+		"checksum plus real template drift": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
+			fixture.input.TargetManifest = mutatePublicDataPlaneCanonicalObject(t, fixture, fixture.serverTarget, "fugue-fugue-edge-country-de-front", func(object map[string]any) {
+				object["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["terminationGracePeriodSeconds"] = manifestNumber("31")
+			})
+			fixture.input.RepeatedTarget = fixture.input.TargetManifest
+		},
+		"unexpected checksum annotation": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
+			fixture.input.TargetManifest = mutatePublicDataPlaneCanonicalObject(t, fixture, fixture.serverTarget, "fugue-fugue-edge-country-de-front", func(object map[string]any) {
+				annotations := object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+				annotations[publicDataPlaneWorkerChecksumAnnotation] = strings.Repeat("e", 64)
+			})
+			fixture.input.RepeatedTarget = fixture.input.TargetManifest
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newPublicDataPlaneAdoptionFixture(t)
+			mutate(t, fixture)
+			if _, _, err := BuildPublicDataPlaneAdoptionPlan(fixture.input); err == nil {
+				t.Fatal("checksum reconciliation authorized non-exact drift")
+			}
+		})
+	}
+
+	t.Run("apply-time checksum drift", func(t *testing.T) {
+		drifted := mutatePublicDataPlaneCanonicalObject(t, fixture, fixture.rawRenderedBase, "fugue-fugue-edge-worker-b", func(object map[string]any) {
+			annotations := object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+			annotations[publicDataPlaneWorkerChecksumAnnotation] = strings.Repeat("f", 64)
+		})
+		if _, err := RenderPublicDataPlaneAdoptionTransactionTarget(
+			drifted, fixture.ownership, "fugue-system", envelope, fixture.secretHMACKey,
+		); err == nil {
+			t.Fatal("transaction accepted a checksum not bound by both server renders and prewrite")
+		}
+	})
 }
 
 func resealPublicDataPlaneAdoptionEnvelope(envelope *PublicDataPlaneAdoptionTransactionEnvelope) {
@@ -242,7 +334,7 @@ func TestPublicDataPlaneAdoptionPrewriteAndRestoreFailClosed(t *testing.T) {
 
 	t.Run("restore UID drift", func(t *testing.T) {
 		drifted := cloneJSONDocument(t, fixture.snapshotDoc)
-		member := findSnapshotObject(t, drifted, "DaemonSet", "fugue-fugue-edge-country-us-worker-b")
+		member := findSnapshotObject(t, drifted, "DaemonSet", "fugue-fugue-edge-worker-b")
 		member["metadata"].(map[string]any)["uid"] = "replacement-uid"
 		if err := VerifyPublicDataPlaneAdoptionRestore(
 			restore, mustJSON(t, drifted), "fugue", "fugue-system", "fugue-fugue",
@@ -253,7 +345,7 @@ func TestPublicDataPlaneAdoptionPrewriteAndRestoreFailClosed(t *testing.T) {
 
 	t.Run("restore spec drift", func(t *testing.T) {
 		drifted := cloneJSONDocument(t, fixture.snapshotDoc)
-		member := findSnapshotObject(t, drifted, "DaemonSet", "fugue-fugue-edge-country-us-worker-b")
+		member := findSnapshotObject(t, drifted, "DaemonSet", "fugue-fugue-edge-worker-b")
 		containers := member["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
 		containers[1].(map[string]any)["image"] = "caddy:drift"
 		if err := VerifyPublicDataPlaneAdoptionRestore(
@@ -267,12 +359,12 @@ func TestPublicDataPlaneAdoptionPrewriteAndRestoreFailClosed(t *testing.T) {
 func TestPublicDataPlaneAdoptionRejectsCrossDomainAndCohortDrift(t *testing.T) {
 	tests := map[string]func(*testing.T, *publicDataPlaneAdoptionFixture){
 		"caddy target drift": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
-			fixture.input.TargetManifest = bytes.Replace(fixture.target, []byte("caddy:2.10.2-alpine"), []byte("caddy:2.10.3-alpine"), 1)
+			fixture.input.TargetManifest = bytes.Replace(fixture.serverTarget, []byte("caddy:2.10.2-alpine"), []byte("caddy:2.10.3-alpine"), 1)
 			fixture.input.RepeatedTarget = fixture.input.TargetManifest
 		},
 		"target non-image drift": func(t *testing.T, fixture *publicDataPlaneAdoptionFixture) {
-			fixture.input.TargetManifest = bytes.Replace(fixture.target, []byte(`terminationGracePeriodSeconds: !!float "30"`), []byte(`terminationGracePeriodSeconds: !!float "31"`), 1)
-			if bytes.Equal(fixture.input.TargetManifest, fixture.target) {
+			fixture.input.TargetManifest = bytes.Replace(fixture.serverTarget, []byte(`terminationGracePeriodSeconds: !!float "30"`), []byte(`terminationGracePeriodSeconds: !!float "31"`), 1)
+			if bytes.Equal(fixture.input.TargetManifest, fixture.serverTarget) {
 				t.Fatal("test mutation did not change target")
 			}
 			fixture.input.RepeatedTarget = fixture.input.TargetManifest
@@ -324,7 +416,7 @@ func (fixture *publicDataPlaneAdoptionFixture) finalEvidence(t *testing.T) ([]by
 	document := cloneJSONDocument(t, fixture.snapshotDoc)
 	for _, name := range []string{
 		"fugue-fugue-edge-country-de-worker-b",
-		"fugue-fugue-edge-country-us-worker-b",
+		"fugue-fugue-edge-worker-b",
 		"fugue-fugue-edge-dynamic-worker-b",
 	} {
 		member := findSnapshotObject(t, document, "DaemonSet", name)
@@ -367,7 +459,7 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 	const releaseName, namespace, fullname = "fugue", "fugue-system", "fugue-fugue"
 	groups := []string{
 		fullname + "-edge-country-de",
-		fullname + "-edge-country-us",
+		fullname + "-edge",
 		fullname + "-edge-dynamic",
 	}
 	items := make([]any, 0, 10)
@@ -494,6 +586,30 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 	if err != nil {
 		t.Fatal(err)
 	}
+	renderedDocument := cloneJSONDocument(t, map[string]any{"apiVersion": "v1", "kind": "List", "items": baseItems})
+	renderedChecksums := publicDataPlaneRenderedChecksums()
+	for _, raw := range renderedDocument["items"].([]any) {
+		item := raw.(map[string]any)
+		if item["kind"] != "DaemonSet" {
+			continue
+		}
+		metadata := item["metadata"].(map[string]any)
+		name := metadata["name"].(string)
+		value, ok := renderedChecksums[name]
+		if !ok {
+			t.Fatalf("rendered checksum missing for %s", name)
+		}
+		annotations := item["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+		if strings.HasSuffix(name, "-front") {
+			annotations[publicDataPlaneFrontChecksumAnnotation] = value
+		} else {
+			annotations[publicDataPlaneWorkerChecksumAnnotation] = value
+		}
+	}
+	rawRenderedBase, err := CanonicalizeRenderedManifest(mustJSON(t, renderedDocument), spec, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
 	intent, err := BuildPublicDataPlaneAdoptionIntent(snapshot, recordSHA, releaseName, namespace, fullname)
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +622,11 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, targetSecretWitness, err := CanonicalizePublicDataPlaneSecretFreeManifest(rawTarget, spec, namespace, secretHMACKey)
+	rawServerTarget, err := renderPublicDataPlaneAdoptionTargetCanonical(rawRenderedBase, spec, namespace, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTarget, targetSecretWitness, err := CanonicalizePublicDataPlaneSecretFreeManifest(rawServerTarget, spec, namespace, secretHMACKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +672,7 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 	}
 
 	input := PublicDataPlaneAdoptionInput{
-		Ownership: ownership, Values: []byte("edge:\n  enabled: true\n"), BaseManifest: base, TargetManifest: target, RepeatedTarget: target,
+		Ownership: ownership, Values: []byte("edge:\n  enabled: true\n"), BaseManifest: base, TargetManifest: serverTarget, RepeatedTarget: serverTarget,
 		ObservedLive: observed, KubernetesSnapshot: snapshot, SourceCommit: recordSHA,
 		ReleaseName: releaseName, ReleaseNamespace: namespace, ReleaseFullname: fullname,
 		BaseRevision: "806", TargetRevision: "807", Bindings: map[string]string{},
@@ -562,7 +682,7 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 	return &publicDataPlaneAdoptionFixture{
 		input: input, ownership: ownership, base: base, target: target, observed: observed,
 		snapshot: snapshot, snapshotDoc: snapshotDoc, secretHMACKey: secretHMACKey,
-		rawBase: rawBase, rawTarget: rawTarget,
+		rawBase: rawBase, rawRenderedBase: rawRenderedBase, rawTarget: rawTarget, serverTarget: serverTarget,
 		lookupSnapshot: lookupSnapshot,
 	}
 }
@@ -577,9 +697,17 @@ func publicDataPlaneDaemonSet(name, release, role, slot string, count int64, edg
 	}
 	containers := []any{map[string]any{"name": "front", "image": "registry.example/front:v1"}}
 	annotations := map[string]any{}
+	if role == "front" {
+		annotations[publicDataPlaneFrontChecksumAnnotation] = "86e41d93a16440747f6c02fea2fd15fc7affc0258d5704c05521362a085c4d6b"
+	}
 	if strings.HasPrefix(role, "worker-") {
 		mode = "node-local-blue-green-worker"
 		labels["fugue.io/edge-slot"] = slot
+		if slot == "a" {
+			annotations[publicDataPlaneWorkerChecksumAnnotation] = "652d3af6567adec76c5c7ab1e40a22799813b78819e91447bdadbee35ec8dbd9"
+		} else {
+			annotations[publicDataPlaneWorkerChecksumAnnotation] = "70964b6dd144e0497ec9abfd937fd4484aeae5a6a6e8ef5ee2a79f20062fd67f"
+		}
 		containers = []any{
 			map[string]any{"name": "edge", "image": edgeImage},
 			map[string]any{"name": "caddy", "image": caddyImage},
@@ -649,6 +777,56 @@ objectRules:
 }
 
 func fixtureRef() string { return "registry.example/edge@sha256:" + strings.Repeat("b", 64) }
+
+func publicDataPlaneRenderedChecksums() map[string]string {
+	return map[string]string{
+		"fugue-fugue-edge-country-de-front":    "fd46c8c1bf7307b843c178e2afd49a8de0410146d4cd99ec2b946297915e4d23",
+		"fugue-fugue-edge-country-de-worker-a": "aff21600cc90fa4f8cd40f5ff4890dc92b6e4fd828e7377ddf8832ba347ddf76",
+		"fugue-fugue-edge-country-de-worker-b": "c49477014fa579158e406b72f2407410752f9ca954f41bebd47651eb112bf056",
+		"fugue-fugue-edge-dynamic-front":       "a7c309cb633f0484400723858dd27f259d1f06cbd3c7158a29a0b3d4dacf5de3",
+		"fugue-fugue-edge-dynamic-worker-a":    "17ef4b4f313fd47c8d5ff433bcbaa765700f9d582f638fb90415a9b29698eaaa",
+		"fugue-fugue-edge-dynamic-worker-b":    "db75c3aff8a9c972270eaaa47dbc9506d0eb80477c1c1f39d14b1b31802b8280",
+		"fugue-fugue-edge-front":               "f24a6144cfb15d725122858cb3327f4a23f3162d766da639b637b452aed36526",
+		"fugue-fugue-edge-worker-a":            "d9fb982dca6864570707c8436895aba987fa8215c22a44046f133075a2398c1b",
+		"fugue-fugue-edge-worker-b":            "4afb9006b89756012d1dcb2d5f587c5075079ff34d2d3294254f9e2dc05a1597",
+	}
+}
+
+func mutatePublicDataPlaneCanonicalObject(
+	t *testing.T,
+	fixture *publicDataPlaneAdoptionFixture,
+	manifest []byte,
+	name string,
+	mutate func(map[string]any),
+) []byte {
+	t.Helper()
+	spec, err := LoadOwnership(bytes.NewReader(fixture.ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, unknown := decodeManifest(manifest, spec, "fugue-system", "test-mutation")
+	if len(unknown) != 0 {
+		t.Fatalf("decode test manifest: %#v", unknown)
+	}
+	indexed, duplicates := indexManifestObjects(objects, "test-mutation")
+	if len(duplicates) != 0 {
+		t.Fatalf("duplicate test manifest objects: %#v", duplicates)
+	}
+	key := identityKey(ObjectIdentity{
+		APIGroup: "apps", Version: "v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: name,
+	})
+	object, ok := indexed[key]
+	if !ok {
+		t.Fatalf("test object %s is missing", name)
+	}
+	mutate(object.Object)
+	indexed[key] = object
+	result, err := encodePublicDataPlaneManifestObjects(indexed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
 
 func cloneJSONDocument[T any](t *testing.T, input T) T {
 	t.Helper()
