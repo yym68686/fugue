@@ -267,6 +267,40 @@ func resealPublicDataPlaneAdoptionEnvelope(envelope *PublicDataPlaneAdoptionTran
 	envelope.PlanDigest = envelope.Plan.Digest
 }
 
+func TestPublicDataPlaneAdoptionPrewriteAcceptsPersistedTransactionRepresentation(t *testing.T) {
+	fixture := newPublicDataPlaneAdoptionFixture(t)
+	plan, restore, err := BuildPublicDataPlaneAdoptionPlan(fixture.input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := NewPublicDataPlaneAdoptionTransaction(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PublicDataPlaneAdoptionTransactionEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(persisted))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(decoded.Plan, plan) {
+		t.Fatal("fixture did not exercise the empty-versus-nil persisted representation boundary")
+	}
+	if err := VerifyPublicDataPlaneAdoptionPrewrite(decoded.Plan, restore, fixture.input); err != nil {
+		t.Fatalf("persisted transaction failed unchanged prewrite: %v", err)
+	}
+
+	drifted := fixture.input
+	drifted.Values = []byte("edge:\n  enabled: false\n")
+	if err := VerifyPublicDataPlaneAdoptionPrewrite(decoded.Plan, restore, drifted); err == nil {
+		t.Fatal("persisted transaction accepted real Helm values drift")
+	}
+}
+
 func TestPublicDataPlaneAdoptionPrewriteAndRestoreFailClosed(t *testing.T) {
 	fixture := newPublicDataPlaneAdoptionFixture(t)
 	plan, restore, err := BuildPublicDataPlaneAdoptionPlan(fixture.input)

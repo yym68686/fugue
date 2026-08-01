@@ -1195,8 +1195,19 @@ func VerifyPublicDataPlaneAdoptionPrewrite(
 	if err != nil {
 		return fmt.Errorf("public data-plane adoption prewrite reconstruction: %w", err)
 	}
-	if !reflect.DeepEqual(freshPlan, plan) || !bytes.Equal(freshRestore, restore) {
-		return fmt.Errorf("public data-plane adoption prewrite evidence drifted")
+	persistedPlan, err := json.Marshal(plan)
+	if err != nil {
+		return fmt.Errorf("public data-plane adoption persisted plan is invalid")
+	}
+	freshPersistedPlan, err := json.Marshal(freshPlan)
+	if err != nil {
+		return fmt.Errorf("public data-plane adoption fresh plan is invalid")
+	}
+	if !bytes.Equal(freshPersistedPlan, persistedPlan) {
+		return fmt.Errorf("public data-plane adoption prewrite canonical plan drifted")
+	}
+	if !bytes.Equal(freshRestore, restore) {
+		return fmt.Errorf("public data-plane adoption prewrite restore witness drifted")
 	}
 	return nil
 }
