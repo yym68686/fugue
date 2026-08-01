@@ -68,7 +68,7 @@ func TestRobustnessStatusIncludesNodeBackupAndOperationEvidence(t *testing.T) {
 	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	configureRobustnessTestPreflight(t, server)
 	now := time.Now().UTC()
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                  "edge-us-1",
 		EdgeGroupID:         "edge-group-country-us",
 		Status:              model.EdgeHealthHealthy,
@@ -453,7 +453,7 @@ func TestRobustnessMetricsExposeGuardiansGenerationAndRepairEvents(t *testing.T)
 
 	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	now := time.Now().UTC()
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                 "edge-us-1",
 		EdgeGroupID:        "edge-group-country-us",
 		Status:             model.EdgeHealthHealthy,

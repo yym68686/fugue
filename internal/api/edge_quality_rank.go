@@ -45,7 +45,7 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 		Since:            since,
 		GeneratedAt:      now,
 	}
-	nodes, _, err := s.store.ListEdgeNodes("")
+	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		s.writeStoreError(w, err)
 		return

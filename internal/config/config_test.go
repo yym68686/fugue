@@ -5,6 +5,18 @@ import (
 	"time"
 )
 
+func TestEdgeWorkloadIdentityCannotBeInjectedThroughEnvironment(t *testing.T) {
+	t.Setenv("FUGUE_EDGE_SLOT", "forged-slot")
+	t.Setenv("FUGUE_EDGE_ID", "forged-edge")
+	t.Setenv("FUGUE_EDGE_GROUP_ID", "forged-group")
+	t.Setenv("FUGUE_EDGE_INSTANCE_UID", "forged-uid")
+	t.Setenv("FUGUE_EDGE_RELEASE_EPOCH", "forged-epoch")
+	cfg := EdgeFromEnv()
+	if cfg.EdgeID == "forged-edge" || cfg.EdgeGroupID == "forged-group" || cfg.EdgeSlot == "forged-slot" || cfg.EdgeInstanceUID == "forged-uid" || cfg.EdgeReleaseEpoch == "forged-epoch" {
+		t.Fatalf("edge workload identity must come only from the read-only Downward API volume: %+v", cfg)
+	}
+}
+
 func TestDNSFromEnvDefaultsEdgeHealthProbeEnabled(t *testing.T) {
 	t.Setenv("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", "")
 

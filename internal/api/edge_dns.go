@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"math"
 	"net"
@@ -902,8 +903,11 @@ func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBun
 	out := map[string][]string{}
 	blockedGroups := map[string]bool{}
 	if s.store != nil {
-		nodes, _, err := s.store.ListEdgeNodes("")
+		nodes, _, err := s.store.ListActiveEdgeNodes("")
 		if err != nil {
+			if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+				return out, nil
+			}
 			return nil, err
 		}
 		now := time.Now().UTC()
@@ -939,8 +943,11 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 	out := map[string]model.EdgeDNSAnswerCandidate{}
 	blockedIPs := map[string]bool{}
 	if s.store != nil {
-		nodes, _, err := s.store.ListEdgeNodes("")
+		nodes, _, err := s.store.ListActiveEdgeNodes("")
 		if err != nil {
+			if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+				return out, nil
+			}
 			return nil, err
 		}
 		now := time.Now().UTC()

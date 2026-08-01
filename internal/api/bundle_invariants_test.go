@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -285,8 +287,12 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	now := time.Now().UTC()
 	stale := now.Add(-(platformNodeHeartbeatStaleAfter + time.Second))
 
-	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	storeState := store.New(storePath)
+	if err := storeState.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                 "edge-de-1",
 		EdgeGroupID:        "edge-group-country-de",
 		Status:             model.EdgeHealthHealthy,
@@ -300,6 +306,7 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record stale edge node: %v", err)
 	}
+	forceEdgeInstanceHeartbeatTimeForAPITest(t, storePath, stale)
 	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
@@ -320,8 +327,12 @@ func TestEdgeRouteBundleInvariantRejectsShortRecoveryBundleFromStaleLKG(t *testi
 
 	now := time.Now().UTC()
 	stale := now.Add(-(platformNodeHeartbeatStaleAfter + time.Second))
-	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	storeState := store.New(storePath)
+	if err := storeState.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                 "edge-de-1",
 		EdgeGroupID:        "edge-group-country-de",
 		Status:             model.EdgeHealthHealthy,
@@ -335,6 +346,7 @@ func TestEdgeRouteBundleInvariantRejectsShortRecoveryBundleFromStaleLKG(t *testi
 	}); err != nil {
 		t.Fatalf("record stale edge node: %v", err)
 	}
+	forceEdgeInstanceHeartbeatTimeForAPITest(t, storePath, stale)
 	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
@@ -380,6 +392,35 @@ func TestEdgeRouteBundleInvariantRejectsShortRecoveryBundleFromStaleLKG(t *testi
 	}
 }
 
+func forceEdgeInstanceHeartbeatTimeForAPITest(t *testing.T, path string, heartbeatAt time.Time) {
+	t.Helper()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read edge instance fixture: %v", err)
+	}
+	var state model.State
+	if err := json.Unmarshal(payload, &state); err != nil {
+		t.Fatalf("decode edge instance fixture: %v", err)
+	}
+	if len(state.EdgeNodeInstances) == 0 {
+		t.Fatal("edge instance fixture is empty")
+	}
+	for index := range state.EdgeNodeInstances {
+		state.EdgeNodeInstances[index].LastHeartbeatAt = heartbeatAt
+		state.EdgeNodeInstances[index].UpdatedAt = heartbeatAt
+		state.EdgeNodeInstances[index].Node.LastHeartbeatAt = &heartbeatAt
+		state.EdgeNodeInstances[index].Node.LastSeenAt = &heartbeatAt
+		state.EdgeNodeInstances[index].Node.UpdatedAt = heartbeatAt
+	}
+	payload, err = json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("encode edge instance fixture: %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write edge instance fixture: %v", err)
+	}
+}
+
 func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
 	t.Parallel()
 
@@ -396,7 +437,7 @@ func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create edge node: %v", err)
 	}
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                 "edge-de-1",
 		EdgeGroupID:        "edge-group-country-de",
 		Status:             model.EdgeHealthDegraded,

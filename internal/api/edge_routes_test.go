@@ -554,7 +554,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 		t.Fatalf("expected route to appear in derived HK bundle before opt-in, got %+v", hkBundle.Routes)
 	}
 
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-us-1",
 		EdgeGroupID: "edge-group-country-us",
 		Status:      model.EdgeHealthHealthy,
@@ -633,7 +633,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 		t.Fatalf("expected US bundle to receive nearest-edge fallback route, got %+v", usBundle.Routes)
 	}
 
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-hk-1",
 		EdgeGroupID: "edge-group-country-hk",
 		Status:      model.EdgeHealthHealthy,
@@ -693,7 +693,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
 	deployAppForEdgeRouteTest(t, storeState, app)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-us-1",
 		EdgeGroupID: "edge-group-country-us",
 		Status:      model.EdgeHealthHealthy,
@@ -701,7 +701,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record healthy US edge node: %v", err)
 	}
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-de-1",
 		EdgeGroupID: "edge-group-country-de",
 		Status:      model.EdgeHealthHealthy,
@@ -968,7 +968,7 @@ func TestPlatformRoutesBootstrapPendingEdgeGroupReceivesBundle(t *testing.T) {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
 	deployAppForEdgeRouteTest(t, storeState, app)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                 "edge-hk-1",
 		EdgeGroupID:        "edge-group-country-hk",
 		Status:             model.EdgeHealthDegraded,
@@ -1013,7 +1013,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 		"upstream_url":"http://fugue-fugue.fugue-system.svc.cluster.local:80",
 		"edge_group_mode":"region_aware"
 	}]}`, nil)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-us-1",
 		EdgeGroupID: "edge-group-country-us",
 		Status:      model.EdgeHealthHealthy,
@@ -1021,7 +1021,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record healthy US edge node: %v", err)
 	}
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-de-1",
 		EdgeGroupID: "edge-group-country-de",
 		Status:      model.EdgeHealthHealthy,
@@ -1305,13 +1305,9 @@ type edgeRouteTestStore interface {
 	GetApp(string) (model.App, error)
 }
 
-type edgeRouteHeartbeatStore interface {
-	UpdateEdgeHeartbeat(model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error)
-}
-
 func recordHealthyEdgeForRouteTest(t *testing.T, storeState edgeRouteHeartbeatStore, id, groupID, publicIPv4 string) {
 	t.Helper()
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          id,
 		EdgeGroupID: groupID,
 		PublicIPv4:  publicIPv4,

@@ -213,6 +213,9 @@ type EdgeConfig struct {
 	EdgeToken                       string
 	EdgeID                          string
 	EdgeGroupID                     string
+	EdgeSlot                        string
+	EdgeInstanceUID                 string
+	EdgeReleaseEpoch                string
 	Region                          string
 	Country                         string
 	PublicHostname                  string
@@ -576,8 +579,11 @@ func EdgeFromEnv() EdgeConfig {
 		EdgeDesiredStateURL:       getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_DESIRED_STATE_URL", ""),
 		WorkloadMode:              getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_WORKLOAD_MODE", ""),
 		EdgeToken:                 getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_TOKEN", getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_NODE_TOKEN", "")),
-		EdgeID:                    getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_ID", getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_NODE_ID", "")),
-		EdgeGroupID:               getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_GROUP_ID", ""),
+		EdgeID:                    readTrimmedFile("/var/run/fugue/edge-identity/edge_id"),
+		EdgeGroupID:               readTrimmedFile("/var/run/fugue/edge-identity/edge_group_id"),
+		EdgeSlot:                  readTrimmedFile("/var/run/fugue/edge-identity/slot"),
+		EdgeInstanceUID:           readTrimmedFile("/var/run/fugue/edge-identity/instance_uid"),
+		EdgeReleaseEpoch:          readTrimmedFile("/var/run/fugue/edge-identity/release_epoch"),
 		Region:                    getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_REGION", ""),
 		Country:                   getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_COUNTRY", ""),
 		PublicHostname:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_HOSTNAME")),
@@ -947,6 +953,14 @@ func readSimpleEnvFile(path string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func readTrimmedFile(path string) string {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(payload))
 }
 
 func unquoteSimpleEnvValue(value string) string {

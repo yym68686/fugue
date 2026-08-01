@@ -33,6 +33,10 @@ type createEdgeNodeTokenRequest struct {
 type edgeHeartbeatRequest struct {
 	EdgeID                 string                        `json:"edge_id"`
 	EdgeGroupID            string                        `json:"edge_group_id"`
+	Slot                   string                        `json:"slot"`
+	InstanceUID            string                        `json:"instance_uid"`
+	ReleaseEpoch           string                        `json:"release_epoch"`
+	FailureClass           string                        `json:"failure_class,omitempty"`
 	WorkloadMode           string                        `json:"workload_mode,omitempty"`
 	Region                 string                        `json:"region,omitempty"`
 	Country                string                        `json:"country,omitempty"`
@@ -188,6 +192,12 @@ func (s *Server) handleGetEdgeNodeQuality(w http.ResponseWriter, r *http.Request
 	node, group, err := s.store.GetEdgeNode(edgeID)
 	if err != nil {
 		s.writeStoreError(w, err)
+		return
+	}
+	if instance, instanceErr := s.store.GetLatestEdgeNodeInstance(edgeID); instanceErr == nil {
+		node = instance.Node
+	} else if !errors.Is(instanceErr, store.ErrNotFound) {
+		s.writeStoreError(w, instanceErr)
 		return
 	}
 	samples, err := s.store.ListEdgePerformanceSamples("", since)
@@ -467,37 +477,84 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if authContext.Scoped && !strings.EqualFold(strings.TrimSpace(req.EdgeID), authContext.EdgeID) {
+		httpx.WriteError(w, http.StatusForbidden, "edge token cannot access another edge_id")
+		return
+	}
+	if !edgeHeartbeatIdentityComplete(req) {
+		httpx.WriteError(w, http.StatusBadRequest, "slot, instance_uid, and release_epoch are required")
+		return
+	}
 	status := model.NormalizeEdgeHealthStatus(req.Status)
 	if status == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "status must be unknown, healthy, degraded, or unhealthy")
 		return
 	}
 	req = s.enrichEdgeHeartbeatFromClusterNode(r.Context(), req)
-	node, _, err := s.store.UpdateEdgeHeartbeat(model.EdgeNode{
-		ID:                  req.EdgeID,
-		EdgeGroupID:         req.EdgeGroupID,
-		WorkloadMode:        req.WorkloadMode,
-		Region:              req.Region,
-		Country:             req.Country,
-		PublicHostname:      req.PublicHostname,
-		PublicIPv4:          req.PublicIPv4,
-		PublicIPv6:          req.PublicIPv6,
-		MeshIP:              req.MeshIP,
-		RouteBundleVersion:  req.RouteBundleVersion,
-		DNSBundleVersion:    req.DNSBundleVersion,
-		ServingGeneration:   req.ServingGeneration,
-		LKGGeneration:       req.LKGGeneration,
-		CaddyRouteCount:     req.CaddyRouteCount,
-		CaddyAppliedVersion: req.CaddyAppliedVersion,
-		CaddyLastError:      req.CaddyLastError,
-		CacheStatus:         req.CacheStatus,
-		TLSStatus:           req.TLSStatus,
-		TLSLastMessage:      req.TLSLastMessage,
-		TLSReadyAt:          req.TLSReadyAt,
-		Status:              status,
-		Healthy:             req.Healthy,
-		Draining:            req.Draining,
-		LastError:           req.LastError,
+	controlNode, _, err := s.store.GetEdgeNode(req.EdgeID)
+	if errors.Is(err, store.ErrNotFound) && !authContext.Scoped {
+		controlNode, _, err = s.store.UpdateEdgeHeartbeat(model.EdgeNode{
+			ID: req.EdgeID, EdgeGroupID: req.EdgeGroupID, WorkloadMode: req.WorkloadMode,
+			Region: req.Region, Country: req.Country, PublicHostname: req.PublicHostname,
+			PublicIPv4: req.PublicIPv4, PublicIPv6: req.PublicIPv6, MeshIP: req.MeshIP,
+			Status: model.EdgeHealthUnknown, Healthy: false,
+		})
+	}
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	node := model.EdgeNode{
+		ID:                   req.EdgeID,
+		EdgeGroupID:          req.EdgeGroupID,
+		WorkloadMode:         req.WorkloadMode,
+		Region:               req.Region,
+		Country:              req.Country,
+		PublicHostname:       req.PublicHostname,
+		PublicIPv4:           req.PublicIPv4,
+		PublicIPv6:           req.PublicIPv6,
+		MeshIP:               req.MeshIP,
+		RouteBundleVersion:   req.RouteBundleVersion,
+		DNSBundleVersion:     req.DNSBundleVersion,
+		ServingGeneration:    req.ServingGeneration,
+		LKGGeneration:        req.LKGGeneration,
+		CaddyRouteCount:      req.CaddyRouteCount,
+		CaddyAppliedVersion:  req.CaddyAppliedVersion,
+		CaddyLastError:       req.CaddyLastError,
+		CacheStatus:          req.CacheStatus,
+		TLSStatus:            req.TLSStatus,
+		TLSLastMessage:       req.TLSLastMessage,
+		TLSReadyAt:           req.TLSReadyAt,
+		Status:               status,
+		Healthy:              req.Healthy,
+		Draining:             req.Draining,
+		LastError:            req.LastError,
+		CanaryState:          controlNode.CanaryState,
+		CanaryWeight:         controlNode.CanaryWeight,
+		PublicProbeStatus:    controlNode.PublicProbeStatus,
+		PublicProbeLastError: controlNode.PublicProbeLastError,
+		PublicProbeLastAt:    controlNode.PublicProbeLastAt,
+	}
+	failureClass := strings.ToLower(strings.TrimSpace(req.FailureClass))
+	switch failureClass {
+	case model.EdgeInstanceFailureNone, model.EdgeInstanceFailureSignatureInvalid, model.EdgeInstanceFailureMaxStaleExceeded, model.EdgeInstanceFailureIdentityDrift:
+	default:
+		httpx.WriteError(w, http.StatusBadRequest, "failure_class is invalid")
+		return
+	}
+	if req.MaxStaleExceeded {
+		failureClass = model.EdgeInstanceFailureMaxStaleExceeded
+	} else if failureClass == model.EdgeInstanceFailureNone && edgeHeartbeatReportsSignatureFailure(req) {
+		failureClass = model.EdgeInstanceFailureSignatureInvalid
+	}
+	instance, err := s.store.UpdateEdgeInstanceHeartbeat(model.EdgeNodeInstance{
+		EdgeID:       req.EdgeID,
+		EdgeGroupID:  req.EdgeGroupID,
+		Slot:         req.Slot,
+		InstanceUID:  req.InstanceUID,
+		ReleaseEpoch: req.ReleaseEpoch,
+		Node:         node,
+		FailureClass: failureClass,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -509,9 +566,24 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"node":     node,
+		"node":     instance.Node,
+		"instance": instance,
 		"accepted": true,
 	})
+}
+
+func edgeHeartbeatIdentityComplete(req edgeHeartbeatRequest) bool {
+	switch strings.ToLower(strings.TrimSpace(req.Slot)) {
+	case model.EdgeSlotA, model.EdgeSlotB, model.EdgeSlotDirect:
+	default:
+		return false
+	}
+	return strings.TrimSpace(req.InstanceUID) != "" && strings.TrimSpace(req.ReleaseEpoch) != ""
+}
+
+func edgeHeartbeatReportsSignatureFailure(req edgeHeartbeatRequest) bool {
+	message := strings.ToLower(strings.Join([]string{req.LastError, req.CaddyLastError, req.CacheStatus}, " "))
+	return strings.Contains(message, "signature") && (strings.Contains(message, "invalid") || strings.Contains(message, "verify") || strings.Contains(message, "mismatch"))
 }
 
 const edgePerformanceSampleRetention = 7 * 24 * time.Hour

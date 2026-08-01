@@ -2467,9 +2467,24 @@ func TestEdgeDaemonSetRendersPublicIdentityEnv(t *testing.T) {
 		`value: "2001:db8::15"`,
 		`name: FUGUE_EDGE_MESH_IP`,
 		`value: "100.64.0.15"`,
+		`fugue.io/edge-slot: "direct"`,
+		`fugue.io/edge-group-id: ""`,
+		`fugue.io/edge-release-epoch: "direct-`,
+		`name: edge-workload-identity`,
+		`mountPath: /var/run/fugue/edge-identity`,
+		`fieldPath: metadata.uid`,
+		`fieldPath: spec.nodeName`,
+		`fieldPath: metadata.labels['fugue.io/edge-group-id']`,
+		`fieldPath: metadata.labels['fugue.io/edge-slot']`,
+		`fieldPath: metadata.annotations['fugue.io/edge-release-epoch']`,
 	} {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("edge daemonset missing public identity env %q:\n%s", want, doc)
+		}
+	}
+	for _, forbidden := range []string{"name: FUGUE_EDGE_SLOT", "name: FUGUE_EDGE_INSTANCE_UID", "name: FUGUE_EDGE_RELEASE_EPOCH"} {
+		if strings.Contains(doc, forbidden) {
+			t.Fatalf("edge workload identity must not be caller-controlled env %q:\n%s", forbidden, doc)
 		}
 	}
 }
@@ -2809,6 +2824,15 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 			`image: "caddy:2.10.2-alpine"`,
 			`fugue.io/rollout-mode: node-local-blue-green-worker`,
 			`fugue.io/edge-slot: ` + tc.slot,
+			`fugue.io/edge-group-id: "edge-group-country-us"`,
+			`fugue.io/edge-release-epoch: "unfenced"`,
+			`name: edge-workload-identity`,
+			`mountPath: /var/run/fugue/edge-identity`,
+			`fieldPath: metadata.uid`,
+			`fieldPath: spec.nodeName`,
+			`fieldPath: metadata.labels['fugue.io/edge-group-id']`,
+			`fieldPath: metadata.labels['fugue.io/edge-slot']`,
+			`fieldPath: metadata.annotations['fugue.io/edge-release-epoch']`,
 			`type: OnDelete`,
 			`name: https-worker`,
 			`hostPort: ` + tc.hostPort,
@@ -2824,10 +2848,35 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 		for _, unwanted := range []string{
 			`hostPort: 80`,
 			`hostPort: 443`,
+			`name: FUGUE_EDGE_SLOT`,
+			`name: FUGUE_EDGE_INSTANCE_UID`,
+			`name: FUGUE_EDGE_RELEASE_EPOCH`,
 		} {
 			if strings.Contains(doc, unwanted) {
 				t.Fatalf("%s worker should not own public hostPort with %q:\n%s", tc.name, unwanted, doc)
 			}
+		}
+	}
+}
+
+func TestEdgeWorkloadIdentityMetadataOverridesFailClosed(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for _, argument := range []string{
+		"podLabels.fugue\\.io/edge-slot=forged",
+		"podLabels.fugue\\.io/edge-group-id=forged",
+		"podAnnotations.fugue\\.io/edge-release-epoch=forged",
+	} {
+		cmd := exec.Command("helm", "template", "fugue", chartDir, "--set-string", argument)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "must not override reserved edge identity key") {
+			t.Fatalf("reserved identity override %q must fail closed: err=%v\n%s", argument, err, output)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -217,6 +218,9 @@ func (s *Store) pgUpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode
 	if err != nil {
 		return model.EdgeNode{}, model.EdgeGroup{}, err
 	}
+	if err := pgApplyEdgeNodeControlToInstances(ctx, tx, edgeID, patch, stored.UpdatedAt); err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return model.EdgeNode{}, model.EdgeGroup{}, fmt.Errorf("commit edge control-state transaction: %w", err)
 	}
@@ -225,6 +229,36 @@ func (s *Store) pgUpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode
 		group = groups[0]
 	}
 	return redactEdgeNode(stored), group, nil
+}
+
+func pgApplyEdgeNodeControlToInstances(ctx context.Context, tx *sql.Tx, edgeID string, patch model.EdgeNode, updatedAt time.Time) error {
+	instances, err := pgReadEdgeNodeInstances(ctx, tx, "")
+	if err != nil {
+		return err
+	}
+	for index := range instances {
+		instance := instances[index]
+		if normalizeEdgeID(instance.EdgeID) != normalizeEdgeID(edgeID) {
+			continue
+		}
+		applyEdgeNodeControlPatch(&instance.Node, patch)
+		if instance.Node.Draining {
+			instance.EffectiveHealthy = false
+			instance.ConsecutiveHealthy = 0
+		}
+		nodeJSON, err := json.Marshal(instance.Node)
+		if err != nil {
+			return fmt.Errorf("encode controlled edge instance: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE fugue_edge_node_instances
+SET node_json=$6, effective_healthy=$7, consecutive_healthy=$8, updated_at=$9
+WHERE edge_id=$1 AND edge_group_id=$2 AND slot=$3 AND instance_uid=$4 AND release_epoch=$5`,
+			instance.EdgeID, instance.EdgeGroupID, instance.Slot, instance.InstanceUID, instance.ReleaseEpoch,
+			nodeJSON, instance.EffectiveHealthy, instance.ConsecutiveHealthy, updatedAt); err != nil {
+			return mapDBErr(err)
+		}
+	}
+	return nil
 }
 
 func pgUpsertEdgeGroup(ctx context.Context, tx *sql.Tx, node model.EdgeNode, now time.Time) error {

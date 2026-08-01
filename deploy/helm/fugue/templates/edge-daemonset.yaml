@@ -2,6 +2,10 @@
 {{- $edgeBlueGreenMigration := default dict .Values.edge.blueGreen.migration -}}
 {{- $keepLegacyDirect := default false $edgeBlueGreenMigration.keepLegacyDirect -}}
 {{- if and .Values.edge.enabled (or (not .Values.edge.blueGreen.enabled) $keepLegacyDirect) }}
+{{- range $key := list "fugue.io/edge-slot" "fugue.io/edge-group-id" "fugue.io/edge-release-epoch" }}
+{{- if hasKey (default dict $.Values.podLabels) $key }}{{- fail (printf "podLabels must not override reserved edge identity key %s" $key) }}{{- end }}
+{{- if hasKey (default dict $.Values.podAnnotations) $key }}{{- fail (printf "podAnnotations must not override reserved edge identity key %s" $key) }}{{- end }}
+{{- end }}
 {{- if and .Values.edge.caddy.enabled (not (trim .Values.edge.edgeGroupID)) }}
 {{- fail "edge.edgeGroupID is required when edge.caddy.enabled=true" }}
 {{- end }}
@@ -21,6 +25,7 @@
 {{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
 {{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}
 {{- $edgeChecksumConfig := omit (deepCopy .Values.edge) "blueGreen" "groups" "dynamic" "sshFront" -}}
+{{- $edgeReleaseEpoch := printf "direct-%s" (toJson $edgeChecksumConfig | sha256sum) -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -44,12 +49,15 @@ spec:
         fugue.io/rollout-subsystem: public-data-plane
         fugue.io/rollout-mode: direct-ondelete-protected
         fugue.io/downtime-class: online-required
+        fugue.io/edge-slot: "direct"
+        fugue.io/edge-group-id: {{ .Values.edge.edgeGroupID | quote }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
         checksum/edge-config: {{ toJson $edgeChecksumConfig | sha256sum }}
+        fugue.io/edge-release-epoch: {{ $edgeReleaseEpoch | quote }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -191,6 +199,9 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
+            - name: edge-workload-identity
+              mountPath: /var/run/fugue/edge-identity
+              readOnly: true
             - name: route-cache
               mountPath: {{ .Values.edge.persistence.mountPath | quote }}
             {{- if .Values.edge.caddy.enabled }}
@@ -259,6 +270,24 @@ spec:
             {{- toYaml .Values.edge.caddy.resources | nindent 12 }}
         {{- end }}
       volumes:
+        - name: edge-workload-identity
+          downwardAPI:
+            items:
+              - path: edge_id
+                fieldRef:
+                  fieldPath: spec.nodeName
+              - path: edge_group_id
+                fieldRef:
+                  fieldPath: metadata.labels['fugue.io/edge-group-id']
+              - path: slot
+                fieldRef:
+                  fieldPath: metadata.labels['fugue.io/edge-slot']
+              - path: instance_uid
+                fieldRef:
+                  fieldPath: metadata.uid
+              - path: release_epoch
+                fieldRef:
+                  fieldPath: metadata.annotations['fugue.io/edge-release-epoch']
         - name: route-cache
           hostPath:
             path: {{ .Values.edge.persistence.hostPath | quote }}

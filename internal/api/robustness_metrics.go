@@ -17,7 +17,7 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 	}
 
 	now := time.Now().UTC()
-	if edgeNodes, _, err := s.store.ListEdgeNodes(""); err == nil {
+	if edgeNodes, _, err := s.store.ListActiveEdgeNodes(""); err == nil {
 		expectedByGroup := mostCommonNonEmptyEdgeRouteGenerationByGroup(edgeNodes)
 		observability.WriteMetricHeader(w, "fugue_robustness_node_generation_drift_seconds", "Seconds since a node was last observed with a generation that differs from the current majority generation.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_robustness_lkg_serving", "Whether a node reports serving an LKG or degraded cache generation.", "gauge")

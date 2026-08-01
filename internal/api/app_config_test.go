@@ -1679,6 +1679,32 @@ func setupFailedImportedAppRecoveryServer(t *testing.T) (*store.Store, *Server, 
 
 func performJSONRequest(t *testing.T, server *Server, method, target, apiKey string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	if method == http.MethodPost && strings.HasPrefix(target, "/v1/edge/heartbeat") {
+		if heartbeat, ok := body.(map[string]any); ok {
+			clone := make(map[string]any, len(heartbeat)+3)
+			for key, value := range heartbeat {
+				clone[key] = value
+			}
+			edgeID, _ := clone["edge_id"].(string)
+			groupID, _ := clone["edge_group_id"].(string)
+			if _, _, err := server.store.GetEdgeNode(edgeID); errors.Is(err, store.ErrNotFound) {
+				if _, _, err := server.store.UpdateEdgeHeartbeat(model.EdgeNode{ID: edgeID, EdgeGroupID: groupID, Status: model.EdgeHealthUnknown}); err != nil {
+					t.Fatalf("create heartbeat test control identity: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("read heartbeat test control identity: %v", err)
+			}
+			clone["slot"] = model.EdgeSlotDirect
+			clone["instance_uid"] = "test-" + edgeID
+			clone["release_epoch"] = "test-" + groupID
+			if _, err := server.store.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
+				EdgeGroupID: groupID, Slot: model.EdgeSlotDirect, ReleaseEpoch: "test-" + groupID, FenceSequence: 1,
+			}); err != nil {
+				t.Fatalf("put active heartbeat test epoch: %v", err)
+			}
+			body = clone
+		}
+	}
 
 	var payload []byte
 	if body != nil {

@@ -14548,12 +14548,22 @@ components:
     EdgeHeartbeatRequest:
       type: object
       additionalProperties: false
-      required: [edge_id, edge_group_id, status, healthy, draining]
+      required: [edge_id, edge_group_id, slot, instance_uid, release_epoch, status, healthy, draining]
       properties:
         edge_id:
           type: string
         edge_group_id:
           type: string
+        slot:
+          type: string
+          enum: [a, b, direct]
+        instance_uid:
+          type: string
+        release_epoch:
+          type: string
+        failure_class:
+          type: string
+          enum: [bundle_signature_invalid, max_stale_exceeded, identity_drift]
         workload_mode:
           type: string
           enum: [static, dynamic]
@@ -14577,6 +14587,10 @@ components:
           type: string
         lkg_generation:
           type: string
+        last_good_generation:
+          type: string
+        cache_corrupt_generation:
+          type: string
         caddy_route_count:
           type: integer
           format: int32
@@ -14593,6 +14607,8 @@ components:
         tls_ready_at:
           type: string
           format: date-time
+        max_stale_exceeded:
+          type: boolean
         status:
           type: string
           enum: [unknown, healthy, degraded, unhealthy]
@@ -14609,12 +14625,65 @@ components:
     EdgeHeartbeatResponse:
       type: object
       additionalProperties: false
-      required: [node, accepted]
+      required: [node, instance, accepted]
       properties:
         node:
           $ref: "#/components/schemas/EdgeNode"
+        instance:
+          $ref: "#/components/schemas/EdgeNodeInstance"
         accepted:
           type: boolean
+    EdgeNodeInstance:
+      type: object
+      additionalProperties: false
+      required:
+        - edge_id
+        - edge_group_id
+        - slot
+        - instance_uid
+        - release_epoch
+        - node
+        - effective_healthy
+        - consecutive_healthy
+        - consecutive_unhealthy
+        - last_heartbeat_at
+        - created_at
+        - updated_at
+      properties:
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        slot:
+          type: string
+          enum: [a, b, direct]
+        instance_uid:
+          type: string
+        release_epoch:
+          type: string
+        node:
+          $ref: "#/components/schemas/EdgeNode"
+        failure_class:
+          type: string
+          enum: [bundle_signature_invalid, max_stale_exceeded, identity_drift]
+        effective_healthy:
+          type: boolean
+        consecutive_healthy:
+          type: integer
+        consecutive_unhealthy:
+          type: integer
+        health_state_since:
+          type: string
+          format: date-time
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     EdgePerformanceSample:
       type: object
       additionalProperties: false

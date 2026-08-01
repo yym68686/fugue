@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/localwal"
 	"fugue/internal/model"
@@ -1259,6 +1260,9 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 		EdgeToken:         "edge-secret",
 		EdgeID:            "edge-us-1",
 		EdgeGroupID:       "edge-group-country-us",
+		EdgeSlot:          model.EdgeSlotB,
+		EdgeInstanceUID:   "pod-uid-b",
+		EdgeReleaseEpoch:  "pdp-release-b",
 		Region:            "us-east",
 		Country:           "US",
 		PublicIPv4:        "203.0.113.10",
@@ -1280,6 +1284,9 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	for key, want := range map[string]any{
 		"edge_id":               "edge-us-1",
 		"edge_group_id":         "edge-group-country-us",
+		"slot":                  model.EdgeSlotB,
+		"instance_uid":          "pod-uid-b",
+		"release_epoch":         "pdp-release-b",
 		"region":                "us-east",
 		"country":               "US",
 		"public_ipv4":           "203.0.113.10",
@@ -1305,6 +1312,27 @@ func TestHeartbeatOnceReportsEdgeInventory(t *testing.T) {
 	}
 }
 
+func TestHeartbeatClassifiesBundleSignatureFailure(t *testing.T) {
+	t.Parallel()
+	service := NewService(config.EdgeConfig{
+		APIURL: "https://api.example.com", EdgeToken: "edge-secret", EdgeID: "edge-us-1",
+		EdgeGroupID: "edge-group-country-us", EdgeSlot: model.EdgeSlotB,
+		EdgeInstanceUID: "pod-uid-b", EdgeReleaseEpoch: "release-b",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncError(fmt.Errorf("verify edge route bundle: %w", bundleauth.ErrInvalidSignature))
+	req, _, err := service.newHeartbeatRequest(context.Background())
+	if err != nil {
+		t.Fatalf("build heartbeat: %v", err)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		t.Fatalf("decode heartbeat: %v", err)
+	}
+	if body["failure_class"] != model.EdgeInstanceFailureSignatureInvalid {
+		t.Fatalf("signature failure must be a hard-failure heartbeat class: %#v", body)
+	}
+}
+
 func TestHeartbeatOnceReportsPerformanceSamples(t *testing.T) {
 	t.Parallel()
 
@@ -1327,6 +1355,9 @@ func TestHeartbeatOnceReportsPerformanceSamples(t *testing.T) {
 		EdgeToken:         "edge-secret",
 		EdgeID:            "edge-us-1",
 		EdgeGroupID:       "edge-group-country-us",
+		EdgeSlot:          model.EdgeSlotB,
+		EdgeInstanceUID:   "pod-uid-b",
+		EdgeReleaseEpoch:  "pdp-release-b",
 		Region:            "us-east",
 		Country:           "US",
 		HeartbeatInterval: time.Minute,

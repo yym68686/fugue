@@ -765,7 +765,7 @@ func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T)
 	}); err != nil {
 		t.Fatalf("put verified app domain: %v", err)
 	}
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-hk-1",
 		EdgeGroupID: "edge-group-country-hk",
 		PublicIPv4:  "203.0.113.20",
@@ -855,7 +855,7 @@ func TestEdgeDNSBundleDerivesFullZonePlatformAppRecords(t *testing.T) {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
 	app = deployAppForEdgeRouteTest(t, storeState, app)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:              "edge-us-1",
 		EdgeGroupID:     "edge-group-country-us",
 		Region:          "us",
@@ -1079,7 +1079,7 @@ func TestEdgeDNSBundleExcludesInvalidLKGEdgeNodeAnswers(t *testing.T) {
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	app = deployAppForEdgeRouteTest(t, storeState, app)
 	recordRouteReadyEdgeForDNSAnswerTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71", false)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                "edge-de-1",
 		EdgeGroupID:       "edge-group-country-de",
 		PublicIPv4:        "51.38.126.103",
@@ -1118,7 +1118,7 @@ func TestEdgeDNSBundleExcludesInvalidLKGEdgeNodeAnswers(t *testing.T) {
 
 func recordRouteReadyEdgeForDNSAnswerTest(t *testing.T, storeState edgeRouteHeartbeatStore, id, groupID, publicIPv4 string, draining bool) {
 	t.Helper()
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:              id,
 		EdgeGroupID:     groupID,
 		PublicIPv4:      publicIPv4,
@@ -1201,7 +1201,7 @@ func TestEdgeDNSBundleUsesDegradedServingLKGEdgeIPsForPlatformAppRecords(t *test
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
 	app = deployAppForEdgeRouteTest(t, storeState, app)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:                 "edge-us-1",
 		EdgeGroupID:        "edge-group-country-us",
 		PublicIPv4:         "15.204.94.71",
@@ -1395,7 +1395,7 @@ func TestEdgeDNSBundleLetsPlatformDomainBindingOverrideStaticAddressRecords(t *t
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
 	app = deployAppForEdgeRouteTest(t, storeState, app)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-us-1",
 		EdgeGroupID: "edge-group-country-us",
 		PublicIPv4:  "15.204.94.71",
@@ -1453,7 +1453,7 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 		{"name":"api.fugue.pro","type":"A","values":["136.112.185.40"],"ttl":300},
 		{"name":"api.fugue.pro","type":"TXT","values":["verification=keep"],"ttl":300}
 	]`, nil)
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-us-1",
 		EdgeGroupID: "edge-group-country-us",
 		PublicIPv4:  "15.204.94.71",
@@ -1462,7 +1462,7 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 	}); err != nil {
 		t.Fatalf("record healthy US edge node: %v", err)
 	}
-	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+	if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, model.EdgeNode{
 		ID:          "edge-de-1",
 		EdgeGroupID: "edge-group-country-de",
 		PublicIPv4:  "51.38.126.103",
@@ -1551,7 +1551,7 @@ func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
 			TLSStatus:         model.EdgeTLSStatusReady,
 		},
 	} {
-		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+		if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, node); err != nil {
 			t.Fatalf("record edge heartbeat: %v", err)
 		}
 	}
@@ -1672,7 +1672,7 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 			TLSStatus:       model.EdgeTLSStatusReady,
 		},
 	} {
-		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+		if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, node); err != nil {
 			t.Fatalf("record edge heartbeat: %v", err)
 		}
 	}
@@ -1948,7 +1948,7 @@ func seedEdgeDNSLatencyFixture(t *testing.T, storeState *store.Store, server *Se
 			TLSStatus:       model.EdgeTLSStatusReady,
 		},
 	} {
-		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+		if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, node); err != nil {
 			t.Fatalf("record edge heartbeat: %v", err)
 		}
 	}
@@ -2063,7 +2063,7 @@ func TestEdgeDNSBundleCreatesScopedLatencyProfileFromClientMetadata(t *testing.T
 			TLSStatus:       model.EdgeTLSStatusReady,
 		},
 	} {
-		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+		if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, node); err != nil {
 			t.Fatalf("record edge heartbeat: %v", err)
 		}
 	}
@@ -2162,7 +2162,7 @@ func TestEdgeDNSBundleHoldsLatencyAwareDecisionDuringCooldown(t *testing.T) {
 			TLSStatus:       model.EdgeTLSStatusReady,
 		},
 	} {
-		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+		if err := recordActiveEdgeHeartbeatForAPITest(t, storeState, node); err != nil {
 			t.Fatalf("record edge heartbeat: %v", err)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -119,9 +120,12 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		requestedEdgeGroupID = edgeGroupIDFromEdgeID(options.EdgeID)
 	}
 	if requestedEdgeGroupID != "" && !healthyEdgeGroups[requestedEdgeGroupID] {
-		nodes, _, err := s.store.ListEdgeNodes(requestedEdgeGroupID)
+		nodes, _, err := s.store.ListActiveEdgeNodes(requestedEdgeGroupID)
 		if err != nil {
-			return model.EdgeRouteBundle{}, err
+			if !errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+				return model.EdgeRouteBundle{}, err
+			}
+			nodes = nil
 		}
 		now := time.Now().UTC()
 		for _, node := range nodes {
@@ -1113,8 +1117,11 @@ func (s *Server) edgeRouteHealthyEdgeGroupInventory() (map[string]bool, map[stri
 }
 
 func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string, map[string]bool, map[string]int, error) {
-	nodes, _, err := s.store.ListEdgeNodes("")
+	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
+		if errors.Is(err, store.ErrEdgeInstanceFencingNotReady) {
+			return map[string]bool{}, map[string][]string{}, map[string]bool{}, map[string]int{}, nil
+		}
 		return nil, nil, nil, nil, err
 	}
 	healthyBeforeQuarantine := make(map[string]bool)

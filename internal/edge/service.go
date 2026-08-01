@@ -110,6 +110,7 @@ type Status struct {
 	DegradedReason         string     `json:"degraded_reason,omitempty"`
 	StaleCache             bool       `json:"stale_cache"`
 	MaxStaleExceeded       bool       `json:"max_stale_exceeded,omitempty"`
+	FailureClass           string     `json:"failure_class,omitempty"`
 	CachePath              string     `json:"cache_path,omitempty"`
 	CaddyEnabled           bool       `json:"caddy_enabled,omitempty"`
 	CaddyListenAddr        string     `json:"caddy_listen_addr,omitempty"`
@@ -2935,6 +2936,9 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 	body := map[string]any{
 		"edge_id":                  strings.TrimSpace(s.Config.EdgeID),
 		"edge_group_id":            strings.TrimSpace(s.Config.EdgeGroupID),
+		"slot":                     strings.TrimSpace(s.Config.EdgeSlot),
+		"instance_uid":             strings.TrimSpace(s.Config.EdgeInstanceUID),
+		"release_epoch":            strings.TrimSpace(s.Config.EdgeReleaseEpoch),
 		"workload_mode":            strings.TrimSpace(s.Config.WorkloadMode),
 		"region":                   strings.TrimSpace(s.Config.Region),
 		"country":                  strings.TrimSpace(s.Config.Country),
@@ -2960,6 +2964,9 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 		"healthy":                  status.Healthy,
 		"draining":                 s.Config.Draining,
 		"last_error":               firstNonEmpty(strings.TrimSpace(status.LastError), strings.TrimSpace(status.CaddyLastError)),
+	}
+	if failureClass := strings.TrimSpace(status.FailureClass); failureClass != "" {
+		body["failure_class"] = failureClass
 	}
 	if len(performanceSamples) > 0 {
 		body["performance_samples"] = performanceSamples
@@ -3459,6 +3466,9 @@ func (s *Service) heartbeatEnabled() bool {
 		strings.TrimSpace(s.Config.EdgeToken) != "" &&
 		strings.TrimSpace(s.Config.EdgeID) != "" &&
 		strings.TrimSpace(s.Config.EdgeGroupID) != "" &&
+		strings.TrimSpace(s.Config.EdgeSlot) != "" &&
+		strings.TrimSpace(s.Config.EdgeInstanceUID) != "" &&
+		strings.TrimSpace(s.Config.EdgeReleaseEpoch) != "" &&
 		s.heartbeatInterval() > 0
 }
 
@@ -3736,6 +3746,9 @@ func (s *Service) recordSyncError(err error) {
 	message := s.redact(err.Error())
 	s.snapshot.LastSyncAt = &now
 	s.snapshot.LastError = message
+	if errors.Is(err, bundleauth.ErrInvalidSignature) || errors.Is(err, bundleauth.ErrMissingSignature) {
+		s.snapshot.FailureClass = model.EdgeInstanceFailureSignatureInvalid
+	}
 	if s.bundle != nil {
 		s.snapshot.StaleCache = true
 		s.snapshot.Status = "stale"

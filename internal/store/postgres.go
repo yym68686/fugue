@@ -837,6 +837,71 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_nodes_edge_group ON fugue_edge_nodes (edge_group_id, updated_at DESC)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_edge_nodes_token_hash ON fugue_edge_nodes (token_hash) WHERE token_hash <> ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_nodes_last_seen ON fugue_edge_nodes (last_seen_at DESC)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_edge_nodes_id_group ON fugue_edge_nodes (id, edge_group_id)`,
+	`CREATE OR REPLACE FUNCTION fugue_reject_legacy_edge_heartbeat_write()
+	RETURNS trigger
+	LANGUAGE plpgsql
+	AS $$
+	BEGIN
+		IF EXISTS (
+			SELECT 1 FROM fugue_meta
+			WHERE key = 'edge_instance_fencing_schema' AND value = 'edge-instance-fencing/v1'
+		) AND (
+			NEW.last_heartbeat_at IS DISTINCT FROM OLD.last_heartbeat_at OR
+			NEW.healthy IS DISTINCT FROM OLD.healthy OR
+			NEW.status IS DISTINCT FROM OLD.status OR
+			NEW.route_bundle_version IS DISTINCT FROM OLD.route_bundle_version OR
+			NEW.dns_bundle_version IS DISTINCT FROM OLD.dns_bundle_version OR
+			NEW.serving_generation IS DISTINCT FROM OLD.serving_generation OR
+			NEW.lkg_generation IS DISTINCT FROM OLD.lkg_generation OR
+			NEW.caddy_route_count IS DISTINCT FROM OLD.caddy_route_count OR
+			NEW.caddy_applied_version IS DISTINCT FROM OLD.caddy_applied_version OR
+			NEW.caddy_last_error IS DISTINCT FROM OLD.caddy_last_error OR
+			NEW.cache_status IS DISTINCT FROM OLD.cache_status OR
+			NEW.tls_status IS DISTINCT FROM OLD.tls_status OR
+			NEW.tls_last_message IS DISTINCT FROM OLD.tls_last_message OR
+			NEW.last_error IS DISTINCT FROM OLD.last_error
+		) THEN
+			RAISE EXCEPTION 'legacy flat edge heartbeat writes are fenced by edge-instance-fencing/v1'
+				USING ERRCODE = '55000';
+		END IF;
+		RETURN NEW;
+	END;
+	$$`,
+	`DROP TRIGGER IF EXISTS trg_fugue_reject_legacy_edge_heartbeat_write ON fugue_edge_nodes`,
+	`CREATE TRIGGER trg_fugue_reject_legacy_edge_heartbeat_write
+	BEFORE UPDATE ON fugue_edge_nodes
+	FOR EACH ROW EXECUTE FUNCTION fugue_reject_legacy_edge_heartbeat_write()`,
+	`CREATE TABLE IF NOT EXISTS fugue_edge_active_epochs (
+		edge_group_id TEXT PRIMARY KEY REFERENCES fugue_edge_groups(id) ON DELETE CASCADE,
+		slot TEXT NOT NULL CHECK (slot IN ('a', 'b', 'direct')),
+		release_epoch TEXT NOT NULL CHECK (btrim(release_epoch) <> ''),
+		fence_sequence BIGINT NOT NULL CHECK (fence_sequence > 0),
+		min_healthy_instances INTEGER NOT NULL CHECK (min_healthy_instances BETWEEN 1 AND 64),
+		activated_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS fugue_edge_node_instances (
+		edge_id TEXT NOT NULL,
+		edge_group_id TEXT NOT NULL REFERENCES fugue_edge_groups(id) ON DELETE CASCADE,
+		slot TEXT NOT NULL CHECK (slot IN ('a', 'b', 'direct', 'legacy')),
+		instance_uid TEXT NOT NULL CHECK (btrim(instance_uid) <> ''),
+		release_epoch TEXT NOT NULL CHECK (btrim(release_epoch) <> ''),
+		node_json JSONB NOT NULL CHECK (jsonb_typeof(node_json) = 'object'),
+		failure_class TEXT NOT NULL DEFAULT '',
+		effective_healthy BOOLEAN NOT NULL DEFAULT false,
+		consecutive_healthy INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_healthy >= 0),
+		consecutive_unhealthy INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_unhealthy >= 0),
+		health_state_since TIMESTAMPTZ NULL,
+		last_heartbeat_at TIMESTAMPTZ NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (edge_id, edge_group_id, slot, instance_uid, release_epoch),
+		FOREIGN KEY (edge_id, edge_group_id) REFERENCES fugue_edge_nodes(id, edge_group_id) ON DELETE CASCADE
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_instances_active ON fugue_edge_node_instances (edge_group_id, slot, release_epoch, updated_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_instances_edge_id ON fugue_edge_node_instances (edge_id, updated_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_edge_performance_samples (
 		id TEXT PRIMARY KEY,
 		edge_id TEXT NOT NULL DEFAULT '',

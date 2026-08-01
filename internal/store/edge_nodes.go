@@ -213,6 +213,17 @@ func (s *Store) UpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode) 
 		applyEdgeNodeControlPatch(&node, patch)
 		node.UpdatedAt = time.Now().UTC()
 		state.EdgeNodes[index] = node
+		for instanceIndex := range state.EdgeNodeInstances {
+			if normalizeEdgeID(state.EdgeNodeInstances[instanceIndex].EdgeID) != edgeID {
+				continue
+			}
+			applyEdgeNodeControlPatch(&state.EdgeNodeInstances[instanceIndex].Node, patch)
+			if state.EdgeNodeInstances[instanceIndex].Node.Draining {
+				state.EdgeNodeInstances[instanceIndex].EffectiveHealthy = false
+				state.EdgeNodeInstances[instanceIndex].ConsecutiveHealthy = 0
+			}
+			state.EdgeNodeInstances[instanceIndex].UpdatedAt = node.UpdatedAt
+		}
 		upsertEdgeGroupForNode(state, node, node.UpdatedAt)
 		out = redactEdgeNode(node)
 		group = edgeGroupSummary(node.EdgeGroupID, state.EdgeGroups, state.EdgeNodes)

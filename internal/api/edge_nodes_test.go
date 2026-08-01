@@ -16,12 +16,24 @@ import (
 func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	t.Parallel()
 
-	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{ID: "edge-us-1", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthUnknown}); err != nil {
+		t.Fatalf("create test control identity: %v", err)
+	}
+	if _, err := storeState.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
+		EdgeGroupID: "edge-group-country-us", Slot: model.EdgeSlotDirect,
+		ReleaseEpoch: "test-edge-group-country-us", FenceSequence: 1,
+	}); err != nil {
+		t.Fatalf("put active test epoch: %v", err)
+	}
 
 	heartbeat := httptest.NewRecorder()
 	body := map[string]any{
 		"edge_id":              "edge-us-1",
 		"edge_group_id":        "edge-group-country-us",
+		"slot":                 model.EdgeSlotDirect,
+		"instance_uid":         "test-edge-us-1",
+		"release_epoch":        "test-edge-group-country-us",
 		"region":               "us-east",
 		"country":              "US",
 		"public_ipv4":          "203.0.113.10",
@@ -47,8 +59,9 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
 	}
 	var heartbeatResponse struct {
-		Node     model.EdgeNode `json:"node"`
-		Accepted bool           `json:"accepted"`
+		Node     model.EdgeNode         `json:"node"`
+		Instance model.EdgeNodeInstance `json:"instance"`
+		Accepted bool                   `json:"accepted"`
 	}
 	mustDecodeJSON(t, heartbeat, &heartbeatResponse)
 	if !heartbeatResponse.Accepted ||
@@ -60,7 +73,9 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 		heartbeatResponse.Node.TLSStatus != model.EdgeTLSStatusReady ||
 		heartbeatResponse.Node.TLSLastMessage != "static platform certificate loaded" ||
 		heartbeatResponse.Node.TLSReadyAt == nil ||
-		heartbeatResponse.Node.LastHeartbeatAt == nil {
+		heartbeatResponse.Node.LastHeartbeatAt == nil ||
+		heartbeatResponse.Instance.InstanceUID != "test-edge-us-1" ||
+		heartbeatResponse.Instance.EffectiveHealthy {
 		t.Fatalf("unexpected heartbeat response: %+v", heartbeatResponse)
 	}
 
@@ -78,8 +93,8 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	}
 	if len(listResponse.Groups) != 1 ||
 		listResponse.Groups[0].ID != "edge-group-country-us" ||
-		!listResponse.Groups[0].HasHealthyNodes ||
-		listResponse.Groups[0].HealthyNodeCount != 1 {
+		listResponse.Groups[0].HasHealthyNodes ||
+		listResponse.Groups[0].HealthyNodeCount != 0 {
 		t.Fatalf("unexpected edge group summary: %+v", listResponse.Groups)
 	}
 
@@ -92,7 +107,7 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 		Group model.EdgeGroup `json:"group"`
 	}
 	mustDecodeJSON(t, get, &getResponse)
-	if getResponse.Node.ID != "edge-us-1" || !getResponse.Group.HasHealthyNodes {
+	if getResponse.Node.ID != "edge-us-1" || getResponse.Group.HasHealthyNodes {
 		t.Fatalf("unexpected edge node get response: %+v", getResponse)
 	}
 }
@@ -211,6 +226,16 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 		heartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", node)
 		if heartbeat.Code != http.StatusOK {
 			t.Fatalf("expected heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
+		}
+		groupID, _ := node["edge_group_id"].(string)
+		if _, err := storeState.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
+			EdgeGroupID: groupID, Slot: model.EdgeSlotDirect, ReleaseEpoch: "test-" + groupID, FenceSequence: 1,
+		}); err != nil {
+			t.Fatalf("put active test epoch: %v", err)
+		}
+		heartbeat = performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", node)
+		if heartbeat.Code != http.StatusOK {
+			t.Fatalf("expected stable heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
 		}
 	}
 	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
@@ -372,8 +397,8 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 	if gate := gates["edge-de-1"]; !gate.Excluded {
 		t.Fatalf("expected service-excluded DE edge in hard gates, got %+v", response.HardGated)
 	}
-	if gate := gates["edge-jp-stale"]; gate.Reason != "edge node heartbeat stale" || gate.Healthy {
-		t.Fatalf("expected stale JP edge to be hard-gated by heartbeat freshness, got %+v in %+v", gate, response.HardGated)
+	if _, exists := gates["edge-jp-stale"]; exists {
+		t.Fatalf("legacy flat JP record must not enter active-epoch ranking, got %+v", response.HardGated)
 	}
 }
 
@@ -553,7 +578,13 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 	t.Parallel()
 
-	_, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, edgeToken, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID: "vps-591f4447", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthUnknown,
+	})
+	if err != nil {
+		t.Fatalf("create edge token: %v", err)
+	}
 	server.clusterNodeInventoryCache.set(clusterNodeInventoryCacheKey, []clusterNodeSnapshot{{
 		node: model.ClusterNode{
 			Name:       "vps-591f4447",
@@ -569,6 +600,9 @@ func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 	body := map[string]any{
 		"edge_id":              "vps-591f4447",
 		"edge_group_id":        "edge-group-country-us",
+		"slot":                 model.EdgeSlotB,
+		"instance_uid":         "pod-uid-b",
+		"release_epoch":        "pdp-release-b",
 		"route_bundle_version": "routegen_first",
 		"caddy_route_count":    3,
 		"status":               model.EdgeHealthHealthy,
@@ -579,7 +613,7 @@ func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal heartbeat: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", bytes.NewReader(payload))
+	req := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token="+edgeToken, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	server.Handler().ServeHTTP(heartbeat, req)
 	if heartbeat.Code != http.StatusOK {
@@ -595,6 +629,50 @@ func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 		heartbeatResponse.Node.MeshIP != "100.64.0.10" {
 		t.Fatalf("expected cluster node endpoint discovery, got %+v", heartbeatResponse.Node)
 	}
+}
+
+func TestEdgeHeartbeatRejectsLegacyOrMismatchedInstanceIdentity(t *testing.T) {
+	t.Parallel()
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, edgeToken, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID: "edge-us-1", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthUnknown,
+	})
+	if err != nil {
+		t.Fatalf("create edge token: %v", err)
+	}
+	base := map[string]any{
+		"edge_id": "edge-us-1", "edge_group_id": "edge-group-country-us",
+		"status": model.EdgeHealthHealthy, "healthy": true,
+	}
+	legacy := performRawJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token="+edgeToken, base)
+	if legacy.Code != http.StatusBadRequest {
+		t.Fatalf("legacy heartbeat must fail closed, got %d body=%s", legacy.Code, legacy.Body.String())
+	}
+	mismatched := map[string]any{}
+	for key, value := range base {
+		mismatched[key] = value
+	}
+	mismatched["edge_id"] = "edge-us-other"
+	mismatched["slot"] = model.EdgeSlotB
+	mismatched["instance_uid"] = "pod-uid-b"
+	mismatched["release_epoch"] = "pdp-release-b"
+	recorder := performRawJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token="+edgeToken, mismatched)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("mismatched scoped edge identity must fail closed, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func performRawJSONRequest(t *testing.T, server *Server, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(recorder, req)
+	return recorder
 }
 
 func TestEdgeNodeDesiredStateAndControlEndpoints(t *testing.T) {
@@ -823,8 +901,8 @@ func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 	allowedHeartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token="+token, bytes.NewReader(sameGroupBody))
 	allowedHeartbeatReq.Header.Set("Content-Type", "application/json")
 	server.Handler().ServeHTTP(allowedHeartbeat, allowedHeartbeatReq)
-	if allowedHeartbeat.Code != http.StatusOK {
-		t.Fatalf("expected scoped token same-group heartbeat to succeed, got %d body=%s", allowedHeartbeat.Code, allowedHeartbeat.Body.String())
+	if allowedHeartbeat.Code != http.StatusForbidden {
+		t.Fatalf("expected scoped token mismatched instance heartbeat to fail closed, got %d body=%s", allowedHeartbeat.Code, allowedHeartbeat.Body.String())
 	}
 
 	forbiddenHeartbeat := httptest.NewRecorder()

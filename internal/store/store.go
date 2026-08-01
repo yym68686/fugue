@@ -142,10 +142,16 @@ func (s *Store) Init() error {
 		if err := s.pgRepairAppStatuses(); err != nil {
 			return err
 		}
+		if err := s.pgEnsureEdgeInstanceFencing(); err != nil {
+			return err
+		}
 		return nil
 	}
 	return s.withFileLockedState(true, func(state *model.State) error {
 		ensureDefaults(state)
+		if err := migrateLegacyEdgeInstancesInState(state, time.Now().UTC()); err != nil {
+			return err
+		}
 		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
 		if err := seedDefaultDataBackendFromEnvInState(state); err != nil {
@@ -178,10 +184,10 @@ func (s *Store) CheckReadiness(ctx context.Context) error {
 		if err := s.db.PingContext(pingCtx); err != nil {
 			return fmt.Errorf("ping postgres: %w", err)
 		}
-		return nil
+		return s.pgVerifyEdgeInstanceFencing(pingCtx)
 	}
 	return s.withFileLockedState(false, func(state *model.State) error {
-		return nil
+		return verifyEdgeInstanceState(state)
 	})
 }
 

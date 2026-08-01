@@ -3412,6 +3412,9 @@ type State struct {
 	EdgeTLSCertificates        []EdgeTLSCertificate        `json:"edge_tls_certificates,omitempty"`
 	EdgeGroups                 []EdgeGroup                 `json:"edge_groups,omitempty"`
 	EdgeNodes                  []EdgeNode                  `json:"edge_nodes,omitempty"`
+	EdgeNodeInstances          []EdgeNodeInstance          `json:"edge_node_instances,omitempty"`
+	EdgeActiveEpochs           []EdgeActiveEpoch           `json:"edge_active_epochs,omitempty"`
+	EdgeInstanceFencingSchema  string                      `json:"edge_instance_fencing_schema,omitempty"`
 	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`
 	HostedZones                []HostedZone                `json:"hosted_zones,omitempty"`
 	DNSRecords                 []DNSRecord                 `json:"dns_records,omitempty"`

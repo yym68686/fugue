@@ -402,7 +402,7 @@ func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts 
 }
 
 func (s *Server) buildEdgeTLSReadinessPreflightCheck(ctx context.Context, principal model.Principal) model.DNSDelegationPreflightCheck {
-	nodes, _, err := s.store.ListEdgeNodes("")
+	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return model.DNSDelegationPreflightCheck{
 			Name:    "edge_tls_ready",
