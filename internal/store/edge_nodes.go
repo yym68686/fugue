@@ -146,6 +146,9 @@ func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.
 	var out model.EdgeNode
 	var group model.EdgeGroup
 	err = s.withLockedState(true, func(state *model.State) error {
+		if state.EdgeActivation != nil && state.EdgeActivation.Phase == model.EdgeActivationPhaseEnforced {
+			return ErrConflict
+		}
 		now := time.Now().UTC()
 		index := findEdgeNode(state, node.ID)
 		if index >= 0 {

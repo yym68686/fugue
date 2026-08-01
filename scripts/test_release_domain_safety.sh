@@ -9193,6 +9193,64 @@ if body.count(needle) != 1:
 path.write_text(body.replace(needle, needle + guard, 1))
 PY
   image_cache_strategy_target_fingerprints_match || fail "exact future guarded source-commit chart fingerprint must pass"
+
+  content_drift_repo="$(mktemp -d "${fingerprint_repo}/content-drift.XXXXXX")"
+  cp -R "${fingerprint_repo}/deploy" "${content_drift_repo}/deploy"
+  printf '\n{{/* unrelated helper mutation */}}\n' >>"${content_drift_repo}/deploy/helm/fugue/templates/_helpers.tpl"
+  if (REPO_ROOT="${content_drift_repo}"; image_cache_strategy_target_fingerprints_match); then
+    fail "chart fingerprint must reject exact-content drift"
+  fi
+
+  extra_file_repo="$(mktemp -d "${fingerprint_repo}/extra-file.XXXXXX")"
+  cp -R "${fingerprint_repo}/deploy" "${extra_file_repo}/deploy"
+  printf '{{/* unexpected chart file */}}\n' >"${extra_file_repo}/deploy/helm/fugue/templates/fingerprint-extra.yaml"
+  if (REPO_ROOT="${extra_file_repo}"; image_cache_strategy_target_fingerprints_match); then
+    fail "chart fingerprint must reject an extra chart file"
+  fi
+
+  missing_file_repo="$(mktemp -d "${fingerprint_repo}/missing-file.XXXXXX")"
+  cp -R "${fingerprint_repo}/deploy" "${missing_file_repo}/deploy"
+  python3 - "${missing_file_repo}/deploy/helm/fugue/templates/service.yaml" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).unlink()
+PY
+  if (REPO_ROOT="${missing_file_repo}"; image_cache_strategy_target_fingerprints_match); then
+    fail "chart fingerprint must reject a missing chart file"
+  fi
+
+  near_miss_repo="$(mktemp -d "${fingerprint_repo}/near-miss.XXXXXX")"
+  cp -R "${fingerprint_repo}/deploy" "${near_miss_repo}/deploy"
+  python3 - "${near_miss_repo}/deploy/helm/fugue/templates/deployment.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+needle = "fugue.pro/source-commit:"
+if body.count(needle) != 1:
+    raise SystemExit("guarded source-commit chart fixture drifted")
+path.write_text(body.replace(needle, "fugue.pro/source-commit-near-miss:", 1))
+PY
+  if (REPO_ROOT="${near_miss_repo}"; image_cache_strategy_target_fingerprints_match); then
+    fail "chart fingerprint must reject a one-field near miss"
+  fi
+
+  role_mismatch_repo="$(mktemp -d "${fingerprint_repo}/role-mismatch.XXXXXX")"
+  cp -R "${fingerprint_repo}/deploy" "${role_mismatch_repo}/deploy"
+  python3 - "${role_mismatch_repo}/deploy/helm/fugue/values.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+body = path.read_text()
+block = 'edgeActivation:\n  enabled: false\n  signingSecretName: ""\n\n'
+if body.count(block) != 1:
+    raise SystemExit("edge activation values fixture drifted")
+path.write_text(body.replace(block, "", 1))
+PY
+  if (REPO_ROOT="${role_mismatch_repo}"; image_cache_strategy_target_fingerprints_match); then
+    fail "chart fingerprint must reject a legacy-values/new-tree role mismatch"
+  fi
+
   printf '\n{{/* unrelated helper mutation */}}\n' >>"${fingerprint_repo}/deploy/helm/fugue/templates/_helpers.tpl"
   if image_cache_strategy_target_fingerprints_match; then
     fail "image-cache strategy migration fingerprint must reject any shared chart runtime mutation"

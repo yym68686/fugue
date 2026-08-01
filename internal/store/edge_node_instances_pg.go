@@ -29,6 +29,19 @@ func (s *Store) pgEnsureEdgeInstanceFencing() error {
 		return fmt.Errorf("begin edge instance migration: %w", err)
 	}
 	defer tx.Rollback()
+	now, err := pgEdgeServerTime(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defaultActivation := defaultEdgeActivationState(now)
+	defaultActivationJSON, err := json.Marshal(defaultActivation)
+	if err != nil {
+		return fmt.Errorf("encode default edge activation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fugue_edge_activation (singleton, phase, generation, state_json, created_at, updated_at)
+VALUES (true,$1,$2,$3,$4,$4) ON CONFLICT (singleton) DO NOTHING`, defaultActivation.Phase, defaultActivation.Generation, defaultActivationJSON, now); err != nil {
+		return fmt.Errorf("ensure default edge activation: %w", err)
+	}
 
 	var schema string
 	err = tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1 FOR UPDATE`, edgeInstanceFencingMetaKey).Scan(&schema)
@@ -39,7 +52,7 @@ func (s *Store) pgEnsureEdgeInstanceFencing() error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit edge instance migration check: %w", err)
 		}
-		return s.pgVerifyEdgeInstanceFencing(ctx)
+		return s.pgVerifyEdgeActivationReadiness(ctx)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read edge instance schema marker: %w", err)
@@ -78,14 +91,6 @@ FROM fugue_edge_nodes ORDER BY id FOR UPDATE`)
 		return fmt.Errorf("iterate legacy edge nodes for migration: %w", err)
 	}
 	rows.Close()
-	now, err := pgEdgeServerTime(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE fugue_edge_nodes
-SET healthy=false, status=$1, last_heartbeat_at=NULL, updated_at=$2`, model.EdgeHealthUnknown, now); err != nil {
-		return fmt.Errorf("fence legacy flat edge health: %w", err)
-	}
 	for _, node := range legacyNodes {
 		node.TokenHash = ""
 		nodeJSON, err := json.Marshal(node)
@@ -114,44 +119,11 @@ VALUES ($1,$2,$3)`, edgeInstanceFencingMetaKey, model.EdgeInstanceFencingSchemaV
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit edge instance migration: %w", err)
 	}
-	return s.pgVerifyEdgeInstanceFencing(ctx)
+	return s.pgVerifyEdgeActivationReadiness(ctx)
 }
 
 func (s *Store) pgVerifyEdgeInstanceFencing(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	if err != nil {
-		return fmt.Errorf("begin edge instance readiness snapshot: %w", err)
-	}
-	defer tx.Rollback()
-	var schema string
-	if err := tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, edgeInstanceFencingMetaKey).Scan(&schema); err != nil {
-		return fmt.Errorf("read edge instance schema marker: %w", err)
-	}
-	if schema != model.EdgeInstanceFencingSchemaV1 {
-		return fmt.Errorf("%w: postgres schema marker mismatch", ErrEdgeInstanceFencingNotReady)
-	}
-	instances, err := pgReadEdgeNodeInstances(ctx, tx, "")
-	if err != nil {
-		return err
-	}
-	epochs, err := pgReadEdgeActiveEpochs(ctx, tx, "")
-	if err != nil {
-		return err
-	}
-	controls, err := pgReadEdgeControlNodes(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if err := verifyEdgeInstanceMaterial(instances, epochs, controls); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit edge instance readiness snapshot: %w", err)
-	}
-	return nil
+	return s.pgVerifyEdgeActivationReadiness(ctx)
 }
 
 func (s *Store) pgPutEdgeActiveEpoch(epoch model.EdgeActiveEpoch) (model.EdgeActiveEpoch, error) {
@@ -237,6 +209,10 @@ func (s *Store) pgListEdgeNodeInstances(edgeGroupID string) ([]model.EdgeNodeIns
 		return nil, nil, fmt.Errorf("begin edge instance inventory snapshot: %w", err)
 	}
 	defer tx.Rollback()
+	activation, err := pgReadEdgeActivation(ctx, tx, false)
+	if err != nil {
+		return nil, nil, err
+	}
 	instances, err := pgReadEdgeNodeInstances(ctx, tx, edgeGroupID)
 	if err != nil {
 		return nil, nil, err
@@ -249,7 +225,7 @@ func (s *Store) pgListEdgeNodeInstances(edgeGroupID string) ([]model.EdgeNodeIns
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := verifyEdgeInstanceMaterial(instances, epochs, controls); err != nil {
+	if err := verifyEdgeInstanceMaterialForActivation(instances, epochs, controls, activation); err != nil {
 		return nil, nil, err
 	}
 	if err := tx.Commit(); err != nil {

@@ -1166,13 +1166,16 @@ func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*s
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
-		AppBaseDomain:          appBaseDomain,
-		APIPublicDomain:        "api.example.com",
-		EdgeQualityRankingMode: "active",
-		EdgeTLSAskToken:        "edge-secret",
-		AllowLegacyEdgeToken:   true,
-		BundleSigningKey:       "platform-artifact-api-test-signing-key",
-		BundleSigningKeyID:     "platform-artifact-api-test",
+		AppBaseDomain:                          appBaseDomain,
+		APIPublicDomain:                        "api.example.com",
+		EdgeQualityRankingMode:                 "active",
+		EdgeTLSAskToken:                        "edge-secret",
+		AllowLegacyEdgeToken:                   true,
+		BundleSigningKey:                       "platform-artifact-api-test-signing-key",
+		BundleSigningKeyID:                     "platform-artifact-api-test",
+		EdgeActivationPlanSigningKey:           "edge-activation-api-test-signing-key-material",
+		EdgeActivationPlanSigningKeyID:         "public-data-plane-release",
+		EdgeActivationPlanSigningKeyGeneration: "generation-test-0001",
 	})
 	resolver := &fakeAppDomainResolver{
 		cname: map[string]string{},

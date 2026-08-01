@@ -3230,19 +3230,22 @@ image_cache_strategy_target_fingerprints_match() {
   file_sha256_matches \
     "${REPO_ROOT}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" \
     "75fdaa91fff878ca633d25671c3a2ae4c06753cb58e3ed9b9804176c4de145f7" || return 1
-  file_sha256_matches \
-    "${REPO_ROOT}/deploy/helm/fugue/values.yaml" \
-    "3177bf44e165d087becc8d6fe626af08b32f305fb3c2435b8e1ddd19abcab92a" || return 1
   CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" \
-    EXPECTED_SHA256_CURRENT="1b6f284f64360bc920518f8c5971eb4bcffadfac1bcd0177b8bd95bb213c5938" \
-    EXPECTED_SHA256_SOURCE_COMMIT="6b6299dbbd1545472c2bc0bd537b05533a2c5fce098d903cb1681a65b16d72ba" \
-    EXPECTED_SHA256_SOURCE_COMMIT_GUARDED="9a7c34f111e9d9e52fdf83d706c9f0f027519109929bd5ca3bb33685b75216b6" \
+    EXPECTED_VALUES_SHA256_LEGACY="3177bf44e165d087becc8d6fe626af08b32f305fb3c2435b8e1ddd19abcab92a" \
+    EXPECTED_TREE_SHA256_LEGACY_CURRENT="1b6f284f64360bc920518f8c5971eb4bcffadfac1bcd0177b8bd95bb213c5938" \
+    EXPECTED_TREE_SHA256_LEGACY_SOURCE_COMMIT="6b6299dbbd1545472c2bc0bd537b05533a2c5fce098d903cb1681a65b16d72ba" \
+    EXPECTED_TREE_SHA256_LEGACY_SOURCE_COMMIT_GUARDED="9a7c34f111e9d9e52fdf83d706c9f0f027519109929bd5ca3bb33685b75216b6" \
+    EXPECTED_VALUES_SHA256_EDGE_ACTIVATION="c32e25f2ea9f76a14ad62167293e32dba8ef3ec1b910e55c24cafc7054da7ff3" \
+    EXPECTED_TREE_SHA256_EDGE_ACTIVATION_CURRENT="2c3dd960833a17c8db085772aecec602f57a3353d09f9b769f7fdda85f458da8" \
+    EXPECTED_TREE_SHA256_EDGE_ACTIVATION_SOURCE_COMMIT="a33dd329d4846248cf124dfb07c8f1c50ee0625e8c6dc352cf6967c8dd1dd00c" \
+    EXPECTED_TREE_SHA256_EDGE_ACTIVATION_SOURCE_COMMIT_GUARDED="198db7ca52e98da4defead934d94767891e0f69a925704d4e8d8bcc55e288c98" \
     python3 -c '
 import hashlib
 import os
 from pathlib import Path
 
 root = Path(os.environ["CHART_ROOT"])
+values_digest = hashlib.sha256((root / "values.yaml").read_bytes()).hexdigest()
 digest = hashlib.sha256()
 files = sorted(
     path for path in root.rglob("*")
@@ -3257,12 +3260,20 @@ for path in files:
     digest.update(relative)
     digest.update(len(content).to_bytes(8, "big"))
     digest.update(content)
-expected = {
-    os.environ["EXPECTED_SHA256_CURRENT"],
-    os.environ["EXPECTED_SHA256_SOURCE_COMMIT"],
-    os.environ["EXPECTED_SHA256_SOURCE_COMMIT_GUARDED"],
+expected_by_values = {
+    os.environ["EXPECTED_VALUES_SHA256_LEGACY"]: {
+        os.environ["EXPECTED_TREE_SHA256_LEGACY_CURRENT"],
+        os.environ["EXPECTED_TREE_SHA256_LEGACY_SOURCE_COMMIT"],
+        os.environ["EXPECTED_TREE_SHA256_LEGACY_SOURCE_COMMIT_GUARDED"],
+    },
+    os.environ["EXPECTED_VALUES_SHA256_EDGE_ACTIVATION"]: {
+        os.environ["EXPECTED_TREE_SHA256_EDGE_ACTIVATION_CURRENT"],
+        os.environ["EXPECTED_TREE_SHA256_EDGE_ACTIVATION_SOURCE_COMMIT"],
+        os.environ["EXPECTED_TREE_SHA256_EDGE_ACTIVATION_SOURCE_COMMIT_GUARDED"],
+    },
 }
-raise SystemExit(0 if digest.hexdigest() in expected else 1)
+expected_trees = expected_by_values.get(values_digest, set())
+raise SystemExit(0 if digest.hexdigest() in expected_trees else 1)
 '
 }
 

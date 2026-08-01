@@ -7,6 +7,8 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
 # shellcheck source=scripts/lib/release_image_ref.sh
 source "${REPO_ROOT}/scripts/lib/release_image_ref.sh"
+# shellcheck source=scripts/lib/edge_activation.sh
+source "${REPO_ROOT}/scripts/lib/edge_activation.sh"
 
 log() {
   printf '[fugue-public-data-plane] %s\n' "$*"
@@ -951,6 +953,8 @@ patch = {
                 "annotations": {
                     "fugue.io/public-data-plane-release-id": release_id,
                     "fugue.io/public-data-plane-release-mode": "node-local-blue-green-worker",
+                    "fugue.io/edge-release-epoch": release_id,
+                    "fugue.io/edge-heartbeat-fenced": "false",
                 },
             },
             "spec": {
@@ -977,6 +981,69 @@ patch_inactive_worker() {
   fi
   kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null || return $?
   wait_daemonset_observed "${daemonset_name}" || return $?
+}
+
+unretire_edge_worker() {
+  local daemonset_name="$1"
+  local snapshot rv current
+  snapshot="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json)" || return 1
+  IFS=$'\t' read -r rv current < <(SNAPSHOT="${snapshot}" python3 -c '
+import json,os
+value=json.loads(os.environ["SNAPSHOT"]); meta=value.get("metadata") or {}; selector=(((value.get("spec") or {}).get("template") or {}).get("spec") or {}).get("nodeSelector") or {}
+print(str(meta.get("resourceVersion") or "")+"\t"+str(selector.get("fugue.io/edge-retired-release") or ""))
+') || return 1
+  [[ "${rv}" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "${current}" ]] || return 0
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=json -p "[{\"op\":\"test\",\"path\":\"/metadata/resourceVersion\",\"value\":\"${rv}\"},{\"op\":\"remove\",\"path\":\"/spec/template/spec/nodeSelector/fugue.io~1edge-retired-release\"}]" >/dev/null
+}
+
+fence_edge_worker_heartbeat() {
+  local daemonset_name="$1"
+  local pod
+  while IFS= read -r pod; do
+    pod="$(trim_field "${pod}")"
+    [[ -n "${pod}" ]] || continue
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" annotate --overwrite "pod/${pod}" fugue.io/edge-heartbeat-fenced=true >/dev/null || return 1
+  done < <(ready_pods_for_daemonset "${daemonset_name}")
+}
+
+scale_edge_worker_zero_cas() {
+  local daemonset_name="$1"
+  local release_id="$2"
+  local snapshot rv current
+  snapshot="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json)" || return 1
+  IFS=$'\t' read -r rv current < <(SNAPSHOT="${snapshot}" python3 -c '
+import json,os
+value=json.loads(os.environ["SNAPSHOT"]); meta=value.get("metadata") or {}; selector=(((value.get("spec") or {}).get("template") or {}).get("spec") or {}).get("nodeSelector") or {}
+print(str(meta.get("resourceVersion") or "")+"\t"+str(selector.get("fugue.io/edge-retired-release") or ""))
+') || return 1
+  [[ "${rv}" =~ ^[0-9]+$ ]] || return 1
+  if [[ -n "${current}" && "${current}" != "${release_id}" ]]; then
+    error "worker ${daemonset_name} is already retired by a different release"
+    return 1
+  fi
+  if [[ -z "${current}" ]]; then
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=json -p "[{\"op\":\"test\",\"path\":\"/metadata/resourceVersion\",\"value\":\"${rv}\"},{\"op\":\"add\",\"path\":\"/spec/template/spec/nodeSelector/fugue.io~1edge-retired-release\",\"value\":\"${release_id}\"}]" >/dev/null || return 1
+  fi
+  local deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )); do
+    [[ "$(daemonset_desired_count "${daemonset_name}")" == "0" ]] && return 0
+    sleep 2
+  done
+  error "retired worker ${daemonset_name} did not converge to desired=0"
+  return 1
+}
+
+isolate_inactive_edge_worker() {
+  local inactive_ds="$1"
+  local active_ds="$2"
+  # Never expand automated isolation when the serving slot is also unhealthy.
+  wait_daemonset_ready "${active_ds}" || {
+    error "both edge slots are unhealthy; refusing automated isolation"
+    return 1
+  }
+  fence_edge_worker_heartbeat "${inactive_ds}" || return 1
+  scale_edge_worker_zero_cas "${inactive_ds}" "failed-${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}"
 }
 
 delete_worker_pods() {
@@ -5573,9 +5640,21 @@ rollback_bluegreen_fronts() {
 abort_bluegreen_release() {
   local reason="$1"
   shift
-  local rollback_failed=false
+	local rollback_failed=false
 
   error "${reason}; aborting blue/green release and restoring original slots"
+  if [[ "${FUGUE_EDGE_ACTIVATION_ENABLED:-false}" == "true" && -n "${FUGUE_EDGE_ACTIVATION_PLAN_DIGEST:-}" ]]; then
+    if ! edge_activation_advance rollback "${FUGUE_EDGE_ACTIVATION_EXPECTED_FILE:-}" "" ""; then
+      error "durable route authority rollback failed; refusing to change Edge slots"
+      return 1
+    fi
+    local rollback_inventory="${FUGUE_EDGE_ACTIVATION_DIR}/rollback-authority.json"
+    edge_activation_get "${rollback_inventory}" || return 1
+    if ! edge_activation_wait_all_api_ack "${rollback_inventory}"; then
+      error "durable route authority rolled back but not every API replica acknowledged it; refusing Edge slot mutation"
+      return 1
+    fi
+  fi
   if ! rollback_bluegreen_fronts "$@"; then
     rollback_failed=true
   fi
@@ -5591,7 +5670,316 @@ abort_bluegreen_release() {
   return 1
 }
 
+prepare_edge_activation_candidate_record() {
+  [[ "${FUGUE_EDGE_ACTIVATION_ENABLED:-false}" == "true" ]] || return 0
+  local proposed_slots_json="$1"
+  local previous_slots_json="$2"
+  local record_name="${FUGUE_RELEASE_FULLNAME}-edge-activation-${GITHUB_RUN_ID:-local}"
+  local activation_dir="${FUGUE_EDGE_ACTIVATION_DIR:-}"
+  if [[ "${activation_dir}" != /* ]] || ! python3 - "${activation_dir}" <<'PY'
+import os
+import stat
+import sys
+
+try:
+    metadata = os.lstat(sys.argv[1])
+except OSError:
+    raise SystemExit(1)
+if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+    raise SystemExit(1)
+raise SystemExit(0 if stat.S_IMODE(metadata.st_mode) == 0o700 else 1)
+PY
+  then
+    edge_activation_error "FUGUE_EDGE_ACTIVATION_DIR must be an initialized absolute 0700 directory when edge activation is enabled"
+    return 1
+  fi
+  local record_file="${activation_dir}/candidate-record.json"
+  local inventory_file="${activation_dir}/phase0-inventory.json"
+  local create_json labeled_json
+  [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "false" ]] || {
+    edge_activation_log "dry-run: candidate activation record and phase transitions are read-only skipped"
+    return 0
+  }
+  [[ "${record_name}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#record_name} -le 253 ]] || {
+    edge_activation_error "candidate record name is invalid"
+    return 1
+  }
+  create_json="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" create configmap "${record_name}" \
+    --from-literal=release_id="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" \
+    --from-literal=mode="edge-activation-candidate-v1" \
+    --from-literal=proposed_active_slots="${proposed_slots_json}" \
+    --from-literal=previous_active_slots="${previous_slots_json}" \
+    --from-literal=edge_image_repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
+    --from-literal=edge_image_tag="${FUGUE_EDGE_IMAGE_TAG}" \
+    --from-literal=edge_image_digest="${FUGUE_EDGE_IMAGE_DIGEST}" \
+    --from-literal=git_sha="${GITHUB_SHA:-}" \
+    --dry-run=client -o json)" || return 1
+  labeled_json="$(RECORD_JSON="${create_json}" RELEASE_INSTANCE="${FUGUE_RELEASE_INSTANCE}" python3 -c '
+import json, os
+value=json.loads(os.environ["RECORD_JSON"])
+labels=value.setdefault("metadata",{}).setdefault("labels",{})
+labels.update({"app.kubernetes.io/instance":os.environ["RELEASE_INSTANCE"],"app.kubernetes.io/component":"edge-activation-candidate","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/edge-activation-schema":"v1"})
+print(json.dumps(value,separators=(",",":"),sort_keys=True))
+')" || return 1
+  if ! kubectl_cmd -n "${FUGUE_NAMESPACE}" create -f - <<<"${labeled_json}" >/dev/null 2>&1; then
+    # Resume is allowed only when the exact named immutable record already exists.
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" get "configmap/${record_name}" -o json >"${record_file}" || return 1
+    RECORD_FILE="${record_file}" EXPECTED_RELEASE="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" EXPECTED_PROPOSED="${proposed_slots_json}" EXPECTED_PREVIOUS="${previous_slots_json}" EXPECTED_REPO="${FUGUE_EDGE_IMAGE_REPOSITORY}" EXPECTED_TAG="${FUGUE_EDGE_IMAGE_TAG}" EXPECTED_DIGEST="${FUGUE_EDGE_IMAGE_DIGEST}" python3 - <<'PY' || return 1
+import json, os
+with open(os.environ["RECORD_FILE"], encoding="utf-8") as handle: value=json.load(handle)
+data=value.get("data") or {}; meta=value.get("metadata") or {}; labels=meta.get("labels") or {}
+expected={"release_id":os.environ["EXPECTED_RELEASE"],"mode":"edge-activation-candidate-v1","proposed_active_slots":os.environ["EXPECTED_PROPOSED"],"previous_active_slots":os.environ["EXPECTED_PREVIOUS"],"edge_image_repository":os.environ["EXPECTED_REPO"],"edge_image_tag":os.environ["EXPECTED_TAG"],"edge_image_digest":os.environ["EXPECTED_DIGEST"],"git_sha":os.environ.get("GITHUB_SHA","")}
+if data != expected or labels.get("fugue.io/edge-activation-schema") != "v1" or meta.get("deletionTimestamp"):
+    raise SystemExit("existing activation candidate record does not exactly match this release")
+PY
+  else
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" get "configmap/${record_name}" -o json >"${record_file}" || return 1
+  fi
+  chmod 600 "${record_file}"
+  edge_activation_get "${inventory_file}" || return 1
+  IFS=$'\t' read -r FUGUE_EDGE_ACTIVATION_RECORD_UID FUGUE_EDGE_ACTIVATION_RECORD_VERSION FUGUE_EDGE_ACTIVATION_RECORD_DIGEST FUGUE_EDGE_ACTIVATION_PLAN_DIGEST FUGUE_EDGE_ACTIVATION_LEGACY_DIGEST < <(
+    python3 - "${record_file}" "${inventory_file}" <<'PY'
+import hashlib,json,sys
+def digest(value):
+    return "sha256:"+hashlib.sha256(json.dumps(value,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+with open(sys.argv[1],encoding="utf-8") as h: record=json.load(h)
+with open(sys.argv[2],encoding="utf-8") as h: inventory=json.load(h)
+meta=record.get("metadata") or {}
+uid=str(meta.get("uid") or "").strip(); rv=str(meta.get("resourceVersion") or "").strip()
+if not uid or not rv.isdigit() or record.get("kind")!="ConfigMap" or meta.get("deletionTimestamp"):
+    raise SystemExit("activation candidate identity is invalid")
+record_material={"uid":uid,"resourceVersion":rv,"data":record.get("data") or {},"labels":meta.get("labels") or {}}
+record_digest=digest(record_material)
+legacy_digest=digest({"nodes":inventory.get("legacy_nodes") or [],"groups":inventory.get("legacy_groups") or []})
+plan_digest=digest({"record":record_digest,"legacy":legacy_digest})
+print("\t".join([uid,rv,record_digest,plan_digest,legacy_digest]))
+PY
+  ) || return 1
+  [[ -n "${FUGUE_EDGE_ACTIVATION_RECORD_UID}" && "${FUGUE_EDGE_ACTIVATION_RECORD_VERSION}" =~ ^[0-9]+$ ]] || return 1
+  FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST="${FUGUE_EDGE_ACTIVATION_RECORD_DIGEST}"
+  export FUGUE_EDGE_ACTIVATION_RECORD_UID FUGUE_EDGE_ACTIVATION_RECORD_VERSION FUGUE_EDGE_ACTIVATION_RECORD_DIGEST
+  export FUGUE_EDGE_ACTIVATION_PLAN_DIGEST FUGUE_EDGE_ACTIVATION_LEGACY_DIGEST FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST
+  edge_activation_advance "shadow" "" "" ""
+}
+
+recover_incomplete_edge_activation_before_release() {
+  [[ "${FUGUE_EDGE_ACTIVATION_ENABLED:-false}" == "true" ]] || return 0
+  local inventory="${FUGUE_EDGE_ACTIVATION_DIR}/startup-activation.json"
+  edge_activation_get "${inventory}" || return 1
+  local phase
+  phase="$(edge_activation_state_field "${inventory}" phase)" || return 1
+  case "${phase}" in
+    legacy-authoritative|active-epoch-enforced) return 0 ;;
+    shadow|active-epoch-fenced|active-epoch-authoritative) ;;
+    *) edge_activation_error "unknown durable activation phase at release start"; return 1 ;;
+  esac
+  local new_release_id="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}"
+  IFS=$'\t' read -r FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID FUGUE_EDGE_ACTIVATION_PLAN_DIGEST FUGUE_EDGE_ACTIVATION_RECORD_UID FUGUE_EDGE_ACTIVATION_RECORD_VERSION FUGUE_EDGE_ACTIVATION_RECORD_DIGEST FUGUE_EDGE_ACTIVATION_LEGACY_DIGEST FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST < <(python3 - "${inventory}" <<'PY'
+import hashlib,json,sys
+with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)["activation"]
+fields=[value.get("release_id"),value.get("plan_digest"),value.get("release_record_uid"),value.get("release_record_version"),value.get("release_record_digest"),value.get("legacy_snapshot_digest")]
+if not all(isinstance(item,str) and item for item in fields): raise SystemExit("incomplete durable activation cannot be recovered")
+evidence="sha256:"+hashlib.sha256(json.dumps(value,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+print("\t".join(fields+[evidence]))
+PY
+) || return 1
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID FUGUE_EDGE_ACTIVATION_PLAN_DIGEST FUGUE_EDGE_ACTIVATION_RECORD_UID FUGUE_EDGE_ACTIVATION_RECORD_VERSION FUGUE_EDGE_ACTIVATION_RECORD_DIGEST FUGUE_EDGE_ACTIVATION_LEGACY_DIGEST FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST
+  edge_activation_advance rollback "" "" "" || return 1
+  local rollback_inventory="${FUGUE_EDGE_ACTIVATION_DIR}/startup-rollback.json"
+  edge_activation_get "${rollback_inventory}" || return 1
+  edge_activation_wait_all_api_ack "${rollback_inventory}" || return 1
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${new_release_id}"
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+  edge_activation_log "recovered incomplete activation to its durable route LKG before any front/slot mutation"
+}
+
+collect_edge_activation_candidate_material() {
+  local proposed_slots_json="$1"
+  [[ "${FUGUE_EDGE_ACTIVATION_ENABLED:-false}" == "true" ]] || return 0
+  local inventory="${FUGUE_EDGE_ACTIVATION_DIR}/candidate-inventory.json"
+  local expected="${FUGUE_EDGE_ACTIVATION_DIR}/expected-instances.json"
+  local epochs="${FUGUE_EDGE_ACTIVATION_DIR}/candidate-epochs.json"
+  edge_activation_get "${inventory}" || return 1
+  INVENTORY="${inventory}" EXPECTED_OUT="${expected}" EPOCHS_OUT="${epochs}" PROPOSED_SLOTS="${proposed_slots_json}" RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" python3 - <<'PY' || return 1
+import datetime,json,os
+with open(os.environ["INVENTORY"],encoding="utf-8") as h: inventory=json.load(h)
+slots=json.loads(os.environ["PROPOSED_SLOTS"])
+if not isinstance(slots,dict) or not slots: raise SystemExit("proposed active slots are empty")
+allowed_slots=set(slots.values())
+if not allowed_slots <= {"a","b"}: raise SystemExit("proposed active slot is invalid")
+expected=[]
+for value in inventory.get("instances") or []:
+    node=value.get("node") or {}
+    if value.get("release_epoch") != os.environ["RELEASE_ID"] or value.get("slot") not in allowed_slots: continue
+    if not value.get("effective_healthy") or int(value.get("consecutive_healthy") or 0) < 2 or value.get("failure_class") or node.get("draining") or node.get("tls_status") != "ready":
+        raise SystemExit("candidate instance is not stably healthy, signature-clean, and TLS-ready")
+    expected.append({key:value.get(key) for key in ("edge_id","edge_group_id","slot","instance_uid","release_epoch")})
+groups={value["edge_group_id"] for value in expected}
+if len(groups) != len(slots) or len(expected) != len(groups):
+    raise SystemExit("candidate instance set is incomplete or ambiguous")
+active=inventory.get("active_epochs") or []
+sequence=max([int(value.get("fence_sequence") or 0) for value in active]+[0])+1
+epochs=[]
+for group in sorted(groups):
+    matches=[value for value in expected if value["edge_group_id"]==group]
+    slot={value["slot"] for value in matches}; release={value["release_epoch"] for value in matches}
+    if len(slot)!=1 or len(release)!=1: raise SystemExit("candidate group identity is ambiguous")
+    epochs.append({"edge_group_id":group,"slot":next(iter(slot)),"release_epoch":next(iter(release)),"fence_sequence":sequence,"min_healthy_instances":len(matches)})
+expected.sort(key=lambda v:(v["edge_group_id"],v["edge_id"],v["slot"],v["instance_uid"],v["release_epoch"]))
+for path,value in ((os.environ["EXPECTED_OUT"],expected),(os.environ["EPOCHS_OUT"],epochs)):
+    with open(path,"w",encoding="utf-8") as h: json.dump(value,h,separators=(",",":"),sort_keys=True); h.write("\n")
+PY
+  chmod 600 "${expected}" "${epochs}"
+  FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST="$(python3 - "${expected}" "${epochs}" "${FUGUE_EDGE_ACTIVATION_RECORD_DIGEST}" <<'PY'
+import hashlib,sys
+h=hashlib.sha256()
+for path in sys.argv[1:3]:
+    with open(path,"rb") as f: h.update(f.read())
+h.update(sys.argv[3].encode())
+print("sha256:"+h.hexdigest())
+PY
+)" || return 1
+  export FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST
+  FUGUE_EDGE_ACTIVATION_EXPECTED_FILE="${expected}"
+  FUGUE_EDGE_ACTIVATION_EPOCHS_FILE="${epochs}"
+  export FUGUE_EDGE_ACTIVATION_EXPECTED_FILE FUGUE_EDGE_ACTIVATION_EPOCHS_FILE
+  edge_activation_advance "active-epoch-fenced" "${expected}" "${epochs}" ""
+}
+
+edge_activation_api_replica_generation() {
+  local deployment="${FUGUE_RELEASE_FULLNAME}-api"
+  local snapshot="${FUGUE_EDGE_ACTIVATION_DIR}/api-generation.json"
+  local pods="${FUGUE_EDGE_ACTIVATION_DIR}/api-pods.json"
+  local after="${FUGUE_EDGE_ACTIVATION_DIR}/api-generation-after.json"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "deployment/${deployment}" -o json >"${snapshot}" || return 1
+  local selector
+  selector="$(python3 - "${snapshot}" <<'PY'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
+match=((value.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+if not match or not all(isinstance(k,str) and isinstance(v,str) and k and v for k,v in match.items()): raise SystemExit("API selector is invalid")
+print(",".join(f"{key}={match[key]}" for key in sorted(match)))
+PY
+)" || return 1
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json >"${pods}" || return 1
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "deployment/${deployment}" -o json >"${after}" || return 1
+  chmod 600 "${snapshot}" "${pods}" "${after}"
+  cmp -s "${snapshot}" "${after}" || {
+    edge_activation_error "API deployment drifted while replica acknowledgements were captured"
+    return 1
+  }
+  python3 - "${snapshot}" "${pods}" <<'PY'
+import hashlib,json,sys
+with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
+with open(sys.argv[2],encoding="utf-8") as h: pod_list=json.load(h)
+meta=value.get("metadata") or {}; spec=value.get("spec") or {}; status=value.get("status") or {}
+generation=int(meta.get("generation") or 0); desired=int(spec.get("replicas") or 0)
+if desired < 2 or int(status.get("observedGeneration") or 0)!=generation:
+    raise SystemExit("API deployment generation is not fully observed")
+for field in ("updatedReplicas","readyReplicas","availableReplicas"):
+    if int(status.get(field) or 0)!=desired: raise SystemExit("API replicas have not unanimously acknowledged the generation")
+containers=((spec.get("template") or {}).get("spec") or {}).get("containers") or []
+images={c.get("name"):c.get("image") for c in containers}
+pods=pod_list.get("items") if isinstance(pod_list,dict) else None
+if not isinstance(pods,list) or len(pods)!=desired: raise SystemExit("API Pod cohort contains an old or missing replica")
+pod_uids=[]
+for pod in pods:
+    pmeta=pod.get("metadata") or {}; pspec=pod.get("spec") or {}; pstatus=pod.get("status") or {}
+    if pmeta.get("deletionTimestamp") or not pmeta.get("uid"): raise SystemExit("API Pod identity is deleting or missing")
+    pimages={c.get("name"):c.get("image") for c in pspec.get("containers") or []}
+    if pimages != images: raise SystemExit("API Pod did not acknowledge the exact deployment image generation")
+    conditions={item.get("type"):item.get("status") for item in pstatus.get("conditions") or []}
+    if pstatus.get("phase")!="Running" or conditions.get("Ready")!="True": raise SystemExit("API Pod is not Running and Ready")
+    pod_uids.append(pmeta["uid"])
+identity={"uid":meta.get("uid"),"generation":generation,"replicas":desired,"images":sorted(images.items()),"pods":sorted(pod_uids)}
+print("api-"+hashlib.sha256(json.dumps(identity,separators=(",",":"),sort_keys=True).encode()).hexdigest())
+PY
+}
+
+edge_activation_wait_all_api_ack() {
+  local inventory="$1" snapshot="${FUGUE_EDGE_ACTIVATION_DIR}/api-ack-pods.json"
+  local expected_generation expected_authority expected_phase
+  IFS=$'\t' read -r expected_generation expected_authority expected_phase < <(python3 - "${inventory}" <<'PY'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)["activation"]
+print("\t".join([str(value.get("generation") or ""),str(value.get("route_authority") or ""),str(value.get("phase") or "")]))
+PY
+) || return 1
+  [[ "${expected_generation}" =~ ^[1-9][0-9]*$ && -n "${expected_authority}" && -n "${expected_phase}" ]] || return 1
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "app.kubernetes.io/instance=${FUGUE_RELEASE_INSTANCE},app.kubernetes.io/component=api" -o json >"${snapshot}" || return 1
+  local pods
+  pods="$(EXPECTED_SHA="${GITHUB_SHA:-}" python3 - "${snapshot}" <<'PY'
+import json,os,sys
+with open(sys.argv[1],encoding="utf-8") as h:value=json.load(h)
+pods=[]
+for pod in value.get("items") or []:
+    meta=pod.get("metadata") or {}; status=pod.get("status") or {}; conditions={x.get("type"):x.get("status") for x in status.get("conditions") or []}
+    if meta.get("deletionTimestamp") or status.get("phase")!="Running" or conditions.get("Ready")!="True" or (meta.get("annotations") or {}).get("fugue.pro/source-commit")!=os.environ["EXPECTED_SHA"]: raise SystemExit("mixed API Pod cohort")
+    pods.append(str(meta.get("name") or ""))
+if len(pods)<2 or any(not pod for pod in pods): raise SystemExit("API Pod cohort is incomplete")
+print("\n".join(sorted(pods)))
+PY
+)" || return 1
+  local pod headers acked=0
+  while IFS= read -r pod; do
+    [[ -n "${pod}" ]] || continue
+    headers="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c api -- curl -fsS --connect-timeout 2 --max-time 5 -D - -o /dev/null http://127.0.0.1:8080/readyz)" || return 1
+    ACK_HEADERS="${headers}" EXPECTED_GENERATION="${expected_generation}" EXPECTED_AUTHORITY="${expected_authority}" EXPECTED_PHASE="${expected_phase}" python3 - <<'PY' || return 1
+import os
+headers={}
+for line in os.environ["ACK_HEADERS"].replace("\r","").splitlines():
+    if ":" in line:
+        key,value=line.split(":",1); headers[key.strip().lower()]=value.strip()
+expected={"x-fugue-edge-activation-generation":os.environ["EXPECTED_GENERATION"],"x-fugue-edge-route-authority":os.environ["EXPECTED_AUTHORITY"],"x-fugue-edge-activation-phase":os.environ["EXPECTED_PHASE"]}
+if any(headers.get(key)!=value for key,value in expected.items()): raise SystemExit("API replica activation acknowledgement drifted")
+PY
+    acked=$((acked+1))
+  done <<<"${pods}"
+  (( acked>=2 )) || return 1
+  edge_activation_api_replica_generation >/dev/null || return 1
+}
+
+edge_activation_complete_cutover_and_soak() {
+  [[ "${FUGUE_EDGE_ACTIVATION_ENABLED:-false}" == "true" ]] || return 0
+  local api_generation inventory="${FUGUE_EDGE_ACTIVATION_DIR}/soak-authority.json"
+  edge_activation_get "${inventory}" || return 1
+  edge_activation_state_matches_transaction "${inventory}" "active-epoch-authoritative" || return 1
+  local soak_seconds="${FUGUE_EDGE_ACTIVATION_SOAK_SECONDS:-180}"
+  [[ "${soak_seconds}" =~ ^[0-9]+$ ]] || return 1
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]] && (( soak_seconds < 180 )); then
+    edge_activation_error "live activation soak must be at least 180 seconds"
+    return 1
+  fi
+  local deadline=$((SECONDS + soak_seconds))
+  while (( SECONDS < deadline )); do
+    run_smoke_urls || return 1
+    sleep 10
+  done
+  run_responses_synthetic || return 1
+  api_generation="$(edge_activation_api_replica_generation)" || return 1
+  local worker
+  while IFS= read -r worker; do
+    worker="$(trim_field "${worker}")"
+    [[ -n "${worker}" ]] || continue
+    fence_edge_worker_heartbeat "${worker}" || return 1
+  done <<<"${FUGUE_EDGE_ACTIVATION_PREVIOUS_WORKERS:-}"
+  edge_activation_advance "active-epoch-enforced" "${FUGUE_EDGE_ACTIVATION_EXPECTED_FILE}" "" "${api_generation}" || return 1
+  while IFS= read -r worker; do
+    worker="$(trim_field "${worker}")"
+    [[ -n "${worker}" ]] || continue
+    scale_edge_worker_zero_cas "${worker}" "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" || return 1
+  done <<<"${FUGUE_EDGE_ACTIVATION_PREVIOUS_WORKERS:-}"
+}
+
 run_bluegreen_release() {
+  local edge_activation_enabled="${FUGUE_EDGE_ACTIVATION_ENABLED:-false}"
+  case "${edge_activation_enabled}" in
+    true|false) ;;
+    *)
+      error "FUGUE_EDGE_ACTIVATION_ENABLED must be true or false"
+      return 1
+      ;;
+  esac
   local bases=()
   local prepared_bases=()
   local prepared_fronts=()
@@ -5601,6 +5989,7 @@ run_bluegreen_release() {
   local base front_ds active inactive inactive_ds active_ds inactive_port
   local protected_before protected_after
   local active_slots_json="{}"
+  local previous_slots_json="{}"
   local index
 
   enable_bluegreen_chart_mode
@@ -5618,6 +6007,9 @@ run_bluegreen_release() {
   fi
 
   log "blue/green release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} bases=${bases[*]}"
+  if [[ "${edge_activation_enabled}" == "true" ]]; then
+    recover_incomplete_edge_activation_before_release || return 1
+  fi
   for base in "${bases[@]}"; do
     front_ds="$(bluegreen_front_daemonset_name "${base}")"
     wait_daemonset_ready "${front_ds}"
@@ -5631,13 +6023,51 @@ run_bluegreen_release() {
     inactive_ds="$(bluegreen_worker_daemonset_name "${base}" "${inactive}")"
     log "${base}: active=${active} inactive=${inactive}"
 
+    prepared_bases+=("${base}")
+    prepared_fronts+=("${front_ds}")
+    prepared_original_slots+=("${active}")
+    prepared_slots+=("${inactive}")
+    if [[ "${edge_activation_enabled}" == "true" ]]; then
+      active_slots_json="$(record_active_slot_json "${active_slots_json}" "${base}" "${inactive}")" || return 1
+      previous_slots_json="$(record_active_slot_json "${previous_slots_json}" "${base}" "${active}")" || return 1
+    fi
+  done
+
+  if (( ${#prepared_bases[@]} == 0 )); then
+    fail "no scheduled blue/green candidates are eligible for activation"
+  fi
+  if [[ "${edge_activation_enabled}" == "true" ]]; then
+    prepare_edge_activation_candidate_record "${active_slots_json}" "${previous_slots_json}" || return 1
+  fi
+
+  for index in "${!prepared_bases[@]}"; do
+    base="${prepared_bases[${index}]}"
+    front_ds="${prepared_fronts[${index}]}"
+    active="${prepared_original_slots[${index}]}"
+    inactive="${prepared_slots[${index}]}"
+    active_ds="$(bluegreen_worker_daemonset_name "${base}" "${active}")"
+    inactive_ds="$(bluegreen_worker_daemonset_name "${base}" "${inactive}")"
+
+    if [[ "${edge_activation_enabled}" == "true" ]]; then
+      unretire_edge_worker "${inactive_ds}" || return 1
+    fi
     protected_before="$(capture_daemonset_pods "${front_ds}" "${active_ds}")"
     patch_inactive_worker "${inactive_ds}" || return $?
     delete_worker_pods "${inactive_ds}" || return $?
-    wait_daemonset_ready "${inactive_ds}" || return $?
+    if ! wait_daemonset_ready "${inactive_ds}"; then
+      if [[ "${edge_activation_enabled}" == "true" ]]; then
+        isolate_inactive_edge_worker "${inactive_ds}" "${active_ds}" || true
+      fi
+      return 1
+    fi
     inactive_port="$(worker_https_port "${inactive_ds}")"
     check_worker_tcp "${inactive_ds}" "${inactive_port}" || return $?
-    check_worker_https_smoke "${inactive_ds}" "${inactive_port}" || return $?
+    if ! check_worker_https_smoke "${inactive_ds}" "${inactive_port}"; then
+      if [[ "${edge_activation_enabled}" == "true" ]]; then
+        isolate_inactive_edge_worker "${inactive_ds}" "${active_ds}" || true
+      fi
+      return 1
+    fi
     protected_after="$(capture_daemonset_pods "${front_ds}" "${active_ds}")"
     if [[ "${protected_before}" != "${protected_after}" ]]; then
       printf '%s\n' "${protected_before}" >/tmp/fugue-public-data-plane-protected-before.txt
@@ -5645,13 +6075,31 @@ run_bluegreen_release() {
       diff -u /tmp/fugue-public-data-plane-protected-before.txt /tmp/fugue-public-data-plane-protected-after.txt || true
       fail "front or active worker pod set changed while upgrading inactive worker ${inactive_ds}"
     fi
-    prepared_bases+=("${base}")
-    prepared_fronts+=("${front_ds}")
-    prepared_original_slots+=("${active}")
-    prepared_slots+=("${inactive}")
   done
 
   log "all ${#prepared_bases[@]} scheduled blue/green candidate(s) passed pre-switch validation"
+  if [[ "${edge_activation_enabled}" == "true" ]]; then
+    collect_edge_activation_candidate_material "${active_slots_json}" || return 1
+    local api_generation
+    api_generation="$(edge_activation_api_replica_generation)" || {
+      abort_bluegreen_release "API generation was not unanimous before route-authority cutover"
+      return 1
+    }
+    if ! edge_activation_advance "active-epoch-authoritative" "${FUGUE_EDGE_ACTIVATION_EXPECTED_FILE}" "" "${api_generation}"; then
+      abort_bluegreen_release "active-epoch route authority could not be committed before front switching"
+      return 1
+    fi
+    local authority_inventory="${FUGUE_EDGE_ACTIVATION_DIR}/pre-front-authority.json"
+    edge_activation_get "${authority_inventory}" || {
+      abort_bluegreen_release "active route authority could not be read back before front switching"
+      return 1
+    }
+    if ! edge_activation_wait_all_api_ack "${authority_inventory}"; then
+      abort_bluegreen_release "not every API replica acknowledged active route authority before front switching"
+      return 1
+    fi
+  fi
+  active_slots_json="{}"
   for index in "${!prepared_bases[@]}"; do
     base="${prepared_bases[${index}]}"
     front_ds="${prepared_fronts[${index}]}"
@@ -5679,7 +6127,24 @@ run_bluegreen_release() {
     abort_bluegreen_release "public smoke failed after all front slot switches" "${rollback_state[@]}"
     return 1
   fi
+  if [[ "${edge_activation_enabled}" == "true" ]]; then
+    if ! run_responses_synthetic; then
+      abort_bluegreen_release "Responses API synthetic failed after all front slot switches" "${rollback_state[@]}"
+      return 1
+    fi
+  fi
   FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="${active_slots_json}"
+  if [[ "${edge_activation_enabled}" == "true" ]]; then
+    FUGUE_EDGE_ACTIVATION_PREVIOUS_WORKERS=""
+    for index in "${!prepared_bases[@]}"; do
+      FUGUE_EDGE_ACTIVATION_PREVIOUS_WORKERS+="$(bluegreen_worker_daemonset_name "${prepared_bases[${index}]}" "${prepared_original_slots[${index}]}")"$'\n'
+    done
+    export FUGUE_EDGE_ACTIVATION_PREVIOUS_WORKERS
+    edge_activation_complete_cutover_and_soak || {
+      abort_bluegreen_release "active-epoch cutover or soak failed" "${rollback_state[@]}"
+      return 1
+    }
+  fi
 }
 
 run_front_ondelete_release() {
@@ -6041,6 +6506,51 @@ run_smoke_urls() {
   done < <(public_data_plane_smoke_urls)
 }
 
+run_responses_synthetic() {
+  local url="${FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_URL:-}"
+  local token="${FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_TOKEN:-}"
+  local model_name="${FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_MODEL:-gpt-5.6-sol}"
+  [[ -n "$(trim_field "${url}")" ]] || {
+    error "live blue-green release requires a /v1/responses synthetic URL"
+    return 1
+  }
+  [[ "${url}" =~ ^https://[^/]+/v1/responses$ ]] || {
+    error "responses synthetic URL must be exact HTTPS /v1/responses"
+    return 1
+  }
+  [[ "${token}" =~ ^[A-Za-z0-9._-]{20,512}$ ]] || {
+    error "responses synthetic token is missing or invalid"
+    return 1
+  }
+  local work_dir="${FUGUE_EDGE_ACTIVATION_DIR:-$(mktemp -d)}"
+  local config="${work_dir}/responses-curl.conf"
+  local body="${work_dir}/responses-body.json"
+  local response="${work_dir}/responses-output.json"
+  (
+    umask 077
+    printf 'silent\nshow-error\nconnect-timeout = 5\nmax-time = 90\nproto = "=https"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\nheader = "Connection: close"\n' "${token}" >"${config}"
+    SYNTHETIC_MODEL="${model_name}" python3 - "${body}" <<'PY'
+import json,os,sys
+with open(sys.argv[1],"w",encoding="utf-8") as handle:
+    json.dump({"model":os.environ["SYNTHETIC_MODEL"],"input":"Reply with exactly ok.","stream":False,"max_output_tokens":8},handle,separators=(",",":"),sort_keys=True)
+    handle.write("\n")
+PY
+    install -m 600 /dev/null "${response}"
+  ) || return 1
+  local status
+  status="$(curl --config "${config}" --request POST --data-binary "@${body}" --output "${response}" --write-out '%{http_code}' "${url}")" || return 1
+  [[ "${status}" == "200" ]] || {
+    error "responses synthetic returned HTTP ${status}"
+    return 1
+  }
+  python3 - "${response}" <<'PY'
+import json,sys
+with open(sys.argv[1],encoding="utf-8") as handle: value=json.load(handle)
+if not isinstance(value,dict) or value.get("status") != "completed" or not (value.get("output") or value.get("output_text")):
+    raise SystemExit("responses synthetic did not return a completed output")
+PY
+}
+
 main() {
   local default_edge_resources
   local default_caddy_resources
@@ -6063,6 +6573,7 @@ main() {
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY:-blue-green}"
   FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN="${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN:-false}"
   FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="${FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM:-false}"
+  FUGUE_EDGE_ACTIVATION_ENABLED="${FUGUE_EDGE_ACTIVATION_ENABLED:-false}"
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID:-pdp-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:-local}}"
   FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT="${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT:-a}"
   FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE="${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE:-/var/lib/fugue/edge-blue-green/active-slot}"
@@ -6093,6 +6604,10 @@ main() {
     true|false) ;;
     *) fail "FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM must be true or false" ;;
   esac
+  case "${FUGUE_EDGE_ACTIVATION_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_EDGE_ACTIVATION_ENABLED must be true or false" ;;
+  esac
   case "${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT}" in
     a|b) ;;
     *) fail "FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT must be a or b" ;;
@@ -6109,6 +6624,37 @@ main() {
     fi
   fi
   detect_kubectl
+
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "blue-green" && "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" && "${FUGUE_EDGE_ACTIVATION_ENABLED}" != "true" ]]; then
+    fail "live blue-green release requires phased edge activation; legacy argv is forbidden"
+  fi
+  if [[ "${FUGUE_EDGE_ACTIVATION_ENABLED}" == "true" ]]; then
+    local signer_snapshot
+    signer_snapshot="$(mktemp)"
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "app.kubernetes.io/instance=${FUGUE_RELEASE_INSTANCE},app.kubernetes.io/component=api" -o json >"${signer_snapshot}" || fail "could not inspect exact API signer cohort"
+    FUGUE_EDGE_ACTIVATION_SIGNER_POD="$(EXPECTED_SHA="${GITHUB_SHA:-}" python3 - "${signer_snapshot}" <<'PY'
+import json,os,sys
+with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
+eligible=[]
+for pod in value.get("items") or []:
+    meta=pod.get("metadata") or {}; status=pod.get("status") or {}
+    conditions={item.get("type"):item.get("status") for item in status.get("conditions") or []}
+    if meta.get("deletionTimestamp") or status.get("phase")!="Running" or conditions.get("Ready")!="True": continue
+    if (meta.get("annotations") or {}).get("fugue.pro/source-commit") != os.environ["EXPECTED_SHA"]: continue
+    eligible.append(str(meta.get("name") or ""))
+if len(eligible)<2 or any(not name for name in eligible): raise SystemExit("at least two exact current API signer Pods are required")
+print(sorted(eligible)[0])
+PY
+)" || fail "API signer cohort is mixed, old, or unavailable"
+    rm -f -- "${signer_snapshot}"
+    : "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME:?FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME is required}"
+    IFS=$'\t' read -r FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION < <(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "secret/${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME}" -o 'jsonpath={.metadata.uid}{"\t"}{.metadata.resourceVersion}') || fail "could not bind activation signer audit identity"
+    [[ -n "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID}" && "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION}" =~ ^[0-9]+$ ]] || fail "activation signer audit identity is invalid"
+    export FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION
+    export FUGUE_EDGE_ACTIVATION_SIGNER_POD
+    edge_activation_init
+    trap edge_activation_cleanup EXIT
+  fi
 
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "blue-green" ]]; then
     FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="node-local-blue-green"

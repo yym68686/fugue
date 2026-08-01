@@ -330,6 +330,10 @@ spec:
                   key: FUGUE_BUNDLE_SIGNING_KEY
             - name: FUGUE_BUNDLE_SIGNING_KEY_ID
               value: {{ .Values.bundle.signingKeyID | quote }}
+            {{- if .Values.edgeActivation.enabled }}
+            - name: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR
+              value: /var/run/secrets/fugue-edge-activation
+            {{- end }}
             - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
               valueFrom:
                 secretKeyRef:
@@ -348,6 +352,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/fugue
+            {{- if .Values.edgeActivation.enabled }}
+            - name: edge-activation-plan-signing-key
+              mountPath: /var/run/secrets/fugue-edge-activation
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /healthz
@@ -373,6 +382,22 @@ spec:
       volumes:
         - name: data
           emptyDir: {}
+        {{- if .Values.edgeActivation.enabled }}
+        {{- if not .Values.edgeActivation.signingSecretName }}
+        {{- fail "edgeActivation.enabled requires edgeActivation.signingSecretName" }}
+        {{- end }}
+        - name: edge-activation-plan-signing-key
+          secret:
+            secretName: {{ .Values.edgeActivation.signingSecretName | quote }}
+            defaultMode: 0400
+            items:
+              - key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY
+                path: plan-signing-key
+              - key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID
+                path: key-id
+              - key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION
+                path: key-generation
+        {{- end }}
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

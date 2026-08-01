@@ -11,6 +11,10 @@ bundle:
   revokedKeyIDs: ""
   validFor: 15m
 
+edgeActivation:
+  enabled: false
+  signingSecretName: ""
+
 configSecret:
   existingSecretName: ""
 

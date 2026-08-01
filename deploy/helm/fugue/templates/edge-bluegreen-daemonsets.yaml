@@ -460,6 +460,7 @@ spec:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" $root }}
         checksum/edge-blue-green-worker: {{ toJson (dict "cohort" $workerChecksumCohort "shared" $workerChecksumShared "slot" $slot) | sha256sum }}
         fugue.io/edge-release-epoch: "unfenced"
+        fugue.io/edge-heartbeat-fenced: "false"
         {{- with $root.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -672,6 +673,9 @@ spec:
               - path: release_epoch
                 fieldRef:
                   fieldPath: metadata.annotations['fugue.io/edge-release-epoch']
+              - path: heartbeat_fenced
+                fieldRef:
+                  fieldPath: metadata.annotations['fugue.io/edge-heartbeat-fenced']
         {{- if $credentialHostPath }}
         - name: edge-node-env
           hostPath:
@@ -724,7 +728,7 @@ spec:
 {{- end -}}
 
 {{- if and .Values.edge.enabled .Values.edge.blueGreen.enabled }}
-{{- range $key := list "fugue.io/edge-slot" "fugue.io/edge-group-id" "fugue.io/edge-release-epoch" }}
+{{- range $key := list "fugue.io/edge-slot" "fugue.io/edge-group-id" "fugue.io/edge-release-epoch" "fugue.io/edge-heartbeat-fenced" }}
 {{- if hasKey (default dict $.Values.podLabels) $key }}{{- fail (printf "podLabels must not override reserved edge identity key %s" $key) }}{{- end }}
 {{- if hasKey (default dict $.Values.podAnnotations) $key }}{{- fail (printf "podAnnotations must not override reserved edge identity key %s" $key) }}{{- end }}
 {{- end }}

@@ -845,7 +845,7 @@ var postgresSchemaStatements = []string{
 	BEGIN
 		IF EXISTS (
 			SELECT 1 FROM fugue_meta
-			WHERE key = 'edge_instance_fencing_schema' AND value = 'edge-instance-fencing/v1'
+			WHERE key = 'edge_instance_flat_write_fence' AND value = 'active-epoch-enforced'
 		) AND (
 			NEW.last_heartbeat_at IS DISTINCT FROM OLD.last_heartbeat_at OR
 			NEW.healthy IS DISTINCT FROM OLD.healthy OR
@@ -902,6 +902,14 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_instances_active ON fugue_edge_node_instances (edge_group_id, slot, release_epoch, updated_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_instances_edge_id ON fugue_edge_node_instances (edge_id, updated_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_edge_activation (
+		singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+		phase TEXT NOT NULL,
+		generation BIGINT NOT NULL CHECK (generation > 0),
+		state_json JSONB NOT NULL CHECK (jsonb_typeof(state_json) = 'object'),
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
 	`CREATE TABLE IF NOT EXISTS fugue_edge_performance_samples (
 		id TEXT PRIMARY KEY,
 		edge_id TEXT NOT NULL DEFAULT '',

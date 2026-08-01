@@ -412,6 +412,11 @@ func forceEdgeInstanceHeartbeatTimeForAPITest(t *testing.T, path string, heartbe
 		state.EdgeNodeInstances[index].Node.LastSeenAt = &heartbeatAt
 		state.EdgeNodeInstances[index].Node.UpdatedAt = heartbeatAt
 	}
+	for index := range state.EdgeNodes {
+		state.EdgeNodes[index].LastHeartbeatAt = &heartbeatAt
+		state.EdgeNodes[index].LastSeenAt = &heartbeatAt
+		state.EdgeNodes[index].UpdatedAt = heartbeatAt
+	}
 	payload, err = json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		t.Fatalf("encode edge instance fixture: %v", err)
@@ -425,6 +430,9 @@ func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
 	t.Parallel()
 
 	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := storeState.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
 	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
 		ID:                 "edge-de-1",
 		EdgeGroupID:        "edge-group-country-de",

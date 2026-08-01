@@ -3462,7 +3462,8 @@ func (s *Service) edgeTLSHeartbeatStatus(status Status) (string, string, *time.T
 }
 
 func (s *Service) heartbeatEnabled() bool {
-	return strings.TrimSpace(s.Config.APIURL) != "" &&
+	return !s.Config.EdgeHeartbeatFenced &&
+		strings.TrimSpace(s.Config.APIURL) != "" &&
 		strings.TrimSpace(s.Config.EdgeToken) != "" &&
 		strings.TrimSpace(s.Config.EdgeID) != "" &&
 		strings.TrimSpace(s.Config.EdgeGroupID) != "" &&

@@ -17,7 +17,7 @@ func TestRouteInventoryConsumesOnlyCentrallyFencedActiveEpoch(t *testing.T) {
 	a := model.EdgeNodeInstance{
 		EdgeID: "edge-shared", EdgeGroupID: "edge-group-country-de", Slot: model.EdgeSlotA,
 		InstanceUID: "pod-a", ReleaseEpoch: "release-a",
-		Node: model.EdgeNode{ID: "edge-shared", EdgeGroupID: "edge-group-country-de", Status: model.EdgeHealthHealthy, Healthy: true, RouteBundleVersion: "route-a", CaddyRouteCount: 2},
+		Node: model.EdgeNode{ID: "edge-shared", EdgeGroupID: "edge-group-country-de", Status: model.EdgeHealthHealthy, Healthy: true, RouteBundleVersion: "route-a", CaddyRouteCount: 2, TLSStatus: model.EdgeTLSStatusReady},
 	}
 	b := a
 	b.Slot, b.InstanceUID, b.ReleaseEpoch = model.EdgeSlotB, "pod-b", "release-b"
@@ -27,11 +27,7 @@ func TestRouteInventoryConsumesOnlyCentrallyFencedActiveEpoch(t *testing.T) {
 			t.Fatalf("seed instance heartbeat: %v", err)
 		}
 	}
-	if _, err := storeState.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
-		EdgeGroupID: "edge-group-country-de", Slot: model.EdgeSlotB, ReleaseEpoch: "release-b", FenceSequence: 7,
-	}); err != nil {
-		t.Fatalf("fence B active: %v", err)
-	}
+	activateExactEpochForAPITest(t, storeState, b)
 
 	a.Node.Status, a.Node.Healthy = model.EdgeHealthUnhealthy, false
 	for index := 0; index < 4; index++ {
@@ -60,7 +56,7 @@ func TestRouteInventoryConsumesOnlyCentrallyFencedActiveEpoch(t *testing.T) {
 	}
 }
 
-func TestRouteInventoryFailsUnavailableWhenActiveEpochIsMissing(t *testing.T) {
+func TestRouteInventoryPreservesLegacyAuthorityBeforeActiveEpochCutover(t *testing.T) {
 	t.Parallel()
 	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
@@ -82,7 +78,7 @@ func TestRouteInventoryFailsUnavailableWhenActiveEpochIsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing active epoch must be represented as unavailable, not serving error: %v", err)
 	}
-	if len(healthy) != 0 || len(nodeIDs) != 0 || len(expected) != 0 || len(minimum) != 0 {
-		t.Fatalf("missing active epoch must fail closed: healthy=%v node_ids=%v expected=%v minimum=%v", healthy, nodeIDs, expected, minimum)
+	if healthy["edge-group-country-de"] || len(nodeIDs["edge-group-country-de"]) != 0 || expected["edge-group-country-de"] || minimum["edge-group-country-de"] != 0 {
+		t.Fatalf("phase0 legacy authority drifted: healthy=%v node_ids=%v expected=%v minimum=%v", healthy, nodeIDs, expected, minimum)
 	}
 }

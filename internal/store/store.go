@@ -149,6 +149,10 @@ func (s *Store) Init() error {
 	}
 	return s.withFileLockedState(true, func(state *model.State) error {
 		ensureDefaults(state)
+		if state.EdgeActivation == nil {
+			activation := defaultEdgeActivationState(time.Now().UTC())
+			state.EdgeActivation = &activation
+		}
 		if err := migrateLegacyEdgeInstancesInState(state, time.Now().UTC()); err != nil {
 			return err
 		}
@@ -184,10 +188,10 @@ func (s *Store) CheckReadiness(ctx context.Context) error {
 		if err := s.db.PingContext(pingCtx); err != nil {
 			return fmt.Errorf("ping postgres: %w", err)
 		}
-		return s.pgVerifyEdgeInstanceFencing(pingCtx)
+		return s.pgVerifyEdgeActivationReadiness(pingCtx)
 	}
 	return s.withFileLockedState(false, func(state *model.State) error {
-		return verifyEdgeInstanceState(state)
+		return verifyEdgeActivationReadiness(state)
 	})
 }
 

@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -12,11 +16,26 @@ import (
 	"fugue/internal/api"
 	"fugue/internal/auth"
 	"fugue/internal/config"
+	"fugue/internal/edgeauthkey"
+	"fugue/internal/model"
 	"fugue/internal/store"
 )
 
 func main() {
 	cfg := config.APIFromEnv()
+	if len(os.Args) == 2 && (os.Args[1] == "sign-edge-activation" || os.Args[1] == "sign-edge-remediation") {
+		if err := runEdgeActivationSigner(os.Args[1], cfg.EdgeActivationPlanSigningProjectionDir); err != nil {
+			fmt.Fprintln(os.Stderr, "edge activation signing failed")
+			os.Exit(1)
+		}
+		return
+	}
+	keySnapshot, err := edgeauthkey.Load(cfg.EdgeActivationPlanSigningProjectionDir)
+	if err == nil {
+		cfg.EdgeActivationPlanSigningKey = keySnapshot.Key
+		cfg.EdgeActivationPlanSigningKeyID = keySnapshot.KeyID
+		cfg.EdgeActivationPlanSigningKeyGeneration = keySnapshot.Generation
+	}
 	logger := log.Default()
 	store := store.New(cfg.StorePath, cfg.DatabaseURL)
 	if err := store.Init(); err != nil {
@@ -43,49 +62,53 @@ func main() {
 			LeaseDuration:  cfg.BackupCoordination.LeaseDuration,
 			RenewPeriod:    cfg.BackupCoordination.RenewPeriod,
 		},
-		ControlPlaneCNPGBackupEnabled:    cfg.ControlPlaneCNPGBackupEnabled,
-		ControlPlaneCNPGBackupName:       cfg.ControlPlaneCNPGBackupName,
-		RegistryGCLeaseName:              cfg.RegistryGCLeaseName,
-		ControlPlaneGitHubRepository:     cfg.ControlPlaneGitHubRepository,
-		ControlPlaneGitHubWorkflow:       cfg.ControlPlaneGitHubWorkflow,
-		ControlPlaneGitHubAPIURL:         cfg.ControlPlaneGitHubAPIURL,
-		ControlPlaneGitHubToken:          cfg.ControlPlaneGitHubToken,
-		AppBaseDomain:                    cfg.AppBaseDomain,
-		APIPublicDomain:                  cfg.APIPublicDomain,
-		SSHPublicHost:                    cfg.SSHPublicHost,
-		SSHPublicPortStart:               cfg.SSHPublicPortStart,
-		SSHPublicPortEnd:                 cfg.SSHPublicPortEnd,
-		DNSStaticRecordsJSON:             cfg.DNSStaticRecordsJSON,
-		DNSNameservers:                   cfg.DNSNameservers,
-		DNSRouteAAnswerIPs:               cfg.DNSRouteAAnswerIPs,
-		DNSBundleTTL:                     cfg.DNSBundleTTL,
-		PlatformRoutesJSON:               cfg.PlatformRoutesJSON,
-		EdgeQualityRankingMode:           cfg.EdgeQualityRankingMode,
-		AppSafeZeroDowntimePublicEnabled: cfg.AppSafeZeroDowntimePublicEnabled,
-		EdgeTLSAskToken:                  cfg.EdgeTLSAskToken,
-		AllowLegacyEdgeToken:             cfg.AllowLegacyEdgeToken,
-		ImageStoreMode:                   cfg.ImageStoreMode,
-		RegistryPushBase:                 cfg.RegistryPushBase,
-		RegistryPullBase:                 cfg.RegistryPullBase,
-		ClusterJoinRegistryEndpoint:      cfg.ClusterJoinRegistryEndpoint,
-		MovableRWOStorageClass:           cfg.MovableRWOStorageClass,
-		ManagedPostgresStorageClass:      cfg.ManagedPostgresStorageClass,
-		ClusterJoinServer:                cfg.ClusterJoinServer,
-		ClusterJoinServerFallbacks:       cfg.ClusterJoinServerFallbacks,
-		ClusterJoinCAHash:                cfg.ClusterJoinCAHash,
-		ClusterJoinBootstrapTokenTTL:     cfg.ClusterJoinBootstrapTokenTTL,
-		ClusterJoinK3SVersion:            cfg.ClusterJoinK3SVersion,
-		ClusterJoinMeshProvider:          cfg.ClusterJoinMeshProvider,
-		ClusterJoinMeshLoginServer:       cfg.ClusterJoinMeshLoginServer,
-		ClusterJoinMeshAuthKey:           cfg.ClusterJoinMeshAuthKey,
-		BundleSigningKey:                 cfg.BundleSigningKey,
-		BundleSigningKeyID:               cfg.BundleSigningKeyID,
-		BundleSigningPreviousKey:         cfg.BundleSigningPreviousKey,
-		BundleSigningPreviousKeyID:       cfg.BundleSigningPreviousKeyID,
-		BundleRevokedKeyIDs:              cfg.BundleRevokedKeyIDs,
-		HeartbeatAuditKeyring:            platformConsumerHeartbeatAuditKeyringFromEnv(),
-		BundleValidFor:                   cfg.BundleValidFor,
-		ImportWorkDir:                    cfg.ImportWorkDir,
+		ControlPlaneCNPGBackupEnabled:          cfg.ControlPlaneCNPGBackupEnabled,
+		ControlPlaneCNPGBackupName:             cfg.ControlPlaneCNPGBackupName,
+		RegistryGCLeaseName:                    cfg.RegistryGCLeaseName,
+		ControlPlaneGitHubRepository:           cfg.ControlPlaneGitHubRepository,
+		ControlPlaneGitHubWorkflow:             cfg.ControlPlaneGitHubWorkflow,
+		ControlPlaneGitHubAPIURL:               cfg.ControlPlaneGitHubAPIURL,
+		ControlPlaneGitHubToken:                cfg.ControlPlaneGitHubToken,
+		AppBaseDomain:                          cfg.AppBaseDomain,
+		APIPublicDomain:                        cfg.APIPublicDomain,
+		SSHPublicHost:                          cfg.SSHPublicHost,
+		SSHPublicPortStart:                     cfg.SSHPublicPortStart,
+		SSHPublicPortEnd:                       cfg.SSHPublicPortEnd,
+		DNSStaticRecordsJSON:                   cfg.DNSStaticRecordsJSON,
+		DNSNameservers:                         cfg.DNSNameservers,
+		DNSRouteAAnswerIPs:                     cfg.DNSRouteAAnswerIPs,
+		DNSBundleTTL:                           cfg.DNSBundleTTL,
+		PlatformRoutesJSON:                     cfg.PlatformRoutesJSON,
+		EdgeQualityRankingMode:                 cfg.EdgeQualityRankingMode,
+		AppSafeZeroDowntimePublicEnabled:       cfg.AppSafeZeroDowntimePublicEnabled,
+		EdgeTLSAskToken:                        cfg.EdgeTLSAskToken,
+		AllowLegacyEdgeToken:                   cfg.AllowLegacyEdgeToken,
+		ImageStoreMode:                         cfg.ImageStoreMode,
+		RegistryPushBase:                       cfg.RegistryPushBase,
+		RegistryPullBase:                       cfg.RegistryPullBase,
+		ClusterJoinRegistryEndpoint:            cfg.ClusterJoinRegistryEndpoint,
+		MovableRWOStorageClass:                 cfg.MovableRWOStorageClass,
+		ManagedPostgresStorageClass:            cfg.ManagedPostgresStorageClass,
+		ClusterJoinServer:                      cfg.ClusterJoinServer,
+		ClusterJoinServerFallbacks:             cfg.ClusterJoinServerFallbacks,
+		ClusterJoinCAHash:                      cfg.ClusterJoinCAHash,
+		ClusterJoinBootstrapTokenTTL:           cfg.ClusterJoinBootstrapTokenTTL,
+		ClusterJoinK3SVersion:                  cfg.ClusterJoinK3SVersion,
+		ClusterJoinMeshProvider:                cfg.ClusterJoinMeshProvider,
+		ClusterJoinMeshLoginServer:             cfg.ClusterJoinMeshLoginServer,
+		ClusterJoinMeshAuthKey:                 cfg.ClusterJoinMeshAuthKey,
+		BundleSigningKey:                       cfg.BundleSigningKey,
+		BundleSigningKeyID:                     cfg.BundleSigningKeyID,
+		BundleSigningPreviousKey:               cfg.BundleSigningPreviousKey,
+		BundleSigningPreviousKeyID:             cfg.BundleSigningPreviousKeyID,
+		BundleRevokedKeyIDs:                    cfg.BundleRevokedKeyIDs,
+		HeartbeatAuditKeyring:                  platformConsumerHeartbeatAuditKeyringFromEnv(),
+		BundleValidFor:                         cfg.BundleValidFor,
+		EdgeActivationPlanSigningKey:           cfg.EdgeActivationPlanSigningKey,
+		EdgeActivationPlanSigningKeyID:         cfg.EdgeActivationPlanSigningKeyID,
+		EdgeActivationPlanSigningKeyGeneration: cfg.EdgeActivationPlanSigningKeyGeneration,
+		EdgeActivationPlanSigningProjectionDir: cfg.EdgeActivationPlanSigningProjectionDir,
+		ImportWorkDir:                          cfg.ImportWorkDir,
 		AutomationShadowLoop: api.AutomationShadowLoopConfig{
 			Enabled:  cfg.AutomationShadowLoopEnabled,
 			Interval: cfg.AutomationShadowLoopInterval,
@@ -144,4 +167,54 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("listen and serve: %v", err)
 	}
+}
+
+func runEdgeActivationSigner(mode, projectionDirectory string) error {
+	snapshot, err := edgeauthkey.Load(projectionDirectory)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20))
+	decoder.DisallowUnknownFields()
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetEscapeHTML(false)
+	switch mode {
+	case "sign-edge-activation":
+		var request model.EdgeActivationAdvance
+		if err := decoder.Decode(&request); err != nil {
+			return err
+		}
+		if err := ensureSignerEOF(decoder); err != nil {
+			return err
+		}
+		if err := api.SignEdgeActivationAdvance(&request, snapshot.Key, snapshot.KeyID, snapshot.Generation, request.Authorization.RunnerObservedSecretUID, request.Authorization.RunnerObservedSecretVersion); err != nil {
+			return err
+		}
+		return encoder.Encode(request)
+	case "sign-edge-remediation":
+		var request model.EdgeRemediationAdvance
+		if err := decoder.Decode(&request); err != nil {
+			return err
+		}
+		if err := ensureSignerEOF(decoder); err != nil {
+			return err
+		}
+		if err := api.SignEdgeRemediationAdvance(&request, snapshot.Key, snapshot.KeyID, snapshot.Generation, request.Authorization.RunnerObservedSecretUID, request.Authorization.RunnerObservedSecretVersion); err != nil {
+			return err
+		}
+		return encoder.Encode(request)
+	default:
+		return errors.New("unsupported edge activation signing command")
+	}
+}
+
+func ensureSignerEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("edge activation signing input has multiple documents")
+		}
+		return err
+	}
+	return nil
 }

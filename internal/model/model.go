@@ -3415,6 +3415,7 @@ type State struct {
 	EdgeNodeInstances          []EdgeNodeInstance          `json:"edge_node_instances,omitempty"`
 	EdgeActiveEpochs           []EdgeActiveEpoch           `json:"edge_active_epochs,omitempty"`
 	EdgeInstanceFencingSchema  string                      `json:"edge_instance_fencing_schema,omitempty"`
+	EdgeActivation             *EdgeActivationState        `json:"edge_activation,omitempty"`
 	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`
 	HostedZones                []HostedZone                `json:"hosted_zones,omitempty"`
 	DNSRecords                 []DNSRecord                 `json:"dns_records,omitempty"`

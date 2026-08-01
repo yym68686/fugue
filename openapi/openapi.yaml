@@ -480,6 +480,59 @@ paths:
                 $ref: "#/components/schemas/EdgeNodeDesiredStateEnvelope"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/edge/activation:
+    get:
+      operationId: adminGetEdgeActivation
+      tags: [Edge]
+      x-fugue-handler: handleAdminGetEdgeActivation
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Durable edge activation state and instance inventory
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      operationId: adminAdvanceEdgeActivation
+      tags: [Edge]
+      x-fugue-handler: handleAdminAdvanceEdgeActivation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Edge activation phase advanced with a durable receipt
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/admin/edge/activation/remediation:
+    post:
+      operationId: adminAdvanceEdgeRemediation
+      tags: [Edge]
+      x-fugue-handler: handleAdminAdvanceEdgeRemediation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Bounded inactive Edge remediation action advanced with a durable fence
+          content:
+            application/json:
+              schema:
+                type: object
   /v1/admin/edge/nodes/{edge_id}/desired-state:
     get:
       operationId: adminGetEdgeNodeDesiredState

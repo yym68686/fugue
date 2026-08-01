@@ -481,10 +481,6 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "edge token cannot access another edge_id")
 		return
 	}
-	if !edgeHeartbeatIdentityComplete(req) {
-		httpx.WriteError(w, http.StatusBadRequest, "slot, instance_uid, and release_epoch are required")
-		return
-	}
 	status := model.NormalizeEdgeHealthStatus(req.Status)
 	if status == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "status must be unknown, healthy, degraded, or unhealthy")
@@ -500,6 +496,11 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 			Status: model.EdgeHealthUnknown, Healthy: false,
 		})
 	}
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	activation, err := s.store.GetEdgeActivationState()
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -535,6 +536,19 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		PublicProbeLastError: controlNode.PublicProbeLastError,
 		PublicProbeLastAt:    controlNode.PublicProbeLastAt,
 	}
+	if !edgeHeartbeatIdentityComplete(req) {
+		if activation.Phase == model.EdgeActivationPhaseEnforced {
+			httpx.WriteError(w, http.StatusBadRequest, "slot, instance_uid, and release_epoch are required")
+			return
+		}
+		legacyNode, _, updateErr := s.store.UpdateEdgeHeartbeat(node)
+		if updateErr != nil {
+			s.writeStoreError(w, updateErr)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": legacyNode, "accepted": true, "activation_phase": activation.Phase})
+		return
+	}
 	failureClass := strings.ToLower(strings.TrimSpace(req.FailureClass))
 	switch failureClass {
 	case model.EdgeInstanceFailureNone, model.EdgeInstanceFailureSignatureInvalid, model.EdgeInstanceFailureMaxStaleExceeded, model.EdgeInstanceFailureIdentityDrift:
@@ -560,15 +574,22 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if activation.Phase != model.EdgeActivationPhaseEnforced {
+		if _, _, err := s.store.UpdateEdgeHeartbeat(node); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
 	if samples := sanitizeEdgeHeartbeatPerformanceSamples(req, now); len(samples) > 0 {
 		if err := s.store.RecordEdgePerformanceSamples(samples, now.Add(-edgePerformanceSampleRetention)); err != nil && s.log != nil {
 			s.log.Printf("edge performance sample ingest failed; edge_id=%s edge_group_id=%s error=%v", req.EdgeID, req.EdgeGroupID, err)
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"node":     instance.Node,
-		"instance": instance,
-		"accepted": true,
+		"node":             instance.Node,
+		"instance":         instance,
+		"accepted":         true,
+		"activation_phase": activation.Phase,
 	})
 }
 

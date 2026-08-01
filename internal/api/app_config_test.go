@@ -1694,13 +1694,14 @@ func performJSONRequest(t *testing.T, server *Server, method, target, apiKey str
 			} else if err != nil {
 				t.Fatalf("read heartbeat test control identity: %v", err)
 			}
-			clone["slot"] = model.EdgeSlotDirect
-			clone["instance_uid"] = "test-" + edgeID
-			clone["release_epoch"] = "test-" + groupID
-			if _, err := server.store.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
-				EdgeGroupID: groupID, Slot: model.EdgeSlotDirect, ReleaseEpoch: "test-" + groupID, FenceSequence: 1,
-			}); err != nil {
-				t.Fatalf("put active heartbeat test epoch: %v", err)
+			if _, ok := clone["slot"]; !ok {
+				clone["slot"] = model.EdgeSlotDirect
+			}
+			if _, ok := clone["instance_uid"]; !ok {
+				clone["instance_uid"] = "test-" + edgeID
+			}
+			if _, ok := clone["release_epoch"]; !ok {
+				clone["release_epoch"] = "test-" + groupID
 			}
 			body = clone
 		}

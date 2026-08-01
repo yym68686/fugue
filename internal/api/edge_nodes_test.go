@@ -20,12 +20,6 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{ID: "edge-us-1", EdgeGroupID: "edge-group-country-us", Status: model.EdgeHealthUnknown}); err != nil {
 		t.Fatalf("create test control identity: %v", err)
 	}
-	if _, err := storeState.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
-		EdgeGroupID: "edge-group-country-us", Slot: model.EdgeSlotDirect,
-		ReleaseEpoch: "test-edge-group-country-us", FenceSequence: 1,
-	}); err != nil {
-		t.Fatalf("put active test epoch: %v", err)
-	}
 
 	heartbeat := httptest.NewRecorder()
 	body := map[string]any{
@@ -93,8 +87,8 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 	}
 	if len(listResponse.Groups) != 1 ||
 		listResponse.Groups[0].ID != "edge-group-country-us" ||
-		listResponse.Groups[0].HasHealthyNodes ||
-		listResponse.Groups[0].HealthyNodeCount != 0 {
+		!listResponse.Groups[0].HasHealthyNodes ||
+		listResponse.Groups[0].HealthyNodeCount != 1 {
 		t.Fatalf("unexpected edge group summary: %+v", listResponse.Groups)
 	}
 
@@ -107,7 +101,7 @@ func TestEdgeHeartbeatRegistersInventoryAndAdminList(t *testing.T) {
 		Group model.EdgeGroup `json:"group"`
 	}
 	mustDecodeJSON(t, get, &getResponse)
-	if getResponse.Node.ID != "edge-us-1" || getResponse.Group.HasHealthyNodes {
+	if getResponse.Node.ID != "edge-us-1" || !getResponse.Group.HasHealthyNodes {
 		t.Fatalf("unexpected edge node get response: %+v", getResponse)
 	}
 }
@@ -223,21 +217,25 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 			"healthy":              true,
 		},
 	} {
+		groupID, _ := node["edge_group_id"].(string)
+		edgeID, _ := node["edge_id"].(string)
+		node["slot"] = model.EdgeSlotDirect
+		node["instance_uid"] = "pod-" + edgeID
+		node["release_epoch"] = "test-" + groupID
 		heartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", node)
 		if heartbeat.Code != http.StatusOK {
 			t.Fatalf("expected heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
-		}
-		groupID, _ := node["edge_group_id"].(string)
-		if _, err := storeState.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
-			EdgeGroupID: groupID, Slot: model.EdgeSlotDirect, ReleaseEpoch: "test-" + groupID, FenceSequence: 1,
-		}); err != nil {
-			t.Fatalf("put active test epoch: %v", err)
 		}
 		heartbeat = performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", node)
 		if heartbeat.Code != http.StatusOK {
 			t.Fatalf("expected stable heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
 		}
 	}
+	instances, _, err := storeState.ListEdgeNodeInstances("")
+	if err != nil {
+		t.Fatalf("list quality-rank instances: %v", err)
+	}
+	activateExactEpochForAPITest(t, storeState, instances...)
 	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
 		ID:                 "edge-jp-stale",
 		EdgeGroupID:        "edge-group-country-jp",
@@ -631,7 +629,7 @@ func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 	}
 }
 
-func TestEdgeHeartbeatRejectsLegacyOrMismatchedInstanceIdentity(t *testing.T) {
+func TestEdgeHeartbeatAllowsLegacyBeforeEnforcementButRejectsMismatchedIdentity(t *testing.T) {
 	t.Parallel()
 	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	_, edgeToken, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
@@ -645,8 +643,8 @@ func TestEdgeHeartbeatRejectsLegacyOrMismatchedInstanceIdentity(t *testing.T) {
 		"status": model.EdgeHealthHealthy, "healthy": true,
 	}
 	legacy := performRawJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token="+edgeToken, base)
-	if legacy.Code != http.StatusBadRequest {
-		t.Fatalf("legacy heartbeat must fail closed, got %d body=%s", legacy.Code, legacy.Body.String())
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("phase0 legacy heartbeat must remain compatible, got %d body=%s", legacy.Code, legacy.Body.String())
 	}
 	mismatched := map[string]any{}
 	for key, value := range base {

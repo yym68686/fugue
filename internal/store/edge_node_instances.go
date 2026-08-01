@@ -21,81 +21,9 @@ const (
 	edgeLegacyMigrationEpoch                  = "legacy-flat-v0"
 )
 
-func (s *Store) PutEdgeActiveEpoch(epoch model.EdgeActiveEpoch) (model.EdgeActiveEpoch, error) {
-	epoch, err := normalizeEdgeActiveEpoch(epoch)
-	if err != nil {
-		return model.EdgeActiveEpoch{}, err
-	}
-	if s.usingDatabase() {
-		return s.pgPutEdgeActiveEpoch(epoch)
-	}
-	var out model.EdgeActiveEpoch
-	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		groupExists := false
-		for _, group := range state.EdgeGroups {
-			if normalizeEdgeGroupID(group.ID) == epoch.EdgeGroupID {
-				groupExists = true
-				break
-			}
-		}
-		if !groupExists {
-			return ErrNotFound
-		}
-		index := findEdgeActiveEpoch(state.EdgeActiveEpochs, epoch.EdgeGroupID)
-		if index >= 0 {
-			current := state.EdgeActiveEpochs[index]
-			if epoch.FenceSequence < current.FenceSequence {
-				return ErrConflict
-			}
-			if epoch.FenceSequence == current.FenceSequence {
-				if !sameEdgeActiveEpochIdentity(current, epoch) {
-					return ErrConflict
-				}
-				out = current
-				return nil
-			}
-			epoch.CreatedAt = current.CreatedAt
-		} else if epoch.CreatedAt.IsZero() {
-			epoch.CreatedAt = now
-		}
-		if epoch.ActivatedAt.IsZero() {
-			epoch.ActivatedAt = now
-		}
-		epoch.UpdatedAt = now
-		if index >= 0 {
-			state.EdgeActiveEpochs[index] = epoch
-		} else {
-			state.EdgeActiveEpochs = append(state.EdgeActiveEpochs, epoch)
-		}
-		state.EdgeInstanceFencingSchema = model.EdgeInstanceFencingSchemaV1
-		out = epoch
-		return nil
-	})
-	return out, err
-}
-
-func (s *Store) GetEdgeActiveEpoch(edgeGroupID string) (model.EdgeActiveEpoch, error) {
-	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
-	if edgeGroupID == "" {
-		return model.EdgeActiveEpoch{}, ErrInvalidInput
-	}
-	if s.usingDatabase() {
-		return s.pgGetEdgeActiveEpoch(edgeGroupID)
-	}
-	var out model.EdgeActiveEpoch
-	err := s.withLockedState(false, func(state *model.State) error {
-		if err := verifyEdgeInstanceState(state); err != nil {
-			return err
-		}
-		index := findEdgeActiveEpoch(state.EdgeActiveEpochs, edgeGroupID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		out = state.EdgeActiveEpochs[index]
-		return nil
-	})
-	return out, err
+func (s *Store) PutEdgeActiveEpoch(model.EdgeActiveEpoch) (model.EdgeActiveEpoch, error) {
+	// Active epochs can move only through the signed activation transaction.
+	return model.EdgeActiveEpoch{}, ErrConflict
 }
 
 func (s *Store) ListEdgeNodeInstances(edgeGroupID string) ([]model.EdgeNodeInstance, []model.EdgeActiveEpoch, error) {
@@ -212,21 +140,32 @@ func (s *Store) updateEdgeInstanceHeartbeatAt(instance model.EdgeNodeInstance, n
 func (s *Store) ListActiveEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error) {
 	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
 	if s.usingDatabase() {
-		instances, epochs, groups, err := s.pgListActiveEdgeInstanceMaterial(edgeGroupID)
-		if err != nil {
-			return nil, nil, err
-		}
-		return aggregateActiveEdgeNodes(instances, epochs, groups, edgeGroupID)
+		return s.pgListRouteEdgeNodes(edgeGroupID)
 	}
 	var nodes []model.EdgeNode
 	var groups []model.EdgeGroup
 	err := s.withLockedState(false, func(state *model.State) error {
-		if err := verifyEdgeInstanceState(state); err != nil {
+		if err := verifyEdgeActivationReadiness(state); err != nil {
 			return err
 		}
-		var err error
-		nodes, groups, err = aggregateActiveEdgeNodes(state.EdgeNodeInstances, state.EdgeActiveEpochs, state.EdgeGroups, edgeGroupID)
-		return err
+		activation, err := normalizeStoredEdgeActivation(*state.EdgeActivation)
+		if err != nil {
+			return err
+		}
+		if !edgeActivationUsesInstanceRoutes(activation) {
+			for _, node := range state.EdgeNodes {
+				normalizeEdgeNodeForRead(&node)
+				if edgeGroupID == "" || node.EdgeGroupID == edgeGroupID {
+					nodes = append(nodes, redactEdgeNode(node))
+				}
+			}
+			groups = edgeGroupSummaries(state.EdgeGroups, state.EdgeNodes, edgeGroupID)
+			sortEdgeNodes(nodes)
+			return nil
+		}
+		var aggregateErr error
+		nodes, groups, aggregateErr = aggregateActiveEdgeNodes(state.EdgeNodeInstances, state.EdgeActiveEpochs, state.EdgeGroups, edgeGroupID)
+		return aggregateErr
 	})
 	return nodes, groups, err
 }
@@ -265,15 +204,33 @@ func migrateLegacyEdgeInstancesInState(state *model.State, now time.Time) error 
 			instance.LastHeartbeatAt = node.LastHeartbeatAt.UTC()
 		}
 		state.EdgeNodeInstances = append(state.EdgeNodeInstances, instance)
-		state.EdgeNodes[index].Healthy = false
-		state.EdgeNodes[index].Status = model.EdgeHealthUnknown
-		state.EdgeNodes[index].LastHeartbeatAt = nil
 	}
 	state.EdgeInstanceFencingSchema = model.EdgeInstanceFencingSchemaV1
-	return verifyEdgeInstanceState(state)
+	return verifyEdgeInstanceMaterialForPhase(state, model.EdgeActivationPhaseLegacyAuthoritative)
 }
 
 func verifyEdgeInstanceState(state *model.State) error {
+	return verifyEdgeInstanceMaterialForPhase(state, model.EdgeActivationPhaseActive)
+}
+
+func verifyEdgeActivationReadiness(state *model.State) error {
+	if state == nil || state.EdgeActivation == nil {
+		return fmt.Errorf("%w: activation state missing", ErrEdgeInstanceFencingNotReady)
+	}
+	activation, err := normalizeStoredEdgeActivation(*state.EdgeActivation)
+	if err != nil {
+		return err
+	}
+	if err := verifyEdgeInstanceMaterialForPhase(state, activation.Phase); err != nil {
+		return err
+	}
+	if activation.Phase == model.EdgeActivationPhaseFenced {
+		return verifyEdgeFenceCandidates(activation.ExpectedInstances, activation.CandidateEpochs, state.EdgeNodeInstances)
+	}
+	return nil
+}
+
+func verifyEdgeInstanceMaterialForPhase(state *model.State, phase string) error {
 	if state == nil || strings.TrimSpace(state.EdgeInstanceFencingSchema) != model.EdgeInstanceFencingSchemaV1 {
 		return fmt.Errorf("%w: schema marker missing", ErrEdgeInstanceFencingNotReady)
 	}
@@ -323,14 +280,22 @@ func verifyEdgeInstanceState(state *model.State) error {
 			activeMatches[normalized.EdgeGroupID]++
 		}
 	}
-	for edgeGroupID := range epochs {
-		if activeMatches[edgeGroupID] == 0 {
-			return fmt.Errorf("%w: active epoch %s has no exact instance", ErrEdgeInstanceFencingNotReady, edgeGroupID)
-		}
+	activation := model.EdgeActivationState{RouteAuthority: model.EdgeRouteAuthorityLegacy}
+	if state.EdgeActivation != nil {
+		activation = *state.EdgeActivation
+	} else if phase == model.EdgeActivationPhaseActive || phase == model.EdgeActivationPhaseEnforced {
+		activation.RouteAuthority = model.EdgeRouteAuthorityActiveEpoch
 	}
-	for edgeGroupID := range instanceGroups {
-		if _, ok := epochs[edgeGroupID]; !ok {
-			return fmt.Errorf("%w: edge instance group %s has no active epoch", ErrEdgeInstanceFencingNotReady, edgeGroupID)
+	if edgeActivationUsesInstanceRoutes(activation) {
+		for edgeGroupID := range epochs {
+			if activeMatches[edgeGroupID] == 0 {
+				return fmt.Errorf("%w: active epoch %s has no exact instance", ErrEdgeInstanceFencingNotReady, edgeGroupID)
+			}
+		}
+		for edgeGroupID := range instanceGroups {
+			if _, ok := epochs[edgeGroupID]; !ok {
+				return fmt.Errorf("%w: edge instance group %s has no active epoch", ErrEdgeInstanceFencingNotReady, edgeGroupID)
+			}
 		}
 	}
 	return nil
@@ -373,6 +338,17 @@ func aggregateActiveEdgeNodes(instances []model.EdgeNodeInstance, epochs []model
 	nodes := make([]model.EdgeNode, 0, len(byEdgeID))
 	for _, candidates := range byEdgeID {
 		sort.Slice(candidates, func(i, j int) bool {
+			iMature := candidates[i].HealthStateSince.After(candidates[i].CreatedAt)
+			jMature := candidates[j].HealthStateSince.After(candidates[j].CreatedAt)
+			if iMature != jMature {
+				return iMature
+			}
+			if iMature && !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+				// Once a replacement has completed the required health transition,
+				// its physical UID fences older same-epoch processes. A late old
+				// heartbeat can be audited but can never retake route authority.
+				return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+			}
 			if candidates[i].LastHeartbeatAt.Equal(candidates[j].LastHeartbeatAt) {
 				return edgeNodeInstanceKey(candidates[i]) > edgeNodeInstanceKey(candidates[j])
 			}

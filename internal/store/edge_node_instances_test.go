@@ -201,7 +201,7 @@ func TestEdgeInstanceMinimumHealthyIsExactActiveEpochNOfM(t *testing.T) {
 	}
 }
 
-func TestLegacyEdgeMigrationIsNeverRouteEligible(t *testing.T) {
+func TestLegacyEdgeMigrationRemainsAuthoritativeUntilCutover(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "store.json")
 	s := New(path)
@@ -221,8 +221,9 @@ func TestLegacyEdgeMigrationIsNeverRouteEligible(t *testing.T) {
 	if len(instances) != 1 || instances[0].Slot != edgeLegacyMigrationSlot || instances[0].EffectiveHealthy || instances[0].Node.TokenHash != "" || len(epochs) != 0 {
 		t.Fatalf("legacy row must be inert migration input: instances=%+v epochs=%+v", instances, epochs)
 	}
-	if _, _, err := s.ListActiveEdgeNodes(""); !errors.Is(err, ErrEdgeInstanceFencingNotReady) {
-		t.Fatalf("legacy-only inventory must fail closed, got %v", err)
+	nodes, _, err := s.ListActiveEdgeNodes("")
+	if err != nil || len(nodes) != 1 || !nodes[0].Healthy {
+		t.Fatalf("phase0 must preserve legacy route authority: nodes=%+v err=%v", nodes, err)
 	}
 }
 
@@ -251,8 +252,20 @@ func TestEdgeInstanceWithoutCentralEpochFailsReadiness(t *testing.T) {
 	if _, err := s.UpdateEdgeInstanceHeartbeat(instance); err != nil {
 		t.Fatalf("write unfenced instance: %v", err)
 	}
+	if err := s.CheckReadiness(nil); err != nil {
+		t.Fatalf("shadow observation without a fence must remain ready: %v", err)
+	}
+	if err := s.withLockedState(true, func(state *model.State) error {
+		state.EdgeActivation.Phase = model.EdgeActivationPhaseActive
+		state.EdgeActivation.RouteAuthority = model.EdgeRouteAuthorityActiveEpoch
+		state.EdgeActivation.Generation++
+		state.EdgeActivation.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatalf("force incomplete active mode: %v", err)
+	}
 	if err := s.CheckReadiness(nil); !errors.Is(err, ErrEdgeInstanceFencingNotReady) {
-		t.Fatalf("unfenced instance must make the store not ready, got %v", err)
+		t.Fatalf("active mode without central epoch must fail readiness, got %v", err)
 	}
 	putEdgeTestEpoch(t, s, "edge-group-country-us", model.EdgeSlotB, "release-b", 1, 1)
 	if err := s.CheckReadiness(nil); err != nil {
@@ -282,6 +295,7 @@ func healthyEdgeTestInstance(edgeID, groupID, slot, uid, epoch string) model.Edg
 		Node: model.EdgeNode{
 			ID: edgeID, EdgeGroupID: groupID, Status: model.EdgeHealthHealthy, Healthy: true,
 			RouteBundleVersion: "routegen-current", ServingGeneration: "routegen-current", CaddyRouteCount: 1,
+			TLSStatus: model.EdgeTLSStatusReady,
 		},
 	}
 }
@@ -297,9 +311,29 @@ func heartbeatEdgeInstanceTwice(t *testing.T, s *Store, instance model.EdgeNodeI
 
 func putEdgeTestEpoch(t *testing.T, s *Store, groupID, slot, epoch string, sequence uint64, minHealthy int) {
 	t.Helper()
-	if _, err := s.PutEdgeActiveEpoch(model.EdgeActiveEpoch{
-		EdgeGroupID: groupID, Slot: slot, ReleaseEpoch: epoch, FenceSequence: sequence, MinHealthyInstances: minHealthy,
-	}); err != nil {
+	err := s.withLockedState(true, func(state *model.State) error {
+		active, err := normalizeEdgeActiveEpoch(model.EdgeActiveEpoch{
+			EdgeGroupID: groupID, Slot: slot, ReleaseEpoch: epoch, FenceSequence: sequence, MinHealthyInstances: minHealthy,
+		})
+		if err != nil {
+			return err
+		}
+		index := findEdgeActiveEpoch(state.EdgeActiveEpochs, groupID)
+		if index >= 0 {
+			if sequence <= state.EdgeActiveEpochs[index].FenceSequence {
+				return ErrConflict
+			}
+			state.EdgeActiveEpochs[index] = active
+		} else {
+			state.EdgeActiveEpochs = append(state.EdgeActiveEpochs, active)
+		}
+		state.EdgeActivation.Phase = model.EdgeActivationPhaseActive
+		state.EdgeActivation.RouteAuthority = model.EdgeRouteAuthorityActiveEpoch
+		state.EdgeActivation.Generation++
+		state.EdgeActivation.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if err != nil {
 		t.Fatalf("put active epoch: %v", err)
 	}
 }
@@ -334,5 +368,66 @@ func TestEdgeInstanceServerTimeIgnoresCallerClockInFileHarness(t *testing.T) {
 	}
 	if !stored.LastHeartbeatAt.Equal(serverNow) || stored.Node.LastHeartbeatAt == nil || !stored.Node.LastHeartbeatAt.Equal(serverNow) {
 		t.Fatalf("heartbeat must bind the store clock: %+v", stored)
+	}
+}
+
+func TestEdgeInstanceSameEpochPodReplacementFencesLateOldUID(t *testing.T) {
+	t.Parallel()
+	s := newEdgeInstanceTestStore(t)
+	createEdgeInstanceControl(t, s, "edge-de-1", "edge-group-country-de")
+	base := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	old := healthyEdgeTestInstance("edge-de-1", "edge-group-country-de", model.EdgeSlotB, "pod-old", "release-b")
+	old.Node.RouteBundleVersion = "route-old"
+	if _, err := s.updateEdgeInstanceHeartbeatAt(old, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.updateEdgeInstanceHeartbeatAt(old, base.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	putEdgeTestEpoch(t, s, old.EdgeGroupID, old.Slot, old.ReleaseEpoch, 1, 1)
+
+	replacement := healthyEdgeTestInstance(old.EdgeID, old.EdgeGroupID, old.Slot, "pod-new", old.ReleaseEpoch)
+	replacement.Node.RouteBundleVersion = "route-new"
+	if _, err := s.updateEdgeInstanceHeartbeatAt(replacement, base.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _, err := s.ListActiveEdgeNodes(old.EdgeGroupID)
+	if err != nil || len(nodes) != 1 || nodes[0].RouteBundleVersion != "route-old" || !nodes[0].Healthy {
+		t.Fatalf("one replacement observation must preserve the mature old UID: nodes=%+v err=%v", nodes, err)
+	}
+	if _, err := s.updateEdgeInstanceHeartbeatAt(replacement, base.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _, err = s.ListActiveEdgeNodes(old.EdgeGroupID)
+	if err != nil || len(nodes) != 1 || nodes[0].RouteBundleVersion != "route-new" || !nodes[0].Healthy {
+		t.Fatalf("stable same-epoch replacement did not take authority: nodes=%+v err=%v", nodes, err)
+	}
+	if _, err := s.updateEdgeInstanceHeartbeatAt(old, base.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _, err = s.ListActiveEdgeNodes(old.EdgeGroupID)
+	if err != nil || len(nodes) != 1 || nodes[0].RouteBundleVersion != "route-new" {
+		t.Fatalf("late old UID retook authority: nodes=%+v err=%v", nodes, err)
+	}
+
+	replacement.Node.Healthy = false
+	replacement.Node.Status = model.EdgeHealthUnhealthy
+	if _, err := s.updateEdgeInstanceHeartbeatAt(replacement, base.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.updateEdgeInstanceHeartbeatAt(replacement, base.Add(6*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	wrong := healthyEdgeTestInstance(old.EdgeID, old.EdgeGroupID, model.EdgeSlotA, "pod-wrong", "release-wrong")
+	wrong.Node.RouteBundleVersion = "route-wrong"
+	if _, err := s.updateEdgeInstanceHeartbeatAt(wrong, base.Add(7*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.updateEdgeInstanceHeartbeatAt(wrong, base.Add(8*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _, err = s.ListActiveEdgeNodes(old.EdgeGroupID)
+	if err != nil || len(nodes) != 1 || nodes[0].RouteBundleVersion != "route-new" || nodes[0].Healthy {
+		t.Fatalf("wrong slot/release replacement bypassed active epoch or old UID was revived: nodes=%+v err=%v", nodes, err)
 	}
 }
