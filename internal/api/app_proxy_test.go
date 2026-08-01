@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,23 @@ type fakeServiceResolver struct {
 type countingServiceResolver struct {
 	fakeServiceResolver
 	lookupCount map[string]int
+}
+
+type synchronizedLogBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *synchronizedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 func (f fakeServiceResolver) LookupCNAME(context.Context, string) (string, error) {
@@ -564,7 +582,7 @@ func TestAppProxyLogsUpstreamProxyErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload deployed app: %v", err)
 	}
-	var logBuffer bytes.Buffer
+	var logBuffer synchronizedLogBuffer
 	server.log = log.New(&logBuffer, "", 0)
 	server.appProxyTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("dial upstream exploded")
