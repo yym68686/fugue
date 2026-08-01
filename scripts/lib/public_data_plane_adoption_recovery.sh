@@ -68,6 +68,66 @@ for name, content in data.items():
 PY
 }
 
+public_data_plane_adoption_classify_delete_response() {
+  python3 - <<'PY'
+import json, os, pathlib
+
+def unique(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+path = pathlib.Path(os.environ["RESPONSE"])
+raw = path.read_bytes()
+require(len(raw) <= 1024 * 1024, "DELETE response is too large")
+code = int(os.environ["HTTP_CODE"])
+curl_rc = int(os.environ["CURL_RC"])
+classification = "invalid"
+output = pathlib.Path(os.environ["OUTPUT"])
+try:
+    if not raw:
+        require(curl_rc != 0 and code == 0, "an empty DELETE response is not an HTTP terminal result")
+        classification = "ambiguous"
+    else:
+        value = json.loads(raw, object_pairs_hook=unique)
+        require(isinstance(value, dict), "DELETE response is not an object")
+        require(value.get("apiVersion") == "v1" and value.get("kind") == "Status", "DELETE response is not a v1 Status")
+        reported_code_present = "code" in value
+        if reported_code_present:
+            reported_code = value["code"]
+            require(type(reported_code) is int and reported_code == code, "DELETE Status.code does not match HTTP status")
+        if 200 <= code <= 299:
+            require(curl_rc == 0 and value.get("status") == "Success", "DELETE 2xx response is not Success")
+            require(value.get("reason") in (None, ""), "DELETE Success response has a failure reason")
+            # Kubernetes may omit Status.code for a successful delete.  The
+            # transport status and Status=Success remain mandatory; when code
+            # is present it must exactly match the HTTP result.
+            classification = "success"
+        elif code == 404:
+            require(curl_rc == 0 and reported_code_present, "DELETE NotFound response has no exact Status.code")
+            require(value.get("status") == "Failure" and value.get("reason") == "NotFound", "DELETE 404 response is not NotFound")
+            classification = "not-found"
+        elif code == 409:
+            raise ValueError("DELETE precondition conflict")
+        elif 500 <= code <= 599:
+            require(curl_rc == 0 and reported_code_present, "DELETE server error has no exact Status.code")
+            require(value.get("status") == "Failure", "DELETE server error is not Failure")
+            classification = "ambiguous"
+        else:
+            raise ValueError("DELETE response status is unsupported")
+finally:
+    output.write_text(classification + "\n", encoding="utf-8")
+    output.chmod(0o600)
+PY
+}
+
 public_data_plane_adoption_delete_configmap_cas() (
   set -euo pipefail
   local cm_name="$1" uid="$2" resource_version="$3"
@@ -163,38 +223,8 @@ PY
   fi
   [[ "${http_code}" =~ ^[0-9]{3}$ ]]
 
-  RESPONSE="${response}" HTTP_CODE="${http_code}" CURL_RC="${curl_rc}" OUTPUT="${classification}" python3 - <<'PY'
-import json, os, pathlib
-def unique(pairs):
-    value={}
-    for key,item in pairs:
-        if key in value: raise ValueError("duplicate JSON key")
-        value[key]=item
-    return value
-path=pathlib.Path(os.environ["RESPONSE"]); raw=path.read_bytes(); assert len(raw) <= 1024*1024
-code=int(os.environ["HTTP_CODE"]); curl_rc=int(os.environ["CURL_RC"]); classification=""
-if not raw:
-    assert curl_rc != 0 and code == 0
-    classification="ambiguous"
-else:
-    value=json.loads(raw, object_pairs_hook=unique)
-    assert isinstance(value,dict) and value.get("apiVersion")=="v1" and value.get("kind")=="Status"
-    assert type(value.get("code")) is int and value["code"]==code
-    if 200 <= code <= 299:
-        assert curl_rc==0 and value.get("status")=="Success"
-        classification="success"
-    elif code==404:
-        assert curl_rc==0 and value.get("status")=="Failure" and value.get("reason")=="NotFound"
-        classification="not-found"
-    elif code==409:
-        raise SystemExit(1)
-    elif 500 <= code <= 599:
-        assert curl_rc==0 and value.get("status")=="Failure"
-        classification="ambiguous"
-    else:
-        raise SystemExit(1)
-out=pathlib.Path(os.environ["OUTPUT"]); out.write_text(classification+"\n",encoding="utf-8"); out.chmod(0o600)
-PY
+  RESPONSE="${response}" HTTP_CODE="${http_code}" CURL_RC="${curl_rc}" OUTPUT="${classification}" \
+    public_data_plane_adoption_classify_delete_response
 
   if reconcile_http="$(HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
     NO_PROXY='*' no_proxy='*' "${curl_path}" --disable --noproxy '*' --silent --show-error \

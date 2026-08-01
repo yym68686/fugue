@@ -231,7 +231,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA", "git diff --name-status --no-renames",
 		"ref: ${{ github.sha }}", "ACTUAL_REF: ${{ github.ref }}", "repos/${REPOSITORY}/git/ref/heads/main",
 		"git merge-base --is-ancestor", "git rev-list --count", "git rev-list --min-parents=2",
-		`"${commit_count}" -le 5`,
+		`"${commit_count}" -le 6`,
 		"curl", "--config \"${curl_config}\"", "curl.config", "path.chmod(0o600)",
 		"object_pairs_hook=unique_object", "duplicate JSON key",
 		"--connect-timeout 5", "--max-time 15", "API_URL: ${{ github.api_url }}",
@@ -308,7 +308,8 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 	}
 	libraryText := string(library)
 	for _, required := range []string{
-		"public_data_plane_adoption_delete_configmap_cas", "configmap-uid", "explicit KUBECONFIG is required",
+		"public_data_plane_adoption_delete_configmap_cas", "public_data_plane_adoption_classify_delete_response",
+		"reported_code_present", "configmap-uid", "explicit KUBECONFIG is required",
 		"--unix-socket=", "--accept-paths=", "DeleteOptions", "resourceVersion",
 		"--data-binary", "--request DELETE", "--request GET", "--max-time 15", "--disable --noproxy '*'",
 	} {
@@ -405,6 +406,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
 			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
 			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery five")
+			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery six")
 			recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 		} else if mode == "branch" {
 			source = runPublicDataPlaneRecoveryGit(t, dir, "commit-tree", sourceTree, "-m", "unrelated source")
@@ -420,6 +422,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery five")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery six")
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery seven")
 		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 	case "extra-file":
 		if err := os.WriteFile(filepath.Join(dir, "unexpected.txt"), []byte("forbidden\n"), 0o600); err != nil {
@@ -433,7 +436,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 	}
 	switch mode {
 	case "valid":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "5" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "6" {
 			t.Fatalf("valid recovery fixture count=%s", count)
 		}
 	case "branch":
@@ -447,7 +450,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 			t.Fatal("merge fixture has no merge commit")
 		}
 	case "over-commit":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "6" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "7" {
 			t.Fatalf("over-commit fixture count=%s", count)
 		}
 	case "extra-file":

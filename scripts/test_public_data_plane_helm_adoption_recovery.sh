@@ -259,8 +259,10 @@ class H(http.server.BaseHTTPRequestHandler):
   requests.append({"method":self.command,"path":self.path,"contentType":self.headers.get("Content-Type"),"bodyLength":len(body),"bodyText":body.decode(errors="replace"),"body":parsed}); write_capture()
  def send_json(self,code,value):
   body=json.dumps(value,separators=(",",":")).encode(); self.send_response(code); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
- def status(self,code,reason,status="Failure"):
-  return {"apiVersion":"v1","kind":"Status","status":status,"reason":reason,"code":code}
+ def status(self,code,reason,status="Failure",include_code=True):
+  value={"apiVersion":"v1","kind":"Status","status":status,"reason":reason}
+  if include_code: value["code"]=code
+  return value
  def do_DELETE(self):
   body=self.rfile.read(int(self.headers.get("Content-Length","0"))); self.record(body)
   if mode=="raw-drop": state["exists"]=False; self.send_json(200,self.status(200,"","Success")); return
@@ -276,6 +278,14 @@ class H(http.server.BaseHTTPRequestHandler):
   if mode=="ambiguous": self.connection.shutdown(2); self.connection.close(); return
   if mode=="invalid-json":
    payload=b'{invalid'; self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload); return
+  if mode=="success-no-code-200": self.send_json(200,self.status(200,"","Success",False)); return
+  if mode=="success-no-code-202": self.send_json(202,self.status(202,"","Success",False)); return
+  if mode=="success-no-code-202-exists": state["exists"]=True; self.send_json(202,self.status(202,"","Success",False)); return
+  if mode=="success-null-code":
+   value=self.status(200,"","Success",False); value["code"]=None; self.send_json(200,value); return
+  if mode=="success-wrong-code": self.send_json(200,self.status(202,"","Success")); return
+  if mode=="non-status": self.send_json(200,{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"recovery-cm"}}); return
+  if mode=="notfound-no-code": self.send_json(404,self.status(404,"NotFound","Failure",False)); return
   if mode in {"five-hundred-absent","five-hundred-exists"}: self.send_json(500,self.status(500,"InternalError")); return
   self.send_json(200,self.status(200,"","Success"))
  def do_GET(self):
@@ -378,6 +388,13 @@ PY
 }
 
 run_cas_case success success
+run_cas_case success-no-code-200 success
+run_cas_case success-no-code-202 success
+run_cas_case success-no-code-202-exists failure
+run_cas_case success-null-code failure
+run_cas_case success-wrong-code failure
+run_cas_case non-status failure
+run_cas_case notfound-no-code failure
 run_cas_case ambiguous failure
 run_cas_case lost-response success cm-uid 7 lost-response
 run_cas_case timeout-exists failure cm-uid 7 timeout-response
@@ -391,6 +408,21 @@ run_cas_case exists failure
 run_cas_case five-hundred-exists failure
 run_cas_case notfound-exists failure
 run_cas_case invalid-json failure
+
+classifier="${cas_real}/classifier"
+mkdir -p "${classifier}"
+printf '%s\n' '{"apiVersion":"v1","kind":"Status","status":"Success","code":null}' >"${classifier}/response.json"
+set +e
+(
+  # shellcheck source=scripts/lib/public_data_plane_adoption_recovery.sh
+  source "${ROOT}/scripts/lib/public_data_plane_adoption_recovery.sh"
+  RESPONSE="${classifier}/response.json" HTTP_CODE=200 CURL_RC=0 OUTPUT="${classifier}/classification" \
+    public_data_plane_adoption_classify_delete_response
+)
+classifier_status=$?
+set -e
+[[ "${classifier_status}" != 0 ]] || fail "invalid Status.code was classified as a successful DELETE"
+[[ "$(cat "${classifier}/classification")" == invalid ]] || fail "failed DELETE classification did not leave a deterministic result"
 
 proxy_failure="${cas_real}/proxy-failure"
 mkdir -p "${proxy_failure}/evidence" "${proxy_failure}/bin"
