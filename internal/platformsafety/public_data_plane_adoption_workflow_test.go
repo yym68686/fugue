@@ -231,6 +231,7 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA", "git diff --name-status --no-renames",
 		"ref: ${{ github.sha }}", "ACTUAL_REF: ${{ github.ref }}", "repos/${REPOSITORY}/git/ref/heads/main",
 		"git merge-base --is-ancestor", "git rev-list --count", "git rev-list --min-parents=2",
+		`"${commit_count}" -le 3`,
 		"curl", "--config \"${curl_config}\"", "curl.config", "path.chmod(0o600)",
 		"object_pairs_hook=unique_object", "duplicate JSON key",
 		"--connect-timeout 5", "--max-time 15", "API_URL: ${{ github.api_url }}",
@@ -362,7 +363,10 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		runPublicDataPlaneRecoveryGit(t, dir, "add", "--", publicDataPlaneRecoveryDeltaPaths[0])
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "-m", "recovery two")
 		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
-		if mode == "branch" {
+		if mode == "valid" {
+			runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
+			recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
+		} else if mode == "branch" {
 			source = runPublicDataPlaneRecoveryGit(t, dir, "commit-tree", sourceTree, "-m", "unrelated source")
 		} else if mode == "source-equals-recovery" {
 			source = recovery
@@ -373,6 +377,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 	case "over-commit":
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery two")
 		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery four")
 		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
 	case "extra-file":
 		if err := os.WriteFile(filepath.Join(dir, "unexpected.txt"), []byte("forbidden\n"), 0o600); err != nil {
@@ -385,6 +390,10 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 		t.Fatalf("unknown recovery identity fixture mode %q", mode)
 	}
 	switch mode {
+	case "valid":
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "3" {
+			t.Fatalf("valid recovery fixture count=%s", count)
+		}
 	case "branch":
 		probe := exec.Command("git", "merge-base", "--is-ancestor", source, recovery)
 		probe.Dir = dir
@@ -396,7 +405,7 @@ func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (strin
 			t.Fatal("merge fixture has no merge commit")
 		}
 	case "over-commit":
-		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "3" {
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "4" {
 			t.Fatalf("over-commit fixture count=%s", count)
 		}
 	case "extra-file":
@@ -423,6 +432,15 @@ func runPublicDataPlaneRecoveryIdentity(t *testing.T, mode, apiMode string) ([]b
 	mockBin := filepath.Join(tempDir, "bin")
 	if err := os.Mkdir(mockBin, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	for _, name := range []string{"bash", "git", "python3", "rm", "chmod", "mktemp"} {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("locate recovery identity harness command %s: %v", name, err)
+		}
+		if err := os.Symlink(target, filepath.Join(mockBin, name)); err != nil {
+			t.Fatalf("link recovery identity harness command %s: %v", name, err)
+		}
 	}
 	curlArguments := filepath.Join(tempDir, "curl-arguments")
 	curl := `#!/usr/bin/env bash
@@ -476,7 +494,7 @@ esac
 	if err := os.WriteFile(curlPath, []byte(curl), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := mockBin + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	path := mockBin
 	noGH := exec.Command("bash", "-c", "command -v gh")
 	noGH.Env = []string{"PATH=" + path}
 	if err := noGH.Run(); err == nil {
