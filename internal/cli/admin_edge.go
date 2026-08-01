@@ -696,6 +696,9 @@ func (c *CLI) mutateEdgeRoutePolicyExclusions(hostname string, createIfMissing b
 	mutate(&policy)
 	policy.ExcludedEdgeIDs = normalizeEdgeRoutePolicyCLIList(policy.ExcludedEdgeIDs)
 	policy.ExcludedEdgeGroupIDs = normalizeEdgeRoutePolicyCLIList(policy.ExcludedEdgeGroupIDs)
+	if (len(policy.ExcludedEdgeIDs) > 0 || len(policy.ExcludedEdgeGroupIDs) > 0) && strings.TrimSpace(policy.ExclusionReason) == "" {
+		return edgeRoutePolicyMutationResult{}, fmt.Errorf("--reason is required while an edge exclusion is configured")
+	}
 	if len(policy.ExcludedEdgeIDs) == 0 && len(policy.ExcludedEdgeGroupIDs) == 0 {
 		policy.ExclusionReason = ""
 		policy.ExclusionExpiresAt = nil
@@ -708,13 +711,15 @@ func (c *CLI) mutateEdgeRoutePolicyExclusions(hostname string, createIfMissing b
 		}
 	}
 	updated, err := client.PutEdgeRoutePolicyUpdate(hostname, edgeRoutePolicyUpdate{
-		EdgeGroupID:          policy.EdgeGroupID,
-		ExcludedEdgeIDs:      policy.ExcludedEdgeIDs,
-		ExcludedEdgeGroupIDs: policy.ExcludedEdgeGroupIDs,
-		ExclusionReason:      policy.ExclusionReason,
-		ExclusionExpiresAt:   policy.ExclusionExpiresAt,
-		MinHealthyEdgeNodes:  policy.MinHealthyEdgeNodes,
-		RoutePolicy:          policy.RoutePolicy,
+		EdgeGroupID:                 policy.EdgeGroupID,
+		ExcludedEdgeIDs:             policy.ExcludedEdgeIDs,
+		ExcludedEdgeGroupIDs:        policy.ExcludedEdgeGroupIDs,
+		ExclusionReason:             policy.ExclusionReason,
+		ExclusionExpiresAt:          policy.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:         policy.MinHealthyEdgeNodes,
+		RoutePolicy:                 policy.RoutePolicy,
+		ExpectedExclusionGeneration: policy.ExclusionGeneration,
+		ExpectedExclusionFence:      policy.ExclusionFence,
 	})
 	if err != nil {
 		return edgeRoutePolicyMutationResult{}, err
@@ -834,6 +839,12 @@ func writeEdgeRoutePolicy(w io.Writer, policy model.EdgeRoutePolicy) error {
 		kvPair{Key: "excluded_edge_groups", Value: strings.Join(policy.ExcludedEdgeGroupIDs, ",")},
 		kvPair{Key: "exclusion_reason", Value: strings.TrimSpace(policy.ExclusionReason)},
 		kvPair{Key: "exclusion_expires", Value: formatOptionalEdgeTime(policy.ExclusionExpiresAt)},
+		kvPair{Key: "exclusion_lifecycle", Value: strings.TrimSpace(policy.ExclusionLifecycle)},
+		kvPair{Key: "exclusion_scope", Value: strings.TrimSpace(policy.ExclusionScope)},
+		kvPair{Key: "exclusion_owner", Value: strings.TrimSpace(policy.ExclusionOwnerDigest)},
+		kvPair{Key: "exclusion_generation", Value: fmt.Sprintf("%d", policy.ExclusionGeneration)},
+		kvPair{Key: "exclusion_evidence_fresh", Value: fmt.Sprintf("%t", policy.ExclusionEvidenceFresh)},
+		kvPair{Key: "exclusion_evidence_reason", Value: strings.TrimSpace(policy.ExclusionEvidenceReason)},
 		kvPair{Key: "min_healthy_edges", Value: fmt.Sprintf("%d", policy.MinHealthyEdgeNodes)},
 		kvPair{Key: "route_policy", Value: strings.TrimSpace(policy.RoutePolicy)},
 		kvPair{Key: "enabled", Value: fmt.Sprintf("%t", policy.Enabled)},
@@ -847,15 +858,18 @@ func writeEdgeRoutePolicyTable(w io.Writer, policies []model.EdgeRoutePolicy) er
 		return sorted[i].Hostname < sorted[j].Hostname
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPOLICY\tMIN_HEALTHY\tEDGE_GROUP\tEXCLUDED_EDGES\tEXCLUDED_GROUPS\tAPP\tENABLED\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPOLICY\tLIFECYCLE\tEVIDENCE\tOWNER_DIGEST\tMIN_HEALTHY\tEDGE_GROUP\tEXCLUDED_EDGES\tEXCLUDED_GROUPS\tAPP\tENABLED\tUPDATED"); err != nil {
 		return err
 	}
 	for _, policy := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d\t%s\t%s\t%s\t%s\t%t\t%s\n",
+			"%s\t%s\t%s\t%t\t%s\t%d\t%s\t%s\t%s\t%s\t%t\t%s\n",
 			strings.TrimSpace(policy.Hostname),
 			strings.TrimSpace(policy.RoutePolicy),
+			strings.TrimSpace(policy.ExclusionLifecycle),
+			policy.ExclusionEvidenceFresh,
+			strings.TrimSpace(policy.ExclusionOwnerDigest),
 			policy.MinHealthyEdgeNodes,
 			strings.TrimSpace(policy.EdgeGroupID),
 			strings.Join(policy.ExcludedEdgeIDs, ","),

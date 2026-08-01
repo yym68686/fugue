@@ -15,6 +15,31 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
+func TestEdgeExclusionClearDefaultsOffAndIsAPIScoped(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	api := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if !strings.Contains(api, "name: FUGUE_EDGE_EXCLUSION_CLEAR_ENABLED\n              value: \"false\"") {
+		t.Fatalf("edge exclusion clear must default off in API:\n%s", api)
+	}
+	controller := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if strings.Contains(controller, "FUGUE_EDGE_EXCLUSION_CLEAR_ENABLED") {
+		t.Fatalf("edge exclusion clear setting leaked outside API:\n%s", controller)
+	}
+}
+
 func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -1336,6 +1361,12 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"FugueEdgeFrontHighClientTCPRetransmits",
 		"FugueEdgeNodeTCPRetransmitRateHigh",
 		"FugueEdgeNodeTCPMetricsUnavailable",
+		"FugueEdgeExclusionExpiresWithin24Hours",
+		"FugueEdgeExclusionExpiresWithinOneHour",
+		"FugueEdgeExclusionExpiredHold",
+		"FugueEdgeExclusionRedundancyAtRisk",
+		"FugueEdgeExclusionSingleGroup",
+		"FugueEdgeExclusionNoSafeRoute",
 		"FugueRobustnessBundlePublishRejected",
 		"FugueRobustnessNodeGenerationDrift",
 		"FugueRobustnessLKGServing",

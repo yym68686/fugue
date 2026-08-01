@@ -156,6 +156,13 @@ func (s *Server) handleDeletePlatformDomainBinding(w http.ResponseWriter, r *htt
 		s.writeStoreError(w, err)
 		return
 	}
+	if policy, policyErr := s.store.GetEdgeRoutePolicy(hostname); policyErr == nil && model.EdgeRoutePolicyHasExclusions(policy) {
+		httpx.WriteError(w, http.StatusConflict, "platform domain has a fail-closed edge exclusion that must be evidence-cleared first")
+		return
+	} else if policyErr != nil && !errors.Is(policyErr, store.ErrNotFound) {
+		s.writeStoreError(w, policyErr)
+		return
+	}
 	if _, err := s.store.DeleteAppDomain(binding.AppID, hostname); err != nil {
 		s.writeStoreError(w, err)
 		return

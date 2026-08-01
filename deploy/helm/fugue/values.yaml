@@ -15,6 +15,9 @@ edgeActivation:
   enabled: false
   signingSecretName: ""
 
+edgeExclusions:
+  clearEnabled: false
+
 configSecret:
   existingSecretName: ""
 

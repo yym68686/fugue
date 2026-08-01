@@ -161,7 +161,10 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	releaseByID := appReleaseByID(releases)
 	trafficPolicyByApp := appTrafficPolicyByApp(trafficPolicies)
 
-	now := time.Now().UTC()
+	now, err := s.store.EdgeRoutePolicyTime()
+	if err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 	// Route publication is intentionally global unless a hostname explicitly
 	// excludes an edge or edge group. Edge group IDs steer DNS, policy, and
 	// telemetry, but every non-excluded edge retains host routes so stale or
@@ -647,6 +650,16 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 			binding.EdgeRedundancyStatus = "at_risk"
 			binding.EdgeRedundancyReason = fmt.Sprintf("healthy edge nodes %d below minimum %d", healthyEdgeNodeCount, minHealthyEdgeNodes)
 		}
+		lifecycle := model.EdgeRoutePolicyExclusionLifecycleAt(policy, now)
+		if policyMatches && (lifecycle == model.EdgeExclusionLifecycleExpiredHold || lifecycle == model.EdgeExclusionLifecycleLegacyHold) {
+			binding.EdgeRedundancyStatus = "at_risk"
+			holdReason := "edge exclusion remains fail-closed in " + lifecycle
+			if binding.EdgeRedundancyReason == "" {
+				binding.EdgeRedundancyReason = holdReason
+			} else {
+				binding.EdgeRedundancyReason += "; " + holdReason
+			}
+		}
 	}
 	binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
 	binding.RuntimeEdgeGroup = runtimeEdgeGroupID
@@ -767,9 +780,7 @@ type edgeRouteExclusions struct {
 }
 
 func edgeRoutePolicyActiveExclusions(policy model.EdgeRoutePolicy, now time.Time) edgeRouteExclusions {
-	if policy.ExclusionExpiresAt != nil && !policy.ExclusionExpiresAt.After(now) {
-		return edgeRouteExclusions{}
-	}
+	_ = now // expiry changes lifecycle/alerts, never the fail-closed exclusion.
 	return newEdgeRouteExclusions(policy.ExcludedEdgeIDs, policy.ExcludedEdgeGroupIDs)
 }
 

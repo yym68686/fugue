@@ -156,6 +156,7 @@ func (s *Store) Init() error {
 		if err := migrateLegacyEdgeInstancesInState(state, time.Now().UTC()); err != nil {
 			return err
 		}
+		migrateLegacyEdgeRoutePolicyExclusionsInState(state, time.Now().UTC())
 		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
 		if err := seedDefaultDataBackendFromEnvInState(state); err != nil {

@@ -346,6 +346,8 @@ spec:
               value: {{ .Values.bundle.revokedKeyIDs | quote }}
             - name: FUGUE_BUNDLE_VALID_FOR
               value: {{ .Values.bundle.validFor | quote }}
+            - name: FUGUE_EDGE_EXCLUSION_CLEAR_ENABLED
+              value: {{ .Values.edgeExclusions.clearEnabled | quote }}
             {{- with .Values.api.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

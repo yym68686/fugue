@@ -764,6 +764,11 @@ var postgresSchemaStatements = []string{
 		excluded_edge_group_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
 		exclusion_reason TEXT NOT NULL DEFAULT '',
 		exclusion_expires_at TIMESTAMPTZ NULL,
+		exclusion_scope TEXT NOT NULL DEFAULT '',
+		exclusion_owner_digest TEXT NOT NULL DEFAULT '',
+		exclusion_created_at TIMESTAMPTZ NULL,
+		exclusion_generation BIGINT NOT NULL DEFAULT 0,
+		exclusion_fence TEXT NOT NULL DEFAULT '',
 		min_healthy_edge_nodes INTEGER NOT NULL DEFAULT 0,
 		route_policy TEXT NOT NULL,
 		enabled BOOLEAN NOT NULL DEFAULT false,
@@ -774,6 +779,63 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS excluded_edge_group_ids JSONB NOT NULL DEFAULT '[]'::jsonb`,
 	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_reason TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_expires_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_scope TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_owner_digest TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_created_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_generation BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS exclusion_fence TEXT NOT NULL DEFAULT ''`,
+	`UPDATE fugue_edge_route_policies
+	 SET exclusion_scope = CASE
+	   WHEN jsonb_array_length(CASE WHEN jsonb_typeof(excluded_edge_ids) = 'array' THEN excluded_edge_ids ELSE '[]'::jsonb END) > 0 AND jsonb_array_length(CASE WHEN jsonb_typeof(excluded_edge_group_ids) = 'array' THEN excluded_edge_group_ids ELSE '[]'::jsonb END) > 0 THEN 'mixed'
+	   WHEN jsonb_array_length(CASE WHEN jsonb_typeof(excluded_edge_ids) = 'array' THEN excluded_edge_ids ELSE '[]'::jsonb END) > 0 THEN 'edge'
+	   WHEN jsonb_array_length(CASE WHEN jsonb_typeof(excluded_edge_group_ids) = 'array' THEN excluded_edge_group_ids ELSE '[]'::jsonb END) > 0 THEN 'edge_group'
+	   ELSE '' END,
+	   exclusion_created_at = COALESCE(exclusion_created_at, updated_at, created_at),
+	   exclusion_generation = CASE WHEN exclusion_generation = 0 THEN 1 ELSE exclusion_generation END,
+	   exclusion_fence = CASE WHEN exclusion_fence = '' THEN 'legacy-md5:' || md5(id || ':' || hostname || ':' || created_at::text) ELSE exclusion_fence END
+	 WHERE jsonb_array_length(CASE WHEN jsonb_typeof(excluded_edge_ids) = 'array' THEN excluded_edge_ids ELSE '[]'::jsonb END) > 0 OR jsonb_array_length(CASE WHEN jsonb_typeof(excluded_edge_group_ids) = 'array' THEN excluded_edge_group_ids ELSE '[]'::jsonb END) > 0`,
+	`CREATE OR REPLACE FUNCTION fugue_edge_route_policy_exclusion_cas_guard() RETURNS trigger AS $$
+	 BEGIN
+	   IF TG_OP = 'INSERT' THEN
+	     IF (jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_ids) = 'array' THEN NEW.excluded_edge_ids ELSE '[]'::jsonb END) > 0 OR jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_group_ids) = 'array' THEN NEW.excluded_edge_group_ids ELSE '[]'::jsonb END) > 0)
+	        AND (NEW.exclusion_generation <= 0 OR NEW.exclusion_fence = '' OR NEW.exclusion_owner_digest !~ '^sha256:[0-9a-f]{64}$'
+	             OR NEW.exclusion_reason = '' OR NEW.exclusion_created_at IS NULL
+	             OR NEW.exclusion_scope <> CASE
+	                  WHEN jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_ids) = 'array' THEN NEW.excluded_edge_ids ELSE '[]'::jsonb END) > 0
+	                   AND jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_group_ids) = 'array' THEN NEW.excluded_edge_group_ids ELSE '[]'::jsonb END) > 0 THEN 'mixed'
+	                  WHEN jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_ids) = 'array' THEN NEW.excluded_edge_ids ELSE '[]'::jsonb END) > 0 THEN 'edge'
+	                  ELSE 'edge_group' END) THEN
+	       RAISE EXCEPTION 'edge exclusion insert requires authenticated fenced CAS' USING ERRCODE = '40001';
+	     END IF;
+	     RETURN NEW;
+	   END IF;
+	   IF NEW.excluded_edge_ids IS DISTINCT FROM OLD.excluded_edge_ids
+	      OR NEW.excluded_edge_group_ids IS DISTINCT FROM OLD.excluded_edge_group_ids
+	      OR NEW.exclusion_reason IS DISTINCT FROM OLD.exclusion_reason
+	      OR NEW.exclusion_expires_at IS DISTINCT FROM OLD.exclusion_expires_at
+	      OR NEW.exclusion_scope IS DISTINCT FROM OLD.exclusion_scope
+	      OR NEW.exclusion_owner_digest IS DISTINCT FROM OLD.exclusion_owner_digest
+	      OR NEW.exclusion_created_at IS DISTINCT FROM OLD.exclusion_created_at THEN
+	     IF NEW.exclusion_generation <> OLD.exclusion_generation + 1
+	        OR NEW.exclusion_fence = '' OR NEW.exclusion_fence = OLD.exclusion_fence
+	        OR ((jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_ids) = 'array' THEN NEW.excluded_edge_ids ELSE '[]'::jsonb END) > 0 OR jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_group_ids) = 'array' THEN NEW.excluded_edge_group_ids ELSE '[]'::jsonb END) > 0)
+	            AND (NEW.exclusion_owner_digest !~ '^sha256:[0-9a-f]{64}$' OR NEW.exclusion_reason = '' OR NEW.exclusion_created_at IS NULL
+	                 OR NEW.exclusion_scope <> CASE
+	                      WHEN jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_ids) = 'array' THEN NEW.excluded_edge_ids ELSE '[]'::jsonb END) > 0
+	                       AND jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_group_ids) = 'array' THEN NEW.excluded_edge_group_ids ELSE '[]'::jsonb END) > 0 THEN 'mixed'
+	                      WHEN jsonb_array_length(CASE WHEN jsonb_typeof(NEW.excluded_edge_ids) = 'array' THEN NEW.excluded_edge_ids ELSE '[]'::jsonb END) > 0 THEN 'edge'
+	                      ELSE 'edge_group' END)) THEN
+	       RAISE EXCEPTION 'edge exclusion mutation requires authenticated fenced CAS' USING ERRCODE = '40001';
+	     END IF;
+	   ELSIF NEW.exclusion_generation IS DISTINCT FROM OLD.exclusion_generation
+	      OR NEW.exclusion_fence IS DISTINCT FROM OLD.exclusion_fence THEN
+	     RAISE EXCEPTION 'edge exclusion generation/fence mutation requires material CAS' USING ERRCODE = '40001';
+	   END IF;
+	   RETURN NEW;
+	 END;
+	 $$ LANGUAGE plpgsql`,
+	`DROP TRIGGER IF EXISTS fugue_edge_route_policy_exclusion_cas_guard ON fugue_edge_route_policies`,
+	`CREATE TRIGGER fugue_edge_route_policy_exclusion_cas_guard BEFORE INSERT OR UPDATE ON fugue_edge_route_policies FOR EACH ROW EXECUTE FUNCTION fugue_edge_route_policy_exclusion_cas_guard()`,
 	`ALTER TABLE fugue_edge_route_policies ADD COLUMN IF NOT EXISTS min_healthy_edge_nodes INTEGER NOT NULL DEFAULT 0`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_edge_route_policies_hostname_ci ON fugue_edge_route_policies (lower(hostname))`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_route_policies_app_id ON fugue_edge_route_policies (app_id, updated_at DESC)`,
@@ -2711,6 +2773,11 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
+func isSerializationFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40001"
+}
+
 func isRetryableBootstrapError(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -2767,7 +2834,7 @@ func mapDBErr(err error) error {
 		return nil
 	case errors.Is(err, sql.ErrNoRows):
 		return ErrNotFound
-	case isUniqueViolation(err):
+	case isUniqueViolation(err), isSerializationFailure(err):
 		return ErrConflict
 	default:
 		return err

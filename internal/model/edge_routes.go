@@ -26,6 +26,19 @@ const (
 )
 
 const (
+	EdgeExclusionLifecycleClear       = "clear"
+	EdgeExclusionLifecycleActive      = "active"
+	EdgeExclusionLifecycleExpiring24H = "expiring_24h"
+	EdgeExclusionLifecycleExpiring1H  = "expiring_1h"
+	EdgeExclusionLifecycleExpiredHold = "expired_hold"
+	EdgeExclusionLifecycleLegacyHold  = "legacy_hold"
+
+	EdgeExclusionScopeEdge      = "edge"
+	EdgeExclusionScopeEdgeGroup = "edge_group"
+	EdgeExclusionScopeMixed     = "mixed"
+)
+
+const (
 	EdgeRoutePolicyRouteAOnly = "route_a_only"
 	EdgeRoutePolicyCanary     = "edge_canary"
 	EdgeRoutePolicyEnabled    = "edge_enabled"
@@ -264,20 +277,72 @@ type EdgeRouteUpstream struct {
 }
 
 type EdgeRoutePolicy struct {
-	ID                   string     `json:"id"`
-	Hostname             string     `json:"hostname"`
-	AppID                string     `json:"app_id"`
-	TenantID             string     `json:"tenant_id"`
-	EdgeGroupID          string     `json:"edge_group_id,omitempty"`
-	ExcludedEdgeIDs      []string   `json:"excluded_edge_ids,omitempty"`
-	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
-	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
-	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
-	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
-	RoutePolicy          string     `json:"route_policy"`
-	Enabled              bool       `json:"enabled"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	ID                         string     `json:"id"`
+	Hostname                   string     `json:"hostname"`
+	AppID                      string     `json:"app_id"`
+	TenantID                   string     `json:"tenant_id"`
+	EdgeGroupID                string     `json:"edge_group_id,omitempty"`
+	ExcludedEdgeIDs            []string   `json:"excluded_edge_ids,omitempty"`
+	ExcludedEdgeGroupIDs       []string   `json:"excluded_edge_group_ids,omitempty"`
+	ExclusionReason            string     `json:"exclusion_reason,omitempty"`
+	ExclusionExpiresAt         *time.Time `json:"exclusion_expires_at,omitempty"`
+	ExclusionScope             string     `json:"exclusion_scope,omitempty"`
+	ExclusionOwnerDigest       string     `json:"exclusion_owner_digest,omitempty"`
+	ExclusionCreatedAt         *time.Time `json:"exclusion_created_at,omitempty"`
+	ExclusionGeneration        uint64     `json:"exclusion_generation,omitempty"`
+	ExclusionFence             string     `json:"exclusion_fence,omitempty"`
+	ExclusionLifecycle         string     `json:"exclusion_lifecycle,omitempty"`
+	ExclusionEvidenceFresh     bool       `json:"exclusion_evidence_fresh,omitempty"`
+	ExclusionEvidenceCheckedAt *time.Time `json:"exclusion_evidence_checked_at,omitempty"`
+	ExclusionEvidenceReason    string     `json:"exclusion_evidence_reason,omitempty"`
+	MinHealthyEdgeNodes        int        `json:"min_healthy_edge_nodes,omitempty"`
+	RoutePolicy                string     `json:"route_policy"`
+	Enabled                    bool       `json:"enabled"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
+}
+
+func EdgeRoutePolicyHasExclusions(policy EdgeRoutePolicy) bool {
+	return len(policy.ExcludedEdgeIDs) > 0 || len(policy.ExcludedEdgeGroupIDs) > 0
+}
+
+func EdgeRoutePolicyExclusionScope(policy EdgeRoutePolicy) string {
+	switch {
+	case len(policy.ExcludedEdgeIDs) > 0 && len(policy.ExcludedEdgeGroupIDs) > 0:
+		return EdgeExclusionScopeMixed
+	case len(policy.ExcludedEdgeIDs) > 0:
+		return EdgeExclusionScopeEdge
+	case len(policy.ExcludedEdgeGroupIDs) > 0:
+		return EdgeExclusionScopeEdgeGroup
+	default:
+		return ""
+	}
+}
+
+// EdgeRoutePolicyExclusionLifecycleAt deliberately keeps expired and legacy
+// exclusions effective. Clearing them requires a separately authorized,
+// evidence-backed mutation rather than the passage of wall-clock time.
+func EdgeRoutePolicyExclusionLifecycleAt(policy EdgeRoutePolicy, now time.Time) string {
+	if !EdgeRoutePolicyHasExclusions(policy) {
+		return EdgeExclusionLifecycleClear
+	}
+	if strings.TrimSpace(policy.ExclusionOwnerDigest) == "" || policy.ExclusionGeneration == 0 || strings.TrimSpace(policy.ExclusionFence) == "" {
+		return EdgeExclusionLifecycleLegacyHold
+	}
+	if policy.ExclusionExpiresAt == nil {
+		return EdgeExclusionLifecycleActive
+	}
+	remaining := policy.ExclusionExpiresAt.UTC().Sub(now.UTC())
+	if remaining <= 0 {
+		return EdgeExclusionLifecycleExpiredHold
+	}
+	if remaining <= time.Hour {
+		return EdgeExclusionLifecycleExpiring1H
+	}
+	if remaining <= 24*time.Hour {
+		return EdgeExclusionLifecycleExpiring24H
+	}
+	return EdgeExclusionLifecycleActive
 }
 
 type PlatformRoute struct {

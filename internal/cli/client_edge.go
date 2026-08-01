@@ -3,6 +3,7 @@ package cli
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,23 +96,27 @@ type setEdgeNodeCanaryRequest struct {
 }
 
 type putEdgeRoutePolicyRequest struct {
-	EdgeGroupID          string     `json:"edge_group_id,omitempty"`
-	ExcludedEdgeIDs      []string   `json:"excluded_edge_ids,omitempty"`
-	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
-	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
-	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
-	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
-	RoutePolicy          string     `json:"route_policy"`
+	EdgeGroupID                 string     `json:"edge_group_id,omitempty"`
+	ExcludedEdgeIDs             []string   `json:"excluded_edge_ids,omitempty"`
+	ExcludedEdgeGroupIDs        []string   `json:"excluded_edge_group_ids,omitempty"`
+	ExclusionReason             string     `json:"exclusion_reason,omitempty"`
+	ExclusionExpiresAt          *time.Time `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes         int        `json:"min_healthy_edge_nodes,omitempty"`
+	RoutePolicy                 string     `json:"route_policy"`
+	ExpectedExclusionGeneration uint64     `json:"expected_exclusion_generation,omitempty"`
+	ExpectedExclusionFence      string     `json:"expected_exclusion_fence,omitempty"`
 }
 
 type edgeRoutePolicyUpdate struct {
-	EdgeGroupID          string
-	ExcludedEdgeIDs      []string
-	ExcludedEdgeGroupIDs []string
-	ExclusionReason      string
-	ExclusionExpiresAt   *time.Time
-	MinHealthyEdgeNodes  int
-	RoutePolicy          string
+	EdgeGroupID                 string
+	ExcludedEdgeIDs             []string
+	ExcludedEdgeGroupIDs        []string
+	ExclusionReason             string
+	ExclusionExpiresAt          *time.Time
+	MinHealthyEdgeNodes         int
+	RoutePolicy                 string
+	ExpectedExclusionGeneration uint64
+	ExpectedExclusionFence      string
 }
 
 type putPlatformDomainBindingRequest struct {
@@ -145,13 +150,15 @@ func (c *Client) PutEdgeRoutePolicy(hostname, edgeGroupID, routePolicy string) (
 
 func (c *Client) PutEdgeRoutePolicyUpdate(hostname string, update edgeRoutePolicyUpdate) (model.EdgeRoutePolicy, error) {
 	request := putEdgeRoutePolicyRequest{
-		EdgeGroupID:          strings.TrimSpace(update.EdgeGroupID),
-		ExcludedEdgeIDs:      append([]string(nil), update.ExcludedEdgeIDs...),
-		ExcludedEdgeGroupIDs: append([]string(nil), update.ExcludedEdgeGroupIDs...),
-		ExclusionReason:      strings.TrimSpace(update.ExclusionReason),
-		ExclusionExpiresAt:   update.ExclusionExpiresAt,
-		MinHealthyEdgeNodes:  update.MinHealthyEdgeNodes,
-		RoutePolicy:          strings.TrimSpace(update.RoutePolicy),
+		EdgeGroupID:                 strings.TrimSpace(update.EdgeGroupID),
+		ExcludedEdgeIDs:             append([]string(nil), update.ExcludedEdgeIDs...),
+		ExcludedEdgeGroupIDs:        append([]string(nil), update.ExcludedEdgeGroupIDs...),
+		ExclusionReason:             strings.TrimSpace(update.ExclusionReason),
+		ExclusionExpiresAt:          update.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:         update.MinHealthyEdgeNodes,
+		RoutePolicy:                 strings.TrimSpace(update.RoutePolicy),
+		ExpectedExclusionGeneration: update.ExpectedExclusionGeneration,
+		ExpectedExclusionFence:      strings.TrimSpace(update.ExpectedExclusionFence),
 	}
 	var response edgeRoutePolicyResponse
 	if err := c.doJSON(http.MethodPut, edgeRoutePolicyPath(hostname), request, &response); err != nil {
@@ -161,8 +168,15 @@ func (c *Client) PutEdgeRoutePolicyUpdate(hostname string, update edgeRoutePolic
 }
 
 func (c *Client) DeleteEdgeRoutePolicy(hostname string) (edgeRoutePolicyDeleteResponse, error) {
+	path := edgeRoutePolicyPath(hostname)
+	if policy, err := c.GetEdgeRoutePolicy(hostname); err == nil && model.EdgeRoutePolicyHasExclusions(policy) {
+		values := url.Values{}
+		values.Set("expected_exclusion_generation", strconv.FormatUint(policy.ExclusionGeneration, 10))
+		values.Set("expected_exclusion_fence", policy.ExclusionFence)
+		path += "?" + values.Encode()
+	}
 	var response edgeRoutePolicyDeleteResponse
-	if err := c.doJSON(http.MethodDelete, edgeRoutePolicyPath(hostname), nil, &response); err != nil {
+	if err := c.doJSON(http.MethodDelete, path, nil, &response); err != nil {
 		return edgeRoutePolicyDeleteResponse{}, err
 	}
 	return response, nil

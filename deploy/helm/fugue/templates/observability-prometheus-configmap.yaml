@@ -302,6 +302,56 @@ data:
             annotations:
               summary: "Fugue edge node TCP metrics are unavailable"
               description: "edge-front could not read the configured /proc/net TCP counters from the edge node."
+      - name: fugue-edge-exclusions
+        rules:
+          - alert: FugueEdgeExclusionExpiresWithin24Hours
+            expr: sum(fugue_edge_exclusion_policies{lifecycle="expiring_24h"}) > 0
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge exclusion expires within 24 hours"
+              description: "A fail-closed edge exclusion is nearing expiry and requires an authorized, evidence-backed review."
+          - alert: FugueEdgeExclusionExpiresWithinOneHour
+            expr: sum(fugue_edge_exclusion_policies{lifecycle="expiring_1h"}) > 0
+            for: 5m
+            labels:
+              severity: page
+            annotations:
+              summary: "Fugue edge exclusion expires within one hour"
+              description: "An edge exclusion is close to expired_hold; expiry will not automatically re-enable the excluded target."
+          - alert: FugueEdgeExclusionExpiredHold
+            expr: sum(fugue_edge_exclusion_policies{lifecycle=~"expired_hold|legacy_hold"}) > 0
+            for: 0m
+            labels:
+              severity: page
+            annotations:
+              summary: "Fugue edge exclusion is held after expiry or legacy migration"
+              description: "The unsafe edge remains excluded. Clear it only with fresh exact TLS and active-epoch evidence."
+          - alert: FugueEdgeExclusionRedundancyAtRisk
+            expr: fugue_edge_exclusion_redundancy_at_risk > 0
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge exclusion reduced route redundancy"
+              description: "One or more exclusion policies are below their configured minimum healthy edge count."
+          - alert: FugueEdgeExclusionSingleGroup
+            expr: fugue_edge_exclusion_single_group > 0
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge exclusion leaves one healthy group"
+              description: "An exclusion policy has only one healthy non-excluded edge group and no group-level redundancy."
+          - alert: FugueEdgeExclusionNoSafeRoute
+            expr: fugue_edge_exclusion_no_safe_route > 0
+            for: 0m
+            labels:
+              severity: page
+            annotations:
+              summary: "Fugue edge exclusion has no safe route"
+              description: "All eligible routes are excluded or unhealthy. The platform remains fail-closed instead of re-enabling an unsafe edge."
       - name: fugue-robustness
         rules:
           - alert: FugueRobustnessBundlePublishRejected

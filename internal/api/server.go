@@ -361,6 +361,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.writeEdgeQualityRollupMetrics(w)
 	s.writeEdgeDNSArtifactMetrics(w)
 	s.writeHostedDNSMetrics(w)
+	s.writeEdgeExclusionMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

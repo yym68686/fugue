@@ -787,6 +787,18 @@ paths:
           required: true
           schema:
             type: string
+        - in: query
+          name: expected_exclusion_generation
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - in: query
+          name: expected_exclusion_fence
+          required: false
+          schema:
+            type: string
       responses:
         '200':
           description: Successful response
@@ -13772,6 +13784,32 @@ components:
           type: string
           format: date-time
           nullable: true
+        exclusion_scope:
+          type: string
+          enum: [edge, edge_group, mixed]
+        exclusion_owner_digest:
+          type: string
+        exclusion_created_at:
+          type: string
+          format: date-time
+          nullable: true
+        exclusion_generation:
+          type: integer
+          format: int64
+          minimum: 0
+        exclusion_fence:
+          type: string
+        exclusion_lifecycle:
+          type: string
+          enum: [clear, active, expiring_24h, expiring_1h, expired_hold, legacy_hold]
+        exclusion_evidence_fresh:
+          type: boolean
+        exclusion_evidence_checked_at:
+          type: string
+          format: date-time
+          nullable: true
+        exclusion_evidence_reason:
+          type: string
         min_healthy_edge_nodes:
           type: integer
           format: int32
@@ -14954,6 +14992,12 @@ components:
           enum: [route_a_only, edge_canary, edge_enabled]
         enabled:
           type: boolean
+        expected_exclusion_generation:
+          type: integer
+          format: int64
+          minimum: 0
+        expected_exclusion_fence:
+          type: string
     PutPlatformDomainBindingRequest:
       type: object
       additionalProperties: false
