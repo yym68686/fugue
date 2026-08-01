@@ -3,7 +3,7 @@ name: recover-public-data-plane-helm-adoption
 on:
   workflow_dispatch:
     inputs:
-      expected_sha:
+      expected_source_sha:
         description: Exact Stage1 source commit recorded by the durable recovery WAL.
         required: true
         type: string
@@ -41,28 +41,40 @@ jobs:
       - name: Checkout exact recovery implementation
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.expected_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Verify exact recovery identity
         env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RECOVERY_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_REF: refs/heads/main
+          ACTUAL_REF: ${{ github.ref }}
           EXPECTED_WAL_DIGEST: ${{ inputs.expected_wal_digest }}
           ORIGIN_RUN_ID: ${{ inputs.origin_run_id }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RECOVERY_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${EXPECTED_WAL_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${ORIGIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
-          [[ "$(git rev-parse HEAD)" == "${EXPECTED_SHA}" ]]
+          [[ "${ACTUAL_REF}" == "${EXPECTED_REF}" ]]
+          [[ "$(git rev-parse HEAD)" == "${RECOVERY_SHA}" ]]
           [[ -z "$(git status --porcelain)" ]]
+          main_sha="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${main_sha}" == "${RECOVERY_SHA}" ]]
+          if [[ "${RECOVERY_SHA}" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            [[ "$(git rev-parse HEAD^)" == "${EXPECTED_SOURCE_SHA}" ]]
+            expected_delta=$'M\t.github/workflows/recover-public-data-plane-helm-adoption.yml\nM\tinternal/platformsafety/public_data_plane_adoption_workflow_test.go\nM\tinternal/releasedomain/public_data_plane_adoption.go\nM\tinternal/releasedomain/public_data_plane_adoption_test.go\nM\tscripts/adopt_public_data_plane_helm_baseline.sh\nM\tscripts/lib/public_data_plane_adoption_recovery.sh\nM\tscripts/recover_public_data_plane_helm_adoption.sh\nM\tscripts/test_public_data_plane_helm_adoption.sh\nM\tscripts/test_public_data_plane_helm_adoption_recovery.sh\nM\tscripts/test_release_domain_workflow.sh'
+            [[ "$(git diff --name-status --no-renames "${EXPECTED_SOURCE_SHA}" "${RECOVERY_SHA}")" == "${expected_delta}" ]]
+          fi
           origin="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/actions/runs/${ORIGIN_RUN_ID}" \
             --jq '[.id,.run_attempt,.event,.head_sha,.status,.conclusion,.path] | @tsv')"
           IFS=$'\t' read -r run_id attempt event head_sha status conclusion path extra <<<"${origin}"
           [[ -z "${extra:-}" && "${run_id}" == "${ORIGIN_RUN_ID}" && "${attempt}" == '1' ]]
-          [[ "${event}" == workflow_dispatch && "${head_sha}" == "${EXPECTED_SHA}" && "${status}" == completed ]]
+          [[ "${event}" == workflow_dispatch && "${head_sha}" == "${EXPECTED_SOURCE_SHA}" && "${status}" == completed ]]
           [[ "${conclusion}" == failure || "${conclusion}" == cancelled || "${conclusion}" == timed_out ]]
           [[ "${path}" == '.github/workflows/adopt-public-data-plane-helm-baseline.yml' ]]
           [[ -z "${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_COORDINATION_LIBRARY:-}" ]]
@@ -84,7 +96,8 @@ jobs:
 
       - name: Recover or finalize the durable Stage1 transaction
         env:
-          FUGUE_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          FUGUE_RECOVERY_SHA: ${{ github.sha }}
+          FUGUE_EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           FUGUE_EXPECTED_WAL_DIGEST: ${{ inputs.expected_wal_digest }}
           FUGUE_EXPECTED_ORIGIN_RUN_ID: ${{ inputs.origin_run_id }}
           FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR: ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}
@@ -99,7 +112,7 @@ jobs:
         with:
           name: public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}/wal.json
+            ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}/terminal-wal.json
             ${{ runner.temp }}/public-data-plane-adoption-recovery-${{ github.run_id }}-${{ github.run_attempt }}/stage1-baseline.json
           if-no-files-found: error
           retention-days: 30

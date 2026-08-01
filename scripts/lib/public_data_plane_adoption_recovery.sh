@@ -119,32 +119,31 @@ PY
 }
 
 public_data_plane_adoption_advance_recovery_wal() {
-  local phase="$1" baseline_digest="${2:-}" cm_name current rv patch updated readback
-  local -a baseline_args=()
+  local phase="$1" baseline_digest="${2:-}" cm_name current rv patch readback
+  local -a command
   cm_name="$(public_data_plane_adoption_recovery_cm_name)"
   public_data_plane_adoption_verify_owned_lease || return 1
   current="$(${KUBECTL} -n "${RELEASE_NAMESPACE}" get "configmap/${cm_name}" -o json)" || return 1
   rm -rf "${EVIDENCE_DIR}/wal-current"
   RELEASE_NAME="${RELEASE_NAME}" public_data_plane_adoption_extract_recovery_configmap "${current}" "${EVIDENCE_DIR}/wal-current" || return 1
   rv="$(cat "${EVIDENCE_DIR}/wal-current/configmap-resource-version")"
-  if [[ -n "${baseline_digest}" ]]; then
-    baseline_args=(--baseline-digest "${baseline_digest}")
-  fi
-  "${ADOPTION_TOOL}" wal-advance \
+  command=("${ADOPTION_TOOL}" wal-advance \
     --transaction "${EVIDENCE_DIR}/wal-current/transaction.json" \
     --restore "${EVIDENCE_DIR}/wal-current/restore.json" \
     --wal "${EVIDENCE_DIR}/wal-current/wal.json" \
     --lease-owner "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
     --lease-token "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
-    --phase "${phase}" --at "$(public_data_plane_adoption_recovery_now)" \
-    "${baseline_args[@]}" >/dev/null || return 1
+    --phase "${phase}" --at "$(public_data_plane_adoption_recovery_now)")
+  if [[ -n "${baseline_digest}" ]]; then
+    command+=(--baseline-digest "${baseline_digest}")
+  fi
+  "${command[@]}" >/dev/null || return 1
   cp "${EVIDENCE_DIR}/wal-current/wal.json" "${EVIDENCE_DIR}/recovery-wal.json"
-  updated="$(cat "${EVIDENCE_DIR}/recovery-wal.json")"
-  patch="$(RV="${rv}" WAL="${updated}" python3 - <<'PY'
-import json, os
+  patch="$(RV="${rv}" WAL_FILE="${EVIDENCE_DIR}/recovery-wal.json" python3 - <<'PY'
+import json, os, pathlib
 print(json.dumps([
   {"op":"test","path":"/metadata/resourceVersion","value":os.environ["RV"]},
-  {"op":"replace","path":"/data/wal.json","value":os.environ["WAL"]},
+  {"op":"replace","path":"/data/wal.json","value":pathlib.Path(os.environ["WAL_FILE"]).read_text(encoding="utf-8")},
 ], separators=(",", ":")))
 PY
 )" || return 1
@@ -161,8 +160,10 @@ PY
 }
 
 public_data_plane_adoption_delete_terminal_wal() {
-  local cm_name current rv
+  local cm_name current rv sealed_digest final_digest
   cm_name="$(public_data_plane_adoption_recovery_cm_name)"
+  [[ -f "${EVIDENCE_DIR}/terminal-wal.json" && ! -L "${EVIDENCE_DIR}/terminal-wal.json" ]] || return 1
+  sealed_digest="$(shasum -a 256 "${EVIDENCE_DIR}/terminal-wal.json" | awk '{print $1}')" || return 1
   current="$(${KUBECTL} -n "${RELEASE_NAMESPACE}" get "configmap/${cm_name}" -o json)" || return 1
   rm -rf "${EVIDENCE_DIR}/wal-terminal"
   RELEASE_NAME="${RELEASE_NAME}" public_data_plane_adoption_extract_recovery_configmap "${current}" "${EVIDENCE_DIR}/wal-terminal" || return 1
@@ -170,13 +171,42 @@ public_data_plane_adoption_delete_terminal_wal() {
     --transaction "${EVIDENCE_DIR}/wal-terminal/transaction.json" \
     --restore "${EVIDENCE_DIR}/wal-terminal/restore.json" \
     --wal "${EVIDENCE_DIR}/wal-terminal/wal.json" >/dev/null || return 1
+  cmp -s "${EVIDENCE_DIR}/terminal-wal.json" "${EVIDENCE_DIR}/wal-terminal/wal.json" || return 1
   WAL="${EVIDENCE_DIR}/wal-terminal/wal.json" python3 - <<'PY'
 import json, os
 with open(os.environ["WAL"], encoding="utf-8") as source: value=json.load(source)
-assert value["phase"] in {"baseline-finalized", "restore-succeeded"}
+assert value["phase"] in {"baseline-finalized", "restore-succeeded", "aborted-before-apply"}
 PY
   rv="$(cat "${EVIDENCE_DIR}/wal-terminal/configmap-resource-version")"
-  ${KUBECTL} -n "${RELEASE_NAMESPACE}" delete "configmap/${cm_name}" --resource-version="${rv}" --wait=false >/dev/null
+  ${KUBECTL} -n "${RELEASE_NAMESPACE}" delete "configmap/${cm_name}" --resource-version="${rv}" --wait=false >/dev/null || return 1
+  "${ADOPTION_TOOL}" wal-verify \
+    --transaction "${EVIDENCE_DIR}/transaction.json" \
+    --restore "${EVIDENCE_DIR}/restore.json" \
+    --wal "${EVIDENCE_DIR}/terminal-wal.json" >/dev/null || return 1
+  final_digest="$(shasum -a 256 "${EVIDENCE_DIR}/terminal-wal.json" | awk '{print $1}')" || return 1
+  [[ "${final_digest}" == "${sealed_digest}" ]]
+}
+
+public_data_plane_adoption_seal_terminal_wal() {
+  local expected_phase="$1" cm_name current
+  cm_name="$(public_data_plane_adoption_recovery_cm_name)"
+  public_data_plane_adoption_verify_owned_lease || return 1
+  current="$(${KUBECTL} -n "${RELEASE_NAMESPACE}" get "configmap/${cm_name}" -o json)" || return 1
+  rm -rf "${EVIDENCE_DIR}/wal-terminal-seal"
+  RELEASE_NAME="${RELEASE_NAME}" public_data_plane_adoption_extract_recovery_configmap \
+    "${current}" "${EVIDENCE_DIR}/wal-terminal-seal" || return 1
+  "${ADOPTION_TOOL}" wal-verify \
+    --transaction "${EVIDENCE_DIR}/wal-terminal-seal/transaction.json" \
+    --restore "${EVIDENCE_DIR}/wal-terminal-seal/restore.json" \
+    --wal "${EVIDENCE_DIR}/wal-terminal-seal/wal.json" >/dev/null || return 1
+  WAL="${EVIDENCE_DIR}/wal-terminal-seal/wal.json" EXPECTED_PHASE="${expected_phase}" python3 - <<'PY'
+import json, os
+with open(os.environ["WAL"], encoding="utf-8") as source: value=json.load(source)
+assert value["phase"] == os.environ["EXPECTED_PHASE"]
+assert value["phase"] in {"baseline-finalized", "restore-succeeded", "aborted-before-apply"}
+PY
+  cp "${EVIDENCE_DIR}/wal-terminal-seal/wal.json" "${EVIDENCE_DIR}/terminal-wal.json"
+  chmod 0600 "${EVIDENCE_DIR}/terminal-wal.json"
 }
 
 public_data_plane_adoption_delete_unarmed_wal() {

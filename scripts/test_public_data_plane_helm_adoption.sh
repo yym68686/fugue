@@ -163,7 +163,11 @@ stop_control_plane_backup_coordination_lease_renewer() { printf 'coord:stop\n' >
 MOCK
   cat >"${dir}/recovery.sh" <<'MOCK'
 public_data_plane_adoption_persist_recovery_wal() { printf 'wal:persist\n' >>"${TEST_LOG}"; }
-public_data_plane_adoption_advance_recovery_wal() { printf 'wal:advance:%s\n' "$1" >>"${TEST_LOG}"; }
+public_data_plane_adoption_advance_recovery_wal() {
+  printf 'wal:advance:%s\n' "$1" >>"${TEST_LOG}"
+  [[ "${TEST_SCENARIO}" != wal-fence-readback-fail || "$1" != fence-armed ]]
+}
+public_data_plane_adoption_seal_terminal_wal() { printf 'wal:seal:%s\n' "$1" >>"${TEST_LOG}"; }
 public_data_plane_adoption_delete_terminal_wal() { printf 'wal:delete\n' >>"${TEST_LOG}"; }
 public_data_plane_adoption_delete_unarmed_wal() { printf 'wal:delete-unarmed\n' >>"${TEST_LOG}"; }
 MOCK
@@ -236,6 +240,19 @@ assert_count 1 'coord:release' "${dir}/log"
 assert_count 0 'coord:arm' "${dir}/log"
 assert_count 0 '^upgrade$' "${dir}/log"
 
+dir="$(run_case wal-fence-readback-fail 1)"
+assert_count 1 'coord:arm' "${dir}/log"
+assert_count 1 'wal:advance:fence-armed' "${dir}/log"
+assert_count 0 'wal:advance:apply-started' "${dir}/log"
+assert_count 0 '^upgrade$' "${dir}/log"
+assert_count 0 'patch daemonset' "${dir}/log"
+assert_count 0 'trace:fence-armed' "${dir}/log"
+assert_count 0 'trace:recovery-fenced' "${dir}/log"
+assert_count 0 'coord:release' "${dir}/log"
+assert_count 1 'coord:stop' "${dir}/log"
+assert_count 1 'primary Stage1 failure: durable WAL fence-armed CAS/readback failed' "${dir}/stderr"
+assert_count 0 'trace transition is invalid' "${dir}/stderr"
+
 dir="$(run_case apply-fail 1)"
 assert_count 1 '^upgrade$' "${dir}/log"
 assert_count 3 'patch daemonset' "${dir}/log"
@@ -271,6 +288,7 @@ assert_count 0 'patch daemonset' "${dir}/log"
 assert_count 1 'coord:release' "${dir}/log"
 assert_count 1 'trace:baseline-finalized' "${dir}/log"
 assert_count 1 'trace:lease-released' "${dir}/log"
+assert_count 1 'wal:seal:baseline-finalized' "${dir}/log"
 [[ -f "${dir}/evidence/stage1-baseline.json" ]] || fail "success baseline missing"
 
 printf 'public data-plane Helm adoption fault matrix passed\n'

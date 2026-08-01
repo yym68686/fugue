@@ -25,9 +25,14 @@ restore_attempted=false
 baseline_finalized=false
 lease_released=false
 cleanup_running=false
+primary_failure=""
 
 log() { printf '[fugue-public-data-plane-adoption] %s\n' "$*" >&2; }
 fail() { log "ERROR: $*"; return 1; }
+record_primary_failure() {
+  primary_failure="$1"
+  log "ERROR: primary Stage1 failure: ${primary_failure}"
+}
 adoption_now() { python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))'; }
 
 require_private_directory() {
@@ -248,13 +253,19 @@ cleanup() {
   set +e
   if [[ "${fence_armed}" == true && "${baseline_finalized}" == false ]]; then
     if [[ "${apply_started}" == true && "${restore_attempted}" == false ]]; then
-      restore_public_snapshot
+      if ! restore_public_snapshot; then
+        log "secondary cleanup failure: authoritative restore did not complete"
+      fi
     fi
-    trace_phase recovery-fenced
+    if [[ "${apply_started}" == true ]]; then
+      if ! trace_phase recovery-fenced; then
+        log "secondary cleanup failure: recovery-fenced trace was not appended"
+      fi
+    fi
     if declare -F stop_control_plane_backup_coordination_lease_renewer >/dev/null; then
       stop_control_plane_backup_coordination_lease_renewer
     fi
-    log "Stage1 failed after the durable fence; coordination Lease remains recovery-required"
+    log "Stage1 failed after the durable fence; coordination Lease remains recovery-required; primary_failure=${primary_failure:-unclassified}"
   elif [[ "${lease_acquired}" == true && "${lease_released}" == false ]]; then
     if [[ "${wal_persisted}" == true ]]; then
       if ! public_data_plane_adoption_delete_unarmed_wal; then
@@ -385,15 +396,30 @@ main() {
   if ! "${ADOPTION_TOOL}" verify-prewrite "${common[@]}"; then
     fail "fresh prewrite evidence drifted"
   fi
-  trace_phase prewrite-verified
-  public_data_plane_adoption_persist_recovery_wal
+  if ! trace_phase prewrite-verified; then
+    record_primary_failure "prewrite-verified trace append failed"
+    return 1
+  fi
+  if ! public_data_plane_adoption_persist_recovery_wal; then
+    record_primary_failure "durable recovery WAL persistence failed"
+    return 1
+  fi
   wal_persisted=true
-  arm_control_plane_release_recovery_fence public-data-plane-adoption-stage1
+  if ! arm_control_plane_release_recovery_fence public-data-plane-adoption-stage1; then
+    record_primary_failure "durable recovery fence arm failed"
+    return 1
+  fi
   fence_armed=true
-  public_data_plane_adoption_advance_recovery_wal fence-armed
-  trace_phase fence-armed
+  if ! public_data_plane_adoption_advance_recovery_wal fence-armed; then
+    record_primary_failure "durable WAL fence-armed CAS/readback failed"
+    return 1
+  fi
+  if ! trace_phase fence-armed; then
+    record_primary_failure "fence-armed trace append failed"
+    return 1
+  fi
 
-  cat >"${EVIDENCE_DIR}/post-renderer.sh" <<EOF
+  if ! cat >"${EVIDENCE_DIR}/post-renderer.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 exec $(printf '%q' "${ADOPTION_TOOL}") transaction-post-render \\
@@ -402,11 +428,24 @@ exec $(printf '%q' "${ADOPTION_TOOL}") transaction-post-render \\
   --namespace $(printf '%q' "${RELEASE_NAMESPACE}") \\
   --secret-hmac-key-file $(printf '%q' "${SECRET_HMAC_KEY_FILE}")
 EOF
-  chmod 0700 "${EVIDENCE_DIR}/post-renderer.sh"
+  then
+    record_primary_failure "transaction post-renderer creation failed"
+    return 1
+  fi
+  if ! chmod 0700 "${EVIDENCE_DIR}/post-renderer.sh"; then
+    record_primary_failure "transaction post-renderer permission seal failed"
+    return 1
+  fi
 
-  public_data_plane_adoption_advance_recovery_wal apply-started
+  if ! public_data_plane_adoption_advance_recovery_wal apply-started; then
+    record_primary_failure "durable WAL apply-started CAS/readback failed"
+    return 1
+  fi
   apply_started=true
-  trace_phase apply-started
+  if ! trace_phase apply-started; then
+    record_primary_failure "apply-started trace append failed"
+    return 1
+  fi
   if ! "${HELM}" upgrade "${RELEASE_NAME}" "${CHART_PATH}" \
     -n "${RELEASE_NAMESPACE}" --reset-values -f "${EVIDENCE_DIR}/prewrite-values.yaml" \
     --no-hooks --wait --timeout "${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TIMEOUT:-10m}" \
@@ -444,6 +483,11 @@ EOF
     fail "could not seal the local completed trace"
   fi
   baseline_finalized=true
+  if ! public_data_plane_adoption_seal_terminal_wal baseline-finalized; then
+    rm -f "${EVIDENCE_DIR}/stage1-baseline.json"
+    record_primary_failure "terminal baseline WAL seal failed"
+    return 1
+  fi
   release_control_plane_backup_coordination_lease
   lease_released=true
   trace_phase lease-released

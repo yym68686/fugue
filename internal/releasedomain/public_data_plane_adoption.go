@@ -720,7 +720,7 @@ func AdvancePublicDataPlaneAdoptionRecoveryWAL(
 	}
 	transitions := map[string]map[string]bool{
 		"lease-acquired":            {"fence-armed": true},
-		"fence-armed":               {"apply-started": true, "restore-started": true},
+		"fence-armed":               {"apply-started": true, "restore-started": true, "aborted-before-apply": true},
 		"apply-started":             {"apply-failed": true, "apply-succeeded": true, "restore-started": true},
 		"apply-failed":              {"restore-started": true},
 		"apply-succeeded":           {"apply-verification-failed": true, "baseline-finalized": true, "restore-started": true},
@@ -730,6 +730,7 @@ func AdvancePublicDataPlaneAdoptionRecoveryWAL(
 		"restore-succeeded":         {},
 		"restore-succeeded-awaiting-helm-compensation": {},
 		"baseline-finalized":                           {},
+		"aborted-before-apply":                         {},
 	}
 	if !transitions[wal.Phase][phase] {
 		return PublicDataPlaneAdoptionRecoveryWAL{}, fmt.Errorf("public data-plane adoption recovery transition is invalid")
@@ -829,14 +830,16 @@ func VerifyPublicDataPlaneAdoptionRecoveryWAL(wal PublicDataPlaneAdoptionRecover
 		"apply-verification-failed": true, "restore-started": true, "restore-failed": true,
 		"restore-succeeded": true, "baseline-finalized": true,
 		"restore-succeeded-awaiting-helm-compensation": true,
+		"aborted-before-apply":                         true,
 	}
 	if !validPhases[wal.Phase] {
 		return fmt.Errorf("public data-plane adoption recovery phase is invalid")
 	}
-	if (wal.Phase == "lease-acquired" || wal.Phase == "fence-armed") && (wal.ApplyAttempts != 0 || wal.RestoreAttempts != 0) {
+	if (wal.Phase == "lease-acquired" || wal.Phase == "fence-armed" || wal.Phase == "aborted-before-apply") &&
+		(wal.ApplyAttempts != 0 || wal.RestoreAttempts != 0) {
 		return fmt.Errorf("public data-plane adoption recovery phase counters mismatch")
 	}
-	if wal.Phase != "lease-acquired" && wal.Phase != "fence-armed" && wal.Phase != "restore-started" &&
+	if wal.Phase != "lease-acquired" && wal.Phase != "fence-armed" && wal.Phase != "aborted-before-apply" && wal.Phase != "restore-started" &&
 		wal.Phase != "restore-succeeded" && wal.Phase != "restore-failed" &&
 		wal.Phase != "restore-succeeded-awaiting-helm-compensation" && wal.ApplyAttempts != 1 {
 		return fmt.Errorf("public data-plane adoption recovery apply counter does not match phase")

@@ -990,11 +990,31 @@ func TestPublicDataPlaneAdoptionDurableWALCrossProcessRecoveryNeverReapplies(t *
 		return updated
 	}
 
+	t.Run("death after fence before apply is a zero-write abort", func(t *testing.T) {
+		wal := advance(t, newWAL(t), "fence-armed")
+		wal = restart(t, wal)
+		wal = advance(t, wal, "aborted-before-apply")
+		if wal.Phase != "aborted-before-apply" || wal.ApplyAttempts != 0 || wal.RestoreAttempts != 0 {
+			t.Fatalf("zero-write abort counters drifted: %#v", wal)
+		}
+		for _, phase := range []string{"apply-started", "restore-started", "aborted-before-apply"} {
+			if _, err := AdvancePublicDataPlaneAdoptionRecoveryWAL(
+				wal, owner, token, phase, "2026-08-01T00:00:02Z", "",
+			); err == nil {
+				t.Fatalf("terminal zero-write abort accepted %s", phase)
+			}
+		}
+		tampered := wal
+		tampered.ApplyAttempts = 1
+		if err := VerifyPublicDataPlaneAdoptionRecoveryWAL(tampered); err == nil {
+			t.Fatal("zero-write abort accepted a nonzero apply counter")
+		}
+	})
+
 	for _, test := range []struct {
 		name   string
 		phases []string
 	}{
-		{name: "death after fence before apply"},
 		{name: "death mid apply", phases: []string{"apply-started"}},
 		{name: "death after apply before finalize", phases: []string{"apply-started", "apply-succeeded"}},
 	} {

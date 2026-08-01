@@ -85,7 +85,7 @@ recovery_trigger = recovery_workflow["on"] || recovery_workflow[true]
 assert_equal(recovery_trigger.keys, ["workflow_dispatch"], "Stage1 recovery trigger set")
 assert_equal(
   recovery_trigger.fetch("workflow_dispatch").fetch("inputs").keys,
-  ["expected_sha", "expected_wal_digest", "origin_run_id", "confirm_recovery"],
+  ["expected_source_sha", "expected_wal_digest", "origin_run_id", "confirm_recovery"],
   "Stage1 recovery input set",
 )
 assert_equal(recovery_workflow.fetch("permissions"), {"contents" => "read"}, "Stage1 recovery top-level permissions")

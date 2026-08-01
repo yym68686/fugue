@@ -10,7 +10,8 @@ EVIDENCE_DIR="${FUGUE_PUBLIC_DATA_PLANE_ADOPTION_EVIDENCE_DIR:-${RUNNER_TEMP:-/t
 RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
 RELEASE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
 RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-fugue-fugue}"
-EXPECTED_SHA="${FUGUE_EXPECTED_SHA:-}"
+EXPECTED_SOURCE_SHA="${FUGUE_EXPECTED_SOURCE_SHA:-}"
+RECOVERY_SHA="${FUGUE_RECOVERY_SHA:-}"
 EXPECTED_WAL_DIGEST="${FUGUE_EXPECTED_WAL_DIGEST:-}"
 EXPECTED_ORIGIN_RUN_ID="${FUGUE_EXPECTED_ORIGIN_RUN_ID:-}"
 KUBECTL="${KUBECTL:-kubectl}"
@@ -122,8 +123,21 @@ finalize_from_wal() {
   fi
 }
 
+verify_aborted_before_apply_state() {
+  local revision
+  capture_snapshot "${EVIDENCE_DIR}/abort-verification-snapshot.json" || return 1
+  "${ADOPTION_TOOL}" verify-restore --restore "${EVIDENCE_DIR}/restore.json" \
+    --snapshot "${EVIDENCE_DIR}/abort-verification-snapshot.json" \
+    --release "${RELEASE_NAME}" --namespace "${RELEASE_NAMESPACE}" --fullname "${RELEASE_FULLNAME}" || return 1
+  revision="$(helm_revision)" || return 1
+  canonical_helm_manifest "${revision}" "${EVIDENCE_DIR}/abort-helm-manifest.yaml" || return 1
+  "${ADOPTION_TOOL}" verify-recovery-base --transaction "${EVIDENCE_DIR}/transaction.json" \
+    --current-revision "${revision}" --current-manifest "${EVIDENCE_DIR}/abort-helm-manifest.yaml"
+}
+
 main() {
-  [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "$(git -C "${REPO_ROOT}" rev-parse HEAD)" == "${EXPECTED_SHA}" ]] || fail "exact recovery SHA mismatch"
+  [[ "${RECOVERY_SHA}" =~ ^[0-9a-f]{40}$ && "$(git -C "${REPO_ROOT}" rev-parse HEAD)" == "${RECOVERY_SHA}" ]] || fail "exact recovery implementation SHA mismatch"
+  [[ "${EXPECTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail "exact Stage1 source SHA is required"
   [[ "${EXPECTED_WAL_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "exact WAL digest is required"
   [[ "${EXPECTED_ORIGIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || fail "exact origin run ID is required"
   [[ -x "${ADOPTION_TOOL}" && -x "${EVIDENCE_TOOL}" ]] || fail "recovery tools are unavailable"
@@ -146,6 +160,7 @@ main() {
   fi
 
   local cm_name current lease_json owner token fields phase source target_revision baseline_digest wal_digest origin_run_id recovery_required
+  local apply_attempts restore_attempts terminal_phase=""
   cm_name="$(public_data_plane_adoption_recovery_cm_name)"
   current="$(${KUBECTL} -n "${RELEASE_NAMESPACE}" get "configmap/${cm_name}" -o json)"
   RELEASE_NAME="${RELEASE_NAME}" public_data_plane_adoption_extract_recovery_configmap "${current}" "${EVIDENCE_DIR}"
@@ -169,11 +184,12 @@ else:
     assert annotations.get("fugue.pro/recovery-required")=="true"
 assert "sha256:"+hashlib.sha256(token.encode()).hexdigest()==wal["leaseTokenDigest"]
 assert not metadata.get("deletionTimestamp")
-print("\t".join([owner,token,wal["phase"],wal["sourceCommit"],wal["targetRevision"],wal.get("baselineDigest",""),recovery or "false"]))
+print("\t".join([owner,token,wal["phase"],wal["sourceCommit"],wal["targetRevision"],wal.get("baselineDigest") or "-",recovery or "false",str(wal["applyAttempts"]),str(wal["restoreAttempts"])]))
 PY
 )"
-  IFS=$'\t' read -r owner token phase source target_revision baseline_digest recovery_required <<<"${fields}"
-  [[ "${source}" == "${EXPECTED_SHA}" ]] || fail "WAL source commit does not match recovery checkout"
+  IFS=$'\t' read -r owner token phase source target_revision baseline_digest recovery_required apply_attempts restore_attempts <<<"${fields}"
+  [[ "${baseline_digest}" != - ]] || baseline_digest=""
+  [[ "${source}" == "${EXPECTED_SOURCE_SHA}" ]] || fail "WAL source commit does not match the exact Stage1 source"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER="${owner}"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN="${token}"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
@@ -188,6 +204,7 @@ PY
       ;;
     baseline-finalized)
       finalize_from_wal "${target_revision}" "${baseline_digest}"
+      terminal_phase=baseline-finalized
       ;;
     restore-succeeded)
       capture_snapshot "${EVIDENCE_DIR}/restore-verification-snapshot.json"
@@ -198,24 +215,41 @@ PY
       canonical_helm_manifest "${revision}" "${EVIDENCE_DIR}/restore-helm-manifest.yaml"
       "${ADOPTION_TOOL}" verify-recovery-base --transaction "${EVIDENCE_DIR}/transaction.json" \
         --current-revision "${revision}" --current-manifest "${EVIDENCE_DIR}/restore-helm-manifest.yaml"
+      terminal_phase=restore-succeeded
       ;;
     restore-failed|restore-succeeded-awaiting-helm-compensation)
       fail "durable WAL records a failed restore; operator repair is required"
+      ;;
+    fence-armed)
+      [[ "${apply_attempts}" == 0 && "${restore_attempts}" == 0 ]] || fail "fence-armed WAL attempt counters are not zero"
+      verify_aborted_before_apply_state || fail "pre-apply abort state is not exact; preserving the recovery fence"
+      public_data_plane_adoption_advance_recovery_wal aborted-before-apply || fail "could not durably record the zero-write abort"
+      terminal_phase=aborted-before-apply
+      ;;
+    aborted-before-apply)
+      [[ "${apply_attempts}" == 0 && "${restore_attempts}" == 0 ]] || fail "aborted WAL attempt counters are not zero"
+      verify_aborted_before_apply_state || fail "zero-write abort state drifted; preserving the recovery fence"
+      terminal_phase=aborted-before-apply
       ;;
     apply-succeeded)
       if finalize_from_wal "${target_revision}" ""; then
         baseline_digest="$(BASELINE="${EVIDENCE_DIR}/stage1-baseline.json" python3 -c 'import json,os; print(json.load(open(os.environ["BASELINE"],encoding="utf-8"))["digest"])')"
         public_data_plane_adoption_advance_recovery_wal baseline-finalized "${baseline_digest}"
+        terminal_phase=baseline-finalized
       else
         rm -f "${EVIDENCE_DIR}/stage1-baseline.json"
         restore_from_wal "${phase}"
+        terminal_phase=restore-succeeded
       fi
       ;;
-    fence-armed|apply-started|apply-failed|apply-verification-failed|restore-started)
+    apply-started|apply-failed|apply-verification-failed|restore-started)
       restore_from_wal "${phase}"
+      terminal_phase=restore-succeeded
       ;;
     *) fail "durable WAL phase is unsupported" ;;
   esac
+  [[ -n "${terminal_phase}" ]] || fail "recovery did not reach a terminal WAL phase"
+  public_data_plane_adoption_seal_terminal_wal "${terminal_phase}" || fail "terminal recovery WAL could not be sealed"
   release_control_plane_backup_coordination_lease
   public_data_plane_adoption_delete_terminal_wal
   log "recovery completed without a second Helm apply"

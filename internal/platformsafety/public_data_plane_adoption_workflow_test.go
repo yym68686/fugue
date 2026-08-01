@@ -181,19 +181,53 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		t.Fatal(err)
 	}
 	text := string(data)
+	var workflow struct {
+		On map[string]yaml.Node `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	var dispatch releaseWorkflowDispatchTrigger
+	dispatchNode := workflow.On["workflow_dispatch"]
+	if err := dispatchNode.Decode(&dispatch); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedMapKeys(dispatch.Inputs); !reflect.DeepEqual(got, []string{
+		"confirm_recovery", "expected_source_sha", "expected_wal_digest", "origin_run_id",
+	}) {
+		t.Fatalf("recovery input inventory drifted: %v", got)
+	}
+	for _, name := range []string{"expected_source_sha", "expected_wal_digest", "origin_run_id"} {
+		var input releaseWorkflowDispatchInput
+		inputNode := dispatch.Inputs[name]
+		if err := inputNode.Decode(&input); err != nil || !input.Required || input.Type != "string" {
+			t.Fatalf("recovery input %s drifted: %+v err=%v", name, input, err)
+		}
+	}
+	var confirm releaseWorkflowDispatchInput
+	confirmNode := dispatch.Inputs["confirm_recovery"]
+	if err := confirmNode.Decode(&confirm); err != nil || confirm.Required || confirm.Type != "boolean" || confirm.Default != false {
+		t.Fatalf("confirm_recovery contract drifted: %+v err=%v", confirm, err)
+	}
 	assertPublicDataPlaneSetupGoBeforeBuild(t, data, "recover", "Build typed recovery tools")
 	for _, required := range []string{
 		"confirm_recovery:", "default: false", "if: ${{ inputs.confirm_recovery }}",
-		"expected_sha:", "expected_wal_digest:", "origin_run_id:",
+		"expected_source_sha:", "expected_wal_digest:", "origin_run_id:",
+		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA", "git diff --name-status --no-renames",
+		"ref: ${{ github.sha }}", "ACTUAL_REF: ${{ github.ref }}", "repos/${REPOSITORY}/git/ref/heads/main",
+		`[[ "$(git rev-parse HEAD^)" == "${EXPECTED_SOURCE_SHA}" ]]`,
 		"fugue-production-cluster-mutation-v1", "cancel-in-progress: false",
-		"actions: read", "contents: read", "run_attempt",
+		"actions: read", "contents: read", "run_attempt", "terminal-wal.json",
 		"./scripts/recover_public_data_plane_helm_adoption.sh",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("recovery workflow is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"cancel-in-progress: true", "actions: write", "contents: write"} {
+	for _, forbidden := range []string{
+		"cancel-in-progress: true", "actions: write", "contents: write",
+		"ref: ${{ inputs.", "FUGUE_EXPECTED_SHA:", "inputs.expected_sha",
+	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("recovery workflow contains forbidden capability %q", forbidden)
 		}
@@ -206,9 +240,14 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 	if strings.Contains(recoveryText, `"${HELM}" upgrade`) || strings.Contains(recoveryText, "helm rollback") {
 		t.Fatal("cross-process recovery can execute a second Helm apply or whole-release reversal")
 	}
+	if strings.Contains(recoveryText, "FUGUE_EXPECTED_SHA") {
+		t.Fatal("recovery script can conflate the Stage1 source with the recovery implementation SHA")
+	}
 	for _, required := range []string{
 		"restore-succeeded-awaiting-helm-compensation", "verify-recovery-base",
+		"aborted-before-apply", "verify_aborted_before_apply_state",
 		"canonicalize-secret-free",
+		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA",
 		"FUGUE_EXPECTED_WAL_DIGEST", "FUGUE_EXPECTED_ORIGIN_RUN_ID",
 		"originRunId",
 		"control_plane_stale_release_old_process_absent",
