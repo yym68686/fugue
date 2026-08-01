@@ -2,6 +2,8 @@ package platformsafety
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +14,19 @@ import (
 const publicDataPlaneAdoptionWorkflow = "../../.github/workflows/adopt-public-data-plane-helm-baseline.yml"
 
 const pinnedPublicDataPlaneSetupGo = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16"
+
+var publicDataPlaneRecoveryDeltaPaths = []string{
+	".github/workflows/recover-public-data-plane-helm-adoption.yml",
+	"internal/platformsafety/public_data_plane_adoption_workflow_test.go",
+	"internal/releasedomain/public_data_plane_adoption.go",
+	"internal/releasedomain/public_data_plane_adoption_test.go",
+	"scripts/adopt_public_data_plane_helm_baseline.sh",
+	"scripts/lib/public_data_plane_adoption_recovery.sh",
+	"scripts/recover_public_data_plane_helm_adoption.sh",
+	"scripts/test_public_data_plane_helm_adoption.sh",
+	"scripts/test_public_data_plane_helm_adoption_recovery.sh",
+	"scripts/test_release_domain_workflow.sh",
+}
 
 func assertPublicDataPlaneSetupGoBeforeBuild(t *testing.T, data []byte, jobName, buildStepName string) {
 	t.Helper()
@@ -215,7 +230,10 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		"expected_source_sha:", "expected_wal_digest:", "origin_run_id:",
 		"FUGUE_RECOVERY_SHA", "FUGUE_EXPECTED_SOURCE_SHA", "git diff --name-status --no-renames",
 		"ref: ${{ github.sha }}", "ACTUAL_REF: ${{ github.ref }}", "repos/${REPOSITORY}/git/ref/heads/main",
-		`[[ "$(git rev-parse HEAD^)" == "${EXPECTED_SOURCE_SHA}" ]]`,
+		"git merge-base --is-ancestor", "git rev-list --count", "git rev-list --min-parents=2",
+		"curl", "--config \"${curl_config}\"", "curl.config", "path.chmod(0o600)",
+		"object_pairs_hook=unique_object", "duplicate JSON key",
+		"--connect-timeout 5", "--max-time 15", "API_URL: ${{ github.api_url }}",
 		"fugue-production-cluster-mutation-v1", "cancel-in-progress: false",
 		"actions: read", "contents: read", "run_attempt", "terminal-wal.json",
 		"./scripts/recover_public_data_plane_helm_adoption.sh",
@@ -226,11 +244,24 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 	}
 	for _, forbidden := range []string{
 		"cancel-in-progress: true", "actions: write", "contents: write",
-		"ref: ${{ inputs.", "FUGUE_EXPECTED_SHA:", "inputs.expected_sha",
+		"ref: ${{ inputs.", "FUGUE_EXPECTED_SHA:", "inputs.expected_sha", "gh api", "command -v gh",
+		`--header "Authorization: Bearer ${GITHUB_TOKEN}"`,
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("recovery workflow contains forbidden capability %q", forbidden)
 		}
+	}
+	identity := publicDataPlaneRecoveryWorkflowStep(t, "Verify exact recovery identity")
+	recover := publicDataPlaneRecoveryWorkflowStep(t, "Recover or finalize the durable Stage1 transaction")
+	upload := publicDataPlaneRecoveryWorkflowStep(t, "Publish recovered Stage1 handoff")
+	if identity.ID != "identity" || recover.ID != "recover" {
+		t.Fatalf("recovery step outcome IDs drifted: identity=%q recover=%q", identity.ID, recover.ID)
+	}
+	if upload.If != "${{ always() && steps.identity.outcome == 'success' && steps.recover.outcome != 'skipped' }}" {
+		t.Fatalf("recovery artifact preflight/run condition drifted: %q", upload.If)
+	}
+	if upload.With["if-no-files-found"] != "error" || !strings.Contains(upload.With["path"], "terminal-wal.json") {
+		t.Fatalf("recovery terminal artifact fail-closed contract drifted: %+v", upload.With)
 	}
 	recovery, err := os.ReadFile("../../scripts/recover_public_data_plane_helm_adoption.sh")
 	if err != nil {
@@ -255,6 +286,280 @@ func TestPublicDataPlaneAdoptionRecoveryWorkflowIsDefaultOffAndOriginBound(t *te
 		if !strings.Contains(recoveryText, required) {
 			t.Fatalf("recovery script is missing %q", required)
 		}
+	}
+}
+
+func publicDataPlaneRecoveryWorkflowStep(t *testing.T, name string) releaseWorkflowStep {
+	t.Helper()
+	data, err := os.ReadFile("../../.github/workflows/recover-public-data-plane-helm-adoption.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := workflow.Jobs["recover"]
+	if !ok {
+		t.Fatal("recovery workflow job is missing")
+	}
+	var matches []releaseWorkflowStep
+	for _, step := range job.Steps {
+		if step.Name == name {
+			matches = append(matches, step)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("recovery workflow step %q count=%d", name, len(matches))
+	}
+	return matches[0]
+}
+
+func runPublicDataPlaneRecoveryGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v output=%s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func publicDataPlaneRecoveryIdentityRepository(t *testing.T, mode string) (string, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	runPublicDataPlaneRecoveryGit(t, dir, "init", "-q")
+	runPublicDataPlaneRecoveryGit(t, dir, "config", "user.name", "Recovery Test")
+	runPublicDataPlaneRecoveryGit(t, dir, "config", "user.email", "recovery@example.invalid")
+	for _, path := range publicDataPlaneRecoveryDeltaPaths {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("source\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runPublicDataPlaneRecoveryGit(t, dir, "add", "--", ".")
+	runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "-m", "source")
+	source := runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
+	sourceTree := runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD^{tree}")
+	for _, path := range publicDataPlaneRecoveryDeltaPaths {
+		if err := os.WriteFile(filepath.Join(dir, path), []byte("recovery-one\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runPublicDataPlaneRecoveryGit(t, dir, "add", "--", ".")
+	runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "-m", "recovery one")
+	first := runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
+	recovery := first
+	switch mode {
+	case "valid", "branch", "source-equals-recovery":
+		if err := os.WriteFile(filepath.Join(dir, publicDataPlaneRecoveryDeltaPaths[0]), []byte("recovery-two\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPublicDataPlaneRecoveryGit(t, dir, "add", "--", publicDataPlaneRecoveryDeltaPaths[0])
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "-m", "recovery two")
+		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
+		if mode == "branch" {
+			source = runPublicDataPlaneRecoveryGit(t, dir, "commit-tree", sourceTree, "-m", "unrelated source")
+		} else if mode == "source-equals-recovery" {
+			source = recovery
+		}
+	case "merge":
+		firstTree := runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", first+"^{tree}")
+		recovery = runPublicDataPlaneRecoveryGit(t, dir, "commit-tree", firstTree, "-p", first, "-p", source, "-m", "forbidden merge")
+	case "over-commit":
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery two")
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "--allow-empty", "-m", "recovery three")
+		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
+	case "extra-file":
+		if err := os.WriteFile(filepath.Join(dir, "unexpected.txt"), []byte("forbidden\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPublicDataPlaneRecoveryGit(t, dir, "add", "--", "unexpected.txt")
+		runPublicDataPlaneRecoveryGit(t, dir, "commit", "-q", "-m", "forbidden extra file")
+		recovery = runPublicDataPlaneRecoveryGit(t, dir, "rev-parse", "HEAD")
+	default:
+		t.Fatalf("unknown recovery identity fixture mode %q", mode)
+	}
+	switch mode {
+	case "branch":
+		probe := exec.Command("git", "merge-base", "--is-ancestor", source, recovery)
+		probe.Dir = dir
+		if err := probe.Run(); err == nil {
+			t.Fatal("branch fixture source is unexpectedly an ancestor")
+		}
+	case "merge":
+		if merges := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--min-parents=2", source+".."+recovery); merges == "" {
+			t.Fatal("merge fixture has no merge commit")
+		}
+	case "over-commit":
+		if count := runPublicDataPlaneRecoveryGit(t, dir, "rev-list", "--count", source+".."+recovery); count != "3" {
+			t.Fatalf("over-commit fixture count=%s", count)
+		}
+	case "extra-file":
+		if delta := runPublicDataPlaneRecoveryGit(t, dir, "diff", "--name-status", "--no-renames", source, recovery); !strings.Contains(delta, "A\tunexpected.txt") {
+			t.Fatalf("extra-file fixture delta=%s", delta)
+		}
+	case "source-equals-recovery":
+		if source != recovery {
+			t.Fatal("source-equals-recovery fixture drifted")
+		}
+	}
+	runPublicDataPlaneRecoveryGit(t, dir, "checkout", "-q", "--detach", recovery)
+	if status := runPublicDataPlaneRecoveryGit(t, dir, "status", "--porcelain"); status != "" {
+		t.Fatalf("recovery identity fixture is dirty: %s", status)
+	}
+	return dir, source, recovery
+}
+
+func runPublicDataPlaneRecoveryIdentity(t *testing.T, mode, apiMode string) ([]byte, error, string) {
+	t.Helper()
+	step := publicDataPlaneRecoveryWorkflowStep(t, "Verify exact recovery identity")
+	dir, source, recovery := publicDataPlaneRecoveryIdentityRepository(t, mode)
+	tempDir := t.TempDir()
+	mockBin := filepath.Join(tempDir, "bin")
+	if err := os.Mkdir(mockBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	curlArguments := filepath.Join(tempDir, "curl-arguments")
+	curl := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' '---' "$@" >>"${CURL_ARGUMENTS}"
+config=''; output=''; url=''
+while (( $# )); do
+  case "$1" in
+    --config) config="$2"; shift 2 ;;
+    --output) output="$2"; shift 2 ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+[[ -n "${config}" && -f "${config}" && ! -L "${config}" && -n "${output}" && -n "${url}" ]]
+CONFIG="${config}" GITHUB_TOKEN="${GITHUB_TOKEN}" python3 - <<'PY'
+import os, pathlib, stat
+path=pathlib.Path(os.environ["CONFIG"])
+assert stat.S_IMODE(path.stat().st_mode) == 0o600
+assert path.read_text() == 'header = "Authorization: Bearer '+os.environ["GITHUB_TOKEN"]+'"\n'
+PY
+printf '%s\n' 'curl_config_private=true' >>"${CURL_ARGUMENTS}"
+case "${url}" in
+  */git/ref/heads/main)
+    sha="${RECOVERY_SHA}"
+    [[ "${MOCK_API_MODE}" != main-mismatch ]] || sha=0000000000000000000000000000000000000000
+    if [[ "${MOCK_API_MODE}" == main-duplicate ]]; then
+      printf '{"ref":"refs/heads/main","ref":"refs/heads/main","object":{"type":"commit","sha":"%s","sha":"%s"}}\n' "${sha}" "${sha}" >"${output}"
+    else
+      printf '{"ref":"refs/heads/main","object":{"type":"commit","sha":"%s"}}\n' "${sha}" >"${output}"
+    fi
+    ;;
+  */actions/runs/*)
+    [[ "${MOCK_API_MODE}" != origin-timeout ]] || exit 28
+    [[ "${MOCK_API_MODE}" != origin-http-failure ]] || exit 22
+    sha="${EXPECTED_SOURCE_SHA}"
+    [[ "${MOCK_API_MODE}" != origin-mismatch ]] || sha=0000000000000000000000000000000000000000
+    document="$(printf '{"id":%s,"run_attempt":1,"event":"workflow_dispatch","head_branch":"main","head_sha":"%s","status":"completed","conclusion":"failure","path":".github/workflows/adopt-public-data-plane-helm-baseline.yml","repository":{"full_name":"example/fugue"}}' "${ORIGIN_RUN_ID}" "${sha}")"
+    if [[ "${MOCK_API_MODE}" == origin-duplicate ]]; then
+      printf '{"id":%s,"id":%s,"run_attempt":1,"event":"workflow_dispatch","head_branch":"main","head_sha":"%s","status":"completed","conclusion":"failure","path":".github/workflows/adopt-public-data-plane-helm-baseline.yml","repository":{"full_name":"example/fugue","full_name":"example/fugue"}}\n' "${ORIGIN_RUN_ID}" "${ORIGIN_RUN_ID}" "${sha}" >"${output}"
+    elif [[ "${MOCK_API_MODE}" == origin-multiple ]]; then
+      printf '%s\n{}\n' "${document}" >"${output}"
+    else
+      printf '%s\n' "${document}" >"${output}"
+    fi
+    ;;
+  *) exit 23 ;;
+esac
+`
+	curlPath := filepath.Join(mockBin, "curl")
+	if err := os.WriteFile(curlPath, []byte(curl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := mockBin + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	noGH := exec.Command("bash", "-c", "command -v gh")
+	noGH.Env = []string{"PATH=" + path}
+	if err := noGH.Run(); err == nil {
+		t.Fatal("recovery identity harness PATH unexpectedly contains gh")
+	}
+	command := exec.Command("bash", "-c", step.Run)
+	command.Dir = dir
+	command.Env = []string{
+		"PATH=" + path,
+		"HOME=" + tempDir,
+		"RUNNER_TEMP=" + tempDir,
+		"RECOVERY_SHA=" + recovery,
+		"EXPECTED_SOURCE_SHA=" + source,
+		"EXPECTED_REF=refs/heads/main",
+		"ACTUAL_REF=refs/heads/main",
+		"EXPECTED_WAL_DIGEST=sha256:" + strings.Repeat("1", 64),
+		"ORIGIN_RUN_ID=123",
+		"GITHUB_TOKEN=test-token",
+		"API_URL=https://api.github.com",
+		"REPOSITORY=example/fugue",
+		"MOCK_API_MODE=" + apiMode,
+		"CURL_ARGUMENTS=" + curlArguments,
+		"FUGUE_PUBLIC_DATA_PLANE_ADOPTION_COORDINATION_LIBRARY=",
+		"FUGUE_PUBLIC_DATA_PLANE_ADOPTION_RECOVERY_LIBRARY=",
+	}
+	output, err := command.CombinedOutput()
+	arguments, readErr := os.ReadFile(curlArguments)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	return output, err, string(arguments)
+}
+
+func TestPublicDataPlaneAdoptionRecoveryIdentityHarness(t *testing.T) {
+	t.Run("self-hosted PATH without gh and exact API evidence", func(t *testing.T) {
+		output, err, arguments := runPublicDataPlaneRecoveryIdentity(t, "valid", "success")
+		if err != nil {
+			t.Fatalf("exact recovery identity failed without gh: %v output=%s", err, output)
+		}
+		for _, required := range []string{
+			"--config", "curl_config_private=true", "--fail", "--silent", "--show-error", "--proto", "=https", "--tlsv1.2",
+			"--connect-timeout", "5", "--max-time", "15", "--retry", "0",
+			"Accept: application/vnd.github+json",
+			"X-GitHub-Api-Version: 2022-11-28", "https://api.github.com/repos/example/fugue/git/ref/heads/main",
+			"https://api.github.com/repos/example/fugue/actions/runs/123",
+		} {
+			if !strings.Contains(arguments, required) {
+				t.Fatalf("strict curl arguments are missing %q: %s", required, arguments)
+			}
+		}
+		if strings.Contains(arguments, "--location") {
+			t.Fatal("recovery identity API client permits redirects")
+		}
+		for _, leaked := range []string{"test-token", "Authorization: Bearer"} {
+			if strings.Contains(arguments, leaked) {
+				t.Fatalf("recovery identity curl argv leaked %q: %s", leaked, arguments)
+			}
+		}
+	})
+	for _, test := range []struct {
+		name    string
+		apiMode string
+	}{
+		{name: "origin API identity mismatch", apiMode: "origin-mismatch"},
+		{name: "main API identity mismatch", apiMode: "main-mismatch"},
+		{name: "origin API HTTP failure", apiMode: "origin-http-failure"},
+		{name: "origin API timeout", apiMode: "origin-timeout"},
+		{name: "duplicate main ref or object keys", apiMode: "main-duplicate"},
+		{name: "duplicate origin run or repository keys", apiMode: "origin-duplicate"},
+		{name: "multiple origin JSON documents", apiMode: "origin-multiple"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if output, err, _ := runPublicDataPlaneRecoveryIdentity(t, "valid", test.apiMode); err == nil {
+				t.Fatalf("recovery identity accepted %s: %s", test.apiMode, output)
+			}
+		})
+	}
+	for _, mode := range []string{"branch", "merge", "over-commit", "extra-file", "source-equals-recovery"} {
+		t.Run("reject lineage "+mode, func(t *testing.T) {
+			if output, err, _ := runPublicDataPlaneRecoveryIdentity(t, mode, "success"); err == nil {
+				t.Fatalf("recovery identity accepted %s lineage: %s", mode, output)
+			}
+		})
 	}
 }
 

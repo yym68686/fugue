@@ -95,8 +95,18 @@ recovery_job = recovery_workflow.fetch("jobs").fetch("recover")
 assert_equal(recovery_job.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "Stage1 recovery job permissions")
 assert_equal(recovery_job.fetch("if"), "${{ inputs.confirm_recovery }}", "Stage1 recovery default-off guard")
 assert_setup_go_before_build(recovery_workflow, "recover", "Build typed recovery tools", "Stage1 recovery")
+recovery_identity = step(recovery_job, "Verify exact recovery identity")
+recovery_execute = step(recovery_job, "Recover or finalize the durable Stage1 transaction")
 recovery_upload = step(recovery_job, "Publish recovered Stage1 handoff")
+assert_equal(recovery_identity.fetch("id"), "identity", "Stage1 recovery identity outcome ID")
+assert_equal(recovery_execute.fetch("id"), "recover", "Stage1 recovery execution outcome ID")
+assert_equal(
+  recovery_upload.fetch("if"),
+  "${{ always() && steps.identity.outcome == 'success' && steps.recover.outcome != 'skipped' }}",
+  "Stage1 recovery artifact preflight/run condition",
+)
 assert_equal(recovery_upload.fetch("with").fetch("if-no-files-found"), "error", "Stage1 recovery artifact missing-file policy")
+fail_contract("Stage1 recovery terminal artifact is missing") unless recovery_upload.fetch("with").fetch("path").include?("terminal-wal.json")
 
 trigger = workflow["on"] || workflow[true]
 fail_contract("workflow trigger is missing") unless trigger.is_a?(Hash)
