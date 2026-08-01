@@ -968,6 +968,7 @@ func TestEdgeDNSBundleExcludesPolicyBlockedEdgeNodeAnswers(t *testing.T) {
 	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/"+app.Route.Hostname, platformAdminKey, map[string]any{
 		"route_policy":      model.EdgeRoutePolicyEnabled,
 		"excluded_edge_ids": []string{"edge-de-1"},
+		"exclusion_reason":  "edge DNS policy test",
 	})
 	if put.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
