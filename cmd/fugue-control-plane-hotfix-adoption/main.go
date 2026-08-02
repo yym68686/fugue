@@ -190,7 +190,7 @@ func stripExactActivationProjection(object map[string]any, secretName, source, a
 		return nil, err
 	}
 	metadata, _ := copy["metadata"].(map[string]any)
-	if metadata["name"] != "fugue-fugue-api" || metadata["namespace"] != "fugue-system" {
+	if metadata["name"] != "fugue-fugue-api" || (metadata["namespace"] != nil && metadata["namespace"] != "fugue-system") {
 		return nil, fmt.Errorf("API Deployment identity drifted")
 	}
 	spec, _ := copy["spec"].(map[string]any)
