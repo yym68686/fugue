@@ -61,7 +61,7 @@ edge_activation_sign_request() {
     *) edge_activation_error "unknown signing mode"; return 1 ;;
   esac
   install -m 600 /dev/null "${signed}"
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${FUGUE_EDGE_ACTIVATION_SIGNER_POD}" -c api -- /usr/local/bin/fugue-api "${command}" <"${request}" >"${signed}" || return 1
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" exec -i "pod/${FUGUE_EDGE_ACTIVATION_SIGNER_POD}" -c api -- /usr/local/bin/fugue-api "${command}" <"${request}" >"${signed}" || return 1
   [[ -s "${signed}" ]] || return 1
   mv -f -- "${signed}" "${request}"
   chmod 600 "${request}"

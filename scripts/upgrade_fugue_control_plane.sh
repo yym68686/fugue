@@ -20850,7 +20850,7 @@ value={"expected_generation":0,"to_phase":"shadow","plan_digest":h,"evidence_dig
 with open(os.environ["OUTPUT"],"x",encoding="utf-8") as stream:json.dump(value,stream,separators=(",", ":"));stream.write("\n")
 os.chmod(os.environ["OUTPUT"],0o600)
 PY
-    release_bounded_kubectl 30 "edge activation signer readiness ${pod}" -n fugue-system exec "pod/${pod}" -c api -- /usr/local/bin/fugue-api sign-edge-activation <"${probe}" >"${response}" || return
+    release_bounded_kubectl 30 "edge activation signer readiness ${pod}" -n fugue-system exec -i "pod/${pod}" -c api -- /usr/local/bin/fugue-api sign-edge-activation <"${probe}" >"${response}" || return
     chmod 600 "${response}" || return
     python3 -c 'import json,re,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));a=v.get("authorization") or {};assert a.get("schema")=="edge-activation-authorization/v1" and re.fullmatch(r"hmac-sha256:[0-9a-f]{64}",str(a.get("signature") or "")) and a.get("runner_observed_secret_uid")==sys.argv[2] and a.get("runner_observed_secret_version")==sys.argv[3]' "${response}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" || return
   done < <(python3 -c 'import json,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));print("\n".join(sorted((p.get("metadata") or {}).get("name") for p in v.get("items") or [])))' "${directory}/pods.json")

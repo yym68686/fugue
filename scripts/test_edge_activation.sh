@@ -58,13 +58,16 @@ export FUGUE_EDGE_ACTIVATION_RECORD_DIGEST=sha256:cccccccccccccccccccccccccccccc
 export FUGUE_EDGE_ACTIVATION_LEGACY_DIGEST=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 # shellcheck source=scripts/lib/edge_activation.sh
 source "${ROOT}/scripts/lib/edge_activation.sh"
-kubectl_cmd() { cat; }
+KUBECTL_TRACE="${TMP}/kubectl-trace"
+: >"${KUBECTL_TRACE}"
+kubectl_cmd() { printf '%q ' "$@" >>"${KUBECTL_TRACE}"; printf '\n' >>"${KUBECTL_TRACE}"; cat; }
 edge_activation_init
 if grep -q bootstrap_ "${MOCK_ARGV}"; then
   echo "activation secret leaked through curl argv" >&2; exit 1
 fi
 edge_activation_advance shadow "" "" ""
 [[ "$(cat "${MOCK_POSTS}")" == POST ]]
+grep -Eq -- '-n fugue-system exec -i pod/fugue-api-test -c api -- /usr/local/bin/fugue-api sign-edge-activation' "${KUBECTL_TRACE}"
 
 export MOCK_MODE=ambiguous
 edge_activation_advance active-epoch-fenced "" "" ""
