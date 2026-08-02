@@ -2,8 +2,12 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -143,16 +147,136 @@ patch='{{"op": "add", "path": "/spec/leaseDurationSeconds", "value": 0}}'
             proc = Path(directory)
             (proc / "101").mkdir()
             (proc / "101" / "environ").write_bytes(b"GITHUB_RUN_ID=42\0")
+            self.assertEqual(
+                recovery.classify_old_run_process(41, proc_root=proc),
+                recovery.OriginProcessClassification("no_match"),
+            )
+            self.assertEqual(
+                recovery.classify_old_run_process(42, proc_root=proc),
+                recovery.OriginProcessClassification("found_origin_process", 101),
+            )
             recovery.assert_old_run_process_absent(41, proc_root=proc)
             with self.assertRaises(recovery.RecoveryProofError):
                 recovery.assert_old_run_process_absent(42, proc_root=proc)
+
+    def test_old_run_process_check_distinguishes_unset_and_different_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / "101").mkdir()
+            (proc / "101" / "environ").write_bytes(b"OTHER=value\0")
+            (proc / "102").mkdir()
+            (proc / "102" / "environ").write_bytes(b"GITHUB_RUN_ID=43\0")
+            self.assertEqual(
+                recovery.classify_old_run_process(42, proc_root=proc).reason,
+                "no_match",
+            )
 
     def test_old_run_process_check_ignores_esrch_race(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             proc = Path(directory)
             (proc / "101").mkdir()
             with mock.patch.object(Path, "read_bytes", side_effect=ProcessLookupError()):
-                recovery.assert_old_run_process_absent(42, proc_root=proc)
+                self.assertEqual(
+                    recovery.classify_old_run_process(42, proc_root=proc).reason,
+                    "no_match",
+                )
+
+    def test_old_run_process_check_classifies_unreadable_and_malformed_proc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc / "101").mkdir()
+            (proc / "101" / "environ").write_bytes(b"GITHUB_RUN_ID=42")
+            self.assertEqual(
+                recovery.classify_old_run_process(42, proc_root=proc),
+                recovery.OriginProcessClassification("malformed_env", 101),
+            )
+            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError()):
+                self.assertEqual(
+                    recovery.classify_old_run_process(42, proc_root=proc),
+                    recovery.OriginProcessClassification("unreadable_proc", 101),
+                )
+            with mock.patch.object(Path, "read_bytes", side_effect=OSError("read failed")):
+                self.assertEqual(
+                    recovery.classify_old_run_process(42, proc_root=proc),
+                    recovery.OriginProcessClassification("unreadable_proc", 101),
+                )
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and Path("/proc").is_dir(), "Linux procfs required")
+    def test_old_run_process_check_reads_real_nul_separated_proc_environ(self) -> None:
+        run_id = str(os.getpid()) + str(time.time_ns())
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            env={**os.environ, "GITHUB_RUN_ID": run_id},
+        )
+        try:
+            deadline = time.monotonic() + 5
+            result = recovery.OriginProcessClassification("no_match")
+            while time.monotonic() < deadline:
+                result = recovery.classify_old_run_process(int(run_id))
+                if result.reason == "found_origin_process":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(result, recovery.OriginProcessClassification("found_origin_process", child.pid))
+            with self.assertRaises(recovery.RecoveryProofError):
+                recovery.assert_old_run_process_absent(int(run_id))
+            recovery.assert_old_run_process_absent(int(run_id) + 1)
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_upgrade_guard_consumes_only_typed_classifier_output(self) -> None:
+        source = Path(__file__).with_name("upgrade_fugue_control_plane.sh").read_text()
+        start = source.index("control_plane_stale_release_old_process_absent()")
+        end = source.index("\n}\n", start) + 2
+        guard = source[start:end]
+        self.assertIn("classify-origin-process", guard)
+        self.assertIn("found_origin_process|unreadable_proc|malformed_env", guard)
+        self.assertNotIn('/proc/[0-9]*', guard)
+        self.assertNotIn('split(b"\\\\0")', guard)
+
+    def test_upgrade_guard_maps_typed_classifier_reasons_without_environment_output(self) -> None:
+        upgrade = Path(__file__).with_name("upgrade_fugue_control_plane.sh")
+        harness = r'''
+set -euo pipefail
+export FUGUE_UPGRADE_LIB_ONLY=true
+source "$1"
+python3() {
+  printf '%s\n' "${CLASSIFICATION}"
+  return "${CLASSIFIER_RC}"
+}
+status=0
+control_plane_stale_release_old_process_absent 42 || status=$?
+printf 'status=%s reason=%s pid=%s\n' \
+  "${status}" \
+  "${CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_REASON}" \
+  "${CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_PID:--}"
+'''
+        cases = (
+            ("no_match\t-", "0", "status=0 reason=no_match pid=-"),
+            ("found_origin_process\t123", "0", "status=1 reason=found_origin_process pid=123"),
+            ("unreadable_proc\t-", "0", "status=1 reason=unreadable_proc pid=-"),
+            ("malformed_env\t124", "0", "status=1 reason=malformed_env pid=124"),
+            ("invalid\t-", "0", "status=1 reason=unreadable_proc pid=-"),
+            ("no_match\t-", "1", "status=1 reason=unreadable_proc pid=-"),
+        )
+        for classification, classifier_rc, expected in cases:
+            with self.subTest(classification=classification, classifier_rc=classifier_rc):
+                completed = subprocess.run(
+                    ["bash", "-c", harness, "_", str(upgrade)],
+                    env={
+                        **os.environ,
+                        "CLASSIFICATION": classification,
+                        "CLASSIFIER_RC": classifier_rc,
+                        "SECRET_MARKER": "must-not-be-logged",
+                    },
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout.strip(), expected)
+                self.assertNotIn("must-not-be-logged", completed.stdout + completed.stderr)
 
     def test_github_evidence_uses_complete_curl_output(self) -> None:
         def fake_download(_url: str, _token: str, output: Path, *, limit: int) -> None:

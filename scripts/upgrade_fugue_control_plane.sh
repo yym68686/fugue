@@ -5234,28 +5234,29 @@ if int(spec.get("leaseDurationSeconds") or 0) < 1:
 
 control_plane_stale_release_old_process_absent() {
   local old_run_id="$1"
+  local classification=""
+  local reason=""
+  local pid=""
+  local extra=""
 
-  OLD_RUN_ID="${old_run_id}" python3 -c '
-import glob
-import os
-
-needle = ("GITHUB_RUN_ID=" + os.environ["OLD_RUN_ID"]).encode()
-uid = os.geteuid()
-for path in glob.glob("/proc/[0-9]*"):
-    try:
-        if os.stat(path).st_uid != uid:
-            continue
-        with open(path + "/environ", "rb") as stream:
-            environment = stream.read().split(b"\\0")
-    except (FileNotFoundError, ProcessLookupError):
-        continue
-    except PermissionError:
-        raise SystemExit(1)
-    except OSError:
-        raise SystemExit(1)
-    if needle in environment:
-        raise SystemExit(1)
-'
+  CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_REASON="unreadable_proc"
+  CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_PID=""
+  classification="$(python3 "${REPO_ROOT}/scripts/verify_stale_release_recovery.py" \
+    classify-origin-process --old-run-id "${old_run_id}")" || return 1
+  IFS=$'\t' read -r reason pid extra <<<"${classification}"
+  [[ -z "${extra}" ]] || return 1
+  case "${reason}" in
+    no_match)
+      [[ "${pid}" == "-" ]] || return 1
+      ;;
+    found_origin_process|unreadable_proc|malformed_env)
+      [[ "${pid}" == "-" || "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_REASON="${reason}"
+  [[ "${pid}" == "-" ]] || CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_PID="${pid}"
+  [[ "${reason}" == "no_match" ]]
 }
 
 control_plane_stale_release_recovery_proof_allows_takeover() {
@@ -5351,7 +5352,7 @@ if [status for revision, status in entries if revision == expected] != ["deploye
   old_run_id="${holder#release/}"
   old_run_id="${old_run_id%-*}"
   if ! control_plane_stale_release_old_process_absent "${old_run_id}"; then
-    log_stderr "stale release recovery refused because the old Actions run may still have a live process"
+    log_stderr "stale release recovery origin process guard denied: reason=${CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_REASON:-unreadable_proc} pid=${CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_PID:--}"
     return 1
   fi
   return 0

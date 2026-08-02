@@ -460,6 +460,7 @@ production_shape="${TMP}/production-shape-aborted"
 mkdir -p "${production_shape}/bin" "${production_shape}/evidence"
 : >"${production_shape}/log"
 printf 'ownership\n' >"${production_shape}/ownership.yaml"
+REAL_PYTHON3="$(command -v python3)"
 cp "${TMP}/death-after-fence/bin/adoption" "${production_shape}/bin/adoption"
 cp "${TMP}/death-after-fence/bin/evidence" "${production_shape}/bin/evidence"
 cp "${TMP}/death-after-fence/bin/helm" "${production_shape}/bin/helm"
@@ -577,6 +578,23 @@ else
 fi
 MOCK
 chmod +x "${production_shape}/bin/kubectl"
+cat >"${production_shape}/bin/python3" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == */scripts/verify_stale_release_recovery.py &&
+      "${2:-}" == classify-origin-process &&
+      "${3:-}" == --old-run-id &&
+      "${4:-}" =~ ^[1-9][0-9]*$ && $# == 4 ]]; then
+  if [[ "${GITHUB_RUN_ID:-}" == "$4" ]]; then
+    printf 'found_origin_process\t%s\n' "$$"
+  else
+    printf 'no_match\t-\n'
+  fi
+  exit 0
+fi
+exec "${TEST_REAL_PYTHON3:?}" "$@"
+MOCK
+chmod +x "${production_shape}/bin/python3"
 cat >"${production_shape}/recovery.sh" <<EOF
 # shellcheck source=scripts/lib/public_data_plane_adoption_recovery.sh
 source "${ROOT}/scripts/lib/public_data_plane_adoption_recovery.sh"
@@ -587,9 +605,28 @@ public_data_plane_adoption_delete_configmap_cas(){
 }
 EOF
 chmod 0600 "${production_shape}/recovery.sh"
+
+same_origin_result="$(
+  PATH="${production_shape}/bin:${PATH}" TEST_REAL_PYTHON3="${REAL_PYTHON3}" \
+    GITHUB_RUN_ID=123 REPO_ROOT="${ROOT}" FUGUE_UPGRADE_LIB_ONLY=true \
+    bash -c '
+set -euo pipefail
+source "$1"
+if control_plane_stale_release_old_process_absent 123; then
+  exit 90
+fi
+printf "reason=%s pid=%s\n" \
+  "${CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_REASON}" \
+  "${CONTROL_PLANE_STALE_RELEASE_ORIGIN_PROCESS_PID:--}"
+' _ "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+)" || fail "same-origin controlled process did not fail closed"
+[[ "${same_origin_result}" =~ ^reason=found_origin_process\ pid=[1-9][0-9]*$ ]] ||
+  fail "same-origin controlled process did not report found_origin_process"
+
 set +e
 env -u FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS \
   -u FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS \
+  GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 TEST_REAL_PYTHON3="${REAL_PYTHON3}" \
   PATH="${production_shape}/bin:${PATH}" TEST_LOG="${production_shape}/log" \
   TEST_PHASE=aborted-before-apply TEST_HELM_BASE=true TEST_LIVE_EXACT=true \
   TEST_WAL_DIGEST="${WAL_DIGEST}" TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" \
@@ -640,6 +677,7 @@ PY
 (
   unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS
   unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS
+  export GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 TEST_REAL_PYTHON3="${REAL_PYTHON3}"
   PATH="${production_fence}/bin:${PATH}" TEST_LOG="${production_fence}/log" \
   TEST_PHASE=fence-armed TEST_HELM_BASE=true TEST_LIVE_EXACT=true \
   TEST_WAL_DIGEST="${WAL_DIGEST}" TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" \
@@ -684,6 +722,7 @@ PY
 (
   unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS
   unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS
+  export GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 TEST_REAL_PYTHON3="${REAL_PYTHON3}"
   PATH="${production_residue}/bin:${PATH}" TEST_LOG="${production_residue}/log" \
   TEST_PHASE=aborted-before-apply TEST_HELM_BASE=true TEST_LIVE_EXACT=true \
   TEST_WAL_DIGEST="${WAL_DIGEST}" TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" \
@@ -724,6 +763,7 @@ wal["phase"]="fence-armed"; value["data"]["wal.json"]=json.dumps(wal,separators=
 path.write_text(json.dumps(value,separators=(",",":"))+"\n")
 PY
 set +e
+GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 TEST_REAL_PYTHON3="${REAL_PYTHON3}" \
 PATH="${production_residue_nonterminal}/bin:${PATH}" TEST_LOG="${production_residue_nonterminal}/log" \
 TEST_PHASE=fence-armed TEST_HELM_BASE=true TEST_LIVE_EXACT=true TEST_WAL_DIGEST="${WAL_DIGEST}" \
 TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" TEST_APPLY_ATTEMPTS=0 TEST_RESTORE_ATTEMPTS=0 \
@@ -751,6 +791,7 @@ rm -rf "${production_residue_drift}/evidence"; mkdir "${production_residue_drift
 rm -f "${production_residue_drift}/deleted" "${production_residue_drift}/lease-read-count"
 : >"${production_residue_drift}/log"
 set +e
+GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 TEST_REAL_PYTHON3="${REAL_PYTHON3}" \
 PATH="${production_residue_drift}/bin:${PATH}" TEST_LOG="${production_residue_drift}/log" \
 TEST_PHASE=aborted-before-apply TEST_HELM_BASE=true TEST_LIVE_EXACT=true TEST_WAL_DIGEST="${WAL_DIGEST}" \
 TEST_WAL_BASELINE_DIGEST='' TEST_BASELINE_DIGEST="${BASELINE_DIGEST}" TEST_APPLY_ATTEMPTS=0 TEST_RESTORE_ATTEMPTS=0 \
@@ -797,6 +838,7 @@ PY
   (
     unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS
     unset FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS
+    export GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 TEST_REAL_PYTHON3="${REAL_PYTHON3}"
     case "${caller_mode}" in
       duration) export FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS=120 ;;
       renew) export FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=30 ;;

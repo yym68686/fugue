@@ -19,12 +19,17 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote, urlsplit
 
 
 class RecoveryProofError(RuntimeError):
     pass
+
+
+class OriginProcessClassification(NamedTuple):
+    reason: str
+    pid: int | None = None
 
 
 def _require(condition: bool, message: str) -> None:
@@ -147,25 +152,48 @@ def validate_helm_history(history: Any, *, expected_revision: int) -> None:
     _require(expected == ["deployed"], "expected Helm revision is not uniquely deployed")
 
 
-def assert_old_run_process_absent(old_run_id: int, *, proc_root: Path = Path("/proc")) -> None:
-    _require(proc_root.is_dir(), "Linux procfs is unavailable")
+def classify_old_run_process(
+    old_run_id: int, *, proc_root: Path = Path("/proc")
+) -> OriginProcessClassification:
+    _require(old_run_id > 0, "old Actions run id must be positive")
+    if not proc_root.is_dir():
+        return OriginProcessClassification("unreadable_proc")
     own_uid = os.geteuid()
     needle = f"GITHUB_RUN_ID={old_run_id}".encode()
-    for process_dir in proc_root.iterdir():
-        if not process_dir.name.isdigit():
-            continue
+    try:
+        process_dirs = sorted(
+            (item for item in proc_root.iterdir() if item.name.isdigit()),
+            key=lambda item: int(item.name),
+        )
+    except (PermissionError, OSError):
+        return OriginProcessClassification("unreadable_proc")
+    for process_dir in process_dirs:
         try:
             if process_dir.stat().st_uid != own_uid:
                 continue
             environ = (process_dir / "environ").read_bytes()
         except (FileNotFoundError, ProcessLookupError):
             continue
-        except PermissionError as exc:
-            raise RecoveryProofError("cannot inspect a same-user process environment") from exc
-        except OSError as exc:
-            raise RecoveryProofError("cannot inspect a same-user process environment") from exc
-        if needle in environ.split(b"\0"):
-            raise RecoveryProofError(f"old Actions run still has a live process: pid={process_dir.name}")
+        except (PermissionError, OSError):
+            return OriginProcessClassification("unreadable_proc", int(process_dir.name))
+        if environ and not environ.endswith(b"\0"):
+            return OriginProcessClassification("malformed_env", int(process_dir.name))
+        entries = environ[:-1].split(b"\0") if environ else []
+        if needle in entries:
+            return OriginProcessClassification("found_origin_process", int(process_dir.name))
+    return OriginProcessClassification("no_match")
+
+
+def assert_old_run_process_absent(old_run_id: int, *, proc_root: Path = Path("/proc")) -> None:
+    classification = classify_old_run_process(old_run_id, proc_root=proc_root)
+    if classification.reason == "no_match":
+        return
+    pid = f": pid={classification.pid}" if classification.pid is not None else ""
+    if classification.reason == "found_origin_process":
+        raise RecoveryProofError(f"old Actions run still has a live process{pid}")
+    raise RecoveryProofError(
+        f"cannot prove the old Actions run process is absent: reason={classification.reason}{pid}"
+    )
 
 
 def _curl_download(url: str, token: str, output: Path, *, limit: int) -> None:
@@ -350,6 +378,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_origin_process_classifier(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--old-run-id", type=int, required=True)
+    args = parser.parse_args(argv)
+    try:
+        classification = classify_old_run_process(args.old_run_id)
+    except RecoveryProofError:
+        classification = OriginProcessClassification("unreadable_proc")
+    pid = str(classification.pid) if classification.pid is not None else "-"
+    print(f"{classification.reason}\t{pid}")
+    return 0
+
+
 def run(args: argparse.Namespace) -> None:
     _require(args.mode == "legacy-pre-helm", "unsupported stale release recovery mode")
     _require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository) is not None, "repository is invalid")
@@ -451,6 +492,8 @@ def run(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["classify-origin-process"]:
+        return run_origin_process_classifier(sys.argv[2:])
     try:
         run(build_parser().parse_args())
     except RecoveryProofError as exc:
