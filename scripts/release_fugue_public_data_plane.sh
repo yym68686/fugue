@@ -1394,6 +1394,88 @@ for raw in sys.stdin:
 '
 }
 
+worker_bundle_smoke_targets() {
+  local daemonset_name="$1"
+  local pod pod_snapshot bundle_file input_file
+  local pods=()
+  while IFS= read -r pod; do
+    pod="$(trim_field "${pod}")"
+    [[ -n "${pod}" ]] && pods+=("${pod}")
+  done < <(ready_pods_for_daemonset "${daemonset_name}")
+  if (( ${#pods[@]} != 1 )); then
+    error "worker ${daemonset_name} must have exactly one Ready candidate Pod for bundle-owned smoke selection"
+    return 1
+  fi
+  pod="${pods[0]}"
+  pod_snapshot="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "pod/${pod}" -o json)" || return 1
+  local edge_group_id pod_uid candidate_identity
+  candidate_identity="$(POD_SNAPSHOT="${pod_snapshot}" EXPECTED_RELEASE="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" EXPECTED_IMAGE="${FUGUE_EDGE_IMAGE_REPOSITORY}@${FUGUE_EDGE_IMAGE_DIGEST}" REQUIRE_TARGET="$([[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]] && printf false || printf true)" python3 -c '
+import json,os
+pod=json.loads(os.environ["POD_SNAPSHOT"]); meta=pod.get("metadata") or {}; status=pod.get("status") or {}
+conditions={item.get("type"):item.get("status") for item in status.get("conditions") or []}
+if meta.get("deletionTimestamp") or not meta.get("uid") or status.get("phase")!="Running" or conditions.get("Ready")!="True": raise SystemExit("candidate Pod is not exact Ready/non-deleting")
+group=str((meta.get("labels") or {}).get("fugue.io/edge-group-id") or "").strip()
+if not group: raise SystemExit("candidate Pod has no exact edge group identity")
+if os.environ["REQUIRE_TARGET"]=="true":
+    images={item.get("name"):item.get("image") for item in (pod.get("spec") or {}).get("containers") or []}
+    if images.get("edge")!=os.environ["EXPECTED_IMAGE"]: raise SystemExit("candidate Pod does not run the exact immutable Edge target")
+    if (meta.get("annotations") or {}).get("fugue.io/edge-release-epoch")!=os.environ["EXPECTED_RELEASE"]: raise SystemExit("candidate Pod release epoch is not the current transaction")
+print(group+"\t"+str(meta["uid"]))
+')" || return 1
+  IFS=$'\t' read -r edge_group_id pod_uid <<<"${candidate_identity}"
+  bundle_file="$(mktemp)" || return 1
+  input_file="$(mktemp)" || { rm -f -- "${bundle_file}"; return 1; }
+  chmod 600 "${bundle_file}" "${input_file}"
+  if ! kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c caddy -- \
+    /usr/bin/wget -qO- http://127.0.0.1:7832/edge/bundle >"${bundle_file}"; then
+    rm -f -- "${bundle_file}" "${input_file}"
+    return 1
+  fi
+  worker_smoke_targets >"${input_file}" || { rm -f -- "${bundle_file}" "${input_file}"; return 1; }
+  python3 - "${bundle_file}" "${input_file}" "${pod}" "${pod_uid}" "${edge_group_id}" <<'PY'
+import hashlib,json,re,sys
+bundle_path,input_path,pod,pod_uid,group=sys.argv[1:6]
+with open(bundle_path,encoding="utf-8") as handle: bundle=json.load(handle)
+version=str(bundle.get("version") or "").strip(); generation=str(bundle.get("generation") or "").strip(); signature=str(bundle.get("signature") or "").strip(); key_id=str(bundle.get("key_id") or "").strip()
+if not re.fullmatch(r"routegen_[0-9a-z]+",version) or generation!=version or not re.fullmatch(r"[A-Za-z0-9_-]{43}",signature) or not key_id:
+    raise SystemExit("candidate Edge bundle is not an exact signed route bundle")
+if str(bundle.get("edge_group_id") or "").strip()!=group:
+    raise SystemExit("candidate Edge bundle group does not match the candidate Pod")
+routes=bundle.get("routes")
+if not isinstance(routes,list): raise SystemExit("candidate Edge bundle routes are invalid")
+with open(input_path,encoding="utf-8") as handle:
+    inputs=[line.rstrip("\n").split("\t",1) for line in handle if line.strip()]
+selected=[]
+for host,path in inputs:
+    host=host.strip().lower(); path=(path or "/").split("?",1)[0] or "/"
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?",host): raise SystemExit("worker smoke hostname is invalid")
+    def prefix(route):
+        value=str(route.get("path_prefix") or "/").strip() or "/"
+        if not value.startswith("/"): value="/"+value
+        return value if value=="/" else value.rstrip("/")
+    candidates=[]
+    for route in routes:
+        if not isinstance(route,dict) or str(route.get("hostname") or "").strip().lower()!=host: continue
+        if str(route.get("edge_group_id") or "").strip()!=group or str(route.get("status") or "").strip().lower()!="active": continue
+        route_prefix=prefix(route)
+        if route_prefix=="/" or path==route_prefix or path.startswith(route_prefix+"/"):
+            candidates.append((len(route_prefix),route))
+    if not candidates: continue
+    best=max(item[0] for item in candidates); matches=[route for length,route in candidates if length==best]
+    if len(matches)!=1: raise SystemExit(f"bundle-owned worker smoke route is ambiguous for {group} {host}{path}")
+    route=matches[0]; route_generation=str(route.get("route_generation") or "").strip()
+    if not re.fullmatch(r"routegen_[0-9a-z]+",route_generation): raise SystemExit("bundle-owned worker smoke route generation is invalid")
+    selected.append((host,path,route_generation))
+if not selected: raise SystemExit(f"worker smoke inputs have no active bundle-owned hostname for {group}")
+digest="sha256:"+hashlib.sha256(json.dumps(bundle,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+for host,path,route_generation in selected:
+    print("\t".join((pod,pod_uid,host,path,group,version,route_generation,digest)))
+PY
+  local rc=$?
+  rm -f -- "${bundle_file}" "${input_file}"
+  return "${rc}"
+}
+
 public_data_plane_smoke_urls() {
   local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
   [[ -n "$(trim_field "${urls}")" ]] || return 0
@@ -3086,18 +3168,28 @@ smoke_curl_with_retry() {
 check_worker_https_smoke() {
   local daemonset_name="$1"
   local port="$2"
-  local host
-  local path
+  local pod pod_uid host path edge_group_id bundle_version route_generation bundle_digest
   local host_ip
+  local targets targets_after
+  local completed=0
 
-  while IFS=$'\t' read -r host path; do
+  targets="$(worker_bundle_smoke_targets "${daemonset_name}")" || return 1
+  while IFS=$'\t' read -r pod pod_uid host path edge_group_id bundle_version route_generation bundle_digest; do
     host="$(trim_field "${host}")"
     [[ -n "${host}" ]] || continue
     path="${path:-/}"
+    log "checking candidate bundle-owned TLS ask pod=${pod} uid=${pod_uid} group=${edge_group_id} bundle=${bundle_version} route=${route_generation} host=${host}"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]] && ! kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c caddy -- \
+      /usr/bin/wget -qS -T 5 -O /dev/null "http://127.0.0.1:7832/edge/tls/ask?domain=${host}" >/dev/null 2>&1; then
+      error "candidate local TLS ask rejected bundle-owned hostname ${host} for ${edge_group_id}"
+      return 1
+    fi
+    local host_ip_count=0
     while IFS= read -r host_ip; do
       host_ip="$(trim_field "${host_ip}")"
       [[ -n "${host_ip}" ]] || continue
       log "checking inactive worker HTTPS smoke ${host_ip}:${port} host=${host} path=${path}"
+      host_ip_count=$((host_ip_count + 1))
       if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
         continue
       fi
@@ -3105,8 +3197,22 @@ check_worker_https_smoke() {
         -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
         --resolve "${host}:${port}:${host_ip}" \
         "https://${host}:${port}${path}" >/dev/null || return $?
+      completed=$((completed + 1))
     done < <(node_ips_for_daemonset "${daemonset_name}")
-  done < <(worker_smoke_targets)
+    if (( host_ip_count == 0 )); then
+      error "candidate worker ${daemonset_name} has no direct node address for bundle-owned hostname ${host}"
+      return 1
+    fi
+  done <<<"${targets}"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]] && (( completed == 0 )); then
+    error "candidate worker ${daemonset_name} completed no bundle-owned direct TLS/HTTPS smoke"
+    return 1
+  fi
+  targets_after="$(worker_bundle_smoke_targets "${daemonset_name}")" || return 1
+  if [[ "${targets_after}" != "${targets}" ]]; then
+    error "candidate Pod or signed bundle-owned smoke target drifted during direct TLS/HTTPS validation"
+    return 1
+  fi
 }
 
 container_patch_for_front() {
