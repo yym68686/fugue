@@ -7,6 +7,10 @@ on:
         description: Exact lowercase main commit SHA authorized for this release
         required: true
         type: string
+      target_sha:
+        description: Exact lowercase runtime commit to build and deploy
+        required: true
+        type: string
       image_cache_convergence:
         description: Internal same-SHA image-cache convergence successor
         required: true
@@ -66,6 +70,7 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           ACTUAL_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
           IMAGE_CACHE_CONVERGENCE: ${{ inputs.image_cache_convergence && 'true' || 'false' }}
           CONVERGENCE_SOURCE_RUN_ID: ${{ inputs.convergence_source_run_id }}
           CONVERGENCE_AUTHORIZATION_FILE: ${{ runner.temp }}/fugue-release-convergence-authorization/successor.json
@@ -87,10 +92,14 @@ jobs:
           [[ "${EVENT_REF_TYPE}" == "branch" ]]
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${ACTUAL_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${EXPECTED_SHA}" == "${ACTUAL_SHA}" ]]
           [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+          remote_main="$(timeout --kill-after=2s 10s gh api \
+            "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${remote_main}" =~ ^[0-9a-f]{40}$ && "${remote_main}" == "${EXPECTED_SHA}" ]]
 
           if [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]; then
             [[ ! -e "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" && ! -L "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE}" ]]
@@ -142,7 +151,7 @@ jobs:
               [[ "${source_status}" == 'completed' && "${source_conclusion}" == 'success' ]] || exit 1
               [[ "${source_path}" == '.github/workflows/deploy-control-plane.yml' ]] || exit 1
               python3 - "${CONVERGENCE_AUTHORIZATION_FILE}" "${CONVERGENCE_SOURCE_RUN_ID}" \
-                "${GITHUB_RUN_ID}" "${GITHUB_RUN_NUMBER}" "${EXPECTED_SHA}" "${REPOSITORY}" <<'PY' || exit 1
+                "${GITHUB_RUN_ID}" "${GITHUB_RUN_NUMBER}" "${EXPECTED_SHA}" "${TARGET_SHA}" "${REPOSITORY}" <<'PY' || exit 1
           import datetime
           import hashlib
           import json
@@ -150,7 +159,7 @@ jobs:
           import re
           import sys
 
-          path, source_run_id, successor_run_id, successor_run_number, expected_sha, repository = sys.argv[1:]
+          path, source_run_id, successor_run_id, successor_run_number, expected_sha, target_sha, repository = sys.argv[1:]
           raw = pathlib.Path(path).read_bytes()
           value = json.loads(raw)
           expected_keys = {
@@ -174,7 +183,7 @@ jobs:
               "successor_run_id": successor_run_id,
               "successor_run_number": int(successor_run_number),
               "successor_status": value["successor_status"],
-              "successor_target_sha": expected_sha,
+              "successor_target_sha": target_sha,
               "baseline_advanced": False,
               "cluster_mutation_attempted": False,
               "workflow_dispatch_attempted": True,
@@ -199,7 +208,7 @@ jobs:
           image_repository = f"ghcr.io/{repository.split('/', 1)[0].lower()}/fugue-image-cache"
           if artifact["component"] != "image_cache" or artifact["repository"] != image_repository:
               raise SystemExit("convergence image-cache artifact identity is invalid")
-          if artifact["source_tag"] != expected_sha or artifact["oci_revision"] != expected_sha:
+          if artifact["source_tag"] != target_sha or artifact["oci_revision"] != target_sha:
               raise SystemExit("convergence image-cache artifact revision is invalid")
           for field in ("top_digest", "config_digest", "platform_manifest_digest"):
               if digest_re.fullmatch(artifact[field] or "") is None:
@@ -260,7 +269,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
       - name: Download Stage1 handoff for planner base
@@ -305,12 +314,22 @@ jobs:
 
       - name: Resolve release-domain baseline
         id: domain_baseline
+        env:
+          SOURCE_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
           readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
-          readonly target_sha="${GITHUB_SHA}"
+          readonly target_sha="${TARGET_SHA}"
 
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_sha}" ]] || exit 1
+          remote_main="$(timeout --kill-after=2s 20s git ls-remote --refs origin refs/heads/main | awk 'NR == 1 {print $1}')" || exit 1
+          [[ "${remote_main}" == "${SOURCE_SHA}" ]] || exit 1
+          timeout --kill-after=5s 60s git fetch --no-tags origin "${SOURCE_SHA}" || exit 1
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${SOURCE_SHA}" ]] || exit 1
+          git merge-base --is-ancestor "${target_sha}" "${SOURCE_SHA}" || exit 1
           remote_branch=''
           set +e
           remote_branch="$(timeout --kill-after=2s 20s git ls-remote --refs --exit-code origin "${baseline_ref}")"
@@ -384,6 +403,7 @@ jobs:
             [[ -n "${parent_shas:-}" ]] || exit 1
           fi
           git cat-file -e "${domain_base_sha}^{commit}" || exit 1
+          [[ "${domain_base_sha}" != "${target_sha}" ]] || exit 1
           git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}" || exit 1
 
           {
@@ -399,14 +419,15 @@ jobs:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
-          FUGUE_IMAGE_TAG: ${{ github.sha }}
+          GITHUB_SHA: ${{ inputs.target_sha }}
+          FUGUE_IMAGE_TAG: ${{ inputs.target_sha }}
           FUGUE_RESOLVE_HELM_IMAGE_BASELINES: "true"
         run: ./scripts/resolve_control_plane_live_images.sh
 
       - name: Compute live-to-target release changed files
         id: release_changes
         env:
-          FUGUE_RELEASE_TARGET_REF: ${{ github.sha }}
+          FUGUE_RELEASE_TARGET_REF: ${{ inputs.target_sha }}
           FUGUE_RELEASE_BASE_REFS: ${{ steps.live_images.outputs.release_baseline_tags }}
           FUGUE_RELEASE_REQUIRE_BASELINE: "true"
         run: ./scripts/compute_release_changed_files_from_live.sh
@@ -419,7 +440,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.target_sha }}
 
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -530,7 +551,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
       - name: Download convergence image artifact authorization
@@ -550,9 +571,13 @@ jobs:
 
       - name: Compute image metadata
         id: meta
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           owner_lc="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          echo "image_tag=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${TARGET_SHA}" ]]
+          echo "image_tag=${TARGET_SHA}" >> "${GITHUB_OUTPUT}"
           echo "api_image_repository=ghcr.io/${owner_lc}/fugue-api" >> "${GITHUB_OUTPUT}"
           echo "controller_image_repository=ghcr.io/${owner_lc}/fugue-controller" >> "${GITHUB_OUTPUT}"
           echo "drain_agent_image_repository=ghcr.io/${owner_lc}/fugue-drain-agent" >> "${GITHUB_OUTPUT}"
@@ -651,7 +676,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
       - name: Download Stage1 handoff for deploy prewrite
@@ -751,7 +776,7 @@ jobs:
         if: ${{ needs.release-baseline.outputs.is_genesis == 'true' }}
         env:
           DOMAIN_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
-          DOMAIN_TARGET_SHA: ${{ github.sha }}
+          DOMAIN_TARGET_SHA: ${{ inputs.target_sha }}
           GENESIS_SHA: ${{ vars.FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA }}
           GENESIS_PARENT_SHA: ${{ needs.release-baseline.outputs.genesis_parent_sha }}
         run: |
@@ -881,7 +906,7 @@ jobs:
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
-          FUGUE_IMAGE_TAG: ${{ needs.build.outputs.image_tag || github.sha }}
+          FUGUE_IMAGE_TAG: ${{ needs.build.outputs.image_tag || inputs.target_sha }}
           FUGUE_IMAGE_TARGETS: ${{ needs.build.outputs.image_targets || '' }}
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
@@ -900,7 +925,7 @@ jobs:
             echo "runner_os=${RUNNER_OS}"
             echo "runner_arch=${RUNNER_ARCH}"
             echo "repository=${GITHUB_REPOSITORY}"
-            echo "commit=${GITHUB_SHA}"
+            echo "commit=${FUGUE_IMAGE_TAG}"
             echo "ref=${GITHUB_REF}"
             echo "release_name=${FUGUE_RELEASE_NAME}"
             echo "namespace=${FUGUE_NAMESPACE}"
@@ -932,7 +957,8 @@ jobs:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
-          FUGUE_IMAGE_TAG: ${{ needs.build.outputs.image_tag || github.sha }}
+          GITHUB_SHA: ${{ inputs.target_sha }}
+          FUGUE_IMAGE_TAG: ${{ needs.build.outputs.image_tag || inputs.target_sha }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ needs.build.outputs.api_image_repository || format('ghcr.io/{0}/fugue-api', github.repository_owner) }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.build.outputs.controller_image_repository || format('ghcr.io/{0}/fugue-controller', github.repository_owner) }}
           FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY: ${{ needs.build.outputs.drain_agent_image_repository || format('ghcr.io/{0}/fugue-drain-agent', github.repository_owner) }}
@@ -944,6 +970,7 @@ jobs:
       - name: Prove explicitly authorized stale pre-Helm release recovery
         if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE != '' }}
         env:
+          GITHUB_SHA: ${{ inputs.target_sha }}
           GITHUB_TOKEN: ${{ github.token }}
           RECOVERY_MODE: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE }}
           RECOVERY_EXPECTED_HOLDER: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_EXPECTED_HOLDER }}
@@ -980,6 +1007,7 @@ jobs:
         # control-plane automation secret, so the workflow only needs one
         # deploy entrypoint.
         env:
+          GITHUB_SHA: ${{ inputs.target_sha }}
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
@@ -1190,7 +1218,7 @@ jobs:
           FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}
           FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref }}
           FUGUE_RELEASE_DOMAIN_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
-          FUGUE_RELEASE_DOMAIN_TARGET_SHA: ${{ github.sha }}
+          FUGUE_RELEASE_DOMAIN_TARGET_SHA: ${{ inputs.target_sha }}
           FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL: ${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence
           FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL: ${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch
           FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE: ${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json
@@ -1233,7 +1261,7 @@ jobs:
           FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS: '600'
           FUGUE_EDGE_ACTIVATION_ENABLED: ${{ vars.FUGUE_EDGE_ACTIVATION_ENABLED || 'false' }}
           FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME: ${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME || '' }}
-          FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE || 'auto' }}
+          FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE: preserve
           FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || needs.build.outputs.build_edge == 'true' }}
           FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE: ${{ vars.FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE || 'auto' }}
           FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE: ${{ vars.FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE || 'guard' }}
@@ -1277,6 +1305,7 @@ jobs:
         id: convergence_successor
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
           PENDING_ACTIVATION_ARTIFACTS: ${{ needs.deploy.outputs.pending_activation_artifacts }}
           SOURCE_IMAGE_CACHE_BASE_REF: ${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}
           SOURCE_IMAGE_CACHE_IMAGE_DIGEST: ${{ needs.build.outputs.image_cache_image_digest }}
@@ -1297,6 +1326,7 @@ jobs:
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
           [[ "${GITHUB_RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]] || exit 1
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "${PENDING_ACTIVATION_ARTIFACTS}" == 'image_cache' ]] || exit 1
 
           state="$(timeout --kill-after=2s 10s gh api \
@@ -1321,6 +1351,7 @@ jobs:
             "repos/${REPOSITORY}/actions/workflows/${workflow_id}/dispatches" \
             -f ref=main \
             -f "inputs[expected_sha]=${main_head}" \
+            -f "inputs[target_sha]=${TARGET_SHA}" \
             -f 'inputs[image_cache_convergence]=true' \
             -f "inputs[convergence_source_run_id]=${GITHUB_RUN_ID}" >/dev/null || exit 1
 
@@ -1344,10 +1375,10 @@ jobs:
             "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
           [[ "${observed_main}" == "${main_head}" ]] || exit 1
 
-          python3 - "${evidence_dir}/successor.json" "${main_head}" \
+          python3 - "${evidence_dir}/successor.json" "${main_head}" "${TARGET_SHA}" \
             "${successor_id}" "${successor_number}" "${successor_status}" <<'PY'
           import datetime, hashlib, json, os, re, sys
-          output, target_sha, successor_id, successor_number, successor_status = sys.argv[1:]
+          output, source_sha, target_sha, successor_id, successor_number, successor_status = sys.argv[1:]
           digest_re = re.compile(r"sha256:[0-9a-f]{64}")
           source_base_ref = os.environ["SOURCE_IMAGE_CACHE_BASE_REF"]
           if re.fullmatch(r"[0-9a-f]{40}", source_base_ref or "") is None:
@@ -1398,7 +1429,7 @@ jobs:
               "repository": os.environ["GITHUB_REPOSITORY"],
               "source_run_id": os.environ["GITHUB_RUN_ID"],
               "source_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-              "source_head_sha": os.environ["GITHUB_SHA"],
+              "source_head_sha": source_sha,
               "source_image_cache_artifact": image_cache_artifact,
               "source_image_cache_artifacts_digest": bound_digest,
               "source_image_cache_base_ref": source_base_ref,
@@ -1444,7 +1475,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.target_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -1452,7 +1483,8 @@ jobs:
         env:
           EXPECTED_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
           EXPECTED_BASE_REF_OBJECT: ${{ needs.release-baseline.outputs.baseline_ref_object_sha }}
-          TARGET_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -1460,9 +1492,13 @@ jobs:
           readonly metadata_path='fugue-runtime-baseline.json'
           [[ "${EXPECTED_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${EXPECTED_BASE_REF_OBJECT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ && "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
           [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${TARGET_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${TARGET_SHA}" ]]
+          remote_main="$(timeout --kill-after=2s 20s git ls-remote --refs origin refs/heads/main | awk 'NR == 1 {print $1}')"
+          [[ "${remote_main}" == "${SOURCE_SHA}" ]]
+          git merge-base --is-ancestor "${TARGET_SHA}" "${SOURCE_SHA}"
+          [[ "${EXPECTED_BASE_SHA}" != "${TARGET_SHA}" ]]
 
           remote_branch=''
           set +e

@@ -117,13 +117,17 @@ dispatch = trigger.fetch("workflow_dispatch")
 inputs = dispatch.fetch("inputs")
 assert_equal(
   inputs.keys,
-  ["expected_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"],
+  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"],
   "dispatch input set",
 )
 expected_sha = inputs.fetch("expected_sha")
 assert_equal(expected_sha["required"], true, "expected_sha required flag")
 assert_equal(expected_sha["type"], "string", "expected_sha type")
 fail_contract("expected_sha must not have a default") if expected_sha.key?("default")
+target_sha = inputs.fetch("target_sha")
+assert_equal(target_sha["required"], true, "target_sha required flag")
+assert_equal(target_sha["type"], "string", "target_sha type")
+fail_contract("target_sha must not have a default") if target_sha.key?("default")
 image_cache_convergence = inputs.fetch("image_cache_convergence")
 assert_equal(image_cache_convergence["required"], true, "image-cache convergence required flag")
 assert_equal(image_cache_convergence["type"], "boolean", "image-cache convergence type")
@@ -170,6 +174,7 @@ guard_step = step(guard, "Guard exact main commit authorization")
 {
   "EXPECTED_SHA" => "${{ inputs.expected_sha }}",
   "ACTUAL_SHA" => "${{ github.sha }}",
+  "TARGET_SHA" => "${{ inputs.target_sha }}",
   "IMAGE_CACHE_CONVERGENCE" => "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
   "CONVERGENCE_SOURCE_RUN_ID" => "${{ inputs.convergence_source_run_id }}",
   "CONVERGENCE_AUTHORIZATION_FILE" => "${{ runner.temp }}/fugue-release-convergence-authorization/successor.json",
@@ -192,6 +197,9 @@ for fragment in [
   '"${EVENT_REF_TYPE}" == "branch"',
   '^[0-9a-f]{40}$',
   '"${EXPECTED_SHA}" == "${ACTUAL_SHA}"',
+  '"${TARGET_SHA}" =~ ^[0-9a-f]{40}$',
+  'repos/${REPOSITORY}/git/ref/heads/main',
+  '"${remote_main}" == "${EXPECTED_SHA}"',
   'false)',
   '[[ -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]',
   'true)',
@@ -216,6 +224,10 @@ end
 baseline = jobs.fetch("release-baseline")
 assert_equal(needs(baseline), ["release-input-guard"], "release-baseline dependencies")
 assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
+for job_name in ["release-baseline", "release-gate", "build", "deploy", "record-release-baseline"]
+  checkout = step(jobs.fetch(job_name), "Checkout")
+  assert_equal(checkout.fetch("with").fetch("ref"), "${{ inputs.target_sha }}", "#{job_name} target checkout")
+end
 stage1_planner_gate = step(baseline, "Verify Stage1 handoff before release planning")
 for fragment in ["canonicalize-secret-free", "verify-stage2"]
   fail_contract("Stage1 planner gate is missing #{fragment.inspect}") unless stage1_planner_gate.fetch("run").include?(fragment)
@@ -232,7 +244,11 @@ assert_equal(
 )
 resolver = step(baseline, "Resolve release-domain baseline")
 assert_equal(resolver["id"], "domain_baseline", "domain baseline step id")
-assert_equal(resolver.fetch("env", {}), {}, "forward baseline resolver environment")
+assert_equal(
+  resolver.fetch("env", {}),
+  {"SOURCE_SHA" => "${{ inputs.expected_sha }}", "TARGET_SHA" => "${{ inputs.target_sha }}"},
+  "forward baseline resolver environment",
+)
 for fragment in [
   "readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
@@ -249,6 +265,8 @@ for fragment in [
   '"${metadata_parent}" == "${previous_baseline_object_sha}"',
   '[[ -n "${parent_shas:-}" ]] || exit 1',
   'git cat-file -e "${domain_base_sha}^{commit}"',
+  '[[ "${domain_base_sha}" != "${target_sha}" ]] || exit 1',
+  'git merge-base --is-ancestor "${target_sha}" "${SOURCE_SHA}"',
   'git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"',
   "printf 'is_genesis=false",
   "printf 'genesis_parent_sha=",
@@ -461,8 +479,10 @@ genesis_evidence = step(deploy, "Write genesis public release evidence")
 assert_equal(genesis_evidence["id"], "genesis_evidence", "genesis evidence id")
 upgrade_env = upgrade.fetch("env")
 {
+  "GITHUB_SHA" => "${{ inputs.target_sha }}",
+  "FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE" => "preserve",
   "FUGUE_RELEASE_DOMAIN_BASE_SHA" => "${{ needs.release-baseline.outputs.domain_base_sha }}",
-  "FUGUE_RELEASE_DOMAIN_TARGET_SHA" => "${{ github.sha }}",
+  "FUGUE_RELEASE_DOMAIN_TARGET_SHA" => "${{ inputs.target_sha }}",
   "FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL" => "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence",
   "FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL" => "${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch",
   "FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE" => "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json",
@@ -661,6 +681,7 @@ for fragment in [
   '[[ -z "${before}" ]] || exit 1',
   'actions/workflows/${workflow_id}/dispatches',
   '-f "inputs[expected_sha]=${main_head}"',
+  '-f "inputs[target_sha]=${TARGET_SHA}"',
   "-f 'inputs[image_cache_convergence]=true'",
   '-f "inputs[convergence_source_run_id]=${GITHUB_RUN_ID}"',
   'successor_number > GITHUB_RUN_NUMBER',
@@ -694,6 +715,7 @@ assert_equal(
 assert_equal(record.fetch("steps").length, 2, "record baseline exact step inventory")
 record_checkout = record.fetch("steps").first
 assert_equal(record_checkout.fetch("name"), "Checkout", "record baseline checkout position")
+assert_equal(record_checkout.fetch("with").fetch("ref"), "${{ inputs.target_sha }}", "record baseline target checkout")
 assert_equal(record_checkout.fetch("with").fetch("persist-credentials"), false, "record baseline checkout credentials")
 advance = step(record, "Advance dedicated forward-only release baseline branch")
 assert_equal(record.fetch("steps").last.fetch("name"), advance.fetch("name"), "record baseline writer position")
@@ -726,7 +748,10 @@ carrier_recorder = advance_run.include?("readonly metadata_path='fugue-runtime-b
 if carrier_recorder
   carrier_fragments = [
     '"${EXPECTED_BASE_REF_OBJECT}" =~ ^[0-9a-f]{40}$',
-    '"${TARGET_SHA}" == "${GITHUB_SHA}"',
+    '"${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ && "${SOURCE_SHA}" == "${GITHUB_SHA}"',
+    '"${remote_main}" == "${SOURCE_SHA}"',
+    'git merge-base --is-ancestor "${TARGET_SHA}" "${SOURCE_SHA}"',
+    '"${EXPECTED_BASE_SHA}" != "${TARGET_SHA}"',
     '"${EXPECTED_BASE_REF_OBJECT}" != "${EXPECTED_BASE_SHA}"',
     '"${represented_runtime}" == "${EXPECTED_BASE_SHA}"',
     '"${represented_parent}" == "${represented_previous}"',
