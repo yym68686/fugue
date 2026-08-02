@@ -129,13 +129,24 @@ func NewHTTPComponentPlanStore(cfg HTTPComponentPlanStoreConfig) (*HTTPComponent
 		return nil, fmt.Errorf("%w: max response size must be between 1 and %d bytes", ErrComponentPlanAPI, maxComponentPlanAPIResponseBytes)
 	}
 
-	client := http.DefaultClient
+	var client *http.Client
 	if cfg.Client != nil {
+		if cfg.Client.Transport == nil {
+			return nil, fmt.Errorf("%w: injected HTTP client must define an explicit transport", ErrComponentPlanAPI)
+		}
 		copy := *cfg.Client
 		client = &copy
 	} else {
-		copy := *http.DefaultClient
-		client = &copy
+		client = &http.Client{Transport: &http.Transport{
+			Proxy:                 nil,
+			DisableCompression:    true,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          8,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}}
 	}
 	client.Timeout = timeout
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {

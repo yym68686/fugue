@@ -168,6 +168,7 @@ func TestNewHTTPComponentPlanStoreRejectsUnsafeTransportConfiguration(t *testing
 		"path traversal":     func(cfg *HTTPComponentPlanStoreConfig) { cfg.BaseURL = "https://example.test/a/../b" },
 		"missing token":      func(cfg *HTTPComponentPlanStoreConfig) { cfg.BearerToken = "" },
 		"header injection":   func(cfg *HTTPComponentPlanStoreConfig) { cfg.BearerToken = "token\r\nX-Leak: yes" },
+		"implicit transport": func(cfg *HTTPComponentPlanStoreConfig) { cfg.Client = &http.Client{} },
 		"unbounded timeout": func(cfg *HTTPComponentPlanStoreConfig) {
 			cfg.RequestTimeout = maxComponentPlanAPIRequestTimeout + time.Nanosecond
 		},
@@ -180,6 +181,27 @@ func TestNewHTTPComponentPlanStoreRejectsUnsafeTransportConfiguration(t *testing
 				t.Fatalf("error = %v, want ErrComponentPlanAPI", err)
 			}
 		})
+	}
+}
+
+func TestNewHTTPComponentPlanStoreUsesIsolatedTransportByDefault(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewHTTPComponentPlanStore(HTTPComponentPlanStoreConfig{
+		BaseURL: "https://example.test", BearerToken: "token",
+	})
+	if err != nil {
+		t.Fatalf("new HTTP store: %v", err)
+	}
+	if store.client == http.DefaultClient {
+		t.Fatal("store reused http.DefaultClient")
+	}
+	transport, ok := store.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", store.client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("default transport can use an environment proxy")
 	}
 }
 
