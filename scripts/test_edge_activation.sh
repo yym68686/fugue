@@ -336,11 +336,17 @@ PY
   export FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://site.example.test,https://api.example.test
   export FUGUE_EDGE_IMAGE_REPOSITORY=registry.example/fugue-edge
   export FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=1
+  export FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS=0
   EDGE_GROUP_ID=edge-group-country-us
   BUNDLE_MODE=us
   ASK_FAIL_HOST=
   SMOKE_FAIL=false
   ASK_TRACE="${TMP}/bundle-owned-ask.trace"
+  BUNDLE_DRIFT=false
+  BUNDLE_WARMUP=false
+  BUNDLE_READS="${TMP}/bundle-owned-bundle-reads"
+  printf '0' >"${BUNDLE_READS}"
   : >"${ASK_TRACE}"
   ready_pods_for_daemonset() { printf 'candidate-pod\n'; }
   node_ips_for_daemonset() { printf '192.0.2.10\n'; }
@@ -355,6 +361,12 @@ PY
       ambiguous)
         printf '%s\n' '{"schema_version":"1.0","version":"routegen_b1","generation":"routegen_b1","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b2"},{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b3"}]}'
         ;;
+      drift)
+        printf '%s\n' '{"schema_version":"1.0","version":"routegen_c1","generation":"routegen_c1","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_c2"}]}'
+        ;;
+      warming)
+        printf '%s\n' '{"schema_version":"1.0","version":"routegen_b0","generation":"routegen_b0","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"unavailable","route_generation":"routegen_b2"}]}'
+        ;;
     esac
   }
   kubectl_cmd() {
@@ -364,7 +376,20 @@ PY
         printf '{"metadata":{"name":"candidate-pod","uid":"candidate-uid","labels":{"fugue.io/edge-group-id":"%s"},"annotations":{"fugue.io/edge-release-epoch":"%s"}},"spec":{"containers":[{"name":"edge","image":"%s@%s"},{"name":"caddy"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}\n' \
           "${EDGE_GROUP_ID}" "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" "${FUGUE_EDGE_IMAGE_REPOSITORY}" "${FUGUE_EDGE_IMAGE_DIGEST}"
         ;;
-      *"/edge/bundle") bundle_fixture ;;
+      *"/edge/bundle")
+        if [[ "${BUNDLE_DRIFT}" == true || "${BUNDLE_WARMUP}" == true ]]; then
+          reads="$(cat "${BUNDLE_READS}")"
+          printf '%s' "$((reads + 1))" >"${BUNDLE_READS}"
+          if [[ "${BUNDLE_DRIFT}" == true ]]; then
+            (( reads == 0 )) || BUNDLE_MODE=drift
+          elif (( reads == 0 )); then
+            BUNDLE_MODE=warming
+          else
+            BUNDLE_MODE=de
+          fi
+        fi
+        bundle_fixture
+        ;;
       *"/edge/tls/ask?domain="*)
         printf '%s\n' "${argv##*domain=}" >>"${ASK_TRACE}"
         [[ -z "${ASK_FAIL_HOST}" || "${argv}" != *"domain=${ASK_FAIL_HOST}" ]]
@@ -372,7 +397,7 @@ PY
       *) return 97 ;;
     esac
   }
-  smoke_curl_with_retry() { [[ "${SMOKE_FAIL}" != true ]]; }
+  curl() { [[ "${SMOKE_FAIL}" != true ]]; }
 
   targets="$(worker_bundle_smoke_targets edge-worker-us)"
   [[ "$(printf '%s\n' "${targets}" | cut -f3 | paste -sd, -)" == site.example.test,api.example.test ]]
@@ -397,8 +422,21 @@ PY
 
   BUNDLE_MODE=de
   : >"${ASK_TRACE}"
+  BUNDLE_WARMUP=true
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=2
+  printf '0' >"${BUNDLE_READS}"
   check_worker_https_smoke edge-worker-de 28443
   [[ "$(cat "${ASK_TRACE}")" == site.example.test ]]
+  [[ "$(cat "${BUNDLE_READS}")" == 3 ]]
+  BUNDLE_WARMUP=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=1
+  BUNDLE_DRIFT=true
+  printf '0' >"${BUNDLE_READS}"
+  if check_worker_https_smoke edge-worker-de 28443 >/dev/null 2>&1; then
+    echo "group-local smoke accepted candidate bundle drift after direct TLS/HTTPS" >&2
+    exit 1
+  fi
+  BUNDLE_DRIFT=false
   ASK_FAIL_HOST=site.example.test
   if check_worker_https_smoke edge-worker-de 28443 >/dev/null 2>&1; then
     echo "group-local smoke accepted a rejected local TLS ask" >&2

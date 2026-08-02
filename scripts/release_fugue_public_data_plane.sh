@@ -3171,48 +3171,62 @@ check_worker_https_smoke() {
   local pod pod_uid host path edge_group_id bundle_version route_generation bundle_digest
   local host_ip
   local targets targets_after
-  local completed=0
+  local attempts="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS:-18}"
+  local delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS:-5}"
+  local attempt=1 completed attempt_ok host_ip_count
 
-  targets="$(worker_bundle_smoke_targets "${daemonset_name}")" || return 1
-  while IFS=$'\t' read -r pod pod_uid host path edge_group_id bundle_version route_generation bundle_digest; do
-    host="$(trim_field "${host}")"
-    [[ -n "${host}" ]] || continue
-    path="${path:-/}"
-    log "checking candidate bundle-owned TLS ask pod=${pod} uid=${pod_uid} group=${edge_group_id} bundle=${bundle_version} route=${route_generation} host=${host}"
-    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]] && ! kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c caddy -- \
-      /usr/bin/wget -qS -T 5 -O /dev/null "http://127.0.0.1:7832/edge/tls/ask?domain=${host}" >/dev/null 2>&1; then
-      error "candidate local TLS ask rejected bundle-owned hostname ${host} for ${edge_group_id}"
-      return 1
-    fi
-    local host_ip_count=0
-    while IFS= read -r host_ip; do
-      host_ip="$(trim_field "${host_ip}")"
-      [[ -n "${host_ip}" ]] || continue
-      log "checking inactive worker HTTPS smoke ${host_ip}:${port} host=${host} path=${path}"
-      host_ip_count=$((host_ip_count + 1))
-      if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
-        continue
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS must be a positive integer"
+  [[ "${delay_seconds}" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS must be a non-negative number"
+  while (( attempt <= attempts )); do
+    completed=0
+    attempt_ok=true
+    if targets="$(worker_bundle_smoke_targets "${daemonset_name}")"; then
+      while IFS=$'\t' read -r pod pod_uid host path edge_group_id bundle_version route_generation bundle_digest; do
+        host="$(trim_field "${host}")"
+        [[ -n "${host}" ]] || continue
+        path="${path:-/}"
+        log "checking candidate bundle-owned TLS ask pod=${pod} uid=${pod_uid} group=${edge_group_id} bundle=${bundle_version} route=${route_generation} host=${host}"
+        if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]] && ! kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c caddy -- \
+          /usr/bin/wget -qS -T 5 -O /dev/null "http://127.0.0.1:7832/edge/tls/ask?domain=${host}" >/dev/null 2>&1; then
+          attempt_ok=false
+          break
+        fi
+        host_ip_count=0
+        while IFS= read -r host_ip; do
+          host_ip="$(trim_field "${host_ip}")"
+          [[ -n "${host_ip}" ]] || continue
+          host_ip_count=$((host_ip_count + 1))
+          log "checking inactive worker HTTPS smoke ${host_ip}:${port} host=${host} path=${path}"
+          if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+            continue
+          fi
+          if ! curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
+            --resolve "${host}:${port}:${host_ip}" "https://${host}:${port}${path}" >/dev/null; then
+            attempt_ok=false
+            break
+          fi
+          completed=$((completed + 1))
+        done < <(node_ips_for_daemonset "${daemonset_name}")
+        (( host_ip_count > 0 )) || attempt_ok=false
+        [[ "${attempt_ok}" == true ]] || break
+      done <<<"${targets}"
+      if [[ "${attempt_ok}" == true ]] && { [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]] || (( completed > 0 )); }; then
+        targets_after="$(worker_bundle_smoke_targets "${daemonset_name}")" || return 1
+        if [[ "${targets_after}" != "${targets}" ]]; then
+          error "candidate Pod or signed bundle-owned smoke target drifted during direct TLS/HTTPS validation"
+          return 1
+        fi
+        return 0
       fi
-      smoke_curl_with_retry "inactive worker ${host_ip}:${port} host=${host} path=${path}" \
-        -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
-        --resolve "${host}:${port}:${host_ip}" \
-        "https://${host}:${port}${path}" >/dev/null || return $?
-      completed=$((completed + 1))
-    done < <(node_ips_for_daemonset "${daemonset_name}")
-    if (( host_ip_count == 0 )); then
-      error "candidate worker ${daemonset_name} has no direct node address for bundle-owned hostname ${host}"
+    fi
+    if (( attempt == attempts )); then
+      error "candidate worker ${daemonset_name} failed bundle-owned local ask/direct TLS/HTTPS smoke after ${attempts} attempt(s)"
       return 1
     fi
-  done <<<"${targets}"
-  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]] && (( completed == 0 )); then
-    error "candidate worker ${daemonset_name} completed no bundle-owned direct TLS/HTTPS smoke"
-    return 1
-  fi
-  targets_after="$(worker_bundle_smoke_targets "${daemonset_name}")" || return 1
-  if [[ "${targets_after}" != "${targets}" ]]; then
-    error "candidate Pod or signed bundle-owned smoke target drifted during direct TLS/HTTPS validation"
-    return 1
-  fi
+    log "bundle-owned worker smoke attempt ${attempt}/${attempts} failed; retrying in ${delay_seconds}s"
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+  done
 }
 
 container_patch_for_front() {
