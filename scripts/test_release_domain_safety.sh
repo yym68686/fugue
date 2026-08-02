@@ -7776,11 +7776,31 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 (
   unset FUGUE_API_IMAGE_DIGEST FUGUE_CONTROLLER_IMAGE_DIGEST
   unset FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST FUGUE_IMAGE_CACHE_IMAGE_DIGEST
+  unset FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS
   CORE_IMAGE_DIGEST_HELM_SET_ARGS=(--set-string before=value)
   build_core_image_digest_helm_set_args || fail "unset core image digests must be accepted"
   assert_eq "${#CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}" "0" "unset core image digests add no Helm arguments"
   set -- "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"
   assert_eq "$#" "0" "unset core image digests expand to zero Helm argv entries under Bash nounset"
+)
+
+(
+  api_digest="sha256:$(printf '%064d' 0 | tr '0' 'a')"
+  controller_digest="sha256:$(printf '%064d' 0 | tr '0' 'b')"
+  telemetry_digest="sha256:$(printf '%064d' 0 | tr '0' 'c')"
+  unset FUGUE_API_IMAGE_DIGEST FUGUE_CONTROLLER_IMAGE_DIGEST
+  unset FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST FUGUE_IMAGE_CACHE_IMAGE_DIGEST
+  FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS='api controller telemetry_agent edge'
+  FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST="${api_digest}"
+  FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST="${controller_digest}"
+  FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST="${telemetry_digest}"
+  build_core_image_digest_helm_set_args || fail "selected release-domain core images must be digest pinned"
+  expected_args="$(printf '%s\n' \
+    --set-string "api.image.digest=${api_digest}" \
+    --set-string "controller.image.digest=${controller_digest}" \
+    --set-string "observability.agent.image.digest=${telemetry_digest}")"
+  assert_eq "$(printf '%s\n' "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}")" "${expected_args}" \
+    "selected release-domain core images use their verified artifact digests"
 )
 
 (

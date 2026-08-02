@@ -481,6 +481,8 @@ trap 'terminate_builds 143' TERM
 names=()
 repositories=()
 dockerfiles=()
+digests=()
+historical_incident_reuse=false
 seen_targets=' '
 for target in ${targets}; do
   repo_var="$(image_repository_var "${target}")" || {
@@ -500,29 +502,103 @@ for target in ${targets}; do
   dockerfiles+=("$(image_dockerfile "${target}")")
 done
 
-for index in "${!names[@]}"; do
-  target="${names[${index}]}"
-  repository="${repositories[${index}]}"
-  dockerfile="${dockerfiles[${index}]}"
-  tag="${repository}:${FUGUE_IMAGE_TAG}"
-  cache_scope="fugue-control-plane-${target}"
-  metadata_file="${metadata_dir}/${target}.json"
-  printf 'building %s -> %s\n' "${target}" "${tag}"
-  (
-    cd "${REPO_ROOT}"
-    exec docker buildx build \
-      --platform linux/amd64 \
-      --file "${dockerfile}" \
-      --tag "${tag}" \
-      --metadata-file "${metadata_file}" \
-      --label "org.opencontainers.image.revision=${FUGUE_IMAGE_TAG}" \
-      --cache-from "type=gha,scope=${cache_scope}" \
-      --cache-to "type=gha,scope=${cache_scope},mode=max,ignore-error=true" \
-      --push \
-      .
-  ) &
-  pids+=("$!")
-done
+if [[ -n "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN:-}" ]]; then
+  [[ "${targets}" == "api controller telemetry_agent edge" ]] || {
+    printf 'historical incident reuse requires the exact four image targets\n' >&2
+    exit 1
+  }
+  [[ "${FUGUE_IMAGE_TAG}" == "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510" ]] || {
+    printf 'historical incident reuse target is invalid\n' >&2
+    exit 1
+  }
+  [[ -f "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN}" &&
+    ! -L "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN}" ]] || {
+    printf 'historical incident build plan must be a regular non-symlink file\n' >&2
+    exit 1
+  }
+  python3 - "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+raw = path.read_bytes()
+if not raw or len(raw) > 128 * 1024:
+    raise SystemExit("historical incident build plan size is invalid")
+value = json.loads(raw)
+expected = {
+    "apiVersion": "release-domain.fugue.dev/v2",
+    "kind": "BuildArtifactPlan",
+    "policy": "artifact-build-plan-v1",
+    "baseCommit": "d2844418b0464a9bd32d3a147841e99b46140b39",
+    "targetCommit": "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
+    "changedFilesDigest": "sha256:0fe56458a677c84469c471e4095159a924558b516db2bd350c27fd6a94051be4",
+    "artifacts": [
+        ("api", "b9cc03ded110b5e869dfbabcbdd73f107475a516", "410a1c75efe1fe9dd51dd83e32d535d548ab4471281223be7a8bc6b7297ae9d8", "fugue-api"),
+        ("controller", "d2844418b0464a9bd32d3a147841e99b46140b39", "e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d", "fugue-controller"),
+        ("edge", "7bf04c33ec153bc63bf9a47d5e23c7026bafccf1", "d85c269268335f32f93d4253dc2331ffa4f48bc197e3005e2835a2dec1483f1b", "fugue-edge"),
+        ("telemetry_agent", "d2844418b0464a9bd32d3a147841e99b46140b39", "3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb", "fugue-telemetry-agent"),
+    ],
+    "digest": "sha256:6f83fee8095f5fe0e824883f7226dbee51936cd90d5a564dcdac70d91ebb1ae5",
+}
+if type(value) is not dict or set(value) != set(expected):
+    raise SystemExit("historical incident build plan shape is invalid")
+for key in ("apiVersion", "kind", "policy", "baseCommit", "targetCommit", "changedFilesDigest", "digest"):
+    if value[key] != expected[key]:
+        raise SystemExit(f"historical incident build plan {key} is invalid")
+artifacts = value["artifacts"]
+if type(artifacts) is not list or len(artifacts) != 4:
+    raise SystemExit("historical incident artifact count is invalid")
+provenance = "sha256:fb14c704a84253ac4df59ba38d3cf83f91ae9e10b78b998ca95ffee2b555e495"
+for artifact, (name, source_base, digest, repository) in zip(artifacts, expected["artifacts"]):
+    if type(artifact) is not dict or set(artifact) != {
+        "name", "sourceBaseCommit", "artifactDigest", "provenanceDigest", "publishedImageRef"
+    }:
+        raise SystemExit("historical incident artifact shape is invalid")
+    digest = "sha256:" + digest
+    image_repository = "ghcr.io/yym68686/" + repository
+    if artifact != {
+        "name": name,
+        "sourceBaseCommit": source_base,
+        "artifactDigest": digest,
+        "provenanceDigest": provenance,
+        "publishedImageRef": image_repository + "@" + digest,
+    }:
+        raise SystemExit(f"historical incident artifact {name} is invalid")
+PY
+  historical_incident_reuse=true
+  digests=(
+    "sha256:410a1c75efe1fe9dd51dd83e32d535d548ab4471281223be7a8bc6b7297ae9d8"
+    "sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"
+    "sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb"
+    "sha256:d85c269268335f32f93d4253dc2331ffa4f48bc197e3005e2835a2dec1483f1b"
+  )
+  printf 'reusing exact historical incident artifacts; rebuild and push are disabled\n'
+else
+  for index in "${!names[@]}"; do
+    target="${names[${index}]}"
+    repository="${repositories[${index}]}"
+    dockerfile="${dockerfiles[${index}]}"
+    tag="${repository}:${FUGUE_IMAGE_TAG}"
+    cache_scope="fugue-control-plane-${target}"
+    metadata_file="${metadata_dir}/${target}.json"
+    printf 'building %s -> %s\n' "${target}" "${tag}"
+    (
+      cd "${REPO_ROOT}"
+      exec docker buildx build \
+        --platform linux/amd64 \
+        --file "${dockerfile}" \
+        --tag "${tag}" \
+        --metadata-file "${metadata_file}" \
+        --label "org.opencontainers.image.revision=${FUGUE_IMAGE_TAG}" \
+        --cache-from "type=gha,scope=${cache_scope}" \
+        --cache-to "type=gha,scope=${cache_scope},mode=max,ignore-error=true" \
+        --push \
+        .
+    ) &
+    pids+=("$!")
+  done
+fi
 
 rc=0
 for index in "${!pids[@]}"; do
@@ -538,16 +614,17 @@ if [[ "${rc}" -ne 0 ]]; then
   exit "${rc}"
 fi
 
-digests=()
-for target in "${names[@]}"; do
-  metadata_file="${metadata_dir}/${target}.json"
-  if ! digest="$(image_digest_from_metadata "${metadata_file}")"; then
-    printf 'image digest metadata verification failed: %s\n' "${target}" >&2
-    rc=1
-    continue
-  fi
-  digests+=("${digest}")
-done
+if [[ "${historical_incident_reuse}" != true ]]; then
+  for target in "${names[@]}"; do
+    metadata_file="${metadata_dir}/${target}.json"
+    if ! digest="$(image_digest_from_metadata "${metadata_file}")"; then
+      printf 'image digest metadata verification failed: %s\n' "${target}" >&2
+      rc=1
+      continue
+    fi
+    digests+=("${digest}")
+  done
+fi
 
 if [[ "${rc}" -ne 0 ]]; then
   exit "${rc}"
@@ -559,8 +636,16 @@ for index in "${!names[@]}"; do
   repository="${repositories[${index}]}"
   digest="${digests[${index}]}"
   verification_file="${metadata_dir}/${target}.verified.json"
+  verification_files+=("${verification_file}")
   printf 'verifying %s -> %s@%s\n' "${target}" "${repository}" "${digest}"
-  if ! python3 "${REPO_ROOT}/scripts/verify_registry_image.py" \
+  if [[ "${historical_incident_reuse}" == true ]]; then
+    python3 "${REPO_ROOT}/scripts/verify_registry_image.py" \
+      --image "${repository}@${digest}" \
+      --platform linux/amd64 \
+      --expected-revision "${FUGUE_IMAGE_TAG}" \
+      >"${verification_file}" &
+    pids+=("$!")
+  elif ! python3 "${REPO_ROOT}/scripts/verify_registry_image.py" \
     --image "${repository}@${digest}" \
     --platform linux/amd64 \
     --expected-revision "${FUGUE_IMAGE_TAG}" \
@@ -568,8 +653,19 @@ for index in "${!names[@]}"; do
     printf 'registry image verification failed: %s\n' "${target}" >&2
     exit 1
   fi
-  verification_files+=("${verification_file}")
 done
+if [[ "${historical_incident_reuse}" == true ]]; then
+  rc=0
+  for index in "${!pids[@]}"; do
+    if ! wait "${pids[${index}]}"; then
+      printf 'historical incident registry verification failed: %s\n' "${names[${index}]}" >&2
+      rc=1
+    fi
+    pids[${index}]=''
+  done
+  pids=()
+  [[ "${rc}" == 0 ]] || exit "${rc}"
+fi
 
 verified_artifacts_file="${metadata_dir}/verified-image-artifacts.json"
 verified_artifacts_digest_file="${metadata_dir}/verified-image-artifacts.digest"
@@ -705,6 +801,13 @@ canonical = json.dumps(artifacts, ensure_ascii=True, separators=(",", ":"), sort
 Path(artifacts_path).write_bytes(canonical)
 Path(digest_path).write_text("sha256:" + hashlib.sha256(canonical).hexdigest(), encoding="ascii")
 PY
+
+if [[ "${historical_incident_reuse}" == true ]]; then
+  [[ "$(cat "${verified_artifacts_digest_file}")" == "sha256:fb14c704a84253ac4df59ba38d3cf83f91ae9e10b78b998ca95ffee2b555e495" ]] || {
+    printf 'historical incident verified artifact provenance changed\n' >&2
+    exit 1
+  }
+fi
 
 staged_output="${metadata_dir}/outputs"
 : >"${staged_output}"

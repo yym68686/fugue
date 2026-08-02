@@ -456,6 +456,7 @@ validate_optional_core_image_digest() {
 build_core_image_digest_helm_set_args() {
   local digest=""
   local pending_args=()
+  local release_domain_targets=" ${FUGUE_RELEASE_DOMAIN_IMAGE_TARGETS:-} "
 
   # Keep an unset variable distinct from an explicitly empty value. Omitting
   # the argument preserves the existing Helm value; an empty argument clears
@@ -466,15 +467,30 @@ build_core_image_digest_helm_set_args() {
     digest="${FUGUE_API_IMAGE_DIGEST}"
     validate_optional_core_image_digest FUGUE_API_IMAGE_DIGEST "${digest}" || return 1
     pending_args+=(--set-string "api.image.digest=${digest}")
+  elif [[ "${release_domain_targets}" == *" api "* ]]; then
+    digest="${FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST:-}"
+    validate_optional_core_image_digest FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST "${digest}" || return 1
+    [[ -n "${digest}" ]] || { log_stderr "FUGUE_RELEASE_DOMAIN_API_IMAGE_DIGEST is required for selected api target"; return 1; }
+    pending_args+=(--set-string "api.image.digest=${digest}")
   fi
   if [[ "${FUGUE_CONTROLLER_IMAGE_DIGEST+x}" == "x" ]]; then
     digest="${FUGUE_CONTROLLER_IMAGE_DIGEST}"
     validate_optional_core_image_digest FUGUE_CONTROLLER_IMAGE_DIGEST "${digest}" || return 1
     pending_args+=(--set-string "controller.image.digest=${digest}")
+  elif [[ "${release_domain_targets}" == *" controller "* ]]; then
+    digest="${FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST:-}"
+    validate_optional_core_image_digest FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST "${digest}" || return 1
+    [[ -n "${digest}" ]] || { log_stderr "FUGUE_RELEASE_DOMAIN_CONTROLLER_IMAGE_DIGEST is required for selected controller target"; return 1; }
+    pending_args+=(--set-string "controller.image.digest=${digest}")
   fi
   if [[ "${FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST+x}" == "x" ]]; then
     digest="${FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST}"
     validate_optional_core_image_digest FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST "${digest}" || return 1
+    pending_args+=(--set-string "observability.agent.image.digest=${digest}")
+  elif [[ "${release_domain_targets}" == *" telemetry_agent "* ]]; then
+    digest="${FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST:-}"
+    validate_optional_core_image_digest FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST "${digest}" || return 1
+    [[ -n "${digest}" ]] || { log_stderr "FUGUE_RELEASE_DOMAIN_TELEMETRY_AGENT_IMAGE_DIGEST is required for selected telemetry_agent target"; return 1; }
     pending_args+=(--set-string "observability.agent.image.digest=${digest}")
   fi
   if [[ "${FUGUE_IMAGE_CACHE_IMAGE_DIGEST+x}" == "x" ]]; then

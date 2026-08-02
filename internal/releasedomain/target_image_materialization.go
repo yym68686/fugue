@@ -133,11 +133,12 @@ func materializeTargetPublishedImageRefs(
 // and newly introduced target-commit images retain the strict artifact
 // requirement. It also removes one Helm-only source of false activation
 // evidence: the public-edge chart hashes its image values into rollout
-// checksum annotations even when an immutable digest keeps the rendered
-// workload image unchanged. When edge was built but not activated, and the
-// checksum is the object's only rendered drift, retain the live checksum. Any
-// authoritative-DNS source change, actual image change, ambiguous ownership,
-// or additional object drift leaves the target intact or fails closed.
+// checksum annotations and pod-template fields even when the rendered
+// workload images remain unchanged. When edge was built but not activated,
+// retain the exact observed-live objects matched by the three public-edge
+// DaemonSet ownership rules. Any actual image change, ambiguous ownership, or
+// other public-data-plane object drift remains in the target and therefore
+// remains fail-closed in activation authorization.
 func MaterializeLiveRelativeTargetPublishedImageRefs(
 	baseManifest, targetManifest, ownership []byte,
 	defaultNamespace, trustedTarget string,
@@ -206,10 +207,6 @@ func materializeObservedLiveRelativeTargetPublishedImageRefs(
 	if err != nil {
 		return nil, err
 	}
-	if containsDomain(releasePlan.Files.Domains, DomainAuthoritativeDNS) {
-		return materialized, nil
-	}
-
 	edgeRepository, found, err := publishedArtifactRepository(buildPlan, "edge")
 	if err != nil {
 		return nil, err
@@ -230,32 +227,35 @@ func materializeObservedLiveRelativeTargetPublishedImageRefs(
 		return nil, manifestEvidenceError(append(baseUnknown, targetUnknown...))
 	}
 	baseByIdentity, duplicateBase := indexManifestObjects(baseObjects, "live-relative base")
-	_, duplicateTarget := indexManifestObjects(targetObjects, "live-relative target")
+	targetByIdentity, duplicateTarget := indexManifestObjects(targetObjects, "live-relative target")
 	if len(duplicateBase) != 0 || len(duplicateTarget) != 0 {
 		return nil, manifestEvidenceError(append(duplicateBase, duplicateTarget...))
 	}
 
+	for identity, base := range baseByIdentity {
+		if _, exists := targetByIdentity[identity]; !exists && isPublicDataPlaneObject(base) {
+			return nil, fmt.Errorf("public-data-plane object is missing from target: %s", base.Identity.String())
+		}
+	}
 	for index := range targetObjects {
 		base, exists := baseByIdentity[identityKey(targetObjects[index].Identity)]
 		if !exists {
+			if isPublicDataPlaneObject(targetObjects[index]) {
+				return nil, fmt.Errorf("public-data-plane object is absent from observed live: %s", targetObjects[index].Identity.String())
+			}
 			continue
 		}
-		if err := preserveBuiltOnlyPublicEdgeChecksum(
+		preserve, err := preserveBuiltOnlyPublicEdgeObject(
 			base, targetObjects[index], spec, context, edgeRepository,
-		); err != nil {
+		)
+		if err != nil {
 			return nil, err
+		}
+		if preserve {
+			targetObjects[index] = base
 		}
 	}
 	return encodeMaterializedTargetObjects(targetObjects)
-}
-
-func containsDomain(domains []Domain, expected Domain) bool {
-	for _, domain := range domains {
-		if domain == expected {
-			return true
-		}
-	}
-	return false
 }
 
 func publishedArtifactRepository(plan BuildArtifactPlan, name string) (string, bool, error) {
@@ -275,96 +275,76 @@ func publishedArtifactRepository(plan BuildArtifactPlan, name string) (string, b
 	return "", false, nil
 }
 
-func preserveBuiltOnlyPublicEdgeChecksum(
+func preserveBuiltOnlyPublicEdgeObject(
 	base, target manifestObject,
 	spec *OwnershipSpec,
 	context ClassificationContextEvidence,
 	edgeRepository string,
-) error {
-	checksumKey, containerName, matches := publicEdgeChecksumBinding(target)
-	if !matches {
-		return nil
-	}
-	pointer := "/spec/template/metadata/annotations/" + escapeJSONPointerToken(checksumKey)
-	rule, err := uniqueActivationObjectRule(spec, base, target, context)
-	if err != nil {
-		return fmt.Errorf("public-edge checksum ownership is not unique: %w", err)
-	}
-	if rule.domainForPointer(pointer) != DomainAuthoritativeDNS {
-		return fmt.Errorf("public-edge checksum is not owned by authoritative-dns")
-	}
-
-	baseAnnotations, err := podTemplateAnnotations(base)
-	if err != nil {
-		return err
-	}
-	targetAnnotations, err := podTemplateAnnotations(target)
-	if err != nil {
-		return err
-	}
-	baseChecksum, baseOK := baseAnnotations[checksumKey].(string)
-	targetChecksum, targetOK := targetAnnotations[checksumKey].(string)
-	if !baseOK || !targetOK || baseChecksum == "" || targetChecksum == "" {
-		return fmt.Errorf("public-edge checksum annotation is missing or invalid")
-	}
-	if baseChecksum == targetChecksum {
-		return nil
-	}
-
+) (bool, error) {
 	pointers := make([]string, 0, 1)
 	diffJSON(normalizedObject(base), true, normalizedObject(target), true, "", &pointers)
-	pointers = uniqueSortedStrings(pointers)
-	if len(pointers) != 1 || pointers[0] != pointer {
-		return nil
+	if len(pointers) == 0 {
+		return false, nil
+	}
+	if !isPublicDataPlaneObject(base) && !isPublicDataPlaneObject(target) {
+		return false, nil
+	}
+	if !isPublicDataPlaneObject(base) || !isPublicDataPlaneObject(target) {
+		return false, fmt.Errorf("public-data-plane object identity changed across live and target")
+	}
+	rule, err := uniqueActivationObjectRule(spec, base, target, context)
+	if err != nil {
+		return false, fmt.Errorf("public-data-plane ownership is not unique: %w", err)
+	}
+	if !isExactPublicEdgePreserveRule(rule.ID) {
+		return false, nil
+	}
+	if rule.Domain != DomainAuthoritativeDNS {
+		return false, fmt.Errorf("public-edge object is not owned by authoritative-dns")
 	}
 	baseContainers, baseWorkload, err := workloadContainers(base)
 	if err != nil {
-		return err
+		return false, err
 	}
 	targetContainers, targetWorkload, err := workloadContainers(target)
 	if err != nil {
-		return err
+		return false, err
 	}
-	baseContainer, baseFound := baseContainers[containerName]
-	targetContainer, targetFound := targetContainers[containerName]
-	if !baseWorkload || !targetWorkload || !baseFound || !targetFound {
-		return fmt.Errorf("public-edge checksum workload container is missing")
+	if !baseWorkload || !targetWorkload || len(baseContainers) != len(targetContainers) {
+		return false, fmt.Errorf("public-edge workload containers are incomplete")
 	}
-	if imageRepository(baseContainer.Image) != edgeRepository || imageRepository(targetContainer.Image) != edgeRepository {
-		return fmt.Errorf("public-edge checksum workload is not bound to the edge artifact repository")
+	edgeRepositoryFound := false
+	for name, baseContainer := range baseContainers {
+		targetContainer, found := targetContainers[name]
+		if !found {
+			return false, fmt.Errorf("public-edge workload container set changed")
+		}
+		if imageRepository(baseContainer.Image) == edgeRepository || imageRepository(targetContainer.Image) == edgeRepository {
+			edgeRepositoryFound = true
+		}
+		if baseContainer.Image != targetContainer.Image {
+			return false, nil
+		}
 	}
-	if baseContainer.Image != targetContainer.Image {
-		return nil
+	if !edgeRepositoryFound {
+		return false, fmt.Errorf("public-edge workload is not bound to the edge artifact repository")
 	}
-	targetAnnotations[checksumKey] = baseChecksum
-	return nil
+	return true, nil
 }
 
-func publicEdgeChecksumBinding(object manifestObject) (string, string, bool) {
-	if object.Identity.APIGroup != "apps" || object.Identity.Version != "v1" || object.Identity.Kind != "DaemonSet" ||
-		object.Labels["fugue.io/rollout-subsystem"] != "public-data-plane" {
-		return "", "", false
-	}
-	switch object.Labels["fugue.io/rollout-mode"] {
-	case "node-local-blue-green-front":
-		return "checksum/edge-blue-green-front", "edge-front", true
-	case "node-local-blue-green-worker":
-		return "checksum/edge-blue-green-worker", "edge", true
+func isPublicDataPlaneObject(object manifestObject) bool {
+	return object.Labels["fugue.io/rollout-subsystem"] == "public-data-plane"
+}
+
+func isExactPublicEdgePreserveRule(ruleID string) bool {
+	switch ruleID {
+	case "authoritative-dns-public-edge-front-daemon-set",
+		"authoritative-dns-public-edge-worker-a-daemon-set",
+		"authoritative-dns-public-edge-worker-b-daemon-set":
+		return true
 	default:
-		return "", "", false
+		return false
 	}
-}
-
-func podTemplateAnnotations(object manifestObject) (map[string]any, error) {
-	metadata, ok := nestedManifestMap(object.Object, "spec", "template", "metadata")
-	if !ok {
-		return nil, fmt.Errorf("pod template metadata is missing for %s", object.Identity.String())
-	}
-	annotations, ok := metadata["annotations"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("pod template annotations are missing for %s", object.Identity.String())
-	}
-	return annotations, nil
 }
 
 func imageRepository(reference string) string {

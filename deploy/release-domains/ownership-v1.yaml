@@ -110,6 +110,18 @@ fileRules:
   - id: control-plane-controller-template
     exact: deploy/helm/fugue/templates/controller-deployment.yaml
     domains: [control-plane]
+  - id: control-plane-observability-alertmanager-config-template
+    exact: deploy/helm/fugue/templates/observability-alertmanager-configmap.yaml
+    domains: [control-plane]
+  - id: control-plane-observability-clickhouse-config-template
+    exact: deploy/helm/fugue/templates/observability-clickhouse-configmap.yaml
+    domains: [control-plane]
+  - id: control-plane-observability-loki-config-template
+    exact: deploy/helm/fugue/templates/observability-loki-configmap.yaml
+    domains: [control-plane]
+  - id: control-plane-observability-prometheus-config-template
+    exact: deploy/helm/fugue/templates/observability-prometheus-configmap.yaml
+    domains: [control-plane]
   - id: control-plane-service-template
     exact: deploy/helm/fugue/templates/service.yaml
     domains: [control-plane]
@@ -1106,6 +1118,86 @@ objectRules:
     name: ${telemetryAgentName}
     requiredLabels:
       app.kubernetes.io/component: telemetry-agent
+  - id: control-plane-observability-alertmanager-config-map
+    domain: control-plane
+    apiGroup: ""
+    version: v1
+    kind: ConfigMap
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-alertmanager
+    requiredLabels:
+      app.kubernetes.io/component: observability-alertmanager
+  - id: control-plane-observability-clickhouse-config-map
+    domain: control-plane
+    apiGroup: ""
+    version: v1
+    kind: ConfigMap
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-clickhouse
+    requiredLabels:
+      app.kubernetes.io/component: observability-clickhouse
+  - id: control-plane-observability-loki-config-map
+    domain: control-plane
+    apiGroup: ""
+    version: v1
+    kind: ConfigMap
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-loki
+    requiredLabels:
+      app.kubernetes.io/component: observability-loki
+  - id: control-plane-observability-prometheus-config-map
+    domain: control-plane
+    apiGroup: ""
+    version: v1
+    kind: ConfigMap
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-prometheus
+    requiredLabels:
+      app.kubernetes.io/component: observability-prometheus
+  - id: control-plane-observability-alertmanager-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-alertmanager
+    requiredLabels:
+      app.kubernetes.io/component: observability-alertmanager
+  - id: control-plane-observability-clickhouse-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-clickhouse
+    requiredLabels:
+      app.kubernetes.io/component: observability-clickhouse
+  - id: control-plane-observability-loki-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-loki
+    requiredLabels:
+      app.kubernetes.io/component: observability-loki
+  - id: control-plane-observability-prometheus-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}-observability-prometheus
+    requiredLabels:
+      app.kubernetes.io/component: observability-prometheus
   - id: control-plane-cluster-role
     domain: control-plane
     apiGroup: rbac.authorization.k8s.io

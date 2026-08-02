@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "1efe99e1ea6a25f9b2fac0004dc4ed595c18f3355ee2363304e66f70026f3bbd")
+	assertWorkflowSourceDigest(t, data, "db8cbca7376dadf9ce5289113700489cc029f6a8d559c2852f7119208870e25e")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2875,11 +2875,11 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-gate/Verify exact source CI receipt":                                        "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
+		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
 		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
-		"build/Compute image build plan":                                                    "e545c87a2385902616eb8fa652954970e0de7e47ffe4c8fea46eb03cb71e5ea0",
-		"build/Verify exact historical incident image plan":                                 "69e0b67e7565de273570140e8a3e498bbd29ac97e7c6354100799d72c62e1d25",
-		"build/Publish verified control-plane image provenance":                             "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
+		"build/Compute image build plan":                                                    "ed9f833cf35832ec4d6d3362ebb5844bef787f5554faccabfdf04fa360d7b051",
+		"build/Verify exact historical incident image plan":                                 "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
+		"build/Publish verified control-plane image provenance":                             "8f188857beb59ed38aa7c3bb427b4cc4c2a5f1f6aa7df0c91211d23642f3589d",
 		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
 		"deploy/Build private release-domain tools":                                         "7b03047d41fb32288f57dd634dce430d1ca7f337331e4464cbe00134eeb6591f",
 		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
@@ -2932,7 +2932,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			StepKeys: [][]string{
 				{"name", "uses", "with"},
 				{"name", "if", "uses", "with"},
-				{"name", "uses", "with"},
+				{"name", "if", "uses", "with"},
+				{"name", "if", "uses", "with"},
+				{"name", "if", "uses", "with"},
 				{"name", "id", "env", "run"},
 				{"name", "id", "env", "run"},
 				{"name", "if", "env", "run"},
@@ -3195,6 +3197,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 	checkoutCount := 0
+	currentToolingCheckoutCount := 0
 	for jobName, job := range workflow.Jobs {
 		if strings.Contains(job.If, "workflow_dispatch") {
 			t.Fatalf("job %s must not condition behavior on workflow_dispatch: %q", jobName, job.If)
@@ -3208,14 +3211,23 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				if step.Uses != checkoutAction {
 					t.Fatalf("step %s/%s uses an unapproved checkout action: %q", jobName, step.Name, step.Uses)
 				}
-				if got, want := step.With["ref"], "${{ inputs.target_sha }}"; got != want {
+				want := "${{ inputs.target_sha }}"
+				if jobName == "build" && step.Name == "Checkout current artifact verifier" {
+					want = "${{ inputs.expected_sha }}"
+					currentToolingCheckoutCount++
+					if step.If != "${{ inputs.target_sha != inputs.expected_sha }}" ||
+						step.With["path"] != "current-release-tools" || step.With["fetch-depth"] != "1" {
+						t.Fatalf("historical artifact verifier checkout is not exact: %#v", step)
+					}
+				}
+				if got := step.With["ref"]; got != want {
 					t.Fatalf("step %s/%s checkout ref drifted: got %q want %q", jobName, step.Name, got, want)
 				}
 			}
 		}
 	}
-	if checkoutCount != 4 {
-		t.Fatalf("control-plane workflow must bind exactly four runtime checkout steps, found %d", checkoutCount)
+	if checkoutCount != 5 || currentToolingCheckoutCount != 1 {
+		t.Fatalf("control-plane workflow checkout closure drifted: total=%d current-tooling=%d", checkoutCount, currentToolingCheckoutCount)
 	}
 
 	if !containsWorkflowNeed(baseline.Needs, "release-input-guard") {
@@ -3404,6 +3416,29 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("historical incident plan must contain %q", required)
 		}
 	}
+	historicalReceipt := workflowStepByName(t, build, "Download exact historical incident build receipt")
+	if historicalReceipt.If != "${{ inputs.target_sha != inputs.expected_sha }}" ||
+		historicalReceipt.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" {
+		t.Fatalf("historical incident receipt download is not exact: %#v", historicalReceipt)
+	}
+	for key, want := range map[string]string{
+		"name":       "fugue-control-plane-build-activation-evidence-30741102194-1",
+		"run-id":     "30741102194",
+		"repository": "${{ github.repository }}",
+	} {
+		if got := historicalReceipt.With[key]; got != want {
+			t.Fatalf("historical incident receipt %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	if setup := workflowStepByName(t, build, "Setup Go"); setup.If != "${{ inputs.target_sha == inputs.expected_sha }}" {
+		t.Fatalf("historical reuse must skip Setup Go: %q", setup.If)
+	}
+	for _, name := range []string{"Setup Docker Buildx", "Login to GHCR"} {
+		step := workflowStepByName(t, build, name)
+		if step.If != "${{ steps.plan.outputs.target_count != '0' && inputs.target_sha == inputs.expected_sha }}" {
+			t.Fatalf("historical reuse must skip %s: %q", name, step.If)
+		}
+	}
 	buildProvenance := workflowStepByName(t, build, "Publish verified control-plane image provenance")
 	if buildProvenance.ID != "build_images" {
 		t.Fatalf("image provenance step id drifted: %q", buildProvenance.ID)
@@ -3421,9 +3456,18 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"FUGUE_IMAGE_CACHE_IMAGE_BASE_REF":                   "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
 		"FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE": "${{ inputs.image_cache_convergence && format('{0}/fugue-release-convergence-authorization/successor.json', runner.temp) || '' }}",
 		"FUGUE_CONVERGENCE_SOURCE_RUN_ID":                    "${{ inputs.convergence_source_run_id }}",
+		"FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN": "${{ inputs.target_sha != inputs.expected_sha && format('{0}/fugue-historical-incident-build/build-artifact-plan.json', runner.temp) || '' }}",
 	} {
 		if got := buildProvenance.Env[key]; got != want {
 			t.Fatalf("image provenance convergence env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{
+		"./current-release-tools/scripts/build_control_plane_images.sh",
+		"./scripts/build_control_plane_images.sh",
+	} {
+		if !strings.Contains(buildProvenance.Run, required) {
+			t.Fatalf("image provenance execution is missing %q", required)
 		}
 	}
 

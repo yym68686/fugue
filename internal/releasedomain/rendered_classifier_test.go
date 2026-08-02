@@ -570,6 +570,10 @@ func renderCurrentProductionProfile(t *testing.T) []byte {
 		"--set-string", "dns.groups[0].nodeSelector.fugue\\.io/role\\.dns=true",
 		"--set", "ingress.enabled=true",
 		"--set", "observability.agent.enabled=true",
+		"--set", "observability.metrics.enabled=true",
+		"--set", "observability.logs.enabled=true",
+		"--set", "observability.analytics.enabled=true",
+		"--set", "observability.alerts.enabled=true",
 		"--set", "edge.caddy.enabled=true",
 		"--set-string", "edge.edgeGroupID=release-domain-test-edge-group",
 		"--set", "edge.blueGreen.enabled=true",
@@ -745,7 +749,7 @@ func TestCurrentChartNodeLocalEnableAlsoChangesObservability(t *testing.T) {
 	base := renderCurrentChart(t, baseArgs...)
 	target := renderCurrentChart(t, targetArgs...)
 	rendered := ClassifyRendered(base, target, spec, currentChartRenderedOptions())
-	if !equalDomains(rendered.Domains, []Domain{DomainNodeLocal}) || len(rendered.Unknown) == 0 {
+	if !equalDomains(rendered.Domains, []Domain{DomainNodeLocal, DomainControlPlane}) || len(rendered.Unknown) != 0 {
 		t.Fatalf("rendered classification = %#v", rendered)
 	}
 }

@@ -58,7 +58,7 @@ func TestMaterializeTargetPublishedImageRefsFailsClosedOnMissingOrAmbiguousArtif
 	}
 }
 
-func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesOnlyBuiltOnlyPublicEdgeChecksum(t *testing.T) {
+func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesExactBuiltOnlyPublicEdgeObject(t *testing.T) {
 	baseCommit := strings.Repeat("1", 40)
 	targetCommit := strings.Repeat("2", 40)
 	oldDigest := "sha256:" + strings.Repeat("a", 64)
@@ -86,7 +86,7 @@ func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesOnlyBuiltOnlyPu
 		}
 		if !bytes.Contains(materialized, []byte("checksum/edge-blue-green-front: live-checksum")) ||
 			bytes.Contains(materialized, []byte("checksum/edge-blue-green-front: target-checksum")) {
-			t.Fatalf("built-only edge checksum was not preserved:\n%s", materialized)
+			t.Fatalf("built-only edge object was not preserved:\n%s", materialized)
 		}
 	})
 
@@ -105,7 +105,7 @@ func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesOnlyBuiltOnlyPu
 		}
 	})
 
-	t.Run("authoritative dns source change retains target checksum", func(t *testing.T) {
+	t.Run("authoritative dns source classification still preserves built-only edge", func(t *testing.T) {
 		releasePlan := publicEdgeTargetMaterializationPlan(t, base, builtOnlyTarget, ownership, changedDigest, DomainAuthoritativeDNS)
 		materialized, err := MaterializeLiveRelativeTargetPublishedImageRefs(
 			base, builtOnlyTarget, ownership, "fugue-system", targetCommit, plan, releasePlan,
@@ -113,8 +113,9 @@ func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesOnlyBuiltOnlyPu
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Contains(materialized, []byte("checksum/edge-blue-green-front: target-checksum")) {
-			t.Fatalf("authoritative-dns checksum change was suppressed:\n%s", materialized)
+		if !bytes.Contains(materialized, []byte("checksum/edge-blue-green-front: live-checksum")) ||
+			bytes.Contains(materialized, []byte("checksum/edge-blue-green-front: target-checksum")) {
+			t.Fatalf("built-only edge was not preserved from live authority:\n%s", materialized)
 		}
 	})
 }
@@ -217,7 +218,7 @@ func publicEdgeTargetMaterializationManifest(checksum, image string) []byte {
 }
 
 func publicEdgeTargetMaterializationOwnership() []byte {
-	return []byte("apiVersion: release-domain.fugue.dev/v1\nkind: ReleaseDomainOwnership\ndomains:\n  - node-local\n  - authoritative-dns\n  - control-plane\n  - image-cache\n  - backup\nrequiredBindings: []\nfileRules: []\nvalueRules: []\nobjectRules:\n  - id: public-edge-front\n    domain: authoritative-dns\n    apiGroup: apps\n    version: v1\n    kind: DaemonSet\n    scope: Namespaced\n    namespace: fugue-system\n    name: fugue-edge-front\n    requiredLabels:\n      fugue.io/rollout-subsystem: public-data-plane\n      fugue.io/rollout-mode: node-local-blue-green-front\n")
+	return []byte("apiVersion: release-domain.fugue.dev/v1\nkind: ReleaseDomainOwnership\ndomains:\n  - node-local\n  - authoritative-dns\n  - control-plane\n  - image-cache\n  - backup\nrequiredBindings: []\nfileRules: []\nvalueRules: []\nobjectRules:\n  - id: authoritative-dns-public-edge-front-daemon-set\n    domain: authoritative-dns\n    apiGroup: apps\n    version: v1\n    kind: DaemonSet\n    scope: Namespaced\n    namespace: fugue-system\n    name: fugue-edge-front\n    requiredLabels:\n      fugue.io/rollout-subsystem: public-data-plane\n      fugue.io/rollout-mode: node-local-blue-green-front\n")
 }
 
 func targetMaterializationOwnership() []byte {
