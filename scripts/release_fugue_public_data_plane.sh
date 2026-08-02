@@ -5941,7 +5941,7 @@ for pod in pods:
     conditions={item.get("type"):item.get("status") for item in pstatus.get("conditions") or []}
     if pstatus.get("phase")!="Running" or conditions.get("Ready")!="True": raise SystemExit("API Pod is not Running and Ready")
     pod_uids.append(pmeta["uid"])
-    actual_cohort.append({"name":str(pmeta.get("name") or ""),"uid":str(pmeta["uid"]),"source":str((pmeta.get("annotations") or {}).get("fugue.pro/source-commit") or ""),"images":sorted(pimages.items())})
+    actual_cohort.append({"name":str(pmeta.get("name") or ""),"uid":str(pmeta["uid"]),"source":str((pmeta.get("annotations") or {}).get("fugue.pro/source-commit") or ""),"images":[list(item) for item in sorted(pimages.items())]})
 expected_cohort=json.loads(os.environ["EXPECTED_COHORT"])
 if sorted(actual_cohort,key=lambda item:item["name"]) != expected_cohort: raise SystemExit("API Pod cohort drifted from the exact signer snapshot")
 identity={"uid":meta.get("uid"),"generation":generation,"replicas":desired,"images":sorted(images.items()),"pods":sorted(pod_uids)}
@@ -5970,7 +5970,7 @@ for pod in value.get("items") or []:
     meta=pod.get("metadata") or {}; status=pod.get("status") or {}; conditions={x.get("type"):x.get("status") for x in status.get("conditions") or []}
     if meta.get("deletionTimestamp") or status.get("phase")!="Running" or conditions.get("Ready")!="True": raise SystemExit("mixed API Pod cohort")
     pimages={c.get("name"):c.get("image") for c in (pod.get("spec") or {}).get("containers") or []}
-    actual.append({"name":str(meta.get("name") or ""),"uid":str(meta.get("uid") or ""),"source":str((meta.get("annotations") or {}).get("fugue.pro/source-commit") or ""),"images":sorted(pimages.items())})
+    actual.append({"name":str(meta.get("name") or ""),"uid":str(meta.get("uid") or ""),"source":str((meta.get("annotations") or {}).get("fugue.pro/source-commit") or ""),"images":[list(item) for item in sorted(pimages.items())]})
     pods.append(str(meta.get("name") or ""))
 expected=json.loads(os.environ["EXPECTED_COHORT"])
 if len(pods)!=2 or any(not pod for pod in pods) or sorted(actual,key=lambda item:item["name"])!=expected: raise SystemExit("API Pod cohort drifted from the exact signer snapshot")
@@ -6685,7 +6685,7 @@ for pod in value.get("items") or []:
     images={item.get("name"):item.get("image") for item in (pod.get("spec") or {}).get("containers") or []}
     api_image=str(images.get("api") or "")
     if "@sha256:" not in api_image: continue
-    eligible.append({"name":str(meta.get("name") or ""),"uid":str(meta.get("uid") or ""),"source":os.environ["EXPECTED_SHA"],"images":sorted(images.items())})
+    eligible.append({"name":str(meta.get("name") or ""),"uid":str(meta.get("uid") or ""),"source":os.environ["EXPECTED_SHA"],"images":[list(item) for item in sorted(images.items())]})
 eligible.sort(key=lambda item:item["name"])
 if len(eligible)!=2 or any(not item["name"] or not item["uid"] for item in eligible): raise SystemExit("exactly two immutable current API signer Pods are required")
 print(eligible[0]["name"]+"\t"+json.dumps(eligible,separators=(",",":"),sort_keys=True))

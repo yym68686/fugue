@@ -333,5 +333,6 @@ assert 'EXPECTED_SHA="${GITHUB_SHA:-}"' not in source
 assert source.count('FUGUE_EDGE_ACTIVATION_API_COHORT_JSON') >= 4
 assert 'len(eligible)!=2' in source
 assert 'API Pod cohort drifted from the exact signer snapshot' in source
+assert source.count('[list(item) for item in sorted(') == 3
 PY
 printf '[test_edge_activation] ok\n'
