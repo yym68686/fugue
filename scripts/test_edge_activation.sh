@@ -300,18 +300,22 @@ JSON
   export FUGUE_EDGE_IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   export FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   kubectl_cmd() {
-    printf '%s\n' '{"spec":{"template":{"metadata":{"labels":{"fugue.io/edge-slot":"a"}},"spec":{"containers":[{"name":"edge","env":[{"name":"FUGUE_EDGE_GROUP_ID","value":"edge-group-country-us"}]},{"name":"caddy"}]}}}}'
+    case "$*" in
+      *"get nodes "*) printf '%s\n' '{"items":[{"metadata":{"name":"edge-us-node"}}]}' ;;
+      *) printf '%s\n' '{"spec":{"template":{"metadata":{"labels":{"fugue.io/edge-slot":"a"}},"spec":{"nodeSelector":{"fugue.io/role.edge":"true"},"containers":[{"name":"edge","env":[{"name":"FUGUE_EDGE_GROUP_ID","value":"edge-group-country-us"}]},{"name":"caddy"}]}}}}' ;;
+    esac
   }
   patch="$(container_patch_for_worker fugue-fugue-edge-worker-a)"
   PATCH="${patch}" python3 - <<'PY'
 import json, os
 patch=json.loads(os.environ["PATCH"])["spec"]["template"]
-assert patch["metadata"]["labels"] == {"fugue.io/edge-group-id":"edge-group-country-us","fugue.io/edge-slot":"a"}
+assert patch["metadata"]["labels"] == {"fugue.io/edge-id":"edge-us-node","fugue.io/edge-group-id":"edge-group-country-us","fugue.io/edge-slot":"a"}
 edge=next(item for item in patch["spec"]["containers"] if item["name"]=="edge")
 assert edge["volumeMounts"] == [{"name":"edge-workload-identity","mountPath":"/var/run/fugue/edge-identity","readOnly":True}]
 volume=patch["spec"]["volumes"][0]
 assert volume["name"] == "edge-workload-identity"
 assert [item["path"] for item in volume["downwardAPI"]["items"]] == ["edge_id","edge_group_id","slot","instance_uid","release_epoch","heartbeat_fenced"]
+assert [item["fieldRef"]["fieldPath"] for item in volume["downwardAPI"]["items"]] == ["metadata.labels['fugue.io/edge-id']","metadata.labels['fugue.io/edge-group-id']","metadata.labels['fugue.io/edge-slot']","metadata.uid","metadata.annotations['fugue.io/edge-release-epoch']","metadata.annotations['fugue.io/edge-heartbeat-fenced']"]
 PY
 
   captured=""

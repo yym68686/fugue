@@ -899,15 +899,33 @@ enable_bluegreen_chart_mode() {
 
 container_patch_for_worker() {
   local daemonset_name="$1"
+  local daemonset_snapshot node_selector edge_id
   validate_requested_edge_image_identity
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+  daemonset_snapshot="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json)" || return 1
+  node_selector="$(SNAPSHOT="${daemonset_snapshot}" python3 -c '
+import json,os
+value=json.loads(os.environ["SNAPSHOT"])
+selector=((value.get("spec") or {}).get("template") or {}).get("spec",{}).get("nodeSelector") or {}
+if not selector or not all(isinstance(key,str) and isinstance(item,str) and key and item for key,item in selector.items()): raise SystemExit("worker daemonset node selector is invalid")
+print(",".join(f"{key}={selector[key]}" for key in sorted(selector)))
+')" || return 1
+  edge_id="$(kubectl_cmd get nodes -l "${node_selector}" -o json | python3 -c '
+import json,sys
+items=[item for item in json.load(sys.stdin).get("items",[]) if not (item.get("metadata") or {}).get("deletionTimestamp")]
+if len(items)!=1: raise SystemExit("worker daemonset selector does not resolve to exactly one live Node")
+name=str((items[0].get("metadata") or {}).get("name") or "")
+if not name: raise SystemExit("worker daemonset Node identity is empty")
+print(name)
+')" || return 1
+  SNAPSHOT="${daemonset_snapshot}" EDGE_ID="${edge_id}" python3 -c '
 import json
 import os
 import re
 import sys
 
-doc = json.load(sys.stdin)
+doc = json.loads(os.environ["SNAPSHOT"])
 release_id = os.environ["FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID"]
+edge_id = os.environ["EDGE_ID"]
 template = doc.get("spec", {}).get("template", {})
 template_labels = template.get("metadata", {}).get("labels", {})
 edge_resources = json.loads(os.environ["FUGUE_EDGE_RESOURCES_JSON"])
@@ -964,6 +982,7 @@ patch = {
         "template": {
             "metadata": {
                 "labels": {
+                    "fugue.io/edge-id": edge_id,
                     "fugue.io/edge-group-id": edge_group_id,
                     "fugue.io/edge-slot": slot,
                 },
@@ -979,12 +998,12 @@ patch = {
                 "volumes": [{
                     "name": "edge-workload-identity",
                     "downwardAPI": {"items": [
-                        {"path": "edge_id", "fieldRef": {"fieldPath": "spec.nodeName"}},
-                        {"path": "edge_group_id", "fieldRef": {"fieldPath": "metadata.labels['fugue.io/edge-group-id']"}},
-                        {"path": "slot", "fieldRef": {"fieldPath": "metadata.labels['fugue.io/edge-slot']"}},
+                        {"path": "edge_id", "fieldRef": {"fieldPath": "metadata.labels["+chr(39)+"fugue.io/edge-id"+chr(39)+"]"}},
+                        {"path": "edge_group_id", "fieldRef": {"fieldPath": "metadata.labels["+chr(39)+"fugue.io/edge-group-id"+chr(39)+"]"}},
+                        {"path": "slot", "fieldRef": {"fieldPath": "metadata.labels["+chr(39)+"fugue.io/edge-slot"+chr(39)+"]"}},
                         {"path": "instance_uid", "fieldRef": {"fieldPath": "metadata.uid"}},
-                        {"path": "release_epoch", "fieldRef": {"fieldPath": "metadata.annotations['fugue.io/edge-release-epoch']"}},
-                        {"path": "heartbeat_fenced", "fieldRef": {"fieldPath": "metadata.annotations['fugue.io/edge-heartbeat-fenced']"}},
+                        {"path": "release_epoch", "fieldRef": {"fieldPath": "metadata.annotations["+chr(39)+"fugue.io/edge-release-epoch"+chr(39)+"]"}},
+                        {"path": "heartbeat_fenced", "fieldRef": {"fieldPath": "metadata.annotations["+chr(39)+"fugue.io/edge-heartbeat-fenced"+chr(39)+"]"}},
                     ]},
                 }],
             },
