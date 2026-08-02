@@ -111,6 +111,9 @@ func TestEdgeActivationReleaseOrderingIsFailClosed(t *testing.T) {
 	if !strings.Contains(text, `EXPECTED_SHA="${FUGUE_EDGE_IMAGE_TAG}"`) {
 		t.Fatal("API signer cohort is not bound to the verified runtime artifact source")
 	}
+	if !strings.Contains(text, `.metadata.resourceVersion}{"\n"}'`) {
+		t.Fatal("signer secret identity read is not newline-terminated")
+	}
 	mainStart := strings.Index(text, "main()")
 	if mainStart < 0 {
 		t.Fatal("public data-plane main function is missing")

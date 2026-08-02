@@ -6632,7 +6632,7 @@ PY
 )" || fail "API signer cohort is mixed, old, or unavailable"
     rm -f -- "${signer_snapshot}"
     : "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME:?FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME is required}"
-    IFS=$'\t' read -r FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION < <(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "secret/${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME}" -o 'jsonpath={.metadata.uid}{"\t"}{.metadata.resourceVersion}') || fail "could not bind activation signer audit identity"
+    IFS=$'\t' read -r FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION < <(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "secret/${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME}" -o 'jsonpath={.metadata.uid}{"\t"}{.metadata.resourceVersion}{"\n"}') || fail "could not bind activation signer audit identity"
     [[ -n "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID}" && "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION}" =~ ^[0-9]+$ ]] || fail "activation signer audit identity is invalid"
     export FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION
     export FUGUE_EDGE_ACTIVATION_SIGNER_POD
