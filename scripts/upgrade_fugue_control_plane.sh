@@ -20826,15 +20826,23 @@ for deployment,image,replicas in ((controller,"ghcr.io/yym68686/fugue-controller
   if len(items)!=1 or items[0].get("image")!=image or int(ds.get("readyReplicas") or 0)!=replicas or int(ds.get("availableReplicas") or 0)!=replicas:raise SystemExit(1)
 ready=[]
 for pod in pods:
-  ps=pod.get("status") or {}; conditions=ps.get("conditions") or []
-  if ps.get("phase")=="Running" and any(c.get("type")=="Ready" and c.get("status")=="True" for c in conditions):ready.append((pod.get("metadata") or {}).get("name"))
+  pm=pod.get("metadata") or {}; ps=pod.get("status") or {}; conditions=ps.get("conditions") or []; pc=[c for c in (pod.get("spec") or {}).get("containers") or [] if c.get("name")=="api"]
+  if not pm.get("deletionTimestamp") and ps.get("phase")=="Running" and any(c.get("type")=="Ready" and c.get("status")=="True" for c in conditions):
+    if len(pc)!=1 or pc[0].get("image")!=plan["apiImage"] or (pm.get("annotations") or {}).get("fugue.pro/source-commit")!=plan["runtimeSource"] or not pm.get("uid"):raise SystemExit(1)
+    ready.append(pm.get("name"))
 if len(ready)!=2 or any(not name for name in ready):raise SystemExit(1)
 slices=load("endpointslices.json").get("items") or []; count=sum(len(e.get("addresses") or []) for s in slices for e in s.get("endpoints") or [] if (e.get("conditions") or {}).get("ready") is True)
 if count!=2:raise SystemExit(1)
 PY
   control_plane_edge_activation_config_verify_secret || return
-  while IFS= read -r pod; do
-    [[ -n "${pod}" ]] || continue
+  while IFS=$'\t' read -r pod pod_uid; do
+    [[ -n "${pod}" && -n "${pod_uid}" ]] || continue
+    bounded_kubectl 15 -n fugue-system get "pod/${pod}" -o json | \
+      EXPECTED_UID="${pod_uid}" EXPECTED_IMAGE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_API_IMAGE}" EXPECTED_SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" python3 -c '
+import json,os,sys
+p=json.load(sys.stdin); m=p.get("metadata") or {}; s=p.get("status") or {}; c={x.get("type"):x.get("status") for x in s.get("conditions") or []}; api=[x for x in (p.get("spec") or {}).get("containers") or [] if x.get("name")=="api"]
+assert m.get("uid")==os.environ["EXPECTED_UID"] and not m.get("deletionTimestamp") and s.get("phase")=="Running" and c.get("Ready")=="True" and len(api)==1 and api[0].get("image")==os.environ["EXPECTED_IMAGE"] and (m.get("annotations") or {}).get("fugue.pro/source-commit")==os.environ["EXPECTED_SOURCE"]
+' || return
     release_bounded_kubectl 30 "edge activation signer projection ${pod}" -n fugue-system exec "pod/${pod}" -c api -- sh -c '
 set -eu
 d=/var/run/secrets/fugue-edge-activation
@@ -20853,11 +20861,12 @@ PY
     release_bounded_kubectl 30 "edge activation signer readiness ${pod}" -n fugue-system exec -i "pod/${pod}" -c api -- /usr/local/bin/fugue-api sign-edge-activation <"${probe}" >"${response}" || return
     chmod 600 "${response}" || return
     python3 -c 'import json,re,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));a=v.get("authorization") or {};assert a.get("schema")=="edge-activation-authorization/v1" and re.fullmatch(r"hmac-sha256:[0-9a-f]{64}",str(a.get("signature") or "")) and a.get("runner_observed_secret_uid")==sys.argv[2] and a.get("runner_observed_secret_version")==sys.argv[3]' "${response}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" || return
-  done < <(python3 -c 'import json,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));items=[]
+  done < <(python3 -c 'import json,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));plan=json.load(open(sys.argv[2],encoding="utf-8"));items=[]
 for p in v.get("items") or []:
- m=p.get("metadata") or {}; s=p.get("status") or {}; c={x.get("type"):x.get("status") for x in s.get("conditions") or []}
- if not m.get("deletionTimestamp") and s.get("phase")=="Running" and c.get("Ready")=="True": items.append(m.get("name"))
-print("\n".join(sorted(items)))' "${directory}/pods.json")
+ m=p.get("metadata") or {}; s=p.get("status") or {}; c={x.get("type"):x.get("status") for x in s.get("conditions") or []}; api=[x for x in (p.get("spec") or {}).get("containers") or [] if x.get("name")=="api"]
+ if not m.get("deletionTimestamp") and s.get("phase")=="Running" and c.get("Ready")=="True" and len(api)==1 and api[0].get("image")==plan["apiImage"] and (m.get("annotations") or {}).get("fugue.pro/source-commit")==plan["runtimeSource"]: items.append((m.get("name"),m.get("uid")))
+assert len(items)==2 and all(name and uid for name,uid in items)
+print("\n".join("\t".join(item) for item in sorted(items)))' "${directory}/pods.json" "${CONTROL_PLANE_HOTFIX_PLAN_FILE}")
   run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 "${FUGUE_SMOKE_URL}" >/dev/null
 }
 
