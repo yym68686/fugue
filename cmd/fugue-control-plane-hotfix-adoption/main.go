@@ -8,8 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strings"
 
 	"fugue/internal/releasedomain"
+	"gopkg.in/yaml.v3"
 )
 
 const maxCanonicalPlanBytes = 1 << 20
@@ -17,6 +21,15 @@ const maxCanonicalPlanBytes = 1 << 20
 type runtimeFactory func(releasedomain.ControlPlaneHotfixAdoptionPlan) (releasedomain.ControlPlaneHotfixRuntime, error)
 
 func main() {
+	if os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_VALIDATE_ONLY") == "true" {
+		os.Exit(runConfigValidation(
+			os.Args[1:], os.Stderr,
+			os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR"),
+			os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_SECRET_NAME"),
+			os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_SOURCE"),
+			os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_API_IMAGE"),
+		))
+	}
 	if os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_BUILD_PLAN") == "true" {
 		os.Exit(runBuildPlan(
 			os.Args[1:], os.Stdout, os.Stderr,
@@ -39,6 +52,289 @@ func main() {
 			return nil, fmt.Errorf("bounded production runtime is not injected")
 		},
 	))
+}
+
+var configSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var configDigestImage = regexp.MustCompile(`^[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$`)
+var configSecretName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
+func runConfigValidation(args []string, stderr io.Writer, evidenceDir, secretName, source, apiImage string) int {
+	if len(args) != 0 {
+		return fail(stderr, "arguments are not supported")
+	}
+	if evidenceDir == "" || !filepath.IsAbs(evidenceDir) || filepath.Clean(evidenceDir) != evidenceDir {
+		return fail(stderr, "validation directory is invalid")
+	}
+	if !configSecretName.MatchString(secretName) || !configSHA.MatchString(source) || !configDigestImage.MatchString(apiImage) {
+		return fail(stderr, "config transaction identity is invalid")
+	}
+	if err := verifyEdgeActivationConfigRenderSet(evidenceDir, secretName, source, apiImage); err != nil {
+		return fail(stderr, "config render-set verification failed: "+err.Error())
+	}
+	return 0
+}
+
+func verifyEdgeActivationConfigRenderSet(directory, secretName, source, apiImage string) error {
+	base, err := readConfigManifest(filepath.Join(directory, "base.yaml"))
+	if err != nil {
+		return fmt.Errorf("base manifest: %w", err)
+	}
+	target, err := readConfigManifest(filepath.Join(directory, "target.yaml"))
+	if err != nil {
+		return fmt.Errorf("target manifest: %w", err)
+	}
+	repeated, err := readConfigManifest(filepath.Join(directory, "repeated-target.yaml"))
+	if err != nil {
+		return fmt.Errorf("repeated target manifest: %w", err)
+	}
+	hybrid, err := readConfigManifest(filepath.Join(directory, "hybrid.yaml"))
+	if err != nil {
+		return fmt.Errorf("hybrid manifest: %w", err)
+	}
+	if len(base) == 0 || len(target) != len(base) || !reflect.DeepEqual(target, repeated) || !reflect.DeepEqual(base, hybrid) {
+		return fmt.Errorf("manifest inventory is missing, nondeterministic, or not compensatable")
+	}
+	const apiKey = "apps/v1\tDeployment\tfugue-system\tfugue-fugue-api"
+	baseAPI, baseOK := base[apiKey]
+	targetAPI, targetOK := target[apiKey]
+	if !baseOK || !targetOK {
+		return fmt.Errorf("exact API Deployment is absent")
+	}
+	for key, object := range base {
+		if key != apiKey && !reflect.DeepEqual(object, target[key]) {
+			return fmt.Errorf("non-API object changed: %s", key)
+		}
+	}
+	stripped, err := stripExactActivationProjection(targetAPI, secretName, source, apiImage)
+	if err != nil {
+		return err
+	}
+	if _, err := stripExactActivationProjection(baseAPI, secretName, source, apiImage); err == nil {
+		return fmt.Errorf("base API already contains the activation projection")
+	}
+	if !reflect.DeepEqual(baseAPI, stripped) {
+		return fmt.Errorf("API Deployment changed outside the exact activation projection")
+	}
+	if err := verifyConfigValues(directory, secretName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readConfigManifest(path string) (map[string]map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 || len(data) > maxCanonicalPlanBytes*32 {
+		return nil, fmt.Errorf("manifest evidence is invalid")
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	objects := map[string]map[string]any{}
+	for {
+		var object map[string]any
+		err := decoder.Decode(&object)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(object) == 0 {
+			continue
+		}
+		metadata, _ := object["metadata"].(map[string]any)
+		apiVersion, _ := object["apiVersion"].(string)
+		kind, _ := object["kind"].(string)
+		name, _ := metadata["name"].(string)
+		namespace, _ := metadata["namespace"].(string)
+		if namespace == "" {
+			namespace = "fugue-system"
+		}
+		if apiVersion == "" || kind == "" || name == "" {
+			return nil, fmt.Errorf("manifest object identity is incomplete")
+		}
+		normalized, err := normalizeConfigValue(object)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.Join([]string{apiVersion, kind, namespace, name}, "\t")
+		if _, exists := objects[key]; exists {
+			return nil, fmt.Errorf("duplicate manifest object %s", key)
+		}
+		objects[key] = normalized
+	}
+	return objects, nil
+}
+
+func normalizeConfigValue(value map[string]any) (map[string]any, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var normalized map[string]any
+	if err := decoder.Decode(&normalized); err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
+func stripExactActivationProjection(object map[string]any, secretName, source, apiImage string) (map[string]any, error) {
+	raw, err := json.Marshal(object)
+	if err != nil {
+		return nil, err
+	}
+	var copy map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&copy); err != nil {
+		return nil, err
+	}
+	metadata, _ := copy["metadata"].(map[string]any)
+	if metadata["name"] != "fugue-fugue-api" || metadata["namespace"] != "fugue-system" {
+		return nil, fmt.Errorf("API Deployment identity drifted")
+	}
+	spec, _ := copy["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	templateMetadata, _ := template["metadata"].(map[string]any)
+	annotations, _ := templateMetadata["annotations"].(map[string]any)
+	if annotations["fugue.pro/source-commit"] != source {
+		return nil, fmt.Errorf("API source annotation drifted")
+	}
+	podSpec, _ := template["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	apiIndex := -1
+	for index, item := range containers {
+		container, _ := item.(map[string]any)
+		if container["name"] == "api" {
+			if apiIndex != -1 {
+				return nil, fmt.Errorf("API container is duplicated")
+			}
+			apiIndex = index
+		}
+	}
+	if apiIndex == -1 {
+		return nil, fmt.Errorf("API container is absent")
+	}
+	apiContainer := containers[apiIndex].(map[string]any)
+	if apiContainer["image"] != apiImage {
+		return nil, fmt.Errorf("API immutable image drifted")
+	}
+	env, ok := removeExactNamedEntry(apiContainer["env"], "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR", map[string]any{
+		"name": "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR", "value": "/var/run/secrets/fugue-edge-activation",
+	})
+	if !ok {
+		return nil, fmt.Errorf("activation projection env is absent or drifted")
+	}
+	apiContainer["env"] = env
+	mounts, ok := removeExactNamedEntry(apiContainer["volumeMounts"], "edge-activation-plan-signing-key", map[string]any{
+		"mountPath": "/var/run/secrets/fugue-edge-activation", "name": "edge-activation-plan-signing-key", "readOnly": true,
+	})
+	if !ok {
+		return nil, fmt.Errorf("activation projection mount is absent or drifted")
+	}
+	apiContainer["volumeMounts"] = mounts
+	containers[apiIndex] = apiContainer
+	podSpec["containers"] = containers
+	volumes, ok := removeExactNamedEntry(podSpec["volumes"], "edge-activation-plan-signing-key", map[string]any{
+		"name": "edge-activation-plan-signing-key",
+		"secret": map[string]any{
+			"defaultMode": json.Number("256"), "secretName": secretName,
+			"items": []any{
+				map[string]any{"key": "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY", "path": "plan-signing-key"},
+				map[string]any{"key": "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID", "path": "key-id"},
+				map[string]any{"key": "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION", "path": "key-generation"},
+			},
+		},
+	})
+	if !ok {
+		return nil, fmt.Errorf("activation projection volume is absent or drifted")
+	}
+	podSpec["volumes"] = volumes
+	template["spec"] = podSpec
+	spec["template"] = template
+	copy["spec"] = spec
+	return copy, nil
+}
+
+func removeExactNamedEntry(raw any, name string, expected map[string]any) ([]any, bool) {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([]any, 0, len(items)-1)
+	found := 0
+	for _, item := range items {
+		object, _ := item.(map[string]any)
+		if object["name"] == name {
+			if !reflect.DeepEqual(object, expected) {
+				return nil, false
+			}
+			found++
+			continue
+		}
+		result = append(result, item)
+	}
+	return result, found == 1
+}
+
+func verifyConfigValues(directory, secretName string) error {
+	base, err := readJSONObject(filepath.Join(directory, "base-values.json"))
+	if err != nil {
+		return fmt.Errorf("base values: %w", err)
+	}
+	target, err := readHelmEnvelopeConfig(filepath.Join(directory, "target.yaml.json"))
+	if err != nil {
+		return fmt.Errorf("target values: %w", err)
+	}
+	repeated, err := readHelmEnvelopeConfig(filepath.Join(directory, "repeated-target.yaml.json"))
+	if err != nil {
+		return fmt.Errorf("repeated target values: %w", err)
+	}
+	hybrid, err := readHelmEnvelopeConfig(filepath.Join(directory, "hybrid.yaml.json"))
+	if err != nil {
+		return fmt.Errorf("hybrid values: %w", err)
+	}
+	if !reflect.DeepEqual(target, repeated) || !reflect.DeepEqual(base, hybrid) {
+		return fmt.Errorf("Helm values are nondeterministic or not compensatable")
+	}
+	edge, _ := target["edgeActivation"].(map[string]any)
+	if !reflect.DeepEqual(edge, map[string]any{"enabled": true, "signingSecretName": secretName}) {
+		return fmt.Errorf("target activation values are not exact")
+	}
+	target["edgeActivation"] = map[string]any{"enabled": false, "signingSecretName": ""}
+	if !reflect.DeepEqual(base, target) {
+		return fmt.Errorf("Helm values changed outside edgeActivation")
+	}
+	return nil
+}
+
+func readJSONObject(path string) (map[string]any, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) == 0 || len(raw) > maxCanonicalPlanBytes*8 {
+		return nil, fmt.Errorf("JSON evidence is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func readHelmEnvelopeConfig(path string) (map[string]any, error) {
+	envelope, err := readJSONObject(path)
+	if err != nil {
+		return nil, err
+	}
+	config, ok := envelope["config"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("Helm envelope config is absent")
+	}
+	return config, nil
 }
 
 func runBuildPlan(args []string, stdout, stderr io.Writer, evidenceDir string) int {

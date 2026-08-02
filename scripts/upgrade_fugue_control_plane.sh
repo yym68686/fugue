@@ -20514,6 +20514,442 @@ PY
   return "${status:-1}"
 }
 
+CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME="fugue-fugue-edge-activation-signing-v1"
+CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID=""
+CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION=""
+CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_CREATED="false"
+
+control_plane_edge_activation_config_build_helm_argv() {
+  local enabled="$1"
+  local secret_name=""
+  case "${enabled}" in
+    true) secret_name="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" ;;
+    false) ;;
+    *) return 2 ;;
+  esac
+  CONTROL_PLANE_HOTFIX_HELM_ARGV=(
+    helm upgrade fugue deploy/helm/fugue
+    -n fugue-system
+    --reset-then-reuse-values
+    --no-hooks
+    --history-max 20
+    --timeout 10m0s
+    --wait
+    --set "edgeActivation.enabled=${enabled}"
+    --set-string "edgeActivation.signingSecretName=${secret_name}"
+  )
+}
+
+control_plane_edge_activation_config_render() {
+  local enabled="$1"
+  local output="$2"
+  local envelope="${output}.json"
+  control_plane_edge_activation_config_build_helm_argv "${enabled}" || return
+  run_release_long_command 630 "edge activation config server render" \
+    "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" --dry-run=server --output json >"${envelope}" || return
+  ENVELOPE="${envelope}" OUTPUT="${output}" python3 - <<'PY'
+import json, os
+with open(os.environ["ENVELOPE"], encoding="utf-8") as stream:
+    value=json.load(stream)
+manifest=value.get("manifest")
+if not isinstance(manifest,str) or not manifest.strip(): raise SystemExit(1)
+with open(os.environ["OUTPUT"],"x",encoding="utf-8") as stream: stream.write(manifest)
+PY
+  chmod 600 "${output}" "${envelope}"
+}
+
+control_plane_edge_activation_config_capture_render_set() {
+  local directory="$1"
+  mkdir -m 700 "${directory}" || return
+  run_release_long_command 30 "edge activation config base manifest read" \
+    helm get manifest fugue -n fugue-system --revision 808 >"${directory}/base.yaml" || return
+  run_release_long_command 30 "edge activation config base values read" \
+    helm get values fugue -n fugue-system --all --revision 808 -o json >"${directory}/base-values.json" || return
+  control_plane_edge_activation_config_render true "${directory}/target.yaml" || return
+  control_plane_edge_activation_config_render true "${directory}/repeated-target.yaml" || return
+  control_plane_edge_activation_config_render false "${directory}/hybrid.yaml" || return
+  chmod 600 "${directory}"/* || return
+  FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_VALIDATE_ONLY=true \
+    FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
+    FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_SECRET_NAME="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" \
+    FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" \
+    FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_API_IMAGE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_API_IMAGE}" \
+    go run ./cmd/fugue-control-plane-hotfix-adoption
+}
+
+control_plane_edge_activation_config_file_digest() {
+  printf 'sha256:%s\n' "$(control_plane_release_sha256_stream <"$1")"
+}
+
+control_plane_edge_activation_config_build_plan() {
+  local directory="$1"
+  local status_file="${directory}/helm-status.json"
+  local lease_file="${directory}/lease.json"
+  local deployment_file="${directory}/deployment.json"
+  run_release_long_command 30 "edge activation config Helm status read" \
+    helm status fugue -n fugue-system -o json >"${status_file}" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${lease_file}" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${deployment_file}" || return
+  chmod 600 "${status_file}" "${lease_file}" "${deployment_file}" || return
+  STATUS="${status_file}" LEASE="${lease_file}" DEPLOYMENT="${deployment_file}" \
+    BASE_MANIFEST_DIGEST="$(control_plane_edge_activation_config_file_digest "${directory}/base.yaml")" \
+    TARGET_MANIFEST_DIGEST="$(control_plane_edge_activation_config_file_digest "${directory}/target.yaml")" \
+    HYBRID_MANIFEST_DIGEST="$(control_plane_edge_activation_config_file_digest "${directory}/hybrid.yaml")" \
+    BASE_VALUES_DIGEST="$(control_plane_hotfix_json_digest <"${directory}/base-values.json")" \
+    TARGET_VALUES_DIGEST="$(python3 -c 'import hashlib,json,sys; v=json.load(open(sys.argv[1],encoding="utf-8"))["config"]; print("sha256:"+hashlib.sha256(json.dumps(v,sort_keys=True,separators=(",", ":")).encode()).hexdigest())' "${directory}/target.yaml.json")" \
+    CHART_DIGEST="sha256:$(git ls-tree -r HEAD -- deploy/helm/fugue | control_plane_release_sha256_stream)" \
+    PLAN="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" EXPECTED_SHA="${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" \
+    RUNTIME_SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" \
+    API_IMAGE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_API_IMAGE}" \
+    SECRET_NAME="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" \
+    RUN_ID="${GITHUB_RUN_ID}" RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
+import hashlib,json,os,re,secrets
+def load(name):
+  with open(os.environ[name],encoding="utf-8") as stream: return json.load(stream)
+status=load("STATUS"); lease=load("LEASE"); deployment=load("DEPLOYMENT")
+meta=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=meta.get("annotations") or {}
+if int(status.get("version") or 0)!=808 or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
+if str(spec.get("holderIdentity") or "") or str(annotations.get("fugue.pro/recovery-required") or "").lower()=="true": raise SystemExit(1)
+dmeta=deployment.get("metadata") or {}
+plan={
+ "apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneEdgeActivationConfigPlan",
+ "policy":"control-plane-edge-activation-config-v1","expectedSha":os.environ["EXPECTED_SHA"],
+ "runtimeSource":os.environ["RUNTIME_SOURCE"],"apiImage":os.environ["API_IMAGE"],
+ "baseRevision":808,"targetRevision":809,"secretName":os.environ["SECRET_NAME"],
+ "runId":os.environ["RUN_ID"],"runAttempt":int(os.environ["RUN_ATTEMPT"]),
+ "helmRecordDigest":"sha256:"+hashlib.sha256(json.dumps(status,sort_keys=True,separators=(",", ":")).encode()).hexdigest(),
+ "baseManifestDigest":os.environ["BASE_MANIFEST_DIGEST"],"targetManifestDigest":os.environ["TARGET_MANIFEST_DIGEST"],
+ "hybridManifestDigest":os.environ["HYBRID_MANIFEST_DIGEST"],"baseValuesDigest":os.environ["BASE_VALUES_DIGEST"],
+ "targetValuesDigest":os.environ["TARGET_VALUES_DIGEST"],"chartTreeDigest":os.environ["CHART_DIGEST"],
+ "lease":{"uid":meta.get("uid"),"resourceVersion":meta.get("resourceVersion")},
+ "api":{"uid":dmeta.get("uid"),"resourceVersion":dmeta.get("resourceVersion"),"generation":dmeta.get("generation")},
+ "fence":"github:yym68686/fugue:"+os.environ["RUN_ID"]+":"+os.environ["RUN_ATTEMPT"]+":"+os.environ["EXPECTED_SHA"],
+ "nonce":"sha256:"+secrets.token_hex(32),"digest":"",
+}
+if not all(isinstance(v,str) and v for v in (plan["lease"]["uid"],plan["lease"]["resourceVersion"],plan["api"]["uid"],plan["api"]["resourceVersion"])): raise SystemExit(1)
+encoded=json.dumps(plan,sort_keys=True,separators=(",", ":")).encode(); plan["digest"]="sha256:"+hashlib.sha256(encoded).hexdigest()
+with open(os.environ["PLAN"],"x",encoding="utf-8") as stream: json.dump(plan,stream,sort_keys=True,separators=(",", ":")); stream.write("\n")
+os.chmod(os.environ["PLAN"],0o600)
+PY
+}
+
+control_plane_edge_activation_config_verify_base() {
+  local directory="$1"
+  local lease_state="$2"
+  local status_file="${directory}/verify-status.json"
+  local lease_file="${directory}/verify-lease.json"
+  local deployment_file="${directory}/verify-deployment.json"
+  local secret_status=0
+  run_release_long_command 30 "edge activation config verify Helm status" helm status fugue -n fugue-system -o json >"${status_file}" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${lease_file}" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${deployment_file}" || return
+  set +e
+  bounded_kubectl 15 -n fugue-system get "secret/${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" >/dev/null 2>&1
+  secret_status=$?
+  set -e
+  [[ "${secret_status}" == 1 ]] || return 1
+  PLAN="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" STATUS="${status_file}" LEASE="${lease_file}" DEPLOYMENT="${deployment_file}" \
+    LEASE_STATE="${lease_state}" EXPECTED_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER:-}" \
+    EXPECTED_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN:-}" python3 - <<'PY'
+import hashlib,json,os
+def load(path):
+  with open(path,encoding="utf-8") as stream:return json.load(stream)
+plan=load(os.environ["PLAN"]); status=load(os.environ["STATUS"]); lease=load(os.environ["LEASE"]); deployment=load(os.environ["DEPLOYMENT"])
+meta=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=meta.get("annotations") or {}
+status_digest="sha256:"+hashlib.sha256(json.dumps(status,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
+if int(status.get("version") or 0)!=808 or status_digest!=plan["helmRecordDigest"]: raise SystemExit(1)
+if meta.get("uid")!=plan["lease"]["uid"]: raise SystemExit(1)
+if os.environ["LEASE_STATE"]=="released":
+  valid=meta.get("resourceVersion")==plan["lease"]["resourceVersion"] and not str(spec.get("holderIdentity") or "") and str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true"
+else:
+  valid=str(spec.get("holderIdentity") or "")==os.environ["EXPECTED_OWNER"] and str(annotations.get("fugue.pro/coordination-token") or "")==os.environ["EXPECTED_TOKEN"] and str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true"
+if not valid: raise SystemExit(1)
+dmeta=deployment.get("metadata") or {}; template=((deployment.get("spec") or {}).get("template") or {}); podspec=template.get("spec") or {}
+containers=podspec.get("containers") or []; api=[c for c in containers if c.get("name")=="api"]
+if len(api)!=1 or api[0].get("image")!=plan["apiImage"] or (template.get("metadata") or {}).get("annotations",{}).get("fugue.pro/source-commit")!=plan["runtimeSource"]: raise SystemExit(1)
+if dmeta.get("uid")!=plan["api"]["uid"] or dmeta.get("resourceVersion")!=plan["api"]["resourceVersion"] or dmeta.get("generation")!=plan["api"]["generation"]: raise SystemExit(1)
+if any(v.get("name")=="edge-activation-plan-signing-key" for v in podspec.get("volumes") or []): raise SystemExit(1)
+PY
+  git diff --quiet "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" HEAD -- deploy/helm/fugue || return 1
+  [[ "$(git rev-parse HEAD)" == "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" ]] || return 1
+  [[ "$(git ls-remote --refs origin refs/heads/main | awk 'NR==1{print $1}')" == "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" ]] || return 1
+}
+
+control_plane_edge_activation_config_write_wal() {
+  local phase="$1" sequence="$2" forward_attempts="$3" compensation_attempts="$4" recovery="$5"
+  local target="${CONTROL_PLANE_HOTFIX_WORK_DIR}/wal.json" temporary="${CONTROL_PLANE_HOTFIX_WORK_DIR}/wal.json.tmp"
+  PLAN="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" TARGET="${target}" TEMPORARY="${temporary}" PHASE="${phase}" \
+    SEQUENCE="${sequence}" FORWARD="${forward_attempts}" COMPENSATION="${compensation_attempts}" RECOVERY="${recovery}" \
+    SECRET_UID="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" SECRET_VERSION="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" python3 - <<'PY'
+import hashlib,json,os
+with open(os.environ["PLAN"],encoding="utf-8") as stream: plan=json.load(stream)
+value={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneEdgeActivationConfigWAL","policy":plan["policy"],"planDigest":plan["digest"],"phase":os.environ["PHASE"],"sequence":int(os.environ["SEQUENCE"]),"forwardAttempts":int(os.environ["FORWARD"]),"compensationAttempts":int(os.environ["COMPENSATION"]),"recoveryRequired":os.environ["RECOVERY"]=="true","secret":{"name":plan["secretName"],"uid":os.environ["SECRET_UID"],"resourceVersion":os.environ["SECRET_VERSION"]},"digest":""}
+value["digest"]="sha256:"+hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
+with open(os.environ["TEMPORARY"],"x",encoding="utf-8") as stream:json.dump(value,stream,sort_keys=True,separators=(",", ":"));stream.write("\n");stream.flush();os.fsync(stream.fileno())
+os.chmod(os.environ["TEMPORARY"],0o600);os.replace(os.environ["TEMPORARY"],os.environ["TARGET"])
+PY
+}
+
+control_plane_edge_activation_config_create_secret() {
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/secret-material"
+  local identity=""
+  mkdir -m 700 "${directory}" || return
+  umask 077
+  openssl rand -base64 48 >"${directory}/plan-signing-key" || return
+  printf '%s\n' public-data-plane-release >"${directory}/key-id" || return
+  printf 'generation-%s\n' "$(date -u +%Y%m%d%H%M%S)" >"${directory}/key-generation" || return
+  release_bounded_kubectl 30 "edge activation signing Secret create" -n fugue-system create secret generic \
+    "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" \
+    --from-file=FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY="${directory}/plan-signing-key" \
+    --from-file=FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID="${directory}/key-id" \
+    --from-file=FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION="${directory}/key-generation" >/dev/null || return
+  CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_CREATED="true"
+  identity="$(bounded_kubectl 15 -n fugue-system get "secret/${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" -o json | python3 -c '
+import base64,json,re,sys
+value=json.load(sys.stdin); data=value.get("data") or {}; expected={"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY","FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID","FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION"}
+assert set(data)==expected
+key=base64.b64decode(data["FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY"],validate=True).decode().strip(); kid=base64.b64decode(data["FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID"],validate=True).decode().strip(); gen=base64.b64decode(data["FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION"],validate=True).decode().strip()
+assert 32<=len(key)<=512 and kid=="public-data-plane-release" and re.fullmatch(r"generation-[0-9]{14}",gen)
+meta=value.get("metadata") or {}; uid=meta.get("uid"); rv=meta.get("resourceVersion"); assert isinstance(uid,str) and uid and isinstance(rv,str) and rv
+print(uid+"\t"+rv)
+')" || return
+  IFS=$'\t' read -r CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION <<<"${identity}" || return
+  rm -rf -- "${directory}" || return
+}
+
+control_plane_edge_activation_config_verify_secret() {
+  bounded_kubectl 15 -n fugue-system get "secret/${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" -o json | \
+    python3 -c '
+import base64,json,re,sys
+uid,rv=sys.argv[1:3]; value=json.load(sys.stdin); meta=value.get("metadata") or {}; data=value.get("data") or {}
+assert meta.get("uid")==uid and meta.get("resourceVersion")==rv
+assert set(data)=={"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY","FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID","FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION"}
+assert 32<=len(base64.b64decode(data["FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY"],validate=True).decode().strip())<=512
+assert base64.b64decode(data["FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID"],validate=True).decode().strip()=="public-data-plane-release"
+assert re.fullmatch(r"generation-[0-9]{14}",base64.b64decode(data["FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION"],validate=True).decode().strip())
+' "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}"
+}
+
+control_plane_edge_activation_config_seal_helm_argv() {
+  local phase="$1" enabled="$2"
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/sealed-${phase}" snapshot=""
+  mkdir -m 700 "${directory}" || return
+  snapshot="${directory}/upgrade-argv.snapshot"
+  control_plane_edge_activation_config_build_helm_argv "${enabled}" || return
+  (umask 077; printf '%s\0' "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" >"${snapshot}") || return
+  chmod 600 "${snapshot}" || return
+  CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${directory}"
+  CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_SNAPSHOT="${snapshot}"
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_INPUT_IDENTITIES="${directory}/argv-input-identities.json"
+  CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_CONTENT_IDENTITY="$(control_plane_release_domain_file_content_identity "${snapshot}")" || return
+  control_plane_release_record_argv_input_identities || return
+  control_plane_release_verify_repository_snapshot "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" || return
+  { exec 16<&-; } 2>/dev/null || :
+  exec 16<"${snapshot}" || return
+  control_plane_release_domain_verify_open_argv_identity || return
+  CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZED_ARGV_CONTENT_IDENTITY="$(control_plane_release_domain_open_argv_content_identity)" || return
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZED_ARGV_CONTENT_IDENTITY}" == "${CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_CONTENT_IDENTITY}" ]] || return 1
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY="true"
+}
+
+control_plane_edge_activation_config_verify_live() {
+  local phase="$1" revision="$2"
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/readback-${phase}"
+  local expected_values=""
+  [[ "$(helm_current_revision)" == "${revision}" ]] || return 1
+  mkdir -m 700 "${directory}" || return
+  cp "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}"/* "${directory}/" || return
+  run_release_long_command 30 "edge activation config live manifest read" \
+    helm get manifest fugue -n fugue-system --revision "${revision}" >"${directory}/${phase}.yaml" || return
+  chmod 600 "${directory}"/* || return
+  FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_VALIDATE_ONLY=true \
+    FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
+    FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_SECRET_NAME="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" \
+    FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" \
+    FUGUE_CONTROL_PLANE_HOTFIX_CONFIG_API_IMAGE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_API_IMAGE}" \
+    go run ./cmd/fugue-control-plane-hotfix-adoption || return
+  if [[ "${phase}" == target ]]; then
+    expected_values="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["targetValuesDigest"])' "${CONTROL_PLANE_HOTFIX_PLAN_FILE}")" || return
+  else
+    expected_values="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["baseValuesDigest"])' "${CONTROL_PLANE_HOTFIX_PLAN_FILE}")" || return
+  fi
+  [[ "$(helm get values fugue -n fugue-system --all --revision "${revision}" -o json | control_plane_hotfix_json_digest)" == "${expected_values}" ]] || return 1
+}
+
+control_plane_edge_activation_config_verify_target_kubernetes() {
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-target"
+  local pod="" probe="" response=""
+  mkdir -m 700 "${directory}" || return
+  for resource in deployment/fugue-fugue-api deployment/fugue-fugue-controller deployment/fugue-fugue-telemetry service/fugue-fugue; do
+    bounded_kubectl 15 -n fugue-system get "${resource}" -o json >"${directory}/$(tr / _ <<<"${resource}").json" || return
+  done
+  bounded_kubectl 15 -n fugue-system get endpointslice -l kubernetes.io/service-name=fugue-fugue -o json >"${directory}/endpointslices.json" || return
+  bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/pods.json" || return
+  PLAN="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" DIRECTORY="${directory}" SECRET_NAME="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" python3 - <<'PY'
+import json,os
+def load(name):
+  with open(os.path.join(os.environ["DIRECTORY"],name),encoding="utf-8") as stream:return json.load(stream)
+with open(os.environ["PLAN"],encoding="utf-8") as stream:plan=json.load(stream)
+api=load("deployment_fugue-fugue-api.json"); controller=load("deployment_fugue-fugue-controller.json"); telemetry=load("deployment_fugue-fugue-telemetry.json"); pods=(load("pods.json").get("items") or [])
+meta=api.get("metadata") or {}; spec=api.get("spec") or {}; status=api.get("status") or {}; template=spec.get("template") or {}; podspec=template.get("spec") or {}
+containers=podspec.get("containers") or []; exact=[c for c in containers if c.get("name")=="api"]
+if len(exact)!=1 or exact[0].get("image")!=plan["apiImage"] or (template.get("metadata") or {}).get("annotations",{}).get("fugue.pro/source-commit")!=plan["runtimeSource"]:raise SystemExit(1)
+if meta.get("uid")!=plan["api"]["uid"] or int(meta.get("generation") or 0)!=int(plan["api"]["generation"])+1:raise SystemExit(1)
+if any(int(status.get(k) or 0)!=2 for k in ("replicas","readyReplicas","updatedReplicas","availableReplicas")) or int(status.get("unavailableReplicas") or 0)!=0:raise SystemExit(1)
+env=[v for v in exact[0].get("env") or [] if v.get("name")=="FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR"]
+mount=[v for v in exact[0].get("volumeMounts") or [] if v.get("name")=="edge-activation-plan-signing-key"]
+volume=[v for v in podspec.get("volumes") or [] if v.get("name")=="edge-activation-plan-signing-key"]
+if env!=[{"name":"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR","value":"/var/run/secrets/fugue-edge-activation"}] or mount!=[{"mountPath":"/var/run/secrets/fugue-edge-activation","name":"edge-activation-plan-signing-key","readOnly":True}]:raise SystemExit(1)
+if len(volume)!=1 or (volume[0].get("secret") or {}).get("secretName")!=os.environ["SECRET_NAME"] or (volume[0].get("secret") or {}).get("defaultMode")!=256:raise SystemExit(1)
+for deployment,image,replicas in ((controller,"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",2),(telemetry,"ghcr.io/yym68686/fugue-telemetry@sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",1)):
+  ds=deployment.get("status") or {}; items=((deployment.get("spec") or {}).get("template") or {}).get("spec",{}).get("containers") or []
+  if len(items)!=1 or items[0].get("image")!=image or int(ds.get("readyReplicas") or 0)!=replicas or int(ds.get("availableReplicas") or 0)!=replicas:raise SystemExit(1)
+ready=[]
+for pod in pods:
+  ps=pod.get("status") or {}; conditions=ps.get("conditions") or []
+  if ps.get("phase")=="Running" and any(c.get("type")=="Ready" and c.get("status")=="True" for c in conditions):ready.append((pod.get("metadata") or {}).get("name"))
+if len(ready)!=2 or any(not name for name in ready):raise SystemExit(1)
+slices=load("endpointslices.json").get("items") or []; count=sum(len(e.get("addresses") or []) for s in slices for e in s.get("endpoints") or [] if (e.get("conditions") or {}).get("ready") is True)
+if count!=2:raise SystemExit(1)
+PY
+  control_plane_edge_activation_config_verify_secret || return
+  while IFS= read -r pod; do
+    [[ -n "${pod}" ]] || continue
+    probe="${directory}/signer-request-${pod}.json"; response="${directory}/signer-response-${pod}.json"
+    UID_VALUE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" RV_VALUE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" OUTPUT="${probe}" python3 - <<'PY'
+import json,os
+h="sha256:"+"a"*64
+value={"expected_generation":0,"to_phase":"shadow","plan_digest":h,"evidence_digest":h,"release_id":"signer-readiness","release_record_uid":"readiness","release_record_version":"1","release_record_digest":h,"expected_instances":[],"active_epochs":[],"legacy_snapshot_digest":h,"authorization":{"release_fence":"github:yym68686/fugue:1:1:"+os.environ["SOURCE"],"phase_nonce":h,"valid_until":"2099-01-01T00:00:00Z","runner_observed_secret_uid":os.environ["UID_VALUE"],"runner_observed_secret_version":os.environ["RV_VALUE"]}}
+with open(os.environ["OUTPUT"],"x",encoding="utf-8") as stream:json.dump(value,stream,separators=(",", ":"));stream.write("\n")
+os.chmod(os.environ["OUTPUT"],0o600)
+PY
+    release_bounded_kubectl 30 "edge activation signer readiness ${pod}" -n fugue-system exec "pod/${pod}" -c api -- /usr/local/bin/fugue-api sign-edge-activation <"${probe}" >"${response}" || return
+    chmod 600 "${response}" || return
+    python3 -c 'import json,re,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));a=v.get("authorization") or {};assert a.get("schema")=="edge-activation-authorization/v1" and re.fullmatch(r"hmac-sha256:[0-9a-f]{64}",str(a.get("signature") or "")) and a.get("runner_observed_secret_uid")==sys.argv[2] and a.get("runner_observed_secret_version")==sys.argv[3]' "${response}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" || return
+  done < <(python3 -c 'import json,sys;v=json.load(open(sys.argv[1],encoding="utf-8"));print("\n".join(sorted((p.get("metadata") or {}).get("name") for p in v.get("items") or [])))' "${directory}/pods.json")
+  run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 "${FUGUE_SMOKE_URL}" >/dev/null
+}
+
+control_plane_edge_activation_config_api_has_no_secret_reference() {
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json | SECRET_NAME="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" python3 -c '
+import json,os,sys
+v=json.load(sys.stdin); pod=(((v.get("spec") or {}).get("template") or {}).get("spec") or {})
+assert all(x.get("name")!="edge-activation-plan-signing-key" and (x.get("secret") or {}).get("secretName")!=os.environ["SECRET_NAME"] for x in pod.get("volumes") or [])
+'
+}
+
+control_plane_edge_activation_config_delete_secret_cas() {
+  local options="${CONTROL_PLANE_HOTFIX_WORK_DIR}/secret-delete-options.json"
+  control_plane_edge_activation_config_verify_secret || return
+  UID_VALUE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" RV_VALUE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" OUTPUT="${options}" python3 - <<'PY'
+import json,os
+with open(os.environ["OUTPUT"],"x",encoding="utf-8") as stream:json.dump({"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":os.environ["UID_VALUE"],"resourceVersion":os.environ["RV_VALUE"]}},stream,separators=(",", ":"));stream.write("\n")
+os.chmod(os.environ["OUTPUT"],0o600)
+PY
+  release_bounded_kubectl 30 "edge activation signing Secret CAS delete" delete \
+    --raw="/api/v1/namespaces/fugue-system/secrets/${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" -f "${options}" >/dev/null || return
+  if bounded_kubectl 15 -n fugue-system get "secret/${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" >/dev/null 2>&1; then return 1; fi
+  CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_CREATED="false"
+}
+
+control_plane_edge_activation_config_cleanup() {
+  local status=$?
+  { exec 16<&-; } 2>/dev/null || :
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY="false"
+  if [[ "${CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED:-false}" == true ]]; then
+    if [[ "${CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED:-false}" == true ]]; then
+      stop_control_plane_backup_coordination_lease_renewer || :
+      log_stderr "edge activation config recovery fence retained; evidence=${CONTROL_PLANE_HOTFIX_WORK_DIR}"
+    elif release_control_plane_backup_coordination_lease; then
+      CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="false"
+    else
+      status=1
+    fi
+  fi
+  if [[ "${CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED:-false}" != true && -n "${CONTROL_PLANE_HOTFIX_WORK_DIR:-}" ]]; then rm -rf -- "${CONTROL_PLANE_HOTFIX_WORK_DIR}" || status=1; fi
+  trap - EXIT HUP INT TERM
+  exit "${status}"
+}
+
+run_control_plane_edge_activation_config_transaction() {
+  local head_sha="" status=1 forward_ready=true live_revision="" compensated_revision=""
+  (( $# == 0 )) || return 2
+  cd "${REPO_ROOT}" || return
+  head_sha="$(git rev-parse --verify HEAD)" || return
+  [[ "${head_sha}" == "$(git ls-remote --refs origin refs/heads/main | awk 'NR==1{print $1}')" ]] || return 1
+  CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE="d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"
+  CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_API_IMAGE="ghcr.io/yym68686/fugue-api@sha256:410a1c75efe1fe9dd51dd83e32d535d548ab4471281223be7a8bc6b7297ae9d8"
+  git diff --quiet "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" HEAD -- deploy/helm/fugue || return 1
+  FUGUE_RELEASE_DOMAIN_TARGET_SHA="${head_sha}"; FUGUE_RELEASE_DOMAIN_BASE_SHA="${head_sha}"
+  GITHUB_RUN_ID="$(date -u +%s)"; GITHUB_RUN_ATTEMPT=1; GITHUB_REPOSITORY=yym68686/fugue
+  FUGUE_NAMESPACE=fugue-system; FUGUE_RELEASE_NAME=fugue; FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_HELM_CHART_PATH=deploy/helm/fugue; FUGUE_HELM_TIMEOUT=10m0s
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=1; FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS=1
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME=fugue-fugue-control-plane-db-backup
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE=fugue-system
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS=120; FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=30
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=15; FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS=20
+  FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"; FUGUE_DEPLOY_JOB_BUDGET_SECONDS=1800; FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=600; FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=60
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0; initialize_control_plane_release_job_deadline || return
+  KUBECTL="$(detect_kubectl)" || return; export KUBECTL GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_REPOSITORY
+  CONTROL_PLANE_HOTFIX_WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-edge-activation-config.XXXXXX")" || return
+  chmod 700 "${CONTROL_PLANE_HOTFIX_WORK_DIR}" || return
+  CONTROL_PLANE_HOTFIX_PLAN_FILE="${CONTROL_PLANE_HOTFIX_WORK_DIR}/plan.json"
+  CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR="${CONTROL_PLANE_HOTFIX_WORK_DIR}/authorized"
+  CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED=false; CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false
+  trap control_plane_edge_activation_config_cleanup EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  control_plane_edge_activation_config_capture_render_set "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
+  control_plane_edge_activation_config_build_plan "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
+  control_plane_edge_activation_config_verify_base "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" released || return
+  control_plane_edge_activation_config_write_wal prepared 1 0 0 false || return
+  acquire_control_plane_backup_coordination_lease || return
+  CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED=true
+  require_control_plane_backup_coordination_or_abort "edge activation config prewrite" || return
+  rm -rf -- "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}"
+  control_plane_edge_activation_config_capture_render_set "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
+  control_plane_edge_activation_config_verify_base "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" owned || return
+  arm_control_plane_release_recovery_fence control-plane-edge-activation-config || return
+  CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=true
+  control_plane_edge_activation_config_create_secret || return
+  control_plane_edge_activation_config_write_wal secret-created 2 0 0 true || forward_ready=false
+  require_control_plane_backup_coordination_or_abort "edge activation config forward" || forward_ready=false
+  control_plane_edge_activation_config_verify_secret || forward_ready=false
+  control_plane_edge_activation_config_seal_helm_argv forward true || forward_ready=false
+  control_plane_edge_activation_config_write_wal forward-started 3 1 0 true || forward_ready=false
+  if [[ "${forward_ready}" == true ]]; then
+    status=0
+    control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
+  fi
+  if control_plane_edge_activation_config_verify_live target 809 && control_plane_edge_activation_config_verify_target_kubernetes; then
+    control_plane_edge_activation_config_write_wal verified 4 1 0 false || return
+    CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false; CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false; CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+    log "edge activation config transaction verified"
+    return 0
+  fi
+  require_control_plane_backup_coordination_or_abort "edge activation config compensation" || return
+  live_revision="$(helm_current_revision)" || return
+  if [[ "${live_revision}" == 808 ]]; then
+    compensated_revision=808
+  elif [[ "${live_revision}" == 809 ]]; then
+    control_plane_edge_activation_config_write_wal compensation-started 4 1 1 true || return
+    control_plane_edge_activation_config_seal_helm_argv compensation false || return
+    control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
+    compensated_revision=810
+  else
+    log_stderr "edge activation config observed unexpected Helm revision ${live_revision}; retaining recovery fence"
+    return "${status:-1}"
+  fi
+  if control_plane_edge_activation_config_verify_live hybrid "${compensated_revision}" && control_plane_edge_activation_config_api_has_no_secret_reference; then
+    control_plane_edge_activation_config_delete_secret_cas || return
+    control_plane_edge_activation_config_write_wal compensated 5 1 1 false || return
+    CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false; CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false; CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+    log_stderr "edge activation config forward failed and exact Helm808 compensation was verified"
+    return 1
+  fi
+  log_stderr "edge activation config forward and compensation are unverified; retaining recovery fence"
+  return "${status:-1}"
+}
+
 run_control_plane_atomic_domain_gate() {
   local release_status=0
 
@@ -21238,6 +21674,11 @@ source "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh"
 
 if [[ "${FUGUE_CONTROL_PLANE_HOTFIX_BASELINE_ADOPTION:-false}" == "true" ]]; then
   run_control_plane_hotfix_baseline_adoption "$@"
+  exit $?
+fi
+
+if [[ "${FUGUE_CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_TRANSACTION:-false}" == "true" ]]; then
+  run_control_plane_edge_activation_config_transaction "$@"
   exit $?
 fi
 

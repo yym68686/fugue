@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -82,6 +84,107 @@ func TestRunReadsOnlyCanonicalPlanAndUsesTheInjectedRuntime(t *testing.T) {
 	}
 	if factoryCalls != 1 || runtime.acquired != 1 || runtime.forwarded != 1 || runtime.released != 1 {
 		t.Fatalf("fixed runtime contract was not followed: factory=%d runtime=%+v", factoryCalls, runtime)
+	}
+}
+
+func TestConfigValidationAcceptsOnlyTheExactAPIProjection(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	const source = "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"
+	const image = "ghcr.io/example/fugue-api@sha256:410a1c75efe1fe9dd51dd83e32d535d548ab4471281223be7a8bc6b7297ae9d8"
+	const secret = "fugue-fugue-edge-activation-signing-v1"
+	base := `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+  namespace: fugue-system
+spec:
+  template:
+    metadata:
+      annotations:
+        fugue.pro/source-commit: ` + source + `
+    spec:
+      containers:
+        - name: api
+          image: ` + image + `
+          env:
+            - name: EXISTING
+              value: preserved
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fugue
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: preserved
+  namespace: fugue-system
+data:
+  value: exact
+`
+	target := strings.Replace(base, `          env:
+            - name: EXISTING
+              value: preserved
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fugue
+      volumes:
+        - name: data
+          emptyDir: {}
+`, `          env:
+            - name: EXISTING
+              value: preserved
+            - name: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR
+              value: /var/run/secrets/fugue-edge-activation
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/fugue
+            - name: edge-activation-plan-signing-key
+              mountPath: /var/run/secrets/fugue-edge-activation
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: edge-activation-plan-signing-key
+          secret:
+            secretName: `+secret+`
+            defaultMode: 0400
+            items:
+              - key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY
+                path: plan-signing-key
+              - key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_ID
+                path: key-id
+              - key: FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY_GENERATION
+                path: key-generation
+`, 1)
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("base.yaml", base)
+	write("target.yaml", target)
+	write("repeated-target.yaml", target)
+	write("hybrid.yaml", base)
+	baseValues := `{"api":{"replicas":2},"edgeActivation":{"enabled":false,"signingSecretName":""}}`
+	targetEnvelope := `{"config":{"api":{"replicas":2},"edgeActivation":{"enabled":true,"signingSecretName":"` + secret + `"}}}`
+	hybridEnvelope := `{"config":` + baseValues + `}`
+	write("base-values.json", baseValues)
+	write("target.yaml.json", targetEnvelope)
+	write("repeated-target.yaml.json", targetEnvelope)
+	write("hybrid.yaml.json", hybridEnvelope)
+	var stderr bytes.Buffer
+	if exitCode := runConfigValidation(nil, &stderr, directory, secret, source, image); exitCode != 0 {
+		t.Fatalf("exact projection was rejected: %s", stderr.String())
+	}
+	write("target.yaml", strings.Replace(target, "value: exact", "value: drifted", 1))
+	stderr.Reset()
+	if exitCode := runConfigValidation(nil, &stderr, directory, secret, source, image); exitCode == 0 || stderr.Len() == 0 {
+		t.Fatalf("non-API drift was accepted: %s", stderr.String())
 	}
 }
 
