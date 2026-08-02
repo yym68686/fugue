@@ -6016,7 +6016,7 @@ if not match or not all(isinstance(k,str) and isinstance(v,str) and k and v for 
 print(",".join(f"{key}={match[key]}" for key in sorted(match)))
 PY
 )" || return 1
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json >"${pods}" || return 1
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "${selector},app.kubernetes.io/component=api" -o json >"${pods}" || return 1
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get "deployment/${deployment}" -o json >"${after}" || return 1
   chmod 600 "${snapshot}" "${pods}" "${after}"
   cmp -s "${snapshot}" "${after}" || {

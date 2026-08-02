@@ -418,6 +418,7 @@ source=open(sys.argv[1],encoding="utf-8").read()
 assert 'EXPECTED_SHA="${GITHUB_SHA:-}"' not in source
 assert source.count('FUGUE_EDGE_ACTIVATION_API_COHORT_JSON') >= 4
 assert 'len(eligible)!=2' in source
+assert 'get pods -l "${selector},app.kubernetes.io/component=api" -o json' in source
 assert 'API Pod cohort drifted from the exact signer snapshot' in source
 assert source.count('[list(item) for item in sorted(') == 3
 assert 'exec "pod/${pod}" -c api -- /usr/bin/wget -qS -T 5 -O /dev/null http://127.0.0.1:8080/readyz 2>&1' in source
