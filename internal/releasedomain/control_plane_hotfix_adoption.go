@@ -22,7 +22,7 @@ const (
 	ControlPlaneHotfixAdoptionPlanKind   = "ControlPlaneHotfixBaselineAdoptionPlan"
 	ControlPlaneHotfixAdoptionWALKind    = "ControlPlaneHotfixBaselineAdoptionWAL"
 	ControlPlaneHotfixAdoptionPolicy     = "control-plane-hotfix-baseline-adoption-v1"
-	controlPlaneHotfixManifestObjects    = 82
+	controlPlaneHotfixManifestObjects    = 79
 	controlPlaneHotfixBaseRevision       = 806
 )
 
