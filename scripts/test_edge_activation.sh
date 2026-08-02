@@ -334,5 +334,6 @@ assert source.count('FUGUE_EDGE_ACTIVATION_API_COHORT_JSON') >= 4
 assert 'len(eligible)!=2' in source
 assert 'API Pod cohort drifted from the exact signer snapshot' in source
 assert source.count('[list(item) for item in sorted(') == 3
+assert 'exec "pod/${pod}" -c api -- /usr/bin/wget -qS -T 5 -O /dev/null http://127.0.0.1:8080/readyz 2>&1' in source
 PY
 printf '[test_edge_activation] ok\n'

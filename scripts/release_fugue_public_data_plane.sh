@@ -5980,7 +5980,7 @@ PY
   local pod headers acked=0
   while IFS= read -r pod; do
     [[ -n "${pod}" ]] || continue
-    headers="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c api -- curl -fsS --connect-timeout 2 --max-time 5 -D - -o /dev/null http://127.0.0.1:8080/readyz)" || return 1
+    headers="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "pod/${pod}" -c api -- /usr/bin/wget -qS -T 5 -O /dev/null http://127.0.0.1:8080/readyz 2>&1)" || return 1
     ACK_HEADERS="${headers}" EXPECTED_GENERATION="${expected_generation}" EXPECTED_AUTHORITY="${expected_authority}" EXPECTED_PHASE="${expected_phase}" python3 - <<'PY' || return 1
 import os
 headers={}
