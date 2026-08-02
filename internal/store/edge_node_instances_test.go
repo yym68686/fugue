@@ -227,6 +227,62 @@ func TestLegacyEdgeMigrationRemainsAuthoritativeUntilCutover(t *testing.T) {
 	}
 }
 
+func TestActiveEdgeInventoryIgnoresUnactivatedLegacyGroups(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "store.json")
+	s := New(path)
+	for _, legacy := range []struct {
+		edgeID  string
+		groupID string
+	}{
+		{edgeID: "edge-hk-legacy", groupID: "edge-group-country-hk"},
+		{edgeID: "edge-jp-legacy", groupID: "edge-group-country-jp"},
+	} {
+		if _, _, err := s.CreateEdgeNodeToken(model.EdgeNode{ID: legacy.edgeID, EdgeGroupID: legacy.groupID, Status: model.EdgeHealthUnknown}); err != nil {
+			t.Fatalf("create legacy control %s: %v", legacy.edgeID, err)
+		}
+		if _, _, err := s.UpdateEdgeHeartbeat(model.EdgeNode{ID: legacy.edgeID, EdgeGroupID: legacy.groupID, Status: model.EdgeHealthHealthy, Healthy: true}); err != nil {
+			t.Fatalf("write legacy heartbeat %s: %v", legacy.edgeID, err)
+		}
+	}
+	if err := s.Init(); err != nil {
+		t.Fatalf("migrate legacy store: %v", err)
+	}
+
+	state, err := s.GetEdgeActivationState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = advanceEdgeActivationTest(t, s, state, model.EdgeActivationPhaseShadow, nil, nil, "")
+	activeInstances := []model.EdgeNodeInstance{
+		healthyEdgeTestInstance("edge-us-active", "edge-group-country-us", model.EdgeSlotA, "pod-us", "release-current"),
+		healthyEdgeTestInstance("edge-de-active", "edge-group-country-de", model.EdgeSlotA, "pod-de", "release-current"),
+	}
+	expected := make([]model.EdgeExpectedInstance, 0, len(activeInstances))
+	epochs := make([]model.EdgeActiveEpoch, 0, len(activeInstances))
+	for index, instance := range activeInstances {
+		createEdgeInstanceControl(t, s, instance.EdgeID, instance.EdgeGroupID)
+		heartbeatEdgeInstanceTwice(t, s, instance)
+		expected = append(expected, model.EdgeExpectedInstance{EdgeID: instance.EdgeID, EdgeGroupID: instance.EdgeGroupID, Slot: instance.Slot, InstanceUID: instance.InstanceUID, ReleaseEpoch: instance.ReleaseEpoch})
+		epochs = append(epochs, model.EdgeActiveEpoch{EdgeGroupID: instance.EdgeGroupID, Slot: instance.Slot, ReleaseEpoch: instance.ReleaseEpoch, FenceSequence: uint64(index + 1), MinHealthyInstances: 1})
+	}
+	state = advanceEdgeActivationTest(t, s, state, model.EdgeActivationPhaseFenced, expected, epochs, "")
+	_ = advanceEdgeActivationTest(t, s, state, model.EdgeActivationPhaseActive, expected, nil, "api-generation-mixed-inventory")
+
+	nodes, _, err := s.ListActiveEdgeNodes("")
+	if err != nil {
+		t.Fatalf("legacy migration rows must not require active epochs: %v", err)
+	}
+	if len(nodes) != len(activeInstances) {
+		t.Fatalf("expected only active epoch nodes, got %+v", nodes)
+	}
+	for _, node := range nodes {
+		if !node.Healthy || node.ID == "edge-hk-legacy" || node.ID == "edge-jp-legacy" {
+			t.Fatalf("legacy migration row entered active route inventory: %+v", nodes)
+		}
+	}
+}
+
 func TestEdgeInstanceStateTamperFailsReadiness(t *testing.T) {
 	t.Parallel()
 	s := newEdgeInstanceTestStore(t)

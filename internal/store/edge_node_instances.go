@@ -323,6 +323,9 @@ func aggregateActiveEdgeNodes(instances []model.EdgeNodeInstance, epochs []model
 		if edgeGroupID != "" && instance.EdgeGroupID != edgeGroupID {
 			continue
 		}
+		if instance.Slot == edgeLegacyMigrationSlot {
+			continue
+		}
 		instanceGroups[instance.EdgeGroupID] = struct{}{}
 		epoch, ok := epochByGroup[instance.EdgeGroupID]
 		if !ok || !edgeInstanceMatchesActiveEpoch(instance, epoch) {

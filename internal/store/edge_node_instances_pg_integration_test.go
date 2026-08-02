@@ -55,6 +55,63 @@ func TestEdgeInstancePostgresSameEpochPodReplacementFencesLateOldUID(t *testing.
 	assertActiveRouteVersion(t, s, groupID, "route-new", true)
 }
 
+func TestEdgeInstancePostgresActiveInventoryIgnoresUnactivatedLegacyGroup(t *testing.T) {
+	databaseURL := requireEdgePostgresTestURL(t)
+	s := New("", databaseURL)
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	suffix := strings.ToLower(model.NewID("edgepglegacy"))
+	activeEdgeID, activeGroupID := "edge-active-"+suffix, "edge-group-active-"+suffix
+	legacyEdgeID, legacyGroupID := "edge-legacy-"+suffix, "edge-group-legacy-"+suffix
+	t.Cleanup(func() {
+		resetPostgresEdgeActivationTestState(t, s, activeGroupID)
+		if _, err := s.db.Exec(`DELETE FROM fugue_edge_groups WHERE id=$1`, legacyGroupID); err != nil {
+			t.Errorf("clear legacy test edge group: %v", err)
+		}
+	})
+
+	legacyNode, _, err := s.UpdateEdgeHeartbeat(model.EdgeNode{ID: legacyEdgeID, EdgeGroupID: legacyGroupID, Status: model.EdgeHealthHealthy, Healthy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyJSON, err := json.Marshal(legacyNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.db.Exec(`INSERT INTO fugue_edge_node_instances (
+		edge_id,edge_group_id,slot,instance_uid,release_epoch,node_json,failure_class,
+		effective_healthy,consecutive_healthy,consecutive_unhealthy,health_state_since,
+		last_heartbeat_at,created_at,updated_at
+	) VALUES ($1,$2,$3,$4,$5,$6,'',false,0,0,NULL,$7,$7,$7)`,
+		legacyEdgeID, legacyGroupID, edgeLegacyMigrationSlot, legacyEdgeInstanceUID(legacyEdgeID), edgeLegacyMigrationEpoch, legacyJSON, now); err != nil {
+		t.Fatalf("insert legacy migration row: %v", err)
+	}
+	if _, _, err := s.UpdateEdgeHeartbeat(model.EdgeNode{ID: activeEdgeID, EdgeGroupID: activeGroupID, Status: model.EdgeHealthUnknown}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.GetEdgeActivationState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = advanceEdgeActivationTest(t, s, state, model.EdgeActivationPhaseShadow, nil, nil, "")
+	active := healthyEdgeTestInstance(activeEdgeID, activeGroupID, model.EdgeSlotA, "pod-active", "release-current")
+	heartbeatEdgeInstanceTwice(t, s, active)
+	expected := []model.EdgeExpectedInstance{{EdgeID: active.EdgeID, EdgeGroupID: active.EdgeGroupID, Slot: active.Slot, InstanceUID: active.InstanceUID, ReleaseEpoch: active.ReleaseEpoch}}
+	epochs := []model.EdgeActiveEpoch{{EdgeGroupID: active.EdgeGroupID, Slot: active.Slot, ReleaseEpoch: active.ReleaseEpoch, FenceSequence: 1, MinHealthyInstances: 1}}
+	state = advanceEdgeActivationTest(t, s, state, model.EdgeActivationPhaseFenced, expected, epochs, "")
+	_ = advanceEdgeActivationTest(t, s, state, model.EdgeActivationPhaseActive, expected, nil, "api-generation-pg-mixed-inventory")
+
+	nodes, _, err := s.ListActiveEdgeNodes("")
+	if err != nil {
+		t.Fatalf("legacy migration row must not require an active epoch: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != activeEdgeID || !nodes[0].Healthy {
+		t.Fatalf("unexpected active inventory with legacy migration row: %+v", nodes)
+	}
+}
+
 func TestEdgeActivationFilePostgresSemanticParity(t *testing.T) {
 	databaseURL := requireEdgePostgresTestURL(t)
 	pg := New("", databaseURL)
