@@ -617,7 +617,7 @@ func verifyControlPlaneHotfixObservation(plan ControlPlaneHotfixAdoptionPlan, ob
 		value.APIReplicas != 2 || value.APIReady != 2 || value.APIUpdated != 2 || value.APIAvailable != 2 || value.APIUnavailable != 0 ||
 		value.ServiceName != base.ServiceName || value.ServiceUID != base.ServiceUID ||
 		value.EndpointSliceName != base.EndpointSliceName || value.EndpointSliceUID != base.EndpointSliceUID ||
-		value.EndpointBindingDigest != base.EndpointBindingDigest || value.ReadyServingEndpoints != 2 {
+		value.ReadyServingEndpoints != 2 {
 		return fmt.Errorf("hotfix %s Kubernetes cohort is not exactly healthy and bound", phase)
 	}
 	return nil

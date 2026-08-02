@@ -20254,9 +20254,12 @@ for endpoint in slice_doc.get("endpoints") or []:
         "zone": endpoint.get("zone"),
     })
 binding = {"addressType": slice_doc.get("addressType"), "endpoints": records, "ports": slice_doc.get("ports") or []}
-if digest(binding) != expected["endpointBindingDigest"] or ready != 2:
+if ready != 2:
     raise SystemExit(1)
-if phase == "base" and (slice_doc.get("metadata") or {}).get("resourceVersion") != expected["endpointSliceResourceVersion"]:
+if phase == "base" and (
+    digest(binding) != expected["endpointBindingDigest"]
+    or (slice_doc.get("metadata") or {}).get("resourceVersion") != expected["endpointSliceResourceVersion"]
+):
     raise SystemExit(1)
 with open(os.path.join(os.environ["DIRECTORY"], "health"), "rb") as stream:
     health_digest = "sha256:" + hashlib.sha256(stream.read()).hexdigest()

@@ -363,6 +363,7 @@ func targetControlPlaneHotfixObservation(plan ControlPlaneHotfixAdoptionPlan) Co
 	observation.Kubernetes.APITemplateDigest = plan.TargetAPITemplateDigest
 	observation.Kubernetes.APIResourceVersion = "101"
 	observation.Kubernetes.EndpointSliceResourceVersion = "301"
+	observation.Kubernetes.EndpointBindingDigest = "sha256:" + strings.Repeat("8", 64)
 	return observation
 }
 
