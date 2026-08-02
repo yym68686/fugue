@@ -98,4 +98,41 @@ ACTUAL="$(cut -d'|' -f2- "${LOG}")"
 [[ "$(grep -c '^api.image.tag=' "${TMP}/argv")" == 1 ]]
 [[ "$(grep -c '^api.image.digest=' "${TMP}/argv")" == 1 ]]
 
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+  mkdir -p "${TMP}/authorized"
+  for manifest in base.yaml target.yaml repeated-target.yaml hybrid.yaml; do
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: fixture\n' >"${TMP}/authorized/${manifest}"
+  done
+  printf '{"targetValuesDigest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"}\n' >"${TMP}/values-plan.json"
+  mkdir -p "${TMP}/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"${TMP}/bin/go"
+  chmod 700 "${TMP}/bin/go"
+
+  CONTROL_PLANE_HOTFIX_WORK_DIR="${TMP}/values-readback"
+  CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR="${TMP}/authorized"
+  CONTROL_PLANE_HOTFIX_PLAN_FILE="${TMP}/values-plan.json"
+  mkdir -p "${CONTROL_PLANE_HOTFIX_WORK_DIR}"
+  PATH="${TMP}/bin:${PATH}"
+  helm_current_revision() { printf '807\n'; }
+  control_plane_hotfix_verify_kubernetes() { :; }
+  run_release_long_command() {
+    shift 2
+    printf '%s\n' "$*" >>"${TMP}/readback-argv"
+    case "$*" in
+      'helm get manifest fugue -n fugue-system --revision 807') printf '%s\n' 'apiVersion: v1' ;;
+      'helm get values fugue -n fugue-system --revision 807 -o json') printf '{}\n' ;;
+      *) return 1 ;;
+    esac
+  }
+
+  control_plane_hotfix_verify_live_target target 807 target.yaml
+  grep -Fxq 'helm get values fugue -n fugue-system --revision 807 -o json' "${TMP}/readback-argv"
+  ! grep -q -- '--all' "${TMP}/readback-argv"
+)
+
 printf '[test_control_plane_hotfix_adoption] fixed single-shell Lease/FD16/Helm transaction passed\n'

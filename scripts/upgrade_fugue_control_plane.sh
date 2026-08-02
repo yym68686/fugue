@@ -20318,7 +20318,7 @@ control_plane_hotfix_verify_live_target() {
     FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
     go run ./cmd/fugue-control-plane-hotfix-adoption <"${CONTROL_PLANE_HOTFIX_PLAN_FILE}" || return
   values_digest="$(run_release_long_command 30 "control-plane hotfix live ${phase} values read" \
-    helm get values fugue -n fugue-system --all --revision "${revision}" -o json | control_plane_hotfix_json_digest)" || return
+    helm get values fugue -n fugue-system --revision "${revision}" -o json | control_plane_hotfix_json_digest)" || return
   if [[ "${phase}" == "target" ]]; then
     expected_values="$(PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" python3 -c 'import json,os; print(json.load(open(os.environ["PLAN_FILE"],encoding="utf-8"))["targetValuesDigest"])')" || return
     [[ "${values_digest}" == "${expected_values}" ]] || return 1
