@@ -156,11 +156,16 @@ func TestFrontHealthServerExposesTCPDebugAndMetrics(t *testing.T) {
 	metrics := string(body)
 	for _, want := range []string{
 		"fugue_edge_front_info",
-		`edge_id="edge_123"`,
+		`component="front",group="edge-group-us"`,
 		"fugue_edge_node_tcp_proc_read_error",
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q in:\n%s", want, metrics)
+		}
+	}
+	for _, forbidden := range []string{"edge_id=", "edge_group_id=", "node_host=", "protocol=", "proxy_protocol="} {
+		if strings.Contains(metrics, forbidden) {
+			t.Fatalf("metrics retained forbidden high-cardinality label %q:\n%s", forbidden, metrics)
 		}
 	}
 

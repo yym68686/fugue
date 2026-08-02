@@ -363,7 +363,7 @@ type PlatformKernelBreakGlassRequest struct {
 type PlatformArtifactVerificationEvidence struct {
 	ConsumerConvergence        bool     `json:"consumer_convergence"`
 	LocalProbe                 bool     `json:"local_probe"`
-	PublicSynthetic            bool     `json:"public_synthetic"`
+	PlatformEvidence           bool     `json:"platform_evidence"`
 	WatchWindow                bool     `json:"watch_window"`
 	BaselineMonotonic          bool     `json:"baseline_monotonic"`
 	DatabaseRollbackCompatible bool     `json:"database_rollback_compatible"`

@@ -87,7 +87,7 @@ func buildNextEdgeRemediation(current model.EdgeActivationState, advance model.E
 			Nonce: advance.Nonce, ReleaseFence: advance.ReleaseFence, AuthorizationDigest: advance.AuthorizationDigest,
 			AuthorizationKeyID: advance.AuthorizationKeyID, AuthorizationKeyGeneration: advance.AuthorizationKeyGeneration, AuthorizationRunnerObservedSecretUID: advance.AuthorizationRunnerObservedSecretUID, AuthorizationRunnerObservedSecretVersion: advance.AuthorizationRunnerObservedSecretVersion,
 			ActivationGeneration: current.Generation, PlanDigest: current.PlanDigest, ReleaseID: current.ReleaseID,
-			ActiveEvidenceDigest: advance.ActiveEvidenceDigest, SyntheticDigest: advance.SyntheticDigest, KubernetesDigest: advance.KubernetesDigest,
+			ActiveEvidenceDigest: advance.ActiveEvidenceDigest, PlatformEvidenceDigest: advance.PlatformEvidenceDigest, KubernetesDigest: advance.KubernetesDigest,
 			Target: advance.Target, Actor: advance.Actor, CreatedAt: now, UpdatedAt: now,
 		}
 	case model.EdgeRemediationPhaseCommitted, model.EdgeRemediationPhaseVerified, model.EdgeRemediationPhaseRollbackPending:
@@ -95,7 +95,7 @@ func buildNextEdgeRemediation(current model.EdgeActivationState, advance model.E
 		if advance.ToPhase == model.EdgeRemediationPhaseVerified || advance.ToPhase == model.EdgeRemediationPhaseRollbackPending {
 			wantCurrent = model.EdgeRemediationPhaseCommitted
 		}
-		if current.Remediation == nil || current.Remediation.Phase != wantCurrent || current.Remediation.Nonce != advance.Nonce || current.Remediation.ReleaseFence != advance.ReleaseFence || current.Remediation.Target != advance.Target || current.Remediation.ActiveEvidenceDigest != advance.ActiveEvidenceDigest || current.Remediation.SyntheticDigest != advance.SyntheticDigest || current.Remediation.KubernetesDigest != advance.KubernetesDigest {
+		if current.Remediation == nil || current.Remediation.Phase != wantCurrent || current.Remediation.Nonce != advance.Nonce || current.Remediation.ReleaseFence != advance.ReleaseFence || current.Remediation.Target != advance.Target || current.Remediation.ActiveEvidenceDigest != advance.ActiveEvidenceDigest || current.Remediation.PlatformEvidenceDigest != advance.PlatformEvidenceDigest || current.Remediation.KubernetesDigest != advance.KubernetesDigest {
 			return model.EdgeActivationState{}, ErrConflict
 		}
 		committed := *current.Remediation
@@ -165,7 +165,7 @@ func verifyInactiveRemediationTarget(target model.EdgeRemediationTarget, instanc
 func normalizeEdgeRemediationAdvance(advance model.EdgeRemediationAdvance) (model.EdgeRemediationAdvance, error) {
 	advance.ToPhase = strings.TrimSpace(strings.ToLower(advance.ToPhase))
 	advance.ActiveEvidenceDigest = normalizeEdgeEvidenceDigest(advance.ActiveEvidenceDigest)
-	advance.SyntheticDigest = normalizeEdgeEvidenceDigest(advance.SyntheticDigest)
+	advance.PlatformEvidenceDigest = normalizeEdgeEvidenceDigest(advance.PlatformEvidenceDigest)
 	advance.KubernetesDigest = normalizeEdgeEvidenceDigest(advance.KubernetesDigest)
 	advance.ReleaseFence = normalizeEdgeInstanceToken(advance.ReleaseFence, 512)
 	advance.Nonce = normalizeEdgeEvidenceDigest(advance.Nonce)
@@ -185,7 +185,7 @@ func normalizeEdgeRemediationAdvance(advance model.EdgeRemediationAdvance) (mode
 	target.DaemonSetUID = normalizeEdgeInstanceToken(target.DaemonSetUID, 128)
 	target.DaemonSetVersion = normalizeEdgeInstanceToken(target.DaemonSetVersion, 128)
 	target.FailureClass = strings.TrimSpace(strings.ToLower(target.FailureClass))
-	if advance.ExpectedActivationGeneration == 0 || advance.Actor == "" || advance.ReleaseFence == "" || advance.Nonce == "" || advance.AuthorizationDigest == "" || advance.AuthorizationKeyID == "" || advance.AuthorizationKeyGeneration == "" || advance.AuthorizationRunnerObservedSecretUID == "" || advance.AuthorizationRunnerObservedSecretVersion == "" || advance.ActiveEvidenceDigest == "" || advance.SyntheticDigest == "" || advance.KubernetesDigest == "" || (advance.ToPhase != model.EdgeRemediationPhasePrepared && advance.ToPhase != model.EdgeRemediationPhaseCommitted && advance.ToPhase != model.EdgeRemediationPhaseVerified && advance.ToPhase != model.EdgeRemediationPhaseRollbackPending) || target.EdgeID == "" || target.EdgeGroupID == "" || target.Slot == "" || target.InstanceUID == "" || target.ReleaseEpoch == "" || target.DaemonSetName == "" || target.DaemonSetUID == "" || target.DaemonSetVersion == "" || !validEdgeRemediationFailure(target.FailureClass) {
+	if advance.ExpectedActivationGeneration == 0 || advance.Actor == "" || advance.ReleaseFence == "" || advance.Nonce == "" || advance.AuthorizationDigest == "" || advance.AuthorizationKeyID == "" || advance.AuthorizationKeyGeneration == "" || advance.AuthorizationRunnerObservedSecretUID == "" || advance.AuthorizationRunnerObservedSecretVersion == "" || advance.ActiveEvidenceDigest == "" || advance.PlatformEvidenceDigest == "" || advance.KubernetesDigest == "" || (advance.ToPhase != model.EdgeRemediationPhasePrepared && advance.ToPhase != model.EdgeRemediationPhaseCommitted && advance.ToPhase != model.EdgeRemediationPhaseVerified && advance.ToPhase != model.EdgeRemediationPhaseRollbackPending) || target.EdgeID == "" || target.EdgeGroupID == "" || target.Slot == "" || target.InstanceUID == "" || target.ReleaseEpoch == "" || target.DaemonSetName == "" || target.DaemonSetUID == "" || target.DaemonSetVersion == "" || !validEdgeRemediationFailure(target.FailureClass) {
 		return model.EdgeRemediationAdvance{}, ErrInvalidInput
 	}
 	return advance, nil

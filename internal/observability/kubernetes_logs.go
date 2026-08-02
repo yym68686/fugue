@@ -32,6 +32,7 @@ const (
 	kubernetesLabelRolloutSubsystem   = "fugue.io/rollout-subsystem"
 	kubernetesPublicDataPlane         = "public-data-plane"
 	kubernetesPublicDataPlaneSelector = kubernetesLabelRolloutSubsystem + "=" + kubernetesPublicDataPlane
+	kubernetesAPISelector             = kubernetesLabelComponent + "=api"
 )
 
 type kubernetesLogCollector struct {
@@ -127,9 +128,13 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 }
 
 func (c *kubernetesLogCollector) collectPriorityOnce(ctx context.Context) {
-	targets, _, ok := c.kubernetesLogTargets(ctx, kubernetesPublicDataPlaneSelector, false)
-	if !ok {
-		return
+	targets := []kubernetesLogTarget{}
+	for _, selector := range []string{kubernetesPublicDataPlaneSelector, kubernetesAPISelector} {
+		selected, _, ok := c.kubernetesLogTargets(ctx, selector, false)
+		if !ok {
+			return
+		}
+		targets = append(targets, selected...)
 	}
 	priorityTargets := make([]kubernetesLogTarget, 0, len(targets))
 	for _, target := range targets {
@@ -377,6 +382,9 @@ func (c *kubernetesLogCollector) ingestLogStreamMode(ctx context.Context, stream
 }
 
 func kubernetesLogPriorityTarget(target kubernetesLogTarget) bool {
+	if strings.EqualFold(strings.TrimSpace(target.pod.Labels[kubernetesLabelComponent]), "api") {
+		return strings.EqualFold(strings.TrimSpace(target.container), "api")
+	}
 	if !strings.EqualFold(strings.TrimSpace(target.pod.Labels[kubernetesLabelRolloutSubsystem]), kubernetesPublicDataPlane) {
 		return false
 	}
@@ -389,12 +397,12 @@ func kubernetesLogPriorityTarget(target kubernetesLogTarget) bool {
 }
 
 func kubernetesLogPriorityMessage(message string) bool {
-	message = strings.TrimSpace(message)
-	if !strings.HasPrefix(message, "{") {
+	payload, ok := structuredLogJSONPayload(message)
+	if !ok {
 		return false
 	}
 	fields := map[string]any{}
-	if err := json.Unmarshal([]byte(message), &fields); err != nil {
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
 		return false
 	}
 	for _, key := range []string{"fugue_table", "table"} {
@@ -407,7 +415,7 @@ func kubernetesLogPriorityMessage(message string) bool {
 	}
 	eventType, _ := fields["event_type"].(string)
 	switch strings.ToLower(strings.TrimSpace(eventType)) {
-	case "request_fact", "request_summary", "edge_request_body_buffer_slow", "edge_request_body_buffer_progress", "edge_front_tcp_connection":
+	case "request_fact", "request_summary", "edge_route_decision", "edge_route_decision_material_missing", "edge_request_body_buffer_slow", "edge_request_body_buffer_progress", "edge_front_tcp_connection":
 		return true
 	default:
 		return false

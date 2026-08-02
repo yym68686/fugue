@@ -70,7 +70,7 @@ func (c *CLI) newAdminReleaseGuardSignalsAddCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(opts.Subject) == "" {
-				return fmt.Errorf("--subject is required, for example app:uni-api-web")
+				return fmt.Errorf("--subject is required, for example app:sample-api-web")
 			}
 			if strings.TrimSpace(opts.Reason) == "" {
 				return fmt.Errorf("--reason is required for release guard signal changes")

@@ -261,7 +261,7 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 				"app_id":           "app_123",
 				"trace_id":         "trace_123",
 				"request_id":       "request_123",
-				"path_template":    "/v1/responses",
+				"path_template":    "/v1/tasks",
 				"status_code":      "200",
 				"duration_ms":      "42",
 				"model":            "gpt-5.5",
@@ -335,7 +335,7 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 		"INSERT INTO fugue_observability.request_spans FORMAT JSONEachRow",
 		"INSERT INTO fugue_observability.app_events FORMAT JSONEachRow",
 		`"duration_ms":42`,
-		`"path_template":"/v1/responses"`,
+		`"path_template":"/v1/tasks"`,
 		`\"category\":\"demo\"`,
 		`\"model\":\"gpt-5.5\"`,
 		`\"provider\":\"primary\"`,
@@ -350,6 +350,73 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ClickHouse export missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+func TestClickHouseExporterPersistsRouteDecisionAndCorrelationMaterial(t *testing.T) {
+	t.Parallel()
+	var inserts []struct{ table, body string }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inserts = append(inserts, struct{ table, body string }{r.URL.Query().Get("query"), readAllString(t, r)})
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exporter := NewClickHouseExporter(server.URL+"?database=fugue_observability", server.Client())
+	decision := Event{Timestamp: time.Unix(106, 7).UTC(), Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "edge_route_decision", "tenant_id": "tenant_123", "project_id": "project_123", "app_id": "app_123",
+		"hostname": "demo.fugue.pro", "decision_id": "decision_123", "bundle_version": "bundle_123", "route_generation": "route_123",
+		"correlation_key": `["decision_123","bundle_123","route_123"]`, "final_status": "unavailable",
+		"final_reason": "runtime invariant violation: image_missing", "invariant_violations_json": `["image_missing"]`,
+		"durable_revision_digest": "sha256:abc", "managed_image_digest": "sha256:def", "deployment_image_digest": "sha256:ghi",
+	}}
+	request := Event{Timestamp: time.Unix(107, 0).UTC(), Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "request_fact", "tenant_id": "tenant_123", "app_id": "app_123", "request_id": "req_123", "path_template": "/",
+		"status_code": "503", "decision_id": "decision_123", "bundle_version": "bundle_123", "route_generation": "route_123",
+		"correlation_key": `["decision_123","bundle_123","route_123"]`, "status_reason": "runtime invariant violation: image_missing",
+	}}
+	if err := exporter.Export(context.Background(), []Event{decision, request}); err != nil {
+		t.Fatalf("export correlated evidence: %v", err)
+	}
+	if len(inserts) != 2 {
+		t.Fatalf("expected decision and request inserts, got %+v", inserts)
+	}
+	joined := inserts[0].table + inserts[0].body + inserts[1].table + inserts[1].body
+	for _, want := range []string{
+		"fugue_observability.edge_route_decisions", `"decision_id":"decision_123"`, `"correlation_key":"[\"decision_123\",\"bundle_123\",\"route_123\"]"`,
+		`\"durable_revision_digest\":\"sha256:abc\"`, `\"managed_image_digest\":\"sha256:def\"`, `\"deployment_image_digest\":\"sha256:ghi\"`,
+		"fugue_observability.request_facts", `"route_generation":"route_123"`, `"status_reason":"runtime invariant violation: image_missing"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("persisted evidence missing %q in %s", want, joined)
+		}
+	}
+}
+
+func TestClickHouseExporterPersistsMissingDecisionLinkAlertIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body = readAllString(t, r)
+		if !strings.Contains(r.URL.Query().Get("query"), ".edge_route_decision_missing_links ") {
+			t.Fatalf("unexpected table query: %s", r.URL.Query().Get("query"))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	exporter := NewClickHouseExporter(server.URL+"?database=fugue_observability", server.Client())
+	err := exporter.Export(context.Background(), []Event{{Timestamp: time.Unix(108, 0).UTC(), Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "edge_route_decision_material_missing", "tenant_id": "tenant_123", "app_id": "app_123", "hostname": "demo.fugue.pro",
+		"request_id": "req_123", "edge_id": "edge_de", "decision_id": "decision_123", "bundle_version": "bundle_123", "route_generation": "route_123",
+		"correlation_key": `["decision_123","bundle_123","route_123"]`, "reason": "decision material absent after grace period",
+	}}})
+	if err != nil {
+		t.Fatalf("export missing-link alert: %v", err)
+	}
+	for _, want := range []string{`"request_id":"req_123"`, `"correlation_key":"[\"decision_123\",\"bundle_123\",\"route_123\"]"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing-link row missing %q: %s", want, body)
 		}
 	}
 }
@@ -495,7 +562,7 @@ func prometheusMetricEvent(timestamp time.Time, value string) Event {
 			"runtime_id":   "runtime_123",
 			"component":    "api",
 			"method":       "POST",
-			"route_id":     "/v1/responses",
+			"route_id":     "/v1/tasks",
 			"status_class": "2xx",
 		},
 	}

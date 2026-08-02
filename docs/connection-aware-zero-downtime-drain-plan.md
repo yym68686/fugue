@@ -15,7 +15,7 @@
 - strict drain app 会把 `terminationGracePeriodSeconds` 提升到至少 `630`。
 - strict drain app 当前还会把 `minReadySeconds` 设置为 `600`。
 
-当前线上 0-0 API app 的实际 manifest 也符合以上语义：
+当前线上 sample-app API app 的实际 manifest 也符合以上语义：
 
 ```yaml
 strategy:
@@ -28,7 +28,7 @@ template:
   spec:
     terminationGracePeriodSeconds: 630
     containers:
-      - name: uni-api-web-api
+      - name: sample-api-web-api
         lifecycle:
           preStop:
             sleep:
@@ -670,23 +670,23 @@ FUGUE_DRAIN_AGENT_IMAGE_TAG
 - timeout 行为可观测。
 - 无 5xx 尖刺。
 
-### 阶段 5：0-0 灰度
+### 阶段 5：sample-app 灰度
 
-对 0-0 开启 connection-aware strict drain。
+对 sample-app 开启 connection-aware strict drain。
 
 验收标准：
 
-- 触发一次 0-0 API image-only rollout。
+- 触发一次 sample-app API image-only rollout。
 - 新 Pod Ready 后旧 Pod 进入 Terminating。
 - 如果无 active connection，旧 Pod 在 quiet period 后快速退出。
-- 如果存在 `/v1/responses` stream，旧 Pod 等 stream 结束。
+- 如果存在 `/v1/tasks` stream，旧 Pod 等 stream 结束。
 - `gateway_request_logs` 无 rollout 相关 503 尖刺。
 - `context.Canceled` 仍按 499 记录，不回归。
 - drain-agent 日志能解释每次旧 Pod 退出原因。
 
 ### 阶段 6：扩大默认启用
 
-0-0 稳定后，把 strict drain 默认模式切换为：
+sample-app 稳定后，把 strict drain 默认模式切换为：
 
 ```text
 connection-aware
@@ -763,8 +763,8 @@ fixed-sleep
 - 测试 app 无连接 rollout：旧 Pod 小于 10s 退出。
 - 测试 app 长连接 rollout：旧 Pod 等连接结束退出。
 - 测试 app timeout：旧 Pod 最多等 600s。
-- 0-0 rollout 无 503 尖刺。
-- 0-0 `context.Canceled` 仍归类 499。
+- sample-app rollout 无 503 尖刺。
+- sample-app `context.Canceled` 仍归类 499。
 - drain-agent 日志和 metrics 可解释每次 drain。
 
 ## 风险与缓解
@@ -906,7 +906,7 @@ fixed-sleep
   - 在当前 Pod 上打开 700s stream 后手动调用 `/drain/prestop`，返回 `{"reason":"timeout","waited_ms":600399,"active_connections":1,"max_active_connections":1,"observer_errors":0}`。
   - cluster logs 包含 `fugue_drain_complete reason=timeout waited_ms=600399 active_connections=1 max_active_connections=1 observer_errors=0`。
 
-### 0-0 验证：`uni-api-web-api`
+### sample-app 验证：`sample-api-web-api`
 
 - 当前稳定状态：`status=deployed`，Pod `app-1778958829-7a965e0863ed-59b497d8b8-47bv8` ready/running。
 - 当前 Pod 使用 `fugue-drain-agent:370c5c9344d505c1e66a33f971689bed887449ad`。
@@ -917,22 +917,22 @@ fixed-sleep
   - app container `preStop.httpGet.port=19090`
   - native sidecar initContainer `fugue-drain-agent` `restartPolicy=Always`
 - runtime diagnosis evidence：`strict drain mode=connection-aware timeout_seconds=600 quiet_period_seconds=2 agent_port=19090 termination_grace_min_seconds=630`。
-- 0-0 drain-agent 升级 rollout：
+- sample-app drain-agent 升级 rollout：
   - 新 Pod `app-1778958829-7a965e0863ed-59b497d8b8-47bv8` 创建 / pull drain-agent `370c5c...`：`2026-07-04T19:36:14Z`
   - 旧 Pod `app-1778958829-7a965e0863ed-d7f757d6c-hhc9r` `Killing` / `SuccessfulDelete`：`2026-07-04T19:36:27Z`
   - 旧 Pod 没有等待 600s。
-- 0-0 image tracking / image-only operation：
+- sample-app image tracking / image-only operation：
   - 当前 `last_operation_id=op_1783186750_fddb86d87beb`
   - image tracking latest decision：tracked digest already matches app desired source / already deployed。
   - 自 `2026-07-04T17:38:00Z` 起，Fugue edge 5xx count `0`。
-  - 自 `2026-07-04T17:38:00Z` 起，0-0 业务表 `llm_usage_events` 5xx total `0`。
+  - 自 `2026-07-04T17:38:00Z` 起，sample-app 业务表 `llm_usage_events` 5xx total `0`。
 - 最终控制平面发布窗口：
   - 自 `2026-07-04T19:29:00Z` 起，Fugue edge 5xx count `0`。
-  - 自 `2026-07-04T19:29:00Z` 起，0-0 业务表 `llm_usage_events` 5xx total `0`。
+  - 自 `2026-07-04T19:29:00Z` 起，sample-app 业务表 `llm_usage_events` 5xx total `0`。
 - `context.Canceled` / client canceled 验证：
-  - 受控客户端主动断开 streaming request 后，0-0 业务表 `llm_usage_events` 在 `2026-07-04T19:47:37.726847Z` 记录 `/v1/responses` `status_code=499`。
+  - 受控客户端主动断开 streaming request 后，sample-app 业务表 `llm_usage_events` 在 `2026-07-04T19:47:37.726847Z` 记录 `/v1/tasks` `status_code=499`。
   - 该 499 记录 `input_tokens=0`、`output_tokens=0`、`total_tokens=0`，符合 client/request canceled 不扣费预期。
-  - Fugue edge request logs 对已经发出 response header 的 streaming 请求可能仍显示 edge-level `200`；判断 0-0 应用层 cancel 语义必须以业务表 `llm_usage_events.status_code=499` 为准。
+  - Fugue edge request logs 对已经发出 response header 的 streaming 请求可能仍显示 edge-level `200`；判断 sample-app 应用层 cancel 语义必须以业务表 `llm_usage_events.status_code=499` 为准。
 
 ## 回滚方案
 
@@ -949,7 +949,7 @@ preStop:
 ```
 
 4. 保留 `terminationGracePeriodSeconds=630`。
-5. 继续用已有 0-0 observability 验证无 503 / 499 异常回归。
+5. 继续用已有 sample-app observability 验证无 503 / 499 异常回归。
 
 ## 可打勾 TODO list
 
@@ -957,7 +957,7 @@ preStop:
 
 - [x] 确认所有当前 strict drain 代码路径：stateless service、online durable image update、online lifecycle update、online resource update、online restart。
 - [x] 固定当前 fixed-sleep 行为测试，确保 fallback 不丢。
-- [x] 明确 production 默认灰度策略：先测试 app，再 0-0，再全局默认。
+- [x] 明确 production 默认灰度策略：先测试 app，再 sample-app，再全局默认。
 - [x] 确认线上 Kubernetes native sidecar capability，记录最低支持版本和 fallback 条件。
 
 ### drain-agent 实现
@@ -1041,14 +1041,14 @@ preStop:
 - [x] 超长连接验证最多等待 600s。
 - [x] 检查 drain-agent 日志 reason=idle / timeout。
 - [x] 检查 metrics 正常上报。
-- [x] 对 0-0 开启 connection-aware。
-- [x] 0-0 image-only rollout 验证无 503 尖刺。
-- [x] 0-0 验证 `context.Canceled` 仍记录 499。
-- [x] 0-0 验证无连接时旧 Pod 快速退出。
+- [x] 对 sample-app 开启 connection-aware。
+- [x] sample-app image-only rollout 验证无 503 尖刺。
+- [x] sample-app 验证 `context.Canceled` 仍记录 499。
+- [x] sample-app 验证无连接时旧 Pod 快速退出。
 
 ### 默认启用与收尾
 
-- [x] connection-aware 在 0-0 稳定运行后设为 strict drain 默认模式。
+- [x] connection-aware 在 sample-app 稳定运行后设为 strict drain 默认模式。
 - [x] 保留 `fixed-sleep` 回滚开关。
 - [x] 更新 `docs/zero-downtime-rollout-incidents.md` 的当前不变量。
 - [x] 更新运维 runbook，说明如何判断 drain reason。
@@ -1064,5 +1064,5 @@ preStop:
 - 600 秒仍是强制退出上限。
 - strict zero-downtime rollout 仍保持 `maxUnavailable=0`。
 - 控制平面普通升级不会意外触发所有 app rollout。
-- 0-0 线上 rollout 无新增 503 尖刺。
+- sample-app 线上 rollout 无新增 503 尖刺。
 - drain 行为可通过日志 / metrics / CLI 证据精确解释。

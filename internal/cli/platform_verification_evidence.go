@@ -11,7 +11,7 @@ import (
 type platformArtifactVerificationEvidenceStateOptions struct {
 	ConsumerConvergence        string
 	LocalProbe                 string
-	PublicSynthetic            string
+	PlatformEvidence           string
 	WatchWindow                string
 	BaselineMonotonic          string
 	DatabaseRollbackCompatible string
@@ -29,8 +29,8 @@ type platformArtifactVerificationEvidenceWireRequest struct {
 	ConsumerConvergenceState   string   `json:"consumer_convergence_state,omitempty"`
 	LocalProbe                 *bool    `json:"local_probe,omitempty"`
 	LocalProbeState            string   `json:"local_probe_state,omitempty"`
-	PublicSynthetic            *bool    `json:"public_synthetic,omitempty"`
-	PublicSyntheticState       string   `json:"public_synthetic_state,omitempty"`
+	PlatformEvidence           *bool    `json:"platform_evidence,omitempty"`
+	PlatformEvidenceState      string   `json:"platform_evidence_state,omitempty"`
 	WatchWindow                *bool    `json:"watch_window,omitempty"`
 	WatchWindowState           string   `json:"watch_window_state,omitempty"`
 	BaselineMonotonic          *bool    `json:"baseline_monotonic,omitempty"`
@@ -49,7 +49,7 @@ func buildPlatformArtifactVerifyLKGWireRequest(
 	evidence := platformArtifactVerificationEvidenceWireRequest{
 		ConsumerConvergenceState: strings.TrimSpace(states.ConsumerConvergence),
 		LocalProbeState:          strings.TrimSpace(states.LocalProbe),
-		PublicSyntheticState:     strings.TrimSpace(states.PublicSynthetic),
+		PlatformEvidenceState:    strings.TrimSpace(states.PlatformEvidence),
 		WatchWindowState:         strings.TrimSpace(states.WatchWindow),
 		BaselineMonotonicState:   strings.TrimSpace(states.BaselineMonotonic),
 		DatabaseRollbackState:    strings.TrimSpace(states.DatabaseRollbackCompatible),
@@ -58,7 +58,7 @@ func buildPlatformArtifactVerifyLKGWireRequest(
 	}
 	evidence.ConsumerConvergence = changedBoolPointer(req.Evidence.ConsumerConvergence, legacyFlagChanged("consumer-convergence"))
 	evidence.LocalProbe = changedBoolPointer(req.Evidence.LocalProbe, legacyFlagChanged("local-probe"))
-	evidence.PublicSynthetic = changedBoolPointer(req.Evidence.PublicSynthetic, legacyFlagChanged("public-synthetic"))
+	evidence.PlatformEvidence = changedBoolPointer(req.Evidence.PlatformEvidence, legacyFlagChanged("platform-evidence"))
 	evidence.WatchWindow = changedBoolPointer(req.Evidence.WatchWindow, legacyFlagChanged("watch-window"))
 	evidence.BaselineMonotonic = changedBoolPointer(req.Evidence.BaselineMonotonic, legacyFlagChanged("baseline-monotonic"))
 	evidence.DatabaseRollbackCompatible = changedBoolPointer(req.Evidence.DatabaseRollbackCompatible, legacyFlagChanged("database-rollback-compatible"))
@@ -70,7 +70,7 @@ func buildPlatformArtifactVerifyLKGWireRequest(
 	}{
 		{"consumer_convergence", evidence.ConsumerConvergenceState, evidence.ConsumerConvergence},
 		{"local_probe", evidence.LocalProbeState, evidence.LocalProbe},
-		{"public_synthetic", evidence.PublicSyntheticState, evidence.PublicSynthetic},
+		{"platform_evidence", evidence.PlatformEvidenceState, evidence.PlatformEvidence},
 		{"watch_window", evidence.WatchWindowState, evidence.WatchWindow},
 		{"baseline_monotonic", evidence.BaselineMonotonicState, evidence.BaselineMonotonic},
 		{"database_rollback_compatible", evidence.DatabaseRollbackState, evidence.DatabaseRollbackCompatible},

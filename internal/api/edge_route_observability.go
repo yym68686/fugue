@@ -78,6 +78,7 @@ type edgeRouteDecisionMaterial struct {
 	Status                         string   `json:"status"`
 	StatusReason                   string   `json:"status_reason,omitempty"`
 	DurableRevisionDigest          string   `json:"durable_revision_digest,omitempty"`
+	DurableImageDigest             string   `json:"durable_image_digest,omitempty"`
 	DurablePhase                   string   `json:"durable_phase,omitempty"`
 	DurableOperationDigest         string   `json:"durable_operation_digest,omitempty"`
 	AppObservationKeyDigest        string   `json:"app_observation_key_digest,omitempty"`
@@ -134,6 +135,7 @@ func edgeRouteDecisionMaterialFor(app model.App, route model.EdgeRouteBinding, p
 		Status:                         strings.TrimSpace(route.Status),
 		StatusReason:                   strings.TrimSpace(route.StatusReason),
 		DurableRevisionDigest:          durableRevisionDigest,
+		DurableImageDigest:             edgeObservationDigest(app.Spec.Image),
 		DurablePhase:                   storedPhase,
 		DurableOperationDigest:         durableOperationDigest,
 		AppObservationKeyDigest:        edgeObservationDigest(evidence.appObservationKey),
@@ -202,25 +204,34 @@ func (s *Server) logEdgeRouteDecisionChanges(bundle model.EdgeRouteBundle, appsB
 		return
 	}
 	for _, route := range bundle.Routes {
-		if !s.edgeRouteDecisionChanged(route) {
-			continue
-		}
 		app := appsByID[strings.TrimSpace(route.AppID)]
 		provenance := provenanceByAppID[strings.TrimSpace(route.AppID)]
 		material := edgeRouteDecisionMaterialFor(app, route, provenance)
+		changed := s.edgeRouteDecisionChanged(route)
+		mustPersist := material.Status != model.EdgeRouteStatusActive || len(material.InvariantViolations) > 0
+		if !changed && !mustPersist {
+			continue
+		}
+		invariantJSON, _ := json.Marshal(material.InvariantViolations)
+		platformErrorClass := model.PlatformErrorClassForRouteStatus(material.Status, material.StatusReason)
 		event := map[string]any{
 			"event_type":                       "edge_route_decision",
 			"decision_id":                      strings.TrimSpace(route.DecisionID),
 			"bundle_version":                   strings.TrimSpace(bundle.Version),
 			"route_generation":                 material.RouteGeneration,
+			"correlation_key":                  model.EdgeRouteDecisionCorrelationKey(route.DecisionID, bundle.Version, material.RouteGeneration),
+			"tenant_id":                        strings.TrimSpace(app.TenantID),
+			"project_id":                       strings.TrimSpace(app.ProjectID),
 			"deployment_generation_digest":     material.DeploymentGenerationDigest,
 			"app_id":                           strings.TrimSpace(route.AppID),
 			"hostname":                         strings.TrimSpace(route.Hostname),
 			"path_prefix":                      model.NormalizeAppRoutePathPrefix(route.PathPrefix),
 			"edge_group_id":                    strings.TrimSpace(route.EdgeGroupID),
 			"final_status":                     material.Status,
+			"platform_error_class":             platformErrorClass,
 			"final_reason":                     material.StatusReason,
 			"durable_revision_digest":          material.DurableRevisionDigest,
+			"durable_image_digest":             material.DurableImageDigest,
 			"durable_phase":                    material.DurablePhase,
 			"durable_operation_digest":         material.DurableOperationDigest,
 			"app_observation_key_digest":       material.AppObservationKeyDigest,
@@ -252,6 +263,8 @@ func (s *Server) logEdgeRouteDecisionChanges(bundle model.EdgeRouteBundle, appsB
 			"image_location_source":            material.ImageLocationSource,
 			"image_location_observed_at":       material.ImageLocationObservedAt,
 			"invariant_violations":             material.InvariantViolations,
+			"invariant_violations_json":        string(invariantJSON),
+			"persistence_priority":             mustPersist,
 			"refresh_started_sequence":         provenance.sequence.refreshStarted,
 			"managed_apps_read_sequence":       provenance.sequence.managedAppsRead,
 			"kube_snapshot_read_sequence":      provenance.sequence.kubeSnapshotRead,

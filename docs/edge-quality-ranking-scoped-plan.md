@@ -684,7 +684,7 @@ candidate_score =
 ### 推荐 CLI
 
 ```sh
-fugue admin edge quality-rank api.0-0.pro \
+fugue admin edge quality-rank api.service.example.test \
   --traffic-class large_body_api \
   --scope asn:4134 \
   --since 30m
@@ -714,7 +714,7 @@ fugue admin edge quality-rank api.0-0.pro \
 建议增强：
 
 ```sh
-fugue admin dns answer-check api.0-0.pro --explain
+fugue admin dns answer-check api.service.example.test --explain
 ```
 
 输出必须能回答：
@@ -746,7 +746,7 @@ Deployment 或 SSH 改线上文件来切换长期配置。
 ### 2. 查询某个服务的 edge 排名
 
 ```sh
-fugue admin edge quality-rank api.0-0.pro \
+fugue admin edge quality-rank api.service.example.test \
   --traffic-class large_body_api \
   --method POST \
   --path-prefix /api \
@@ -763,7 +763,7 @@ fugue admin edge quality-rank api.0-0.pro \
 ### 3. 查询 DNS answer 与 shadow 差异
 
 ```sh
-fugue admin dns answer-check api.0-0.pro --explain
+fugue admin dns answer-check api.service.example.test --explain
 ```
 
 在 `shadow` 模式下：

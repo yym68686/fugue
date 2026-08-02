@@ -188,14 +188,14 @@ read-only CLI/API，而 DNS answer 继续使用 hostname 级 scoped score。
 运维调查入口：
 
 ```sh
-fugue admin edge quality-rank api.0-0.pro \
+fugue admin edge quality-rank api.service.example.test \
   --traffic-class large_body_api \
   --method POST \
   --path-prefix /api \
   --scope asn:as4134 \
   --window 30m
 
-fugue admin dns answer-check api.0-0.pro --explain
+fugue admin dns answer-check api.service.example.test --explain
 ```
 
 `quality-rank` 会输出 selected scope、fallback level、hard-gated candidates、

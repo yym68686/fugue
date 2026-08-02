@@ -714,6 +714,13 @@ func clickHouseRowForEvent(event Event) (string, any, error) {
 		return "request_spans", clickHouseRequestSpanRow(event), nil
 	case "app_events":
 		return "app_events", clickHouseAppEventRow(event), nil
+	case "edge_route_decisions":
+		if !edgeRouteDecisionEventComplete(event) {
+			return "app_events", clickHouseIncompleteEdgeRouteDecisionAppEventRow(event), nil
+		}
+		return "edge_route_decisions", clickHouseEdgeRouteDecisionRow(event), nil
+	case "edge_route_decision_missing_links":
+		return "edge_route_decision_missing_links", clickHouseEdgeRouteDecisionMissingLinkRow(event), nil
 	case "":
 		return "", nil, nil
 	default:
@@ -730,6 +737,10 @@ func clickHouseTableForEvent(event Event) string {
 			return "request_spans"
 		case "app_events", "app_event":
 			return "app_events"
+		case "edge_route_decisions", "edge_route_decision":
+			return "edge_route_decisions"
+		case "edge_route_decision_missing_links", "edge_route_decision_missing_link":
+			return "edge_route_decision_missing_links"
 		}
 	}
 	switch event.Kind {
@@ -743,6 +754,10 @@ func clickHouseTableForEvent(event Event) string {
 			return "request_spans"
 		case "app_event", "operation_event", "deploy_event", "runtime_event", "platform_event", "edge_event", "request_fact_incomplete", "edge_request_body_buffer_progress", "edge_request_body_buffer_slow", "edge_front_tcp_connection":
 			return "app_events"
+		case "edge_route_decision":
+			return "edge_route_decisions"
+		case "edge_route_decision_material_missing":
+			return "edge_route_decision_missing_links"
 		default:
 			return ""
 		}
@@ -750,31 +765,77 @@ func clickHouseTableForEvent(event Event) string {
 }
 
 type requestFactRow struct {
-	Timestamp    string `json:"ts"`
-	TenantID     string `json:"tenant_id"`
-	ProjectID    string `json:"project_id"`
-	AppID        string `json:"app_id"`
-	RuntimeID    string `json:"runtime_id"`
-	EdgeID       string `json:"edge_id"`
-	Pod          string `json:"pod"`
-	TraceID      string `json:"trace_id"`
-	RequestID    string `json:"request_id"`
-	RouteID      string `json:"route_id"`
-	Hostname     string `json:"hostname"`
-	PathTemplate string `json:"path_template"`
-	Method       string `json:"method"`
-	StatusCode   uint16 `json:"status_code"`
-	StatusClass  string `json:"status_class"`
-	DurationMS   uint32 `json:"duration_ms"`
-	TTFBMS       uint32 `json:"ttfb_ms"`
-	UpstreamMS   uint32 `json:"upstream_ms"`
-	BytesIn      uint64 `json:"bytes_in"`
-	BytesOut     uint64 `json:"bytes_out"`
-	Streaming    bool   `json:"streaming"`
-	ErrorType    string `json:"error_type"`
-	DeploymentID string `json:"deployment_id"`
-	OperationID  string `json:"operation_id"`
-	SummaryJSON  string `json:"summary_json"`
+	Timestamp          string `json:"ts"`
+	TenantID           string `json:"tenant_id"`
+	ProjectID          string `json:"project_id"`
+	AppID              string `json:"app_id"`
+	RuntimeID          string `json:"runtime_id"`
+	EdgeID             string `json:"edge_id"`
+	Pod                string `json:"pod"`
+	TraceID            string `json:"trace_id"`
+	RequestID          string `json:"request_id"`
+	RouteID            string `json:"route_id"`
+	DecisionID         string `json:"decision_id"`
+	BundleVersion      string `json:"bundle_version"`
+	RouteGeneration    string `json:"route_generation"`
+	CorrelationKey     string `json:"correlation_key"`
+	StatusReason       string `json:"status_reason"`
+	PlatformErrorClass string `json:"platform_error_class"`
+	OriginConnected    bool   `json:"origin_connected"`
+	EdgeGroupID        string `json:"edge_group_id"`
+	Slot               string `json:"slot"`
+	ReleaseEpoch       string `json:"release_epoch"`
+	Hostname           string `json:"hostname"`
+	PathTemplate       string `json:"path_template"`
+	Method             string `json:"method"`
+	StatusCode         uint16 `json:"status_code"`
+	StatusClass        string `json:"status_class"`
+	DurationMS         uint32 `json:"duration_ms"`
+	TTFBMS             uint32 `json:"ttfb_ms"`
+	UpstreamMS         uint32 `json:"upstream_ms"`
+	BytesIn            uint64 `json:"bytes_in"`
+	BytesOut           uint64 `json:"bytes_out"`
+	Streaming          bool   `json:"streaming"`
+	ErrorType          string `json:"error_type"`
+	DeploymentID       string `json:"deployment_id"`
+	OperationID        string `json:"operation_id"`
+	SummaryJSON        string `json:"summary_json"`
+}
+
+type edgeRouteDecisionRow struct {
+	Timestamp          string `json:"ts"`
+	IngestedAtNanos    uint64 `json:"ingested_at_unix_nano"`
+	TenantID           string `json:"tenant_id"`
+	ProjectID          string `json:"project_id"`
+	AppID              string `json:"app_id"`
+	Hostname           string `json:"hostname"`
+	PathPrefix         string `json:"path_prefix"`
+	EdgeGroupID        string `json:"edge_group_id"`
+	DecisionID         string `json:"decision_id"`
+	BundleVersion      string `json:"bundle_version"`
+	RouteGeneration    string `json:"route_generation"`
+	CorrelationKey     string `json:"correlation_key"`
+	FinalStatus        string `json:"final_status"`
+	PlatformErrorClass string `json:"platform_error_class"`
+	FinalReason        string `json:"final_reason"`
+	InvariantJSON      string `json:"invariant_violations_json"`
+	MaterialJSON       string `json:"material_json"`
+}
+
+type edgeRouteDecisionMissingLinkRow struct {
+	Timestamp       string `json:"ts"`
+	IngestedAtNanos uint64 `json:"ingested_at_unix_nano"`
+	TenantID        string `json:"tenant_id"`
+	AppID           string `json:"app_id"`
+	Hostname        string `json:"hostname"`
+	RequestID       string `json:"request_id"`
+	EdgeID          string `json:"edge_id"`
+	DecisionID      string `json:"decision_id"`
+	BundleVersion   string `json:"bundle_version"`
+	RouteGeneration string `json:"route_generation"`
+	CorrelationKey  string `json:"correlation_key"`
+	Reason          string `json:"reason"`
+	MaterialJSON    string `json:"material_json"`
 }
 
 type requestSpanRow struct {
@@ -828,32 +889,112 @@ var requestSummaryDimensionKeys = map[string]struct{}{
 
 func clickHouseRequestFactRow(event Event) requestFactRow {
 	return requestFactRow{
-		Timestamp:    clickHouseTime(event.Timestamp),
-		TenantID:     eventAttr(event, "tenant_id"),
-		ProjectID:    eventAttr(event, "project_id"),
-		AppID:        eventAttr(event, "app_id"),
-		RuntimeID:    eventAttr(event, "runtime_id"),
-		EdgeID:       eventAttr(event, "edge_id"),
-		Pod:          eventAttr(event, "pod"),
-		TraceID:      eventAttr(event, "trace_id"),
-		RequestID:    eventAttr(event, "request_id"),
-		RouteID:      eventAttr(event, "route_id"),
-		Hostname:     eventAttr(event, "hostname"),
-		PathTemplate: firstAttr(event, "path_template", "path", "route"),
-		Method:       eventAttr(event, "method"),
-		StatusCode:   uint16Attr(event, "status_code"),
-		StatusClass:  firstAttr(event, "status_class", "status"),
-		DurationMS:   uint32Attr(event, "duration_ms", "total_ms"),
-		TTFBMS:       uint32Attr(event, "ttfb_ms"),
-		UpstreamMS:   uint32Attr(event, "upstream_ms"),
-		BytesIn:      uint64Attr(event, "bytes_in"),
-		BytesOut:     uint64Attr(event, "bytes_out"),
-		Streaming:    boolAttr(event, "streaming", "stream"),
-		ErrorType:    eventAttr(event, "error_type"),
-		DeploymentID: eventAttr(event, "deployment_id"),
-		OperationID:  eventAttr(event, "operation_id"),
-		SummaryJSON:  summaryJSON(event),
+		Timestamp:          clickHouseTime(event.Timestamp),
+		TenantID:           eventAttr(event, "tenant_id"),
+		ProjectID:          eventAttr(event, "project_id"),
+		AppID:              eventAttr(event, "app_id"),
+		RuntimeID:          eventAttr(event, "runtime_id"),
+		EdgeID:             eventAttr(event, "edge_id"),
+		Pod:                eventAttr(event, "pod"),
+		TraceID:            eventAttr(event, "trace_id"),
+		RequestID:          eventAttr(event, "request_id"),
+		RouteID:            eventAttr(event, "route_id"),
+		DecisionID:         eventAttr(event, "decision_id"),
+		BundleVersion:      eventAttr(event, "bundle_version"),
+		RouteGeneration:    firstAttr(event, "route_generation", "route_id"),
+		CorrelationKey:     eventAttr(event, "correlation_key"),
+		StatusReason:       eventAttr(event, "status_reason"),
+		PlatformErrorClass: eventAttr(event, "platform_error_class"),
+		OriginConnected:    boolAttr(event, "origin_connected"),
+		EdgeGroupID:        eventAttr(event, "edge_group_id"),
+		Slot:               eventAttr(event, "slot"),
+		ReleaseEpoch:       eventAttr(event, "release_epoch"),
+		Hostname:           eventAttr(event, "hostname"),
+		PathTemplate:       firstAttr(event, "path_template", "path", "route"),
+		Method:             eventAttr(event, "method"),
+		StatusCode:         uint16Attr(event, "status_code"),
+		StatusClass:        firstAttr(event, "status_class", "status"),
+		DurationMS:         uint32Attr(event, "duration_ms", "total_ms"),
+		TTFBMS:             uint32Attr(event, "ttfb_ms"),
+		UpstreamMS:         uint32Attr(event, "upstream_ms"),
+		BytesIn:            uint64Attr(event, "bytes_in"),
+		BytesOut:           uint64Attr(event, "bytes_out"),
+		Streaming:          boolAttr(event, "streaming", "stream"),
+		ErrorType:          eventAttr(event, "error_type"),
+		DeploymentID:       eventAttr(event, "deployment_id"),
+		OperationID:        eventAttr(event, "operation_id"),
+		SummaryJSON:        summaryJSON(event),
 	}
+}
+
+func clickHouseEdgeRouteDecisionRow(event Event) edgeRouteDecisionRow {
+	timestamp := event.Timestamp.UTC()
+	return edgeRouteDecisionRow{
+		Timestamp:          clickHouseTime(timestamp),
+		IngestedAtNanos:    uint64(timestamp.UnixNano()),
+		TenantID:           eventAttr(event, "tenant_id"),
+		ProjectID:          eventAttr(event, "project_id"),
+		AppID:              eventAttr(event, "app_id"),
+		Hostname:           eventAttr(event, "hostname"),
+		PathPrefix:         eventAttr(event, "path_prefix"),
+		EdgeGroupID:        eventAttr(event, "edge_group_id"),
+		DecisionID:         eventAttr(event, "decision_id"),
+		BundleVersion:      eventAttr(event, "bundle_version"),
+		RouteGeneration:    eventAttr(event, "route_generation"),
+		CorrelationKey:     eventAttr(event, "correlation_key"),
+		FinalStatus:        eventAttr(event, "final_status"),
+		PlatformErrorClass: eventAttr(event, "platform_error_class"),
+		FinalReason:        eventAttr(event, "final_reason"),
+		InvariantJSON:      firstAttr(event, "invariant_violations_json", "invariant_violations"),
+		MaterialJSON:       attributesJSON(event),
+	}
+}
+
+func edgeRouteDecisionEventComplete(event Event) bool {
+	return eventAttr(event, "app_id") != "" &&
+		eventAttr(event, "decision_id") != "" &&
+		eventAttr(event, "bundle_version") != "" &&
+		eventAttr(event, "route_generation") != "" &&
+		eventAttr(event, "correlation_key") != ""
+}
+
+func clickHouseIncompleteEdgeRouteDecisionAppEventRow(event Event) appEventRow {
+	attrs := cloneEventAttributes(event.Attributes)
+	attrs["event_type"] = "edge_route_decision_incomplete"
+	attrs["severity"] = "warning"
+	attrs["original_event_type"] = "edge_route_decision"
+	attrs["fugue_table"] = "app_events"
+	incomplete := event
+	incomplete.Message = "incomplete edge route decision rejected"
+	incomplete.Attributes = attrs
+	return clickHouseAppEventRow(incomplete)
+}
+
+func clickHouseEdgeRouteDecisionMissingLinkRow(event Event) edgeRouteDecisionMissingLinkRow {
+	timestamp := event.Timestamp.UTC()
+	return edgeRouteDecisionMissingLinkRow{
+		Timestamp:       clickHouseTime(timestamp),
+		IngestedAtNanos: uint64(timestamp.UnixNano()),
+		TenantID:        eventAttr(event, "tenant_id"),
+		AppID:           eventAttr(event, "app_id"),
+		Hostname:        eventAttr(event, "hostname"),
+		RequestID:       eventAttr(event, "request_id"),
+		EdgeID:          eventAttr(event, "edge_id"),
+		DecisionID:      eventAttr(event, "decision_id"),
+		BundleVersion:   eventAttr(event, "bundle_version"),
+		RouteGeneration: eventAttr(event, "route_generation"),
+		CorrelationKey:  eventAttr(event, "correlation_key"),
+		Reason:          firstAttr(event, "reason", "status_reason"),
+		MaterialJSON:    attributesJSON(event),
+	}
+}
+
+func cloneEventAttributes(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values)+4)
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func requestFactEventComplete(event Event) bool {

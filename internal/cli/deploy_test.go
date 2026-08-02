@@ -109,7 +109,7 @@ func TestResolveAppReferenceFallsBackToSingleAppInMatchedProject(t *testing.T) {
 				t.Fatalf("expected include_resource_usage=false, got %q", got)
 			}
 			switch {
-			case r.URL.Query().Get("q") == "uni-api-web":
+			case r.URL.Query().Get("q") == "sample-api-web":
 				_, _ = w.Write([]byte(`{"apps":[]}`))
 			case r.URL.Query().Get("project_id") == "project_123":
 				_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"api","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
@@ -120,7 +120,7 @@ func TestResolveAppReferenceFallsBackToSingleAppInMatchedProject(t *testing.T) {
 			if got := r.URL.Query().Get("tenant_id"); got != "" {
 				t.Fatalf("expected cross-tenant project lookup, got %q", got)
 			}
-			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"uni-api-web","slug":"uni-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_123","name":"sample-api-web","slug":"sample-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -131,7 +131,7 @@ func TestResolveAppReferenceFallsBackToSingleAppInMatchedProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	app, err := resolveAppReference(client, "uni-api-web", "", "")
+	app, err := resolveAppReference(client, "sample-api-web", "", "")
 	if err != nil {
 		t.Fatalf("resolve app: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRunDeployLocalWithAccountResolvesWorkspaceThroughWeb(t *testing.T) {
 			if got := r.URL.Query().Get("tenant_id"); got != "tenant_acct" {
 				t.Fatalf("expected tenant_acct project lookup, got %q", got)
 			}
-			_, _ = w.Write([]byte(`{"projects":[{"id":"project_target","tenant_id":"tenant_acct","name":"uni-api-web","slug":"uni-api-web"}]}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_target","tenant_id":"tenant_acct","name":"sample-api-web","slug":"sample-api-web"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
 			_, _ = w.Write([]byte(`{"apps":[]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-upload":
@@ -272,7 +272,7 @@ func TestRunDeployLocalWithAccountResolvesWorkspaceThroughWeb(t *testing.T) {
 		"--web-base-url", webServer.URL,
 		"--token", "admin-token",
 		"--account", "user@example.com",
-		"--project", "uni-api-web",
+		"--project", "sample-api-web",
 		"--dir", dir,
 		"--wait=false",
 	}, &stdout, &stderr)

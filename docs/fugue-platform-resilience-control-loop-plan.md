@@ -924,7 +924,7 @@ fugue debug bundle service <app|hostname|url> \
 ```json
 {
   "check_id": "dns.authoritative_answer",
-  "scope": "hostname:api.0-0.pro",
+  "scope": "hostname:api.service.example.test",
   "pass": true,
   "severity": "info",
   "source": "dns-node:ovhvps",
@@ -946,8 +946,8 @@ fugue debug bundle service <app|hostname|url> \
   "status": "degraded",
   "root_cause": "edge_origin_connect_failure",
   "confidence": "confirmed",
-  "impact": "api.0-0.pro requests through edge-jp returned 503",
-  "recommended_action": "drain edge-jp for api.0-0.pro or restart fugue-edge.service on dmit",
+  "impact": "api.service.example.test requests through edge-jp returned 503",
+  "recommended_action": "drain edge-jp for api.service.example.test or restart fugue-edge.service on dmit",
   "missing_evidence": []
 }
 ```
@@ -1924,7 +1924,7 @@ DNS/edge failover 必须满足：
 >
 > 2026-07-11 bounded layer GET checkpoint: OCI registry fallback 不再只用 `HEAD` 证明 layer 存在；
 > 它在逐层校验 descriptor digest/size 和 HEAD 后，继续对每个非空 layer 发出
-> `Range: bytes=0-0` 的 GET，并严格要求有效 `206 Content-Range` 和恰好一个响应字节。registry
+> `Range: bytes=sample-app` 的 GET，并严格要求有效 `206 Content-Range` 和恰好一个响应字节。registry
 > 忽略 Range、GET 被拒、Content-Range/size/digest header 异常都会 fail closed，因而既验证真实
 > pull 权限又把单层下载上限限制为 1 byte。synthetic registry 的 HEAD-pass/GET-denied、忽略 Range
 > 和错误 Content-Range 负向测试均通过；对当前 API 8 个 layer 与 controller 10 个 layer 的真实

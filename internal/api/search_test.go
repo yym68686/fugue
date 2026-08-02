@@ -18,17 +18,17 @@ func TestSearchResourcesFindsProjectAppAndDomain(t *testing.T) {
 	domain, err := stateStore.PutAppDomain(model.AppDomain{
 		AppID:       app.ID,
 		TenantID:    app.TenantID,
-		Hostname:    "uni-api.example.com",
+		Hostname:    "sample-api.example.com",
 		Status:      model.AppDomainStatusVerified,
 		DNSStatus:   model.AppDomainDNSStatusReady,
 		TLSStatus:   model.AppDomainTLSStatusReady,
-		RouteTarget: "uni-api-web-api.apps.example.com",
+		RouteTarget: "sample-api-web-api.apps.example.com",
 	})
 	if err != nil {
 		t.Fatalf("put app domain: %v", err)
 	}
 
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/search?q=uni-api&limit=20", apiKey, nil)
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/search?q=sample-api&limit=20", apiKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -37,7 +37,7 @@ func TestSearchResourcesFindsProjectAppAndDomain(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode search response: %v", err)
 	}
-	if !searchResponseHas(response, "project", "uni-api-web") {
+	if !searchResponseHas(response, "project", "sample-api-web") {
 		t.Fatalf("expected project match in %+v", response.Results)
 	}
 	appResult, ok := searchResponseFind(response, "app", app.ID)
@@ -71,20 +71,20 @@ func TestListAppsSupportsSearchAndProjectFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create other tenant: %v", err)
 	}
-	otherProject, err := stateStore.CreateProject(otherTenant.ID, "uni-api-web", "")
+	otherProject, err := stateStore.CreateProject(otherTenant.ID, "sample-api-web", "")
 	if err != nil {
 		t.Fatalf("create other project: %v", err)
 	}
 	raiseManagedTestCap(t, stateStore, otherTenant.ID)
-	if _, err := stateStore.CreateApp(otherTenant.ID, otherProject.ID, "uni-api-web-api", "", model.AppSpec{
-		Image:    "ghcr.io/example/uni-api-web-api:latest",
+	if _, err := stateStore.CreateApp(otherTenant.ID, otherProject.ID, "sample-api-web-api", "", model.AppSpec{
+		Image:    "ghcr.io/example/sample-api-web-api:latest",
 		Ports:    []int{8080},
 		Replicas: 1,
 	}); err != nil {
 		t.Fatalf("create other app: %v", err)
 	}
 
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps?tenant_id="+app.TenantID+"&project_id="+app.ProjectID+"&q=uni-api&include_live_status=false&include_resource_usage=false", platformKey, nil)
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps?tenant_id="+app.TenantID+"&project_id="+app.ProjectID+"&q=sample-api&include_live_status=false&include_resource_usage=false", platformKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
@@ -98,7 +98,7 @@ func TestListAppsSupportsSearchAndProjectFilters(t *testing.T) {
 		t.Fatalf("expected only filtered app %s, got %+v", app.ID, response.Apps)
 	}
 
-	tenantRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps?project_id="+app.ProjectID+"&q=uni-api&include_live_status=false&include_resource_usage=false", apiKey, nil)
+	tenantRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps?project_id="+app.ProjectID+"&q=sample-api&include_live_status=false&include_resource_usage=false", apiKey, nil)
 	if tenantRecorder.Code != http.StatusOK {
 		t.Fatalf("expected tenant status %d, got %d body=%s", http.StatusOK, tenantRecorder.Code, tenantRecorder.Body.String())
 	}
@@ -115,7 +115,7 @@ func setupSearchTestServer(t *testing.T) (*store.Store, *Server, string, model.A
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
-	project, err := stateStore.CreateProject(tenant.ID, "uni-api-web", "")
+	project, err := stateStore.CreateProject(tenant.ID, "sample-api-web", "")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -124,8 +124,8 @@ func setupSearchTestServer(t *testing.T) (*store.Store, *Server, string, model.A
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
-	app, err := stateStore.CreateApp(tenant.ID, project.ID, "uni-api-web-api", "", model.AppSpec{
-		Image:    "ghcr.io/example/uni-api-web-api:latest",
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "sample-api-web-api", "", model.AppSpec{
+		Image:    "ghcr.io/example/sample-api-web-api:latest",
 		Ports:    []int{8080},
 		Replicas: 1,
 	})

@@ -100,7 +100,7 @@ The active `ns101351` LVs map to current database PVCs:
 
 | PVC LV size | Workload reference |
 | ---: | --- |
-| 20 GiB | `uni-api-web-api-db-postgres-3` |
+| 20 GiB | `sample-api-web-api-db-postgres-3` |
 | 20 GiB | `morlane-river-postgres-postgres-1` |
 | 1 GiB | `oaix-solar-postgres-postgres-1` |
 | 5 GiB | `gaokao-db-postgres-1` |

@@ -127,7 +127,7 @@ func edgeRemediationAuthorizationMaterial(advance model.EdgeRemediationAdvance) 
 	return strings.Join([]string{
 		a.Schema, a.KeyID, a.KeyGeneration, a.ReleaseFence, a.ActionNonce, a.ValidUntil, a.RunnerObservedSecretUID, a.RunnerObservedSecretVersion,
 		strconv.FormatUint(advance.ExpectedActivationGeneration, 10), strconv.FormatUint(advance.ExpectedActionSequence, 10), advance.ToPhase,
-		advance.ActiveEvidenceDigest, advance.SyntheticDigest, advance.KubernetesDigest,
+		advance.ActiveEvidenceDigest, advance.PlatformEvidenceDigest, advance.KubernetesDigest,
 		t.EdgeID, t.EdgeGroupID, t.Slot, t.InstanceUID, t.ReleaseEpoch, t.DaemonSetName, t.DaemonSetUID, t.DaemonSetVersion, t.FailureClass,
 	}, "\n")
 }

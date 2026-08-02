@@ -1806,9 +1806,9 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 		ID:        "app_demo",
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
-		Name:      "uni-api-web-api",
+		Name:      "sample-api-web-api",
 		Spec: model.AppSpec{
-			Image:     "ghcr.io/example/uni-api:v1",
+			Image:     "ghcr.io/example/sample-api:v1",
 			Ports:     []int{8000},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
@@ -1816,7 +1816,7 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 				Database:    "uniapi",
 				User:        "uniapi",
 				Password:    "secret",
-				ServiceName: "uni-api-web-api-db-postgres",
+				ServiceName: "sample-api-web-api-db-postgres",
 			},
 		},
 	}
@@ -1857,10 +1857,10 @@ func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *te
 
 	want := []string{
 		"DELETE /api/v1/namespaces/fg-tenant-demo/services/app-demo",
-		"DELETE /api/v1/namespaces/fg-tenant-demo/services/uni-api-web-api-db-postgres",
-		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/uni-api-web-api-pgsec",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/services/sample-api-web-api-db-postgres",
+		"DELETE /api/v1/namespaces/fg-tenant-demo/secrets/sample-api-web-api-pgsec",
 		"DELETE /apis/apps/v1/namespaces/fg-tenant-demo/deployments/app-demo",
-		"DELETE /apis/postgresql.cnpg.io/v1/namespaces/fg-tenant-demo/clusters/uni-api-web-api-db-postgres",
+		"DELETE /apis/postgresql.cnpg.io/v1/namespaces/fg-tenant-demo/clusters/sample-api-web-api-db-postgres",
 	}
 	sort.Strings(deleted)
 	sort.Strings(want)
@@ -3999,9 +3999,9 @@ func TestDeleteManagedAppResourcesIgnoresMissingCustomResourceAPIsForStatelessAp
 		ID:        "app_demo",
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
-		Name:      "uni-api-web-api",
+		Name:      "sample-api-web-api",
 		Spec: model.AppSpec{
-			Image:     "ghcr.io/example/uni-api:v1",
+			Image:     "ghcr.io/example/sample-api:v1",
 			Ports:     []int{8000},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",

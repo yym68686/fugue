@@ -18,8 +18,8 @@ func TestRunFindRendersResultsAndFollowupCommands(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/search" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		if got := r.URL.Query().Get("q"); got != "uni-api-web" {
-			t.Fatalf("expected query uni-api-web, got %q", got)
+		if got := r.URL.Query().Get("q"); got != "sample-api-web" {
+			t.Fatalf("expected query sample-api-web, got %q", got)
 		}
 		if got := r.URL.Query().Get("types"); got != "app,project" {
 			t.Fatalf("expected app,project types, got %q", got)
@@ -28,21 +28,21 @@ func TestRunFindRendersResultsAndFollowupCommands(t *testing.T) {
 			t.Fatalf("expected limit 10, got %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(model.SearchResponse{
-			Query: "uni-api-web",
+			Query: "sample-api-web",
 			Limit: 10,
 			Results: []model.SearchResult{
 				{
 					Kind:          "app",
 					ID:            "app_123",
-					Name:          "uni-api-web-api",
+					Name:          "sample-api-web-api",
 					TenantID:      "tenant_123",
 					TenantName:    "Ming Workspace",
 					ProjectID:     "project_123",
-					ProjectName:   "uni-api-web",
+					ProjectName:   "sample-api-web",
 					AppID:         "app_123",
-					AppName:       "uni-api-web-api",
+					AppName:       "sample-api-web-api",
 					Status:        "ready",
-					PublicURL:     "https://uni-api.example.com",
+					PublicURL:     "https://sample-api.example.com",
 					InternalURL:   "http://app-123.tenant-123.svc.cluster.local:8000",
 					MatchedFields: []string{"name"},
 					Score:         100,
@@ -57,7 +57,7 @@ func TestRunFindRendersResultsAndFollowupCommands(t *testing.T) {
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"find", "uni-api-web",
+		"find", "sample-api-web",
 		"--type", "app,project",
 		"--limit", "10",
 	}, &stdout, &stderr)
@@ -65,7 +65,7 @@ func TestRunFindRendersResultsAndFollowupCommands(t *testing.T) {
 		t.Fatalf("run find: %v", err)
 	}
 	out := stdout.String()
-	for _, want := range []string{"uni-api-web-api", "https://uni-api.example.com", "http://app-123.tenant-123.svc.cluster.local:8000", "next_commands", "fugue --tenant 'Ming Workspace' --project 'uni-api-web' app overview 'uni-api-web-api'"} {
+	for _, want := range []string{"sample-api-web-api", "https://sample-api.example.com", "http://app-123.tenant-123.svc.cluster.local:8000", "next_commands", "fugue --tenant 'Ming Workspace' --project 'sample-api-web' app overview 'sample-api-web-api'"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -93,7 +93,7 @@ func TestRunAppListSearchSendsServerSideFilters(t *testing.T) {
 			if got := r.URL.Query().Get("include_resource_usage"); got != "false" {
 				t.Fatalf("expected include_resource_usage=false, got %q", got)
 			}
-			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"uni-api-web-api","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"sample-api-web-api","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
 			_, _ = w.Write([]byte(`{"runtimes":[]}`))
 		default:
@@ -116,7 +116,7 @@ func TestRunAppListSearchSendsServerSideFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run app ls: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "uni-api-web-api") {
+	if !strings.Contains(stdout.String(), "sample-api-web-api") {
 		t.Fatalf("expected app list output, got %q", stdout.String())
 	}
 }
@@ -132,11 +132,11 @@ func TestRunProjectOverviewSearchesAllProjectsWhenTenantIsAmbiguous(t *testing.T
 			if got := r.URL.Query().Get("tenant_id"); got != "" {
 				t.Fatalf("expected cross-tenant project lookup, got tenant_id=%q", got)
 			}
-			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_b","name":"uni-api-web","slug":"uni-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","tenant_id":"tenant_b","name":"sample-api-web","slug":"sample-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/console/projects/project_123":
-			_, _ = w.Write([]byte(`{"project_id":"project_123","project_name":"uni-api-web","project":{"id":"project_123","tenant_id":"tenant_b","name":"uni-api-web","slug":"uni-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"apps":[],"operations":[],"cluster_nodes":[]}`))
+			_, _ = w.Write([]byte(`{"project_id":"project_123","project_name":"sample-api-web","project":{"id":"project_123","tenant_id":"tenant_b","name":"sample-api-web","slug":"sample-api-web","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"apps":[],"operations":[],"cluster_nodes":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/console/gallery":
-			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","name":"uni-api-web","app_count":0,"service_count":0,"lifecycle":{"label":"idle","live":false,"sync_mode":"auto","tone":"neutral"},"resource_usage_snapshot":{},"service_badges":[]}]}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","name":"sample-api-web","app_count":0,"service_count":0,"lifecycle":{"label":"idle","live":false,"sync_mode":"auto","tone":"neutral"},"resource_usage_snapshot":{},"service_badges":[]}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -148,7 +148,7 @@ func TestRunProjectOverviewSearchesAllProjectsWhenTenantIsAmbiguous(t *testing.T
 	err := runWithStreams([]string{
 		"--base-url", server.URL,
 		"--token", "token",
-		"project", "overview", "uni-api-web",
+		"project", "overview", "sample-api-web",
 		"--with-services=false",
 		"--with-domains=false",
 		"--with-db=false",
@@ -156,7 +156,7 @@ func TestRunProjectOverviewSearchesAllProjectsWhenTenantIsAmbiguous(t *testing.T
 	if err != nil {
 		t.Fatalf("run project overview: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "project=uni-api-web") {
+	if !strings.Contains(stdout.String(), "project=sample-api-web") {
 		t.Fatalf("expected project overview output, got %q", stdout.String())
 	}
 }

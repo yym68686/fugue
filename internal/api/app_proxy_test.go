@@ -361,7 +361,7 @@ func TestAppProxyForwardsInboundTraceHeaders(t *testing.T) {
 	}
 	observed := appProxyObservation{}
 	proxy := server.newAppReverseProxy("demo.example.com", target, model.App{ID: "app_demo"}, &observed)
-	req := httptest.NewRequest(http.MethodGet, "http://demo.example.com/v1/responses", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://demo.example.com/api/resource", nil)
 	req.Header.Set("traceparent", traceparent)
 	req.Header.Set(appProxyTraceIDHeader, traceID)
 	req.Header.Set("X-Request-Id", requestID)
@@ -415,7 +415,7 @@ func TestAppProxyGeneratesTraceHeadersWhenMissing(t *testing.T) {
 	proxy := server.newAppReverseProxy("demo.example.com", target, model.App{ID: "app_demo"}, &observed)
 
 	recorder := httptest.NewRecorder()
-	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://demo.example.com/v1/responses", nil))
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://demo.example.com/api/resource", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
@@ -663,7 +663,7 @@ func TestAppProxyRetriesTransientUpstreamErrorsWithReplayableBody(t *testing.T) 
 		maxAttempts: 2,
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/api/small-json", strings.NewReader(requestBody))
+	req := httptest.NewRequest(http.MethodPut, "http://"+app.Route.Hostname+"/api/resource", strings.NewReader(requestBody))
 	req.Host = app.Route.Hostname
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
@@ -684,35 +684,41 @@ func TestAppProxyDoesNotPrepareReplayBodyForHighRiskRequests(t *testing.T) {
 
 	tests := []struct {
 		name   string
+		method string
 		path   string
 		accept string
 		body   string
 	}{
 		{
-			name: "responses",
-			path: "/v1/responses",
-			body: `{"model":"demo","input":"hello"}`,
+			name:   "post with billable side effects",
+			method: http.MethodPost,
+			path:   "/api/jobs",
+			body:   `{"model":"demo","input":"hello"}`,
 		},
 		{
-			name: "image generation",
-			path: "/v1/images/generations",
-			body: `{"model":"demo","prompt":"hello"}`,
+			name:   "patch with externally visible side effects",
+			method: http.MethodPatch,
+			path:   "/api/media",
+			body:   `{"model":"demo","prompt":"hello"}`,
 		},
 		{
 			name:   "sse accept",
+			method: http.MethodPut,
 			path:   "/api/streaming",
 			accept: "text/event-stream",
 			body:   `{"stream":true}`,
 		},
 		{
-			name: "stream path",
-			path: "/events/stream",
-			body: `{"stream":true}`,
+			name:   "stream path",
+			method: http.MethodPut,
+			path:   "/events/stream",
+			body:   `{"stream":true}`,
 		},
 		{
-			name: "large body",
-			path: "/api/small-json",
-			body: strings.Repeat("x", defaultAppProxyReplayBodyLimit+1),
+			name:   "large body",
+			method: http.MethodPut,
+			path:   "/api/resource",
+			body:   strings.Repeat("x", defaultAppProxyReplayBodyLimit+1),
 		},
 	}
 
@@ -721,7 +727,7 @@ func TestAppProxyDoesNotPrepareReplayBodyForHighRiskRequests(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			req := httptest.NewRequest(http.MethodPost, "http://app.example"+tt.path, strings.NewReader(tt.body))
+			req := httptest.NewRequest(tt.method, "http://app.example"+tt.path, strings.NewReader(tt.body))
 			if tt.accept != "" {
 				req.Header.Set("Accept", tt.accept)
 			}
@@ -735,7 +741,7 @@ func TestAppProxyDoesNotPrepareReplayBodyForHighRiskRequests(t *testing.T) {
 	}
 }
 
-func TestAppProxyDoesNotRetryResponsesRequestBody(t *testing.T) {
+func TestAppProxyDoesNotRetryNonIdempotentRequestBody(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, app, _ := setupAppDomainTestServer(t)
@@ -772,7 +778,7 @@ func TestAppProxyDoesNotRetryResponsesRequestBody(t *testing.T) {
 		maxAttempts: 3,
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/v1/responses", strings.NewReader(`{"input":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "http://"+app.Route.Hostname+"/api/jobs", strings.NewReader(`{"input":"hello"}`))
 	req.Host = app.Route.Hostname
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
@@ -781,7 +787,7 @@ func TestAppProxyDoesNotRetryResponsesRequestBody(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadGateway, recorder.Code, recorder.Body.String())
 	}
 	if attempts != 1 {
-		t.Fatalf("expected responses request to be attempted once, got %d attempts", attempts)
+		t.Fatalf("expected non-idempotent request to be attempted once, got %d attempts", attempts)
 	}
 }
 
@@ -799,7 +805,7 @@ func TestAppProxyRetryTransportDoesNotRetryNonReplayableBody(t *testing.T) {
 		}),
 		maxAttempts: 3,
 	}
-	req := httptest.NewRequest(http.MethodPost, "http://app.example/v1/responses", io.NopCloser(strings.NewReader("payload")))
+	req := httptest.NewRequest(http.MethodPost, "http://app.example/api/jobs", io.NopCloser(strings.NewReader("payload")))
 	req.GetBody = nil
 
 	_, err := transport.RoundTrip(req)

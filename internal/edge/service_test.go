@@ -135,6 +135,9 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	if fields["decision_id"] != "decision_123" || fields["bundle_version"] != "routegen_bundle_123" || fields["status_reason"] != "runtime invariant violation: image_missing" {
 		t.Fatalf("missing route decision binding: %+v", fields)
 	}
+	if fields["route_generation"] != "routegen_123" || fields["correlation_key"] != `["decision_123","routegen_bundle_123","routegen_123"]` {
+		t.Fatalf("missing canonical route decision correlation key: %+v", fields)
+	}
 	summary := fmt.Sprint(fields["summary_json"])
 	if strings.Contains(summary, "token=") || strings.Contains(summary, "Authorization") || strings.Contains(summary, "upstream_url") {
 		t.Fatalf("summary leaked sensitive data: %s", summary)
@@ -148,6 +151,7 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	if !strings.Contains(summary, `"route_generation":"routegen_123"`) ||
 		!strings.Contains(summary, `"decision_id":"decision_123"`) ||
 		!strings.Contains(summary, `"bundle_version":"routegen_bundle_123"`) ||
+		!strings.Contains(summary, `"correlation_key":"[\"decision_123\",\"routegen_bundle_123\",\"routegen_123\"]"`) ||
 		!strings.Contains(summary, `"status_reason":"runtime invariant violation: image_missing"`) ||
 		!strings.Contains(summary, `"lkg_generation":"lkg_123"`) ||
 		!strings.Contains(summary, `"origin_resolution_mode":"cluster_service"`) {
@@ -309,7 +313,7 @@ func TestProxyHandlerBuffersJSONSSERequestBodyBeforeOrigin(t *testing.T) {
 	}, log.New(ioDiscard{}, "", 0))
 	service.recordSyncSuccess(bundle, `"routegen_buffer_body"`, time.Now().UTC(), false)
 
-	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", strings.NewReader(`{"prompt":"hello"}`))
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/tasks", strings.NewReader(`{"prompt":"hello"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	recorder := httptest.NewRecorder()
@@ -348,7 +352,7 @@ func TestRequestBodyBuffersEndpointReportsActiveReads(t *testing.T) {
 	observed := edgeProxyObservation{
 		Host:             "demo.fugue.pro",
 		Method:           http.MethodPost,
-		Path:             "/v1/responses",
+		Path:             "/v1/tasks",
 		TraceID:          "4bf92f3577b34da6a3ce929d0e0e4736",
 		RequestID:        "req_123",
 		EdgeRequestID:    "edge_req_123",
@@ -414,7 +418,7 @@ func TestRequestBodyBufferSlowEventLogsStructuredFact(t *testing.T) {
 	observed := edgeProxyObservation{
 		Host:             "demo.fugue.pro",
 		Method:           http.MethodPost,
-		Path:             "/v1/responses",
+		Path:             "/v1/tasks",
 		TraceID:          "4bf92f3577b34da6a3ce929d0e0e4736",
 		RequestID:        "req_123",
 		EdgeRequestID:    "edge_req_123",
@@ -471,7 +475,7 @@ func TestProxyHandlerDoesNotReachOriginWhenBufferedBodyShortReads(t *testing.T) 
 	}, log.New(ioDiscard{}, "", 0))
 	service.recordSyncSuccess(bundle, `"routegen_buffer_short_read"`, time.Now().UTC(), false)
 
-	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", io.NopCloser(&shortReadReader{
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/tasks", io.NopCloser(&shortReadReader{
 		data: []byte(`{"bad"`),
 		err:  io.ErrUnexpectedEOF,
 	}))
@@ -511,7 +515,7 @@ func TestProxyHandlerRejectsBufferedBodyOverLimit(t *testing.T) {
 	}, log.New(ioDiscard{}, "", 0))
 	service.recordSyncSuccess(bundle, `"routegen_buffer_too_large"`, time.Now().UTC(), false)
 
-	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", strings.NewReader("abcd"))
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/tasks", strings.NewReader("abcd"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	recorder := httptest.NewRecorder()
@@ -554,7 +558,7 @@ func TestProxyHandlerRaisesBufferedBodyLimitFromBudget(t *testing.T) {
 	}, log.New(ioDiscard{}, "", 0))
 	service.recordSyncSuccess(bundle, `"routegen_buffer_dynamic_limit"`, time.Now().UTC(), false)
 
-	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", strings.NewReader("abcd"))
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/tasks", strings.NewReader("abcd"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	recorder := httptest.NewRecorder()
@@ -600,7 +604,7 @@ func TestProxyHandlerRaisesUnknownLengthBufferedBodyLimitFromBudget(t *testing.T
 	}, log.New(ioDiscard{}, "", 0))
 	service.recordSyncSuccess(bundle, `"routegen_buffer_dynamic_limit_unknown_length"`, time.Now().UTC(), false)
 
-	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", io.NopCloser(strings.NewReader("abcd")))
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/tasks", io.NopCloser(strings.NewReader("abcd")))
 	req.ContentLength = -1
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -865,7 +869,7 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_info{edge_id="",edge_group_id="edge-group-country-hk"} 1`,
+		`fugue_edge_info{component="worker",group="edge-group-country-hk",slot="",release_epoch=""} 1`,
 		`fugue_edge_bundle_sync_total{result="success"} 1`,
 		`fugue_edge_bundle_sync_total{result="not_modified"} 0`,
 		`fugue_edge_bundle_sync_total{result="error"} 0`,
@@ -1568,7 +1572,7 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 		t.Fatalf("expected metrics status 200, got %d body=%s", metrics.Code, metrics.Body.String())
 	}
 	if !strings.Contains(metrics.Body.String(), `fugue_edge_stale_cache 1`) ||
-		!strings.Contains(metrics.Body.String(), `fugue_edge_routes{bundle_version="routegen_stale"} 1`) ||
+		!strings.Contains(metrics.Body.String(), `fugue_edge_routes 1`) ||
 		!strings.Contains(metrics.Body.String(), `fugue_edge_bundle_sync_total{result="error"} 1`) ||
 		!strings.Contains(metrics.Body.String(), `fugue_edge_cache_load_total{result="success"} 1`) {
 		t.Fatalf("expected stale cache metrics, got %s", metrics.Body.String())
@@ -1775,7 +1779,7 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	if !strings.Contains(metrics, `fugue_edge_caddy_config_apply_total{result="success"} 1`) ||
-		!strings.Contains(metrics, `fugue_edge_caddy_routes{bundle_version="routegen_caddy_equivalent"} 2`) {
+		!strings.Contains(metrics, `fugue_edge_caddy_routes 2`) {
 		t.Fatalf("expected caddy apply metrics, got %s", metrics)
 	}
 }
@@ -2574,7 +2578,7 @@ func TestInternalCacheWarmupDoesNotEnterBusinessQualityMetrics(t *testing.T) {
 		t.Fatalf("internal warmup marker leaked to origin: %q", originWarmupHeader)
 	}
 	metrics := renderMetrics(t, service)
-	want := `fugue_edge_route_requests_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`
+	want := `fugue_edge_route_requests_total 1`
 	if !strings.Contains(metrics, want) {
 		t.Fatalf("expected only the non-loopback forged request in business metrics; missing %q:\n%s", want, metrics)
 	}
@@ -3209,15 +3213,11 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_requests_total{hostname="demo.fugue.pro",path_prefix="/",method="POST",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_requests_total{hostname="www.customer.com",path_prefix="/",method="POST",app="app_demo",route_kind="custom-domain",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",method="POST",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",status="201"} 1`,
-		`fugue_edge_route_status_total{hostname="www.customer.com",path_prefix="/",method="POST",app="app_demo",route_kind="custom-domain",client_country="",client_region="",client_asn="",status="200"} 1`,
-		`fugue_edge_route_upload_requests_total{hostname="demo.fugue.pro",path_prefix="/",method="POST",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_sse_total{hostname="www.customer.com",path_prefix="/",method="POST",app="app_demo",route_kind="custom-domain",client_country="",client_region="",client_asn="",result="success"} 1`,
-		`fugue_edge_route_streaming_total{hostname="www.customer.com",path_prefix="/",method="POST",app="app_demo",route_kind="custom-domain",client_country="",client_region="",client_asn="",result="success"} 1`,
-		`fugue_edge_route_upstream_latency_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="POST",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_upstream_latency_seconds_count{hostname="www.customer.com",path_prefix="/",method="POST",app="app_demo",route_kind="custom-domain",client_country="",client_region="",client_asn=""} 1`,
+		`fugue_edge_route_requests_total 2`,
+		`fugue_edge_route_upload_requests_total 2`,
+		`fugue_edge_route_sse_total 1`,
+		`fugue_edge_route_streaming_total 1`,
+		`fugue_edge_route_upstream_latency_seconds_count 2`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -3331,13 +3331,12 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",cache_status="hit",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",cache_status="miss",cache_policy_id="static-assets-immutable-v1",asset_class="next_static"} 1`,
-		`fugue_edge_route_cache_lookup_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 2`,
-		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_response_write_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 2`,
+		`fugue_edge_route_cache_total 2`,
+		`fugue_edge_route_cache_lookup_duration_seconds_count 2`,
+		`fugue_edge_route_origin_connect_duration_seconds_count 1`,
+		`fugue_edge_route_origin_ttfb_seconds_count 1`,
+		`fugue_edge_route_origin_total_duration_seconds_count 1`,
+		`fugue_edge_route_response_write_duration_seconds_count 2`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -3390,9 +3389,9 @@ func TestProxyHandlerReusesOriginConnections(t *testing.T) {
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_origin_connect_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
-		`fugue_edge_route_origin_ttfb_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 2`,
-		`fugue_edge_route_origin_total_duration_seconds_count{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 2`,
+		`fugue_edge_route_origin_connect_duration_seconds_count 1`,
+		`fugue_edge_route_origin_ttfb_seconds_count 2`,
+		`fugue_edge_route_origin_total_duration_seconds_count 2`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -3759,11 +3758,7 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 	}
 
 	metrics := renderMetrics(t, service)
-	for _, want := range []string{
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 3`,
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 2`,
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",cache_status="stale",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
-	} {
+	for _, want := range []string{`fugue_edge_route_cache_total 8`} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
 		}
@@ -3962,8 +3957,8 @@ func TestProxyHandlerReturnsUnavailableForInactiveRoute(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",status="503"} 1`,
-		`fugue_edge_route_fallback_hits_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
+		`status_class="5xx",platform_error_class="route_unavailable"} 1`,
+		`fugue_edge_route_fallback_hits_total 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -3996,8 +3991,8 @@ func TestProxyHandlerRecordsUpstreamErrors(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",status="502"} 1`,
-		`fugue_edge_route_upstream_errors_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
+		`status_class="5xx",platform_error_class="origin_connect"} 1`,
+		`fugue_edge_route_upstream_errors_total 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -4029,14 +4024,14 @@ func TestProxyHandlerClassifiesClientCanceledOriginAs499(t *testing.T) {
 	}
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",method="POST",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",status="499"} 1`,
-		`fugue_edge_route_upload_requests_total{hostname="demo.fugue.pro",path_prefix="/",method="POST",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`,
+		`status_class="4xx",platform_error_class=""} 1`,
+		`fugue_edge_route_upload_requests_total 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
 		}
 	}
-	if strings.Contains(metrics, `fugue_edge_route_upstream_errors_total{hostname="demo.fugue.pro"`) {
+	if !strings.Contains(metrics, `fugue_edge_route_upstream_errors_total 0`) {
 		t.Fatalf("client cancellation should not increment upstream error metrics:\n%s", metrics)
 	}
 }
@@ -4136,7 +4131,7 @@ func TestProxyHandlerSupportsWebSocket(t *testing.T) {
 		t.Fatal("timed out waiting for backend websocket validation")
 	}
 
-	wantMetric := `fugue_edge_route_websocket_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn="",result="success"} 1`
+	wantMetric := `fugue_edge_route_websocket_total 1`
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		metrics := renderMetrics(t, service)

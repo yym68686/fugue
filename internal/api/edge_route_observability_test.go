@@ -149,7 +149,11 @@ func TestEdgeRouteDecisionEventBindsRefreshSequenceWithoutRawRefs(t *testing.T) 
 		`"event_type":"edge_route_decision"`,
 		`"bundle_version":"routegen_bundle"`,
 		`"decision_id":"` + route.DecisionID + `"`,
+		`"correlation_key":"[\"` + route.DecisionID + `\",\"routegen_bundle\",\"routegen_observed\"]"`,
+		`"tenant_id":"tenant_observation"`,
+		`"project_id":"project_observation"`,
 		`"deployment_generation_digest":"` + edgeObservationDigest(route.DeploymentGeneration) + `"`,
+		`"durable_image_digest":"` + edgeObservationDigest(app.Spec.Image) + `"`,
 		`"refresh_started_sequence":10`,
 		`"managed_apps_read_sequence":11`,
 		`"kube_snapshot_read_sequence":12`,
@@ -160,10 +164,56 @@ func TestEdgeRouteDecisionEventBindsRefreshSequenceWithoutRawRefs(t *testing.T) 
 			t.Fatalf("decision event missing %s: %s", want, logLine)
 		}
 	}
-	for _, forbidden := range []string{"registry.example/private/image:secret", "op_sensitive_value", "deployment_op_sensitive_value"} {
+	for _, forbidden := range []string{"registry/new", "registry.example/private/image:secret", "op_sensitive_value", "deployment_op_sensitive_value"} {
 		if strings.Contains(logLine, forbidden) {
 			t.Fatalf("decision event leaked raw reference %q: %s", forbidden, logLine)
 		}
+	}
+}
+
+func TestEdgeRouteInvariantDecisionBypassesChangeLogDedup(t *testing.T) {
+	t.Parallel()
+
+	app := edgeRouteObservationTestApp("deploying", "op_running")
+	provenance := edgeRouteObservationTestProvenance()
+	provenance.evidence.invariantViolations = []string{"current_image_mismatch", "image_missing"}
+	route := edgeRouteObservationTestRoute()
+	route.DecisionID = edgeRouteDecisionID(edgeRouteDecisionMaterialFor(app, route, provenance))
+	bundle := model.EdgeRouteBundle{Version: "routegen_bundle", Routes: []model.EdgeRouteBinding{route}}
+	before := bundle
+	var output bytes.Buffer
+	server := &Server{log: log.New(&output, "", 0)}
+	for range 2 {
+		server.logEdgeRouteDecisionChanges(bundle, map[string]model.App{app.ID: app}, map[string]managedAppObservationProvenance{app.ID: provenance})
+	}
+	if got := strings.Count(output.String(), `"event_type":"edge_route_decision"`); got != 2 {
+		t.Fatalf("invariant decision material was deduplicated: got %d events: %s", got, output.String())
+	}
+	if !strings.Contains(output.String(), `"invariant_violations_json":"[\"current_image_mismatch\",\"image_missing\"]"`) {
+		t.Fatalf("missing persistable invariant material: %s", output.String())
+	}
+	if !reflect.DeepEqual(bundle, before) {
+		t.Fatalf("persistence logging changed route/bundle behavior: before=%+v after=%+v", before, bundle)
+	}
+}
+
+func TestEdgeRouteActiveDecisionStillUsesChangeLogDedup(t *testing.T) {
+	t.Parallel()
+
+	app := edgeRouteObservationTestApp("deployed", "op_complete")
+	provenance := edgeRouteObservationTestProvenance()
+	route := edgeRouteObservationTestRoute()
+	route.Status = model.EdgeRouteStatusActive
+	route.StatusReason = ""
+	route.DecisionID = edgeRouteDecisionID(edgeRouteDecisionMaterialFor(app, route, provenance))
+	bundle := model.EdgeRouteBundle{Version: "routegen_bundle", Routes: []model.EdgeRouteBinding{route}}
+	var output bytes.Buffer
+	server := &Server{log: log.New(&output, "", 0)}
+	for range 2 {
+		server.logEdgeRouteDecisionChanges(bundle, map[string]model.App{app.ID: app}, map[string]managedAppObservationProvenance{app.ID: provenance})
+	}
+	if got := strings.Count(output.String(), `"event_type":"edge_route_decision"`); got != 1 {
+		t.Fatalf("active decision dedup changed: got %d events: %s", got, output.String())
 	}
 }
 
@@ -181,8 +231,9 @@ func TestManagedAppObservationSequenceIsMonotonic(t *testing.T) {
 
 func edgeRouteObservationTestApp(phase, operationID string) model.App {
 	return model.App{
-		ID:       "app_observation",
-		TenantID: "tenant_observation",
+		ID:        "app_observation",
+		TenantID:  "tenant_observation",
+		ProjectID: "project_observation",
 		Spec: model.AppSpec{
 			Image:     "registry/new",
 			Replicas:  1,

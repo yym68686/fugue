@@ -828,8 +828,8 @@ func EvaluateLKGPromotion(release model.PlatformArtifactRelease, req model.Platf
 	if !evidence.LocalProbe {
 		missing = append(missing, "local_probe")
 	}
-	if !evidence.PublicSynthetic {
-		missing = append(missing, "public_synthetic")
+	if !evidence.PlatformEvidence {
+		missing = append(missing, "platform_evidence")
 	}
 	if !evidence.WatchWindow {
 		missing = append(missing, "watch_window")
@@ -869,7 +869,7 @@ func VerificationEvidenceMap(req model.PlatformArtifactVerifyLKGRequest) map[str
 		"evidence_refs":                strings.Join(normalizeStrings(req.Evidence.EvidenceRefs), ","),
 		"expected_consumer_set_id":     strings.TrimSpace(req.Evidence.ExpectedConsumerSetID),
 		"local_probe":                  fmt.Sprintf("%t", req.Evidence.LocalProbe),
-		"public_synthetic":             fmt.Sprintf("%t", req.Evidence.PublicSynthetic),
+		"platform_evidence":            fmt.Sprintf("%t", req.Evidence.PlatformEvidence),
 		"reason":                       strings.TrimSpace(req.Reason),
 		"watch_window":                 fmt.Sprintf("%t", req.Evidence.WatchWindow),
 	}

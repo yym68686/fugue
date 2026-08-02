@@ -24,6 +24,33 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminEdgeCacheCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeQualityRankCommand())
 	cmd.AddCommand(c.newAdminEdgeNodesCommand())
+	cmd.AddCommand(c.newAdminEdgeReleaseEvidenceCommand())
+	return cmd
+}
+
+func (c *CLI) newAdminEdgeReleaseEvidenceCommand() *cobra.Command {
+	opts := struct{ Window string }{Window: "5m"}
+	cmd := &cobra.Command{
+		Use:   "release-evidence <release-epoch>",
+		Short: "Inspect typed, fail-closed platform release evidence",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			evidence, err := client.GetPlatformReleaseEvidence(args[0], opts.Window)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, evidence)
+			}
+			_, err = fmt.Fprintf(c.stdout, "status=%s release_epoch=%s bundle=%s phase=%s evidence=%s reason=%s\n", evidence.Status, evidence.ReleaseEpoch, evidence.BundleVersion, evidence.ActivationPhase, evidence.EvidenceDigest, evidence.Reason)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&opts.Window, "window", opts.Window, "Bounded request evidence window from 1m through 30m")
 	return cmd
 }
 

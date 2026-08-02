@@ -773,7 +773,7 @@ func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
 		"--reason", "verified after canary",
 		"--consumer-convergence",
 		"--local-probe",
-		"--public-synthetic",
+		"--platform-evidence",
 		"--watch-window",
 		"--baseline-monotonic",
 		"--database-rollback-compatible",
@@ -789,7 +789,7 @@ func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
 	if request.FencingToken != 9 ||
 		request.Evidence.ConsumerConvergence == nil || !*request.Evidence.ConsumerConvergence ||
 		request.Evidence.LocalProbe == nil || !*request.Evidence.LocalProbe ||
-		request.Evidence.PublicSynthetic == nil || !*request.Evidence.PublicSynthetic ||
+		request.Evidence.PlatformEvidence == nil || !*request.Evidence.PlatformEvidence ||
 		request.Evidence.WatchWindow == nil || !*request.Evidence.WatchWindow ||
 		request.Evidence.BaselineMonotonic == nil || !*request.Evidence.BaselineMonotonic ||
 		request.Evidence.DatabaseRollbackCompatible == nil || !*request.Evidence.DatabaseRollbackCompatible ||
@@ -810,7 +810,7 @@ func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
 		"--reason", "verified with four-state evidence",
 		"--consumer-convergence-state", "pass",
 		"--local-probe-state", "pass",
-		"--public-synthetic-state", "pass",
+		"--platform-evidence-state", "pass",
 		"--watch-window-state", "pass",
 		"--baseline-monotonic-state", "pass",
 		"--database-rollback-compatible-state", "pass",
@@ -823,11 +823,11 @@ func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
 	}
 	stateRequest := requests[1]
 	if stateRequest.Evidence.ConsumerConvergence != nil || stateRequest.Evidence.LocalProbe != nil ||
-		stateRequest.Evidence.PublicSynthetic != nil || stateRequest.Evidence.WatchWindow != nil ||
+		stateRequest.Evidence.PlatformEvidence != nil || stateRequest.Evidence.WatchWindow != nil ||
 		stateRequest.Evidence.BaselineMonotonic != nil || stateRequest.Evidence.DatabaseRollbackCompatible != nil ||
 		stateRequest.Evidence.ConsumerConvergenceState != model.InvariantEvidenceStatePass ||
 		stateRequest.Evidence.LocalProbeState != model.InvariantEvidenceStatePass ||
-		stateRequest.Evidence.PublicSyntheticState != model.InvariantEvidenceStatePass ||
+		stateRequest.Evidence.PlatformEvidenceState != model.InvariantEvidenceStatePass ||
 		stateRequest.Evidence.WatchWindowState != model.InvariantEvidenceStatePass ||
 		stateRequest.Evidence.BaselineMonotonicState != model.InvariantEvidenceStatePass ||
 		stateRequest.Evidence.DatabaseRollbackState != model.InvariantEvidenceStatePass {

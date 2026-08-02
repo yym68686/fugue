@@ -167,7 +167,7 @@ edge_activation_cleanup
   edge_activation_advance() { forbidden_activation_helper advance; }
   edge_activation_get() { forbidden_activation_helper get; }
   edge_activation_wait_all_api_ack() { forbidden_activation_helper ack; }
-  run_responses_synthetic() { forbidden_activation_helper responses; }
+  run_platform_release_evidence() { forbidden_activation_helper platform-evidence; }
   edge_activation_complete_cutover_and_soak() { forbidden_activation_helper soak; }
   fence_edge_worker_heartbeat() { forbidden_activation_helper fence; }
   scale_edge_worker_zero_cas() { forbidden_activation_helper scale; }
@@ -228,11 +228,11 @@ edge_activation_cleanup
   edge_activation_advance() { step "advance:$1"; }
   edge_activation_get() { step get; }
   edge_activation_wait_all_api_ack() { step ack; }
-  run_responses_synthetic() { step responses; }
+  run_platform_release_evidence() { step platform-evidence; }
   edge_activation_complete_cutover_and_soak() { step soak; }
 
   run_bluegreen_release
-  expected=$'recover\nprepare\nunretire\ncollect\napi-generation\nadvance:active-epoch-authoritative\nget\nack\nfront\nresponses\nsoak'
+  expected=$'recover\nprepare\nunretire\ncollect\napi-generation\nadvance:active-epoch-authoritative\nget\nack\nfront\nplatform-evidence\nsoak'
   [[ "$(cat "${trace}")" == "${expected}" ]]
 
   for FAIL_POINT in recover prepare unretire collect api-generation advance:active-epoch-authoritative get ack; do
@@ -247,5 +247,41 @@ edge_activation_cleanup
       exit 1
     fi
   done
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${ROOT}/scripts/release_fugue_public_data_plane.sh"
+  export FUGUE_EDGE_ACTIVATION_ENABLED=true
+  export FUGUE_EDGE_ACTIVATION_DIR="${TMP}/platform-evidence"
+  export FUGUE_EDGE_ACTIVATION_CURL_CONFIG="${TMP}/platform-evidence-curl.conf"
+  export FUGUE_EDGE_ACTIVATION_API_URL=https://api.example.test
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=release-platform-evidence
+  mkdir -m 0700 "${FUGUE_EDGE_ACTIVATION_DIR}"
+  install -m 0600 /dev/null "${FUGUE_EDGE_ACTIVATION_CURL_CONFIG}"
+  MOCK_PLATFORM_STATUS=passed
+  curl() {
+    local output="" arg
+    while (($#)); do
+      arg="$1"; shift
+      if [[ "${arg}" == --output ]]; then output="$1"; shift; fi
+    done
+    cat >"${output}" <<JSON
+{"schema":"platform-release-evidence/v1","status":"${MOCK_PLATFORM_STATUS}","release_epoch":"release-platform-evidence","evidence_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","metrics":{"request_count":17,"hard_failure_count":0,"origin_connected_application_5xx_count":5,"platform_error_classes":["origin_connected_application_5xx"]}}
+JSON
+    printf 200
+  }
+  run_platform_release_evidence
+  MOCK_PLATFORM_STATUS=unknown
+  if run_platform_release_evidence >/dev/null 2>&1; then
+    echo "unknown platform evidence must stop the release" >&2
+    exit 1
+  fi
+  MOCK_PLATFORM_STATUS=failed
+  if run_platform_release_evidence >/dev/null 2>&1; then
+    echo "failed platform evidence must stop the release" >&2
+    exit 1
+  fi
 )
 printf '[test_edge_activation] ok\n'

@@ -586,77 +586,44 @@ func (s *Service) handleTCPCaptureHints(w http.ResponseWriter, r *http.Request) 
 func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request, cfg Config) {
 	metrics, active := s.metricsSnapshot()
 	procMetrics, procErr := tcpdiag.ReadProcNetTCPMetrics(cfg.ProcNetSNMPPath, cfg.ProcNetNetstatPath)
-	identityLabels := edgeFrontIdentityMetricLabels(cfg)
+	labels := fmt.Sprintf(`component="front",group="%s"`, prometheusTCPLabelValue(cfg.EdgeGroupID))
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintln(w, "# HELP fugue_edge_front_info Static edge-front identity labels.")
+	fmt.Fprintln(w, "# HELP fugue_edge_front_info Static low-cardinality edge-front identity labels.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_info gauge")
-	fmt.Fprintf(w, "fugue_edge_front_info{edge_id=\"%s\",edge_group_id=\"%s\",node_host=\"%s\"} 1\n", prometheusTCPLabelValue(cfg.EdgeID), prometheusTCPLabelValue(cfg.EdgeGroupID), prometheusTCPLabelValue(cfg.NodeHost))
+	fmt.Fprintf(w, "fugue_edge_front_info{%s} 1\n", labels)
 	fmt.Fprintln(w, "# HELP fugue_edge_front_tcp_active_connections Active public TCP connections handled by edge-front.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_tcp_active_connections gauge")
-	for _, key := range sortedEdgeFrontActiveKeys(active) {
-		fmt.Fprintf(w, "fugue_edge_front_tcp_active_connections{%s,protocol=\"%s\",slot=\"%s\",proxy_protocol=\"%s\"} %d\n", identityLabels, prometheusTCPLabelValue(key.Protocol), prometheusTCPLabelValue(key.Slot), prometheusTCPLabelValue(fmt.Sprintf("%t", key.ProxyProtocol)), active[key])
+	for _, slot := range sortedEdgeFrontActiveSlots(active) {
+		fmt.Fprintf(w, "fugue_edge_front_tcp_active_connections{%s,slot=\"%s\"} %d\n", labels, prometheusTCPLabelValue(slot), sumEdgeFrontActiveSlot(active, slot))
 	}
 	fmt.Fprintln(w, "# HELP fugue_edge_front_tcp_connections_total Public TCP connections completed by edge-front.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_tcp_connections_total counter")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ConnectionsTotal) {
-		fmt.Fprintf(w, "fugue_edge_front_tcp_connections_total{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ConnectionsTotal[key])
-	}
+	fmt.Fprintf(w, "fugue_edge_front_tcp_connections_total{%s} %d\n", labels, sumEdgeFrontCounter(metrics.ConnectionsTotal))
 	fmt.Fprintln(w, "# HELP fugue_edge_front_tcp_bytes_total Bytes proxied by edge-front public TCP connections.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_tcp_bytes_total counter")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientToWorkerBytes) {
-		fmt.Fprintf(w, "fugue_edge_front_tcp_bytes_total{%s,%s,direction=\"client_to_worker\"} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientToWorkerBytes[key])
-	}
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.WorkerToClientBytes) {
-		fmt.Fprintf(w, "fugue_edge_front_tcp_bytes_total{%s,%s,direction=\"worker_to_client\"} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.WorkerToClientBytes[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_front_tcp_connection_duration_seconds Public TCP connection lifetime at edge-front.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_front_tcp_connection_duration_seconds summary")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.DurationCount) {
-		fmt.Fprintf(w, "fugue_edge_front_tcp_connection_duration_seconds_sum{%s,%s} %.6f\n", identityLabels, edgeFrontMetricLabels(key), metrics.DurationSum[key])
-		fmt.Fprintf(w, "fugue_edge_front_tcp_connection_duration_seconds_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.DurationCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_rtt_seconds Client-side TCP RTT sampled from Linux TCP_INFO when public connections close.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_rtt_seconds summary")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPRTTCount) {
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_rtt_seconds_sum{%s,%s} %.6f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRTTSum[key])
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_rtt_seconds_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRTTCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_total_retrans Client-side total retransmits sampled from Linux TCP_INFO when public connections close.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_total_retrans summary")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPRetransCount) {
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_retrans_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRetransSum[key])
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_retrans_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRetransCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_bytes_retrans Client-side retransmitted bytes sampled from Linux TCP_INFO when public connections close.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_bytes_retrans summary")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPBytesRetransCount) {
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_bytes_retrans_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPBytesRetransSum[key])
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_bytes_retrans_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPBytesRetransCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_total_rto Client-side RTO count sampled from Linux TCP_INFO when public connections close.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_total_rto summary")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPRTOCount) {
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_rto_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRTOSum[key])
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_rto_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRTOCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_delivery_rate_bps Client-side delivery rate sampled from Linux TCP_INFO when public connections close.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_delivery_rate_bps summary")
-	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPDeliveryCount) {
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_delivery_rate_bps_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPDeliverySum[key])
-		fmt.Fprintf(w, "fugue_edge_front_client_tcp_delivery_rate_bps_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPDeliveryCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_node_tcp_counter TCP counters read from the edge node /proc/net files.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_node_tcp_counter counter")
+	fmt.Fprintf(w, "fugue_edge_front_tcp_bytes_total{%s} %d\n", labels, sumEdgeFrontCounter(metrics.ClientToWorkerBytes)+sumEdgeFrontCounter(metrics.WorkerToClientBytes))
+	writeEdgeFrontAggregateSummary(w, labels, "fugue_edge_front_tcp_connection_duration_seconds", "Public TCP connection lifetime at edge-front.", metrics.DurationSum, metrics.DurationCount)
+	writeEdgeFrontAggregateSummary(w, labels, "fugue_edge_front_client_tcp_rtt_seconds", "Client-side TCP RTT sampled from Linux TCP_INFO.", metrics.ClientTCPRTTSum, metrics.ClientTCPRTTCount)
+	writeEdgeFrontAggregateSummary(w, labels, "fugue_edge_front_client_tcp_total_retrans", "Client-side total retransmits sampled from Linux TCP_INFO.", metrics.ClientTCPRetransSum, metrics.ClientTCPRetransCount)
+	writeEdgeFrontAggregateSummary(w, labels, "fugue_edge_front_client_tcp_bytes_retrans", "Client-side retransmitted bytes sampled from Linux TCP_INFO.", metrics.ClientTCPBytesRetransSum, metrics.ClientTCPBytesRetransCount)
+	writeEdgeFrontAggregateSummary(w, labels, "fugue_edge_front_client_tcp_total_rto", "Client-side RTO count sampled from Linux TCP_INFO.", metrics.ClientTCPRTOSum, metrics.ClientTCPRTOCount)
+	writeEdgeFrontAggregateSummary(w, labels, "fugue_edge_front_client_tcp_delivery_rate_bps", "Client-side delivery rate sampled from Linux TCP_INFO.", metrics.ClientTCPDeliverySum, metrics.ClientTCPDeliveryCount)
+	var retransSegments uint64
 	for _, metric := range procMetrics {
-		fmt.Fprintf(w, "fugue_edge_node_tcp_counter{%s,protocol=\"%s\",name=\"%s\"} %d\n", identityLabels, prometheusTCPLabelValue(metric.Protocol), prometheusTCPLabelValue(metric.Name), metric.Value)
+		if metric.Protocol == "Tcp" && metric.Name == "RetransSegs" {
+			retransSegments += metric.Value
+		}
 	}
+	fmt.Fprintln(w, "# HELP fugue_edge_node_tcp_retrans_segments_total TCP retransmitted segments read from the edge node procfs counters.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_node_tcp_retrans_segments_total counter")
+	fmt.Fprintf(w, "fugue_edge_node_tcp_retrans_segments_total{%s} %d\n", labels, retransSegments)
 	fmt.Fprintln(w, "# HELP fugue_edge_node_tcp_proc_read_error Whether edge-front failed to read node /proc/net TCP counters.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_node_tcp_proc_read_error gauge")
 	errorValue := 0
 	if procErr != nil {
 		errorValue = 1
 	}
-	fmt.Fprintf(w, "fugue_edge_node_tcp_proc_read_error{%s} %d\n", identityLabels, errorValue)
+	fmt.Fprintf(w, "fugue_edge_node_tcp_proc_read_error{%s} %d\n", labels, errorValue)
 }
 
 func (s *Service) metricsSnapshot() (edgeFrontMetrics, map[edgeFrontActiveMetricKey]int) {
@@ -710,6 +677,52 @@ func cloneEdgeFrontFloatMap(in map[edgeFrontMetricKey]float64) map[edgeFrontMetr
 		out[key] = value
 	}
 	return out
+}
+
+func sumEdgeFrontCounter(values map[edgeFrontMetricKey]uint64) uint64 {
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func sumEdgeFrontFloat(values map[edgeFrontMetricKey]float64) float64 {
+	var total float64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func writeEdgeFrontAggregateSummary(w io.Writer, labels, name, help string, sums map[edgeFrontMetricKey]float64, counts map[edgeFrontMetricKey]uint64) {
+	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(w, "# TYPE %s summary\n", name)
+	fmt.Fprintf(w, "%s_sum{%s} %.6f\n", name, labels, sumEdgeFrontFloat(sums))
+	fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, sumEdgeFrontCounter(counts))
+}
+
+func sortedEdgeFrontActiveSlots(values map[edgeFrontActiveMetricKey]int) []string {
+	seen := map[string]struct{}{}
+	for key := range values {
+		seen[key.Slot] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for slot := range seen {
+		out = append(out, slot)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sumEdgeFrontActiveSlot(values map[edgeFrontActiveMetricKey]int, slot string) int {
+	total := 0
+	for key, value := range values {
+		if key.Slot == slot {
+			total += value
+		}
+	}
+	return total
 }
 
 func (s *Service) activeSlot(cfg Config) string {
@@ -794,25 +807,6 @@ func connAddr(addr net.Addr) string {
 		return "-"
 	}
 	return logSafeTCPValue(addr.String())
-}
-
-func edgeFrontMetricLabels(key edgeFrontMetricKey) string {
-	return fmt.Sprintf(
-		"protocol=\"%s\",slot=\"%s\",first_completed=\"%s\",proxy_protocol=\"%s\"",
-		prometheusTCPLabelValue(key.Protocol),
-		prometheusTCPLabelValue(key.Slot),
-		prometheusTCPLabelValue(key.FirstCompleted),
-		prometheusTCPLabelValue(fmt.Sprintf("%t", key.ProxyProtocol)),
-	)
-}
-
-func edgeFrontIdentityMetricLabels(cfg Config) string {
-	return fmt.Sprintf(
-		"edge_id=\"%s\",edge_group_id=\"%s\",node_host=\"%s\"",
-		prometheusTCPLabelValue(cfg.EdgeID),
-		prometheusTCPLabelValue(cfg.EdgeGroupID),
-		prometheusTCPLabelValue(cfg.NodeHost),
-	)
 }
 
 func sortedEdgeFrontMetricKeys[T any](values map[edgeFrontMetricKey]T) []edgeFrontMetricKey {

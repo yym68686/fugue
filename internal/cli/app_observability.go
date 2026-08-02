@@ -44,6 +44,48 @@ func (c *CLI) newAppObservabilityCommand() *cobra.Command {
 		Short:   "Inspect and export app observability data",
 	}
 	cmd.AddCommand(c.newAppObservabilityExportCommand())
+	cmd.AddCommand(c.newAppEdgeRouteDecisionsCommand())
+	return cmd
+}
+
+func (c *CLI) newAppEdgeRouteDecisionsCommand() *cobra.Command {
+	opts := appEdgeRouteDecisionOptions{Limit: defaultAppObservabilityLimit}
+	cmd := &cobra.Command{
+		Use:   "edge-route-decisions <app>",
+		Short: "Inspect persisted Edge route-decision evidence for one domain",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(opts.Domain) == "" {
+				return fmt.Errorf("--domain is required")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.ListAppEdgeRouteDecisions(app.ID, opts)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			if err := renderAppObservabilityHeader(c.stdout, response.Source, response.Window); err != nil {
+				return err
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "domain", Value: response.Domain},
+				kvPair{Key: "decisions", Value: formatInt(len(response.Decisions))},
+				kvPair{Key: "missing_links", Value: formatInt(len(response.MissingLinks))},
+			)
+		},
+	}
+	addAppObservabilityWindowFlags(cmd, &opts.appObservabilityWindowOptions)
+	cmd.Flags().StringVar(&opts.Domain, "domain", "", "Exact app domain to correlate")
+	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum decisions and missing-link alerts to return")
 	return cmd
 }
 

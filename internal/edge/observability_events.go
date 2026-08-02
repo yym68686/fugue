@@ -57,6 +57,11 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		observed.Upstream = observed.Duration
 	}
 	route := observed.Route
+	correlationKey := model.EdgeRouteDecisionCorrelationKey(route.DecisionID, observed.BundleVersion, route.RouteGeneration)
+	platformErrorClass := edgePlatformErrorClass(observed)
+	if model.PlatformErrorClassRequiresDecision(platformErrorClass) && correlationKey == "" {
+		platformErrorClass = model.PlatformErrorClassDecisionMissing
+	}
 	summary := map[string]any{
 		"request_source":         edgeRequestSource(observed.InternalWarmup),
 		"route_kind":             strings.TrimSpace(route.RouteKind),
@@ -64,6 +69,12 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"decision_id":            strings.TrimSpace(route.DecisionID),
 		"bundle_version":         strings.TrimSpace(observed.BundleVersion),
 		"status_reason":          strings.TrimSpace(route.StatusReason),
+		"correlation_key":        correlationKey,
+		"status_class":           edgeStatusClass(observed.StatusCode),
+		"platform_error_class":   platformErrorClass,
+		"origin_connected":       observed.OriginGotConn,
+		"slot":                   strings.TrimSpace(cfg.EdgeSlot),
+		"release_epoch":          strings.TrimSpace(cfg.EdgeReleaseEpoch),
 		"lkg_generation":         strings.TrimSpace(lkgGeneration),
 		"origin_resolution_mode": edgeOriginResolutionMode(route),
 		"deployment_generation":  strings.TrimSpace(route.DeploymentGeneration),
@@ -168,36 +179,76 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	}
 	summaryJSON, _ := json.Marshal(summary)
 	return map[string]any{
-		"event_type":     "request_fact",
-		"message":        "edge request",
-		"tenant_id":      strings.TrimSpace(route.TenantID),
-		"app_id":         strings.TrimSpace(route.AppID),
-		"release_id":     strings.TrimSpace(observed.ReleaseID),
-		"release_role":   strings.TrimSpace(observed.ReleaseRole),
-		"runtime_id":     strings.TrimSpace(route.RuntimeID),
-		"edge_id":        strings.TrimSpace(cfg.EdgeID),
-		"trace_id":       strings.TrimSpace(observed.TraceID),
-		"request_id":     strings.TrimSpace(observed.RequestID),
-		"route_id":       strings.TrimSpace(route.RouteGeneration),
-		"decision_id":    strings.TrimSpace(route.DecisionID),
-		"bundle_version": strings.TrimSpace(observed.BundleVersion),
-		"status_reason":  strings.TrimSpace(route.StatusReason),
-		"lkg_generation": strings.TrimSpace(lkgGeneration),
-		"hostname":       firstNonEmpty(route.Hostname, observed.Host),
-		"path_template":  model.NormalizeAppRoutePathPrefix(route.PathPrefix),
-		"method":         strings.TrimSpace(observed.Method),
-		"status_code":    observed.StatusCode,
-		"status_class":   edgeStatusClass(observed.StatusCode),
-		"duration_ms":    durationMilliseconds(observed.Duration),
-		"ttfb_ms":        durationMilliseconds(observed.TTFB),
-		"upstream_ms":    durationMilliseconds(observed.Upstream),
-		"bytes_in":       nonNegativeInt64(observed.RequestBytes),
-		"bytes_out":      nonNegativeInt64(observed.ResponseBytes),
-		"streaming":      observed.Streaming,
-		"request_source": edgeRequestSource(observed.InternalWarmup),
-		"error_type":     edgeObservationErrorType(observed),
-		"summary_json":   string(summaryJSON),
+		"event_type":           "request_fact",
+		"message":              "edge request",
+		"tenant_id":            strings.TrimSpace(route.TenantID),
+		"app_id":               strings.TrimSpace(route.AppID),
+		"release_id":           strings.TrimSpace(observed.ReleaseID),
+		"release_role":         strings.TrimSpace(observed.ReleaseRole),
+		"runtime_id":           strings.TrimSpace(route.RuntimeID),
+		"edge_id":              strings.TrimSpace(cfg.EdgeID),
+		"trace_id":             strings.TrimSpace(observed.TraceID),
+		"request_id":           strings.TrimSpace(observed.RequestID),
+		"route_id":             strings.TrimSpace(route.RouteGeneration),
+		"route_generation":     strings.TrimSpace(route.RouteGeneration),
+		"decision_id":          strings.TrimSpace(route.DecisionID),
+		"bundle_version":       strings.TrimSpace(observed.BundleVersion),
+		"correlation_key":      correlationKey,
+		"status_reason":        strings.TrimSpace(route.StatusReason),
+		"lkg_generation":       strings.TrimSpace(lkgGeneration),
+		"hostname":             firstNonEmpty(route.Hostname, observed.Host),
+		"path_template":        model.NormalizeAppRoutePathPrefix(route.PathPrefix),
+		"method":               strings.TrimSpace(observed.Method),
+		"status_code":          observed.StatusCode,
+		"status_class":         edgeStatusClass(observed.StatusCode),
+		"platform_error_class": platformErrorClass,
+		"origin_connected":     observed.OriginGotConn,
+		"edge_group_id":        strings.TrimSpace(cfg.EdgeGroupID),
+		"slot":                 strings.TrimSpace(cfg.EdgeSlot),
+		"release_epoch":        strings.TrimSpace(cfg.EdgeReleaseEpoch),
+		"duration_ms":          durationMilliseconds(observed.Duration),
+		"ttfb_ms":              durationMilliseconds(observed.TTFB),
+		"upstream_ms":          durationMilliseconds(observed.Upstream),
+		"bytes_in":             nonNegativeInt64(observed.RequestBytes),
+		"bytes_out":            nonNegativeInt64(observed.ResponseBytes),
+		"streaming":            observed.Streaming,
+		"request_source":       edgeRequestSource(observed.InternalWarmup),
+		"error_type":           edgeObservationErrorType(observed),
+		"summary_json":         string(summaryJSON),
 	}
+}
+
+const edgeReleaseEvidenceLatencyThreshold = 5 * time.Second
+
+func edgePlatformErrorClass(observed edgeProxyObservation) string {
+	if observed.ClientCanceled {
+		return model.PlatformErrorClassNone
+	}
+	if class := model.PlatformErrorClassForRouteStatus(observed.Route.Status, observed.Route.StatusReason); class != model.PlatformErrorClassNone {
+		return class
+	}
+	if strings.TrimSpace(observed.OriginDNSError) != "" {
+		return model.PlatformErrorClassOriginDNS
+	}
+	if strings.TrimSpace(observed.OriginConnectError) != "" {
+		return model.PlatformErrorClassOriginConnect
+	}
+	if strings.TrimSpace(observed.UpstreamError) != "" {
+		return model.PlatformErrorClassOriginUnavailable
+	}
+	if observed.StatusCode >= 500 {
+		if observed.Proxied && observed.OriginGotConn {
+			return model.PlatformErrorClassOriginConnectedApp5xx
+		}
+		if observed.Proxied {
+			return model.PlatformErrorClassOriginUnavailable
+		}
+		return model.PlatformErrorClassEvidenceUnknown
+	}
+	if !observed.Streaming && (observed.TTFB > edgeReleaseEvidenceLatencyThreshold || observed.Duration > edgeReleaseEvidenceLatencyThreshold) {
+		return model.PlatformErrorClassLatencyRegression
+	}
+	return model.PlatformErrorClassNone
 }
 
 func edgeOriginResolutionMode(route model.EdgeRouteBinding) string {

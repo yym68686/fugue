@@ -20,8 +20,8 @@ type platformArtifactVerificationEvidenceHTTPRequest struct {
 	ConsumerConvergenceState   string   `json:"consumer_convergence_state,omitempty"`
 	LocalProbe                 *bool    `json:"local_probe,omitempty"`
 	LocalProbeState            string   `json:"local_probe_state,omitempty"`
-	PublicSynthetic            *bool    `json:"public_synthetic,omitempty"`
-	PublicSyntheticState       string   `json:"public_synthetic_state,omitempty"`
+	PlatformEvidence           *bool    `json:"platform_evidence,omitempty"`
+	PlatformEvidenceState      string   `json:"platform_evidence_state,omitempty"`
 	WatchWindow                *bool    `json:"watch_window,omitempty"`
 	WatchWindowState           string   `json:"watch_window_state,omitempty"`
 	BaselineMonotonic          *bool    `json:"baseline_monotonic,omitempty"`
@@ -74,7 +74,7 @@ func (req platformArtifactVerificationEvidenceHTTPRequest) modelEvidence() (mode
 	}{
 		{"consumer_convergence", req.ConsumerConvergenceState, req.ConsumerConvergence, &evidence.ConsumerConvergence},
 		{"local_probe", req.LocalProbeState, req.LocalProbe, &evidence.LocalProbe},
-		{"public_synthetic", req.PublicSyntheticState, req.PublicSynthetic, &evidence.PublicSynthetic},
+		{"platform_evidence", req.PlatformEvidenceState, req.PlatformEvidence, &evidence.PlatformEvidence},
 		{"watch_window", req.WatchWindowState, req.WatchWindow, &evidence.WatchWindow},
 		{"baseline_monotonic", req.BaselineMonotonicState, req.BaselineMonotonic, &evidence.BaselineMonotonic},
 		{"database_rollback_compatible", req.DatabaseRollbackState, req.DatabaseRollbackCompatible, &evidence.DatabaseRollbackCompatible},

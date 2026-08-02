@@ -114,7 +114,7 @@ type EdgeRemediationAction struct {
 	PlanDigest                               string                `json:"plan_digest"`
 	ReleaseID                                string                `json:"release_id"`
 	ActiveEvidenceDigest                     string                `json:"active_evidence_digest"`
-	SyntheticDigest                          string                `json:"synthetic_digest"`
+	PlatformEvidenceDigest                   string                `json:"platform_evidence_digest"`
 	KubernetesDigest                         string                `json:"kubernetes_digest"`
 	Target                                   EdgeRemediationTarget `json:"target"`
 	Actor                                    string                `json:"actor"`
@@ -127,7 +127,7 @@ type EdgeRemediationAdvance struct {
 	ExpectedActionSequence                   uint64                       `json:"expected_action_sequence"`
 	ToPhase                                  string                       `json:"to_phase"`
 	ActiveEvidenceDigest                     string                       `json:"active_evidence_digest"`
-	SyntheticDigest                          string                       `json:"synthetic_digest"`
+	PlatformEvidenceDigest                   string                       `json:"platform_evidence_digest"`
 	KubernetesDigest                         string                       `json:"kubernetes_digest"`
 	Target                                   EdgeRemediationTarget        `json:"target"`
 	Authorization                            EdgeRemediationAuthorization `json:"authorization"`

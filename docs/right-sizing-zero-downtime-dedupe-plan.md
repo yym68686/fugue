@@ -1,10 +1,10 @@
 # 自动 right-sizing 重复 deploy 导致 strict zero downtime 失效修复方案
 
-本文固定 `2026-07-05 22:16:20–22:19:52 CST` 期间 `0-0 -> uni-api-ember` 503 事件的精确根因、修复方案、验证方案和可打勾 TODO。本文不包含 secret，不包含一次性线上热修步骤，不引入任何项目名 / app 名特判。所有代码修复必须回到 `fugue` 仓库，通过 `main` 分支和 GitHub Actions 控制平面发布链路上线。
+本文固定 `2026-07-05 22:16:20–22:19:52 CST` 期间 `sample-app -> sample-api-ember` 503 事件的精确根因、修复方案、验证方案和可打勾 TODO。本文不包含 secret，不包含一次性线上热修步骤，不引入任何项目名 / app 名特判。所有代码修复必须回到 `fugue` 仓库，通过 `main` 分支和 GitHub Actions 控制平面发布链路上线。
 
 ## 事故结论
 
-本次不是 `0-0` 前端 / 后端业务代码问题，也不是 `uni-api` 业务代码主动返回 503；本次是 Fugue 控制面自动 right-sizing 与 ManagedApp rollout 策略组合出的平台 bug。
+本次不是 `sample-app` 前端 / 后端业务代码问题，也不是 `sample-api` 业务代码主动返回 503；本次是 Fugue 控制面自动 right-sizing 与 ManagedApp rollout 策略组合出的平台 bug。
 
 精确原因：
 
@@ -15,7 +15,7 @@
 5. 第一个 operation 被正确识别为 `online_resource_update`，渲染为 `RollingUpdate / online-required`。
 6. 第一个 operation 完成后，第二个 operation 的 desired spec 已经等于 current app spec；控制器重新计算 rollout intent 时得到空 intent。
 7. 对带 `movable_rwo` 持久化存储的 app，空 rollout intent 会被渲染为 `Recreate / downtime-required / single-writer-storage`。
-8. 第二个重复 no-op deploy 因此把刚创建的新 ReplicaSet 也缩到 0；旧 Pod drain 600 秒到达 hard deadline 后，直到新 Pod 再次创建并 ready 前，service 没有可用业务 Pod，`0-0` 调用下游 `uni-api-ember` 出现 503。
+8. 第二个重复 no-op deploy 因此把刚创建的新 ReplicaSet 也缩到 0；旧 Pod drain 600 秒到达 hard deadline 后，直到新 Pod 再次创建并 ready 前，service 没有可用业务 Pod，`sample-app` 调用下游 `sample-api-ember` 出现 503。
 
 ## 线上证据摘要
 
@@ -32,7 +32,7 @@
 | 旧 Pod drain 结果 | `2026-07-05T14:16:19Z` (`22:16:19`) | `reason=timeout waited_ms=600314 active_connections=14 max_active_connections=16 observer_errors=0` |
 | 新 Pod 再创建 | `2026-07-05T14:19:42Z` (`22:19:42`) | `Scaled up replica set ...-66fdb9b9c7 from 0 to 1` |
 | 新 Pod 启动完成 | `2026-07-05T14:19:48Z` (`22:19:48`) | app logs: `Application startup complete`, `Uvicorn running on 0.0.0.0:8000` |
-| 0-0 侧恢复 | `2026-07-05T14:19:50–14:19:52Z` (`22:19:50–22:19:52`) | `uni-api-ember` 开始重新返回 `200 OK` |
+| sample-app 侧恢复 | `2026-07-05T14:19:50–14:19:52Z` (`22:19:50–22:19:52`) | `sample-api-ember` 开始重新返回 `200 OK` |
 
 drain-agent 本身没有“误判无连接”。旧 Pod 的 drain-agent 明确看到连接仍然存在并等满 600 秒：
 
@@ -97,7 +97,7 @@ deployOperationDesiredStateMatchesApp(op, currentApp) == true
 ## 非目标
 
 - 不把所有 deploy 全局改成“有 active deploy 就拒绝”。这可能改变用户连续 deploy / import 的既有语义。
-- 不对 `uni-api-ember`、`0-0`、任何具体 app 名称写特判。
+- 不对 `sample-api-ember`、`sample-app`、任何具体 app 名称写特判。
 - 不关闭所有 right-sizing 能力作为永久修复。
 - 不把本应 downtime-required 的真实存储迁移伪装成 zero downtime。
 
@@ -276,8 +276,8 @@ CreateAutoscalingDeployOperation(op model.Operation) (model.Operation, Autoscali
 6. 线上观察：
    - `fugue-api` pods 正常 ready。
    - 自动 right-sizing 日志没有为同一 app 同一轮创建重复 operation。
-   - 对 `uni-api-ember` 再次触发 right-sizing / redeploy 时，timeline 不能出现由 right-sizing 触发的 `Recreate / downtime-required`。
-   - `0-0` 请求不再出现同类 503 窗口。
+   - 对 `sample-api-ember` 再次触发 right-sizing / redeploy 时，timeline 不能出现由 right-sizing 触发的 `Recreate / downtime-required`。
+   - `sample-app` 请求不再出现同类 503 窗口。
 
 ## 回滚策略
 
@@ -330,8 +330,8 @@ CreateAutoscalingDeployOperation(op model.Operation) (model.Operation, Autoscali
 - [x] 提交代码。
 - [x] push 到 `main`，由 GitHub Actions 发布控制面。
 - [x] 监控 `fugue-api` / `fugue-controller` 新版本 ready。
-- [x] 监控 `uni-api-ember` 后续 right-sizing / deploy timeline，确认不再出现同类重复 deploy + Recreate。
-- [x] 监控 `0-0` 503 请求，确认没有复现同类窗口。
+- [x] 监控 `sample-api-ember` 后续 right-sizing / deploy timeline，确认不再出现同类重复 deploy + Recreate。
+- [x] 监控 `sample-app` 503 请求，确认没有复现同类窗口。
 
 ### F. 上线监控发现的非预期行为
 

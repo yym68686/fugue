@@ -11,10 +11,10 @@ to make every controller decision explainable after the fact.
 
 ## Incident Evidence
 
-For `uni-api-web-api`, Fugue image tracking was enabled for:
+For `sample-api-web-api`, Fugue image tracking was enabled for:
 
 ```text
-docker.io/yym68686/uni-api-backend:main
+docker.io/yym68686/sample-api-backend:main
 ```
 
 Known production facts from the investigation:

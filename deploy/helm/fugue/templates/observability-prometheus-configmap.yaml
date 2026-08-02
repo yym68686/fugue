@@ -161,9 +161,9 @@ data:
           - alert: FugueAppHighErrorRate
             expr: |
               (
-                sum by (tenant_id, project_id, app_id) (rate(fugue_app_response_status_total{status_class=~"5xx"}[5m]))
+                sum(rate(fugue_app_response_status_total{status_class=~"5xx"}[5m]))
                 /
-                sum by (tenant_id, project_id, app_id) (rate(fugue_app_requests_total[5m]))
+                sum(rate(fugue_app_requests_total[5m]))
               ) > 0.05
             for: 5m
             labels:
@@ -175,7 +175,7 @@ data:
             expr: |
               histogram_quantile(
                 0.95,
-                sum by (tenant_id, project_id, app_id, le) (rate(fugue_app_duration_seconds_bucket[5m]))
+                sum by (le) (rate(fugue_app_duration_seconds_bucket[5m]))
               ) > 5
             for: 10m
             labels:
@@ -244,50 +244,74 @@ data:
       {{ end }}
       - name: fugue-edge-request-body
         rules:
+          - alert: FugueEdgeRouteDecisionMaterialMissing
+            expr: fugue_telemetry_edge_route_decision_missing_links > 0
+            for: 0m
+            labels:
+              severity: page
+            annotations:
+              summary: "Edge platform failure is missing route-decision material"
+              description: "At least one decision-required request fact remained unlinked to persisted control-plane route-decision evidence after the bounded grace period."
+          - alert: FugueEdgeRouteDecisionEvidenceDropped
+            expr: increase(fugue_telemetry_edge_route_decision_drops_total[5m]) > 0 or increase(fugue_telemetry_edge_route_decision_persistence_errors_total[5m]) > 0
+            for: 0m
+            labels:
+              severity: page
+            annotations:
+              summary: "Edge route-decision evidence was dropped"
+              description: "The bounded telemetry queue or memory limiter rejected priority route-decision evidence. Request serving remained available, but incident attribution may be incomplete."
+          - alert: FugueEdgeRouteDecisionLinkCheckFailed
+            expr: increase(fugue_telemetry_edge_route_decision_link_checks_total{outcome="error"}[5m]) > 0
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Edge route-decision link check failed"
+              description: "The telemetry agent could not verify persisted invariant request facts against route-decision evidence."
           - alert: FugueEdgeSlowRequestBodyRead
             expr: |
               (
-                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_read_seconds_sum[5m]))
+                rate(fugue_edge_request_body_read_seconds_sum[5m])
                 /
-                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_read_seconds_count[5m]))
+                rate(fugue_edge_request_body_read_seconds_count[5m])
               ) > 30
             for: 5m
             labels:
               severity: warning
             annotations:
               summary: "Fugue edge request body reads are slow"
-              description: "Buffered request body reads averaged more than 30 seconds over 5 minutes for an edge/app/route/client segment."
+              description: "Buffered request body reads averaged more than 30 seconds over 5 minutes. High-cardinality drilldown is available in ClickHouse."
           - alert: FugueEdgeLowRequestBodyThroughput
             expr: |
               (
-                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_throughput_bps_sum[5m]))
+                rate(fugue_edge_request_body_throughput_bps_sum[5m])
                 /
-                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_throughput_bps_count[5m]))
+                rate(fugue_edge_request_body_throughput_bps_count[5m])
               ) < 65536
               and
-              sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_throughput_bps_count[5m])) > 0
+              rate(fugue_edge_request_body_throughput_bps_count[5m]) > 0
             for: 5m
             labels:
               severity: warning
             annotations:
               summary: "Fugue edge request body throughput is low"
-              description: "Buffered request body throughput averaged below 64 KiB/s over 5 minutes for an edge/app/route/client segment."
+              description: "Buffered request body throughput averaged below 64 KiB/s over 5 minutes. High-cardinality drilldown is available in ClickHouse."
           - alert: FugueEdgeFrontHighClientTCPRetransmits
             expr: |
               (
-                sum by (edge_id, edge_group_id, node_host, protocol) (rate(fugue_edge_front_client_tcp_total_retrans_sum[5m]))
+                sum by (component, group) (rate(fugue_edge_front_client_tcp_total_retrans_sum[5m]))
                 /
-                sum by (edge_id, edge_group_id, node_host, protocol) (rate(fugue_edge_front_client_tcp_total_retrans_count[5m]))
+                sum by (component, group) (rate(fugue_edge_front_client_tcp_total_retrans_count[5m]))
               ) > 5
             for: 5m
             labels:
               severity: warning
             annotations:
               summary: "Fugue edge-front client TCP retransmits are high"
-              description: "Completed public TCP connections averaged more than 5 retransmits over 5 minutes for an edge node/protocol segment."
+              description: "Completed public TCP connections averaged more than 5 retransmits over 5 minutes for an edge group."
           - alert: FugueEdgeNodeTCPRetransmitRateHigh
             expr: |
-              rate(fugue_edge_node_tcp_counter{protocol="Tcp",name="RetransSegs"}[5m]) > 100
+              rate(fugue_edge_node_tcp_retrans_segments_total[5m]) > 100
             for: 5m
             labels:
               severity: warning

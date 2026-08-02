@@ -1,58 +1,86 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
+TMP="$(mktemp -d)"
+trap 'rm -rf "${TMP}"' EXIT
 mkdir -p "${TMP}/bin"
+
 cat >"${TMP}/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-output=""; config=""
+output=""
+url=""
 while (($#)); do
   case "$1" in
-    --output) output="$2"; shift 2;;
-    --config) config="$2"; shift 2;;
-    --data-binary|--request|--write-out|--header) shift 2;;
-    *) shift;;
+    --output) output="$2"; shift 2 ;;
+    --config|--data-urlencode|--write-out) shift 2 ;;
+    --get) shift ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
   esac
 done
-if [[ "${config}" == *activation-curl.conf ]]; then
-  cat >"${output}" <<JSON
+case "${url}" in
+  */v1/admin/edge/activation)
+    cat >"${output}" <<JSON
 {"activation":{"schema":"edge-activation/v1","phase":"active-epoch-enforced","route_authority":"active-epoch","generation":5,"release_id":"release-b","plan_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","soak_started_at":"2026-08-01T00:00:00Z","expected_instances":[{"edge_id":"edge-de","edge_group_id":"edge-group-de","slot":"b","instance_uid":"pod-b","release_epoch":"release-b"}]},"instances":[{"edge_id":"edge-de","edge_group_id":"edge-group-de","slot":"b","instance_uid":"pod-b","release_epoch":"release-b","effective_healthy":${MOCK_HEALTHY:-true},"failure_class":"","node":{"draining":false,"tls_status":"ready"}}]}
 JSON
-else
-  printf '{"status":"completed","output":[{"type":"message"}]}\n' >"${output}"
-fi
+    ;;
+  */v1/admin/edge/release-evidence)
+    cat >"${output}" <<JSON
+{"schema":"platform-release-evidence/v1","status":"${MOCK_PLATFORM_STATUS:-passed}","reason":"${MOCK_PLATFORM_REASON:-active cohort and platform requests passed}","release_epoch":"release-b","evidence_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metrics":{"request_count":12,"hard_failure_count":${MOCK_HARD_FAILURES:-0},"origin_connected_application_5xx_count":${MOCK_APPLICATION_5XX:-4},"platform_error_classes":["origin_connected_application_5xx"]}}
+JSON
+    ;;
+  *) echo "unexpected URL ${url}" >&2; exit 97 ;;
+esac
 printf 200
 MOCK
 chmod +x "${TMP}/bin/curl"
 export PATH="${TMP}/bin:${PATH}"
 export FUGUE_EDGE_ACTIVATION_API_URL=https://api.example.test
 export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz
-export FUGUE_RESPONSES_SYNTHETIC_URL=https://api.example.test/v1/responses
-export FUGUE_RESPONSES_SYNTHETIC_TOKEN=synthetic_abcdefghijklmnopqrstuvwxyz
 export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/due"
 export FUGUE_EDGE_WATCHDOG_NOW=2026-08-02T00:00:01Z
-export MOCK_HEALTHY=true
+export MOCK_HEALTHY=true MOCK_PLATFORM_STATUS=passed MOCK_HARD_FAILURES=0 MOCK_APPLICATION_5XX=4
 bash "${ROOT}/scripts/observe_edge_activation_watchdog.sh" | grep -Fx '[edge_activation_watchdog] ok'
 python3 - "${TMP}/due/evidence.json" <<'PY'
 import json,sys
 value=json.load(open(sys.argv[1]))
-assert value["schema"]=="edge-activation-watchdog/v1" and value["status"]=="passed" and value["responses_http"]==200
+assert value["schema"]=="edge-activation-watchdog/v1"
+assert value["status"]=="passed"
+assert value["platform_http"]==200
+assert value["platform_evidence_digest"].startswith("sha256:")
+assert "responses_http" not in value
 PY
 
+# The API has already classified connected application 5xx as non-platform;
+# the watchdog consumes the resulting passed evidence without business replay.
 export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz
-export FUGUE_RESPONSES_SYNTHETIC_TOKEN=synthetic_abcdefghijklmnopqrstuvwxyz
 export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/not-due"
 export FUGUE_EDGE_WATCHDOG_NOW=2026-08-01T12:00:00Z
 bash "${ROOT}/scripts/observe_edge_activation_watchdog.sh"
 grep -q '"status":"not-due"' "${TMP}/not-due/evidence.json"
 
 export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz
-export FUGUE_RESPONSES_SYNTHETIC_TOKEN=synthetic_abcdefghijklmnopqrstuvwxyz
-export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/unhealthy"
+export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/unknown"
 export FUGUE_EDGE_WATCHDOG_NOW=2026-08-02T00:00:01Z
-export MOCK_HEALTHY=false
+export MOCK_PLATFORM_STATUS=unknown
+if bash "${ROOT}/scripts/observe_edge_activation_watchdog.sh" >/dev/null 2>&1; then
+  echo "unknown platform evidence must fail closed" >&2; exit 1
+fi
+
+export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz
+export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/unhealthy"
+export MOCK_PLATFORM_STATUS=passed MOCK_HEALTHY=false
 if bash "${ROOT}/scripts/observe_edge_activation_watchdog.sh" >/dev/null 2>&1; then
   echo "unhealthy 24-hour instance must fail closed" >&2; exit 1
+fi
+
+legacy_response_path='/v1/'"responses"
+legacy_synthetic='RESPONSES_'"SYNTHETIC"
+if rg -n "${legacy_response_path}|${legacy_synthetic}|PLATFORM_EVIDENCE_(URL|TOKEN|MODEL)" \
+  "${ROOT}/scripts/observe_edge_activation_watchdog.sh" \
+  "${ROOT}/.github/workflows/observe-edge-activation-watchdog.yml"; then
+  echo "watchdog retained business-specific evidence coupling" >&2; exit 1
 fi
 printf '[test_edge_activation_watchdog] ok\n'

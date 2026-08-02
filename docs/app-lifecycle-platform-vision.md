@@ -62,8 +62,8 @@ Fugue 应该成为“应用拓扑平台”。
 一个项目不再只是一个 app，而是一张完整的系统图：
 
 ```text
-Project: uni-api-web
-  domain: 0-0.pro
+Project: sample-api-web
+  domain: service.example.test
   /        -> web
   /v1/*    -> api
   cron     -> billing worker
@@ -83,7 +83,7 @@ Project: uni-api-web
 Fugue 应该能回答并处理：
 
 ```text
-为什么 0-0.pro 慢了？
+为什么 service.example.test 慢了？
 为什么 /v1/models 500？
 这次发布有没有让注册转化下降？
 数据库迁移安全吗？

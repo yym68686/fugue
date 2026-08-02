@@ -62,8 +62,8 @@ func (c *CLI) newProjectRoutesApplyCommand() *cobra.Command {
 		Use:   "apply <project>",
 		Short: "Replace the project route table from a fugue.yaml-style file",
 		Example: strings.TrimSpace(`
-fugue project routes apply uni-api-web --file fugue.yaml
-fugue project routes apply uni-api-web --file routes.yaml
+fugue project routes apply sample-api-web --file fugue.yaml
+fugue project routes apply sample-api-web --file routes.yaml
 `),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -36,7 +36,7 @@ capture_edge_remediation_candidate() {
   edge_activation_get "${inventory}" || return 1
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get daemonsets,pods -l "fugue.io/rollout-mode=node-local-blue-green-worker" -o json >"${workloads}" || return 1
   chmod 600 "${inventory}" "${workloads}"
-  INVENTORY="${inventory}" WORKLOADS="${workloads}" OUT="${output}" RELEASE_FENCE="${FUGUE_EDGE_ACTIVATION_RELEASE_FENCE}" SYNTHETIC_DIGEST="${FUGUE_EDGE_REMEDIATION_SYNTHETIC_DIGEST}" python3 - <<'PY'
+  INVENTORY="${inventory}" WORKLOADS="${workloads}" OUT="${output}" RELEASE_FENCE="${FUGUE_EDGE_ACTIVATION_RELEASE_FENCE}" PLATFORM_EVIDENCE_DIGEST="${FUGUE_EDGE_REMEDIATION_PLATFORM_EVIDENCE_DIGEST}" python3 - <<'PY'
 import datetime,hashlib,json,os
 def digest(value): return "sha256:"+hashlib.sha256(json.dumps(value,separators=(",",":"),sort_keys=True).encode()).hexdigest()
 with open(os.environ["INVENTORY"],encoding="utf-8") as h: inventory=json.load(h)
@@ -128,7 +128,7 @@ active_material.sort(key=lambda v:(v["edge_group_id"],v["edge_id"],v["instance_u
 kube_material={"active":[{"uid":(daemonsets[(g,e["slot"],e["release_epoch"])].get("metadata") or {}).get("uid"),"rv":(daemonsets[(g,e["slot"],e["release_epoch"])].get("metadata") or {}).get("resourceVersion"),"status":daemonsets[(g,e["slot"],e["release_epoch"])].get("status") or {}} for g,e in sorted(active_by_group.items())],"target":{"uid":meta.get("uid"),"rv":meta.get("resourceVersion"),"generation":meta.get("generation"),"status":status,"template":template}}
 sequence=int(remediation.get("sequence") or 0)
 nonce=digest({"fence":os.environ["RELEASE_FENCE"],"activation_generation":activation.get("generation"),"action_sequence":sequence,"target":target})
-result={"actionable":True,"activation_generation":activation.get("generation"),"action_sequence":sequence,"nonce":nonce,"target":target,"active_evidence_digest":digest({"epochs":epochs,"instances":active_material}),"kubernetes_digest":digest(kube_material),"synthetic_digest":os.environ["SYNTHETIC_DIGEST"],"candidate_count":len(ordered)}
+result={"actionable":True,"activation_generation":activation.get("generation"),"action_sequence":sequence,"nonce":nonce,"target":target,"active_evidence_digest":digest({"epochs":epochs,"instances":active_material}),"kubernetes_digest":digest(kube_material),"platform_evidence_digest":os.environ["PLATFORM_EVIDENCE_DIGEST"],"candidate_count":len(ordered)}
 with open(os.environ["OUT"],"w",encoding="utf-8") as h: json.dump(result,h,separators=(",",":"),sort_keys=True); h.write("\n")
 PY
   chmod 600 "${output}"
@@ -150,7 +150,7 @@ if phase=="prepared": expected_sequence=int(candidate["action_sequence"])
 else:
     expected_sequence=int(current.get("sequence") or 0)
     if current.get("nonce")!=candidate["nonce"]: raise SystemExit("action nonce changed")
-request={"expected_activation_generation":activation["generation"],"expected_action_sequence":expected_sequence,"to_phase":phase,"active_evidence_digest":candidate["active_evidence_digest"],"synthetic_digest":candidate["synthetic_digest"],"kubernetes_digest":candidate["kubernetes_digest"],"target":candidate["target"],"authorization":{"release_fence":os.environ["RELEASE_FENCE"],"action_nonce":candidate["nonce"],"valid_until":(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=5)).replace(microsecond=0).isoformat().replace("+00:00","Z"),"runner_observed_secret_uid":os.environ["FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID"],"runner_observed_secret_version":os.environ["FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION"]}}
+request={"expected_activation_generation":activation["generation"],"expected_action_sequence":expected_sequence,"to_phase":phase,"active_evidence_digest":candidate["active_evidence_digest"],"platform_evidence_digest":candidate["platform_evidence_digest"],"kubernetes_digest":candidate["kubernetes_digest"],"target":candidate["target"],"authorization":{"release_fence":os.environ["RELEASE_FENCE"],"action_nonce":candidate["nonce"],"valid_until":(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=5)).replace(microsecond=0).isoformat().replace("+00:00","Z"),"runner_observed_secret_uid":os.environ["FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID"],"runner_observed_secret_version":os.environ["FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION"]}}
 with open(os.environ["REQUEST"],"w",encoding="utf-8") as h: json.dump(request,h,separators=(",",":"),sort_keys=True); h.write("\n")
 PY
   chmod 600 "${request}"
@@ -234,35 +234,39 @@ PY
   return 1
 }
 
-fresh_route_synthetic() {
-  run_smoke_urls && run_responses_synthetic
+fresh_platform_release_evidence() {
+  local inventory="${FUGUE_EDGE_ACTIVATION_DIR}/platform-evidence-activation.json"
+  edge_activation_get "${inventory}" || return 1
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="$(edge_activation_state_field "${inventory}" release_id)" || return 1
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+  run_smoke_urls && run_platform_release_evidence
 }
 
-compute_remediation_synthetic_digest() {
-  python3 - "${FUGUE_EDGE_ACTIVATION_DIR}/responses-output.json" "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS}" <<'PY'
+compute_remediation_platform_evidence_digest() {
+  python3 - "${FUGUE_EDGE_ACTIVATION_DIR}/platform-release-evidence.json" <<'PY'
 import hashlib,sys
-h=hashlib.sha256(); h.update(sys.argv[2].encode()); h.update(b"\0"); h.update(open(sys.argv[1],"rb").read()); print("sha256:"+h.hexdigest())
+h=hashlib.sha256(); h.update(open(sys.argv[1],"rb").read()); print("sha256:"+h.hexdigest())
 PY
 }
 
 observe_once() {
-  fresh_route_synthetic || return 1
-  FUGUE_EDGE_REMEDIATION_SYNTHETIC_DIGEST="$(compute_remediation_synthetic_digest)"; export FUGUE_EDGE_REMEDIATION_SYNTHETIC_DIGEST
+  fresh_platform_release_evidence || return 1
+  FUGUE_EDGE_REMEDIATION_PLATFORM_EVIDENCE_DIGEST="$(compute_remediation_platform_evidence_digest)"; export FUGUE_EDGE_REMEDIATION_PLATFORM_EVIDENCE_DIGEST
   local candidate="${FUGUE_EDGE_ACTIVATION_DIR}/candidate.json"
   capture_edge_remediation_candidate "${candidate}" || return 1
   python3 -c 'import json,sys;raise SystemExit(0 if json.load(open(sys.argv[1])).get("actionable") else 1)' "${candidate}"
 }
 
 execute_once() {
-  fresh_route_synthetic || return 1
-  FUGUE_EDGE_REMEDIATION_SYNTHETIC_DIGEST="$(compute_remediation_synthetic_digest)"; export FUGUE_EDGE_REMEDIATION_SYNTHETIC_DIGEST
+  fresh_platform_release_evidence || return 1
+  FUGUE_EDGE_REMEDIATION_PLATFORM_EVIDENCE_DIGEST="$(compute_remediation_platform_evidence_digest)"; export FUGUE_EDGE_REMEDIATION_PLATFORM_EVIDENCE_DIGEST
   local candidate="${FUGUE_EDGE_ACTIVATION_DIR}/candidate.json"
   capture_edge_remediation_candidate "${candidate}" || return 1
   python3 -c 'import json,sys;raise SystemExit(0 if json.load(open(sys.argv[1])).get("actionable") else 1)' "${candidate}" || return 0
   edge_remediation_action_advance prepared "${candidate}" || return 1
   fence_and_scale_inactive_target_once "${candidate}" || return 1
   edge_remediation_action_advance committed "${candidate}" || return 1
-  if ! fresh_route_synthetic; then
+  if ! fresh_platform_release_evidence; then
     edge_remediation_action_advance rollback_pending "${candidate}" || true
     return 1
   fi

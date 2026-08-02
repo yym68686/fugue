@@ -708,7 +708,7 @@ fugue admin dns answer-check <hostname> --explain
 - `dmit` 运行 dynamic edge-front / worker-a / worker-b。
 - `dmit` edge group 为 `edge-group-country-jp`，除非用户显式改为其他 group。
 - `dmit` 先进入 canary，不直接全量。
-- `api.0-0.pro` 如存在 service-level exclusion，必须继续生效。
+- `api.service.example.test` 如存在 service-level exclusion，必须继续生效。
 
 ## Todo list
 

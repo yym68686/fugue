@@ -217,16 +217,32 @@ func TestKubernetesLogCollectorPriorityPassOnlyIngestsStructuredDataPlaneFacts(t
 		`2026-06-06T01:02:01Z {"event_type":"request_fact","trace_id":"trace_webhook","request_id":"req_webhook","path_template":"/v1","summary_json":"{\"path\":\"/v1/webhook/provider\"}"}`,
 		"2026-06-06T01:02:02Z another noisy edge request text",
 		`2026-06-06T01:02:03Z {"event_type":"request_fact","trace_id":"trace_status","request_id":"req_status","path_template":"/v1","summary_json":"{\"path\":\"/v1/billing/topup/status?...\"}"}`,
+		`2026-06-06T01:02:04Z 2026/06/06 01:02:04 {"event_type":"edge_route_decision","decision_id":"decision_123","bundle_version":"bundle_123","route_generation":"route_123"}`,
 	}, "\n") + "\n"
 
 	result := collector.ingestLogStreamMode(context.Background(), strings.NewReader(lines), pod, "edge", 10, true)
-	if result.scanned != 4 || result.ingested != 2 {
-		t.Fatalf("expected four scanned lines and two priority facts, got %+v", result)
+	if result.scanned != 5 || result.ingested != 3 {
+		t.Fatalf("expected five scanned lines and three priority facts, got %+v", result)
 	}
 	first := <-pipeline.queue
 	second := <-pipeline.queue
+	third := <-pipeline.queue
 	if first.Attributes["trace_id"] != "trace_webhook" || second.Attributes["trace_id"] != "trace_status" {
 		t.Fatalf("unexpected priority facts: first=%+v second=%+v", first, second)
+	}
+	if third.Attributes["event_type"] != "edge_route_decision" || third.Attributes["decision_id"] != "decision_123" {
+		t.Fatalf("route decision material was not prioritized: %+v", third)
+	}
+}
+
+func TestEventFromLogLineParsesExactGoLoggerPrefixForDecisionMaterial(t *testing.T) {
+	t.Parallel()
+	event, redacted := EventFromLogLine("api", `2026/08/01 00:33:31.416123 {"event_type":"edge_route_decision","decision_id":"decision_123","bundle_version":"bundle_123","route_generation":"route_123"}`)
+	if redacted != 0 || event.Attributes["event_type"] != "edge_route_decision" || event.Attributes["decision_id"] != "decision_123" {
+		t.Fatalf("Go logger prefix hid structured decision material: redacted=%d event=%+v", redacted, event)
+	}
+	if _, ok := structuredLogJSONPayload(`not-a-go-prefix {"event_type":"edge_route_decision"}`); ok {
+		t.Fatal("arbitrary log prefixes must not be treated as trusted structured events")
 	}
 }
 
@@ -244,6 +260,13 @@ func TestKubernetesLogPriorityTargetUsesExplicitDataPlaneMetadata(t *testing.T) 
 	}
 	if kubernetesLogPriorityTarget(kubernetesLogTarget{pod: priority, container: "caddy"}) {
 		t.Fatal("non-producing data-plane sidecars must not consume the priority line budget")
+	}
+	api := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{kubernetesLabelComponent: "api"}}}
+	if !kubernetesLogPriorityTarget(kubernetesLogTarget{pod: api, container: "api"}) {
+		t.Fatal("expected control-plane decision producer to use the priority collector")
+	}
+	if kubernetesLogPriorityTarget(kubernetesLogTarget{pod: api, container: "sidecar"}) {
+		t.Fatal("API sidecars must not consume the decision-material priority budget")
 	}
 }
 

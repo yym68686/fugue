@@ -839,6 +839,9 @@ func shouldReplayAppProxyRequestBody(req *http.Request) bool {
 	if req == nil || req.Body == nil || req.Body == http.NoBody || req.GetBody != nil {
 		return false
 	}
+	if !appProxyMethodAllowsReplay(req.Method) {
+		return false
+	}
 	if req.ContentLength <= 0 || req.ContentLength > defaultAppProxyReplayBodyLimit {
 		return false
 	}
@@ -846,10 +849,22 @@ func shouldReplayAppProxyRequestBody(req *http.Request) bool {
 	if req.URL != nil {
 		path = req.URL.Path
 	}
-	if isAppProxyUpgradeRequest(req) || isAppProxyStreamingRequest(req) || isAppProxyNoReplayPath(path) {
+	if isAppProxyUpgradeRequest(req) || isAppProxyStreamingRequest(req) || isAppProxyStreamPath(path) {
 		return false
 	}
 	return true
+}
+
+// appProxyMethodAllowsReplay is intentionally method based rather than tied
+// to an application path. Requests that can create billable or externally
+// visible side effects are never replayed after an ambiguous transport error.
+func appProxyMethodAllowsReplay(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func isAppProxyStreamingRequest(req *http.Request) bool {
@@ -870,16 +885,10 @@ func isAppProxyStreamingRequest(req *http.Request) bool {
 	return false
 }
 
-func isAppProxyNoReplayPath(path string) bool {
+func isAppProxyStreamPath(path string) bool {
 	path = strings.TrimSpace(strings.ToLower(path))
 	if path == "" {
 		return false
-	}
-	if path == "/v1/responses" || strings.HasPrefix(path, "/v1/responses/") {
-		return true
-	}
-	if path == "/v1/images" || strings.HasPrefix(path, "/v1/images/") {
-		return true
 	}
 	if path == "/stream" || strings.HasSuffix(path, "/stream") || strings.Contains(path, "/stream/") {
 		return true

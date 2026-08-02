@@ -30,10 +30,10 @@ const (
 )
 
 type workflowSpec struct {
-	Name      string                    `json:"name,omitempty" yaml:"name,omitempty"`
-	BaseURLs  map[string]string         `json:"base_urls,omitempty" yaml:"base_urls,omitempty"`
-	Variables map[string]string         `json:"variables,omitempty" yaml:"variables,omitempty"`
-	Steps     []workflowStepSpec        `json:"steps" yaml:"steps"`
+	Name      string             `json:"name,omitempty" yaml:"name,omitempty"`
+	BaseURLs  map[string]string  `json:"base_urls,omitempty" yaml:"base_urls,omitempty"`
+	Variables map[string]string  `json:"variables,omitempty" yaml:"variables,omitempty"`
+	Steps     []workflowStepSpec `json:"steps" yaml:"steps"`
 }
 
 type workflowStepSpec struct {

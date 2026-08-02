@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"fugue/internal/model"
 )
 
 type EventKind string
@@ -37,33 +39,40 @@ type Event struct {
 }
 
 type PipelineSnapshot struct {
-	Enabled                 bool   `json:"enabled"`
-	Running                 bool   `json:"running"`
-	QueueDepth              int64  `json:"queue_depth"`
-	QueuedBytes             int64  `json:"queued_bytes"`
-	Received                uint64 `json:"received"`
-	Exported                uint64 `json:"exported"`
-	Dropped                 uint64 `json:"dropped"`
-	Redacted                uint64 `json:"redacted"`
-	Batches                 uint64 `json:"batches"`
-	ExportErrors            uint64 `json:"export_errors"`
-	RuntimeLogLines         uint64 `json:"runtime_log_lines"`
-	RuntimeLogErrors        uint64 `json:"runtime_log_errors"`
-	KubernetesLogLines      uint64 `json:"kubernetes_log_lines"`
-	KubernetesLogErrors     uint64 `json:"kubernetes_log_errors"`
-	KubernetesLogPods       int64  `json:"kubernetes_log_pods"`
+	Enabled                       bool   `json:"enabled"`
+	Running                       bool   `json:"running"`
+	QueueDepth                    int64  `json:"queue_depth"`
+	QueuedBytes                   int64  `json:"queued_bytes"`
+	Received                      uint64 `json:"received"`
+	Exported                      uint64 `json:"exported"`
+	Dropped                       uint64 `json:"dropped"`
+	Redacted                      uint64 `json:"redacted"`
+	Batches                       uint64 `json:"batches"`
+	ExportErrors                  uint64 `json:"export_errors"`
+	RuntimeLogLines               uint64 `json:"runtime_log_lines"`
+	RuntimeLogErrors              uint64 `json:"runtime_log_errors"`
+	KubernetesLogLines            uint64 `json:"kubernetes_log_lines"`
+	KubernetesLogErrors           uint64 `json:"kubernetes_log_errors"`
+	KubernetesLogPods             int64  `json:"kubernetes_log_pods"`
 	KubernetesPriorityLines       uint64 `json:"kubernetes_priority_log_lines"`
 	KubernetesPriorityTruncations uint64 `json:"kubernetes_priority_log_truncations"`
 	KubernetesPriorityTargets     int64  `json:"kubernetes_priority_log_targets"`
-	PrometheusScrapes       uint64 `json:"prometheus_scrapes"`
-	PrometheusScrapeErrors  uint64 `json:"prometheus_scrape_errors"`
-	OTLPRequests            uint64 `json:"otlp_requests"`
-	OTLPBytes               uint64 `json:"otlp_bytes"`
-	QuotaDropped            uint64 `json:"quota_dropped"`
-	LastError               string `json:"last_error,omitempty"`
-	RuntimeLogPipelineCount int    `json:"runtime_log_pipeline_count"`
-	KubernetesLogPipeline   bool   `json:"kubernetes_log_pipeline"`
-	PrometheusScrapeCount   int    `json:"prometheus_scrape_count"`
+	PrometheusScrapes             uint64 `json:"prometheus_scrapes"`
+	PrometheusScrapeErrors        uint64 `json:"prometheus_scrape_errors"`
+	OTLPRequests                  uint64 `json:"otlp_requests"`
+	OTLPBytes                     uint64 `json:"otlp_bytes"`
+	QuotaDropped                  uint64 `json:"quota_dropped"`
+	EdgeRouteDecisionEvents       uint64 `json:"edge_route_decision_events"`
+	EdgeRouteDecisionDrops        uint64 `json:"edge_route_decision_drops"`
+	EdgeRoutePersistenceErrors    uint64 `json:"edge_route_decision_persistence_errors"`
+	EdgeRouteMissingLinks         int64  `json:"edge_route_decision_missing_links"`
+	EdgeRouteLinkChecks           uint64 `json:"edge_route_decision_link_checks"`
+	EdgeRouteLinkAlerts           uint64 `json:"edge_route_decision_link_alerts"`
+	EdgeRouteLinkErrors           uint64 `json:"edge_route_decision_link_errors"`
+	LastError                     string `json:"last_error,omitempty"`
+	RuntimeLogPipelineCount       int    `json:"runtime_log_pipeline_count"`
+	KubernetesLogPipeline         bool   `json:"kubernetes_log_pipeline"`
+	PrometheusScrapeCount         int    `json:"prometheus_scrape_count"`
 }
 
 type Exporter interface {
@@ -118,28 +127,35 @@ type Pipeline struct {
 	meterMu            sync.Mutex
 	tenantMeters       map[string]telemetryTenantMeter
 
-	queueDepth              atomic.Int64
-	queuedBytes             atomic.Int64
-	received                atomic.Uint64
-	exported                atomic.Uint64
-	dropped                 atomic.Uint64
-	redacted                atomic.Uint64
-	quotaDropped            atomic.Uint64
-	batches                 atomic.Uint64
-	exportErrors            atomic.Uint64
-	runtimeLogLines         atomic.Uint64
-	runtimeLogErrors        atomic.Uint64
-	kubernetesLogLines      atomic.Uint64
-	kubernetesLogErrors     atomic.Uint64
-	kubernetesLogPods       atomic.Int64
+	queueDepth                    atomic.Int64
+	queuedBytes                   atomic.Int64
+	received                      atomic.Uint64
+	exported                      atomic.Uint64
+	dropped                       atomic.Uint64
+	redacted                      atomic.Uint64
+	quotaDropped                  atomic.Uint64
+	batches                       atomic.Uint64
+	exportErrors                  atomic.Uint64
+	runtimeLogLines               atomic.Uint64
+	runtimeLogErrors              atomic.Uint64
+	kubernetesLogLines            atomic.Uint64
+	kubernetesLogErrors           atomic.Uint64
+	kubernetesLogPods             atomic.Int64
 	kubernetesPriorityLines       atomic.Uint64
 	kubernetesPriorityTruncations atomic.Uint64
 	kubernetesPriorityTargets     atomic.Int64
-	prometheusScrapes       atomic.Uint64
-	prometheusScrapeErrors  atomic.Uint64
-	otlpRequests            atomic.Uint64
-	otlpBytes               atomic.Uint64
-	lastError               atomic.Value
+	prometheusScrapes             atomic.Uint64
+	prometheusScrapeErrors        atomic.Uint64
+	otlpRequests                  atomic.Uint64
+	otlpBytes                     atomic.Uint64
+	lastError                     atomic.Value
+	edgeRouteDecisionEvents       atomic.Uint64
+	edgeRouteDecisionDrops        atomic.Uint64
+	edgeRoutePersistenceErrors    atomic.Uint64
+	edgeRouteMissingLinks         atomic.Int64
+	edgeRouteLinkChecks           atomic.Uint64
+	edgeRouteLinkAlerts           atomic.Uint64
+	edgeRouteLinkErrors           atomic.Uint64
 }
 
 func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
@@ -190,6 +206,10 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.wg.Add(1)
 		go p.runKubernetesLogCollection()
 	}
+	if strings.TrimSpace(p.cfg.ClickHouseDSN) != "" {
+		p.wg.Add(1)
+		go p.runEdgeRouteDecisionLinkChecks()
+	}
 	for _, scrapeURL := range p.cfg.PrometheusScrapeURLs {
 		scrapeURL := scrapeURL
 		p.wg.Add(1)
@@ -228,49 +248,64 @@ func (p *Pipeline) Snapshot() PipelineSnapshot {
 	running := p.running
 	p.mu.Unlock()
 	return PipelineSnapshot{
-		Enabled:                 p.cfg.Enabled,
-		Running:                 running,
-		QueueDepth:              p.queueDepth.Load(),
-		QueuedBytes:             p.queuedBytes.Load(),
-		Received:                p.received.Load(),
-		Exported:                p.exported.Load(),
-		Dropped:                 p.dropped.Load(),
-		Redacted:                p.redacted.Load(),
-		Batches:                 p.batches.Load(),
-		ExportErrors:            p.exportErrors.Load(),
-		RuntimeLogLines:         p.runtimeLogLines.Load(),
-		RuntimeLogErrors:        p.runtimeLogErrors.Load(),
-		KubernetesLogLines:      p.kubernetesLogLines.Load(),
-		KubernetesLogErrors:     p.kubernetesLogErrors.Load(),
-		KubernetesLogPods:       p.kubernetesLogPods.Load(),
+		Enabled:                       p.cfg.Enabled,
+		Running:                       running,
+		QueueDepth:                    p.queueDepth.Load(),
+		QueuedBytes:                   p.queuedBytes.Load(),
+		Received:                      p.received.Load(),
+		Exported:                      p.exported.Load(),
+		Dropped:                       p.dropped.Load(),
+		Redacted:                      p.redacted.Load(),
+		Batches:                       p.batches.Load(),
+		ExportErrors:                  p.exportErrors.Load(),
+		RuntimeLogLines:               p.runtimeLogLines.Load(),
+		RuntimeLogErrors:              p.runtimeLogErrors.Load(),
+		KubernetesLogLines:            p.kubernetesLogLines.Load(),
+		KubernetesLogErrors:           p.kubernetesLogErrors.Load(),
+		KubernetesLogPods:             p.kubernetesLogPods.Load(),
 		KubernetesPriorityLines:       p.kubernetesPriorityLines.Load(),
 		KubernetesPriorityTruncations: p.kubernetesPriorityTruncations.Load(),
 		KubernetesPriorityTargets:     p.kubernetesPriorityTargets.Load(),
-		PrometheusScrapes:       p.prometheusScrapes.Load(),
-		PrometheusScrapeErrors:  p.prometheusScrapeErrors.Load(),
-		OTLPRequests:            p.otlpRequests.Load(),
-		OTLPBytes:               p.otlpBytes.Load(),
-		QuotaDropped:            p.quotaDropped.Load(),
-		LastError:               p.lastErrorString(),
-		RuntimeLogPipelineCount: len(p.cfg.RuntimeLogPaths),
-		KubernetesLogPipeline:   p.cfg.KubernetesLogsEnabled,
-		PrometheusScrapeCount:   len(p.cfg.PrometheusScrapeURLs),
+		PrometheusScrapes:             p.prometheusScrapes.Load(),
+		PrometheusScrapeErrors:        p.prometheusScrapeErrors.Load(),
+		OTLPRequests:                  p.otlpRequests.Load(),
+		OTLPBytes:                     p.otlpBytes.Load(),
+		QuotaDropped:                  p.quotaDropped.Load(),
+		EdgeRouteDecisionEvents:       p.edgeRouteDecisionEvents.Load(),
+		EdgeRouteDecisionDrops:        p.edgeRouteDecisionDrops.Load(),
+		EdgeRoutePersistenceErrors:    p.edgeRoutePersistenceErrors.Load(),
+		EdgeRouteMissingLinks:         p.edgeRouteMissingLinks.Load(),
+		EdgeRouteLinkChecks:           p.edgeRouteLinkChecks.Load(),
+		EdgeRouteLinkAlerts:           p.edgeRouteLinkAlerts.Load(),
+		EdgeRouteLinkErrors:           p.edgeRouteLinkErrors.Load(),
+		LastError:                     p.lastErrorString(),
+		RuntimeLogPipelineCount:       len(p.cfg.RuntimeLogPaths),
+		KubernetesLogPipeline:         p.cfg.KubernetesLogsEnabled,
+		PrometheusScrapeCount:         len(p.cfg.PrometheusScrapeURLs),
 	}
 }
 
 func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
+	event = classifyPlatformRequestFact(event)
+	criticalDecisionEvidence := edgeRouteDecisionEvidenceEvent(event)
+	if criticalDecisionEvidence {
+		p.edgeRouteDecisionEvents.Add(1)
+	}
 	if !p.cfg.Enabled {
 		p.dropped.Add(1)
+		if criticalDecisionEvidence {
+			p.edgeRouteDecisionDrops.Add(1)
+		}
 		return false
 	}
-	if p.cfg.SampleRate < 1 && rand.Float64() > p.cfg.SampleRate {
+	if !criticalDecisionEvidence && p.cfg.SampleRate < 1 && rand.Float64() > p.cfg.SampleRate {
 		p.dropped.Add(1)
 		return false
 	}
 
 	event, redacted := p.prepareEvent(event)
 	p.redacted.Add(uint64(redacted))
-	if !p.allowWithinTelemetryQuota(event) {
+	if !criticalDecisionEvidence && !p.allowWithinTelemetryQuota(event) {
 		p.dropped.Add(1)
 		p.quotaDropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
@@ -285,6 +320,9 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 			p.dropped.Add(1)
 			p.recordTenantMeter(event, "dropped")
 			p.recordError(errors.New("telemetry memory limiter dropped event"))
+			if criticalDecisionEvidence {
+				p.edgeRouteDecisionDrops.Add(1)
+			}
 			return false
 		}
 	}
@@ -302,6 +340,9 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
 		p.recordError(ctx.Err())
+		if criticalDecisionEvidence {
+			p.edgeRouteDecisionDrops.Add(1)
+		}
 		return false
 	default:
 		if p.cfg.MemoryLimitBytes > 0 {
@@ -310,6 +351,9 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
 		p.recordError(errors.New("telemetry queue full"))
+		if criticalDecisionEvidence {
+			p.edgeRouteDecisionDrops.Add(1)
+		}
 		return false
 	}
 }
@@ -396,14 +440,17 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"dropped\"} %d\n", snap.Dropped)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"quota_dropped\"} %d\n", snap.QuotaDropped)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"redacted\"} %d\n", snap.Redacted)
-	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_tenant_events_total Telemetry events observed by tenant for platform observability metering.")
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_tenant_events_total Telemetry events observed for platform metering. Tenant drilldown remains in ClickHouse.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_tenant_events_total counter")
+	var tenantReceived, tenantDropped, tenantQuotaDropped uint64
 	for _, meter := range p.tenantMeterSnapshot() {
-		tenantID := EscapePrometheusLabelValue(meter.TenantID)
-		_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{tenant_id=\"%s\",outcome=\"received\"} %d\n", tenantID, meter.Received)
-		_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{tenant_id=\"%s\",outcome=\"dropped\"} %d\n", tenantID, meter.Dropped)
-		_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{tenant_id=\"%s\",outcome=\"quota_dropped\"} %d\n", tenantID, meter.QuotaDropped)
+		tenantReceived += meter.Received
+		tenantDropped += meter.Dropped
+		tenantQuotaDropped += meter.QuotaDropped
 	}
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{outcome=\"received\"} %d\n", tenantReceived)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{outcome=\"dropped\"} %d\n", tenantDropped)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{outcome=\"quota_dropped\"} %d\n", tenantQuotaDropped)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_batches_total Export batches attempted by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_batches_total counter")
 	writeMetric("fugue_telemetry_pipeline_batches_total", snap.Batches)
@@ -431,7 +478,100 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_otlp_requests_total OTLP HTTP requests received by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_otlp_requests_total counter")
 	writeMetric("fugue_telemetry_pipeline_otlp_requests_total", snap.OTLPRequests)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_edge_route_decision_events_total Priority route-decision and invariant request evidence observed by the telemetry pipeline.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_edge_route_decision_events_total counter")
+	writeMetric("fugue_telemetry_edge_route_decision_events_total", snap.EdgeRouteDecisionEvents)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_edge_route_decision_drops_total Priority route-decision evidence that could not enter the bounded persistence queue.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_edge_route_decision_drops_total counter")
+	writeMetric("fugue_telemetry_edge_route_decision_drops_total", snap.EdgeRouteDecisionDrops)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_edge_route_decision_persistence_errors_total Priority route-decision evidence that exhausted exporter retries.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_edge_route_decision_persistence_errors_total counter")
+	writeMetric("fugue_telemetry_edge_route_decision_persistence_errors_total", snap.EdgeRoutePersistenceErrors)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_edge_route_decision_missing_links Invariant request facts still missing matching persisted decision material after the grace period.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_edge_route_decision_missing_links gauge")
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_edge_route_decision_missing_links %d\n", snap.EdgeRouteMissingLinks)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_edge_route_decision_link_checks_total Persistent decision-link checks by outcome.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_edge_route_decision_link_checks_total counter")
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_edge_route_decision_link_checks_total{outcome=\"checked\"} %d\n", snap.EdgeRouteLinkChecks)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_edge_route_decision_link_checks_total{outcome=\"alerted\"} %d\n", snap.EdgeRouteLinkAlerts)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_edge_route_decision_link_checks_total{outcome=\"error\"} %d\n", snap.EdgeRouteLinkErrors)
 	return b.String()
+}
+
+func edgeRouteDecisionEvidenceEvent(event Event) bool {
+	eventType := strings.ToLower(strings.TrimSpace(event.Attributes["event_type"]))
+	if eventType == "edge_route_decision" || eventType == "edge_route_decision_material_missing" {
+		return true
+	}
+	if eventType != "request_fact" && eventType != "request_summary" {
+		return false
+	}
+	platformClass := model.NormalizePlatformErrorClass(event.Attributes["platform_error_class"])
+	return model.PlatformErrorClassBlocksRelease(platformClass)
+}
+
+func classifyPlatformRequestFact(event Event) Event {
+	eventType := strings.ToLower(strings.TrimSpace(event.Attributes["event_type"]))
+	if eventType != "request_fact" && eventType != "request_summary" {
+		return event
+	}
+	if event.Attributes == nil {
+		return event
+	}
+	if raw := strings.TrimSpace(event.Attributes["platform_error_class"]); raw != "" {
+		event.Attributes["platform_error_class"] = model.NormalizePlatformErrorClass(raw)
+		return event
+	}
+	if uint16Attr(event, "status_code") < http.StatusInternalServerError {
+		return event
+	}
+	if reason := strings.TrimSpace(event.Attributes["status_reason"]); reason != "" {
+		event.Attributes["platform_error_class"] = model.PlatformErrorClassForRouteStatus(model.EdgeRouteStatusUnavailable, reason)
+		return event
+	}
+	summary := legacyRequestFactSummary(event.Attributes["summary_json"])
+	if strings.TrimSpace(event.Attributes["origin_dns_error"]) != "" || summaryString(summary, "origin_dns_error") != "" {
+		event.Attributes["platform_error_class"] = model.PlatformErrorClassOriginDNS
+		return event
+	}
+	if strings.TrimSpace(event.Attributes["origin_connect_error"]) != "" || summaryString(summary, "origin_connect_error") != "" {
+		event.Attributes["platform_error_class"] = model.PlatformErrorClassOriginConnect
+		return event
+	}
+	if boolAttr(event, "upstream_error") || strings.EqualFold(strings.TrimSpace(event.Attributes["error_type"]), "upstream_error") || summaryBool(summary, "upstream_error") {
+		event.Attributes["platform_error_class"] = model.PlatformErrorClassOriginUnavailable
+		return event
+	}
+	// A connected-origin application response is the only legacy 5xx that can
+	// be proven non-platform from one explicit transport fact. All other N-1
+	// omissions remain evidence_unknown and enter the priority persistence path.
+	if boolAttr(event, "origin_connected", "origin_got_conn") || summaryBool(summary, "origin_connected") || summaryBool(summary, "origin_got_conn") {
+		event.Attributes["platform_error_class"] = model.PlatformErrorClassOriginConnectedApp5xx
+		return event
+	}
+	event.Attributes["platform_error_class"] = model.PlatformErrorClassEvidenceUnknown
+	return event
+}
+
+func legacyRequestFactSummary(raw string) map[string]any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		return nil
+	}
+	return summary
+}
+
+func summaryString(summary map[string]any, key string) string {
+	value, _ := summary[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func summaryBool(summary map[string]any, key string) bool {
+	value, _ := summary[key].(bool)
+	return value
 }
 
 func (p *Pipeline) IngestLogLine(ctx context.Context, source string, line string) bool {
@@ -466,7 +606,8 @@ func EventFromLogLine(source string, line string) (Event, int) {
 
 	var raw map[string]any
 	kind := EventKindLog
-	if err := json.Unmarshal([]byte(line), &raw); err == nil {
+	structuredPayload, structured := structuredLogJSONPayload(line)
+	if structured && json.Unmarshal([]byte(structuredPayload), &raw) == nil {
 		kind = eventKindFromStructuredLog(raw)
 		for key, value := range raw {
 			if IsSecretField(key) {
@@ -501,6 +642,36 @@ func EventFromLogLine(source string, line string) (Event, int) {
 		Message:    message,
 		Attributes: attrs,
 	}, redacted
+}
+
+func structuredLogJSONPayload(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "{") && json.Valid([]byte(line)) {
+		return line, true
+	}
+	if len(line) <= len("2006/01/02 15:04:05") {
+		return "", false
+	}
+	const goLogTimestampLength = len("2006/01/02 15:04:05")
+	if _, err := time.Parse("2006/01/02 15:04:05", line[:goLogTimestampLength]); err != nil {
+		return "", false
+	}
+	remainder := line[goLogTimestampLength:]
+	if strings.HasPrefix(remainder, ".") {
+		index := 1
+		for index < len(remainder) && remainder[index] >= '0' && remainder[index] <= '9' {
+			index++
+		}
+		if index == 1 {
+			return "", false
+		}
+		remainder = remainder[index:]
+	}
+	remainder = strings.TrimSpace(remainder)
+	if !strings.HasPrefix(remainder, "{") || !json.Valid([]byte(remainder)) {
+		return "", false
+	}
+	return remainder, true
 }
 
 func eventKindFromStructuredLog(raw map[string]any) EventKind {
@@ -597,6 +768,11 @@ func (p *Pipeline) exportBatch(batch []Event) {
 		}
 	}
 	p.exportErrors.Add(1)
+	for _, event := range batch {
+		if edgeRouteDecisionEvidenceEvent(event) {
+			p.edgeRoutePersistenceErrors.Add(1)
+		}
+	}
 	p.recordError(fmt.Errorf("export via %s failed: %w", p.exporter.Name(), err))
 }
 

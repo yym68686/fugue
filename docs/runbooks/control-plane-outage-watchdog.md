@@ -9,7 +9,7 @@ Use this runbook when the Fugue control-plane API, Kubernetes API, runner, or co
    FUGUE_WATCHDOG_KUBE_API_URL=https://<kube-api>/readyz \
    FUGUE_WATCHDOG_DNS_SERVER=<authoritative-dns-ip> \
    FUGUE_WATCHDOG_DNS_NAME=api.fugue.pro \
-   FUGUE_WATCHDOG_EDGE_URLS=https://0-0.pro/ \
+   FUGUE_WATCHDOG_EDGE_URLS=https://service.example.test/ \
    fugue-watchdog -once
    ```
 

@@ -533,6 +533,38 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/admin/edge/release-evidence:
+    get:
+      operationId: adminGetPlatformReleaseEvidence
+      summary: Get fail-closed platform release evidence for an active Edge epoch
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminGetPlatformReleaseEvidence
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: release_epoch
+          required: true
+          schema:
+            type: string
+            maxLength: 256
+        - in: query
+          name: window
+          required: false
+          description: Bounded request evidence window from 1m through 30m.
+          schema:
+            type: string
+            default: 5m
+      responses:
+        '200':
+          description: Typed active-cohort, route, origin, link, and latency evidence.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/edge/nodes/{edge_id}/desired-state:
     get:
       operationId: adminGetEdgeNodeDesiredState
@@ -6551,6 +6583,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppObservabilityRequestsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/edge-route-decisions:
+    get:
+      operationId: listAppEdgeRouteDecisions
+      summary: List persisted Edge route-decision evidence and missing-link alerts
+      tags: [Apps]
+      x-fugue-handler: handleListAppEdgeRouteDecisions
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: domain
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        '200':
+          description: Persisted route-decision evidence scoped to the authorized app and domain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppEdgeRouteDecisionEvidenceResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/observability/requests/stream:
@@ -23838,6 +23904,29 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ObservabilityRequestSummary"
+    AppEdgeRouteDecisionEvidenceResponse:
+      type: object
+      additionalProperties: false
+      required: [source, app_id, domain, window, decisions, missing_links]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        app_id:
+          type: string
+        domain:
+          type: string
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        decisions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        missing_links:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
     AppObservabilityTraceResponse:
       type: object
       additionalProperties: false
@@ -27798,11 +27887,11 @@ components:
         local_probe_state:
           type: string
           enum: [pass, fail, unknown, stale]
-        public_synthetic:
+        platform_evidence:
           type: boolean
           deprecated: true
-          description: Legacy compatibility field. Prefer public_synthetic_state.
-        public_synthetic_state:
+          description: Legacy compatibility field. Prefer platform_evidence_state.
+        platform_evidence_state:
           type: string
           enum: [pass, fail, unknown, stale]
         watch_window:

@@ -81,7 +81,7 @@ blast_radius:
   max_edges_per_group: 1
   preserve_min_healthy_edge_groups: 1
 rollback_on:
-  - public_synthetic_503_no_healthy_edge_groups
+  - platform_evidence_503_no_healthy_edge_groups
   - release_guard_block_rollout
 kill_switch: FUGUE_GATE_NODE_KUBERNETES_SERVICE_DNS_MODE
 ```
@@ -158,8 +158,8 @@ node-updater、edge、DNS、image-cache、telemetry-agent 这类异步消费者�
 发布后的公网合成探测必须覆盖：
 
 - `https://api.fugue.pro/healthz`
-- 平台代表服务，例如 `https://api.0-0.pro/healthz`
-- 平台代表 Web，例如 `https://0-0.pro/healthz`
+- 平台代表服务，例如 `https://api.service.example.test/healthz`
+- 平台代表 Web，例如 `https://service.example.test/healthz`
 - 每个 active edge IP 的 `--resolve` 直连。
 - 每个 active DNS answer IP 的 DNS query + HTTPS probe。
 
@@ -409,7 +409,7 @@ node-updater 需要显式 generation 和 rollout 状态，不能靠所有 timer 
 
 - [x] 新 node health check 错误地在所有节点 fail。
 - [x] 新 quarantine rule 会移除全部 edge group。
-- [x] 新 route gate 会让 `api.0-0.pro` 没有 active route。
+- [x] 新 route gate 会让 `api.service.example.test` 没有 active route。
 - [x] 新 DNS answer rule 会返回非 route-ready edge。
 - [x] 新 edge worker 版本在 inactive slot 通过 Kubernetes ready 但公网 `--resolve` 返回 503。
 - [x] post-deploy release guard 返回 `block_rollout=true`。

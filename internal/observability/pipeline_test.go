@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/model"
 )
 
 func TestPipelineInjectsIdentityAndDropsMetricSecrets(t *testing.T) {
@@ -178,13 +180,251 @@ func TestPipelineEnforcesAppTelemetryQuota(t *testing.T) {
 	metrics := pipeline.PrometheusMetrics()
 	for _, want := range []string{
 		`fugue_telemetry_pipeline_events_total{outcome="quota_dropped"} 1`,
-		`fugue_telemetry_tenant_events_total{tenant_id="tenant_123",outcome="received"} 1`,
-		`fugue_telemetry_tenant_events_total{tenant_id="tenant_123",outcome="dropped"} 1`,
-		`fugue_telemetry_tenant_events_total{tenant_id="tenant_123",outcome="quota_dropped"} 1`,
+		`fugue_telemetry_tenant_events_total{outcome="received"} 1`,
+		`fugue_telemetry_tenant_events_total{outcome="dropped"} 1`,
+		`fugue_telemetry_tenant_events_total{outcome="quota_dropped"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("expected quota meter %q, got:\n%s", want, metrics)
 		}
+	}
+	if strings.Contains(metrics, `tenant_id=`) {
+		t.Fatalf("Prometheus tenant meter leaked a high-cardinality tenant label:\n%s", metrics)
+	}
+}
+
+func TestPipelinePriorityDecisionEvidenceBypassesQuota(t *testing.T) {
+	t.Parallel()
+	pipeline := NewPipeline(Config{
+		Enabled:                   true,
+		QueueSize:                 4,
+		MemoryLimitBytes:          4096,
+		SampleRate:                1,
+		TenantEventQuotaPerMinute: 1,
+	}, nil)
+	ordinary := Event{Kind: EventKindLog, Attributes: map[string]string{"event_type": "app_event", "tenant_id": "tenant_123"}}
+	if !pipeline.Ingest(context.Background(), ordinary) {
+		t.Fatal("expected first ordinary event to consume quota")
+	}
+	decision := Event{Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "edge_route_decision", "tenant_id": "tenant_123", "app_id": "app_123",
+		"decision_id": "decision_123", "bundle_version": "bundle_123", "route_generation": "route_123",
+	}}
+	if !pipeline.Ingest(context.Background(), decision) {
+		t.Fatal("priority decision evidence must bypass quota")
+	}
+	invariant := Event{Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "request_fact", "tenant_id": "tenant_123", "status_code": "503",
+		"status_reason": "runtime invariant violation: image_missing",
+	}}
+	if !pipeline.Ingest(context.Background(), invariant) {
+		t.Fatal("invariant request evidence must bypass quota")
+	}
+	application5xx := Event{Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "request_fact", "tenant_id": "tenant_123", "status_code": "500",
+		"origin_connected": "true",
+	}}
+	if pipeline.Ingest(context.Background(), application5xx) {
+		t.Fatal("untyped origin-connected application 5xx must not bypass quota or become platform evidence")
+	}
+	snapshot := pipeline.Snapshot()
+	if snapshot.EdgeRouteDecisionEvents != 2 || snapshot.EdgeRouteDecisionDrops != 0 {
+		t.Fatalf("unexpected priority evidence counters: %+v", snapshot)
+	}
+}
+
+func TestClassifyPlatformRequestFactNMinusOneCompatibility(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		attrs    map[string]string
+		want     string
+		priority bool
+	}{
+		{
+			name:  "current explicit field wins",
+			attrs: map[string]string{"event_type": "request_fact", "status_code": "503", "status_reason": "runtime invariant violation", "platform_error_class": "origin_connected_application_5xx"},
+			want:  model.PlatformErrorClassOriginConnectedApp5xx,
+		},
+		{
+			name:     "explicit latency on successful response",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "200", "platform_error_class": "latency_regression"},
+			want:     model.PlatformErrorClassLatencyRegression,
+			priority: true,
+		},
+		{
+			name:     "explicit route failure on non-5xx response",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "409", "platform_error_class": "route_unavailable"},
+			want:     model.PlatformErrorClassRouteUnavailable,
+			priority: true,
+		},
+		{
+			name:     "explicit invariant on non-5xx response",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "200", "platform_error_class": "invariant"},
+			want:     model.PlatformErrorClassInvariant,
+			priority: true,
+		},
+		{
+			name:     "invalid explicit class on successful response",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "200", "platform_error_class": "future_platform_failure"},
+			want:     model.PlatformErrorClassEvidenceUnknown,
+			priority: true,
+		},
+		{
+			name:     "legacy invariant reason",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "503", "status_reason": "runtime invariant violation: image_missing"},
+			want:     model.PlatformErrorClassInvariant,
+			priority: true,
+		},
+		{
+			name:     "legacy unknown evidence",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "503"},
+			want:     model.PlatformErrorClassEvidenceUnknown,
+			priority: true,
+		},
+		{
+			name:     "legacy origin dns fact",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "502", "origin_dns_error": "lookup failed"},
+			want:     model.PlatformErrorClassOriginDNS,
+			priority: true,
+		},
+		{
+			name:     "legacy origin connect summary",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "502", "summary_json": `{"origin_connect_error":"connection refused"}`},
+			want:     model.PlatformErrorClassOriginConnect,
+			priority: true,
+		},
+		{
+			name:     "legacy upstream fact",
+			attrs:    map[string]string{"event_type": "request_fact", "status_code": "502", "error_type": "upstream_error"},
+			want:     model.PlatformErrorClassOriginUnavailable,
+			priority: true,
+		},
+		{
+			name:  "legacy connected application response",
+			attrs: map[string]string{"event_type": "request_fact", "status_code": "500", "origin_connected": "true"},
+			want:  model.PlatformErrorClassOriginConnectedApp5xx,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			event := classifyPlatformRequestFact(Event{Kind: EventKindLog, Attributes: testCase.attrs})
+			if got := event.Attributes["platform_error_class"]; got != testCase.want {
+				t.Fatalf("class=%q want=%q", got, testCase.want)
+			}
+			if got := edgeRouteDecisionEvidenceEvent(event); got != testCase.priority {
+				t.Fatalf("priority=%t want=%t class=%q", got, testCase.priority, testCase.want)
+			}
+		})
+	}
+}
+
+func TestEveryBlockingPlatformClassBypassesSamplingAndQuota(t *testing.T) {
+	t.Parallel()
+	blocking := []string{
+		model.PlatformErrorClassRouteUnavailable,
+		model.PlatformErrorClassNoHealthy,
+		model.PlatformErrorClassBundleSignature,
+		model.PlatformErrorClassInvariant,
+		model.PlatformErrorClassOriginDNS,
+		model.PlatformErrorClassOriginConnect,
+		model.PlatformErrorClassOriginUnavailable,
+		model.PlatformErrorClassDecisionMissing,
+		model.PlatformErrorClassEvidenceUnknown,
+		model.PlatformErrorClassLatencyRegression,
+	}
+	for _, class := range blocking {
+		t.Run(class, func(t *testing.T) {
+			pipeline := NewPipeline(Config{Enabled: true, QueueSize: 2, MemoryLimitBytes: 4096, SampleRate: 1, TenantEventQuotaPerMinute: 1}, nil)
+			ordinary := Event{Kind: EventKindLog, Attributes: map[string]string{"event_type": "app_event", "tenant_id": "tenant-1"}}
+			if !pipeline.Ingest(context.Background(), ordinary) {
+				t.Fatal("ordinary event did not establish the quota boundary")
+			}
+			evidence := Event{Kind: EventKindLog, Attributes: map[string]string{"event_type": "request_fact", "tenant_id": "tenant-1", "status_code": "503", "platform_error_class": class}}
+			if !pipeline.Ingest(context.Background(), evidence) {
+				t.Fatalf("blocking class %q did not bypass quota", class)
+			}
+			sampled := NewPipeline(Config{Enabled: true, QueueSize: 1, MemoryLimitBytes: 4096, SampleRate: 0}, nil)
+			if !sampled.Ingest(context.Background(), evidence) {
+				t.Fatalf("blocking class %q did not bypass sampling", class)
+			}
+		})
+	}
+
+	for _, class := range []string{model.PlatformErrorClassOriginConnectedApp5xx} {
+		pipeline := NewPipeline(Config{Enabled: true, QueueSize: 2, MemoryLimitBytes: 4096, SampleRate: 1, TenantEventQuotaPerMinute: 1}, nil)
+		ordinary := Event{Kind: EventKindLog, Attributes: map[string]string{"event_type": "app_event", "tenant_id": "tenant-1"}}
+		if !pipeline.Ingest(context.Background(), ordinary) {
+			t.Fatal("ordinary event did not establish the quota boundary")
+		}
+		evidence := Event{Kind: EventKindLog, Attributes: map[string]string{"event_type": "request_fact", "tenant_id": "tenant-1", "status_code": "500", "platform_error_class": class}}
+		if pipeline.Ingest(context.Background(), evidence) {
+			t.Fatalf("non-platform class %q incorrectly bypassed quota", class)
+		}
+	}
+}
+
+func TestPipelinePriorityDecisionEvidenceConvergesAcrossReplayAndOutOfOrder(t *testing.T) {
+	t.Parallel()
+	pipeline := NewPipeline(Config{Enabled: true, QueueSize: 4, MemoryLimitBytes: 4096}, nil)
+	request := Event{Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "request_fact", "status_code": "503", "status_reason": "runtime invariant violation: image_missing",
+		"decision_id": "decision-1", "bundle_version": "bundle-1", "route_generation": "route-1",
+	}}
+	decision := Event{Kind: EventKindLog, Attributes: map[string]string{
+		"event_type": "edge_route_decision", "decision_id": "decision-1", "bundle_version": "bundle-1", "route_generation": "route-1",
+	}}
+	if !pipeline.Ingest(context.Background(), request) || !pipeline.Ingest(context.Background(), request) || !pipeline.Ingest(context.Background(), decision) {
+		t.Fatal("out-of-order request, replay, and later decision must all enter the persistence queue")
+	}
+	first := <-pipeline.queue
+	second := <-pipeline.queue
+	third := <-pipeline.queue
+	if first.Attributes["platform_error_class"] != model.PlatformErrorClassInvariant || second.Attributes["platform_error_class"] != model.PlatformErrorClassInvariant || third.Attributes["event_type"] != "edge_route_decision" {
+		t.Fatalf("priority evidence order or N-1 projection drifted: first=%+v second=%+v third=%+v", first.Attributes, second.Attributes, third.Attributes)
+	}
+	if got := pipeline.Snapshot().EdgeRouteDecisionEvents; got != 3 {
+		t.Fatalf("priority replay accounting=%d want=3", got)
+	}
+}
+
+func TestPipelinePriorityDecisionDropIsObservableWithoutBlocking(t *testing.T) {
+	t.Parallel()
+	pipeline := NewPipeline(Config{Enabled: true, QueueSize: 1, MemoryLimitBytes: 4096}, nil)
+	event := Event{Kind: EventKindLog, Attributes: map[string]string{"event_type": "edge_route_decision"}}
+	if !pipeline.Ingest(context.Background(), event) {
+		t.Fatal("expected first decision event to enter queue")
+	}
+	if pipeline.Ingest(context.Background(), event) {
+		t.Fatal("expected bounded queue to reject duplicate while full")
+	}
+	snapshot := pipeline.Snapshot()
+	if snapshot.EdgeRouteDecisionEvents != 2 || snapshot.EdgeRouteDecisionDrops != 1 || snapshot.Dropped != 1 {
+		t.Fatalf("critical persistence backpressure was not observable: %+v", snapshot)
+	}
+	metrics := pipeline.PrometheusMetrics()
+	for _, want := range []string{
+		"fugue_telemetry_edge_route_decision_events_total 2",
+		"fugue_telemetry_edge_route_decision_drops_total 1",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("missing fail-observable metric %q:\n%s", want, metrics)
+		}
+	}
+}
+
+func TestPipelineDecisionPersistenceFailureIsObservable(t *testing.T) {
+	t.Parallel()
+	pipeline := NewPipeline(Config{Enabled: true, QueueSize: 2, BatchSize: 1, MemoryLimitBytes: 4096, RetryMaxAttempts: 1}, nil)
+	pipeline.ctx = context.Background()
+	pipeline.exporter = &recordingExporter{name: "failed-analytics", failures: 1}
+	pipeline.exportBatch([]Event{{Kind: EventKindLog, Attributes: map[string]string{"event_type": "edge_route_decision"}}})
+	snapshot := pipeline.Snapshot()
+	if snapshot.ExportErrors != 1 || snapshot.EdgeRoutePersistenceErrors != 1 {
+		t.Fatalf("terminal persistence failure was not observable: %+v", snapshot)
+	}
+	if !strings.Contains(pipeline.PrometheusMetrics(), "fugue_telemetry_edge_route_decision_persistence_errors_total 1") {
+		t.Fatalf("missing persistence failure metric:\n%s", pipeline.PrometheusMetrics())
 	}
 }
 
@@ -400,7 +640,7 @@ func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *test
 	t.Cleanup(receiver.Close)
 
 	summary := map[string]any{
-		"endpoint":    "/v1/responses",
+		"endpoint":    "/v1/tasks",
 		"statusCode":  http.StatusServiceUnavailable,
 		"routeSource": "zero_zero",
 		"ttftMs":      240,
@@ -428,11 +668,11 @@ func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *test
 		t.Fatalf("marshal admission summary: %v", err)
 	}
 	payload, err := json.Marshal(map[string]any{
-		"service": "uni-api-web-api",
+		"service": "sample-api-web-api",
 		"events": []map[string]any{{
 			"kind":          "log",
 			"event_type":    "request_summary",
-			"source":        "uni-api-web-api",
+			"source":        "sample-api-web-api",
 			"message":       "request_summary",
 			"timestamp":     "2026-07-16T03:16:02.720Z",
 			"id":            "event_zero_zero_contract",
@@ -443,10 +683,10 @@ func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *test
 			"trace_id":      "trace_zero_zero_contract",
 			"span_id":       "span_zero_zero_contract",
 			"request_id":    "request_zero_zero_contract",
-			"path":          "/v1/responses",
-			"path_template": "/v1/responses",
+			"path":          "/v1/tasks",
+			"path_template": "/v1/tasks",
 			"method":        http.MethodPost,
-			"route_id":      "/v1/responses",
+			"route_id":      "/v1/tasks",
 			"status_code":   http.StatusServiceUnavailable,
 			"status_class":  "5xx",
 			"duration_ms":   6627,
@@ -457,7 +697,7 @@ func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *test
 		}, {
 			"kind":       "log",
 			"event_type": "large_body_admission_decision",
-			"source":     "uni-api-ember",
+			"source":     "sample-api-ember",
 			"message":    "large body admission reject",
 			"timestamp":  "2026-07-16T03:16:03.000Z",
 			"tenant_id":  "tenant_contract",
@@ -478,7 +718,7 @@ func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *test
 		}},
 	})
 	if err != nil {
-		t.Fatalf("marshal 0-0 request summary envelope: %v", err)
+		t.Fatalf("marshal sample-app request summary envelope: %v", err)
 	}
 	req, err := http.NewRequest(http.MethodPost, receiver.URL+"/v1/logs", bytes.NewReader(payload))
 	if err != nil {
@@ -530,18 +770,18 @@ func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *test
 		t.Fatalf("decode request_facts JSONEachRow body: %v\nbody=%s", err, insert.body)
 	}
 	if row.AppID != "app_zero_zero_contract" ||
-		row.PathTemplate != "/v1/responses" ||
+		row.PathTemplate != "/v1/tasks" ||
 		row.StatusCode != http.StatusServiceUnavailable ||
 		row.StatusClass != "5xx" ||
 		row.Method != http.MethodPost ||
-		row.RouteID != "/v1/responses" ||
+		row.RouteID != "/v1/tasks" ||
 		row.DurationMS != 6627 ||
 		row.TTFBMS != 0 ||
 		!row.Streaming {
-		t.Fatalf("0-0 request summary fields were not preserved in request_facts: %+v", row)
+		t.Fatalf("sample-app request summary fields were not preserved in request_facts: %+v", row)
 	}
 	if !strings.Contains(row.SummaryJSON, `"ttftMs":240`) {
-		t.Fatalf("0-0 TTFT was not preserved with its real semantics: %s", row.SummaryJSON)
+		t.Fatalf("sample-app TTFT was not preserved with its real semantics: %s", row.SummaryJSON)
 	}
 	if appInsert.err != nil {
 		t.Fatalf("read admission app_events insert: %v", appInsert.err)

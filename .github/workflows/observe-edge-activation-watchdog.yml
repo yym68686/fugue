@@ -26,9 +26,6 @@ jobs:
         env:
           FUGUE_EDGE_ACTIVATION_API_URL: ${{ vars.FUGUE_API_URL }}
           FUGUE_EDGE_ACTIVATION_API_KEY: ${{ secrets.FUGUE_BOOTSTRAP_KEY }}
-          FUGUE_RESPONSES_SYNTHETIC_URL: ${{ vars.FUGUE_RESPONSES_SYNTHETIC_URL }}
-          FUGUE_RESPONSES_SYNTHETIC_TOKEN: ${{ secrets.FUGUE_RESPONSES_SYNTHETIC_TOKEN }}
-          FUGUE_RESPONSES_SYNTHETIC_MODEL: ${{ vars.FUGUE_RESPONSES_SYNTHETIC_MODEL || 'gpt-5.6-sol' }}
           FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR: ${{ runner.temp }}/edge-activation-watchdog
         run: ./scripts/observe_edge_activation_watchdog.sh
       - name: Upload bounded watchdog evidence

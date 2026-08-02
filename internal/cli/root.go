@@ -109,7 +109,7 @@ Quick start for most users:
 	  fugue auth login --token <copied-access-key>
 	  # or: export FUGUE_API_KEY=<copied-access-key>
 	  fugue deploy .
-	  fugue find uni-api-web
+	  fugue find sample-api-web
 	  fugue app ls
 
 	Defaults and auto-selection:

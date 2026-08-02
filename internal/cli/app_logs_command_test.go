@@ -45,7 +45,7 @@ func TestRunAppRuntimeLogsGrepFiltersFollowOutput(t *testing.T) {
 				`data: {"cursor":"c1","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"INFO uvicorn access log"}`,
 				"",
 				"event: log",
-				`data: {"cursor":"c2","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:01Z","line":"2026-04-20 00:00:01 - uni-api - INFO - request routed"}`,
+				`data: {"cursor":"c2","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:01Z","line":"2026-04-20 00:00:01 - sample-api - INFO - request routed"}`,
 				"",
 				"event: end",
 				`data: {"cursor":"c2","reason":"snapshot_complete"}`,
@@ -64,14 +64,14 @@ func TestRunAppRuntimeLogsGrepFiltersFollowOutput(t *testing.T) {
 		"--token", "token",
 		"app", "logs", "runtime", "demo",
 		"--follow",
-		"--grep", "uni-api",
+		"--grep", "sample-api",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run app runtime logs --grep: %v stderr=%s", err, stderr.String())
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "uni-api") {
+	if !strings.Contains(out, "sample-api") {
 		t.Fatalf("expected grep output to include matching line, got %q", out)
 	}
 	if strings.Contains(out, "uvicorn") {
@@ -216,7 +216,7 @@ func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
 					"",
 					"id: c1",
 					"event: log",
-					`data: {"cursor":"c1","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"first uni-api line"}`,
+					`data: {"cursor":"c1","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"first sample-api line"}`,
 					"",
 				}, "\n"))
 				if flusher, ok := w.(http.Flusher); ok {
@@ -230,7 +230,7 @@ func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
 				_, _ = fmt.Fprint(w, strings.Join([]string{
 					"id: c2",
 					"event: log",
-					`data: {"cursor":"c2","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:01Z","line":"second uni-api line"}`,
+					`data: {"cursor":"c2","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:01Z","line":"second sample-api line"}`,
 					"",
 					"id: c2",
 					"event: end",
@@ -253,7 +253,7 @@ func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
 		"--token", "token",
 		"app", "logs", "runtime", "demo",
 		"--follow",
-		"--grep", "uni-api",
+		"--grep", "sample-api",
 	}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("run app runtime logs --follow: %v stderr=%s", err, stderr.String())
@@ -266,10 +266,10 @@ func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
 	if !sawResume.Load() {
 		t.Fatal("expected the second stream request to resume with Last-Event-ID")
 	}
-	if strings.Count(out, "first uni-api line") != 1 {
+	if strings.Count(out, "first sample-api line") != 1 {
 		t.Fatalf("expected first line exactly once, got %q", out)
 	}
-	if strings.Count(out, "second uni-api line") != 1 {
+	if strings.Count(out, "second sample-api line") != 1 {
 		t.Fatalf("expected second line exactly once, got %q", out)
 	}
 }
@@ -297,7 +297,7 @@ func TestRunAppRuntimeLogsFollowDoesNotBlockOnSlowTextOutput(t *testing.T) {
 			}, "\n")+"\n")
 			for i := range logEvents {
 				_, _ = fmt.Fprintf(w, "event: log\n")
-				_, _ = fmt.Fprintf(w, `data: {"cursor":"c%d","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"uni-api line %d"}`+"\n\n", i+1, i)
+				_, _ = fmt.Fprintf(w, `data: {"cursor":"c%d","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"sample-api line %d"}`+"\n\n", i+1, i)
 			}
 			_, _ = fmt.Fprint(w, "event: end\n")
 			_, _ = fmt.Fprint(w, `data: {"cursor":"c-end","reason":"snapshot_complete"}`+"\n\n")
@@ -317,7 +317,7 @@ func TestRunAppRuntimeLogsFollowDoesNotBlockOnSlowTextOutput(t *testing.T) {
 			"--token", "token",
 			"app", "logs", "runtime", "demo",
 			"--follow",
-			"--grep", "uni-api",
+			"--grep", "sample-api",
 		}, stdout, &stderr)
 	}()
 

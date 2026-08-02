@@ -61,7 +61,7 @@ func TestRollbackSemanticArtifactGenerationMatchesEdgeRouteAPI(t *testing.T) {
 		RequestBodyPolicies: []model.EdgeRequestBodyPolicy{{
 			Name:              "responses-upload",
 			Methods:           []string{"POST"},
-			Paths:             []string{"/v1/responses"},
+			Paths:             []string{"/v1/tasks"},
 			MaxBytes:          64 << 20,
 			TimeoutSeconds:    600,
 			MaxConcurrent:     32,

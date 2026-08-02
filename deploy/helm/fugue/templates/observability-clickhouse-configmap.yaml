@@ -33,6 +33,16 @@ data:
       trace_id String,
       request_id String,
       route_id String,
+      decision_id String,
+      bundle_version String,
+      route_generation String,
+      correlation_key String,
+      status_reason String,
+      platform_error_class LowCardinality(String),
+      origin_connected Bool,
+      edge_group_id String,
+      slot LowCardinality(String),
+      release_epoch String,
       hostname String,
       path_template String,
       method LowCardinality(String),
@@ -52,7 +62,63 @@ data:
     ENGINE = MergeTree
     PARTITION BY toDate(ts)
     ORDER BY (tenant_id, project_id, app_id, ts, trace_id, request_id)
-    TTL ts + INTERVAL 1 DAY DELETE;
+    TTL ts + INTERVAL 7 DAY DELETE;
+
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS decision_id String AFTER route_id;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS bundle_version String AFTER decision_id;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS route_generation String AFTER bundle_version;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS correlation_key String AFTER route_generation;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS status_reason String AFTER correlation_key;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS platform_error_class LowCardinality(String) AFTER status_reason;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS origin_connected Bool AFTER platform_error_class;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS edge_group_id String AFTER origin_connected;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS slot LowCardinality(String) AFTER edge_group_id;
+    ALTER TABLE fugue_observability.request_facts ADD COLUMN IF NOT EXISTS release_epoch String AFTER slot;
+    ALTER TABLE fugue_observability.request_facts MODIFY TTL ts + INTERVAL 7 DAY DELETE;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.edge_route_decisions
+    (
+      ts DateTime64(3, 'UTC'),
+      ingested_at_unix_nano UInt64,
+      tenant_id String,
+      project_id String,
+      app_id String,
+      hostname String,
+      path_prefix String,
+      edge_group_id String,
+      decision_id String,
+      bundle_version String,
+      route_generation String,
+      correlation_key String,
+      final_status LowCardinality(String),
+      platform_error_class LowCardinality(String),
+      final_reason String,
+      invariant_violations_json String,
+      material_json String
+    )
+    ENGINE = ReplacingMergeTree(ingested_at_unix_nano)
+    ORDER BY (tenant_id, app_id, decision_id, bundle_version, route_generation)
+    TTL ts + INTERVAL 30 DAY DELETE;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.edge_route_decision_missing_links
+    (
+      ts DateTime64(3, 'UTC'),
+      ingested_at_unix_nano UInt64,
+      tenant_id String,
+      app_id String,
+      hostname String,
+      request_id String,
+      edge_id String,
+      decision_id String,
+      bundle_version String,
+      route_generation String,
+      correlation_key String,
+      reason String,
+      material_json String
+    )
+    ENGINE = ReplacingMergeTree(ingested_at_unix_nano)
+    ORDER BY (tenant_id, app_id, correlation_key, request_id)
+    TTL ts + INTERVAL 30 DAY DELETE;
 
     CREATE TABLE IF NOT EXISTS fugue_observability.request_spans
     (

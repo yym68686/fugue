@@ -2392,16 +2392,16 @@ release_safety_required_gates() {
     [[ -n "${subsystem}" ]] || continue
     case "${subsystem}" in
       node_updater)
-        gates+=("node_deep_health" "node_heartbeat" "release_guard" "public_synthetic")
+        gates+=("node_deep_health" "node_heartbeat" "release_guard" "platform_evidence")
         ;;
       edge_route)
-        gates+=("route_check" "dns_answer_audit" "release_guard" "public_synthetic")
+        gates+=("route_check" "dns_answer_audit" "release_guard" "platform_evidence")
         ;;
       dns_server)
         gates+=("authoritative_dns" "dns_answer_audit" "release_guard")
         ;;
       cluster_dns)
-        gates+=("central_coredns" "node_local_dns" "service_resolution" "release_guard" "public_synthetic" "rollback_path_smoke")
+        gates+=("central_coredns" "node_local_dns" "service_resolution" "release_guard" "platform_evidence" "rollback_path_smoke")
         ;;
       edge_worker)
         gates+=("inactive_worker_smoke" "active_slot_smoke" "edge_request_error_class")
@@ -2410,10 +2410,10 @@ release_safety_required_gates() {
         gates+=("release_guard" "rollback_path_smoke")
         ;;
       control_plane_api|control_plane_controller)
-        gates+=("platform_autonomy" "release_guard" "public_synthetic" "rollback_path_smoke")
+        gates+=("platform_autonomy" "release_guard" "platform_evidence" "rollback_path_smoke")
         ;;
       shared_control_plane|helm_shared)
-        gates+=("platform_autonomy" "release_guard" "public_synthetic" "rollback_path_smoke")
+        gates+=("platform_autonomy" "release_guard" "platform_evidence" "rollback_path_smoke")
         ;;
       node_local_build_plane)
         gates+=("node_heartbeat" "release_guard" "registry_readiness")
@@ -2425,7 +2425,7 @@ release_safety_required_gates() {
         gates+=("restore_readiness" "platform_autonomy" "release_guard" "rollback_path_smoke")
         ;;
       unknown_high_risk)
-        gates+=("manual_risk_attribution" "platform_autonomy" "release_guard" "public_synthetic" "rollback_path_smoke")
+        gates+=("manual_risk_attribution" "platform_autonomy" "release_guard" "platform_evidence" "rollback_path_smoke")
         ;;
     esac
   done < <(release_safety_changed_file_subsystems)
@@ -2474,42 +2474,42 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 }
 
-public_synthetic_error_class() {
+platform_evidence_error_class() {
   local status="$1"
   local body="$2"
   local normalized
 
   normalized="$(printf '%s' "${body}" | tr '[:upper:]' '[:lower:]')"
   if [[ "${status}" == "503" && "${normalized}" == *"no healthy edge groups"* ]]; then
-    printf 'public_synthetic_503_no_healthy_edge_groups\n'
+    printf 'platform_evidence_503_no_healthy_edge_groups\n'
     return 0
   fi
   if [[ "${status}" == "503" && "${normalized}" == *"edge group has no healthy non-excluded edge nodes"* ]]; then
-    printf 'public_synthetic_503_no_healthy_non_excluded_edge_nodes\n'
+    printf 'platform_evidence_503_no_healthy_non_excluded_edge_nodes\n'
     return 0
   fi
   if [[ "${normalized}" == *"no active route"* ]]; then
-    printf 'public_synthetic_no_active_route\n'
+    printf 'platform_evidence_no_active_route\n'
     return 0
   fi
   if [[ "${normalized}" == *"dns answer contains non route-ready edge"* ]]; then
-    printf 'public_synthetic_dns_non_route_ready_edge\n'
+    printf 'platform_evidence_dns_non_route_ready_edge\n'
     return 0
   fi
   if [[ "${status}" == "503" && "${normalized}" == *"upstream unavailable"* ]]; then
-    printf 'public_synthetic_503_upstream_unavailable\n'
+    printf 'platform_evidence_503_upstream_unavailable\n'
     return 0
   fi
   printf 'none\n'
 }
 
-public_synthetic_status_is_hard_rollback() {
+platform_evidence_status_is_hard_rollback() {
   local class="$1"
   case "${class}" in
-    public_synthetic_503_no_healthy_edge_groups|\
-    public_synthetic_503_no_healthy_non_excluded_edge_nodes|\
-    public_synthetic_no_active_route|\
-    public_synthetic_dns_non_route_ready_edge)
+    platform_evidence_503_no_healthy_edge_groups|\
+    platform_evidence_503_no_healthy_non_excluded_edge_nodes|\
+    platform_evidence_no_active_route|\
+    platform_evidence_dns_non_route_ready_edge)
       return 0
       ;;
   esac
@@ -3243,6 +3243,9 @@ image_cache_strategy_target_fingerprints_match() {
     EXPECTED_TREE_SHA256_CONTROLLER_768_CURRENT="312a3b5fbf322a50d830b41702d74487d23c944511bb9a083cef75fe93aced11" \
     EXPECTED_TREE_SHA256_CONTROLLER_768_SOURCE_COMMIT="0e229daf2bc0dfd86f6579b8ba11acba9ffa4d62bc8727f19b89e5c501a34e7e" \
     EXPECTED_TREE_SHA256_CONTROLLER_768_SOURCE_COMMIT_GUARDED="2ed666e373c935611e7a3f8015caef6473f1ec39c319ce97a026b470cc851227" \
+    EXPECTED_TREE_SHA256_PLATFORM_EVIDENCE_CURRENT="51bd6af468e6c0bed31fdb028450a5c2d9898668df94cb3b83c7bd749838b553" \
+    EXPECTED_TREE_SHA256_PLATFORM_EVIDENCE_SOURCE_COMMIT="e084c0e9e4ae0e0d174d118a54ee52f3139cd1f60a3b531d50f372393116cb98" \
+    EXPECTED_TREE_SHA256_PLATFORM_EVIDENCE_SOURCE_COMMIT_GUARDED="063fe6f69a8a9ef027e1478676c85cf59ff287fdb9b1510e52441168f17b5858" \
     python3 -c '
 import hashlib
 import os
@@ -3279,6 +3282,9 @@ expected_by_values = {
         os.environ["EXPECTED_TREE_SHA256_CONTROLLER_768_CURRENT"],
         os.environ["EXPECTED_TREE_SHA256_CONTROLLER_768_SOURCE_COMMIT"],
         os.environ["EXPECTED_TREE_SHA256_CONTROLLER_768_SOURCE_COMMIT_GUARDED"],
+        os.environ["EXPECTED_TREE_SHA256_PLATFORM_EVIDENCE_CURRENT"],
+        os.environ["EXPECTED_TREE_SHA256_PLATFORM_EVIDENCE_SOURCE_COMMIT"],
+        os.environ["EXPECTED_TREE_SHA256_PLATFORM_EVIDENCE_SOURCE_COMMIT_GUARDED"],
     },
 }
 expected_trees = expected_by_values.get(values_digest, set())

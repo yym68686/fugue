@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestPublicDataPlaneReleaseRequiresPhasedActivationAndSynthetic(t *testing.T) {
+func TestPublicDataPlaneReleaseRequiresPhasedActivationAndPlatformEvidence(t *testing.T) {
 	data, err := os.ReadFile("../../.github/workflows/release-public-data-plane.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -22,9 +22,15 @@ func TestPublicDataPlaneReleaseRequiresPhasedActivationAndSynthetic(t *testing.T
 		t.Fatal("public release must remain explicit workflow_dispatch")
 	}
 	inputs := workflow.On.WorkflowDispatch.Inputs
-	for _, name := range []string{"confirm_phased_activation", "responses_synthetic_url", "responses_synthetic_model"} {
+	legacySynthetic := strings.Join([]string{"responses", "synthetic"}, "_")
+	for _, name := range []string{"confirm_phased_activation"} {
 		if _, ok := inputs[name]; !ok {
 			t.Fatalf("public release missing activation input %q", name)
+		}
+	}
+	for _, name := range []string{"platform_evidence_url", "platform_evidence_model", legacySynthetic + "_url", legacySynthetic + "_model"} {
+		if _, ok := inputs[name]; ok {
+			t.Fatalf("public release retained business-specific evidence input %q", name)
 		}
 	}
 	var confirm releaseWorkflowDispatchInput
@@ -38,17 +44,19 @@ func TestPublicDataPlaneReleaseRequiresPhasedActivationAndSynthetic(t *testing.T
 	}
 	step := job.Steps[len(job.Steps)-1]
 	wantEnv := map[string]string{
-		"FUGUE_EDGE_ACTIVATION_ENABLED":                     "${{ inputs.confirm_phased_activation && 'true' || 'false' }}",
-		"FUGUE_EDGE_ACTIVATION_API_URL":                     "${{ vars.FUGUE_API_URL }}",
-		"FUGUE_EDGE_ACTIVATION_API_KEY":                     "${{ secrets.FUGUE_BOOTSTRAP_KEY }}",
-		"FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME":         "${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME }}",
-		"FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_URL":   "${{ inputs.responses_synthetic_url }}",
-		"FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_MODEL": "${{ inputs.responses_synthetic_model }}",
-		"FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_TOKEN": "${{ secrets.FUGUE_RESPONSES_SYNTHETIC_TOKEN }}",
+		"FUGUE_EDGE_ACTIVATION_ENABLED":             "${{ inputs.confirm_phased_activation && 'true' || 'false' }}",
+		"FUGUE_EDGE_ACTIVATION_API_URL":             "${{ vars.FUGUE_API_URL }}",
+		"FUGUE_EDGE_ACTIVATION_API_KEY":             "${{ secrets.FUGUE_BOOTSTRAP_KEY }}",
+		"FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME": "${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME }}",
 	}
 	for name, want := range wantEnv {
 		if step.Env[name] != want {
 			t.Fatalf("public release env %s=%q want %q", name, step.Env[name], want)
+		}
+	}
+	for _, name := range []string{"FUGUE_PUBLIC_DATA_PLANE_PLATFORM_EVIDENCE_URL", "FUGUE_PUBLIC_DATA_PLANE_PLATFORM_EVIDENCE_MODEL", "FUGUE_PUBLIC_DATA_PLANE_PLATFORM_EVIDENCE_TOKEN", "FUGUE_" + strings.ToUpper(legacySynthetic) + "_TOKEN"} {
+		if _, ok := step.Env[name]; ok {
+			t.Fatalf("public release retained external business evidence environment %q", name)
 		}
 	}
 }
@@ -75,7 +83,7 @@ func TestEdgeActivationReleaseOrderingIsFailClosed(t *testing.T) {
 		`edge_activation_advance "active-epoch-authoritative"`,
 		`edge_activation_wait_all_api_ack "${authority_inventory}"`,
 		`write_front_active_slot "${front_ds}" "${inactive}"`,
-		`run_responses_synthetic`,
+		`run_platform_release_evidence`,
 		`edge_activation_complete_cutover_and_soak`,
 	}
 	last := -1
@@ -89,7 +97,7 @@ func TestEdgeActivationReleaseOrderingIsFailClosed(t *testing.T) {
 	completeStart := strings.Index(text, "edge_activation_complete_cutover_and_soak()")
 	completeEnd := strings.Index(text[completeStart:], "\n}\n") + completeStart
 	complete := text[completeStart:completeEnd]
-	for _, marker := range []string{"run_responses_synthetic", "fence_edge_worker_heartbeat", "edge_activation_advance \"active-epoch-enforced\"", "scale_edge_worker_zero_cas"} {
+	for _, marker := range []string{"run_platform_release_evidence", "fence_edge_worker_heartbeat", "edge_activation_advance \"active-epoch-enforced\"", "scale_edge_worker_zero_cas"} {
 		if !strings.Contains(complete, marker) {
 			t.Fatalf("cutover/retire transaction missing %q", marker)
 		}
@@ -145,7 +153,7 @@ func TestEdgeAutoRemediatorIsDefaultOffSingleActionAndSharedMutex(t *testing.T) 
 		t.Fatal(err)
 	}
 	source := string(script)
-	ordered := []string{"edge_remediation_action_advance prepared", "fence_and_scale_inactive_target_once", "edge_remediation_action_advance committed", "fresh_route_synthetic", "edge_remediation_action_advance verified"}
+	ordered := []string{"edge_remediation_action_advance prepared", "fence_and_scale_inactive_target_once", "edge_remediation_action_advance committed", "fresh_platform_release_evidence", "edge_remediation_action_advance verified"}
 	last := -1
 	for _, marker := range ordered {
 		index := strings.LastIndex(source, marker)
@@ -173,6 +181,8 @@ func readWorkflowPermissions(t *testing.T, data []byte) map[string]string {
 }
 
 func TestEdgeActivationWatchdogIsReportOnlyAndDelayed(t *testing.T) {
+	legacySynthetic := strings.Join([]string{"responses", "synthetic"}, "_")
+	legacyResponsePath := "/v1/" + strings.Join([]string{"res", "ponses"}, "")
 	data, err := os.ReadFile("../../.github/workflows/observe-edge-activation-watchdog.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +218,13 @@ func TestEdgeActivationWatchdogIsReportOnlyAndDelayed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(script), "age < 24*3600") || !strings.Contains(string(script), "active-epoch-enforced") || !strings.Contains(string(script), "/v1/responses") {
-		t.Fatal("watchdog delayed identity/synthetic contract drifted")
+	source := string(script)
+	if !strings.Contains(source, "age < 24*3600") || !strings.Contains(source, "active-epoch-enforced") || !strings.Contains(source, "/v1/admin/edge/release-evidence") {
+		t.Fatal("watchdog delayed identity/platform evidence contract drifted")
+	}
+	for _, forbidden := range []string{legacyResponsePath, strings.ToUpper(legacySynthetic), "PLATFORM_EVIDENCE_URL", "PLATFORM_EVIDENCE_TOKEN", "PLATFORM_EVIDENCE_MODEL"} {
+		if strings.Contains(source, forbidden) || strings.Contains(string(data), forbidden) {
+			t.Fatalf("watchdog retained business-specific evidence coupling %q", forbidden)
+		}
 	}
 }

@@ -15,7 +15,7 @@ func TestPlatformVerificationEvidenceWireSupportsLegacyAndFourState(t *testing.T
 	legacyEvidence, legacyStates, err := (platformArtifactVerificationEvidenceHTTPRequest{
 		ConsumerConvergence:        &legacyPass,
 		LocalProbe:                 &legacyPass,
-		PublicSynthetic:            &legacyPass,
+		PlatformEvidence:           &legacyPass,
 		WatchWindow:                &legacyPass,
 		BaselineMonotonic:          &legacyPass,
 		DatabaseRollbackCompatible: &legacyPass,
@@ -27,7 +27,7 @@ func TestPlatformVerificationEvidenceWireSupportsLegacyAndFourState(t *testing.T
 	stateOnly := passingPlatformVerificationEvidenceHTTPRequest()
 	stateEvidence, stateValues, err := stateOnly.modelEvidence()
 	if err != nil || !stateEvidence.ConsumerConvergence || !stateEvidence.LocalProbe ||
-		!stateEvidence.PublicSynthetic || !stateEvidence.WatchWindow ||
+		!stateEvidence.PlatformEvidence || !stateEvidence.WatchWindow ||
 		!stateEvidence.BaselineMonotonic || !stateEvidence.DatabaseRollbackCompatible ||
 		len(nonPassingPlatformVerificationEvidence(stateValues)) != 0 {
 		t.Fatalf("state-only passing evidence must be accepted: evidence=%+v states=%+v err=%v", stateEvidence, stateValues, err)
@@ -112,7 +112,7 @@ func passingPlatformVerificationEvidenceHTTPRequest() platformArtifactVerificati
 	return platformArtifactVerificationEvidenceHTTPRequest{
 		ConsumerConvergenceState: model.InvariantEvidenceStatePass,
 		LocalProbeState:          model.InvariantEvidenceStatePass,
-		PublicSyntheticState:     model.InvariantEvidenceStatePass,
+		PlatformEvidenceState:    model.InvariantEvidenceStatePass,
 		WatchWindowState:         model.InvariantEvidenceStatePass,
 		BaselineMonotonicState:   model.InvariantEvidenceStatePass,
 		DatabaseRollbackState:    model.InvariantEvidenceStatePass,

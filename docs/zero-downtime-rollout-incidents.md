@@ -4,17 +4,17 @@
 
 > 当前行为说明：2026-07-28 起，所有有 cluster Service 且期望副本数大于 0 的 app 默认受 zero-downtime 保护。本文中“默认 Recreate”描述的是历史故障行为，不再是当前契约；运行中服务没有可验证的在线计划时，controller 必须在 apply 前拒绝，而不是退化为 `Recreate`。
 
-本文记录本轮围绕 `uni-api` 在 Fugue 上实现 zero downtime rollout 过程中发现的问题、线上现象、调查过程、证据和修复思路。本文不记录任何 secret、API key 或私有环境变量值。
+本文记录本轮围绕 `sample-api` 在 Fugue 上实现 zero downtime rollout 过程中发现的问题、线上现象、调查过程、证据和修复思路。本文不记录任何 secret、API key 或私有环境变量值。
 
 ## 范围
 
-- 目标业务：`uni-api-web` / `uni-api-ember`
+- 目标业务：`sample-api-web` / `sample-api-ember`
 - 重点路径：`fugue app deploy`、`fugue app restart --wait`、`fugue app fs put --source live` 之后的 ManagedApp/Deployment rollout
 - 重点风险：带持久化存储的 app 在重启、镜像更新、资源更新、生命周期配置更新时是否会被降级为 `Recreate`，以及 `--wait` 是否会在真正可服务之前提前返回
 
 ## 总结
 
-本轮问题不是 `uni-api-web` 业务代码的 503/504 bug。主要原因在 Fugue 的 ManagedApp rollout 控制面：
+本轮问题不是 `sample-api-web` 业务代码的 503/504 bug。主要原因在 Fugue 的 ManagedApp rollout 控制面：
 
 1. 带 `movable_rwo` 持久化存储的 app 默认会走 `Recreate`，但部分变更类型本应可以在同一节点使用 `RollingUpdate maxUnavailable=0 maxSurge=1` 完成。
 2. 操作驱动的 online rollout 意图曾经只存在于内存对象，后台 reconciler 或 stale snapshot 可能把它覆盖掉，导致线上 Deployment 被重新渲染为 `Recreate`。
@@ -28,13 +28,13 @@
 用户执行：
 
 ```sh
-fugue app fs put uni-api-ember /home/api.yaml \
+fugue app fs put sample-api-ember /home/api.yaml \
   --source live \
-  --from-file /Users/yanyuming/Downloads/GitHub/uni-api/api-fugue.yaml \
-&& fugue app restart uni-api-ember --wait
+  --from-file /Users/yanyuming/Downloads/GitHub/sample-api/api-fugue.yaml \
+&& fugue app restart sample-api-ember --wait
 ```
 
-随后 `uni-api-web` 在 2026-06-11 23:31:29 Asia/Shanghai 附近出现 503/504。业务侧错误形态包括：
+随后 `sample-api-web` 在 2026-06-11 23:31:29 Asia/Shanghai 附近出现 503/504。业务侧错误形态包括：
 
 ```text
 unexpected status 503 Service Unavailable: {"detail":"upstream unavailable"}
@@ -45,7 +45,7 @@ unexpected status 503 Service Unavailable: {"detail":"upstream unavailable"}
 1. 查询 Fugue operation，确认该次 restart operation 的创建、开始、完成时间。
 2. 查询控制平面记录的 app desired spec，确认镜像、replica、runtime、持久化存储和 restart token。
 3. SSH 到控制平面节点查看 Kubernetes ManagedApp、Deployment、Pod 的 live 状态。
-4. 对齐 `uni-api-web-api` 日志中的 request id、HTTP status 和 downstream app。
+4. 对齐 `sample-api-web-api` 日志中的 request id、HTTP status 和 downstream app。
 5. 比对 operation 完成时间与实际新 pod Ready 时间，确认 `--wait` 是否提前返回。
 
 ### 证据
@@ -68,17 +68,17 @@ unexpected status 503 Service Unavailable: {"detail":"upstream unavailable"}
   - pod：`app-1780014428-4ccd706744ad-857f8d944c-fn9xx`
   - created / started：`2026-06-11T15:31:26Z`
   - Ready：`2026-06-11T15:31:31Z`
-- `uni-api-web-api` 日志：
+- `sample-api-web-api` 日志：
   - request id：`fd5e54f2-8032-4cb1-b817-d960dfc4b228`
   - 503 出现在 `2026-06-11T15:31:27.825Z` 到 `2026-06-11T15:31:29.901Z` 附近
-  - downstream：`uni-api-ember`
+  - downstream：`sample-api-ember`
   - 15:30:00Z 到 15:33:30Z 窗口内，503 约 284 条，504 约 196 条，未见 502/500 为主因
 
 ### 精确原因
 
-该次 `restart --wait` 的 operation 在 `15:29:34Z` 已经完成，但真正替换出来的新 pod 在 `15:31:31Z` 才 Ready。中间窗口里 Deployment 使用了 `Recreate`，因此旧 pod 已经不可用、新 pod 尚未 Ready，`uni-api-web` 调用 downstream `uni-api-ember` 时得到 upstream unavailable，表现为 503/504。
+该次 `restart --wait` 的 operation 在 `15:29:34Z` 已经完成，但真正替换出来的新 pod 在 `15:31:31Z` 才 Ready。中间窗口里 Deployment 使用了 `Recreate`，因此旧 pod 已经不可用、新 pod 尚未 Ready，`sample-api-web` 调用 downstream `sample-api-ember` 时得到 upstream unavailable，表现为 503/504。
 
-这不是 `uni-api-web` 业务 bug，而是 Fugue rollout 控制面的 bug：
+这不是 `sample-api-web` 业务 bug，而是 Fugue rollout 控制面的 bug：
 
 - `RolloutIntent` 在 `model.AppSpec` 中是 transient 字段，JSON 不持久化。
 - operation 期间的 online restart 意图没有被可靠保存到 ManagedApp CR。
@@ -103,7 +103,7 @@ unexpected status 503 Service Unavailable: {"detail":"upstream unavailable"}
 - clean 环境 `make test` 通过。
 - GitHub Actions control-plane deploy run `27360010579` 成功。
 - 线上 control plane `api` 和 `controller` 已运行镜像 tag `2b8d6b0636801681689c8e6eb830c88339d39c1d`。
-- 新版本部署后抽查 `uni-api-web-api` 日志，503/504 在观测窗口内为 0。
+- 新版本部署后抽查 `sample-api-web-api` 日志，503/504 在观测窗口内为 0。
 
 ## 修复批次 1：支持资源类 zero downtime rollout
 
@@ -153,7 +153,7 @@ maxSurge=1
 
 ### 问题
 
-即使 Deployment strategy 是 rolling update，如果 termination grace 太短，旧 pod 被终止时仍然可能切断长请求或流式请求。对 `/v1/responses` 这类可能有较长生命周期的请求，这会让客户端在 rollout 期间看到失败。
+即使 Deployment strategy 是 rolling update，如果 termination grace 太短，旧 pod 被终止时仍然可能切断长请求或流式请求。对 `/v1/tasks` 这类可能有较长生命周期的请求，这会让客户端在 rollout 期间看到失败。
 
 ### 现象
 
@@ -589,7 +589,7 @@ fugue_drain_complete reason=idle waited_ms≈2000 active_connections=0
 - 首次 `make test` 失败原因是本机 shell 中存在生产 R2 环境变量，导致 data backend 测试尝试访问真实 R2；清理相关环境变量后测试通过。该失败不是代码回归。
 - control plane 标准发布链路已跑通，GitHub Actions control-plane deploy 成功。
 - 线上 control plane `api` / `controller` 更新到修复镜像后 Ready。
-- 修复后抽查 `uni-api-web-api` 503/504，在观测窗口内为 0。
+- 修复后抽查 `sample-api-web-api` 503/504，在观测窗口内为 0。
 
 ## 后续回归建议
 

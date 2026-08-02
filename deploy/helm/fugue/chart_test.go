@@ -1454,6 +1454,9 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"FugueAppHighErrorRate",
 		"FugueEdgeFrontHighClientTCPRetransmits",
 		"FugueEdgeNodeTCPRetransmitRateHigh",
+		"FugueEdgeRouteDecisionMaterialMissing",
+		"FugueEdgeRouteDecisionEvidenceDropped",
+		"FugueEdgeRouteDecisionLinkCheckFailed",
 		"FugueEdgeNodeTCPMetricsUnavailable",
 		"FugueEdgeExclusionExpiresWithin24Hours",
 		"FugueEdgeExclusionExpiresWithinOneHour",
@@ -1657,7 +1660,7 @@ func TestObservabilityAlertmanagerIsDisabledByDefaultAndCanRender(t *testing.T) 
 	}
 	for _, want := range []string{
 		"receiver: default",
-		"group_by: [\"tenant_id\", \"project_id\", \"app_id\", \"alertname\"]",
+		"group_by: [\"alertname\", \"component\", \"group\", \"slot\", \"release_epoch\", \"status_class\", \"platform_error_class\"]",
 		"url: \"https://alerts.example.test/hook\"",
 		"send_resolved: true",
 	} {
@@ -1842,6 +1845,10 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"<clickhouse>",
 		"<console>true</console>",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.request_facts",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.edge_route_decisions",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.edge_route_decision_missing_links",
+		"ALTER TABLE fugue_observability.request_facts MODIFY TTL ts + INTERVAL 7 DAY DELETE",
+		"TTL ts + INTERVAL 30 DAY DELETE",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.request_spans",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.app_events",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.diagnosis_windows_1m",

@@ -223,6 +223,7 @@ type telemetry struct {
 	RouteWriteCount             map[routeMetricKey]uint64
 	RouteWriteSum               map[routeMetricKey]float64
 	RouteCacheStatus            map[routeCacheMetricKey]uint64
+	PlatformReleaseRequests     map[platformReleaseMetricKey]uint64
 }
 
 type metricSnapshot struct {
@@ -270,6 +271,14 @@ type routeCacheMetricKey struct {
 	CacheStatus    string
 	CachePolicyID  string
 	AssetClass     string
+}
+
+type platformReleaseMetricKey struct {
+	Group              string
+	Slot               string
+	ReleaseEpoch       string
+	StatusClass        string
+	PlatformErrorClass string
 }
 
 type edgeProxyObservation struct {
@@ -2489,9 +2498,9 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.metricSnapshot()
 	status := snapshot.Status
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintln(w, "# HELP fugue_edge_info Static fugue-edge identity labels.")
+	fmt.Fprintln(w, "# HELP fugue_edge_info Static low-cardinality fugue-edge identity labels.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_info gauge")
-	fmt.Fprintf(w, "fugue_edge_info{edge_id=\"%s\",edge_group_id=\"%s\"} 1\n", prometheusLabelValue(status.EdgeID), prometheusLabelValue(status.EdgeGroupID))
+	fmt.Fprintf(w, "fugue_edge_info{component=\"worker\",group=\"%s\",slot=\"%s\",release_epoch=\"%s\"} 1\n", prometheusLabelValue(status.EdgeGroupID), prometheusLabelValue(s.Config.EdgeSlot), prometheusLabelValue(s.Config.EdgeReleaseEpoch))
 	fmt.Fprintln(w, "# HELP fugue_edge_health Whether fugue-edge has a usable route bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_health gauge")
 	fmt.Fprintf(w, "fugue_edge_health %d\n", boolGauge(status.Healthy))
@@ -2501,17 +2510,15 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP fugue_edge_stale_age_seconds Seconds since the last successful bundle sync while serving a stale cache.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_stale_age_seconds gauge")
 	fmt.Fprintf(w, "fugue_edge_stale_age_seconds %.0f\n", staleAgeSeconds(status.StaleCache, status.LastSuccessAt, time.Now().UTC()))
-	if strings.TrimSpace(status.DegradedReason) != "" {
-		fmt.Fprintln(w, "# HELP fugue_edge_degraded_reason Current fugue-edge degraded reason.")
-		fmt.Fprintln(w, "# TYPE fugue_edge_degraded_reason gauge")
-		fmt.Fprintf(w, "fugue_edge_degraded_reason{reason=\"%s\"} 1\n", prometheusLabelValue(status.DegradedReason))
-	}
+	fmt.Fprintln(w, "# HELP fugue_edge_degraded Whether fugue-edge is currently degraded.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_degraded gauge")
+	fmt.Fprintf(w, "fugue_edge_degraded %d\n", boolGauge(strings.TrimSpace(status.DegradedReason) != ""))
 	fmt.Fprintln(w, "# HELP fugue_edge_routes Number of routes in the current bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_routes gauge")
-	fmt.Fprintf(w, "fugue_edge_routes{bundle_version=\"%s\"} %d\n", prometheusLabelValue(status.BundleVersion), status.RouteCount)
+	fmt.Fprintf(w, "fugue_edge_routes %d\n", status.RouteCount)
 	fmt.Fprintln(w, "# HELP fugue_edge_tls_allowlist_entries Number of TLS allowlist entries in the current bundle.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_tls_allowlist_entries gauge")
-	fmt.Fprintf(w, "fugue_edge_tls_allowlist_entries{bundle_version=\"%s\"} %d\n", prometheusLabelValue(status.BundleVersion), status.TLSAllowlistCount)
+	fmt.Fprintf(w, "fugue_edge_tls_allowlist_entries %d\n", status.TLSAllowlistCount)
 	fmt.Fprintln(w, "# HELP fugue_edge_last_sync_timestamp_seconds Last route bundle sync attempt time.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_last_sync_timestamp_seconds gauge")
 	fmt.Fprintf(w, "fugue_edge_last_sync_timestamp_seconds %.0f\n", unixSeconds(status.LastSyncAt))
@@ -2558,145 +2565,56 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "fugue_edge_http_cache_warmup_duration_seconds %.6f\n", durationSeconds(snapshot.Metrics.CacheWarmupDuration))
 	fmt.Fprintln(w, "# HELP fugue_edge_caddy_routes Number of host routes in the last applied Caddy config.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_routes gauge")
-	fmt.Fprintf(w, "fugue_edge_caddy_routes{bundle_version=\"%s\"} %d\n", prometheusLabelValue(snapshot.Metrics.CaddyAppliedVersion), snapshot.Metrics.CaddyRouteCount)
+	fmt.Fprintf(w, "fugue_edge_caddy_routes %d\n", snapshot.Metrics.CaddyRouteCount)
 	fmt.Fprintln(w, "# HELP fugue_edge_caddy_last_apply_timestamp_seconds Last successful Caddy config apply time.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_caddy_last_apply_timestamp_seconds gauge")
 	fmt.Fprintf(w, "fugue_edge_caddy_last_apply_timestamp_seconds %.0f\n", unixSeconds(snapshot.Metrics.CaddyLastApplyAt))
-	fmt.Fprintln(w, "# HELP fugue_edge_route_requests_total Edge data-plane requests by route.")
+	fmt.Fprintln(w, "# HELP fugue_edge_route_requests_total Edge data-plane requests. High-cardinality route dimensions are exported only to ClickHouse.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_requests_total counter")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteRequests) {
-		fmt.Fprintf(w, "fugue_edge_route_requests_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteRequests[key])
+	fmt.Fprintf(w, "fugue_edge_route_requests_total %d\n", sumRouteCounter(snapshot.Metrics.RouteRequests))
+	fmt.Fprintln(w, "# HELP fugue_edge_platform_release_requests_total Low-cardinality request evidence for platform release gates.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_platform_release_requests_total counter")
+	for _, key := range sortedPlatformReleaseMetricKeys(snapshot.Metrics.PlatformReleaseRequests) {
+		fmt.Fprintf(w, "fugue_edge_platform_release_requests_total{component=\"worker\",group=\"%s\",slot=\"%s\",release_epoch=\"%s\",status_class=\"%s\",platform_error_class=\"%s\"} %d\n",
+			prometheusLabelValue(key.Group), prometheusLabelValue(key.Slot), prometheusLabelValue(key.ReleaseEpoch),
+			prometheusLabelValue(key.StatusClass), prometheusLabelValue(key.PlatformErrorClass), snapshot.Metrics.PlatformReleaseRequests[key])
 	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_status_total Edge data-plane responses by route and status code.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_status_total counter")
-	for _, key := range sortedRouteStatusMetricKeys(snapshot.Metrics.RouteStatuses) {
-		fmt.Fprintf(w, "fugue_edge_route_status_total{%s,status=\"%d\"} %d\n", routeMetricLabels(key.RouteMetricKey), key.StatusCode, snapshot.Metrics.RouteStatuses[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_errors_total Edge data-plane upstream proxy errors by route.")
+	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_errors_total Edge data-plane upstream proxy errors.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_errors_total counter")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteUpstreamErrors) {
-		fmt.Fprintf(w, "fugue_edge_route_upstream_errors_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteUpstreamErrors[key])
-	}
+	fmt.Fprintf(w, "fugue_edge_route_upstream_errors_total %d\n", sumRouteCounter(snapshot.Metrics.RouteUpstreamErrors))
 	fmt.Fprintln(w, "# HELP fugue_edge_route_fallback_hits_total Edge data-plane requests that matched a non-active fallback route.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_fallback_hits_total counter")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteFallbackHits) {
-		fmt.Fprintf(w, "fugue_edge_route_fallback_hits_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteFallbackHits[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_websocket_total Edge data-plane websocket requests by route and result.")
+	fmt.Fprintf(w, "fugue_edge_route_fallback_hits_total %d\n", sumRouteCounter(snapshot.Metrics.RouteFallbackHits))
+	fmt.Fprintln(w, "# HELP fugue_edge_route_websocket_total Edge data-plane websocket requests.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_websocket_total counter")
-	for _, key := range sortedRouteResultMetricKeys(snapshot.Metrics.RouteWebSocketResults) {
-		fmt.Fprintf(w, "fugue_edge_route_websocket_total{%s,result=\"%s\"} %d\n", routeMetricLabels(key.RouteMetricKey), prometheusLabelValue(key.Result), snapshot.Metrics.RouteWebSocketResults[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_sse_total Edge data-plane SSE requests by route and result.")
+	fmt.Fprintf(w, "fugue_edge_route_websocket_total %d\n", sumRouteResultCounter(snapshot.Metrics.RouteWebSocketResults))
+	fmt.Fprintln(w, "# HELP fugue_edge_route_sse_total Edge data-plane SSE requests.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_sse_total counter")
-	for _, key := range sortedRouteResultMetricKeys(snapshot.Metrics.RouteSSEResults) {
-		fmt.Fprintf(w, "fugue_edge_route_sse_total{%s,result=\"%s\"} %d\n", routeMetricLabels(key.RouteMetricKey), prometheusLabelValue(key.Result), snapshot.Metrics.RouteSSEResults[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_streaming_total Edge data-plane streaming requests by route and result.")
+	fmt.Fprintf(w, "fugue_edge_route_sse_total %d\n", sumRouteResultCounter(snapshot.Metrics.RouteSSEResults))
+	fmt.Fprintln(w, "# HELP fugue_edge_route_streaming_total Edge data-plane streaming requests.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_streaming_total counter")
-	for _, key := range sortedRouteResultMetricKeys(snapshot.Metrics.RouteStreamingResults) {
-		fmt.Fprintf(w, "fugue_edge_route_streaming_total{%s,result=\"%s\"} %d\n", routeMetricLabels(key.RouteMetricKey), prometheusLabelValue(key.Result), snapshot.Metrics.RouteStreamingResults[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_upload_requests_total Edge data-plane upload requests by route.")
+	fmt.Fprintf(w, "fugue_edge_route_streaming_total %d\n", sumRouteResultCounter(snapshot.Metrics.RouteStreamingResults))
+	fmt.Fprintln(w, "# HELP fugue_edge_route_upload_requests_total Edge data-plane upload requests.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_upload_requests_total counter")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteUploadRequests) {
-		fmt.Fprintf(w, "fugue_edge_route_upload_requests_total{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteUploadRequests[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_request_body_read_seconds Time spent blocked reading buffered request bodies at the edge.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_request_body_read_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteBodyReadCount) {
-		fmt.Fprintf(w, "fugue_edge_request_body_read_seconds_sum{%s} %.6f\n", edgeRouteMetricLabels(status, key), snapshot.Metrics.RouteBodyReadSum[key])
-		fmt.Fprintf(w, "fugue_edge_request_body_read_seconds_count{%s} %d\n", edgeRouteMetricLabels(status, key), snapshot.Metrics.RouteBodyReadCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_request_body_file_write_seconds Time spent writing buffered request bodies to the edge temp file.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_request_body_file_write_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteBodyWriteCount) {
-		fmt.Fprintf(w, "fugue_edge_request_body_file_write_seconds_sum{%s} %.6f\n", edgeRouteMetricLabels(status, key), snapshot.Metrics.RouteBodyWriteSum[key])
-		fmt.Fprintf(w, "fugue_edge_request_body_file_write_seconds_count{%s} %d\n", edgeRouteMetricLabels(status, key), snapshot.Metrics.RouteBodyWriteCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_request_body_throughput_bps Buffered request body read throughput in bytes per second at the edge.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_request_body_throughput_bps summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteBodyThroughputCount) {
-		fmt.Fprintf(w, "fugue_edge_request_body_throughput_bps_sum{%s} %.6f\n", edgeRouteMetricLabels(status, key), snapshot.Metrics.RouteBodyThroughputSum[key])
-		fmt.Fprintf(w, "fugue_edge_request_body_throughput_bps_count{%s} %d\n", edgeRouteMetricLabels(status, key), snapshot.Metrics.RouteBodyThroughputCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_total_duration_seconds Edge data-plane request duration by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_total_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteDurationCount) {
-		fmt.Fprintf(w, "fugue_edge_route_total_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteDurationSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_total_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteDurationCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_upstream_latency_seconds Edge data-plane upstream proxy latency by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_upstream_latency_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteLatencyCount) {
-		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencySum[key])
-		fmt.Fprintf(w, "fugue_edge_route_upstream_latency_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteLatencyCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_ttfb_seconds Edge data-plane proxy time-to-first-byte by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_ttfb_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteTTFBCount) {
-		fmt.Fprintf(w, "fugue_edge_route_ttfb_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteTTFBSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_ttfb_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteTTFBCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_lookup_duration_seconds Edge data-plane local HTTP cache lookup duration by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_cache_lookup_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteCacheLookupCount) {
-		fmt.Fprintf(w, "fugue_edge_route_cache_lookup_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteCacheLookupSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_cache_lookup_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteCacheLookupCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_dns_duration_seconds Edge data-plane origin DNS lookup duration by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_dns_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginDNSCount) {
-		fmt.Fprintf(w, "fugue_edge_route_origin_dns_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginDNSSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_origin_dns_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginDNSCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_connect_duration_seconds Edge data-plane origin TCP connect duration by route for non-reused upstream connections.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_connect_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginConnCount) {
-		fmt.Fprintf(w, "fugue_edge_route_origin_connect_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginConnSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_origin_connect_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginConnCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_request_write_duration_seconds Edge data-plane time until the origin request, including body, is written by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_request_write_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginWriteCount) {
-		fmt.Fprintf(w, "fugue_edge_route_origin_request_write_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWriteSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_origin_request_write_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWriteCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_response_header_wait_seconds Edge data-plane time spent waiting for the first origin response byte after writing the origin request by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_response_header_wait_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginWaitCount) {
-		fmt.Fprintf(w, "fugue_edge_route_origin_response_header_wait_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWaitSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_origin_response_header_wait_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWaitCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_ttfb_seconds Edge data-plane origin time-to-first-byte by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_ttfb_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginTTFBCount) {
-		fmt.Fprintf(w, "fugue_edge_route_origin_ttfb_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTTFBSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_origin_ttfb_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTTFBCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_total_duration_seconds Edge data-plane origin response read duration by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_total_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginTotalCount) {
-		fmt.Fprintf(w, "fugue_edge_route_origin_total_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTotalSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_origin_total_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginTotalCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_response_write_duration_seconds Edge data-plane time spent writing response bytes by route.")
-	fmt.Fprintln(w, "# TYPE fugue_edge_route_response_write_duration_seconds summary")
-	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteWriteCount) {
-		fmt.Fprintf(w, "fugue_edge_route_response_write_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteWriteSum[key])
-		fmt.Fprintf(w, "fugue_edge_route_response_write_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteWriteCount[key])
-	}
-	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_total Edge data-plane cache decisions by route and cache status.")
+	fmt.Fprintf(w, "fugue_edge_route_upload_requests_total %d\n", sumRouteCounter(snapshot.Metrics.RouteUploadRequests))
+	writeAggregateRouteSummary(w, "fugue_edge_request_body_read_seconds", "Time spent blocked reading buffered request bodies at the edge.", snapshot.Metrics.RouteBodyReadSum, snapshot.Metrics.RouteBodyReadCount)
+	writeAggregateRouteSummary(w, "fugue_edge_request_body_file_write_seconds", "Time spent writing buffered request bodies to the edge temp file.", snapshot.Metrics.RouteBodyWriteSum, snapshot.Metrics.RouteBodyWriteCount)
+	writeAggregateRouteSummary(w, "fugue_edge_request_body_throughput_bps", "Buffered request body read throughput in bytes per second at the edge.", snapshot.Metrics.RouteBodyThroughputSum, snapshot.Metrics.RouteBodyThroughputCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_total_duration_seconds", "Edge data-plane request duration.", snapshot.Metrics.RouteDurationSum, snapshot.Metrics.RouteDurationCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_upstream_latency_seconds", "Edge data-plane upstream proxy latency.", snapshot.Metrics.RouteLatencySum, snapshot.Metrics.RouteLatencyCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_ttfb_seconds", "Edge data-plane proxy time-to-first-byte.", snapshot.Metrics.RouteTTFBSum, snapshot.Metrics.RouteTTFBCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_cache_lookup_duration_seconds", "Edge data-plane local HTTP cache lookup duration.", snapshot.Metrics.RouteCacheLookupSum, snapshot.Metrics.RouteCacheLookupCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_origin_dns_duration_seconds", "Edge data-plane origin DNS lookup duration.", snapshot.Metrics.RouteOriginDNSSum, snapshot.Metrics.RouteOriginDNSCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_origin_connect_duration_seconds", "Edge data-plane origin TCP connect duration.", snapshot.Metrics.RouteOriginConnSum, snapshot.Metrics.RouteOriginConnCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_origin_request_write_duration_seconds", "Edge data-plane origin request write duration.", snapshot.Metrics.RouteOriginWriteSum, snapshot.Metrics.RouteOriginWriteCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_origin_response_header_wait_seconds", "Edge data-plane origin response-header wait duration.", snapshot.Metrics.RouteOriginWaitSum, snapshot.Metrics.RouteOriginWaitCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_origin_ttfb_seconds", "Edge data-plane origin time-to-first-byte.", snapshot.Metrics.RouteOriginTTFBSum, snapshot.Metrics.RouteOriginTTFBCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_origin_total_duration_seconds", "Edge data-plane origin response read duration.", snapshot.Metrics.RouteOriginTotalSum, snapshot.Metrics.RouteOriginTotalCount)
+	writeAggregateRouteSummary(w, "fugue_edge_route_response_write_duration_seconds", "Edge data-plane response write duration.", snapshot.Metrics.RouteWriteSum, snapshot.Metrics.RouteWriteCount)
+	fmt.Fprintln(w, "# HELP fugue_edge_route_cache_total Edge data-plane cache decisions.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_cache_total counter")
-	for _, key := range sortedRouteCacheMetricKeys(snapshot.Metrics.RouteCacheStatus) {
-		fmt.Fprintf(w, "fugue_edge_route_cache_total{%s,cache_status=\"%s\",cache_policy_id=\"%s\",asset_class=\"%s\"} %d\n",
-			routeMetricLabels(key.RouteMetricKey),
-			prometheusLabelValue(key.CacheStatus),
-			prometheusLabelValue(key.CachePolicyID),
-			prometheusLabelValue(key.AssetClass),
-			snapshot.Metrics.RouteCacheStatus[key],
-		)
-	}
+	fmt.Fprintf(w, "fugue_edge_route_cache_total %d\n", sumRouteCacheCounter(snapshot.Metrics.RouteCacheStatus))
+
 }
 
 func (s *Service) startHTTPServer() (func(context.Context) error, error) {
@@ -3925,6 +3843,17 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 	}
 	s.metrics.RouteRequests[key]++
 	s.metrics.RouteStatuses[statusKey]++
+	if s.metrics.PlatformReleaseRequests == nil {
+		s.metrics.PlatformReleaseRequests = make(map[platformReleaseMetricKey]uint64)
+	}
+	platformKey := platformReleaseMetricKey{
+		Group:              firstNonEmpty(strings.TrimSpace(observed.Route.EdgeGroupID), strings.TrimSpace(s.Config.EdgeGroupID)),
+		Slot:               strings.TrimSpace(s.Config.EdgeSlot),
+		ReleaseEpoch:       strings.TrimSpace(s.Config.EdgeReleaseEpoch),
+		StatusClass:        edgeStatusClass(observed.StatusCode),
+		PlatformErrorClass: edgePlatformErrorClass(observed),
+	}
+	s.metrics.PlatformReleaseRequests[platformKey]++
 	if observed.FallbackHit {
 		if s.metrics.RouteFallbackHits == nil {
 			s.metrics.RouteFallbackHits = make(map[routeMetricKey]uint64)
@@ -4309,6 +4238,7 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	out.Metrics.RouteWriteCount = cloneRouteCounterMap(s.metrics.RouteWriteCount)
 	out.Metrics.RouteWriteSum = cloneRouteFloatMap(s.metrics.RouteWriteSum)
 	out.Metrics.RouteCacheStatus = cloneRouteCacheCounterMap(s.metrics.RouteCacheStatus)
+	out.Metrics.PlatformReleaseRequests = clonePlatformReleaseCounterMap(s.metrics.PlatformReleaseRequests)
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
 		generatedAt := s.bundle.GeneratedAt
 		out.BundleGeneratedAt = &generatedAt
@@ -4901,6 +4831,80 @@ func cloneRouteCacheCounterMap(in map[routeCacheMetricKey]uint64) map[routeCache
 	return out
 }
 
+func clonePlatformReleaseCounterMap(in map[platformReleaseMetricKey]uint64) map[platformReleaseMetricKey]uint64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[platformReleaseMetricKey]uint64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func sumRouteCounter(values map[routeMetricKey]uint64) uint64 {
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func sumRouteResultCounter(values map[routeResultMetricKey]uint64) uint64 {
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func sumRouteCacheCounter(values map[routeCacheMetricKey]uint64) uint64 {
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func sumRouteFloat(values map[routeMetricKey]float64) float64 {
+	var total float64
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func writeAggregateRouteSummary(w io.Writer, name, help string, sums map[routeMetricKey]float64, counts map[routeMetricKey]uint64) {
+	fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	fmt.Fprintf(w, "# TYPE %s summary\n", name)
+	fmt.Fprintf(w, "%s_sum %.6f\n", name, sumRouteFloat(sums))
+	fmt.Fprintf(w, "%s_count %d\n", name, sumRouteCounter(counts))
+}
+
+func sortedPlatformReleaseMetricKeys(values map[platformReleaseMetricKey]uint64) []platformReleaseMetricKey {
+	keys := make([]platformReleaseMetricKey, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := keys[i], keys[j]
+		if left.Group != right.Group {
+			return left.Group < right.Group
+		}
+		if left.Slot != right.Slot {
+			return left.Slot < right.Slot
+		}
+		if left.ReleaseEpoch != right.ReleaseEpoch {
+			return left.ReleaseEpoch < right.ReleaseEpoch
+		}
+		if left.StatusClass != right.StatusClass {
+			return left.StatusClass < right.StatusClass
+		}
+		return left.PlatformErrorClass < right.PlatformErrorClass
+	})
+	return keys
+}
+
 func sortedRouteResultMetricKeys(values map[routeResultMetricKey]uint64) []routeResultMetricKey {
 	keys := make([]routeResultMetricKey, 0, len(values))
 	for key := range values {
@@ -5039,30 +5043,6 @@ func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCa
 		return keys[i].AssetClass < keys[j].AssetClass
 	})
 	return keys
-}
-
-func routeMetricLabels(key routeMetricKey) string {
-	return fmt.Sprintf(
-		`hostname="%s",path_prefix="%s",method="%s",app="%s",route_kind="%s",client_country="%s",client_region="%s",client_asn="%s"`,
-		prometheusLabelValue(key.Hostname),
-		prometheusLabelValue(model.NormalizeAppRoutePathPrefix(key.PathPrefix)),
-		prometheusLabelValue(key.Method),
-		prometheusLabelValue(key.AppID),
-		prometheusLabelValue(key.RouteKind),
-		prometheusLabelValue(key.ClientCountry),
-		prometheusLabelValue(key.ClientRegion),
-		prometheusLabelValue(key.ClientASN),
-	)
-}
-
-func edgeRouteMetricLabels(status Status, key routeMetricKey) string {
-	base := routeMetricLabels(key)
-	return fmt.Sprintf(
-		`edge_id="%s",edge_group_id="%s",%s`,
-		prometheusLabelValue(status.EdgeID),
-		prometheusLabelValue(status.EdgeGroupID),
-		base,
-	)
 }
 
 func prometheusLabelValue(value string) string {

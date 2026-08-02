@@ -12,7 +12,7 @@ data:
   alertmanager.yml: |
     route:
       receiver: default
-      group_by: ["tenant_id", "project_id", "app_id", "alertname"]
+      group_by: ["alertname", "component", "group", "slot", "release_epoch", "status_class", "platform_error_class"]
       group_wait: 30s
       group_interval: 5m
       repeat_interval: 4h

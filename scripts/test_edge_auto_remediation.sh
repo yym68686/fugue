@@ -19,7 +19,7 @@ mkdir -m 700 "${FUGUE_EDGE_ACTIVATION_DIR}"
 
 candidate="${TMP}/candidate.json"
 cat >"${candidate}" <<'JSON'
-{"actionable":true,"activation_generation":10,"action_sequence":0,"nonce":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active_evidence_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","synthetic_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kubernetes_digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","target":{"edge_id":"node-de","edge_group_id":"edge-group-country-de","slot":"a","instance_uid":"pod-a","release_epoch":"release-old","daemonset_name":"fugue-edge-worker-a","daemonset_uid":"ds-a","daemonset_version":"100","failure_class":"bundle_signature_invalid"}}
+{"actionable":true,"activation_generation":10,"action_sequence":0,"nonce":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","active_evidence_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","platform_evidence_digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kubernetes_digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","target":{"edge_id":"node-de","edge_group_id":"edge-group-country-de","slot":"a","instance_uid":"pod-a","release_epoch":"release-old","daemonset_name":"fugue-edge-worker-a","daemonset_uid":"ds-a","daemonset_version":"100","failure_class":"bundle_signature_invalid"}}
 JSON
 
 state="${TMP}/state.json"

@@ -318,7 +318,7 @@ func verifyPlatformArtifactReleaseAPI(t *testing.T, server *Server, platformAdmi
 		Evidence: model.PlatformArtifactVerificationEvidence{
 			ConsumerConvergence:        true,
 			LocalProbe:                 true,
-			PublicSynthetic:            true,
+			PlatformEvidence:           true,
 			WatchWindow:                true,
 			BaselineMonotonic:          true,
 			DatabaseRollbackCompatible: true,

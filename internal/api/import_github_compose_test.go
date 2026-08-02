@@ -20,25 +20,25 @@ func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
 	}
 
 	got := rewriteComposeEnvironment(env, map[string]string{
-		"api": "uni-api-web-api",
-		"db":  "uni-api-web-api-db-postgres",
+		"api": "sample-api-web-api",
+		"db":  "sample-api-web-api-db-postgres",
 	})
 
-	if got["API_BASE_URL"] != "http://uni-api-web-api:8000/v1" {
+	if got["API_BASE_URL"] != "http://sample-api-web-api:8000/v1" {
 		t.Fatalf("unexpected API_BASE_URL rewrite: %q", got["API_BASE_URL"])
 	}
-	if got["DATABASE_URL"] != "postgresql://demo:secret@uni-api-web-api-db-postgres:5432/demo" {
+	if got["DATABASE_URL"] != "postgresql://demo:secret@sample-api-web-api-db-postgres:5432/demo" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
 	}
-	if got["DB_HOST"] != "uni-api-web-api-db-postgres" {
+	if got["DB_HOST"] != "sample-api-web-api-db-postgres" {
 		t.Fatalf("unexpected DB_HOST rewrite: %q", got["DB_HOST"])
 	}
 }
 
 func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.T) {
 	env := map[string]string{
-		"DATABASE_URL":      "postgresql+asyncpg://uniapi:@uni-api-web-api-db-postgres:5432/uniapi",
-		"DATABASE_HOST":     "uni-api-web-api-db-postgres",
+		"DATABASE_URL":      "postgresql+asyncpg://uniapi:@sample-api-web-api-db-postgres:5432/uniapi",
+		"DATABASE_HOST":     "sample-api-web-api-db-postgres",
 		"DATABASE_PORT":     "15432",
 		"DATABASE_USER":     "placeholder",
 		"DATABASE_PASSWORD": "",
@@ -46,16 +46,16 @@ func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.
 	}
 
 	got := applyManagedPostgresEnvironment(env, model.AppPostgresSpec{
-		ServiceName: "uni-api-web-api-db-postgres",
+		ServiceName: "sample-api-web-api-db-postgres",
 		Database:    "uniapi",
 		User:        "uniapi",
 		Password:    "secret-pass",
 	})
 
-	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres:5432/uniapi" {
+	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@sample-api-web-api-db-postgres:5432/uniapi" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
 	}
-	if got["DATABASE_HOST"] != "uni-api-web-api-db-postgres" {
+	if got["DATABASE_HOST"] != "sample-api-web-api-db-postgres" {
 		t.Fatalf("unexpected DATABASE_HOST rewrite: %q", got["DATABASE_HOST"])
 	}
 	if got["DATABASE_PORT"] != "5432" {
@@ -78,7 +78,7 @@ func TestApplyManagedPostgresEnvironmentKeepsExternalDatabaseURL(t *testing.T) {
 	}
 
 	got := applyManagedPostgresEnvironment(env, model.AppPostgresSpec{
-		ServiceName: "uni-api-web-api-db-postgres",
+		ServiceName: "sample-api-web-api-db-postgres",
 		Database:    "uniapi",
 		User:        "uniapi",
 		Password:    "new-secret",

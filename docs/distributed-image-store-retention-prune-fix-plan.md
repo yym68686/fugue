@@ -64,8 +64,8 @@ inventory/dry-run 和 blob 文件大小，没有执行 delete/prune/patch/restar
 | App | limit | `fugue_images` | available | lost | active pins | current pins | rollback pins |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `yesir` | 1 | 80 | 44 | 36 | 139 | 81 | 58 |
-| `uni-api-web` | 2 | 60 | 60 | 0 | 133 | 67 | 66 |
-| `uni-api-web-api` | 2 | 60 | 60 | 0 | 152 | 77 | 75 |
+| `sample-api-web` | 2 | 60 | 60 | 0 | 133 | 67 | 66 |
+| `sample-api-web-api` | 2 | 60 | 60 | 0 | 152 | 77 | 75 |
 | `gaokao` | 1 | 31 | 2 | 29 | 38 | 32 | 6 |
 | `oaix` | 2 | 25 | 17 | 8 | 61 | 37 | 24 |
 | `medical-insurance-audit-agent` | 1 | 18 | 17 | 1 | 34 | 18 | 16 |
@@ -656,7 +656,7 @@ min_available_replica_count=2
 - 发布 planner 和 prune-plan explainability；
 - 不删除 pins、tasks、manifests、blobs；
 - CLI/API 输出：每个 app keep/drop decisions，每个 node reclaim estimate；
-- 对比 production facts：`yesir`、`uni-api-web*`、`specforge` 等是否符合预期。
+- 对比 production facts：`yesir`、`sample-api-web*`、`specforge` 等是否符合预期。
 
 ### Phase 1: Safe metadata reconciliation
 

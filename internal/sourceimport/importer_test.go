@@ -61,11 +61,11 @@ func TestDetectDockerBuildInputs(t *testing.T) {
 }
 
 func TestBuildGitContextURL(t *testing.T) {
-	got, err := buildGitContextURL("https://github.com/yym68686/uni-api", "main", "abcdef1234567890")
+	got, err := buildGitContextURL("https://github.com/yym68686/sample-api", "main", "abcdef1234567890")
 	if err != nil {
 		t.Fatalf("build git context url: %v", err)
 	}
-	want := "git://github.com/yym68686/uni-api.git#refs/heads/main#abcdef1234567890"
+	want := "git://github.com/yym68686/sample-api.git#refs/heads/main#abcdef1234567890"
 	if got != want {
 		t.Fatalf("unexpected git context url:\nwant: %s\ngot:  %s", want, got)
 	}
@@ -190,12 +190,12 @@ func TestBuildKanikoJobObjectUsesDockerfileRelativeToContextSubPath(t *testing.T
 	t.Parallel()
 
 	jobObject, err := buildKanikoJobObject("fugue-system", "build-demo", dockerfileBuildRequest{
-		RepoURL:         "https://github.com/yym68686/uni-api-web",
+		RepoURL:         "https://github.com/yym68686/sample-api-web",
 		Branch:          "main",
 		CommitSHA:       "2251810595260b7ffbdbb1e45bbc875cb13ff631",
 		DockerfilePath:  "apps/api/Dockerfile",
 		BuildContextDir: "apps/api",
-		ImageRef:        "10.128.0.2:30500/fugue-apps/yym68686-uni-api-web-api:git-225181059526",
+		ImageRef:        "10.128.0.2:30500/fugue-apps/yym68686-sample-api-web-api:git-225181059526",
 	})
 	if err != nil {
 		t.Fatalf("build kaniko job object: %v", err)

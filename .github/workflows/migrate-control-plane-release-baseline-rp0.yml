@@ -170,7 +170,7 @@ jobs:
           expected_gates = [
               "active_slot_smoke", "authoritative_dns", "central_coredns",
               "dns_answer_audit", "edge_request_error_class", "inactive_worker_smoke",
-              "node_local_dns", "platform_autonomy", "public_synthetic", "release_guard",
+              "node_local_dns", "platform_autonomy", "platform_evidence", "release_guard",
               "rollback_path_smoke", "service_resolution",
           ]
           if windows.get("release_id") != head_sha or windows.get("watch_seconds") != 180:

@@ -92,7 +92,7 @@ func edgeRemediationTestAdvance(state model.EdgeActivationState, actionSequence 
 	nonce := fmt.Sprintf("sha256:%064x", state.Generation+actionSequence+100)
 	return model.EdgeRemediationAdvance{
 		ExpectedActivationGeneration: state.Generation, ExpectedActionSequence: actionSequence, ToPhase: phase,
-		ActiveEvidenceDigest: edgeActivationTestEvidence, SyntheticDigest: edgeActivationTestLegacy, KubernetesDigest: edgeActivationTestRecord,
+		ActiveEvidenceDigest: edgeActivationTestEvidence, PlatformEvidenceDigest: edgeActivationTestLegacy, KubernetesDigest: edgeActivationTestRecord,
 		Target: target, Actor: "bootstrap/remediator", ReleaseFence: "github:test/repo:9:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Nonce: nonce, AuthorizationDigest: edgeActivationTestPlan,
 		AuthorizationKeyID: "test-key", AuthorizationKeyGeneration: "generation-test", AuthorizationRunnerObservedSecretUID: "secret-uid", AuthorizationRunnerObservedSecretVersion: "1",
 	}

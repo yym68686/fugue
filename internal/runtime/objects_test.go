@@ -12,9 +12,9 @@ import (
 func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",
-		Name:     "uni-api-demo",
+		Name:     "sample-api-demo",
 		Spec: model.AppSpec{
-			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Image:     "registry.fugue.pro/fugue-apps/sample-api:git-abc123",
 			Ports:     []int{8000},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
@@ -33,7 +33,7 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 				Database:    "uniapi",
 				User:        "root",
 				Password:    "secret",
-				ServiceName: "uni-api-demo-postgres",
+				ServiceName: "sample-api-demo-postgres",
 				Resources: &model.ResourceSpec{
 					CPUMilliCores:   500,
 					MemoryMebibytes: 1024,
@@ -71,8 +71,8 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 	if selector, ok := postgresAliasSpec["selector"].(map[string]string); !ok {
 		t.Fatalf("expected postgres alias selector, got %#v", postgresAliasSpec["selector"])
-	} else if got := selector["cnpg.io/cluster"]; got != "uni-api-demo-postgres" {
-		t.Fatalf("expected postgres alias selector cluster %q, got %#v", "uni-api-demo-postgres", got)
+	} else if got := selector["cnpg.io/cluster"]; got != "sample-api-demo-postgres" {
+		t.Fatalf("expected postgres alias selector cluster %q, got %#v", "sample-api-demo-postgres", got)
 	}
 	if kind, _ := objects[4]["kind"].(string); kind != CloudNativePGClusterKind {
 		t.Fatalf("expected postgres cluster, got %#v", objects[4]["kind"])
@@ -125,7 +125,7 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 	containers := appPodSpec["containers"].([]map[string]any)
 	envObjects := containers[0]["env"].([]map[string]any)
-	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres" {
+	if got := envValue(envObjects, "DB_HOST"); got != "sample-api-demo-postgres" {
 		t.Fatalf("expected inline postgres DB_HOST to use Fugue-managed primary service, got %q", got)
 	}
 	waitPostgres := initContainers[len(initContainers)-1]
@@ -133,7 +133,7 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 		t.Fatalf("expected wait-postgres init container, got %#v", got)
 	}
 	command := waitPostgres["command"].([]string)
-	expectedWaitCommand := `host="uni-api-demo-postgres"; env_host="${UNI_API_DEMO_POSTGRES_SERVICE_HOST:-}"; if [ -n "$env_host" ]; then host="$env_host"; fi; until nc -z "$host" 5432; do sleep 1; done`
+	expectedWaitCommand := `host="sample-api-demo-postgres"; env_host="${SAMPLE_API_DEMO_POSTGRES_SERVICE_HOST:-}"; if [ -n "$env_host" ]; then host="$env_host"; fi; until nc -z "$host" 5432; do sleep 1; done`
 	if got := command[2]; got != expectedWaitCommand {
 		t.Fatalf("expected wait-postgres init container to prefer service ClusterIP env, got %q", got)
 	}
@@ -2348,9 +2348,9 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 		ID:        "app_demo",
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
-		Name:      "uni-api-demo",
+		Name:      "sample-api-demo",
 		Spec: model.AppSpec{
-			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Image:     "registry.fugue.pro/fugue-apps/sample-api:git-abc123",
 			Ports:     []int{8000},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
@@ -2379,7 +2379,7 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 				TenantID:    "tenant_demo",
 				ProjectID:   "project_demo",
 				OwnerAppID:  "app_demo",
-				Name:        "uni-api-demo",
+				Name:        "sample-api-demo",
 				Type:        model.BackingServiceTypePostgres,
 				Provisioner: model.BackingServiceProvisionerManaged,
 				Status:      model.BackingServiceStatusActive,
@@ -2388,7 +2388,7 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 						Database:    "uniapi",
 						User:        "root",
 						Password:    "secret",
-						ServiceName: "uni-api-demo-postgres",
+						ServiceName: "sample-api-demo-postgres",
 					},
 				},
 			},
@@ -2402,7 +2402,7 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 				Alias:     "postgres",
 				Env: map[string]string{
 					"DB_TYPE":     "postgres",
-					"DB_HOST":     "uni-api-demo-postgres",
+					"DB_HOST":     "sample-api-demo-postgres",
 					"DB_PORT":     "5432",
 					"DB_USER":     "root",
 					"DB_PASSWORD": "secret",
@@ -2442,7 +2442,7 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 
 	postgresCluster := objects[4]
-	if got := postgresCluster["metadata"].(map[string]any)["name"]; got != "uni-api-demo-postgres" {
+	if got := postgresCluster["metadata"].(map[string]any)["name"]; got != "sample-api-demo-postgres" {
 		t.Fatalf("expected managed backing service resource name, got %#v", got)
 	}
 	postgresLabels := postgresCluster["metadata"].(map[string]any)["labels"].(map[string]string)
@@ -2468,9 +2468,9 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 		ID:        "app_demo",
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
-		Name:      "uni-api-demo",
+		Name:      "sample-api-demo",
 		Spec: model.AppSpec{
-			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Image:     "registry.fugue.pro/fugue-apps/sample-api:git-abc123",
 			Ports:     []int{8000},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
@@ -2481,7 +2481,7 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 				TenantID:    "tenant_demo",
 				ProjectID:   "project_demo",
 				OwnerAppID:  "app_demo",
-				Name:        "uni-api-demo",
+				Name:        "sample-api-demo",
 				Type:        model.BackingServiceTypePostgres,
 				Provisioner: model.BackingServiceProvisionerManaged,
 				Status:      model.BackingServiceStatusActive,
@@ -2490,7 +2490,7 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 						Database:    "uniapi",
 						User:        "root",
 						Password:    "secret",
-						ServiceName: "uni-api-demo-postgres",
+						ServiceName: "sample-api-demo-postgres",
 					},
 				},
 			},
@@ -2528,8 +2528,8 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 	}
 	if selector, ok := aliasSpec["selector"].(map[string]string); !ok {
 		t.Fatalf("expected postgres alias selector, got %#v", aliasSpec["selector"])
-	} else if got := selector["cnpg.io/cluster"]; got != "uni-api-demo-postgres" {
-		t.Fatalf("expected postgres alias selector cluster %q, got %#v", "uni-api-demo-postgres", got)
+	} else if got := selector["cnpg.io/cluster"]; got != "sample-api-demo-postgres" {
+		t.Fatalf("expected postgres alias selector cluster %q, got %#v", "sample-api-demo-postgres", got)
 	}
 
 	postgresCluster := objects[3]
@@ -2981,9 +2981,9 @@ func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
 		ID:        "app_demo",
 		TenantID:  "tenant_demo",
 		ProjectID: "project_demo",
-		Name:      "uni-api-demo",
+		Name:      "sample-api-demo",
 		Spec: model.AppSpec{
-			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Image:     "registry.fugue.pro/fugue-apps/sample-api:git-abc123",
 			Ports:     []int{8000},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
@@ -2991,7 +2991,7 @@ func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
 				Database:    "uniapi",
 				User:        "root",
 				Password:    "secret",
-				ServiceName: "uni-api-demo-postgres",
+				ServiceName: "sample-api-demo-postgres",
 			},
 			NetworkPolicy: &model.AppNetworkPolicySpec{
 				Egress: &model.AppNetworkPolicyDirectionSpec{
@@ -3007,7 +3007,7 @@ func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
 	spec := networkPolicy["spec"].(map[string]any)
 	egress := spec["egress"].([]map[string]any)
 	postgresEgress := networkPolicyRuleByPodSelector(t, egress, map[string]string{
-		"cnpg.io/cluster":      "uni-api-demo-postgres",
+		"cnpg.io/cluster":      "sample-api-demo-postgres",
 		"cnpg.io/instanceRole": "primary",
 	})
 	postgresPorts := postgresEgress["ports"].([]map[string]any)

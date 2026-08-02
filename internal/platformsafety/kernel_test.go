@@ -462,7 +462,7 @@ func TestLKGPromotionRequiresCurrentFenceAndCompleteEvidence(t *testing.T) {
 		Evidence: model.PlatformArtifactVerificationEvidence{
 			ConsumerConvergence:        true,
 			LocalProbe:                 true,
-			PublicSynthetic:            true,
+			PlatformEvidence:           true,
 			WatchWindow:                true,
 			BaselineMonotonic:          true,
 			DatabaseRollbackCompatible: true,
@@ -481,11 +481,11 @@ func TestLKGPromotionRequiresCurrentFenceAndCompleteEvidence(t *testing.T) {
 		t.Fatalf("stale fencing token must fail: %+v", decision)
 	}
 	req.FencingToken = 7
-	req.Evidence.PublicSynthetic = false
+	req.Evidence.PlatformEvidence = false
 	if decision := EvaluateLKGPromotion(release, req, false); decision.Pass {
 		t.Fatalf("missing public synthetic evidence must fail: %+v", decision)
 	}
-	req.Evidence.PublicSynthetic = true
+	req.Evidence.PlatformEvidence = true
 	req.AllowInitialLKG = false
 	if decision := EvaluateLKGPromotion(release, req, false); decision.Pass {
 		t.Fatalf("initial LKG seed must require explicit approval: %+v", decision)

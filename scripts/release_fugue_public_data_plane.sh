@@ -5955,7 +5955,7 @@ edge_activation_complete_cutover_and_soak() {
     run_smoke_urls || return 1
     sleep 10
   done
-  run_responses_synthetic || return 1
+  run_platform_release_evidence || return 1
   api_generation="$(edge_activation_api_replica_generation)" || return 1
   local worker
   while IFS= read -r worker; do
@@ -6128,8 +6128,8 @@ run_bluegreen_release() {
     return 1
   fi
   if [[ "${edge_activation_enabled}" == "true" ]]; then
-    if ! run_responses_synthetic; then
-      abort_bluegreen_release "Responses API synthetic failed after all front slot switches" "${rollback_state[@]}"
+    if ! run_platform_release_evidence; then
+      abort_bluegreen_release "typed platform release evidence failed after all front slot switches" "${rollback_state[@]}"
       return 1
     fi
   fi
@@ -6506,48 +6506,32 @@ run_smoke_urls() {
   done < <(public_data_plane_smoke_urls)
 }
 
-run_responses_synthetic() {
-  local url="${FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_URL:-}"
-  local token="${FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_TOKEN:-}"
-  local model_name="${FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_MODEL:-gpt-5.6-sol}"
-  [[ -n "$(trim_field "${url}")" ]] || {
-    error "live blue-green release requires a /v1/responses synthetic URL"
+run_platform_release_evidence() {
+  [[ "${FUGUE_EDGE_ACTIVATION_ENABLED:-false}" == "true" ]] || {
+    error "typed platform release evidence requires active-epoch activation"
     return 1
   }
-  [[ "${url}" =~ ^https://[^/]+/v1/responses$ ]] || {
-    error "responses synthetic URL must be exact HTTPS /v1/responses"
-    return 1
-  }
-  [[ "${token}" =~ ^[A-Za-z0-9._-]{20,512}$ ]] || {
-    error "responses synthetic token is missing or invalid"
-    return 1
-  }
-  local work_dir="${FUGUE_EDGE_ACTIVATION_DIR:-$(mktemp -d)}"
-  local config="${work_dir}/responses-curl.conf"
-  local body="${work_dir}/responses-body.json"
-  local response="${work_dir}/responses-output.json"
-  (
-    umask 077
-    printf 'silent\nshow-error\nconnect-timeout = 5\nmax-time = 90\nproto = "=https"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\nheader = "Connection: close"\n' "${token}" >"${config}"
-    SYNTHETIC_MODEL="${model_name}" python3 - "${body}" <<'PY'
-import json,os,sys
-with open(sys.argv[1],"w",encoding="utf-8") as handle:
-    json.dump({"model":os.environ["SYNTHETIC_MODEL"],"input":"Reply with exactly ok.","stream":False,"max_output_tokens":8},handle,separators=(",",":"),sort_keys=True)
-    handle.write("\n")
-PY
-    install -m 600 /dev/null "${response}"
-  ) || return 1
+  local response="${FUGUE_EDGE_ACTIVATION_DIR}/platform-release-evidence.json"
   local status
-  status="$(curl --config "${config}" --request POST --data-binary "@${body}" --output "${response}" --write-out '%{http_code}' "${url}")" || return 1
+  install -m 600 /dev/null "${response}"
+  status="$(curl --config "${FUGUE_EDGE_ACTIVATION_CURL_CONFIG}" --get \
+    --data-urlencode "release_epoch=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" \
+    --data-urlencode "window=${FUGUE_PLATFORM_RELEASE_EVIDENCE_WINDOW:-5m}" \
+    --output "${response}" --write-out '%{http_code}' \
+    "${FUGUE_EDGE_ACTIVATION_API_URL%/}/v1/admin/edge/release-evidence")" || return 1
   [[ "${status}" == "200" ]] || {
-    error "responses synthetic returned HTTP ${status}"
+    error "platform release evidence returned HTTP ${status}"
     return 1
   }
-  python3 - "${response}" <<'PY'
-import json,sys
+  EXPECTED_RELEASE="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" python3 - "${response}" <<'PY'
+import json,os,re,sys
 with open(sys.argv[1],encoding="utf-8") as handle: value=json.load(handle)
-if not isinstance(value,dict) or value.get("status") != "completed" or not (value.get("output") or value.get("output_text")):
-    raise SystemExit("responses synthetic did not return a completed output")
+if not isinstance(value,dict) or value.get("schema")!="platform-release-evidence/v1": raise SystemExit("platform release evidence schema is invalid")
+if value.get("release_epoch")!=os.environ["EXPECTED_RELEASE"]: raise SystemExit("platform release evidence belongs to another release")
+if value.get("status")!="passed": raise SystemExit("platform release evidence did not pass")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}",str(value.get("evidence_digest") or "")): raise SystemExit("platform release evidence digest is invalid")
+metrics=value.get("metrics") or {}
+if int(metrics.get("request_count") or 0)<=0 or int(metrics.get("hard_failure_count") or 0)!=0: raise SystemExit("platform request evidence is incomplete or failed")
 PY
 }
 

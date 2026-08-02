@@ -44,6 +44,120 @@ func TestAppObservabilityMetricsSummaryDisabledIsStable(t *testing.T) {
 	}
 }
 
+func TestAppEdgeRouteDecisionEvidenceIsDomainScopedAndDisabledStable(t *testing.T) {
+	t.Parallel()
+	storeState, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	domain := "observed.example.test"
+	if _, err := storeState.PutAppDomain(model.AppDomain{Hostname: domain, AppID: app.ID, TenantID: app.TenantID, Status: model.AppDomainStatusVerified}); err != nil {
+		t.Fatalf("put verified app domain: %v", err)
+	}
+	path := "/v1/apps/" + app.ID + "/observability/edge-route-decisions?domain=" + url.QueryEscape(domain) + "&since=30m"
+	recorder := performJSONRequest(t, server, http.MethodGet, path, apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source       appObservabilitySourceStatus `json:"source"`
+		Domain       string                       `json:"domain"`
+		Decisions    []any                        `json:"decisions"`
+		MissingLinks []any                        `json:"missing_links"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Source.Status != "disabled" || response.Source.Retention != observability.EdgeRouteDecisionRetention.String() || response.Domain != domain {
+		t.Fatalf("unexpected disabled decision evidence response: %+v", response)
+	}
+	if response.Decisions == nil || response.MissingLinks == nil {
+		t.Fatalf("evidence arrays must be stable empty arrays: %+v", response)
+	}
+
+	for _, testCase := range []struct {
+		query string
+		code  int
+	}{
+		{query: "", code: http.StatusBadRequest},
+		{query: "?domain=other.example.test", code: http.StatusForbidden},
+		{query: "?domain=" + url.QueryEscape(domain) + "&limit=501", code: http.StatusBadRequest},
+	} {
+		recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/edge-route-decisions"+testCase.query, apiKey, nil)
+		if recorder.Code != testCase.code {
+			t.Fatalf("query %q: expected %d, got %d body=%s", testCase.query, testCase.code, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestBuildAppEdgeRouteDecisionQueriesBindsAppDomainAndTime(t *testing.T) {
+	t.Parallel()
+	window := appObservabilityWindow{Since: "2026-08-01T00:30:00Z", Until: "2026-08-01T00:40:00Z"}
+	decisionQuery, missingQuery, err := buildAppEdgeRouteDecisionQueries("tenant_' OR 1=1 --", "app_' OR 1=1 --", "FUGUE.PRO.", window, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{decisionQuery, missingQuery} {
+		for _, want := range []string{
+			"tenant_id = 'tenant_\\' OR 1=1 --'",
+			"app_id = 'app_\\' OR 1=1 --'",
+			"hostname = 'fugue.pro'",
+			"parseDateTime64BestEffort('2026-08-01T00:30:00Z')",
+			"parseDateTime64BestEffort('2026-08-01T00:40:00Z')",
+			"LIMIT 25",
+			"FINAL",
+		} {
+			if !strings.Contains(query, want) {
+				t.Fatalf("query missing %q:\n%s", want, query)
+			}
+		}
+	}
+}
+
+func TestAppEdgeRouteDecisionEvidenceQueriesTypedClickHouseTables(t *testing.T) {
+	t.Parallel()
+	storeState, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	domain := "observed.example.test"
+	if _, err := storeState.PutAppDomain(model.AppDomain{Hostname: domain, AppID: app.ID, TenantID: app.TenantID, Status: model.AppDomainStatusVerified}); err != nil {
+		t.Fatalf("put verified domain: %v", err)
+	}
+	queries := []string{}
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		queries = append(queries, query)
+		switch {
+		case strings.Contains(query, "edge_route_decisions"):
+			_, _ = fmt.Fprintln(w, `{"ts":"2026-08-01 00:33:31.416","tenant_id":"`+app.TenantID+`","project_id":"`+app.ProjectID+`","app_id":"`+app.ID+`","hostname":"observed.example.test","decision_id":"decision_123","bundle_version":"bundle_123","route_generation":"route_123","correlation_key":"[\"decision_123\",\"bundle_123\",\"route_123\"]","final_status":"unavailable","final_reason":"runtime invariant violation: image_missing","invariant_violations_json":"[\"image_missing\"]","material_json":"{\"cache_layer\":\"list\",\"deployment_image_digest\":\"sha256:abc\"}"}`)
+		case strings.Contains(query, "edge_route_decision_missing_links"):
+			_, _ = fmt.Fprintln(w, `{"ts":"2026-08-01 00:33:34.000","tenant_id":"`+app.TenantID+`","app_id":"`+app.ID+`","hostname":"observed.example.test","request_id":"req_123","decision_id":"decision_missing","bundle_version":"bundle_missing","route_generation":"route_missing","correlation_key":"[\"decision_missing\",\"bundle_missing\",\"route_missing\"]","reason":"decision material absent after 2m grace period","material_json":"{}"}`)
+		default:
+			t.Fatalf("unexpected query: %s", query)
+		}
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{Enabled: true, ClickHouseDSN: clickHouse.URL}.Normalize()
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/edge-route-decisions?domain="+domain+"&since=30m", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source       appObservabilitySourceStatus `json:"source"`
+		Decisions    []map[string]any             `json:"decisions"`
+		MissingLinks []map[string]any             `json:"missing_links"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || len(response.Decisions) != 1 || len(response.MissingLinks) != 1 {
+		t.Fatalf("unexpected evidence response: %+v", response)
+	}
+	material, ok := response.Decisions[0]["material"].(map[string]any)
+	if !ok || material["cache_layer"] != "list" || material["deployment_image_digest"] != "sha256:abc" {
+		t.Fatalf("decision material not decoded: %+v", response.Decisions[0])
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected exactly two bounded queries, got %+v", queries)
+	}
+	for _, query := range queries {
+		if !strings.Contains(query, "tenant_id = '"+app.TenantID+"'") || !strings.Contains(query, "app_id = '"+app.ID+"'") || !strings.Contains(query, "hostname = '"+domain+"'") {
+			t.Fatalf("query escaped tenant/app/domain scope: %s", query)
+		}
+	}
+}
+
 func TestAppObservabilityMetricsSummaryQueriesPrometheus(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 	queries := []string{}
@@ -257,12 +371,17 @@ func TestAppObservabilityRequiresReadScope(t *testing.T) {
 		t.Fatalf("create restricted api key: %v", err)
 	}
 
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/summary?since=30m", apiKey, nil)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	if !strings.Contains(recorder.Body.String(), "app.observability.read") {
-		t.Fatalf("expected missing scope message, got %s", recorder.Body.String())
+	for _, endpoint := range []string{
+		"/v1/apps/" + app.ID + "/observability/metrics/summary?since=30m",
+		"/v1/apps/" + app.ID + "/observability/edge-route-decisions?domain=observed.example.test&since=30m",
+	} {
+		recorder := performJSONRequest(t, server, http.MethodGet, endpoint, apiKey, nil)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s: expected 403, got %d body=%s", endpoint, recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), "app.observability.read") {
+			t.Fatalf("%s: expected missing scope message, got %s", endpoint, recorder.Body.String())
+		}
 	}
 }
 
@@ -1273,7 +1392,7 @@ func TestAppObservabilityRuleDiagnosisPrefersTopSpanOverLatencyOnlyReleaseRegres
 			"stream_count":                   17,
 		}},
 		[]map[string]any{{
-			"service":      "uni-api-ember",
+			"service":      "sample-api-ember",
 			"stage":        "upstream_headers_received",
 			"span_count":   17,
 			"p95_stage_ms": 28040,

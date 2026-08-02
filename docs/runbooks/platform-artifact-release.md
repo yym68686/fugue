@@ -34,7 +34,7 @@ fugue admin artifact verify-lkg <release-id> \
   --allow-initial-lkg \
   --consumer-convergence \
   --local-probe \
-  --public-synthetic \
+  --platform-evidence \
   --watch-window \
   --baseline-monotonic \
   --database-rollback-compatible \

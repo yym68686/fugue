@@ -46,15 +46,6 @@ on:
         description: Comma-separated HTTPS URLs covering at least two distinct hostnames.
         required: true
         type: string
-      responses_synthetic_url:
-        description: Exact HTTPS /v1/responses endpoint used for a real post-switch synthetic.
-        required: true
-        type: string
-      responses_synthetic_model:
-        description: Model used by the bounded Responses API synthetic.
-        required: false
-        type: string
-        default: gpt-5.6-sol
 
 permissions:
   contents: read
@@ -117,7 +108,4 @@ jobs:
           FUGUE_EDGE_ACTIVATION_API_URL: ${{ vars.FUGUE_API_URL }}
           FUGUE_EDGE_ACTIVATION_API_KEY: ${{ secrets.FUGUE_BOOTSTRAP_KEY }}
           FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME: ${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME }}
-          FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_URL: ${{ inputs.responses_synthetic_url }}
-          FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_MODEL: ${{ inputs.responses_synthetic_model }}
-          FUGUE_PUBLIC_DATA_PLANE_RESPONSES_SYNTHETIC_TOKEN: ${{ secrets.FUGUE_RESPONSES_SYNTHETIC_TOKEN }}
         run: ./scripts/release_fugue_public_data_plane.sh

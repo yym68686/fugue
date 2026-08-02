@@ -3,7 +3,7 @@
 本文档固定 Fugue 系统性提升自组织、自恢复和鲁棒性的下一阶段改造方案。它基于近期两类生产事故抽象通用能力：
 
 - edge / DNS / route 机制更新后，真实流量调度、健康判断和回退保护暴露不足。
-- `ns101351` 节点上的 kube-dns Service `10.43.0.10:53` 被过期 Fugue local DNS escape-hatch iptables DNAT 规则转发到不存在的 `10.42.8.1:53`，导致 0-0 Web/API pod 内部 DNS 解析失败，进而出现前端认证不可用和 API `503 upstream unavailable`。
+- `ns101351` 节点上的 kube-dns Service `10.43.0.10:53` 被过期 Fugue local DNS escape-hatch iptables DNAT 规则转发到不存在的 `10.42.8.1:53`，导致 sample-app Web/API pod 内部 DNS 解析失败，进而出现前端认证不可用和 API `503 upstream unavailable`。
 
 本文不是单次事故热修记录，也不是替代已有计划。它补充并收敛以下文档：
 

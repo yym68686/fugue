@@ -219,7 +219,7 @@ func TestRP0MetadataObjectMaterializationIsHostedEvidenceBoundAndRefFree(t *test
 	if err != nil {
 		t.Fatalf("read RP0 migration workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "a154d22eeecf2344f37ee4ff36b3462803f911795dcb4333d01d7966cf56d874")
+	assertWorkflowSourceDigest(t, data, "76a1e6c6a4d6af1df8516c9c1f418ee0421149d91332188be74fd8a651f99070")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -291,7 +291,7 @@ func TestRP0MetadataObjectMaterializationIsHostedEvidenceBoundAndRefFree(t *test
 	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
 		"migrate-forward-baseline": {Steps: job.Steps},
 	}, map[string]string{
-		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline":      "5d634b19d90645ba234e335c8601fad69996bd17ee4feadf13cbaca3bb843b03",
+		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline":      "c451c407dae5526825da3e969d827e89d365517fad45a0ba8027416cc626bbd9",
 		"migrate-forward-baseline/Write RP0 migration intent evidence":                                 "854da0bb501bd6179d242f9557768848fefc4d62981bc051d889749388108f5c",
 		"migrate-forward-baseline/Observe unchanged production health before baseline migration":       "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
 		"migrate-forward-baseline/Materialize canonical orphan baseline metadata object without a ref": "4fa8d03db5455ccfeb33fae687e46072adf80651745868a106615628829b9ae4",

@@ -1074,25 +1074,25 @@ func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T)
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests = append(requests, req.Method+" "+req.URL.Path)
 		switch {
-		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo" && len(requests) == 1:
+		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo" && len(requests) == 1:
 			return &http.Response{
 				StatusCode: http.StatusUnprocessableEntity,
-				Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"uni-api-demo\" is invalid: spec.selector: Invalid value: map[string]string{\"app.kubernetes.io/name\":\"uni-api-demo\"}: field is immutable"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"sample-api-demo\" is invalid: spec.selector: Invalid value: map[string]string{\"app.kubernetes.io/name\":\"sample-api-demo\"}: field is immutable"}`)),
 				Header:     make(http.Header),
 			}, nil
-		case req.Method == http.MethodDelete && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo":
+		case req.Method == http.MethodDelete && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo":
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(`{}`)),
 				Header:     make(http.Header),
 			}, nil
-		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo":
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo":
 			return &http.Response{
 				StatusCode: http.StatusNotFound,
 				Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
 				Header:     make(http.Header),
 			}, nil
-		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo" && len(requests) == 4:
+		case req.Method == http.MethodPatch && req.URL.Path == "/apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo" && len(requests) == 4:
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(`{"kind":"Deployment"}`)),
@@ -1115,7 +1115,7 @@ func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T)
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata": map[string]any{
-			"name": "uni-api-demo",
+			"name": "sample-api-demo",
 		},
 	}
 
@@ -1124,10 +1124,10 @@ func TestApplyObjectRecreatesDeploymentAfterImmutableSelectorError(t *testing.T)
 	}
 
 	expected := []string{
-		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo",
-		"DELETE /apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo",
-		"GET /apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo",
-		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo",
+		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo",
+		"DELETE /apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo",
+		"GET /apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo",
+		"PATCH /apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo",
 	}
 	if len(requests) != len(expected) {
 		t.Fatalf("expected request sequence %v, got %v", expected, requests)
@@ -1145,12 +1145,12 @@ func TestApplyObjectRefusesDeploymentRecreateWhenZeroDowntimeIsRequired(t *testi
 	var requests []string
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests = append(requests, req.Method+" "+req.URL.Path)
-		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo" {
+		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo" {
 			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
 		}
 		return &http.Response{
 			StatusCode: http.StatusUnprocessableEntity,
-			Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"uni-api-demo\" is invalid: spec.selector: field is immutable"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"sample-api-demo\" is invalid: spec.selector: field is immutable"}`)),
 			Header:     make(http.Header),
 		}, nil
 	})
@@ -1165,7 +1165,7 @@ func TestApplyObjectRefusesDeploymentRecreateWhenZeroDowntimeIsRequired(t *testi
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata": map[string]any{
-			"name": "uni-api-demo",
+			"name": "sample-api-demo",
 			"annotations": map[string]string{
 				runtime.FugueAnnotationZeroDowntimeRequired: "true",
 			},
@@ -1187,12 +1187,12 @@ func TestApplyObjectRefusesDestructiveVolumeRepairWhenZeroDowntimeIsRequired(t *
 	var requests []string
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests = append(requests, req.Method+" "+req.URL.Path)
-		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/uni-api-demo" {
+		if req.Method != http.MethodPatch || req.URL.Path != "/apis/apps/v1/namespaces/tenant-demo/deployments/sample-api-demo" {
 			t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
 		}
 		return &http.Response{
 			StatusCode: http.StatusUnprocessableEntity,
-			Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"uni-api-demo\" is invalid: spec.template.spec.containers[0].volumeMounts[0].name: Not found: \"app-files\""}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Deployment.apps \"sample-api-demo\" is invalid: spec.template.spec.containers[0].volumeMounts[0].name: Not found: \"app-files\""}`)),
 			Header:     make(http.Header),
 		}, nil
 	})
@@ -1207,7 +1207,7 @@ func TestApplyObjectRefusesDestructiveVolumeRepairWhenZeroDowntimeIsRequired(t *
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata": map[string]any{
-			"name": "uni-api-demo",
+			"name": "sample-api-demo",
 			"annotations": map[string]string{
 				runtime.FugueAnnotationZeroDowntimeRequired: "true",
 			},

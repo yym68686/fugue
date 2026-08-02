@@ -220,7 +220,7 @@ func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
 
 	put := performJSONRequest(t, server, http.MethodPut, "/v1/projects/"+frontend.ProjectID+"/routes", apiKey, map[string]any{
 		"domains": []map[string]any{
-			{"name": "production", "hostname": "0-0.fugue.pro"},
+			{"name": "production", "hostname": "sample-app.fugue.pro"},
 			{"name": "api", "hostname": "api.fugue.pro"},
 			{"name": "staging", "hostname": "api2.fugue.pro"},
 		},
@@ -308,7 +308,7 @@ func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
 		apiRoute.Upstreams[1].UpstreamURL != "https://api-candidate.example.internal" {
 		t.Fatalf("unexpected api candidate upstream: %+v", apiRoute.Upstreams[1])
 	}
-	rootRoute := edgeRouteByHostKindAndPath(bundle.Routes, "0-0.fugue.pro", model.EdgeRouteKindPlatformDomain, "/")
+	rootRoute := edgeRouteByHostKindAndPath(bundle.Routes, "sample-app.fugue.pro", model.EdgeRouteKindPlatformDomain, "/")
 	if rootRoute == nil {
 		t.Fatalf("expected production root route, got %+v", bundle.Routes)
 	}

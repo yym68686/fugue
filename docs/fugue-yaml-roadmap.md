@@ -104,12 +104,12 @@ Fugue 现在的 `fugue.yaml` 更像“导入拓扑 manifest”，还不是完整
 version: 2
 
 project:
-  name: uni-api-web
-  description: App lifecycle project for 0-0.pro
+  name: sample-api-web
+  description: App lifecycle project for service.example.test
 
 domains:
   - name: production
-    host: 0-0.pro
+    host: service.example.test
     tls: managed
 
 entrypoints:
@@ -123,7 +123,7 @@ entrypoints:
 
 services:
   web:
-    image: yym68686/uni-api-frontend:main
+    image: yym68686/sample-api-frontend:main
     port: 3000
     env:
       NEXT_PUBLIC_API_BASE_URL: /v1

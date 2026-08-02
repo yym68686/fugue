@@ -585,7 +585,7 @@ func TestPlatformBadFullReleaseDoesNotOverwriteVerifiedLKG(t *testing.T) {
 		t.Fatalf("candidate release overwrote stable LKG before verification: %+v", lkg)
 	}
 	incomplete := completePlatformVerificationRequest(release.FencingToken, false)
-	incomplete.Evidence.PublicSynthetic = false
+	incomplete.Evidence.PlatformEvidence = false
 	if _, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(release.ID, incomplete, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected incomplete evidence conflict, got %v", err)
 	}
@@ -885,7 +885,7 @@ func completePlatformVerificationRequest(fencingToken int64, allowInitial bool) 
 		Evidence: model.PlatformArtifactVerificationEvidence{
 			ConsumerConvergence:        true,
 			LocalProbe:                 true,
-			PublicSynthetic:            true,
+			PlatformEvidence:           true,
 			WatchWindow:                true,
 			BaselineMonotonic:          true,
 			DatabaseRollbackCompatible: true,

@@ -90,6 +90,18 @@ type edgeNodeControlResponse struct {
 	DesiredState edgeNodeDesiredState `json:"desired_state"`
 }
 
+type platformReleaseEvidenceResponse struct {
+	Schema          string           `json:"schema"`
+	Status          string           `json:"status"`
+	Reason          string           `json:"reason"`
+	ReleaseEpoch    string           `json:"release_epoch"`
+	BundleVersion   string           `json:"bundle_version"`
+	ActivationPhase string           `json:"activation_phase"`
+	EvidenceDigest  string           `json:"evidence_digest"`
+	Groups          []map[string]any `json:"groups"`
+	Metrics         map[string]any   `json:"metrics"`
+}
+
 type setEdgeNodeCanaryRequest struct {
 	State  string `json:"state,omitempty"`
 	Weight int    `json:"weight,omitempty"`
@@ -336,6 +348,17 @@ func (c *Client) UndrainEdgeNode(edgeID string) (edgeNodeControlResponse, error)
 		return edgeNodeControlResponse{}, err
 	}
 	return response, nil
+}
+
+func (c *Client) GetPlatformReleaseEvidence(releaseEpoch, window string) (platformReleaseEvidenceResponse, error) {
+	query := url.Values{}
+	query.Set("release_epoch", strings.TrimSpace(releaseEpoch))
+	if strings.TrimSpace(window) != "" {
+		query.Set("window", strings.TrimSpace(window))
+	}
+	var response platformReleaseEvidenceResponse
+	err := c.doJSON(http.MethodGet, "/v1/admin/edge/release-evidence?"+query.Encode(), nil, &response)
+	return response, err
 }
 
 func edgeRoutePolicyPath(hostname string) string {

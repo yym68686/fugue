@@ -65,6 +65,12 @@ type appObservabilityDiagnosisOptions struct {
 	appObservabilityWindowOptions
 }
 
+type appEdgeRouteDecisionOptions struct {
+	appObservabilityWindowOptions
+	Domain string
+	Limit  int
+}
+
 type appRolloutTimelineOptions struct {
 	Around string
 	Window time.Duration
@@ -117,6 +123,15 @@ type appObservabilityDiagnosisResponse struct {
 	Source    appObservabilitySourceStatus `json:"source"`
 	Window    appObservabilityWindow       `json:"window"`
 	Diagnosis appObservabilityDiagnosis    `json:"diagnosis"`
+}
+
+type appEdgeRouteDecisionEvidenceResponse struct {
+	Source       appObservabilitySourceStatus `json:"source"`
+	AppID        string                       `json:"app_id"`
+	Domain       string                       `json:"domain"`
+	Window       appObservabilityWindow       `json:"window"`
+	Decisions    []map[string]any             `json:"decisions"`
+	MissingLinks []map[string]any             `json:"missing_links"`
 }
 
 func (c *Client) GetAppObservabilityMetricsSummary(id string, opts appObservabilityMetricsOptions) (appObservabilityMetricsSummaryResponse, error) {
@@ -221,6 +236,24 @@ func (c *Client) GetAppObservabilityDiagnosis(id string, opts appObservabilityDi
 	var response appObservabilityDiagnosisResponse
 	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return appObservabilityDiagnosisResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListAppEdgeRouteDecisions(id string, opts appEdgeRouteDecisionOptions) (appEdgeRouteDecisionEvidenceResponse, error) {
+	values := url.Values{}
+	appendAppObservabilityWindowValues(values, opts.appObservabilityWindowOptions)
+	if domain := strings.TrimSpace(opts.Domain); domain != "" {
+		values.Set("domain", domain)
+	}
+	appendPositiveIntQueryValue(values, "limit", opts.Limit)
+	relative := appObservabilityPath(id, "edge-route-decisions")
+	if encoded := values.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appEdgeRouteDecisionEvidenceResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appEdgeRouteDecisionEvidenceResponse{}, err
 	}
 	return response, nil
 }

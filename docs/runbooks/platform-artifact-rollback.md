@@ -35,7 +35,7 @@ fugue admin artifact verify-lkg <rollback-release-id> \
   --fencing-token <token> \
   --consumer-convergence \
   --local-probe \
-  --public-synthetic \
+  --platform-evidence \
   --watch-window \
   --baseline-monotonic \
   --database-rollback-compatible \

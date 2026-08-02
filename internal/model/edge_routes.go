@@ -1,9 +1,28 @@
 package model
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
+
+// EdgeRouteDecisionCorrelationKey is the canonical, lossless key shared by
+// control-plane decision material and edge request facts.
+func EdgeRouteDecisionCorrelationKey(decisionID, bundleVersion, routeGeneration string) string {
+	values := [3]string{
+		strings.TrimSpace(decisionID),
+		strings.TrimSpace(bundleVersion),
+		strings.TrimSpace(routeGeneration),
+	}
+	if values[0] == "" || values[1] == "" || values[2] == "" {
+		return ""
+	}
+	body, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(body)
+}
 
 const (
 	BundleSchemaVersionV1 = "1.0"

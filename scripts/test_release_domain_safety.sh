@@ -9136,6 +9136,24 @@ for path, binding, body in loaded:
     path.write_text(body.replace(binding, "", 1).replace(guard, "", 1))
 PY
   image_cache_strategy_target_fingerprints_match || fail "normalized current chart tree fingerprint must pass"
+  accepted_observability_current="$(CHART_ROOT="${fingerprint_repo}/deploy/helm/fugue" python3 - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+root = Path(os.environ["CHART_ROOT"])
+digest = hashlib.sha256()
+files = sorted(path for path in root.rglob("*") if path.is_file() and path.name != "chart_test.go" and not path.name.endswith("_test.go"))
+for path in files:
+    relative = path.relative_to(root).as_posix().encode()
+    content = path.read_bytes()
+    digest.update(len(relative).to_bytes(4, "big"))
+    digest.update(relative)
+    digest.update(len(content).to_bytes(8, "big"))
+    digest.update(content)
+print(digest.hexdigest())
+PY
+)"
+  assert_eq "${accepted_observability_current}" "51bd6af468e6c0bed31fdb028450a5c2d9898668df94cb3b83c7bd749838b553" "exact platform release evidence chart fingerprint"
   python3 - "${fingerprint_repo}/deploy/helm/fugue/templates/deployment.yaml" <<'PY'
 from pathlib import Path
 import sys
@@ -11155,7 +11173,7 @@ node_updater_subsystems="$(release_safety_changed_file_subsystems)"
   fail "node-updater changed files must select node-updater and control-plane API subsystems, got ${node_updater_subsystems}"
 assert_eq "$(FUGUE_NODE_UPDATER_TIMER_CYCLE_SECONDS=123 release_safety_watch_window_seconds)" "123" "node-updater changed files must require a full timer-cycle watch window"
 node_updater_gates="$(release_safety_required_gates)"
-[[ "${node_updater_gates}" == *"node_deep_health"* && "${node_updater_gates}" == *"public_synthetic"* ]] ||
+[[ "${node_updater_gates}" == *"node_deep_health"* && "${node_updater_gates}" == *"platform_evidence"* ]] ||
   fail "node-updater changed files must require node deep health and public synthetic gates, got ${node_updater_gates}"
 
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/edge_routes.go'
@@ -11223,12 +11241,12 @@ FUGUE_UNKNOWN_RELEASE_RISK_APPROVED=true
 require_release_safety_attribution || fail "explicit unknown high-risk approval must release the hold"
 unset FUGUE_UNKNOWN_RELEASE_RISK_APPROVED
 
-assert_eq "$(public_synthetic_error_class 503 'no healthy edge groups')" "public_synthetic_503_no_healthy_edge_groups" "synthetic no healthy edge groups class"
-public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'edge group has no healthy non-excluded edge nodes')" ||
+assert_eq "$(platform_evidence_error_class 503 'no healthy edge groups')" "platform_evidence_503_no_healthy_edge_groups" "synthetic no healthy edge groups class"
+platform_evidence_status_is_hard_rollback "$(platform_evidence_error_class 503 'edge group has no healthy non-excluded edge nodes')" ||
   fail "synthetic 503 no healthy non-excluded edge nodes must trigger hard rollback"
-public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'no healthy edge groups')" ||
+platform_evidence_status_is_hard_rollback "$(platform_evidence_error_class 503 'no healthy edge groups')" ||
   fail "synthetic 503 no healthy edge groups must trigger hard rollback"
-if public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'upstream unavailable')"; then
+if platform_evidence_status_is_hard_rollback "$(platform_evidence_error_class 503 'upstream unavailable')"; then
   fail "generic upstream unavailable must not hard rollback without Fugue routing attribution"
 fi
 

@@ -46,6 +46,37 @@ func TestRunAppMetricsUsesObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunAppEdgeRouteDecisionsUsesDomainTimeQuery(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			writeObservabilityTestApp(w)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/edge-route-decisions":
+			if r.URL.Query().Get("domain") != "fugue.pro" || r.URL.Query().Get("since") != "30m" || r.URL.Query().Get("limit") != "25" {
+				t.Fatalf("unexpected evidence query: %s", r.URL.RawQuery)
+			}
+			_, _ = fmt.Fprint(w, `{"source":{"available":true,"status":"available","mode":"instrumented","retention":"720h0m0s","active_exporters":["analytics"],"reason":"ok"},"app_id":"app_123","domain":"fugue.pro","window":{"since":"2026-08-01T00:00:00Z","until":"2026-08-01T00:30:00Z"},"decisions":[{"decision_id":"decision_123"}],"missing_links":[]}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL, "--token", "token", "app", "observability", "edge-route-decisions", "demo",
+		"--domain", "fugue.pro", "--since", "30m", "--limit", "25",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run edge route decisions: %v stderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{"domain=fugue.pro", "decisions=1", "missing_links=0"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("output missing %q: %s", want, stdout.String())
+		}
+	}
+}
+
 func TestRunAppMetricsQueryUsesObservabilityEndpoint(t *testing.T) {
 	t.Parallel()
 
