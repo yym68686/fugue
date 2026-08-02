@@ -120,6 +120,59 @@ func TestMaterializeLiveRelativeTargetPublishedImageRefsPreservesExactBuiltOnlyP
 	})
 }
 
+func TestMaterializeObservedWorkloadImagesKeepsHelmObjectAndCopiesOnlyImages(t *testing.T) {
+	helmBaseObjects, unknown := decodeManifest(
+		publicEdgeTargetMaterializationManifest("helm-checksum", "registry.test/edge:helm-base"),
+		mustLoadOwnership(t, publicEdgeTargetMaterializationOwnership()),
+		"fugue-system",
+		"helm base",
+	)
+	if len(unknown) != 0 || len(helmBaseObjects) != 1 {
+		t.Fatalf("decode Helm base: objects=%d unknown=%v", len(helmBaseObjects), unknown)
+	}
+	observedManifest := bytes.Replace(
+		publicEdgeTargetMaterializationManifest("observed-only-checksum", "registry.test/edge@sha256:"+strings.Repeat("a", 64)),
+		[]byte("  labels:\n"),
+		[]byte("  annotations:\n    "+DisabledPublicEdgeWorkerObservationAnnotation+": observed-only\n  labels:\n"),
+		1,
+	)
+	observedObjects, unknown := decodeManifest(
+		observedManifest,
+		mustLoadOwnership(t, publicEdgeTargetMaterializationOwnership()),
+		"fugue-system",
+		"observed live",
+	)
+	if len(unknown) != 0 || len(observedObjects) != 1 {
+		t.Fatalf("decode observed live: objects=%d unknown=%v", len(observedObjects), unknown)
+	}
+
+	preserved, err := materializeObservedWorkloadImages(helmBaseObjects[0], observedObjects[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeMaterializedTargetObjects([]manifestObject{preserved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(DisabledPublicEdgeWorkerObservationAnnotation)) ||
+		bytes.Contains(encoded, []byte("observed-only-checksum")) {
+		t.Fatalf("observed-only metadata escaped into immutable target:\n%s", encoded)
+	}
+	if !bytes.Contains(encoded, []byte("checksum/edge-blue-green-front: helm-checksum")) ||
+		!bytes.Contains(encoded, []byte("registry.test/edge@sha256:"+strings.Repeat("a", 64))) {
+		t.Fatalf("Helm object or observed image was not preserved exactly:\n%s", encoded)
+	}
+}
+
+func mustLoadOwnership(t *testing.T, ownership []byte) *OwnershipSpec {
+	t.Helper()
+	spec, err := LoadOwnership(bytes.NewReader(ownership))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec
+}
+
 func TestMaterializeLiveRelativeTargetPublishedImageRefsAcceptsAlreadyLiveTargetImage(t *testing.T) {
 	baseCommit := strings.Repeat("1", 40)
 	targetCommit := strings.Repeat("2", 40)

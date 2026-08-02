@@ -221,15 +221,19 @@ func materializeObservedLiveRelativeTargetPublishedImageRefs(
 	if err := spec.ValidateBindings(context.BindingMap()); err != nil {
 		return nil, fmt.Errorf("validate ownership bindings: %w", err)
 	}
+	helmBaseObjects, helmBaseUnknown := decodeManifest(baseManifest, spec, defaultNamespace, "live-relative helm base")
 	baseObjects, baseUnknown := decodeManifest(observedLiveManifest, spec, defaultNamespace, "live-relative observed base")
 	targetObjects, targetUnknown := decodeManifest(materialized, spec, defaultNamespace, "live-relative target")
-	if len(baseUnknown) != 0 || len(targetUnknown) != 0 {
-		return nil, manifestEvidenceError(append(baseUnknown, targetUnknown...))
+	if len(helmBaseUnknown) != 0 || len(baseUnknown) != 0 || len(targetUnknown) != 0 {
+		unknown := append(append(helmBaseUnknown, baseUnknown...), targetUnknown...)
+		return nil, manifestEvidenceError(unknown)
 	}
+	helmBaseByIdentity, duplicateHelmBase := indexManifestObjects(helmBaseObjects, "live-relative helm base")
 	baseByIdentity, duplicateBase := indexManifestObjects(baseObjects, "live-relative base")
 	targetByIdentity, duplicateTarget := indexManifestObjects(targetObjects, "live-relative target")
-	if len(duplicateBase) != 0 || len(duplicateTarget) != 0 {
-		return nil, manifestEvidenceError(append(duplicateBase, duplicateTarget...))
+	if len(duplicateHelmBase) != 0 || len(duplicateBase) != 0 || len(duplicateTarget) != 0 {
+		duplicates := append(append(duplicateHelmBase, duplicateBase...), duplicateTarget...)
+		return nil, manifestEvidenceError(duplicates)
 	}
 
 	for identity, base := range baseByIdentity {
@@ -252,10 +256,42 @@ func materializeObservedLiveRelativeTargetPublishedImageRefs(
 			return nil, err
 		}
 		if preserve {
-			targetObjects[index] = base
+			helmBase, exists := helmBaseByIdentity[identityKey(base.Identity)]
+			if !exists {
+				return nil, fmt.Errorf("public-data-plane object is absent from Helm base: %s", base.Identity.String())
+			}
+			preserved, err := materializeObservedWorkloadImages(helmBase, base)
+			if err != nil {
+				return nil, err
+			}
+			targetObjects[index] = preserved
 		}
 	}
 	return encodeMaterializedTargetObjects(targetObjects)
+}
+
+func materializeObservedWorkloadImages(helmBase, observed manifestObject) (manifestObject, error) {
+	helmContainers, helmWorkload, err := workloadContainers(helmBase)
+	if err != nil {
+		return manifestObject{}, err
+	}
+	observedContainers, observedWorkload, err := workloadContainers(observed)
+	if err != nil {
+		return manifestObject{}, err
+	}
+	if !helmWorkload || !observedWorkload || len(helmContainers) != len(observedContainers) {
+		return manifestObject{}, fmt.Errorf("public-edge Helm and observed workload containers are incomplete")
+	}
+	for name, helmContainer := range helmContainers {
+		observedContainer, found := observedContainers[name]
+		if !found {
+			return manifestObject{}, fmt.Errorf("public-edge Helm and observed workload container set changed")
+		}
+		if err := setRenderedContainerImage(helmBase, helmContainer.Pointer, observedContainer.Image); err != nil {
+			return manifestObject{}, err
+		}
+	}
+	return helmBase, nil
 }
 
 func publishedArtifactRepository(plan BuildArtifactPlan, name string) (string, bool, error) {
