@@ -20581,7 +20581,7 @@ control_plane_edge_activation_config_capture_render_set() {
   run_release_long_command 30 "edge activation config base manifest read" \
     helm get manifest fugue -n fugue-system --revision 808 >"${directory}/base.yaml" || return
   run_release_long_command 30 "edge activation config base values read" \
-    helm get values fugue -n fugue-system --all --revision 808 -o json >"${directory}/base-values.json" || return
+    helm get values fugue -n fugue-system --revision 808 -o json >"${directory}/base-values.json" || return
   control_plane_edge_activation_config_render true "${directory}/target.yaml" || return
   control_plane_edge_activation_config_render true "${directory}/repeated-target.yaml" || return
   control_plane_edge_activation_config_render false "${directory}/hybrid.yaml" || return
@@ -20791,7 +20791,7 @@ control_plane_edge_activation_config_verify_live() {
   else
     expected_values="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1],encoding="utf-8"))["baseValuesDigest"])' "${CONTROL_PLANE_HOTFIX_PLAN_FILE}")" || return
   fi
-  [[ "$(helm get values fugue -n fugue-system --all --revision "${revision}" -o json | control_plane_hotfix_json_digest)" == "${expected_values}" ]] || return 1
+  [[ "$(helm get values fugue -n fugue-system --revision "${revision}" -o json | control_plane_hotfix_json_digest)" == "${expected_values}" ]] || return 1
 }
 
 control_plane_edge_activation_config_verify_target_kubernetes() {
