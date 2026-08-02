@@ -17,6 +17,12 @@ const maxCanonicalPlanBytes = 1 << 20
 type runtimeFactory func(releasedomain.ControlPlaneHotfixAdoptionPlan) (releasedomain.ControlPlaneHotfixRuntime, error)
 
 func main() {
+	if os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_BUILD_PLAN") == "true" {
+		os.Exit(runBuildPlan(
+			os.Args[1:], os.Stdout, os.Stderr,
+			os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_BUILD_DIR"),
+		))
+	}
 	if os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY") == "true" {
 		os.Exit(runValidation(
 			os.Args[1:], os.Stdin, os.Stderr,
@@ -35,6 +41,52 @@ func main() {
 	))
 }
 
+func runBuildPlan(args []string, stdout, stderr io.Writer, evidenceDir string) int {
+	if len(args) != 0 {
+		return fail(stderr, "arguments are not supported")
+	}
+	if evidenceDir == "" || !filepath.IsAbs(evidenceDir) || filepath.Clean(evidenceDir) != evidenceDir {
+		return fail(stderr, "build directory is invalid")
+	}
+	raw, err := readFixedEvidenceFile(evidenceDir, "input.json", maxCanonicalPlanBytes)
+	if err != nil {
+		return fail(stderr, "build input is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var input releasedomain.ControlPlaneHotfixAdoptionInput
+	if err := decoder.Decode(&input); err != nil {
+		return fail(stderr, "build input decode failed")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return fail(stderr, err.Error())
+	}
+	for index, name := range []string{"base.yaml", "target.yaml", "repeated-target.yaml", "hybrid.yaml"} {
+		data, readErr := readFixedEvidenceFile(evidenceDir, name, maxCanonicalPlanBytes*32)
+		if readErr != nil {
+			return fail(stderr, "build evidence is invalid")
+		}
+		switch index {
+		case 0:
+			input.BaseManifest = data
+		case 1:
+			input.TargetManifest = data
+		case 2:
+			input.RepeatedTarget = data
+		case 3:
+			input.HybridManifest = data
+		}
+	}
+	plan, err := releasedomain.BuildControlPlaneHotfixAdoptionPlanFromRenderSet(input)
+	if err != nil {
+		return fail(stderr, "plan construction failed: "+err.Error())
+	}
+	if err := writeCanonicalJSON(stdout, plan); err != nil {
+		return fail(stderr, "plan write failed")
+	}
+	return 0
+}
+
 func runValidation(args []string, stdin io.Reader, stderr io.Writer, evidenceDir string) int {
 	if len(args) != 0 {
 		return fail(stderr, "arguments are not supported")
@@ -48,12 +100,7 @@ func runValidation(args []string, stdin io.Reader, stderr io.Writer, evidenceDir
 	}
 	manifests := make([][]byte, 0, 4)
 	for _, name := range []string{"base.yaml", "target.yaml", "repeated-target.yaml", "hybrid.yaml"} {
-		path := filepath.Join(evidenceDir, name)
-		info, statErr := os.Lstat(path)
-		if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maxCanonicalPlanBytes*32 {
-			return fail(stderr, "validation evidence is invalid")
-		}
-		data, readErr := os.ReadFile(path)
+		data, readErr := readFixedEvidenceFile(evidenceDir, name, maxCanonicalPlanBytes*32)
 		if readErr != nil {
 			return fail(stderr, "validation evidence is invalid")
 		}
@@ -63,6 +110,15 @@ func runValidation(args []string, stdin io.Reader, stderr io.Writer, evidenceDir
 		return fail(stderr, "render-set verification failed: "+err.Error())
 	}
 	return 0
+}
+
+func readFixedEvidenceFile(directory, name string, limit int64) ([]byte, error) {
+	path := filepath.Join(directory, name)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > limit {
+		return nil, fmt.Errorf("evidence file is invalid")
+	}
+	return os.ReadFile(path)
 }
 
 func run(

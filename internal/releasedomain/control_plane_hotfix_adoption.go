@@ -217,6 +217,30 @@ func BuildControlPlaneHotfixAdoptionPlan(input ControlPlaneHotfixAdoptionInput) 
 	return plan, nil
 }
 
+// BuildControlPlaneHotfixAdoptionPlanFromRenderSet strips rendered Secret
+// objects inside the caller's private evidence directory before applying the
+// same exact two-pointer plan construction contract.
+func BuildControlPlaneHotfixAdoptionPlanFromRenderSet(input ControlPlaneHotfixAdoptionInput) (ControlPlaneHotfixAdoptionPlan, error) {
+	var err error
+	input.BaseManifest, err = canonicalSecretFreeHotfixManifest(input.BaseManifest)
+	if err != nil {
+		return ControlPlaneHotfixAdoptionPlan{}, fmt.Errorf("base manifest: %w", err)
+	}
+	input.TargetManifest, err = canonicalSecretFreeHotfixManifest(input.TargetManifest)
+	if err != nil {
+		return ControlPlaneHotfixAdoptionPlan{}, fmt.Errorf("target manifest: %w", err)
+	}
+	input.RepeatedTarget, err = canonicalSecretFreeHotfixManifest(input.RepeatedTarget)
+	if err != nil {
+		return ControlPlaneHotfixAdoptionPlan{}, fmt.Errorf("repeated target manifest: %w", err)
+	}
+	input.HybridManifest, err = canonicalSecretFreeHotfixManifest(input.HybridManifest)
+	if err != nil {
+		return ControlPlaneHotfixAdoptionPlan{}, fmt.Errorf("hybrid manifest: %w", err)
+	}
+	return BuildControlPlaneHotfixAdoptionPlan(input)
+}
+
 func VerifyControlPlaneHotfixAdoptionPlan(plan ControlPlaneHotfixAdoptionPlan) error {
 	if plan.APIVersion != ControlPlaneHotfixAdoptionAPIVersion || plan.Kind != ControlPlaneHotfixAdoptionPlanKind || plan.Policy != ControlPlaneHotfixAdoptionPolicy {
 		return fmt.Errorf("hotfix plan identity is invalid")
