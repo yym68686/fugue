@@ -20519,6 +20519,21 @@ CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID=""
 CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION=""
 CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_CREATED="false"
 
+control_plane_edge_activation_config_prepare_post_renderer() {
+  local daemonsets_json="" checksum_records=""
+  [[ -z "${HELM_POST_RENDERER_FILE:-}" || ! -f "${HELM_POST_RENDERER_FILE}" ]] || rm -f "${HELM_POST_RENDERER_FILE}"
+  HELM_POST_RENDERER_FILE=""; HELM_POST_RENDERER_ARGS=()
+  daemonsets_json="$(bounded_kubectl 15 -n fugue-system get daemonsets -o json)" || return
+  checksum_records="$(public_data_plane_checksum_records_from_daemonset_snapshot "${daemonsets_json}")" || return
+  CHECKSUMS="${checksum_records}" python3 -c 'import json,os; value=json.loads(os.environ["CHECKSUMS"]); assert len(value)==9' || return
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON="${checksum_records}"
+  PUBLIC_DATA_PLANE_PRESERVED=true
+  NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=false
+  PREVIOUS_REVISION=808
+  prepare_helm_post_renderer || return
+  [[ "${#HELM_POST_RENDERER_ARGS[@]}" == 2 && -x "${HELM_POST_RENDERER_FILE}" ]]
+}
+
 control_plane_edge_activation_config_build_helm_argv() {
   local enabled="$1"
   local secret_name=""
@@ -20537,6 +20552,7 @@ control_plane_edge_activation_config_build_helm_argv() {
     --wait
     --set "edgeActivation.enabled=${enabled}"
     --set-string "edgeActivation.signingSecretName=${secret_name}"
+    "${HELM_POST_RENDERER_ARGS[@]}"
   )
 }
 
@@ -20544,6 +20560,7 @@ control_plane_edge_activation_config_render() {
   local enabled="$1"
   local output="$2"
   local envelope="${output}.json"
+  control_plane_edge_activation_config_prepare_post_renderer || return
   control_plane_edge_activation_config_build_helm_argv "${enabled}" || return
   run_release_long_command 630 "edge activation config server render" \
     "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" --dry-run=server --output json >"${envelope}" || return
@@ -20735,6 +20752,7 @@ control_plane_edge_activation_config_seal_helm_argv() {
   local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/sealed-${phase}" snapshot=""
   mkdir -m 700 "${directory}" || return
   snapshot="${directory}/upgrade-argv.snapshot"
+  control_plane_edge_activation_config_prepare_post_renderer || return
   control_plane_edge_activation_config_build_helm_argv "${enabled}" || return
   (umask 077; printf '%s\0' "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" >"${snapshot}") || return
   chmod 600 "${snapshot}" || return
@@ -20856,6 +20874,7 @@ control_plane_edge_activation_config_cleanup() {
   local status=$?
   { exec 16<&-; } 2>/dev/null || :
   CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY="false"
+  [[ -z "${HELM_POST_RENDERER_FILE:-}" || ! -f "${HELM_POST_RENDERER_FILE}" ]] || rm -f "${HELM_POST_RENDERER_FILE}"
   if [[ "${CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED:-false}" == true ]]; then
     if [[ "${CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED:-false}" == true ]]; then
       stop_control_plane_backup_coordination_lease_renewer || :
