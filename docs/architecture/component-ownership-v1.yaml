@@ -8,6 +8,9 @@ legacyRelease: fugue
 sharedSourceRoots:
   - go.mod
   - go.sum
+  - docs/architecture/component-ownership-v1.md
+  - docs/architecture/component-ownership-v1.yaml
+  - docs/architecture/microservices-migration-acceptance-v1.md
   - internal/model
   - internal/config
   - internal/store/postgres.go
@@ -20,6 +23,8 @@ components:
     runtimeKinds: [deployment, coordinator]
     ownershipMode: transitional-shared
     sourceRoots:
+      - cmd/fugue-component-plan
+      - internal/componentmanifest
       - internal/platformcontrol
       - scripts/upgrade_fugue_control_plane.sh
       - .github/workflows/deploy-control-plane.yml
