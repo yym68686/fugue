@@ -8,6 +8,15 @@ DIST_DIR=${1:-"${REPO_ROOT}/dist/cli"}
 GO_CACHE_DIR=${GOCACHE:-"${REPO_ROOT}/.gocache"}
 BASE_LDFLAGS=${FUGUE_CLI_LDFLAGS:-"-s -w"}
 TARGETS=${FUGUE_CLI_TARGETS:-"linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"}
+BUILD_JOBS=${FUGUE_CLI_BUILD_JOBS:-2}
+
+case "${BUILD_JOBS}" in
+  1|2|3|4|5|6) ;;
+  *)
+    printf 'FUGUE_CLI_BUILD_JOBS must be an integer from 1 through 6\n' >&2
+    exit 1
+    ;;
+esac
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -86,14 +95,30 @@ mkdir -p "${DIST_DIR}"
 rm -f "${DIST_DIR}"/fugue_*.tar.gz "${DIST_DIR}"/fugue_*.zip "${DIST_DIR}"/fugue_checksums.txt
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fugue-cli-dist.XXXXXX")
-trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM HUP
+ACTIVE_PIDS=""
+
+cleanup() {
+  for pid in ${ACTIVE_PIDS}; do
+    kill "${pid}" >/dev/null 2>&1 || true
+  done
+  for pid in ${ACTIVE_PIDS}; do
+    wait "${pid}" >/dev/null 2>&1 || true
+  done
+  rm -rf "${WORK_DIR}"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 BUILD_VERSION=$(resolve_build_version)
 BUILD_COMMIT=$(resolve_build_commit)
 BUILD_TIME=$(resolve_build_time)
 LDFLAGS="${BASE_LDFLAGS} -X fugue/internal/cli.buildVersion=${BUILD_VERSION} -X fugue/internal/cli.buildCommit=${BUILD_COMMIT} -X fugue/internal/cli.buildTime=${BUILD_TIME}"
 
-for target in ${TARGETS}; do
+build_target() {
+  target="$1"
   goos=${target%/*}
   goarch=${target#*/}
   package_dir="${WORK_DIR}/${goos}_${goarch}"
@@ -118,14 +143,40 @@ for target in ${TARGETS}; do
       cd "${package_dir}"
       zip -q "${archive_path}" "${binary_name}"
     )
-    continue
+    return
   fi
 
   (
     cd "${package_dir}"
     tar -czf "${archive_path}" "${binary_name}"
   )
+}
+
+wait_batch() {
+  batch_failed=0
+  for pid in ${ACTIVE_PIDS}; do
+    if ! wait "${pid}"; then
+      batch_failed=1
+    fi
+  done
+  ACTIVE_PIDS=""
+  [ "${batch_failed}" -eq 0 ]
+}
+
+batch_count=0
+for target in ${TARGETS}; do
+  build_target "${target}" &
+  ACTIVE_PIDS="${ACTIVE_PIDS} $!"
+  batch_count=$((batch_count + 1))
+  if [ "${batch_count}" -eq "${BUILD_JOBS}" ]; then
+    wait_batch || exit 1
+    batch_count=0
+  fi
 done
+
+if [ "${batch_count}" -ne 0 ]; then
+  wait_batch || exit 1
+fi
 
 CHECKSUM_FILE="${DIST_DIR}/fugue_checksums.txt"
 : > "${CHECKSUM_FILE}"
