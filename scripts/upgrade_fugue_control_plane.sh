@@ -20625,14 +20625,14 @@ def load(name):
   with open(os.environ[name],encoding="utf-8") as stream: return json.load(stream)
 status=load("STATUS"); lease=load("LEASE"); deployment=load("DEPLOYMENT")
 meta=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=meta.get("annotations") or {}
-if int(status.get("version") or 0)!=808 or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
+if int(status.get("version") or 0)!=810 or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
 if str(spec.get("holderIdentity") or "") or str(annotations.get("fugue.pro/recovery-required") or "").lower()=="true": raise SystemExit(1)
 dmeta=deployment.get("metadata") or {}
 plan={
  "apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneEdgeActivationConfigPlan",
  "policy":"control-plane-edge-activation-config-v1","expectedSha":os.environ["EXPECTED_SHA"],
  "runtimeSource":os.environ["RUNTIME_SOURCE"],"apiImage":os.environ["API_IMAGE"],
- "baseRevision":808,"targetRevision":809,"secretName":os.environ["SECRET_NAME"],
+ "authorityRevision":808,"baseRevision":810,"targetRevision":811,"secretName":os.environ["SECRET_NAME"],
  "runId":os.environ["RUN_ID"],"runAttempt":int(os.environ["RUN_ATTEMPT"]),
  "helmRecordDigest":"sha256:"+hashlib.sha256(json.dumps(status,sort_keys=True,separators=(",", ":")).encode()).hexdigest(),
  "baseManifestDigest":os.environ["BASE_MANIFEST_DIGEST"],"targetManifestDigest":os.environ["TARGET_MANIFEST_DIGEST"],
@@ -20674,7 +20674,7 @@ def load(path):
 plan=load(os.environ["PLAN"]); status=load(os.environ["STATUS"]); lease=load(os.environ["LEASE"]); deployment=load(os.environ["DEPLOYMENT"])
 meta=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=meta.get("annotations") or {}
 status_digest="sha256:"+hashlib.sha256(json.dumps(status,sort_keys=True,separators=(",", ":")).encode()).hexdigest()
-if int(status.get("version") or 0)!=808 or status_digest!=plan["helmRecordDigest"]: raise SystemExit(1)
+if int(status.get("version") or 0)!=plan["baseRevision"] or status_digest!=plan["helmRecordDigest"]: raise SystemExit(1)
 if meta.get("uid")!=plan["lease"]["uid"]: raise SystemExit(1)
 if os.environ["LEASE_STATE"]=="released":
   valid=meta.get("resourceVersion")==plan["lease"]["resourceVersion"] and not str(spec.get("holderIdentity") or "") and str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true"
@@ -20798,7 +20798,7 @@ control_plane_edge_activation_config_verify_target_kubernetes() {
   local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-target"
   local pod="" probe="" response=""
   mkdir -m 700 "${directory}" || return
-  for resource in deployment/fugue-fugue-api deployment/fugue-fugue-controller deployment/fugue-fugue-telemetry service/fugue-fugue; do
+  for resource in deployment/fugue-fugue-api deployment/fugue-fugue-controller deployment/fugue-fugue-telemetry-agent service/fugue-fugue; do
     bounded_kubectl 15 -n fugue-system get "${resource}" -o json >"${directory}/$(tr / _ <<<"${resource}").json" || return
   done
   bounded_kubectl 15 -n fugue-system get endpointslice -l kubernetes.io/service-name=fugue-fugue -o json >"${directory}/endpointslices.json" || return
@@ -20808,7 +20808,7 @@ import json,os
 def load(name):
   with open(os.path.join(os.environ["DIRECTORY"],name),encoding="utf-8") as stream:return json.load(stream)
 with open(os.environ["PLAN"],encoding="utf-8") as stream:plan=json.load(stream)
-api=load("deployment_fugue-fugue-api.json"); controller=load("deployment_fugue-fugue-controller.json"); telemetry=load("deployment_fugue-fugue-telemetry.json"); pods=(load("pods.json").get("items") or [])
+api=load("deployment_fugue-fugue-api.json"); controller=load("deployment_fugue-fugue-controller.json"); telemetry=load("deployment_fugue-fugue-telemetry-agent.json"); pods=(load("pods.json").get("items") or [])
 meta=api.get("metadata") or {}; spec=api.get("spec") or {}; status=api.get("status") or {}; template=spec.get("template") or {}; podspec=template.get("spec") or {}
 containers=podspec.get("containers") or []; exact=[c for c in containers if c.get("name")=="api"]
 if len(exact)!=1 or exact[0].get("image")!=plan["apiImage"] or (template.get("metadata") or {}).get("annotations",{}).get("fugue.pro/source-commit")!=plan["runtimeSource"]:raise SystemExit(1)
@@ -20819,7 +20819,7 @@ mount=[v for v in exact[0].get("volumeMounts") or [] if v.get("name")=="edge-act
 volume=[v for v in podspec.get("volumes") or [] if v.get("name")=="edge-activation-plan-signing-key"]
 if env!=[{"name":"FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_PROJECTION_DIR","value":"/var/run/secrets/fugue-edge-activation"}] or mount!=[{"mountPath":"/var/run/secrets/fugue-edge-activation","name":"edge-activation-plan-signing-key","readOnly":True}]:raise SystemExit(1)
 if len(volume)!=1 or (volume[0].get("secret") or {}).get("secretName")!=os.environ["SECRET_NAME"] or (volume[0].get("secret") or {}).get("defaultMode")!=256:raise SystemExit(1)
-for deployment,image,replicas in ((controller,"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",2),(telemetry,"ghcr.io/yym68686/fugue-telemetry@sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",1)):
+for deployment,image,replicas in ((controller,"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",2),(telemetry,"ghcr.io/yym68686/fugue-telemetry-agent@sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",1)):
   ds=deployment.get("status") or {}; items=((deployment.get("spec") or {}).get("template") or {}).get("spec",{}).get("containers") or []
   if len(items)!=1 or items[0].get("image")!=image or int(ds.get("readyReplicas") or 0)!=replicas or int(ds.get("availableReplicas") or 0)!=replicas:raise SystemExit(1)
 ready=[]
@@ -20941,7 +20941,7 @@ run_control_plane_edge_activation_config_transaction() {
     status=0
     control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
   fi
-  if control_plane_edge_activation_config_verify_live target 809 && control_plane_edge_activation_config_verify_target_kubernetes; then
+  if control_plane_edge_activation_config_verify_live target 811 && control_plane_edge_activation_config_verify_target_kubernetes; then
     control_plane_edge_activation_config_write_wal verified 4 1 0 false || return
     CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false; CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false; CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
     log "edge activation config transaction verified"
@@ -20949,13 +20949,13 @@ run_control_plane_edge_activation_config_transaction() {
   fi
   require_control_plane_backup_coordination_or_abort "edge activation config compensation" || return
   live_revision="$(helm_current_revision)" || return
-  if [[ "${live_revision}" == 808 ]]; then
-    compensated_revision=808
-  elif [[ "${live_revision}" == 809 ]]; then
+  if [[ "${live_revision}" == 810 ]]; then
+    compensated_revision=810
+  elif [[ "${live_revision}" == 811 ]]; then
     control_plane_edge_activation_config_write_wal compensation-started 4 1 1 true || return
     control_plane_edge_activation_config_seal_helm_argv compensation false || return
     control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
-    compensated_revision=810
+    compensated_revision=812
   else
     log_stderr "edge activation config observed unexpected Helm revision ${live_revision}; retaining recovery fence"
     return "${status:-1}"
