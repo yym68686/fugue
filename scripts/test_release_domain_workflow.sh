@@ -224,7 +224,7 @@ end
 baseline = jobs.fetch("release-baseline")
 assert_equal(needs(baseline), ["release-input-guard"], "release-baseline dependencies")
 assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
-for job_name in ["release-baseline", "release-gate", "build", "deploy", "record-release-baseline"]
+for job_name in ["release-baseline", "build", "deploy", "record-release-baseline"]
   checkout = step(jobs.fetch(job_name), "Checkout")
   assert_equal(checkout.fetch("with").fetch("ref"), "${{ inputs.target_sha }}", "#{job_name} target checkout")
 end
@@ -291,8 +291,21 @@ assert_equal(
 
 gate = jobs.fetch("release-gate")
 assert_equal(needs(gate), ["release-input-guard"], "release-gate dependencies")
-gate_commands = Array(gate["steps"]).map { |candidate| candidate["run"].to_s }.join("\n")
-fail_contract("release gate must run the workflow contract test") unless gate_commands.include?("bash scripts/test_release_domain_workflow.sh")
+assert_equal(gate.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-gate permissions")
+assert_equal(Array(gate["steps"]).length, 1, "release-gate exact receipt step inventory")
+receipt = step(gate, "Verify exact source CI receipt")
+for fragment in [
+  "actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100",
+  "select(.head_sha ==",
+  '"${ci_attempt}" == \'1\'',
+  '"${ci_sha}" == "${EXPECTED_SHA}"',
+  '"${ci_path}" == \'.github/workflows/ci.yml\'',
+]
+  fail_contract("release gate source CI receipt is missing #{fragment.inspect}") unless receipt.fetch("run").include?(fragment)
+end
+for forbidden in ["test_release_domain_safety.sh", "test_node_local_dns_release.sh", "test_verify_stale_release_recovery.py", "go test ./..."]
+  fail_contract("release gate reruns source CI command #{forbidden.inspect}") if receipt.fetch("run").include?(forbidden)
+end
 
 build = jobs.fetch("build")
 assert_equal(build["permissions"], {"actions" => "read", "contents" => "read", "packages" => "write"}, "build permissions")
@@ -924,6 +937,7 @@ assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}
 allowed_permissions = {
   "release-input-guard" => {"actions" => "read", "contents" => "read"},
   "release-baseline" => {"actions" => "read", "contents" => "read"},
+  "release-gate" => {"actions" => "read", "contents" => "read"},
   "build" => {"actions" => "read", "contents" => "read", "packages" => "write"},
   "deploy" => {"actions" => "read", "contents" => "read"},
   "continue-release-convergence" => {"actions" => "write", "contents" => "read"},

@@ -209,17 +209,20 @@ patch='{{"op": "add", "path": "/spec/leaseDurationSeconds", "value": 0}}'
             env={**os.environ, "GITHUB_RUN_ID": run_id},
         )
         try:
-            deadline = time.monotonic() + 5
-            result = recovery.OriginProcessClassification("no_match")
-            while time.monotonic() < deadline:
-                result = recovery.classify_old_run_process(int(run_id))
-                if result.reason == "found_origin_process":
-                    break
-                time.sleep(0.05)
-            self.assertEqual(result, recovery.OriginProcessClassification("found_origin_process", child.pid))
-            with self.assertRaises(recovery.RecoveryProofError):
-                recovery.assert_old_run_process_absent(int(run_id))
-            recovery.assert_old_run_process_absent(int(run_id) + 1)
+            with tempfile.TemporaryDirectory() as directory:
+                proc = Path(directory)
+                (proc / str(child.pid)).symlink_to(Path("/proc") / str(child.pid), target_is_directory=True)
+                deadline = time.monotonic() + 5
+                result = recovery.OriginProcessClassification("no_match")
+                while time.monotonic() < deadline:
+                    result = recovery.classify_old_run_process(int(run_id), proc_root=proc)
+                    if result.reason == "found_origin_process":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(result, recovery.OriginProcessClassification("found_origin_process", child.pid))
+                with self.assertRaises(recovery.RecoveryProofError):
+                    recovery.assert_old_run_process_absent(int(run_id), proc_root=proc)
+                recovery.assert_old_run_process_absent(int(run_id) + 1, proc_root=proc)
         finally:
             child.terminate()
             child.wait(timeout=5)
