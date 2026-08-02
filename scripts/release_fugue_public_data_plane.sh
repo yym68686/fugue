@@ -5976,13 +5976,14 @@ collect_edge_activation_candidate_material() {
 import datetime,json,os
 with open(os.environ["INVENTORY"],encoding="utf-8") as h: inventory=json.load(h)
 slots=json.loads(os.environ["PROPOSED_SLOTS"])
+release_id=os.environ["RELEASE_ID"].strip().lower()
 if not isinstance(slots,dict) or not slots: raise SystemExit("proposed active slots are empty")
 allowed_slots=set(slots.values())
 if not allowed_slots <= {"a","b"}: raise SystemExit("proposed active slot is invalid")
 expected=[]
 for value in inventory.get("instances") or []:
     node=value.get("node") or {}
-    if value.get("release_epoch") != os.environ["RELEASE_ID"] or value.get("slot") not in allowed_slots: continue
+    if value.get("release_epoch") != release_id or value.get("slot") not in allowed_slots: continue
     if not value.get("effective_healthy") or int(value.get("consecutive_healthy") or 0) < 2 or value.get("failure_class") or node.get("draining") or node.get("tls_status") != "ready":
         raise SystemExit("candidate instance is not stably healthy, signature-clean, and TLS-ready")
     expected.append({key:value.get(key) for key in ("edge_id","edge_group_id","slot","instance_uid","release_epoch")})

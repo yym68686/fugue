@@ -450,7 +450,7 @@ PY
   fi
 
   export FUGUE_EDGE_ACTIVATION_ENABLED=true
-  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=stable-candidate-fixture
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=stable-Candidate-Fixture
   export FUGUE_EDGE_ACTIVATION_RECORD_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   export FUGUE_EDGE_ACTIVATION_DIR="${TMP}/stable-candidate"
   mkdir -m 0700 "${FUGUE_EDGE_ACTIVATION_DIR}"
@@ -471,6 +471,7 @@ PY
   [[ "$(cat "${stable_reads}")" == 2 ]]
   [[ "$(cat "${stable_advances}")" == active-epoch-fenced ]]
   [[ -s "${FUGUE_EDGE_ACTIVATION_EXPECTED_FILE}" && -s "${FUGUE_EDGE_ACTIVATION_EPOCHS_FILE}" ]]
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))[0]["release_epoch"]=="stable-candidate-fixture"' "${FUGUE_EDGE_ACTIVATION_EXPECTED_FILE}"
 )
 
 python3 - "${ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
