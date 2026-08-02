@@ -5968,8 +5968,11 @@ collect_edge_activation_candidate_material() {
   local inventory="${FUGUE_EDGE_ACTIVATION_DIR}/candidate-inventory.json"
   local expected="${FUGUE_EDGE_ACTIVATION_DIR}/expected-instances.json"
   local epochs="${FUGUE_EDGE_ACTIVATION_DIR}/candidate-epochs.json"
-  edge_activation_get "${inventory}" || return 1
-  INVENTORY="${inventory}" EXPECTED_OUT="${expected}" EPOCHS_OUT="${epochs}" PROPOSED_SLOTS="${proposed_slots_json}" RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" python3 - <<'PY' || return 1
+  local attempts="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS:-18}"
+  local delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS:-5}"
+  local attempt=1
+  while (( attempt <= attempts )); do
+    if edge_activation_get "${inventory}" && INVENTORY="${inventory}" EXPECTED_OUT="${expected}" EPOCHS_OUT="${epochs}" PROPOSED_SLOTS="${proposed_slots_json}" RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" python3 - <<'PY'
 import datetime,json,os
 with open(os.environ["INVENTORY"],encoding="utf-8") as h: inventory=json.load(h)
 slots=json.loads(os.environ["PROPOSED_SLOTS"])
@@ -5998,6 +6001,17 @@ expected.sort(key=lambda v:(v["edge_group_id"],v["edge_id"],v["slot"],v["instanc
 for path,value in ((os.environ["EXPECTED_OUT"],expected),(os.environ["EPOCHS_OUT"],epochs)):
     with open(path,"w",encoding="utf-8") as h: json.dump(value,h,separators=(",",":"),sort_keys=True); h.write("\n")
 PY
+    then
+      break
+    fi
+    if (( attempt == attempts )); then
+      error "candidate activation material did not become stably healthy after ${attempts} attempt(s)"
+      return 1
+    fi
+    log "candidate activation material attempt ${attempt}/${attempts} was not stable; retrying in ${delay_seconds}s"
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+  done
   chmod 600 "${expected}" "${epochs}"
   FUGUE_EDGE_ACTIVATION_EVIDENCE_DIGEST="$(python3 - "${expected}" "${epochs}" "${FUGUE_EDGE_ACTIVATION_RECORD_DIGEST}" <<'PY'
 import hashlib,sys

@@ -448,6 +448,29 @@ PY
     echo "group-local smoke accepted a failed direct TLS/HTTPS probe" >&2
     exit 1
   fi
+
+  export FUGUE_EDGE_ACTIVATION_ENABLED=true
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=stable-candidate-fixture
+  export FUGUE_EDGE_ACTIVATION_RECORD_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  export FUGUE_EDGE_ACTIVATION_DIR="${TMP}/stable-candidate"
+  mkdir -m 0700 "${FUGUE_EDGE_ACTIVATION_DIR}"
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=2
+  stable_reads="${TMP}/stable-candidate.reads"
+  stable_advances="${TMP}/stable-candidate.advances"
+  printf '0' >"${stable_reads}"
+  : >"${stable_advances}"
+  edge_activation_get() {
+    reads="$(cat "${stable_reads}")"
+    printf '%s' "$((reads + 1))" >"${stable_reads}"
+    consecutive=1
+    (( reads > 0 )) && consecutive=2
+    printf '{"instances":[{"edge_id":"edge-us","edge_group_id":"group-us","slot":"a","instance_uid":"candidate-uid","release_epoch":"stable-candidate-fixture","effective_healthy":true,"consecutive_healthy":%s,"failure_class":"","node":{"draining":false,"tls_status":"ready"}}],"active_epochs":[]}\n' "${consecutive}" >"$1"
+  }
+  edge_activation_advance() { printf '%s\n' "$1" >>"${stable_advances}"; }
+  collect_edge_activation_candidate_material '{"edge-base":"a"}'
+  [[ "$(cat "${stable_reads}")" == 2 ]]
+  [[ "$(cat "${stable_advances}")" == active-epoch-fenced ]]
+  [[ -s "${FUGUE_EDGE_ACTIVATION_EXPECTED_FILE}" && -s "${FUGUE_EDGE_ACTIVATION_EPOCHS_FILE}" ]]
 )
 
 python3 - "${ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
