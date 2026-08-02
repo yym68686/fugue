@@ -287,4 +287,38 @@ JSON
     exit 1
   fi
 )
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${ROOT}/scripts/release_fugue_public_data_plane.sh"
+  export FUGUE_NAMESPACE=fugue-system
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=pdp-20260802T123248Z-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export FUGUE_EDGE_RESOURCES_JSON='{"requests":{"cpu":"10m"}}'
+  export FUGUE_EDGE_CADDY_RESOURCES_JSON='{}'
+  export FUGUE_EDGE_IMAGE_REPOSITORY=registry.example/fugue-edge
+  export FUGUE_EDGE_IMAGE_TAG=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  kubectl_cmd() {
+    printf '%s\n' '{"spec":{"template":{"metadata":{"labels":{"fugue.io/edge-slot":"a"}},"spec":{"containers":[{"name":"edge","env":[{"name":"FUGUE_EDGE_GROUP_ID","value":"edge-group-country-us"}]},{"name":"caddy"}]}}}}'
+  }
+  patch="$(container_patch_for_worker fugue-fugue-edge-worker-a)"
+  PATCH="${patch}" python3 - <<'PY'
+import json, os
+patch=json.loads(os.environ["PATCH"])["spec"]["template"]
+assert patch["metadata"]["labels"] == {"fugue.io/edge-group-id":"edge-group-country-us","fugue.io/edge-slot":"a"}
+edge=next(item for item in patch["spec"]["containers"] if item["name"]=="edge")
+assert edge["volumeMounts"] == [{"name":"edge-workload-identity","mountPath":"/var/run/fugue/edge-identity","readOnly":True}]
+volume=patch["spec"]["volumes"][0]
+assert volume["name"] == "edge-workload-identity"
+assert [item["path"] for item in volume["downwardAPI"]["items"]] == ["edge_id","edge_group_id","slot","instance_uid","release_epoch","heartbeat_fenced"]
+PY
+
+  captured=""
+  wait_daemonset_ready() { :; }
+  fence_edge_worker_heartbeat() { :; }
+  scale_edge_worker_zero_cas() { captured="$2"; }
+  isolate_inactive_edge_worker inactive active
+  [[ "${captured}" =~ ^failed-[0-9a-f]{56}$ && ${#captured} -eq 63 ]]
+)
 printf '[test_edge_activation] ok\n'

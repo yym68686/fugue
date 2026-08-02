@@ -908,6 +908,8 @@ import sys
 
 doc = json.load(sys.stdin)
 release_id = os.environ["FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID"]
+template = doc.get("spec", {}).get("template", {})
+template_labels = template.get("metadata", {}).get("labels", {})
 edge_resources = json.loads(os.environ["FUGUE_EDGE_RESOURCES_JSON"])
 caddy_resources = json.loads(os.environ["FUGUE_EDGE_CADDY_RESOURCES_JSON"])
 edge_repo = os.environ.get("FUGUE_EDGE_IMAGE_REPOSITORY", "").strip()
@@ -926,13 +928,21 @@ if edge_digest_present:
 elif edge_repo and edge_tag:
     edge_ref = f"{edge_repo}:{edge_tag}"
 containers = []
-for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+edge_group_id = ""
+for container in template.get("spec", {}).get("containers", []):
     name = container.get("name")
     patch = {"name": name}
     if name == "edge":
+        for item in container.get("env", []):
+            if item.get("name") == "FUGUE_EDGE_GROUP_ID":
+                edge_group_id = str(item.get("value") or "").strip()
+                break
+        if not edge_group_id:
+            raise SystemExit("worker daemonset has no exact FUGUE_EDGE_GROUP_ID value")
         if edge_ref:
             patch["image"] = edge_ref
         patch["resources"] = edge_resources
+        patch["volumeMounts"] = [{"name": "edge-workload-identity", "mountPath": "/var/run/fugue/edge-identity", "readOnly": True}]
     elif name == "caddy":
         if caddy_repo and caddy_tag:
             patch["image"] = f"{caddy_repo}:{caddy_tag}"
@@ -942,6 +952,9 @@ for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("co
     containers.append(patch)
 if not containers:
     raise SystemExit("worker daemonset has no edge/caddy containers")
+slot = str(template_labels.get("fugue.io/edge-slot") or "").strip()
+if slot not in ("a", "b"):
+    raise SystemExit("worker daemonset has no exact edge slot label")
 patch = {
     "spec": {
         "updateStrategy": {
@@ -950,6 +963,10 @@ patch = {
         },
         "template": {
             "metadata": {
+                "labels": {
+                    "fugue.io/edge-group-id": edge_group_id,
+                    "fugue.io/edge-slot": slot,
+                },
                 "annotations": {
                     "fugue.io/public-data-plane-release-id": release_id,
                     "fugue.io/public-data-plane-release-mode": "node-local-blue-green-worker",
@@ -959,6 +976,17 @@ patch = {
             },
             "spec": {
                 "containers": containers,
+                "volumes": [{
+                    "name": "edge-workload-identity",
+                    "downwardAPI": {"items": [
+                        {"path": "edge_id", "fieldRef": {"fieldPath": "spec.nodeName"}},
+                        {"path": "edge_group_id", "fieldRef": {"fieldPath": "metadata.labels['fugue.io/edge-group-id']"}},
+                        {"path": "slot", "fieldRef": {"fieldPath": "metadata.labels['fugue.io/edge-slot']"}},
+                        {"path": "instance_uid", "fieldRef": {"fieldPath": "metadata.uid"}},
+                        {"path": "release_epoch", "fieldRef": {"fieldPath": "metadata.annotations['fugue.io/edge-release-epoch']"}},
+                        {"path": "heartbeat_fenced", "fieldRef": {"fieldPath": "metadata.annotations['fugue.io/edge-heartbeat-fenced']"}},
+                    ]},
+                }],
             },
         },
     },
@@ -1037,13 +1065,15 @@ print(str(meta.get("resourceVersion") or "")+"\t"+str(selector.get("fugue.io/edg
 isolate_inactive_edge_worker() {
   local inactive_ds="$1"
   local active_ds="$2"
+  local failed_release_fence
   # Never expand automated isolation when the serving slot is also unhealthy.
   wait_daemonset_ready "${active_ds}" || {
     error "both edge slots are unhealthy; refusing automated isolation"
     return 1
   }
   fence_edge_worker_heartbeat "${inactive_ds}" || return 1
-  scale_edge_worker_zero_cas "${inactive_ds}" "failed-${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}"
+  failed_release_fence="$(RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID}" python3 -c 'import hashlib,os; print("failed-"+hashlib.sha256(os.environ["RELEASE_ID"].encode()).hexdigest()[:56])')" || return 1
+  scale_edge_worker_zero_cas "${inactive_ds}" "${failed_release_fence}"
 }
 
 delete_worker_pods() {
