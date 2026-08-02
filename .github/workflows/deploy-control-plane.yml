@@ -724,17 +724,23 @@ jobs:
 
           tools_root="${RUNNER_TEMP}/fugue-current-release-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ownership_backup="${RUNNER_TEMP}/fugue-historical-runtime-ownership-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"
+          upgrade_backup="${RUNNER_TEMP}/fugue-historical-runtime-upgrade-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sh"
           [[ ! -e "${tools_root}" && ! -L "${tools_root}" ]]
           [[ ! -e "${ownership_backup}" && ! -L "${ownership_backup}" ]]
+          [[ ! -e "${upgrade_backup}" && ! -L "${upgrade_backup}" ]]
           install -d -m 0700 "${tools_root}"
           git archive "${SOURCE_SHA}" | tar -x -C "${tools_root}"
           [[ "$(git show "${SOURCE_SHA}:deploy/release-domains/ownership-v1.yaml" | sha256sum | awk '{print $1}')" == \
             "$(sha256sum "${tools_root}/deploy/release-domains/ownership-v1.yaml" | awk '{print $1}')" ]]
 
           install -m 0600 deploy/release-domains/ownership-v1.yaml "${ownership_backup}"
+          install -m 0700 scripts/upgrade_fugue_control_plane.sh "${upgrade_backup}"
           install -m 0644 "${tools_root}/deploy/release-domains/ownership-v1.yaml" deploy/release-domains/ownership-v1.yaml
+          install -m 0755 "${tools_root}/scripts/upgrade_fugue_control_plane.sh" scripts/upgrade_fugue_control_plane.sh
           cmp -s "${tools_root}/deploy/release-domains/ownership-v1.yaml" deploy/release-domains/ownership-v1.yaml
-          git update-index --assume-unchanged -- deploy/release-domains/ownership-v1.yaml
+          cmp -s "${tools_root}/scripts/upgrade_fugue_control_plane.sh" scripts/upgrade_fugue_control_plane.sh
+          git update-index --assume-unchanged -- \
+            deploy/release-domains/ownership-v1.yaml scripts/upgrade_fugue_control_plane.sh
           git diff --quiet --ignore-submodules --
           git diff --cached --quiet --ignore-submodules --
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
@@ -745,6 +751,7 @@ jobs:
           {
             printf 'FUGUE_CURRENT_RELEASE_TOOLS_ROOT=%s\n' "${tools_root}"
             printf 'FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP=%s\n' "${ownership_backup}"
+            printf 'FUGUE_HISTORICAL_RUNTIME_UPGRADE_BACKUP=%s\n' "${upgrade_backup}"
             printf 'FUGUE_API_IMAGE_DIGEST=%s\n' "${API_DIGEST}"
             printf 'FUGUE_CONTROLLER_IMAGE_DIGEST=%s\n' "${CONTROLLER_DIGEST}"
             printf 'FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST=%s\n' "${TELEMETRY_DIGEST}"
@@ -1354,8 +1361,11 @@ jobs:
           set -euo pipefail
           [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
           [[ -f "${FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP}" && ! -L "${FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP}" ]]
+          [[ -f "${FUGUE_HISTORICAL_RUNTIME_UPGRADE_BACKUP}" && ! -L "${FUGUE_HISTORICAL_RUNTIME_UPGRADE_BACKUP}" ]]
           install -m 0644 "${FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP}" deploy/release-domains/ownership-v1.yaml
-          git update-index --no-assume-unchanged -- deploy/release-domains/ownership-v1.yaml
+          install -m 0755 "${FUGUE_HISTORICAL_RUNTIME_UPGRADE_BACKUP}" scripts/upgrade_fugue_control_plane.sh
+          git update-index --no-assume-unchanged -- \
+            deploy/release-domains/ownership-v1.yaml scripts/upgrade_fugue_control_plane.sh
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${TARGET_SHA}" ]]
           git diff --quiet --ignore-submodules --
           git diff --cached --quiet --ignore-submodules --

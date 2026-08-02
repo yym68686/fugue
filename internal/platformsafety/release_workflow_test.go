@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "e64674b2997bc3400eaed2b1eef846baf3dbaf17d6fb0f0cf758c7880906269a")
+	assertWorkflowSourceDigest(t, data, "10da1833b021e9c6371ed348e9918e9fe310922fdcfd8a9b24985d98979a4a1e")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2881,9 +2881,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"build/Verify exact historical incident image plan":                                 "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
 		"build/Publish verified control-plane image provenance":                             "8f188857beb59ed38aa7c3bb427b4cc4c2a5f1f6aa7df0c91211d23642f3589d",
 		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
-		"deploy/Prepare exact current tooling for historical runtime evidence":              "58356a6014715486b41cb3731208ff69dd840e95cb9885f3aff12ca0a6f8039d",
+		"deploy/Prepare exact current tooling for historical runtime evidence":              "15cd94ec3a12647dc78e51695e2ce52ee7ed2b8a29ee2cf63e9df945e6d7c33a",
 		"deploy/Build private release-domain tools":                                         "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
-		"deploy/Restore exact historical runtime checkout":                                  "2a2d9cad5c6caa758954108141911ffe7d0f95fa375be37b3678b42a2b363ee1",
+		"deploy/Restore exact historical runtime checkout":                                  "72a75a948848c5b0bf2042e66c5849835fedcd7e311c91910cd73287d77c9142",
 		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
 		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
 		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
@@ -3544,7 +3544,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		`git archive "${SOURCE_SHA}"`,
 		"deploy/release-domains/ownership-v1.yaml",
+		"scripts/upgrade_fugue_control_plane.sh",
 		"git update-index --assume-unchanged",
+		"FUGUE_HISTORICAL_RUNTIME_UPGRADE_BACKUP",
 		"FUGUE_API_IMAGE_DIGEST",
 		"FUGUE_CONTROLLER_IMAGE_DIGEST",
 		"FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST",
@@ -3556,6 +3558,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	restoreRuntime := workflowStepByName(t, deploy, "Restore exact historical runtime checkout")
 	if !strings.Contains(restoreRuntime.If, "steps.current_tooling.outcome == 'success'") ||
 		!strings.Contains(restoreRuntime.Run, "git update-index --no-assume-unchanged") ||
+		!strings.Contains(restoreRuntime.Run, "FUGUE_HISTORICAL_RUNTIME_UPGRADE_BACKUP") ||
 		!strings.Contains(restoreRuntime.Run, "git diff --quiet --ignore-submodules --") {
 		t.Fatalf("historical runtime restoration is incomplete: %#v", restoreRuntime)
 	}

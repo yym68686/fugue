@@ -12367,6 +12367,7 @@ live_deployment_replicas() {
 
 prepare_helm_post_renderer() {
   local public_checksums="${PUBLIC_DATA_PLANE_CHECKSUMS_JSON:-}"
+  local public_base_manifest=""
   local registry_deployment=""
   local registry_replicas=""
   local renderer_config_b64=""
@@ -12389,13 +12390,30 @@ prepare_helm_post_renderer() {
   if [[ "${public_checksums}" != '{}' && "${PUBLIC_DATA_PLANE_PRESERVED:-false}" != "true" ]]; then
     return 1
   fi
-  renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" <<'PY'
+  if [[ "${public_checksums}" != '{}' ]]; then
+    [[ "${PREVIOUS_REVISION:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+    public_base_manifest="$(mktemp -t fugue-public-data-plane-helm-base.XXXXXX.yaml)" || return 1
+    if ! (umask 077; run_release_long_command \
+      "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}" \
+      "public data-plane Helm base manifest" \
+      helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" \
+      --revision "${PREVIOUS_REVISION}" >"${public_base_manifest}"); then
+      rm -f "${public_base_manifest}"
+      return 1
+    fi
+    chmod 0600 "${public_base_manifest}" || {
+      rm -f "${public_base_manifest}"
+      return 1
+    }
+  fi
+  if ! renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" "${public_base_manifest}" <<'PY'
 import base64
 import json
+import os
 import re
 import sys
 
-registry, raw_checksums = sys.argv[1:]
+registry, raw_checksums, base_manifest_path = sys.argv[1:]
 checksums = json.loads(raw_checksums)
 if not isinstance(checksums, dict):
     raise SystemExit(1)
@@ -12408,15 +12426,80 @@ for name, record in checksums.items():
         raise SystemExit(1)
     if not isinstance(record["value"], str) or re.fullmatch(r"[0-9a-f]{64}", record["value"]) is None:
         raise SystemExit(1)
+
+def documents(raw):
+    result = []
+    document = []
+    for line in raw.splitlines():
+        if line == "---" and document:
+            result.append(document)
+            document = [line]
+        else:
+            document.append(line)
+    if document:
+        result.append(document)
+    return result
+
+def identity(document):
+    kind = next((line[6:] for line in document if line.startswith("kind: ")), "")
+    metadata_index = next((index for index, line in enumerate(document) if line == "metadata:"), -1)
+    metadata_end = next(
+        (
+            index
+            for index, line in enumerate(document[metadata_index + 1 :], metadata_index + 1)
+            if line and not line.startswith(" ")
+        ),
+        len(document),
+    )
+    names = [
+        line[8:]
+        for line in document[metadata_index + 1 : metadata_end]
+        if line.startswith("  name: ")
+    ] if metadata_index >= 0 else []
+    if len(names) != (1 if metadata_index >= 0 else 0):
+        raise SystemExit(1)
+    return kind, names[0] if names else ""
+
+preserved_objects = {}
+if checksums:
+    if not base_manifest_path or not os.path.isfile(base_manifest_path) or os.path.islink(base_manifest_path):
+        raise SystemExit(1)
+    with open(base_manifest_path, encoding="utf-8") as handle:
+        base_source = handle.read()
+    for document in documents(base_source):
+        kind, name = identity(document)
+        if name not in checksums:
+            continue
+        if kind != "DaemonSet" or name in preserved_objects:
+            raise SystemExit(1)
+        record = checksums[name]
+        checksum = re.compile(
+            rf"^        {re.escape(record['key'])}: [\"']?{record['value']}[\"']?$"
+        )
+        if sum(1 for line in document if checksum.fullmatch(line)) != 1:
+            raise SystemExit(1)
+        preserved_objects[name] = document
+    if set(preserved_objects) != set(checksums):
+        raise SystemExit(1)
+elif base_manifest_path:
+    raise SystemExit(1)
 payload = json.dumps(
-    {"publicDataPlaneChecksums": checksums, "registryDeployment": registry},
+    {
+        "publicDataPlaneChecksums": checksums,
+        "publicDataPlaneObjects": preserved_objects,
+        "registryDeployment": registry,
+    },
     ensure_ascii=True,
     separators=(",", ":"),
     sort_keys=True,
 ).encode("utf-8")
 print(base64.b64encode(payload).decode("ascii"))
 PY
-)" || return 1
+)"; then
+    [[ -z "${public_base_manifest}" ]] || rm -f "${public_base_manifest}"
+    return 1
+  fi
+  [[ -z "${public_base_manifest}" ]] || rm -f "${public_base_manifest}"
   [[ -n "${renderer_config_b64}" ]] || return 1
   if [[ -z "${registry_deployment}" && "${public_checksums}" == '{}' ]]; then
     return 0
@@ -12431,6 +12514,7 @@ PY
 config = json.loads(base64.b64decode(CONFIG_B64, validate=True).decode("utf-8"))
 target_name = config["registryDeployment"]
 checksums = config["publicDataPlaneChecksums"]
+preserved_objects = config["publicDataPlaneObjects"]
 source = sys.stdin.read()
 lines = source.splitlines()
 documents = []
@@ -12444,25 +12528,8 @@ for line in lines:
 if document:
     documents.append(document)
 
-seen_checksums = set()
+seen_public_objects = set()
 rendered = []
-
-def block_end(lines, start, indent):
-    for index, line in enumerate(lines[start + 1 :], start + 1):
-        if line and len(line) - len(line.lstrip(" ")) <= indent:
-            return index
-    return len(lines)
-
-def unique_mapping(lines, start, end, indent, key):
-    expected = f"{' ' * indent}{key}:"
-    matches = [
-        index
-        for index, line in enumerate(lines[start:end], start)
-        if line == expected
-    ]
-    if len(matches) != 1:
-        raise SystemExit(1)
-    return matches[0]
 
 for document in documents:
     kind = next((line[6:] for line in document if line.startswith("kind: ")), "")
@@ -12485,28 +12552,14 @@ for document in documents:
         raise SystemExit(1)
     name = name_lines[0] if name_lines else ""
 
-    if name in checksums:
-        if kind != "DaemonSet":
+    if name in preserved_objects:
+        if kind != "DaemonSet" or name in seen_public_objects:
             raise SystemExit(1)
-        record = checksums[name]
-        key = record["key"]
-        spec_end = block_end(document, spec_index, 0)
-        template_index = unique_mapping(document, spec_index + 1, spec_end, 2, "template")
-        template_end = block_end(document, template_index, 2)
-        pod_metadata_index = unique_mapping(document, template_index + 1, template_end, 4, "metadata")
-        pod_metadata_end = block_end(document, pod_metadata_index, 4)
-        annotations_index = unique_mapping(document, pod_metadata_index + 1, pod_metadata_end, 6, "annotations")
-        annotations_end = block_end(document, annotations_index, 6)
-        prefix = f"        {key}:"
-        matches = [
-            index
-            for index, line in enumerate(document[annotations_index + 1 : annotations_end], annotations_index + 1)
-            if line.startswith(prefix)
-        ]
-        if len(matches) != 1 or name in seen_checksums:
+        base_document = preserved_objects[name]
+        if not isinstance(base_document, list) or not base_document or not all(isinstance(line, str) for line in base_document):
             raise SystemExit(1)
-        document[matches[0]] = f"        {key}: {record['value']}"
-        seen_checksums.add(name)
+        document = list(base_document)
+        seen_public_objects.add(name)
 
     if target_name and name == target_name and kind == "Deployment":
         if spec_index < 0:
@@ -12523,7 +12576,7 @@ for document in documents:
             document.insert(spec_index + 1, "  replicas: 0")
     rendered.extend(document)
 
-if seen_checksums != set(checksums):
+if seen_public_objects != set(checksums) or set(preserved_objects) != set(checksums):
     raise SystemExit(1)
 sys.stdout.write("\n".join(rendered))
 if source.endswith("\n"):
@@ -12544,7 +12597,7 @@ PY
     log "preserving ${registry_deployment} at replicas=0 during this Helm upgrade"
   fi
   if [[ "${public_checksums}" != '{}' ]]; then
-    log "preserving live public data-plane blue/green checksum annotations during this Helm upgrade"
+    log "preserving exact Helm-base public data-plane objects during this Helm upgrade"
   fi
 }
 

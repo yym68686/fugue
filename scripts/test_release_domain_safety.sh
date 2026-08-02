@@ -12382,8 +12382,36 @@ node_local_build_plane_preflight_override_allowed || fail "deploy tooling change
   PUBLIC_DATA_PLANE_PRESERVED=true
   NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=true
   FUGUE_REGISTRY_DEPLOYMENT_NAME=fugue-registry
+  FUGUE_NAMESPACE=fugue-system
+  PREVIOUS_REVISION=807
   live_deployment_replicas() { printf '0'; }
   stateful_dependency_changed() { return 1; }
+  run_release_long_command() {
+    shift 2
+    [[ "$*" == "helm get manifest fugue -n fugue-system --revision 807" ]] || return 1
+    printf '%s\n' \
+      'apiVersion: apps/v1' \
+      'kind: DaemonSet' \
+      'metadata:' \
+      '  name: fugue-edge-front' \
+      'spec:' \
+      '  template:' \
+      '    metadata:' \
+      '      annotations:' \
+      "        checksum/edge-blue-green-front: ${front_live_checksum}" \
+      '        fugue.io/base-only: "true"' \
+      '---' \
+      'apiVersion: apps/v1' \
+      'kind: DaemonSet' \
+      'metadata:' \
+      '  name: fugue-edge-worker-a' \
+      'spec:' \
+      '  template:' \
+      '    metadata:' \
+      '      annotations:' \
+      "        checksum/edge-blue-green-worker: ${worker_live_checksum}" \
+      '        fugue.io/base-only: "true"'
+  }
   prepare_helm_post_renderer || fail "combined public checksum and registry-zero renderer must be created"
   [[ "${PRESERVE_REGISTRY_ZERO_REPLICAS}" == "true" ]] || fail "combined renderer must preserve registry zero replicas"
   renderer_file="${HELM_POST_RENDERER_FILE}"
@@ -12401,6 +12429,7 @@ spec:
     metadata:
       annotations:
         checksum/edge-blue-green-front: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        fugue.io/target-only: "true"
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -12411,6 +12440,7 @@ spec:
     metadata:
       annotations:
         checksum/edge-blue-green-worker: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+        fugue.io/target-only: "true"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -12422,6 +12452,8 @@ YAML
 )" || fail "combined renderer must accept every exact preserved target"
   [[ "${rendered_manifest}" == *"checksum/edge-blue-green-front: ${front_live_checksum}"* ]] || fail "renderer must preserve the live front checksum"
   [[ "${rendered_manifest}" == *"checksum/edge-blue-green-worker: ${worker_live_checksum}"* ]] || fail "renderer must preserve the live worker checksum"
+  assert_eq "$(grep -c 'fugue.io/base-only: "true"' <<<"${rendered_manifest}")" "2" "renderer must preserve exact Helm-base public objects"
+  assert_eq "$(grep -c 'fugue.io/target-only:' <<<"${rendered_manifest}" || true)" "0" "renderer must remove target-only public object drift"
   assert_eq "$(grep -c '^  replicas: 0$' <<<"${rendered_manifest}")" "1" "combined renderer retains registry-zero behavior"
 
   missing_output=""
@@ -12434,8 +12466,8 @@ YAML
   fi
   [[ -z "${missing_output}" ]] || fail "failed renderer must emit no partial manifest"
 
-  decoy_output=""
-  if decoy_output="$("${renderer_file}" <<'YAML'
+  duplicate_output=""
+  if duplicate_output="$("${renderer_file}" <<'YAML'
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -12443,9 +12475,18 @@ metadata:
 spec:
   template:
     metadata:
-      labels:
+      annotations:
         checksum/edge-blue-green-front: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-      annotations: {}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-edge-front
+spec:
+  template:
+    metadata:
+      annotations:
+        checksum/edge-blue-green-front: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -12458,9 +12499,9 @@ spec:
         checksum/edge-blue-green-worker: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 YAML
 )"; then
-    fail "renderer must not accept a checksum-shaped label in place of the exact pod-template annotation"
+    fail "renderer must reject a duplicate preserved public object"
   fi
-  [[ -z "${decoy_output}" ]] || fail "path-mismatched renderer failure must emit no partial manifest"
+  [[ -z "${duplicate_output}" ]] || fail "duplicate renderer failure must emit no partial manifest"
   cleanup_upgrade_override_values
 )
 
