@@ -333,7 +333,7 @@ PY
   export FUGUE_NAMESPACE=fugue-system
   export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=pdp-bundle-owned-smoke
   export FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
-  export FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://0-0.pro,https://api.0-0.pro
+  export FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://site.example.test,https://api.example.test
   export FUGUE_EDGE_IMAGE_REPOSITORY=registry.example/fugue-edge
   export FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   EDGE_GROUP_ID=edge-group-country-us
@@ -347,13 +347,13 @@ PY
   bundle_fixture() {
     case "${BUNDLE_MODE}" in
       us)
-        printf '%s\n' '{"schema_version":"1.0","version":"routegen_a1","generation":"routegen_a1","edge_group_id":"edge-group-country-us","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"0-0.pro","path_prefix":"/","edge_group_id":"edge-group-country-us","status":"active","route_generation":"routegen_a2"},{"hostname":"api.0-0.pro","path_prefix":"/","edge_group_id":"edge-group-country-us","status":"active","route_generation":"routegen_a3"},{"hostname":"api.0-0.pro","path_prefix":"/v1","edge_group_id":"edge-group-country-us","status":"active","route_generation":"routegen_a4"}]}'
+        printf '%s\n' '{"schema_version":"1.0","version":"routegen_a1","generation":"routegen_a1","edge_group_id":"edge-group-country-us","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-us","status":"active","route_generation":"routegen_a2"},{"hostname":"api.example.test","path_prefix":"/","edge_group_id":"edge-group-country-us","status":"active","route_generation":"routegen_a3"},{"hostname":"api.example.test","path_prefix":"/v1","edge_group_id":"edge-group-country-us","status":"active","route_generation":"routegen_a4"}]}'
         ;;
       de)
-        printf '%s\n' '{"schema_version":"1.0","version":"routegen_b1","generation":"routegen_b1","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"0-0.pro","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b2"},{"hostname":"api2.0-0.pro","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b3"}]}'
+        printf '%s\n' '{"schema_version":"1.0","version":"routegen_b1","generation":"routegen_b1","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b2"},{"hostname":"api2.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b3"}]}'
         ;;
       ambiguous)
-        printf '%s\n' '{"schema_version":"1.0","version":"routegen_b1","generation":"routegen_b1","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"0-0.pro","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b2"},{"hostname":"0-0.pro","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b3"}]}'
+        printf '%s\n' '{"schema_version":"1.0","version":"routegen_b1","generation":"routegen_b1","edge_group_id":"edge-group-country-de","key_id":"control-plane","signature":"cO5Kz_yn2rWtAO12eY2XHgVsEEQQPi7tyFosehrKgPQ","routes":[{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b2"},{"hostname":"site.example.test","path_prefix":"/","edge_group_id":"edge-group-country-de","status":"active","route_generation":"routegen_b3"}]}'
         ;;
     esac
   }
@@ -375,20 +375,20 @@ PY
   smoke_curl_with_retry() { [[ "${SMOKE_FAIL}" != true ]]; }
 
   targets="$(worker_bundle_smoke_targets edge-worker-us)"
-  [[ "$(printf '%s\n' "${targets}" | cut -f3 | paste -sd, -)" == 0-0.pro,api.0-0.pro ]]
+  [[ "$(printf '%s\n' "${targets}" | cut -f3 | paste -sd, -)" == site.example.test,api.example.test ]]
 
   EDGE_GROUP_ID=edge-group-country-de
   BUNDLE_MODE=de
   targets="$(worker_bundle_smoke_targets edge-worker-de)"
-  [[ "$(printf '%s\n' "${targets}" | cut -f3)" == 0-0.pro ]]
-  [[ "${targets}" != *api.0-0.pro* ]]
+  [[ "$(printf '%s\n' "${targets}" | cut -f3)" == site.example.test ]]
+  [[ "${targets}" != *api.example.test* ]]
 
-  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://api.0-0.pro
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://api.example.test
   if worker_bundle_smoke_targets edge-worker-de >/dev/null 2>&1; then
     echo "group-local smoke accepted an input hostname absent from its signed bundle" >&2
     exit 1
   fi
-  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://0-0.pro,https://api.0-0.pro
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=https://site.example.test,https://api.example.test
   BUNDLE_MODE=ambiguous
   if worker_bundle_smoke_targets edge-worker-de >/dev/null 2>&1; then
     echo "group-local smoke accepted an ambiguous signed-bundle route" >&2
@@ -398,8 +398,8 @@ PY
   BUNDLE_MODE=de
   : >"${ASK_TRACE}"
   check_worker_https_smoke edge-worker-de 28443
-  [[ "$(cat "${ASK_TRACE}")" == 0-0.pro ]]
-  ASK_FAIL_HOST=0-0.pro
+  [[ "$(cat "${ASK_TRACE}")" == site.example.test ]]
+  ASK_FAIL_HOST=site.example.test
   if check_worker_https_smoke edge-worker-de 28443 >/dev/null 2>&1; then
     echo "group-local smoke accepted a rejected local TLS ask" >&2
     exit 1
