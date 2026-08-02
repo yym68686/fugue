@@ -8,9 +8,16 @@ legacyRelease: fugue
 sharedSourceRoots:
   - go.mod
   - go.sum
+  - internal/api/component_release_plan_test.go
+  - internal/api/platform_state.go
+  - internal/api/resilience_explain.go
+  - internal/apispec/spec_gen.go
   - internal/model
   - internal/config
+  - internal/platformsafety/kernel.go
+  - internal/platformsafety/kernel_test.go
   - internal/store/postgres.go
+  - internal/store/platform_state.go
   - openapi/openapi.yaml
   - deploy/helm/fugue
 

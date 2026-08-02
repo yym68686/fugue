@@ -110,6 +110,69 @@ func TestPlanFoundationSliceIsCoveredAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPlanShadowPersistenceSliceIsCoveredAndFailsClosed(t *testing.T) {
+	manifest := loadRepositoryManifest(t)
+	paths := []string{
+		"cmd/fugue-component-plan/main.go",
+		"cmd/fugue-component-plan/main_test.go",
+		"docs/architecture/component-ownership-v1.md",
+		"docs/architecture/component-ownership-v1.yaml",
+		"docs/architecture/microservices-migration-acceptance-v1.md",
+		"internal/api/component_release_plan_test.go",
+		"internal/api/platform_state.go",
+		"internal/api/resilience_explain.go",
+		"internal/apispec/spec_gen.go",
+		"internal/componentmanifest/artifact.go",
+		"internal/componentmanifest/artifact_test.go",
+		"internal/componentmanifest/planner_test.go",
+		"internal/model/platform_state.go",
+		"internal/platformcontrol/registry.go",
+		"internal/platformcontrol/registry_test.go",
+		"internal/platformsafety/kernel.go",
+		"internal/platformsafety/kernel_test.go",
+		"internal/releasecontrol/component_plan_http_store.go",
+		"internal/releasecontrol/component_plan_http_store_test.go",
+		"internal/releasecontrol/component_plan_reconciler.go",
+		"internal/releasecontrol/component_plan_reconciler_test.go",
+		"internal/store/platform_state.go",
+		"openapi/openapi.yaml",
+	}
+	plan, err := PlanChanges(manifest, paths)
+	if err != nil {
+		t.Fatalf("PlanChanges() error = %v", err)
+	}
+	if plan.DispatchMode != DispatchModeLegacyShared || !plan.RequiresLegacyRelease {
+		t.Fatalf("shadow persistence plan = mode %q legacy=%v", plan.DispatchMode, plan.RequiresLegacyRelease)
+	}
+	if len(plan.ChangedPaths) != len(paths) {
+		t.Fatalf("changed paths = %d, want %d", len(plan.ChangedPaths), len(paths))
+	}
+	if len(plan.ImpactedComponents) != len(manifest.Components) {
+		t.Fatalf("impacted components = %d, want %d", len(plan.ImpactedComponents), len(manifest.Components))
+	}
+	sharedPaths := map[string]struct{}{
+		"internal/api/component_release_plan_test.go": {},
+		"internal/api/platform_state.go":              {},
+		"internal/api/resilience_explain.go":          {},
+		"internal/apispec/spec_gen.go":                {},
+		"internal/platformsafety/kernel.go":           {},
+		"internal/platformsafety/kernel_test.go":      {},
+		"internal/store/platform_state.go":            {},
+	}
+	for _, changedPath := range plan.ChangedPaths {
+		if _, mustBeShared := sharedPaths[changedPath.Path]; mustBeShared && !changedPath.Shared {
+			t.Fatalf("cross-boundary path %q is not shared", changedPath.Path)
+		}
+	}
+	coordination, err := BuildShadowCoordinationPlan(plan)
+	if err != nil {
+		t.Fatalf("BuildShadowCoordinationPlan() error = %v", err)
+	}
+	if !coordination.ObservationOnly || coordination.ProductionMutationAllowed {
+		t.Fatalf("shadow persistence coordination can mutate production: %+v", coordination)
+	}
+}
+
 func TestPlanRejectsUnknownDuplicateAndNonCanonicalPaths(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	for name, paths := range map[string][]string{
