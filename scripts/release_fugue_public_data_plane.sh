@@ -5898,8 +5898,8 @@ PY
     edge_activation_error "API deployment drifted while replica acknowledgements were captured"
     return 1
   }
-  python3 - "${snapshot}" "${pods}" <<'PY'
-import hashlib,json,sys
+  EXPECTED_COHORT="${FUGUE_EDGE_ACTIVATION_API_COHORT_JSON:-}" python3 - "${snapshot}" "${pods}" <<'PY'
+import hashlib,json,os,sys
 with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
 with open(sys.argv[2],encoding="utf-8") as h: pod_list=json.load(h)
 meta=value.get("metadata") or {}; spec=value.get("spec") or {}; status=value.get("status") or {}
@@ -5913,6 +5913,7 @@ images={c.get("name"):c.get("image") for c in containers}
 pods=pod_list.get("items") if isinstance(pod_list,dict) else None
 if not isinstance(pods,list) or len(pods)!=desired: raise SystemExit("API Pod cohort contains an old or missing replica")
 pod_uids=[]
+actual_cohort=[]
 for pod in pods:
     pmeta=pod.get("metadata") or {}; pspec=pod.get("spec") or {}; pstatus=pod.get("status") or {}
     if pmeta.get("deletionTimestamp") or not pmeta.get("uid"): raise SystemExit("API Pod identity is deleting or missing")
@@ -5921,6 +5922,9 @@ for pod in pods:
     conditions={item.get("type"):item.get("status") for item in pstatus.get("conditions") or []}
     if pstatus.get("phase")!="Running" or conditions.get("Ready")!="True": raise SystemExit("API Pod is not Running and Ready")
     pod_uids.append(pmeta["uid"])
+    actual_cohort.append({"name":str(pmeta.get("name") or ""),"uid":str(pmeta["uid"]),"source":str((pmeta.get("annotations") or {}).get("fugue.pro/source-commit") or ""),"images":sorted(pimages.items())})
+expected_cohort=json.loads(os.environ["EXPECTED_COHORT"])
+if sorted(actual_cohort,key=lambda item:item["name"]) != expected_cohort: raise SystemExit("API Pod cohort drifted from the exact signer snapshot")
 identity={"uid":meta.get("uid"),"generation":generation,"replicas":desired,"images":sorted(images.items()),"pods":sorted(pod_uids)}
 print("api-"+hashlib.sha256(json.dumps(identity,separators=(",",":"),sort_keys=True).encode()).hexdigest())
 PY
@@ -5938,15 +5942,19 @@ PY
   [[ "${expected_generation}" =~ ^[1-9][0-9]*$ && -n "${expected_authority}" && -n "${expected_phase}" ]] || return 1
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "app.kubernetes.io/instance=${FUGUE_RELEASE_INSTANCE},app.kubernetes.io/component=api" -o json >"${snapshot}" || return 1
   local pods
-  pods="$(EXPECTED_SHA="${GITHUB_SHA:-}" python3 - "${snapshot}" <<'PY'
+  pods="$(EXPECTED_COHORT="${FUGUE_EDGE_ACTIVATION_API_COHORT_JSON:-}" python3 - "${snapshot}" <<'PY'
 import json,os,sys
 with open(sys.argv[1],encoding="utf-8") as h:value=json.load(h)
 pods=[]
+actual=[]
 for pod in value.get("items") or []:
     meta=pod.get("metadata") or {}; status=pod.get("status") or {}; conditions={x.get("type"):x.get("status") for x in status.get("conditions") or []}
-    if meta.get("deletionTimestamp") or status.get("phase")!="Running" or conditions.get("Ready")!="True" or (meta.get("annotations") or {}).get("fugue.pro/source-commit")!=os.environ["EXPECTED_SHA"]: raise SystemExit("mixed API Pod cohort")
+    if meta.get("deletionTimestamp") or status.get("phase")!="Running" or conditions.get("Ready")!="True": raise SystemExit("mixed API Pod cohort")
+    pimages={c.get("name"):c.get("image") for c in (pod.get("spec") or {}).get("containers") or []}
+    actual.append({"name":str(meta.get("name") or ""),"uid":str(meta.get("uid") or ""),"source":str((meta.get("annotations") or {}).get("fugue.pro/source-commit") or ""),"images":sorted(pimages.items())})
     pods.append(str(meta.get("name") or ""))
-if len(pods)<2 or any(not pod for pod in pods): raise SystemExit("API Pod cohort is incomplete")
+expected=json.loads(os.environ["EXPECTED_COHORT"])
+if len(pods)!=2 or any(not pod for pod in pods) or sorted(actual,key=lambda item:item["name"])!=expected: raise SystemExit("API Pod cohort drifted from the exact signer snapshot")
 print("\n".join(sorted(pods)))
 PY
 )" || return 1
@@ -6646,7 +6654,7 @@ main() {
     local signer_snapshot
     signer_snapshot="$(mktemp)"
     kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "app.kubernetes.io/instance=${FUGUE_RELEASE_INSTANCE},app.kubernetes.io/component=api" -o json >"${signer_snapshot}" || fail "could not inspect exact API signer cohort"
-    FUGUE_EDGE_ACTIVATION_SIGNER_POD="$(EXPECTED_SHA="${FUGUE_EDGE_IMAGE_TAG}" python3 - "${signer_snapshot}" <<'PY'
+    IFS=$'\t' read -r FUGUE_EDGE_ACTIVATION_SIGNER_POD FUGUE_EDGE_ACTIVATION_API_COHORT_JSON < <(EXPECTED_SHA="${FUGUE_EDGE_IMAGE_TAG}" python3 - "${signer_snapshot}" <<'PY'
 import json,os,sys
 with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
 eligible=[]
@@ -6655,17 +6663,21 @@ for pod in value.get("items") or []:
     conditions={item.get("type"):item.get("status") for item in status.get("conditions") or []}
     if meta.get("deletionTimestamp") or status.get("phase")!="Running" or conditions.get("Ready")!="True": continue
     if (meta.get("annotations") or {}).get("fugue.pro/source-commit") != os.environ["EXPECTED_SHA"]: continue
-    eligible.append(str(meta.get("name") or ""))
-if len(eligible)<2 or any(not name for name in eligible): raise SystemExit("at least two exact current API signer Pods are required")
-print(sorted(eligible)[0])
+    images={item.get("name"):item.get("image") for item in (pod.get("spec") or {}).get("containers") or []}
+    api_image=str(images.get("api") or "")
+    if "@sha256:" not in api_image: continue
+    eligible.append({"name":str(meta.get("name") or ""),"uid":str(meta.get("uid") or ""),"source":os.environ["EXPECTED_SHA"],"images":sorted(images.items())})
+eligible.sort(key=lambda item:item["name"])
+if len(eligible)!=2 or any(not item["name"] or not item["uid"] for item in eligible): raise SystemExit("exactly two immutable current API signer Pods are required")
+print(eligible[0]["name"]+"\t"+json.dumps(eligible,separators=(",",":"),sort_keys=True))
 PY
-)" || fail "API signer cohort is mixed, old, or unavailable"
+) || fail "API signer cohort is mixed, old, or unavailable"
     rm -f -- "${signer_snapshot}"
     : "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME:?FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME is required}"
     IFS=$'\t' read -r FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION < <(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "secret/${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME}" -o 'jsonpath={.metadata.uid}{"\t"}{.metadata.resourceVersion}{"\n"}') || fail "could not bind activation signer audit identity"
     [[ -n "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID}" && "${FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION}" =~ ^[0-9]+$ ]] || fail "activation signer audit identity is invalid"
     export FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_UID FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_VERSION
-    export FUGUE_EDGE_ACTIVATION_SIGNER_POD
+    export FUGUE_EDGE_ACTIVATION_SIGNER_POD FUGUE_EDGE_ACTIVATION_API_COHORT_JSON
     edge_activation_init
     trap edge_activation_cleanup EXIT
   fi

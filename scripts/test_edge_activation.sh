@@ -321,4 +321,13 @@ PY
   isolate_inactive_edge_worker inactive active
   [[ "${captured}" =~ ^failed-[0-9a-f]{56}$ && ${#captured} -eq 63 ]]
 )
+
+python3 - "${ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
+import sys
+source=open(sys.argv[1],encoding="utf-8").read()
+assert 'EXPECTED_SHA="${GITHUB_SHA:-}"' not in source
+assert source.count('FUGUE_EDGE_ACTIVATION_API_COHORT_JSON') >= 4
+assert 'len(eligible)!=2' in source
+assert 'API Pod cohort drifted from the exact signer snapshot' in source
+PY
 printf '[test_edge_activation] ok\n'
