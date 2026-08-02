@@ -701,6 +701,55 @@ jobs:
           ref: ${{ inputs.target_sha }}
           fetch-depth: 0
 
+      - name: Prepare exact current tooling for historical runtime evidence
+        id: current_tooling
+        if: ${{ inputs.target_sha != inputs.expected_sha && needs.release-baseline.outputs.is_genesis != 'true' }}
+        env:
+          SOURCE_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          API_DIGEST: ${{ needs.build.outputs.api_image_digest }}
+          CONTROLLER_DIGEST: ${{ needs.build.outputs.controller_image_digest }}
+          TELEMETRY_DIGEST: ${{ needs.build.outputs.telemetry_agent_image_digest }}
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ && "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
+          [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${TARGET_SHA}" ]]
+          remote_main="$(timeout --kill-after=2s 20s git ls-remote --refs origin refs/heads/main | awk 'NR == 1 {print $1}')"
+          [[ "${remote_main}" == "${SOURCE_SHA}" ]]
+          timeout --kill-after=5s 60s git fetch --no-tags origin "${SOURCE_SHA}"
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${SOURCE_SHA}" ]]
+          git merge-base --is-ancestor "${TARGET_SHA}" "${SOURCE_SHA}"
+
+          tools_root="${RUNNER_TEMP}/fugue-current-release-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ownership_backup="${RUNNER_TEMP}/fugue-historical-runtime-ownership-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yaml"
+          [[ ! -e "${tools_root}" && ! -L "${tools_root}" ]]
+          [[ ! -e "${ownership_backup}" && ! -L "${ownership_backup}" ]]
+          install -d -m 0700 "${tools_root}"
+          git archive "${SOURCE_SHA}" | tar -x -C "${tools_root}"
+          [[ "$(git show "${SOURCE_SHA}:deploy/release-domains/ownership-v1.yaml" | sha256sum | awk '{print $1}')" == \
+            "$(sha256sum "${tools_root}/deploy/release-domains/ownership-v1.yaml" | awk '{print $1}')" ]]
+
+          install -m 0600 deploy/release-domains/ownership-v1.yaml "${ownership_backup}"
+          install -m 0644 "${tools_root}/deploy/release-domains/ownership-v1.yaml" deploy/release-domains/ownership-v1.yaml
+          cmp -s "${tools_root}/deploy/release-domains/ownership-v1.yaml" deploy/release-domains/ownership-v1.yaml
+          git update-index --assume-unchanged -- deploy/release-domains/ownership-v1.yaml
+          git diff --quiet --ignore-submodules --
+          git diff --cached --quiet --ignore-submodules --
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+          [[ "${API_DIGEST}" == 'sha256:410a1c75efe1fe9dd51dd83e32d535d548ab4471281223be7a8bc6b7297ae9d8' ]]
+          [[ "${CONTROLLER_DIGEST}" == 'sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d' ]]
+          [[ "${TELEMETRY_DIGEST}" == 'sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb' ]]
+          {
+            printf 'FUGUE_CURRENT_RELEASE_TOOLS_ROOT=%s\n' "${tools_root}"
+            printf 'FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP=%s\n' "${ownership_backup}"
+            printf 'FUGUE_API_IMAGE_DIGEST=%s\n' "${API_DIGEST}"
+            printf 'FUGUE_CONTROLLER_IMAGE_DIGEST=%s\n' "${CONTROLLER_DIGEST}"
+            printf 'FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST=%s\n' "${TELEMETRY_DIGEST}"
+          } >>"${GITHUB_ENV}"
+
       - name: Download Stage1 handoff for deploy prewrite
         if: ${{ inputs.public_data_plane_adoption_run_id != '' && needs.release-baseline.outputs.is_genesis != 'true' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -720,12 +769,16 @@ jobs:
       - name: Build private release-domain tools
         run: |
           set -euo pipefail
+          source_root="${FUGUE_CURRENT_RELEASE_TOOLS_ROOT:-${GITHUB_WORKSPACE}}"
+          [[ -d "${source_root}" && ! -L "${source_root}" ]]
           tools_dir="${RUNNER_TEMP}/fugue-release-tools"
           [[ ! -e "${tools_dir}" && ! -L "${tools_dir}" ]]
           install -d -m 0700 "${tools_dir}"
           [[ -d "${tools_dir}" && ! -L "${tools_dir}" ]]
           [[ "$(stat -c '%a' "${tools_dir}")" == '700' ]]
           umask 077
+          cd "${source_root}"
+          module_files_digest="$(sha256sum go.mod go.sum | sha256sum | awk '{print $1}')"
           for goarch in amd64 arm64; do
             env \
               CGO_ENABLED=0 \
@@ -755,7 +808,7 @@ jobs:
             'GOVCS=*:off' \
             GOWORK=off \
             go mod verify
-          git diff --exit-code -- go.mod go.sum
+          [[ "$(sha256sum go.mod go.sum | sha256sum | awk '{print $1}')" == "${module_files_digest}" ]]
           go build -trimpath -o "${tools_dir}/fugue-release-domain-evidence" ./cmd/fugue-release-domain-evidence
           go build -trimpath -o "${tools_dir}/fugue-release-domain-dispatch" ./cmd/fugue-release-domain-dispatch
           go build -trimpath -o "${tools_dir}/fugue-public-data-plane-adoption" ./cmd/fugue-public-data-plane-adoption
@@ -1292,6 +1345,21 @@ jobs:
           FUGUE_PUBLIC_DATA_PLANE_STAGE1_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
           FUGUE_PUBLIC_DATA_PLANE_ADOPTION_TOOL: ${{ inputs.public_data_plane_adoption_run_id != '' && format('{0}/fugue-release-tools/fugue-public-data-plane-adoption', runner.temp) || '' }}
         uses: ./.github/actions/operational-domain-guarded-deploy
+
+      - name: Restore exact historical runtime checkout
+        if: ${{ always() && steps.current_tooling.outcome == 'success' && inputs.target_sha != inputs.expected_sha && needs.release-baseline.outputs.is_genesis != 'true' }}
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
+          [[ -f "${FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP}" && ! -L "${FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP}" ]]
+          install -m 0644 "${FUGUE_HISTORICAL_RUNTIME_OWNERSHIP_BACKUP}" deploy/release-domains/ownership-v1.yaml
+          git update-index --no-assume-unchanged -- deploy/release-domains/ownership-v1.yaml
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${TARGET_SHA}" ]]
+          git diff --quiet --ignore-submodules --
+          git diff --cached --quiet --ignore-submodules --
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
 
       - name: Remove stale release recovery proof
         if: ${{ always() && needs.release-baseline.outputs.is_genesis != 'true' }}

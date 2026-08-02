@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "db8cbca7376dadf9ce5289113700489cc029f6a8d559c2852f7119208870e25e")
+	assertWorkflowSourceDigest(t, data, "e64674b2997bc3400eaed2b1eef846baf3dbaf17d6fb0f0cf758c7880906269a")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2881,7 +2881,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"build/Verify exact historical incident image plan":                                 "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
 		"build/Publish verified control-plane image provenance":                             "8f188857beb59ed38aa7c3bb427b4cc4c2a5f1f6aa7df0c91211d23642f3589d",
 		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
-		"deploy/Build private release-domain tools":                                         "7b03047d41fb32288f57dd634dce430d1ca7f337331e4464cbe00134eeb6591f",
+		"deploy/Prepare exact current tooling for historical runtime evidence":              "58356a6014715486b41cb3731208ff69dd840e95cb9885f3aff12ca0a6f8039d",
+		"deploy/Build private release-domain tools":                                         "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
+		"deploy/Restore exact historical runtime checkout":                                  "2a2d9cad5c6caa758954108141911ffe7d0f95fa375be37b3678b42a2b363ee1",
 		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
 		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
 		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
@@ -2948,6 +2950,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			StepKeys: [][]string{
 				{"name", "if", "run"},
 				{"name", "uses", "with"},
+				{"name", "id", "if", "env", "run"},
 				{"name", "if", "uses", "with"},
 				{"name", "uses", "with"},
 				{"name", "run"},
@@ -2961,6 +2964,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "id", "if", "env", "run"},
 				{"name", "if", "env", "run"},
 				{"name", "id", "if", "env", "uses"},
+				{"name", "if", "env", "run"},
 				{"name", "if", "run"},
 				{"name", "if", "uses", "with"},
 			},
@@ -3501,6 +3505,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	buildTools := workflowStepByName(t, deploy, "Build private release-domain tools")
 	for _, required := range []string{
+		`source_root="${FUGUE_CURRENT_RELEASE_TOOLS_ROOT:-${GITHUB_WORKSPACE}}"`,
+		`cd "${source_root}"`,
 		"${RUNNER_TEMP}/fugue-release-tools",
 		"for goarch in amd64 arm64; do",
 		"CGO_ENABLED=0",
@@ -3511,7 +3517,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"go mod verify",
 		"GOPROXY=https://proxy.golang.org",
 		"'GOVCS=*:off'",
-		"git diff --exit-code -- go.mod go.sum",
+		"module_files_digest",
 		"./cmd/fugue-release-domain-evidence",
 		"./cmd/fugue-release-domain-dispatch",
 		"chmod 0700",
@@ -3519,6 +3525,39 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if !strings.Contains(buildTools.Run, required) {
 			t.Fatalf("deploy release tool build must contain %q", required)
 		}
+	}
+	currentTooling := workflowStepByName(t, deploy, "Prepare exact current tooling for historical runtime evidence")
+	if currentTooling.ID != "current_tooling" || currentTooling.If != "${{ inputs.target_sha != inputs.expected_sha && needs.release-baseline.outputs.is_genesis != 'true' }}" {
+		t.Fatalf("historical current-tooling gate drifted: %#v", currentTooling)
+	}
+	for key, want := range map[string]string{
+		"SOURCE_SHA":        "${{ inputs.expected_sha }}",
+		"TARGET_SHA":        "${{ inputs.target_sha }}",
+		"API_DIGEST":        "${{ needs.build.outputs.api_image_digest }}",
+		"CONTROLLER_DIGEST": "${{ needs.build.outputs.controller_image_digest }}",
+		"TELEMETRY_DIGEST":  "${{ needs.build.outputs.telemetry_agent_image_digest }}",
+	} {
+		if got := currentTooling.Env[key]; got != want {
+			t.Fatalf("historical current-tooling env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{
+		`git archive "${SOURCE_SHA}"`,
+		"deploy/release-domains/ownership-v1.yaml",
+		"git update-index --assume-unchanged",
+		"FUGUE_API_IMAGE_DIGEST",
+		"FUGUE_CONTROLLER_IMAGE_DIGEST",
+		"FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST",
+	} {
+		if !strings.Contains(currentTooling.Run, required) {
+			t.Fatalf("historical current-tooling proof is missing %q", required)
+		}
+	}
+	restoreRuntime := workflowStepByName(t, deploy, "Restore exact historical runtime checkout")
+	if !strings.Contains(restoreRuntime.If, "steps.current_tooling.outcome == 'success'") ||
+		!strings.Contains(restoreRuntime.Run, "git update-index --no-assume-unchanged") ||
+		!strings.Contains(restoreRuntime.Run, "git diff --quiet --ignore-submodules --") {
+		t.Fatalf("historical runtime restoration is incomplete: %#v", restoreRuntime)
 	}
 	if strings.Contains(buildTools.Run, "go mod download all") {
 		t.Fatal("deploy release tool build must not preload unrelated module versions")
