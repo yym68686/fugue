@@ -122,7 +122,7 @@ func releaseClonedRepo(repo clonedGitHubRepo) {
 	_ = os.RemoveAll(repo.RepoDir)
 }
 
-func defaultImportedImageRef(registryPushBase, imageRepository string, repo clonedGitHubRepo, imageNameSuffix string) string {
+func defaultImportedImageRef(registryPushBase, imageRepository string, repo clonedGitHubRepo, imageNameSuffix string, jobLabels map[string]string) string {
 	imageRepository = strings.Trim(strings.TrimSpace(imageRepository), "/")
 	if imageRepository == "" {
 		imageRepository = "fugue-apps"
@@ -131,7 +131,8 @@ func defaultImportedImageRef(registryPushBase, imageRepository string, repo clon
 	if suffix := model.SlugifyOptional(imageNameSuffix); suffix != "" {
 		repoPath += "-" + suffix
 	}
-	return fmt.Sprintf("%s/%s/%s:git-%s", strings.TrimSpace(registryPushBase), imageRepository, repoPath, shortCommit(repo.CommitSHA))
+	tag := operationScopedBuildTag("git-"+shortCommit(repo.CommitSHA), jobLabels)
+	return fmt.Sprintf("%s/%s/%s:%s", strings.TrimSpace(registryPushBase), imageRepository, repoPath, tag)
 }
 
 func normalizeRepoSourceDir(repoDir, sourceDir string) (string, error) {

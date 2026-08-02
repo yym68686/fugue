@@ -1,6 +1,8 @@
 package sourceimport
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"os"
 	"strings"
@@ -8,6 +10,67 @@ import (
 
 const defaultKanikoRegistryMirror = "mirror.gcr.io"
 const defaultKanikoSnapshotMode = "redo"
+const builderOperationIDLabel = "fugue.pro/operation-id"
+const maximumImageTagLength = 128
+
+// operationScopedBuildTag makes the registry tag identify one build output,
+// not merely its source input. Source builds are not guaranteed to be
+// reproducible: unpinned base images, package indexes, and build-generated
+// metadata can all change the manifest digest while the Git commit or upload
+// archive stays the same. Reusing git-<commit> or upload-<archive> across
+// operations therefore lets a retry rebind an apparently immutable tag.
+//
+// Managed operations use server-generated IDs containing only tag-safe
+// characters, so the normal path preserves that exact unique identity. The
+// digest fallback keeps the helper safe for unexpected external callers while
+// remaining within the OCI/Docker 128-character tag limit.
+func operationScopedBuildTag(baseTag string, jobLabels map[string]string) string {
+	baseTag = strings.TrimSpace(baseTag)
+	operationID := strings.TrimSpace(jobLabels[builderOperationIDLabel])
+	if baseTag == "" || operationID == "" {
+		return baseTag
+	}
+
+	suffix := operationID
+	candidate := baseTag + "-build-" + suffix
+	if !validImageTag(candidate) || len(candidate) > maximumImageTagLength {
+		digest := sha256.Sum256([]byte(operationID))
+		suffix = "sha256-" + hex.EncodeToString(digest[:])
+		candidate = baseTag + "-build-" + suffix
+	}
+	if len(candidate) <= maximumImageTagLength {
+		return candidate
+	}
+
+	maximumBaseLength := maximumImageTagLength - len("-build-") - len(suffix)
+	if maximumBaseLength <= 0 {
+		return baseTag
+	}
+	baseTag = strings.TrimRight(baseTag[:maximumBaseLength], ".-")
+	if baseTag == "" {
+		return candidate[len(candidate)-maximumImageTagLength:]
+	}
+	return baseTag + "-build-" + suffix
+}
+
+func validImageTag(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	for index, char := range []byte(tag) {
+		letterOrDigit := char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
+		if index == 0 {
+			if !letterOrDigit && char != '_' {
+				return false
+			}
+			continue
+		}
+		if !letterOrDigit && char != '_' && char != '.' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
 
 func registryHostFromImageRef(imageRef string) string {
 	host := strings.TrimSpace(imageRef)

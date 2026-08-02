@@ -128,7 +128,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		return GitHubImportResult{}, err
 	}
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := nixpacksBuildRequest{
 		RepoURL:               repoURL,

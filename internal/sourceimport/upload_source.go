@@ -339,7 +339,7 @@ func importStaticSiteFromExtractedUpload(ctx context.Context, src extractedUploa
 		return GitHubImportResult{}, err
 	}
 
-	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
+	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix, jobLabels)
 	destinationImageRef := importControllerDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildJobNameValue := ""
 	if len(plan.SourceOverlay) > 0 {
@@ -403,7 +403,7 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 	if exposesPublicService && shouldSuppressDetectedPublicServiceForProject(src.RootDir, buildContextDir, detectedStack) {
 		exposesPublicService = false
 	}
-	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
+	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := dockerfileBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,
@@ -458,7 +458,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		return GitHubImportResult{}, err
 	}
 	sourceOverlayFiles = append(sourceOverlayFiles, systemOverlayFiles...)
-	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
+	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := buildpacksBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,
@@ -522,7 +522,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 	if err != nil {
 		return GitHubImportResult{}, err
 	}
-	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
+	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := nixpacksBuildRequest{
 		CommitSHA:             src.ArchiveSHA256,
@@ -586,7 +586,7 @@ func UploadImageRepositoryName(appName, imageNameSuffix string) string {
 	return repoPath + "-" + suffix
 }
 
-func defaultUploadedImageRef(registryPushBase, imageRepository, appName, archiveSHA256, imageNameSuffix string) string {
+func defaultUploadedImageRef(registryPushBase, imageRepository, appName, archiveSHA256, imageNameSuffix string, jobLabels map[string]string) string {
 	imageRepository = strings.Trim(strings.TrimSpace(imageRepository), "/")
 	if imageRepository == "" {
 		imageRepository = "fugue-apps"
@@ -596,7 +596,8 @@ func defaultUploadedImageRef(registryPushBase, imageRepository, appName, archive
 	if tagSeed == "" {
 		tagSeed = repoPath
 	}
-	return fmt.Sprintf("%s/%s/%s:upload-%s", strings.TrimSpace(registryPushBase), imageRepository, repoPath, shortCommit(tagSeed))
+	tag := operationScopedBuildTag("upload-"+shortCommit(tagSeed), jobLabels)
+	return fmt.Sprintf("%s/%s/%s:%s", strings.TrimSpace(registryPushBase), imageRepository, repoPath, tag)
 }
 
 func buildArchiveDownloadInitContainers(archiveURL string) []map[string]any {

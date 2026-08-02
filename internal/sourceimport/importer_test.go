@@ -78,7 +78,7 @@ func TestDefaultImportedImageRefOmitsBlankOptionalSuffix(t *testing.T) {
 		RepoOwner: "Example",
 		RepoName:  "Demo",
 		CommitSHA: "abcdef1234567890",
-	}, "")
+	}, "", nil)
 	want := "registry.push.example/fugue-apps/example-demo:git-abcdef123456"
 	if got != want {
 		t.Fatalf("unexpected imported image ref:\nwant: %s\ngot:  %s", want, got)
@@ -88,10 +88,57 @@ func TestDefaultImportedImageRefOmitsBlankOptionalSuffix(t *testing.T) {
 func TestDefaultUploadedImageRefOmitsBlankOptionalSuffix(t *testing.T) {
 	t.Parallel()
 
-	got := defaultUploadedImageRef("registry.push.example", "fugue-apps", "Demo App", "abcdef1234567890", "")
+	got := defaultUploadedImageRef("registry.push.example", "fugue-apps", "Demo App", "abcdef1234567890", "", nil)
 	want := "registry.push.example/fugue-apps/demo-app:upload-abcdef123456"
 	if got != want {
 		t.Fatalf("unexpected uploaded image ref:\nwant: %s\ngot:  %s", want, got)
+	}
+}
+
+func TestManagedBuildImageRefsAreScopedToTheOperation(t *testing.T) {
+	t.Parallel()
+
+	labelsA := map[string]string{"fugue.pro/operation-id": "op_1784803448_7194c4c59000"}
+	labelsB := map[string]string{"fugue.pro/operation-id": "op_1784803917_1778733cf6fd"}
+	repo := clonedGitHubRepo{
+		RepoOwner: "Example",
+		RepoName:  "Demo",
+		CommitSHA: "abcdef1234567890",
+	}
+
+	githubA := defaultImportedImageRef("registry.push.example", "fugue-apps", repo, "web", labelsA)
+	githubB := defaultImportedImageRef("registry.push.example", "fugue-apps", repo, "web", labelsB)
+	if githubA == githubB {
+		t.Fatalf("different build operations reused one GitHub image tag: %q", githubA)
+	}
+	if want := "registry.push.example/fugue-apps/example-demo-web:git-abcdef123456-build-op_1784803448_7194c4c59000"; githubA != want {
+		t.Fatalf("unexpected operation-scoped GitHub image ref:\nwant: %s\ngot:  %s", want, githubA)
+	}
+	if repeated := defaultImportedImageRef("registry.push.example", "fugue-apps", repo, "web", labelsA); repeated != githubA {
+		t.Fatalf("one build operation produced unstable GitHub image refs: first=%q repeated=%q", githubA, repeated)
+	}
+
+	uploadA := defaultUploadedImageRef("registry.push.example", "fugue-apps", "Demo App", "abcdef1234567890", "web", labelsA)
+	uploadB := defaultUploadedImageRef("registry.push.example", "fugue-apps", "Demo App", "abcdef1234567890", "web", labelsB)
+	if uploadA == uploadB {
+		t.Fatalf("different build operations reused one uploaded-source image tag: %q", uploadA)
+	}
+	if want := "registry.push.example/fugue-apps/demo-app-web:upload-abcdef123456-build-op_1784803448_7194c4c59000"; uploadA != want {
+		t.Fatalf("unexpected operation-scoped uploaded-source image ref:\nwant: %s\ngot:  %s", want, uploadA)
+	}
+}
+
+func TestOperationScopedBuildTagBoundsUnexpectedOperationIdentity(t *testing.T) {
+	t.Parallel()
+
+	tag := operationScopedBuildTag("git-abcdef123456", map[string]string{
+		builderOperationIDLabel: strings.Repeat("invalid/operation/", 32),
+	})
+	if len(tag) > maximumImageTagLength {
+		t.Fatalf("operation-scoped tag length = %d, want <= %d: %q", len(tag), maximumImageTagLength, tag)
+	}
+	if !validImageTag(tag) {
+		t.Fatalf("operation-scoped fallback tag is invalid: %q", tag)
 	}
 }
 

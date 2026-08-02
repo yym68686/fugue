@@ -48,6 +48,7 @@ func TestDefaultUploadedImageRefAvoidsDuplicateServiceSuffix(t *testing.T) {
 		"argus-runtime",
 		"abcdef1234567890",
 		"runtime",
+		nil,
 	)
 	want := "registry.push.example/fugue-apps/argus-runtime:upload-abcdef123456"
 	if got != want {

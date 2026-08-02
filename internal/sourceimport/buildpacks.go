@@ -85,7 +85,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 	sourceOverlayFiles = append(sourceOverlayFiles, systemOverlayFiles...)
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := buildpacksBuildRequest{
 		RepoURL:               repoURL,

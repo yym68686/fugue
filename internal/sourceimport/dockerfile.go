@@ -128,7 +128,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		exposesPublicService = false
 	}
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix, jobLabels)
 	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := dockerfileBuildRequest{
 		RepoURL:               repoURL,

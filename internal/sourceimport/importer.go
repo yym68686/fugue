@@ -150,7 +150,7 @@ func importStaticSiteFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		return GitHubImportResult{}, err
 	}
 
-	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix, jobLabels)
 	destinationImageRef := importControllerDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildJobNameValue := ""
 	if len(plan.SourceOverlay) > 0 {
