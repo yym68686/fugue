@@ -105,7 +105,7 @@ jobs:
           FUGUE_EDGE_IMAGE_DIGEST: ${{ inputs.edge_image_digest }}
           FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS: ${{ inputs.smoke_urls }}
           FUGUE_EDGE_ACTIVATION_ENABLED: ${{ inputs.confirm_phased_activation && 'true' || 'false' }}
-          FUGUE_EDGE_ACTIVATION_API_URL: ${{ vars.FUGUE_API_URL }}
-          FUGUE_EDGE_ACTIVATION_API_KEY: ${{ secrets.FUGUE_BOOTSTRAP_KEY }}
-          FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME: ${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME }}
+          FUGUE_EDGE_ACTIVATION_API_URL: ${{ vars.FUGUE_API_URL || 'https://api.fugue.pro' }}
+          FUGUE_EDGE_ACTIVATION_API_KEY: ${{ secrets.FUGUE_BOOTSTRAP_KEY || secrets.FUGUE_API_KEY }}
+          FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME: ${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME || 'fugue-fugue-config' }}
         run: ./scripts/release_fugue_public_data_plane.sh

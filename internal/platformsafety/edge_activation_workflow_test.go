@@ -45,9 +45,9 @@ func TestPublicDataPlaneReleaseRequiresPhasedActivationAndPlatformEvidence(t *te
 	step := job.Steps[len(job.Steps)-1]
 	wantEnv := map[string]string{
 		"FUGUE_EDGE_ACTIVATION_ENABLED":             "${{ inputs.confirm_phased_activation && 'true' || 'false' }}",
-		"FUGUE_EDGE_ACTIVATION_API_URL":             "${{ vars.FUGUE_API_URL }}",
-		"FUGUE_EDGE_ACTIVATION_API_KEY":             "${{ secrets.FUGUE_BOOTSTRAP_KEY }}",
-		"FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME": "${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME }}",
+		"FUGUE_EDGE_ACTIVATION_API_URL":             "${{ vars.FUGUE_API_URL || 'https://api.fugue.pro' }}",
+		"FUGUE_EDGE_ACTIVATION_API_KEY":             "${{ secrets.FUGUE_BOOTSTRAP_KEY || secrets.FUGUE_API_KEY }}",
+		"FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME": "${{ vars.FUGUE_EDGE_ACTIVATION_SIGNING_SECRET_NAME || 'fugue-fugue-config' }}",
 	}
 	for name, want := range wantEnv {
 		if step.Env[name] != want {
@@ -107,6 +107,9 @@ func TestEdgeActivationReleaseOrderingIsFailClosed(t *testing.T) {
 	}
 	if !strings.Contains(text, "live blue-green release requires phased edge activation; legacy argv is forbidden") || !strings.Contains(text, "soak_seconds < 180") {
 		t.Fatal("legacy argv or minimum soak fail-closed contract is missing")
+	}
+	if !strings.Contains(text, `EXPECTED_SHA="${FUGUE_EDGE_IMAGE_TAG}"`) {
+		t.Fatal("API signer cohort is not bound to the verified runtime artifact source")
 	}
 	mainStart := strings.Index(text, "main()")
 	if mainStart < 0 {

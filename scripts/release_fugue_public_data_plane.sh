@@ -6616,7 +6616,7 @@ main() {
     local signer_snapshot
     signer_snapshot="$(mktemp)"
     kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "app.kubernetes.io/instance=${FUGUE_RELEASE_INSTANCE},app.kubernetes.io/component=api" -o json >"${signer_snapshot}" || fail "could not inspect exact API signer cohort"
-    FUGUE_EDGE_ACTIVATION_SIGNER_POD="$(EXPECTED_SHA="${GITHUB_SHA:-}" python3 - "${signer_snapshot}" <<'PY'
+    FUGUE_EDGE_ACTIVATION_SIGNER_POD="$(EXPECTED_SHA="${FUGUE_EDGE_IMAGE_TAG}" python3 - "${signer_snapshot}" <<'PY'
 import json,os,sys
 with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
 eligible=[]
