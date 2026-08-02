@@ -20619,20 +20619,22 @@ control_plane_edge_activation_config_build_plan() {
     RUNTIME_SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" \
     API_IMAGE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_API_IMAGE}" \
     SECRET_NAME="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_NAME}" \
+    BASE_REVISION="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION}" \
     RUN_ID="${GITHUB_RUN_ID}" RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
 import hashlib,json,os,re,secrets
 def load(name):
   with open(os.environ[name],encoding="utf-8") as stream: return json.load(stream)
 status=load("STATUS"); lease=load("LEASE"); deployment=load("DEPLOYMENT")
 meta=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=meta.get("annotations") or {}
-if int(status.get("version") or 0)!=810 or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
+base_revision=int(os.environ["BASE_REVISION"])
+if int(status.get("version") or 0)!=base_revision or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
 if str(spec.get("holderIdentity") or "") or str(annotations.get("fugue.pro/recovery-required") or "").lower()=="true": raise SystemExit(1)
 dmeta=deployment.get("metadata") or {}
 plan={
  "apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneEdgeActivationConfigPlan",
  "policy":"control-plane-edge-activation-config-v1","expectedSha":os.environ["EXPECTED_SHA"],
  "runtimeSource":os.environ["RUNTIME_SOURCE"],"apiImage":os.environ["API_IMAGE"],
- "authorityRevision":808,"baseRevision":810,"targetRevision":811,"secretName":os.environ["SECRET_NAME"],
+ "authorityRevision":808,"baseRevision":base_revision,"targetRevision":base_revision+1,"secretName":os.environ["SECRET_NAME"],
  "runId":os.environ["RUN_ID"],"runAttempt":int(os.environ["RUN_ATTEMPT"]),
  "helmRecordDigest":"sha256:"+hashlib.sha256(json.dumps(status,sort_keys=True,separators=(",", ":")).encode()).hexdigest(),
  "baseManifestDigest":os.environ["BASE_MANIFEST_DIGEST"],"targetManifestDigest":os.environ["TARGET_MANIFEST_DIGEST"],
@@ -20833,6 +20835,13 @@ PY
   control_plane_edge_activation_config_verify_secret || return
   while IFS= read -r pod; do
     [[ -n "${pod}" ]] || continue
+    release_bounded_kubectl 30 "edge activation signer projection ${pod}" -n fugue-system exec "pod/${pod}" -c api -- sh -c '
+set -eu
+d=/var/run/secrets/fugue-edge-activation
+test -L "$d/..data"
+for f in plan-signing-key key-id key-generation; do test -r "$d/$f"; done
+printf "projection pod=%s uid=%s data=%s key_bytes=%s key_id=%s generation=%s\n" "$HOSTNAME" "$(id -u)" "$(readlink "$d/..data")" "$(wc -c <"$d/plan-signing-key")" "$(tr -d "[:space:]" <"$d/key-id")" "$(tr -d "[:space:]" <"$d/key-generation")"
+' || return
     probe="${directory}/signer-request-${pod}.json"; response="${directory}/signer-response-${pod}.json"
     UID_VALUE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_UID}" RV_VALUE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_SECRET_VERSION}" SOURCE="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_RUNTIME_SOURCE}" OUTPUT="${probe}" python3 - <<'PY'
 import json,os
@@ -20891,7 +20900,7 @@ control_plane_edge_activation_config_cleanup() {
 }
 
 run_control_plane_edge_activation_config_transaction() {
-  local head_sha="" status=1 forward_ready=true live_revision="" compensated_revision=""
+  local head_sha="" status=1 forward_ready=true live_revision="" compensated_revision="" target_revision=""
   (( $# == 0 )) || return 2
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
@@ -20911,6 +20920,9 @@ run_control_plane_edge_activation_config_transaction() {
   FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"; FUGUE_DEPLOY_JOB_BUDGET_SECONDS=1800; FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=600; FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=60
   CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0; initialize_control_plane_release_job_deadline || return
   KUBECTL="$(detect_kubectl)" || return; export KUBECTL GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_REPOSITORY
+  CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION="$(helm_current_revision)" || return
+  [[ "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION}" =~ ^[1-9][0-9]*$ && "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION}" -ge 808 ]] || return 1
+  target_revision=$((CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION + 1))
   CONTROL_PLANE_HOTFIX_WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-edge-activation-config.XXXXXX")" || return
   chmod 700 "${CONTROL_PLANE_HOTFIX_WORK_DIR}" || return
   TMPDIR="${CONTROL_PLANE_HOTFIX_WORK_DIR}"
@@ -20941,7 +20953,7 @@ run_control_plane_edge_activation_config_transaction() {
     status=0
     control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
   fi
-  if control_plane_edge_activation_config_verify_live target 811 && control_plane_edge_activation_config_verify_target_kubernetes; then
+  if control_plane_edge_activation_config_verify_live target "${target_revision}" && control_plane_edge_activation_config_verify_target_kubernetes; then
     control_plane_edge_activation_config_write_wal verified 4 1 0 false || return
     CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false; CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false; CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
     log "edge activation config transaction verified"
@@ -20949,13 +20961,13 @@ run_control_plane_edge_activation_config_transaction() {
   fi
   require_control_plane_backup_coordination_or_abort "edge activation config compensation" || return
   live_revision="$(helm_current_revision)" || return
-  if [[ "${live_revision}" == 810 ]]; then
-    compensated_revision=810
-  elif [[ "${live_revision}" == 811 ]]; then
+  if [[ "${live_revision}" == "${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION}" ]]; then
+    compensated_revision="${CONTROL_PLANE_EDGE_ACTIVATION_CONFIG_BASE_REVISION}"
+  elif [[ "${live_revision}" == "${target_revision}" ]]; then
     control_plane_edge_activation_config_write_wal compensation-started 4 1 1 true || return
     control_plane_edge_activation_config_seal_helm_argv compensation false || return
     control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
-    compensated_revision=812
+    compensated_revision=$((target_revision + 1))
   else
     log_stderr "edge activation config observed unexpected Helm revision ${live_revision}; retaining recovery fence"
     return "${status:-1}"
