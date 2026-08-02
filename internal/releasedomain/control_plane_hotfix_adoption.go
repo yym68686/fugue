@@ -251,6 +251,55 @@ func VerifyControlPlaneHotfixAdoptionPlan(plan ControlPlaneHotfixAdoptionPlan) e
 	return nil
 }
 
+// VerifyControlPlaneHotfixRenderSet replays the plan's exact manifest proof
+// without owning any production mutation. The production shell transaction
+// uses it before acquiring the write boundary and again for fresh prewrite
+// evidence while it owns the shared Lease.
+func VerifyControlPlaneHotfixRenderSet(plan ControlPlaneHotfixAdoptionPlan, base, target, repeatedTarget, hybrid []byte) error {
+	if err := VerifyControlPlaneHotfixAdoptionPlan(plan); err != nil {
+		return err
+	}
+	base, err := canonicalSecretFreeHotfixManifest(base)
+	if err != nil {
+		return fmt.Errorf("base manifest: %w", err)
+	}
+	target, err = canonicalSecretFreeHotfixManifest(target)
+	if err != nil {
+		return fmt.Errorf("target manifest: %w", err)
+	}
+	repeatedTarget, err = canonicalSecretFreeHotfixManifest(repeatedTarget)
+	if err != nil {
+		return fmt.Errorf("repeated target manifest: %w", err)
+	}
+	hybrid, err = canonicalSecretFreeHotfixManifest(hybrid)
+	if err != nil {
+		return fmt.Errorf("hybrid manifest: %w", err)
+	}
+	if !bytes.Equal(target, repeatedTarget) {
+		return fmt.Errorf("target render is not deterministic")
+	}
+	input := ControlPlaneHotfixAdoptionInput{
+		Namespace:      plan.Namespace,
+		CurrentSource:  plan.CurrentSource,
+		AdoptedSource:  plan.AdoptedSource,
+		LiveImageRef:   plan.LiveImageRef,
+		Kubernetes:     plan.Kubernetes,
+		BaseManifest:   base,
+		TargetManifest: target,
+		RepeatedTarget: repeatedTarget,
+		HybridManifest: hybrid,
+	}
+	if err := verifyHotfixTransition(base, target, hybrid, input); err != nil {
+		return err
+	}
+	if hotfixDigest(base) != plan.BaseManifestDigest ||
+		hotfixDigest(target) != plan.TargetManifestDigest ||
+		hotfixDigest(hybrid) != plan.HybridManifestDigest {
+		return fmt.Errorf("hotfix render digest drifted")
+	}
+	return nil
+}
+
 func NewControlPlaneHotfixAdoptionWAL(plan ControlPlaneHotfixAdoptionPlan) (ControlPlaneHotfixAdoptionWAL, error) {
 	if err := VerifyControlPlaneHotfixAdoptionPlan(plan); err != nil {
 		return ControlPlaneHotfixAdoptionWAL{}, err
@@ -738,6 +787,35 @@ func verifyHotfixTransition(base, target, hybrid []byte, input ControlPlaneHotfi
 }
 
 type hotfixObjects map[string]map[string]any
+
+func canonicalSecretFreeHotfixManifest(data []byte) ([]byte, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var filtered bytes.Buffer
+	first := true
+	for {
+		var value map[string]any
+		err := decoder.Decode(&value)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		if len(value) == 0 || value["kind"] == "Secret" {
+			continue
+		}
+		encoded, err := yaml.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		if !first {
+			filtered.WriteString("---\n")
+		}
+		first = false
+		filtered.Write(encoded)
+	}
+	return canonicalHotfixManifest(filtered.Bytes())
+}
 
 func canonicalHotfixManifest(data []byte) ([]byte, error) {
 	objects, err := decodeHotfixObjects(data)

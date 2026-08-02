@@ -19948,6 +19948,500 @@ wait_for_post_deploy_robustness() {
   done
 }
 
+CONTROL_PLANE_HOTFIX_WORK_DIR=""
+CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="false"
+CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED="false"
+
+control_plane_hotfix_write_wal() {
+  local phase="$1"
+  local sequence="$2"
+  local forward_attempts="$3"
+  local compensation_attempts="$4"
+  local recovery_required="$5"
+  local target="${CONTROL_PLANE_HOTFIX_WORK_DIR}/wal.json"
+  local temporary="${target}.tmp"
+
+  PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" PHASE="${phase}" SEQUENCE="${sequence}" \
+    FORWARD_ATTEMPTS="${forward_attempts}" COMPENSATION_ATTEMPTS="${compensation_attempts}" \
+    RECOVERY_REQUIRED="${recovery_required}" TARGET="${target}" TEMPORARY="${temporary}" python3 - <<'PY'
+import hashlib
+import json
+import os
+
+with open(os.environ["PLAN_FILE"], encoding="utf-8") as stream:
+    plan = json.load(stream)
+wal = {
+    "apiVersion": "release-domain.fugue.dev/v1",
+    "kind": "ControlPlaneHotfixBaselineAdoptionWAL",
+    "policy": "control-plane-hotfix-baseline-adoption-v1",
+    "planDigest": plan["digest"],
+    "nonce": plan["nonce"],
+    "fence": plan["fence"],
+    "phase": os.environ["PHASE"],
+    "sequence": int(os.environ["SEQUENCE"]),
+    "forwardAttempts": int(os.environ["FORWARD_ATTEMPTS"]),
+    "compensationAttempts": int(os.environ["COMPENSATION_ATTEMPTS"]),
+    "recoveryRequired": os.environ["RECOVERY_REQUIRED"] == "true",
+    "digest": "",
+}
+encoded = json.dumps(wal, separators=(",", ":")).encode()
+wal["digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+with open(os.environ["TEMPORARY"], "x", encoding="utf-8") as stream:
+    json.dump(wal, stream, separators=(",", ":"))
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+os.chmod(os.environ["TEMPORARY"], 0o600)
+os.replace(os.environ["TEMPORARY"], os.environ["TARGET"])
+directory = os.open(os.path.dirname(os.environ["TARGET"]), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+control_plane_hotfix_cleanup() {
+  local status=$?
+  { exec 16<&-; } 2>/dev/null || :
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY="false"
+  if [[ "${CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED:-false}" == "true" ]]; then
+    if [[ "${CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED:-false}" == "true" ]]; then
+      stop_control_plane_backup_coordination_lease_renewer || :
+      log_stderr "control-plane hotfix recovery fence retained; evidence=${CONTROL_PLANE_HOTFIX_WORK_DIR}"
+    elif release_control_plane_backup_coordination_lease; then
+      CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="false"
+    else
+      status=1
+    fi
+  fi
+  if [[ "${CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED:-false}" != "true" &&
+    -n "${CONTROL_PLANE_HOTFIX_WORK_DIR:-}" ]]; then
+    rm -rf -- "${CONTROL_PLANE_HOTFIX_WORK_DIR}" || status=1
+  fi
+  trap - EXIT HUP INT TERM
+  exit "${status}"
+}
+
+control_plane_hotfix_build_helm_argv() {
+  local source_commit="$1"
+  CONTROL_PLANE_HOTFIX_HELM_ARGV=(
+    helm upgrade fugue deploy/helm/fugue
+    -n fugue-system
+    --reset-then-reuse-values
+    --no-hooks
+    --history-max 20
+    --timeout 10m0s
+    --wait
+    --set-string "api.image.tag=${source_commit}"
+    --set-string "api.image.digest=${CONTROL_PLANE_HOTFIX_IMAGE_DIGEST}"
+  )
+}
+
+control_plane_hotfix_render() {
+  local source_commit="$1"
+  local output="$2"
+  local envelope="${output}.json"
+
+  control_plane_hotfix_build_helm_argv "${source_commit}" || return
+  run_release_long_command 630 "control-plane hotfix server render" \
+    "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" --dry-run=server --output json >"${envelope}" || return
+  ENVELOPE="${envelope}" OUTPUT="${output}" python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["ENVELOPE"], encoding="utf-8") as stream:
+    document = json.load(stream)
+manifest = document.get("manifest")
+if not isinstance(manifest, str) or not manifest.strip():
+    raise SystemExit(1)
+with open(os.environ["OUTPUT"], "x", encoding="utf-8") as stream:
+    stream.write(manifest)
+PY
+  chmod 600 "${output}" "${envelope}"
+}
+
+control_plane_hotfix_capture_render_set() {
+  local directory="$1"
+  mkdir -m 700 "${directory}" || return
+  run_release_long_command 30 "control-plane hotfix base manifest read" \
+    helm get manifest fugue -n fugue-system --revision 806 >"${directory}/base.yaml" || return
+  chmod 600 "${directory}/base.yaml" || return
+  control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${directory}/target.yaml" || return
+  control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${directory}/repeated-target.yaml" || return
+  control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_CURRENT_SOURCE}" "${directory}/hybrid.yaml" || return
+  FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY=true \
+    FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
+    go run ./cmd/fugue-control-plane-hotfix-adoption <"${CONTROL_PLANE_HOTFIX_PLAN_FILE}"
+}
+
+control_plane_hotfix_json_digest() {
+  python3 -c 'import hashlib,json,sys; print("sha256:"+hashlib.sha256(json.dumps(json.load(sys.stdin),sort_keys=True,separators=(",", ":")).encode()).hexdigest())'
+}
+
+control_plane_hotfix_verify_prewrite_bindings() {
+  local render_directory="$1"
+  local lease_state="${2:-released}"
+  local status_file="${render_directory}/helm-status.json"
+  local values_file="${render_directory}/helm-values.json"
+  local lease_file="${render_directory}/lease.json"
+  local chart_digest=""
+  local status_digest=""
+  local values_digest=""
+  local target_values_digest=""
+
+  run_release_long_command 30 "control-plane hotfix Helm status read" \
+    helm status fugue -n fugue-system -o json >"${status_file}" || return
+  run_release_long_command 30 "control-plane hotfix Helm values read" \
+    helm get values fugue -n fugue-system --all --revision 806 -o json >"${values_file}" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${lease_file}" || return
+  chmod 600 "${status_file}" "${values_file}" "${lease_file}" || return
+  status_digest="$(control_plane_hotfix_json_digest <"${status_file}")" || return
+  values_digest="$(control_plane_hotfix_json_digest <"${values_file}")" || return
+  target_values_digest="$(control_plane_hotfix_json_digest <"${render_directory}/target.yaml.json")" || return
+  chart_digest="sha256:$(git ls-tree -r HEAD -- deploy/helm/fugue | control_plane_release_sha256_stream)" || return
+  PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" STATUS_FILE="${status_file}" LEASE_FILE="${lease_file}" \
+    STATUS_DIGEST="${status_digest}" VALUES_DIGEST="${values_digest}" \
+    TARGET_ENVELOPE="${render_directory}/target.yaml.json" TARGET_VALUES_DIGEST="${target_values_digest}" \
+    CHART_DIGEST="${chart_digest}" LEASE_STATE="${lease_state}" \
+    EXPECTED_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER:-}" \
+    EXPECTED_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN:-}" python3 - <<'PY'
+import hashlib
+import json
+import os
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+with open(os.environ["PLAN_FILE"], encoding="utf-8") as stream:
+    plan = json.load(stream)
+with open(os.environ["STATUS_FILE"], encoding="utf-8") as stream:
+    status = json.load(stream)
+with open(os.environ["LEASE_FILE"], encoding="utf-8") as stream:
+    lease = json.load(stream)
+with open(os.environ["TARGET_ENVELOPE"], encoding="utf-8") as stream:
+    target = json.load(stream)
+info = status.get("info") or {}
+metadata = lease.get("metadata") or {}
+annotations = metadata.get("annotations") or {}
+spec = lease.get("spec") or {}
+if int(status.get("version") or 0) != 806 or str(info.get("status") or "").lower() != "deployed":
+    raise SystemExit(1)
+if os.environ["STATUS_DIGEST"] != plan["helmRecordDigest"]:
+    raise SystemExit(1)
+if os.environ["VALUES_DIGEST"] != plan["baseValuesDigest"]:
+    raise SystemExit(1)
+if digest(target.get("config")) != plan["targetValuesDigest"]:
+    raise SystemExit(1)
+if os.environ["CHART_DIGEST"] != plan["chartTreeDigest"]:
+    raise SystemExit(1)
+expected = plan["lease"]
+if metadata.get("name") != expected["name"] or metadata.get("namespace") != expected["namespace"] or metadata.get("uid") != expected["uid"]:
+    raise SystemExit(1)
+if os.environ["LEASE_STATE"] == "released":
+    valid_lease = (
+        metadata.get("resourceVersion") == expected["resourceVersion"]
+        and not str(spec.get("holderIdentity") or "")
+        and str(annotations.get("fugue.pro/recovery-required") or "").lower() != "true"
+    )
+elif os.environ["LEASE_STATE"] == "owned":
+    valid_lease = (
+        str(spec.get("holderIdentity") or "") == os.environ["EXPECTED_OWNER"]
+        and str(annotations.get("fugue.pro/coordination-token") or "") == os.environ["EXPECTED_TOKEN"]
+        and str(annotations.get("fugue.pro/recovery-required") or "").lower() != "true"
+    )
+else:
+    valid_lease = False
+if not valid_lease:
+    raise SystemExit(1)
+PY
+}
+
+control_plane_hotfix_verify_kubernetes() {
+  local phase="$1"
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-${phase}"
+  local health_url="${FUGUE_SMOKE_URL:-}"
+  mkdir -m 700 "${directory}" || return
+  [[ "${health_url}" == https://* && "${health_url}" != *[[:space:]]* ]] || return 1
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/deployment.json" || return
+  bounded_kubectl 15 -n fugue-system get service/fugue-fugue -o json >"${directory}/service.json" || return
+  bounded_kubectl 15 -n fugue-system get endpointslice \
+    -l kubernetes.io/service-name=fugue-fugue -o json >"${directory}/endpointslices.json" || return
+  bounded_kubectl 15 -n fugue-system get pods \
+    -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/pods.json" || return
+  run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 \
+    "${health_url}" >"${directory}/health" || return
+  chmod 600 "${directory}"/* || return
+  PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" PHASE="${phase}" DIRECTORY="${directory}" python3 - <<'PY'
+import hashlib
+import json
+import os
+
+def load(name):
+    with open(os.path.join(os.environ["DIRECTORY"], name), encoding="utf-8") as stream:
+        return json.load(stream)
+
+def digest(value):
+    data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+with open(os.environ["PLAN_FILE"], encoding="utf-8") as stream:
+    plan = json.load(stream)
+expected = plan["kubernetes"]
+phase = os.environ["PHASE"]
+deployment = load("deployment.json")
+service = load("service.json")
+slices = load("endpointslices.json").get("items") or []
+pods = load("pods.json").get("items") or []
+metadata = deployment.get("metadata") or {}
+spec = deployment.get("spec") or {}
+status = deployment.get("status") or {}
+template = spec.get("template") or {}
+annotations = (template.get("metadata") or {}).get("annotations") or {}
+containers = (template.get("spec") or {}).get("containers") or []
+api_images = [item.get("image") for item in containers if item.get("name") == "api"]
+want_source = plan["currentSource"] if phase == "base" else plan["adoptedSource"]
+want_generation = int(expected["apiGeneration"]) + (0 if phase == "base" else 1)
+if (
+    metadata.get("name") != expected["apiName"]
+    or metadata.get("uid") != expected["apiUid"]
+    or int(metadata.get("generation") or 0) != want_generation
+    or int(status.get("observedGeneration") or 0) != want_generation
+    or annotations.get("fugue.pro/source-commit") != want_source
+    or api_images != [plan["liveImageRef"]]
+    or int(spec.get("replicas") or 0) != 2
+    or any(int(status.get(key) or 0) != 2 for key in ("replicas", "readyReplicas", "updatedReplicas", "availableReplicas"))
+    or int(status.get("unavailableReplicas") or 0) != 0
+):
+    raise SystemExit(1)
+if phase == "base" and metadata.get("resourceVersion") != expected["apiResourceVersion"]:
+    raise SystemExit(1)
+if phase != "base" and metadata.get("resourceVersion") == expected["apiResourceVersion"]:
+    raise SystemExit(1)
+ready_image_ids = []
+for pod in pods:
+    pod_status = pod.get("status") or {}
+    conditions = pod_status.get("conditions") or []
+    if pod_status.get("phase") != "Running" or not any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions):
+        continue
+    statuses = [item for item in pod_status.get("containerStatuses") or [] if item.get("name") == "api"]
+    if len(statuses) != 1:
+        raise SystemExit(1)
+    ready_image_ids.append(statuses[0].get("imageID"))
+if ready_image_ids != [expected["apiImageId"], expected["apiImageId"]]:
+    raise SystemExit(1)
+service_meta = service.get("metadata") or {}
+selector = (service.get("spec") or {}).get("selector") or {}
+if service_meta.get("name") != expected["serviceName"] or service_meta.get("uid") != expected["serviceUid"] or digest(selector) != expected["serviceSelectorDigest"]:
+    raise SystemExit(1)
+if phase == "base" and service_meta.get("resourceVersion") != expected["serviceResourceVersion"]:
+    raise SystemExit(1)
+selected = [item for item in slices if (item.get("metadata") or {}).get("name") == expected["endpointSliceName"]]
+if len(selected) != 1 or (selected[0].get("metadata") or {}).get("uid") != expected["endpointSliceUid"]:
+    raise SystemExit(1)
+slice_doc = selected[0]
+records = []
+ready = 0
+for endpoint in slice_doc.get("endpoints") or []:
+    conditions = endpoint.get("conditions") or {}
+    if conditions.get("ready") is True and conditions.get("serving", True) is True:
+        ready += len(endpoint.get("addresses") or [])
+    records.append({
+        "addresses": sorted(endpoint.get("addresses") or []),
+        "conditions": conditions,
+        "nodeName": endpoint.get("nodeName"),
+        "targetRef": endpoint.get("targetRef"),
+        "zone": endpoint.get("zone"),
+    })
+binding = {"addressType": slice_doc.get("addressType"), "endpoints": records, "ports": slice_doc.get("ports") or []}
+if digest(binding) != expected["endpointBindingDigest"] or ready != 2:
+    raise SystemExit(1)
+if phase == "base" and (slice_doc.get("metadata") or {}).get("resourceVersion") != expected["endpointSliceResourceVersion"]:
+    raise SystemExit(1)
+with open(os.path.join(os.environ["DIRECTORY"], "health"), "rb") as stream:
+    health_digest = "sha256:" + hashlib.sha256(stream.read()).hexdigest()
+if health_digest != expected["apiHealthDigest"]:
+    raise SystemExit(1)
+PY
+}
+
+control_plane_hotfix_seal_helm_argv() {
+  local phase="$1"
+  local source_commit="$2"
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/sealed-${phase}"
+  local snapshot="${directory}/upgrade-argv.snapshot"
+
+  mkdir -m 700 "${directory}" || return
+  control_plane_hotfix_build_helm_argv "${source_commit}" || return
+  (umask 077; printf '%s\0' "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" >"${snapshot}") || return
+  chmod 600 "${snapshot}" || return
+  CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${directory}"
+  CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_SNAPSHOT="${snapshot}"
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_INPUT_IDENTITIES="${directory}/argv-input-identities.json"
+  CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_CONTENT_IDENTITY="$(
+    control_plane_release_domain_file_content_identity "${snapshot}"
+  )" || return
+  control_plane_release_record_argv_input_identities || return
+  control_plane_release_verify_repository_snapshot \
+    "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" || return
+  { exec 16<&-; } 2>/dev/null || :
+  exec 16<"${snapshot}" || return
+  control_plane_release_domain_verify_open_argv_identity || return
+  CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZED_ARGV_CONTENT_IDENTITY="$(
+    control_plane_release_domain_open_argv_content_identity
+  )" || return
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZED_ARGV_CONTENT_IDENTITY}" == \
+    "${CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_CONTENT_IDENTITY}" ]] || return 1
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY="true"
+}
+
+control_plane_hotfix_verify_live_target() {
+  local phase="$1"
+  local revision="$2"
+  local expected_manifest="$3"
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/readback-${phase}"
+  local current_revision=""
+  local values_digest=""
+  local expected_values=""
+
+  current_revision="$(helm_current_revision)" || return
+  [[ "${current_revision}" == "${revision}" ]] || return 1
+  mkdir -m 700 "${directory}" || return
+  cp "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}/base.yaml" "${directory}/base.yaml" || return
+  cp "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}/target.yaml" "${directory}/target.yaml" || return
+  cp "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}/repeated-target.yaml" "${directory}/repeated-target.yaml" || return
+  cp "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}/hybrid.yaml" "${directory}/hybrid.yaml" || return
+  run_release_long_command 30 "control-plane hotfix live ${phase} manifest read" \
+    helm get manifest fugue -n fugue-system --revision "${revision}" >"${directory}/${expected_manifest}" || return
+  chmod 600 "${directory}"/*.yaml || return
+  FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY=true \
+    FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
+    go run ./cmd/fugue-control-plane-hotfix-adoption <"${CONTROL_PLANE_HOTFIX_PLAN_FILE}" || return
+  values_digest="$(run_release_long_command 30 "control-plane hotfix live ${phase} values read" \
+    helm get values fugue -n fugue-system --all --revision "${revision}" -o json | control_plane_hotfix_json_digest)" || return
+  if [[ "${phase}" == "target" ]]; then
+    expected_values="$(PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" python3 -c 'import json,os; print(json.load(open(os.environ["PLAN_FILE"],encoding="utf-8"))["targetValuesDigest"])')" || return
+    [[ "${values_digest}" == "${expected_values}" ]] || return 1
+    control_plane_hotfix_verify_kubernetes target
+  fi
+}
+
+run_control_plane_hotfix_baseline_adoption() {
+  local head_sha=""
+  local fields=""
+  local status=0
+
+  (( $# == 0 )) || return 2
+  cd "${REPO_ROOT}" || return
+  CONTROL_PLANE_HOTFIX_WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-control-plane-hotfix.XXXXXX")" || return
+  chmod 700 "${CONTROL_PLANE_HOTFIX_WORK_DIR}" || return
+  CONTROL_PLANE_HOTFIX_PLAN_FILE="${CONTROL_PLANE_HOTFIX_WORK_DIR}/plan.json"
+  if ! (umask 077; python3 -c 'import sys; data=sys.stdin.buffer.read(1048577); assert 0 < len(data) <= 1048576; sys.stdout.buffer.write(data)' >"${CONTROL_PLANE_HOTFIX_PLAN_FILE}"); then
+    return 1
+  fi
+  chmod 600 "${CONTROL_PLANE_HOTFIX_PLAN_FILE}" || return
+  fields="$(PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" python3 - <<'PY'
+import json
+import os
+import re
+with open(os.environ["PLAN_FILE"], encoding="utf-8") as stream:
+    plan = json.load(stream)
+image = plan.get("liveImageRef", "")
+match = re.fullmatch(r"(.+)@(sha256:[0-9a-f]{64})", image)
+if match is None:
+    raise SystemExit(1)
+values = (
+    plan.get("expectedSha"), plan.get("runId"), str(plan.get("runAttempt")),
+    plan.get("namespace"), plan.get("releaseName"), plan.get("releaseFullname"),
+    str(plan.get("baseRevision")), str(plan.get("targetRevision")),
+    plan.get("currentSource"), plan.get("adoptedSource"), match.group(2),
+)
+if any(not isinstance(value, str) or not value or "\t" in value or "\n" in value for value in values):
+    raise SystemExit(1)
+print("\t".join(values))
+PY
+)" || return
+  IFS=$'\t' read -r FUGUE_RELEASE_DOMAIN_TARGET_SHA GITHUB_RUN_ID GITHUB_RUN_ATTEMPT \
+    FUGUE_NAMESPACE FUGUE_RELEASE_NAME FUGUE_RELEASE_FULLNAME \
+    CONTROL_PLANE_HOTFIX_BASE_REVISION CONTROL_PLANE_HOTFIX_TARGET_REVISION \
+    CONTROL_PLANE_HOTFIX_CURRENT_SOURCE CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE \
+    CONTROL_PLANE_HOTFIX_IMAGE_DIGEST <<<"${fields}"
+  [[ "${FUGUE_NAMESPACE}" == "fugue-system" && "${FUGUE_RELEASE_NAME}" == "fugue" &&
+    "${FUGUE_RELEASE_FULLNAME}" == "fugue-fugue" && "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "806" &&
+    "${CONTROL_PLANE_HOTFIX_TARGET_REVISION}" == "807" && "${GITHUB_RUN_ATTEMPT}" == "1" ]] || return 1
+  head_sha="$(git rev-parse --verify HEAD)" || return
+  [[ "${head_sha}" == "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" ]] || return 1
+  FUGUE_RELEASE_DOMAIN_BASE_SHA="${head_sha}"
+  FUGUE_HELM_CHART_PATH="deploy/helm/fugue"
+  FUGUE_HELM_TIMEOUT="10m0s"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=1
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS=1
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME="fugue-fugue-control-plane-db-backup"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE="fugue-system"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS=120
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=30
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=15
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS=20
+  FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"
+  FUGUE_DEPLOY_JOB_BUDGET_SECONDS=1800
+  FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=600
+  FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=60
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0
+  initialize_control_plane_release_job_deadline || return
+  KUBECTL="$(detect_kubectl)" || return
+  export KUBECTL GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
+  CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR="${CONTROL_PLANE_HOTFIX_WORK_DIR}/authorized"
+  trap control_plane_hotfix_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  control_plane_hotfix_capture_render_set "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
+  control_plane_hotfix_verify_prewrite_bindings "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" released || return
+  control_plane_hotfix_verify_kubernetes base || return
+  control_plane_hotfix_write_wal prepared 1 0 0 false || return
+  acquire_control_plane_backup_coordination_lease || return
+  CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="true"
+  require_control_plane_backup_coordination_or_abort "control-plane hotfix prewrite" || return
+  rm -rf -- "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}"
+  control_plane_hotfix_capture_render_set "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
+  control_plane_hotfix_verify_prewrite_bindings "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" owned || return
+  control_plane_hotfix_verify_kubernetes base || return
+  control_plane_hotfix_write_wal prewrite-verified 2 0 0 false || return
+  arm_control_plane_release_recovery_fence control-plane-hotfix-baseline-adoption || return
+  CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED="true"
+  control_plane_hotfix_write_wal forward-started 3 1 0 true || return
+  control_plane_hotfix_seal_helm_argv forward "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" || return
+  if control_plane_release_domain_execute_sealed_helm_upgrade; then
+    status=0
+  else
+    status=$?
+  fi
+  if control_plane_hotfix_verify_live_target target 807 target.yaml; then
+    control_plane_hotfix_write_wal forward-committed 4 1 0 true || return
+    control_plane_hotfix_write_wal verified 5 1 0 false || return
+    CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED="false"
+    CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+    log "control-plane hotfix baseline adoption verified"
+    return 0
+  fi
+  require_control_plane_backup_coordination_or_abort "control-plane hotfix compensation" || return
+  control_plane_hotfix_write_wal compensation-started 4 1 1 true || return
+  control_plane_hotfix_seal_helm_argv compensation "${CONTROL_PLANE_HOTFIX_CURRENT_SOURCE}" || return
+  control_plane_release_domain_execute_sealed_helm_upgrade || status=$?
+  if control_plane_hotfix_verify_live_target hybrid 808 hybrid.yaml; then
+    control_plane_hotfix_write_wal compensated 5 1 1 false || return
+    CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED="false"
+    CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+    log_stderr "control-plane hotfix forward failed and exact hybrid compensation was verified"
+    return 1
+  fi
+  log_stderr "control-plane hotfix forward and hybrid compensation are unverified; retaining recovery fence"
+  return "${status:-1}"
+}
+
 run_control_plane_atomic_domain_gate() {
   local release_status=0
 
@@ -20669,6 +21163,11 @@ PY
 source "${REPO_ROOT}/scripts/lib/control_plane_release_domains.sh"
 # shellcheck source=scripts/lib/control_plane_release_domain_production.sh
 source "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh"
+
+if [[ "${FUGUE_CONTROL_PLANE_HOTFIX_BASELINE_ADOPTION:-false}" == "true" ]]; then
+  run_control_plane_hotfix_baseline_adoption "$@"
+  exit $?
+fi
 
 if [[ "${FUGUE_UPGRADE_LIB_ONLY:-false}" == "true" ]]; then
   return 0 2>/dev/null || exit 0

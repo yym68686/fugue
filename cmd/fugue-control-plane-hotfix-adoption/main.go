@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"fugue/internal/releasedomain"
 )
@@ -16,6 +17,12 @@ const maxCanonicalPlanBytes = 1 << 20
 type runtimeFactory func(releasedomain.ControlPlaneHotfixAdoptionPlan) (releasedomain.ControlPlaneHotfixRuntime, error)
 
 func main() {
+	if os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY") == "true" {
+		os.Exit(runValidation(
+			os.Args[1:], os.Stdin, os.Stderr,
+			os.Getenv("FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR"),
+		))
+	}
 	os.Exit(run(
 		os.Args[1:],
 		os.Stdin,
@@ -26,6 +33,36 @@ func main() {
 			return nil, fmt.Errorf("bounded production runtime is not injected")
 		},
 	))
+}
+
+func runValidation(args []string, stdin io.Reader, stderr io.Writer, evidenceDir string) int {
+	if len(args) != 0 {
+		return fail(stderr, "arguments are not supported")
+	}
+	plan, err := readCanonicalPlan(stdin)
+	if err != nil {
+		return fail(stderr, err.Error())
+	}
+	if evidenceDir == "" || !filepath.IsAbs(evidenceDir) || filepath.Clean(evidenceDir) != evidenceDir {
+		return fail(stderr, "validation directory is invalid")
+	}
+	manifests := make([][]byte, 0, 4)
+	for _, name := range []string{"base.yaml", "target.yaml", "repeated-target.yaml", "hybrid.yaml"} {
+		path := filepath.Join(evidenceDir, name)
+		info, statErr := os.Lstat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maxCanonicalPlanBytes*32 {
+			return fail(stderr, "validation evidence is invalid")
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fail(stderr, "validation evidence is invalid")
+		}
+		manifests = append(manifests, data)
+	}
+	if err := releasedomain.VerifyControlPlaneHotfixRenderSet(plan, manifests[0], manifests[1], manifests[2], manifests[3]); err != nil {
+		return fail(stderr, "render-set verification failed: "+err.Error())
+	}
+	return 0
 }
 
 func run(
