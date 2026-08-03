@@ -21645,10 +21645,18 @@ control_plane_m16_observed_recovery_assert_renderer() {
     "${HELM_POST_RENDERER_ARGS[1]}" == "${renderer}" ]] || return 1
 }
 
+control_plane_m16_observed_recovery_assert_base_revision() {
+  local observed_helm_revision=822
+  (( $# == 0 )) || return 2
+  [[ "${CONTROL_PLANE_HOTFIX_BASE_REVISION:-}" == "${observed_helm_revision}" &&
+    "${PREVIOUS_REVISION:-}" == "${observed_helm_revision}" ]] || return 1
+}
+
 control_plane_m16_observed_recovery_prepare_render_set() {
   local directory="$1"
   local observed_manifest="${directory}/second/helm-manifest-822.yaml"
   local renderer_digest=""
+  control_plane_m16_observed_recovery_assert_base_revision || return
   control_plane_m16_observed_recovery_build_raw_target "${directory}/second/helm-manifest-820.yaml" "${observed_manifest}" "${directory}" || return
   control_plane_m16_observed_recovery_server_render "${directory}" render-one || return
   control_plane_m16_observed_recovery_server_render "${directory}" render-two || return
@@ -21901,26 +21909,31 @@ PY
 run_control_plane_controller_m16_observed_recovery_v1() {
   local evidence_dir="${FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_EVIDENCE_DIR:-}"
   local work_dir="" head_sha="" changed_files="" fields="" helm_status=0 unknown_recorded=false
+  local observed_helm_revision=822
   (( $# == 0 )) || return 2
   [[ "${FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM:-}" == "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717" ]] || return 1
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
-    "$(git rev-parse --verify HEAD^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
-    "$(git rev-parse --verify HEAD^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 6 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
+    "$(git rev-parse --verify HEAD^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
+    "$(git rev-parse --verify HEAD^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 7 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1
   [[ "${evidence_dir}" == /* && -d "${evidence_dir}" && ! -L "${evidence_dir}" && "$(stat -c '%a' "${evidence_dir}")" == 700 ]] || return 1
   [[ -z "$(find "${evidence_dir}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || return 1
-  EVIDENCE_DIR="${evidence_dir}" HEAD_SHA="${head_sha}" RUN_ID="${GITHUB_RUN_ID}" python3 - <<'PY'
+  EVIDENCE_DIR="${evidence_dir}" HEAD_SHA="${head_sha}" RUN_ID="${GITHUB_RUN_ID}" \
+    OBSERVED_HELM_REVISION="${observed_helm_revision}" python3 - <<'PY'
 import json,os,pathlib
-value={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneControllerM16ObservedRecoveryInvocation","expectedSha":os.environ["HEAD_SHA"],"originRunId":"30836591717","originRunAttempt":1,"originSourceSha":"fbfa707084d429176783354745043b5c12b3b488","observedHelmRevision":822,"workflowRunId":os.environ["RUN_ID"],"workflowRunAttempt":1}
+observed=os.environ["OBSERVED_HELM_REVISION"]
+if observed!="822": raise SystemExit(1)
+value={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneControllerM16ObservedRecoveryInvocation","expectedSha":os.environ["HEAD_SHA"],"originRunId":"30836591717","originRunAttempt":1,"originSourceSha":"fbfa707084d429176783354745043b5c12b3b488","observedHelmRevision":int(observed),"workflowRunId":os.environ["RUN_ID"],"workflowRunAttempt":1}
 pathlib.Path(os.environ["EVIDENCE_DIR"],"invocation.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
 PY
   chmod 600 "${evidence_dir}/invocation.json" || return
@@ -21947,6 +21960,10 @@ PY
   FUGUE_RELEASE_DOMAIN_BASE_SHA="${head_sha}"
   FUGUE_RELEASE_DOMAIN_TARGET_SHA="${head_sha}"
   PREVIOUS_REVISION=822
+  CONTROL_PLANE_HOTFIX_BASE_REVISION=822
+  [[ "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "${PREVIOUS_REVISION}" &&
+    "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "${observed_helm_revision}" ]] || return 1
+  control_plane_m16_observed_recovery_assert_base_revision || return
   work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-controller-m16-observed-recovery.XXXXXX")" || return
   chmod 700 "${work_dir}" || return
   CONTROL_PLANE_HOTFIX_WORK_DIR="${work_dir}"

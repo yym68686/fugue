@@ -444,10 +444,62 @@ PY
   CONTROL_PLANE_HOTFIX_PLAN_VERSION=1
   control_plane_hotfix_prepare_post_renderer
   [[ -z "${HELM_POST_RENDERER_FILE}" && "${#HELM_POST_RENDERER_ARGS[@]}" == 0 ]]
+
+  prepare_observed_recovery_render_fixture() {
+    local directory="$1"
+    mkdir -m 700 -p "${directory}/second"
+    cp "${fixture_root}/helm822-observed.yaml" "${directory}/second/helm-manifest-822.yaml"
+    cp "${fixture_root}/helm822-observed.yaml" "${directory}/second/helm-manifest-820.yaml"
+  }
+  control_plane_m16_observed_recovery_build_raw_target() {
+    local directory="$3"
+    cp "${fixture_root}/helm820-api-template.json" "${directory}/target-api-template.json"
+    cp "${fixture_root}/helm822-controller-template.json" "${directory}/target-controller-template.json"
+    cp "${fixture_root}/helm823-target.yaml" "${directory}/target.yaml"
+    cp "${fixture_root}/helm823-target.yaml" "${directory}/repeated-target.yaml"
+  }
+  control_plane_m16_observed_recovery_server_render() {
+    local directory="$1"
+    local prefix="$2"
+    cp "${fixture_root}/helm822-server-render.yaml" "${directory}/${prefix}.raw"
+    chmod 600 "${directory}/${prefix}.raw"
+  }
+
+  render_set_root="${fixture_root}/render-set-positive"
+  prepare_observed_recovery_render_fixture "${render_set_root}"
+  PREVIOUS_REVISION=822
+  CONTROL_PLANE_HOTFIX_BASE_REVISION=822
+  control_plane_m16_observed_recovery_prepare_render_set "${render_set_root}"
+  cmp -s "${fixture_root}/helm822-observed.yaml" "${render_set_root}/reconstructed-822.yaml"
+  cmp -s "${fixture_root}/helm823-target.yaml" "${render_set_root}/effective-target.yaml"
+
+  for invalid_base in unset empty 821; do
+    invalid_root="${fixture_root}/render-set-invalid-${invalid_base}"
+    prepare_observed_recovery_render_fixture "${invalid_root}"
+    if (
+      PREVIOUS_REVISION=822
+      case "${invalid_base}" in
+        unset) unset CONTROL_PLANE_HOTFIX_BASE_REVISION ;;
+        empty) CONTROL_PLANE_HOTFIX_BASE_REVISION="" ;;
+        821) CONTROL_PLANE_HOTFIX_BASE_REVISION=821 ;;
+      esac
+      control_plane_m16_observed_recovery_prepare_render_set "${invalid_root}"
+    ); then
+      exit 1
+    fi
+  done
+  invalid_previous_root="${fixture_root}/render-set-invalid-previous"
+  prepare_observed_recovery_render_fixture "${invalid_previous_root}"
+  PREVIOUS_REVISION=821
+  CONTROL_PLANE_HOTFIX_BASE_REVISION=822
+  ! control_plane_m16_observed_recovery_prepare_render_set "${invalid_previous_root}"
 )
 
 observed_recovery_source="$(sed -n '/^run_control_plane_controller_m16_observed_recovery_v1()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+grep -Fq 'CONTROL_PLANE_HOTFIX_BASE_REVISION=822' <<<"${observed_recovery_source}"
+grep -Fq 'control_plane_m16_observed_recovery_assert_base_revision || return' <<<"${observed_recovery_source}"
 observed_render_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_render_set()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+grep -Fq 'control_plane_m16_observed_recovery_assert_base_revision || return' <<<"${observed_render_source}"
 [[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
 [[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
 observed_seal_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_sealed_argv()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
