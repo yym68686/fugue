@@ -300,10 +300,11 @@ jobs:
           [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
           [[ "${AUTHORIZATION}" == CONFIRM_API_HOTFIX_RECOVERY_30804033592 ]]
           [[ "$(git rev-parse --verify HEAD)" == "${EXPECTED_SHA}" ]]
-          [[ "$(git rev-parse --verify HEAD^)" == c12f9548f4e15464cc572189d4b3381c7e1b9a03 ]]
-          [[ "$(git rev-parse --verify HEAD^^)" == d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ]]
-          [[ "$(git rev-parse --verify HEAD^^^)" == 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ]]
-          [[ "$(git rev-parse --verify HEAD^^^^)" == 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ]]
+          [[ "$(git rev-parse --verify HEAD^)" == 1188a37ff87e0117abd548da107f4d9f1f7c24fd ]]
+          [[ "$(git rev-parse --verify HEAD^^)" == c12f9548f4e15464cc572189d4b3381c7e1b9a03 ]]
+          [[ "$(git rev-parse --verify HEAD^^^)" == d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^)" == 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^)" == 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ]]
           [[ "$(git diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == internal/platformsafety/release_workflow_test.go ]]
           [[ "$(git diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == $'1\t0\tinternal/platformsafety/release_workflow_test.go' ]]
           [[ "$(git diff --name-only 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
@@ -584,12 +585,12 @@ jobs:
           readonly live_source='a0f5bc0ac36b4e29c4c7928dda1923c2c4727759'
           readonly target_source='57dc767999741cea25fe4820a6c9603984dfa0b9'
           readonly tooling_root='5a3b09c571601993367c50561b257dd6b9e743ca'
-          readonly tooling_parent='c12f9548f4e15464cc572189d4b3381c7e1b9a03'
+          readonly tooling_parent='1188a37ff87e0117abd548da107f4d9f1f7c24fd'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
           git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
-          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '10' ]]
+          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '11' ]]
           [[ "$(git rev-list --parents -n 1 "${EXPECTED_SHA}" | awk '{print NF}')" == '2' ]]
           [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
           [[ "$(git rev-parse --verify "${tooling_root}^")" == "${target_source}" ]]

@@ -20392,8 +20392,11 @@ for item in value.get("items") or []:
         labels=metadata.get("labels") or {}
         if labels.get("app.kubernetes.io/component")=="api" and labels.get("app.kubernetes.io/instance")=="fugue":
             continue
+        owners=metadata.get("ownerReferences") or []
+        if any(owner.get("controller") is True and owner.get("kind") in {"Job","CronJob"} for owner in owners):
+            continue
         statuses=(item.get("status") or {}).get("containerStatuses") or []
-        result.append({"kind":"PodImageCohort","ownerReferences":metadata.get("ownerReferences") or [],"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")})
+        result.append({"kind":"PodImageCohort","ownerReferences":owners,"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")})
         continue
     status=item.get("status") or {}
     result.append({"apiVersion":item.get("apiVersion"),"kind":kind,"metadata":{key:metadata.get(key) for key in ("annotations","deletionTimestamp","generation","labels","name","namespace","uid")},"spec":item.get("spec"),"status":{key:status.get(key,0) for key in ("availableReplicas","currentNumberScheduled","desiredNumberScheduled","misscheduled","observedGeneration","readyReplicas","replicas","numberAvailable","numberMisscheduled","numberReady","numberUnavailable","updatedNumberScheduled","updatedReplicas","unavailableReplicas")}})
@@ -20801,13 +20804,15 @@ for item in workloads.get("items") or []:
     if kind=="Pod":
         labels=md.get("labels") or {}
         if labels.get("app.kubernetes.io/component")=="api" and labels.get("app.kubernetes.io/instance")=="fugue": continue
+        owners=md.get("ownerReferences") or []
+        if any(owner.get("controller") is True and owner.get("kind") in {"Job","CronJob"} for owner in owners): continue
         statuses=(item.get("status") or {}).get("containerStatuses") or []
-        semantic.append({"kind":"PodImageCohort","ownerReferences":md.get("ownerReferences") or [],"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")})
+        semantic.append({"kind":"PodImageCohort","ownerReferences":owners,"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")})
         continue
     live_status=item.get("status") or {}
     semantic.append({"apiVersion":item.get("apiVersion"),"kind":kind,"metadata":{key:md.get(key) for key in ("annotations","deletionTimestamp","generation","labels","name","namespace","uid")},"spec":item.get("spec"),"status":{key:live_status.get(key,0) for key in ("availableReplicas","currentNumberScheduled","desiredNumberScheduled","misscheduled","observedGeneration","readyReplicas","replicas","numberAvailable","numberMisscheduled","numberReady","numberUnavailable","updatedNumberScheduled","updatedReplicas","unavailableReplicas")}})
 semantic.sort(key=lambda item:json.dumps(item,sort_keys=True,separators=(",",":")))
-require(digest(semantic)=="sha256:6b17b9bc5ceed8cec0d4fe20bd3dced845d06209497a9e262576a254c54b8f42", "non_api_semantic_witness")
+require(digest(semantic)=="sha256:698f66842da66f97debc0f35ee4816f1e4efc9b4a3b3960c874582cb03a1211f", "non_api_semantic_witness")
 
 lease=json.loads(os.environ["LEASE_JSON"]); lm=lease.get("metadata") or {}; la=lm.get("annotations") or {}; ls=lease.get("spec") or {}
 require(lm.get("uid")=="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" and not lm.get("deletionTimestamp") and int(ls.get("leaseDurationSeconds") or 0)==120, "lease_identity")
@@ -20835,11 +20840,12 @@ run_control_plane_api_hotfix_recovery_only() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${GITHUB_SHA:-}" == "${head_sha}" &&
-    "$(git rev-parse --verify HEAD^)" == "c12f9548f4e15464cc572189d4b3381c7e1b9a03" &&
-    "$(git rev-parse --verify HEAD^^)" == "d4b5ed71838d48766fa5704a27f46fcb578bf2f4" &&
-    "$(git rev-parse --verify HEAD^^^)" == "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
-    "$(git rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" == "4" &&
+    "$(git rev-parse --verify HEAD^)" == "1188a37ff87e0117abd548da107f4d9f1f7c24fd" &&
+    "$(git rev-parse --verify HEAD^^)" == "c12f9548f4e15464cc572189d4b3381c7e1b9a03" &&
+    "$(git rev-parse --verify HEAD^^^)" == "d4b5ed71838d48766fa5704a27f46fcb578bf2f4" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
+    "$(git rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" == "5" &&
     -z "$(git rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" ]] || return 1
   [[ "$(git diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == "internal/platformsafety/release_workflow_test.go" &&
     "$(git diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == $'1\t0\tinternal/platformsafety/release_workflow_test.go' ]] || return 1
@@ -20933,11 +20939,12 @@ run_control_plane_api_hotfix_rollout_v2() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "c12f9548f4e15464cc572189d4b3381c7e1b9a03" &&
-    "$(git rev-parse --verify HEAD^^)" == "d4b5ed71838d48766fa5704a27f46fcb578bf2f4" &&
-    "$(git rev-parse --verify HEAD^^^)" == "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
-    "$(git rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" == "4" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "1188a37ff87e0117abd548da107f4d9f1f7c24fd" &&
+    "$(git rev-parse --verify HEAD^^)" == "c12f9548f4e15464cc572189d4b3381c7e1b9a03" &&
+    "$(git rev-parse --verify HEAD^^^)" == "d4b5ed71838d48766fa5704a27f46fcb578bf2f4" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
+    "$(git rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" == "5" &&
     -z "$(git rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" ]] || return 1
   [[ "$(git diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == "internal/platformsafety/release_workflow_test.go" &&
     "$(git diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == $'1\t0\tinternal/platformsafety/release_workflow_test.go' ]] || return 1

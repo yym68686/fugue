@@ -465,11 +465,12 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
-      'rev-parse --verify HEAD^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
-      'rev-parse --verify HEAD^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
-      'rev-parse --verify HEAD^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
-      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '4\n' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' 1188a37ff87e0117abd548da107f4d9f1f7c24fd ;;
+      'rev-parse --verify HEAD^^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
+      'rev-parse --verify HEAD^^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
+      'rev-parse --verify HEAD^^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
+      'rev-parse --verify HEAD^^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '5\n' ;;
       'rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') : ;;
       'diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '%s\n' internal/platformsafety/release_workflow_test.go ;;
       'diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '1\t0\t%s\n' internal/platformsafety/release_workflow_test.go ;;
@@ -569,7 +570,8 @@ PY
 import json, os
 variant=os.environ["VARIANT"]
 deployment={"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/source-commit":"a"*40},"generation":9,"labels":{"app":"controller"},"name":"controller","namespace":"fugue-system","resourceVersion":"100","uid":"controller-uid"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"example/controller@sha256:"+"a"*64,"name":"controller"}]}}},"status":{"availableReplicas":1,"observedGeneration":9,"readyReplicas":1,"updatedReplicas":1}}
-pod={"apiVersion":"v1","kind":"Pod","metadata":{"labels":{"app.kubernetes.io/component":"controller"},"ownerReferences":[{"kind":"ReplicaSet","name":"controller-rs","uid":"rs-uid"}],"resourceVersion":"200","uid":"pod-uid"},"status":{"phase":"Running","containerStatuses":[{"imageID":"example/controller@sha256:"+"a"*64,"name":"controller","ready":True}]}}
+pod={"apiVersion":"v1","kind":"Pod","metadata":{"labels":{"app.kubernetes.io/component":"controller"},"ownerReferences":[{"controller":True,"kind":"ReplicaSet","name":"controller-rs","uid":"rs-uid"}],"resourceVersion":"200","uid":"pod-uid"},"status":{"phase":"Running","containerStatuses":[{"imageID":"example/controller@sha256:"+"a"*64,"name":"controller","ready":True}]}}
+custom_pod={"apiVersion":"v1","kind":"Pod","metadata":{"labels":{"cnpg.io/cluster":"postgres"},"ownerReferences":[{"controller":True,"kind":"Cluster","name":"postgres","uid":"cluster-uid"}],"resourceVersion":"250","uid":"custom-pod-uid"},"status":{"phase":"Running","containerStatuses":[{"imageID":"example/postgres@sha256:"+"d"*64,"name":"postgres","ready":True}]}}
 daemonset={"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"generation":4,"labels":{"app":"cache"},"name":"cache","namespace":"fugue-system","resourceVersion":"300","uid":"cache-uid"},"spec":{"selector":{"matchLabels":{"app":"cache"}},"template":{"metadata":{"labels":{"app":"cache"}},"spec":{"containers":[{"image":"example/cache@sha256:"+"c"*64,"name":"cache"}]}}},"status":{"currentNumberScheduled":1,"desiredNumberScheduled":1,"numberAvailable":1,"numberMisscheduled":0,"numberReady":1,"numberUnavailable":0,"observedGeneration":4,"updatedNumberScheduled":1}}
 if variant == "volatile":
     deployment["metadata"]["resourceVersion"]="101"
@@ -591,7 +593,23 @@ elif variant == "desired-drift":
     daemonset["status"]["desiredNumberScheduled"]=2
 elif variant == "pod-drift":
     pod["status"]["containerStatuses"][0]["imageID"]="example/controller@sha256:"+"b"*64
-print(json.dumps({"items":[deployment,daemonset,pod]},separators=(",",":")))
+elif variant == "pod-ready-drift":
+    pod["status"]["containerStatuses"][0]["ready"]=False
+elif variant == "pod-phase-drift":
+    pod["status"]["phase"]="Failed"
+elif variant == "custom-image-drift":
+    custom_pod["status"]["containerStatuses"][0]["imageID"]="example/postgres@sha256:"+"e"*64
+elif variant == "custom-ready-drift":
+    custom_pod["status"]["containerStatuses"][0]["ready"]=False
+elif variant == "custom-phase-drift":
+    custom_pod["status"]["phase"]="Failed"
+items=[deployment,daemonset,pod,custom_pod]
+if variant in {"job-present","cronjob-present"}:
+    owner_kind="Job" if variant=="job-present" else "CronJob"
+    items.append({"apiVersion":"v1","kind":"Pod","metadata":{"labels":{"batch.kubernetes.io/job-name":"build","job-name":"build"},"ownerReferences":[{"controller":True,"kind":owner_kind,"name":"build","uid":"build-uid"}],"uid":"build-pod-uid"},"status":{"phase":"Succeeded","containerStatuses":[{"imageID":"example/kaniko@sha256:"+"f"*64,"name":"kaniko","ready":False}]}})
+elif variant == "job-label-custom-owner":
+    items.append({"apiVersion":"v1","kind":"Pod","metadata":{"labels":{"batch.kubernetes.io/job-name":"not-authority","job-name":"not-authority"},"ownerReferences":[{"controller":True,"kind":"Cluster","name":"custom","uid":"custom-uid"}],"uid":"labeled-custom-pod-uid"},"status":{"phase":"Running","containerStatuses":[{"imageID":"example/custom@sha256:"+"9"*64,"name":"custom","ready":True}]}})
+print(json.dumps({"items":items},separators=(",",":")))
 PY
   }
 
@@ -606,6 +624,14 @@ PY
     [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
   done
   fixture_variant=pod-drift
+  [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
+  for fixture_variant in pod-ready-drift pod-phase-drift custom-image-drift custom-ready-drift custom-phase-drift; do
+    [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
+  done
+  for fixture_variant in job-present cronjob-present; do
+    [[ "$(control_plane_hotfix_non_api_workload_digest)" == "${base}" ]]
+  done
+  fixture_variant=job-label-custom-owner
   [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
 )
 
@@ -627,11 +653,12 @@ PY
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%040d\n' 7 ;;
-      'rev-parse --verify HEAD^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
-      'rev-parse --verify HEAD^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
-      'rev-parse --verify HEAD^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
-      'rev-parse --verify HEAD^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
-      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '4\n' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' 1188a37ff87e0117abd548da107f4d9f1f7c24fd ;;
+      'rev-parse --verify HEAD^^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
+      'rev-parse --verify HEAD^^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
+      'rev-parse --verify HEAD^^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
+      'rev-parse --verify HEAD^^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '5\n' ;;
       'rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') : ;;
       'diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '%s\n' internal/platformsafety/release_workflow_test.go ;;
       'diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '1\t0\t%s\n' internal/platformsafety/release_workflow_test.go ;;
