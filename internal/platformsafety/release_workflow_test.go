@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "522f492eb27e52514f97aa5deb695982f0d5a4f34c5171abfe13245498217d4c")
+	assertWorkflowSourceDigest(t, data, "7e1b61108ba952d1c1eda77b1cfc3b40be98883e94740e55e5722008afec2724")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2875,7 +2875,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-baseline/Verify exact API hotfix runtime closure":                          "4c42caf73b556b4e212805f19da92889445d02fa7f95e6371475cce53a8115a5",
+		"release-baseline/Verify exact API hotfix runtime closure":                          "85d5aec9938d138b70b5974fb28bd08bef10ed305deda871228f7aa935033fa6",
 		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
 		"release-gate/Verify exact API hotfix product receipt":                              "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
 		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
@@ -3371,7 +3371,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759", "57dc767999741cea25fe4820a6c9603984dfa0b9",
 		"5a3b09c571601993367c50561b257dd6b9e743ca",
-		"76153c632a302c3ed11fd9151a0658c8a2d37e7f",
+		"7668839a3c462e3b3e0336e6efea4d8ed21ab4dc",
 		`M\tinternal/api/managed_app_status.go`, `M\tinternal/api/managed_app_status_test.go`,
 		`.github/workflows/deploy-control-plane.yml`, `scripts/upgrade_fugue_control_plane.sh`,
 	} {

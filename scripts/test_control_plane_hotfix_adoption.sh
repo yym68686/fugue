@@ -99,6 +99,10 @@ ACTUAL="$(cut -d'|' -f2- "${LOG}")"
 [[ "$(cut -d'|' -f1 "${LOG}" | sort -u | wc -l | tr -d ' ')" == 1 ]]
 [[ "$(grep -c '^api.image.tag=' "${TMP}/argv")" == 1 ]]
 [[ "$(grep -c '^api.image.digest=' "${TMP}/argv")" == 1 ]]
+grep -Fq 'base:released|base:owned|target:target|hybrid:hybrid' \
+  "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+! grep -Fq 'local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-${phase}"' \
+  "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
 (
   cd "${ROOT}"
@@ -160,6 +164,66 @@ assert template["spec"] == {"containers":[{"image":os.environ["TARGET_IMAGE"],"i
 assert raw.endswith('data:\n  value: exact\n')
 PY
   rm -f -- "${HELM_POST_RENDERER_FILE}"
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  fixture="${TMP}/kubernetes-observation-fixture"
+  mkdir -m 700 "${fixture}"
+  cat >"${fixture}/deployment.json" <<'JSON'
+{"metadata":{"generation":7,"name":"fugue-fugue-api","resourceVersion":"11","uid":"api-uid"},"spec":{"replicas":2,"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9","name":"api"}]}}},"status":{"availableReplicas":2,"observedGeneration":7,"readyReplicas":2,"replicas":2,"updatedReplicas":2}}
+JSON
+  cat >"${fixture}/service.json" <<'JSON'
+{"metadata":{"name":"fugue-fugue","resourceVersion":"21","uid":"service-uid"},"spec":{"selector":{"app":"api"}}}
+JSON
+  cat >"${fixture}/slices.json" <<'JSON'
+{"items":[{"addressType":"IPv4","endpoints":[{"addresses":["10.0.0.1"],"conditions":{"ready":true,"serving":true},"targetRef":{"name":"api-1"}},{"addresses":["10.0.0.2"],"conditions":{"ready":true,"serving":true},"targetRef":{"name":"api-2"}}],"metadata":{"name":"fugue-fugue-a","resourceVersion":"31","uid":"slice-uid"},"ports":[{"port":8080}]}]}
+JSON
+  cat >"${fixture}/pods.json" <<'JSON'
+{"items":[{"status":{"conditions":[{"status":"True","type":"Ready"}],"containerStatuses":[{"imageID":"docker-pullable://ghcr.io/yym68686/fugue-api@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","name":"api"}],"phase":"Running"}},{"status":{"conditions":[{"status":"True","type":"Ready"}],"containerStatuses":[{"imageID":"docker-pullable://ghcr.io/yym68686/fugue-api@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","name":"api"}],"phase":"Running"}}]}
+JSON
+  printf 'ok\n' >"${fixture}/health"
+  FIXTURE="${fixture}" python3 - <<'PY'
+import hashlib,json,os,pathlib
+r=pathlib.Path(os.environ["FIXTURE"]); load=lambda n:json.load(open(r/n))
+digest=lambda v:"sha256:"+hashlib.sha256(json.dumps(v,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+d=load("deployment.json");s=load("service.json");sl=load("slices.json")["items"][0]
+records=[]
+for e in sl["endpoints"]:
+ records.append({"addresses":sorted(e.get("addresses") or []),"conditions":e.get("conditions") or {},"nodeName":e.get("nodeName"),"targetRef":e.get("targetRef"),"zone":e.get("zone")})
+records.sort(key=lambda v:json.dumps(v,sort_keys=True,separators=(",",":")))
+p={"planVersion":2,"currentSource":"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759","adoptedSource":"57dc767999741cea25fe4820a6c9603984dfa0b9","targetApiImageRef":"ghcr.io/yym68686/fugue-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","liveHybridApiImageRef":"ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9","targetApiTemplateDigest":"sha256:"+"b"*64,"hybridApiTemplateDigest":digest(d["spec"]["template"]),"kubernetes":{"apiName":"fugue-fugue-api","apiUid":"api-uid","apiResourceVersion":"11","apiGeneration":7,"apiTemplateDigest":digest(d["spec"]["template"]),"apiImageId":"docker-pullable://ghcr.io/yym68686/fugue-api@sha256:"+"e"*64,"apiHealthDigest":"sha256:"+hashlib.sha256((r/"health").read_bytes()).hexdigest(),"serviceName":"fugue-fugue","serviceUid":"service-uid","serviceResourceVersion":"21","serviceSelectorDigest":digest(s["spec"]["selector"]),"endpointSliceName":"fugue-fugue-a","endpointSliceUid":"slice-uid","endpointSliceResourceVersion":"31","endpointBindingDigest":digest({"addressType":sl["addressType"],"endpoints":records,"ports":sl["ports"]})}}
+(r/"plan.json").write_text(json.dumps(p,separators=(",",":")),encoding="utf-8")
+PY
+  calls="${fixture}/calls"
+  : >"${calls}"
+  bounded_kubectl() {
+    printf '%s\n' "$*" >>"${calls}"
+    case "$*" in
+      *'get deployment/fugue-fugue-api -o json') cat "${fixture}/deployment.json" ;;
+      *'get service/fugue-fugue -o json') cat "${fixture}/service.json" ;;
+      *'get endpointslice -l kubernetes.io/service-name=fugue-fugue -o json') cat "${fixture}/slices.json" ;;
+      *'get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json') cat "${fixture}/pods.json" ;;
+      *) return 1 ;;
+    esac
+  }
+  run_with_wall_timeout() { cat "${fixture}/health"; }
+  CONTROL_PLANE_HOTFIX_PLAN_FILE="${fixture}/plan.json"
+  CONTROL_PLANE_HOTFIX_WORK_DIR="${fixture}/positive"
+  FUGUE_SMOKE_URL=https://api.example.test/healthz
+  mkdir -m 700 "${CONTROL_PLANE_HOTFIX_WORK_DIR}"
+  control_plane_hotfix_verify_kubernetes base released
+  control_plane_hotfix_verify_kubernetes base owned
+  [[ -d "${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-base-released" && -d "${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-base-owned" ]]
+  [[ "$(wc -l <"${calls}" | tr -d ' ')" == 8 ]]
+  ! control_plane_hotfix_verify_kubernetes base released
+  CONTROL_PLANE_HOTFIX_WORK_DIR="${fixture}/poison"
+  mkdir -m 700 "${CONTROL_PLANE_HOTFIX_WORK_DIR}"
+  ln -s "${fixture}" "${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-base-owned"
+  ! control_plane_hotfix_verify_kubernetes base owned
 )
 
 (
@@ -401,8 +465,8 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' '76153c632a302c3ed11fd9151a0658c8a2d37e7f' ;;
-      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '76153c632a302c3ed11fd9151a0658c8a2d37e7f' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' '7668839a3c462e3b3e0336e6efea4d8ed21ab4dc' ;;
+      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '7668839a3c462e3b3e0336e6efea4d8ed21ab4dc' ;;
       'merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD') : ;;
       'diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD') printf '%s\n' \
         '.github/workflows/deploy-control-plane.yml' \

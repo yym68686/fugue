@@ -20507,8 +20507,14 @@ PY
 
 control_plane_hotfix_verify_kubernetes() {
   local phase="$1"
-  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-${phase}"
+  local observation="${2:-${phase}}"
+  local directory="${CONTROL_PLANE_HOTFIX_WORK_DIR}/kubernetes-${phase}-${observation}"
   local health_url="${FUGUE_SMOKE_URL:-}"
+  case "${phase}:${observation}" in
+    base:released|base:owned|target:target|hybrid:hybrid) ;;
+    *) return 1 ;;
+  esac
+  [[ ! -e "${directory}" && ! -L "${directory}" ]] || return 1
   mkdir -m 700 "${directory}" || return
   [[ "${health_url}" == https://* && "${health_url}" != *[[:space:]]* ]] || return 1
   bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/deployment.json" || return
@@ -20700,11 +20706,11 @@ control_plane_hotfix_verify_live_target() {
   if [[ "${phase}" == "target" ]]; then
     expected_values="$(PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" python3 -c 'import json,os; print(json.load(open(os.environ["PLAN_FILE"],encoding="utf-8"))["targetValuesDigest"])')" || return
     [[ "${values_digest}" == "${expected_values}" ]] || return 1
-    control_plane_hotfix_verify_kubernetes target
+  control_plane_hotfix_verify_kubernetes target target
   elif [[ "${phase}" == "hybrid" ]]; then
     expected_values="$(PLAN_FILE="${CONTROL_PLANE_HOTFIX_PLAN_FILE}" python3 -c 'import json,os; p=json.load(open(os.environ["PLAN_FILE"],encoding="utf-8")); print(p.get("hybridValuesDigest") or p["baseValuesDigest"])')" || return
     [[ "${values_digest}" == "${expected_values}" ]] || return 1
-    control_plane_hotfix_verify_kubernetes hybrid
+    control_plane_hotfix_verify_kubernetes hybrid hybrid
   fi
 }
 
@@ -20736,7 +20742,7 @@ run_control_plane_api_hotfix_rollout_v2() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "76153c632a302c3ed11fd9151a0658c8a2d37e7f" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "7668839a3c462e3b3e0336e6efea4d8ed21ab4dc" &&
     "$(git rev-list --parents -n 1 HEAD | awk '{print NF}')" == "2" ]] || return 1
   git merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD || return 1
   [[ "${artifact_file}" == /* && -f "${artifact_file}" && ! -L "${artifact_file}" &&
@@ -21043,7 +21049,7 @@ PY
 
   control_plane_hotfix_capture_render_set "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
   control_plane_hotfix_verify_prewrite_bindings "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" released || return
-  control_plane_hotfix_verify_kubernetes base || return
+  control_plane_hotfix_verify_kubernetes base released || return
   control_plane_hotfix_write_wal prepared 1 0 0 false || return
   acquire_control_plane_backup_coordination_lease || return
   CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="true"
@@ -21051,7 +21057,7 @@ PY
   rm -rf -- "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}"
   control_plane_hotfix_capture_render_set "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" || return
   control_plane_hotfix_verify_prewrite_bindings "${CONTROL_PLANE_HOTFIX_AUTHORIZED_DIR}" owned || return
-  control_plane_hotfix_verify_kubernetes base || return
+  control_plane_hotfix_verify_kubernetes base owned || return
   control_plane_hotfix_write_wal prewrite-verified 2 0 0 false || return
   arm_control_plane_release_recovery_fence "${CONTROL_PLANE_HOTFIX_POLICY}" || return
   CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED="true"
