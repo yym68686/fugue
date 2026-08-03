@@ -27,6 +27,10 @@ const (
 	PublicDataPlaneAdoptionBaselineKind       = "PublicDataPlaneHelmAdoptionBaseline"
 	PublicDataPlaneAdoptionTraceKind          = "PublicDataPlaneHelmAdoptionExecutionTrace"
 	PublicDataPlaneAdoptionRecoveryWALKind    = "PublicDataPlaneHelmAdoptionRecoveryWAL"
+
+	publicDataPlaneEdgeImagePath         = "/spec/template/spec/containers/0/image"
+	publicDataPlaneEdgeIdentityImagePath = "/spec/template/spec/initContainers/0/image"
+	publicDataPlaneEdgeIdentityContainer = "edge-workload-identity"
 )
 
 // PublicDataPlaneAdoptionMemberEvidence binds one member of an exact
@@ -550,7 +554,7 @@ func VerifyPublicDataPlaneAdoptionPlan(plan PublicDataPlaneAdoptionPlan) error {
 	}
 	for _, item := range plan.Rendered.Evidence {
 		if item.Ignored || !isExactTransactionDomain(item.Domains, DomainAuthoritativeDNS) ||
-			len(item.Paths) != 1 || item.Paths[0] != "/spec/template/spec/containers/0/image" {
+			!publicDataPlaneBoundEdgeImagePaths(item.Paths) {
 			return fmt.Errorf("public data-plane adoption contains non-image or non-authoritative rendered evidence")
 		}
 	}
@@ -1054,7 +1058,8 @@ func restorePublicDataPlaneAdoptionChecksums(
 }
 
 // RenderPublicDataPlaneAdoptionTarget is the Stage1 post-renderer. It changes
-// only the edge container selected by the signed adoption intent and returns
+// only the two image pointers of the Edge artifact selected by the signed
+// adoption intent and returns
 // the same canonical representation consumed by the release classifier.
 func RenderPublicDataPlaneAdoptionTarget(
 	rendered, ownership []byte,
@@ -1098,15 +1103,12 @@ func renderPublicDataPlaneAdoptionTargetCanonical(
 		if !ok {
 			return nil, fmt.Errorf("public data-plane adoption post-render worker %s is missing", patch.WorkloadName)
 		}
-		containers, ok := publicDataPlaneNestedSlice(object.Object, "spec", "template", "spec", "containers")
-		if !ok || len(containers) != 2 {
-			return nil, fmt.Errorf("public data-plane adoption post-render worker %s container shape is invalid", patch.WorkloadName)
-		}
-		edge, ok := containers[0].(map[string]any)
-		if !ok || edge["name"] != patch.Container {
+		images, err := publicDataPlaneWorkerImageSet(object.Object, patch.WorkloadName, "spec", "template", "spec")
+		if err != nil || patch.Container != "edge" {
 			return nil, fmt.Errorf("public data-plane adoption post-render worker %s edge pointer is invalid", patch.WorkloadName)
 		}
-		edge["image"] = patch.ImageRef
+		images.edge["image"] = patch.ImageRef
+		images.identity["image"] = patch.ImageRef
 	}
 	return encodePublicDataPlaneManifestObjects(indexed)
 }
@@ -1230,7 +1232,8 @@ func PublicDataPlaneAdoptionRestorePatches(restore []byte) ([]PublicDataPlaneRes
 			UID:  member.UID,
 			Patch: []any{
 				map[string]any{"op": "test", "path": "/metadata/uid", "value": member.UID},
-				map[string]any{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": member.EdgeImageRef},
+				map[string]any{"op": "replace", "path": publicDataPlaneEdgeImagePath, "value": member.EdgeImageRef},
+				map[string]any{"op": "replace", "path": publicDataPlaneEdgeIdentityImagePath, "value": member.EdgeImageRef},
 			},
 		})
 	}
@@ -1317,16 +1320,12 @@ func VerifyPublicDataPlaneAdoptionRecoveryCandidate(
 			return fmt.Errorf("public data-plane recovery candidate %s spec is invalid", member.Name)
 		}
 		clone := cloneManifestMap(spec)
-		containers, ok := publicDataPlaneNestedSlice(clone, "template", "spec", "containers")
-		if !ok || len(containers) != 2 {
-			return fmt.Errorf("public data-plane recovery candidate %s containers are invalid", member.Name)
-		}
-		edge, ok := containers[0].(map[string]any)
-		current, _ := edge["image"].(string)
-		if !ok || edge["name"] != "edge" || (current != member.EdgeImageRef && current != targetEdgeImageRef) {
+		images, imageErr := publicDataPlaneWorkerImageSet(clone, member.Name, "template", "spec")
+		if imageErr != nil || (images.edgeRef != member.EdgeImageRef && images.edgeRef != targetEdgeImageRef) {
 			return fmt.Errorf("public data-plane recovery candidate %s edge image is outside the transaction", member.Name)
 		}
-		edge["image"] = member.EdgeImageRef
+		images.edge["image"] = member.EdgeImageRef
+		images.identity["image"] = member.EdgeImageRef
 		encoded, encodeErr := json.Marshal(clone)
 		if encodeErr != nil || digestBytesSHA256(encoded) != member.SpecDigest {
 			return fmt.Errorf("public data-plane recovery candidate %s non-image spec drifted", member.Name)
@@ -1487,7 +1486,7 @@ func verifyPublicDataPlaneAdoptionOnlyImageDelta(
 	}
 	for _, evidence := range rendered.Evidence {
 		if evidence.Ignored || !isExactTransactionDomain(evidence.Domains, DomainAuthoritativeDNS) ||
-			len(evidence.Paths) != 1 || evidence.Paths[0] != "/spec/template/spec/containers/0/image" {
+			!publicDataPlaneBoundEdgeImagePaths(evidence.Paths) {
 			return fmt.Errorf("public data-plane adoption target changes a non-edge-image field")
 		}
 		const prefix = "apps/v1 DaemonSet "
@@ -1520,18 +1519,16 @@ func verifyPublicDataPlaneAdoptionOnlyImageDelta(
 		if !baseOK || !targetOK {
 			return fmt.Errorf("public data-plane adoption image worker %s is missing", patch.WorkloadName)
 		}
-		baseContainers, baseShape := publicDataPlaneNestedSlice(baseObject.Object, "spec", "template", "spec", "containers")
-		targetContainers, targetShape := publicDataPlaneNestedSlice(targetObject.Object, "spec", "template", "spec", "containers")
-		if !baseShape || !targetShape || len(baseContainers) != 2 || len(targetContainers) != 2 {
+		baseImages, baseErr := publicDataPlaneWorkerImageSet(baseObject.Object, patch.WorkloadName, "spec", "template", "spec")
+		targetImages, targetErr := publicDataPlaneWorkerImageSet(targetObject.Object, patch.WorkloadName, "spec", "template", "spec")
+		if baseErr != nil || targetErr != nil {
 			return fmt.Errorf("public data-plane adoption image worker %s container shape is invalid", patch.WorkloadName)
 		}
-		baseEdge, baseEdgeOK := baseContainers[0].(map[string]any)
-		targetEdge, targetEdgeOK := targetContainers[0].(map[string]any)
-		if !baseEdgeOK || !targetEdgeOK || baseEdge["name"] != patch.Container || targetEdge["name"] != patch.Container ||
-			targetEdge["image"] != patch.ImageRef {
+		if patch.Container != "edge" || targetImages.edgeRef != patch.ImageRef {
 			return fmt.Errorf("public data-plane adoption image worker %s edge pointer is invalid", patch.WorkloadName)
 		}
-		targetEdge["image"] = baseEdge["image"]
+		targetImages.edge["image"] = baseImages.edgeRef
+		targetImages.identity["image"] = baseImages.edgeRef
 		targetIndex[key] = targetObject
 	}
 	reversed, err := encodePublicDataPlaneManifestObjects(targetIndex)
@@ -1939,28 +1936,11 @@ func parsePublicDataPlaneSnapshotMember(
 		if slot != "a" && slot != "b" {
 			return publicDataPlaneSnapshotMember{}, fmt.Errorf("public data-plane worker %s slot is invalid", name)
 		}
-		containers, ok := publicDataPlaneNestedSlice(item, "spec", "template", "spec", "containers")
-		if !ok || len(containers) != 2 {
-			return publicDataPlaneSnapshotMember{}, fmt.Errorf("public data-plane worker %s must have edge and caddy containers", name)
+		images, imageErr := publicDataPlaneWorkerImageSet(item, name, "spec", "template", "spec")
+		if imageErr != nil {
+			return publicDataPlaneSnapshotMember{}, imageErr
 		}
-		for index, raw := range containers {
-			container, ok := raw.(map[string]any)
-			if !ok {
-				return publicDataPlaneSnapshotMember{}, fmt.Errorf("public data-plane worker %s container is invalid", name)
-			}
-			containerName, _ := container["name"].(string)
-			image, _ := container["image"].(string)
-			if index == 0 && containerName == "edge" {
-				edgeRef = image
-			} else if index == 1 && containerName == "caddy" {
-				caddyRef = image
-			} else {
-				return publicDataPlaneSnapshotMember{}, fmt.Errorf("public data-plane worker %s container order is invalid", name)
-			}
-		}
-		if validatePublicDataPlaneImageRef(edgeRef, false) != nil || validatePublicDataPlaneImageRef(caddyRef, false) != nil {
-			return publicDataPlaneSnapshotMember{}, fmt.Errorf("public data-plane worker %s image is invalid", name)
-		}
+		edgeRef, caddyRef = images.edgeRef, images.caddyRef
 	}
 	specBytes, err := json.Marshal(spec)
 	if err != nil {
@@ -2010,23 +1990,62 @@ func publicDataPlaneNestedSlice(root map[string]any, path ...string) ([]any, boo
 	return result, ok
 }
 
-func publicDataPlaneWorkerImages(object manifestObject) (string, string, error) {
-	containers, ok := publicDataPlaneNestedSlice(object.Object, "spec", "template", "spec", "containers")
+type publicDataPlaneWorkerImagePointers struct {
+	edge, caddy, identity map[string]any
+	edgeRef, caddyRef     string
+}
+
+func publicDataPlaneWorkerImageSet(root map[string]any, name string, podSpecPath ...string) (publicDataPlaneWorkerImagePointers, error) {
+	containers, ok := publicDataPlaneNestedSlice(root, append(append([]string(nil), podSpecPath...), "containers")...)
 	if !ok || len(containers) != 2 {
-		return "", "", fmt.Errorf("public data-plane worker %s must have edge and caddy containers", object.Identity.Name)
+		return publicDataPlaneWorkerImagePointers{}, fmt.Errorf("public data-plane worker %s must have edge and caddy containers", name)
 	}
-	values := make([]string, 2)
-	for index, expected := range []string{"edge", "caddy"} {
-		container, ok := containers[index].(map[string]any)
-		if !ok || container["name"] != expected {
-			return "", "", fmt.Errorf("public data-plane worker %s container order is invalid", object.Identity.Name)
-		}
-		values[index], _ = container["image"].(string)
-		if err := validatePublicDataPlaneImageRef(values[index], false); err != nil {
-			return "", "", err
-		}
+	initContainers, ok := publicDataPlaneNestedSlice(root, append(append([]string(nil), podSpecPath...), "initContainers")...)
+	if !ok || len(initContainers) != 1 {
+		return publicDataPlaneWorkerImagePointers{}, fmt.Errorf("public data-plane worker %s must have one Edge identity init container", name)
 	}
-	return values[0], values[1], nil
+	edge, edgeOK := containers[0].(map[string]any)
+	caddy, caddyOK := containers[1].(map[string]any)
+	identity, identityOK := initContainers[0].(map[string]any)
+	edgeRef, _ := edge["image"].(string)
+	caddyRef, _ := caddy["image"].(string)
+	identityRef, _ := identity["image"].(string)
+	if !edgeOK || !caddyOK || !identityOK || edge["name"] != "edge" || caddy["name"] != "caddy" ||
+		identity["name"] != publicDataPlaneEdgeIdentityContainer {
+		return publicDataPlaneWorkerImagePointers{}, fmt.Errorf("public data-plane worker %s container order is invalid", name)
+	}
+	if validatePublicDataPlaneImageRef(edgeRef, false) != nil || validatePublicDataPlaneImageRef(caddyRef, false) != nil ||
+		validatePublicDataPlaneImageRef(identityRef, false) != nil || identityRef != edgeRef {
+		return publicDataPlaneWorkerImagePointers{}, fmt.Errorf("public data-plane worker %s Edge image pointers are not bound", name)
+	}
+	return publicDataPlaneWorkerImagePointers{
+		edge: edge, caddy: caddy, identity: identity, edgeRef: edgeRef, caddyRef: caddyRef,
+	}, nil
+}
+
+func publicDataPlaneWorkerImages(object manifestObject) (string, string, error) {
+	images, err := publicDataPlaneWorkerImageSet(object.Object, object.Identity.Name, "spec", "template", "spec")
+	if err != nil {
+		return "", "", err
+	}
+	return images.edgeRef, images.caddyRef, nil
+}
+
+func publicDataPlaneBoundEdgeImagePaths(paths []string) bool {
+	if len(paths) != 2 {
+		return false
+	}
+	want := map[string]struct{}{
+		publicDataPlaneEdgeImagePath:         {},
+		publicDataPlaneEdgeIdentityImagePath: {},
+	}
+	for _, path := range paths {
+		if _, ok := want[path]; !ok {
+			return false
+		}
+		delete(want, path)
+	}
+	return len(want) == 0
 }
 
 func validatePublicDataPlaneImageRef(value string, immutable bool) error {
@@ -2050,24 +2069,16 @@ func marshalPublicDataPlaneRestoreSnapshot(snapshot publicDataPlaneSnapshot) ([]
 	for _, patch := range snapshot.patches {
 		name := patch.WorkloadName
 		spec := snapshot.rawSpecs[name]
-		containers, ok := publicDataPlaneNestedSlice(spec, "template", "spec", "containers")
-		if !ok || len(containers) != 2 {
-			return nil, fmt.Errorf("public data-plane restore worker %s container shape is invalid", name)
-		}
-		edge, ok := containers[0].(map[string]any)
-		if !ok || edge["name"] != "edge" {
-			return nil, fmt.Errorf("public data-plane restore worker %s edge pointer is invalid", name)
-		}
-		edgeRef, _ := edge["image"].(string)
-		if err := validatePublicDataPlaneImageRef(edgeRef, false); err != nil {
-			return nil, err
+		images, imageErr := publicDataPlaneWorkerImageSet(spec, name, "template", "spec")
+		if imageErr != nil {
+			return nil, imageErr
 		}
 		encoded, err := json.Marshal(spec)
 		if err != nil {
 			return nil, err
 		}
 		members = append(members, publicDataPlaneRestoreMember{
-			Name: name, UID: snapshot.rawUIDs[name], EdgeImageRef: edgeRef, SpecDigest: digestBytesSHA256(encoded),
+			Name: name, UID: snapshot.rawUIDs[name], EdgeImageRef: images.edgeRef, SpecDigest: digestBytesSHA256(encoded),
 		})
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })

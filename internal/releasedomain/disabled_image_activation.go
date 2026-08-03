@@ -360,16 +360,21 @@ func disabledPublicEdgeWorkerNonImageObject(object manifestObject) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	if !workload || len(containers) != 2 {
-		return nil, fmt.Errorf("disabled public edge worker must have exactly the edge and caddy containers")
+	if !workload || len(containers) != 3 {
+		return nil, fmt.Errorf("disabled public edge worker must have exactly the edge, caddy, and Edge identity init containers")
 	}
 	edge, edgeExists := containers["edge"]
 	caddy, caddyExists := containers["caddy"]
+	identity, identityExists := containers[publicDataPlaneEdgeIdentityContainer]
 	if !edgeExists || edge.Pointer != "/spec/template/spec/containers/0/image" ||
-		!caddyExists || caddy.Pointer != "/spec/template/spec/containers/1/image" {
+		!caddyExists || caddy.Pointer != "/spec/template/spec/containers/1/image" ||
+		!identityExists || identity.Pointer != "/spec/template/spec/initContainers/0/image" || identity.Image != edge.Image {
 		return nil, fmt.Errorf("disabled public edge worker container identity is invalid")
 	}
 	if err := deleteRenderedContainerImage(result, edge.Pointer); err != nil {
+		return nil, err
+	}
+	if err := deleteRenderedContainerImage(result, identity.Pointer); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -610,7 +615,8 @@ func disabledPublicEdgeWorkerImageChangeIsInactive(
 	}
 	baseSlot, baseCandidate := disabledPublicEdgeWorkerIdentity(base)
 	targetSlot, targetCandidate := disabledPublicEdgeWorkerIdentity(target)
-	if !baseCandidate || !targetCandidate || baseSlot != targetSlot || base.Identity != target.Identity || targetContainer.Name != "edge" {
+	if !baseCandidate || !targetCandidate || baseSlot != targetSlot || base.Identity != target.Identity ||
+		(targetContainer.Name != "edge" && targetContainer.Name != publicDataPlaneEdgeIdentityContainer) {
 		return false, nil
 	}
 	if _, reserved := target.Annotations[DisabledPublicEdgeWorkerObservationAnnotation]; reserved {

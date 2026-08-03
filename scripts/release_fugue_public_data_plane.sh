@@ -947,10 +947,14 @@ elif edge_repo and edge_tag:
     edge_ref = f"{edge_repo}:{edge_tag}"
 containers = []
 edge_group_id = ""
+current_edge_ref = ""
 for container in template.get("spec", {}).get("containers", []):
     name = container.get("name")
     patch = {"name": name}
     if name == "edge":
+        current_edge_ref = str(container.get("image") or "").strip()
+        if not current_edge_ref:
+            raise SystemExit("worker daemonset main Edge image is empty")
         for item in container.get("env", []):
             if item.get("name") == "FUGUE_EDGE_GROUP_ID":
                 edge_group_id = str(item.get("value") or "").strip()
@@ -970,6 +974,17 @@ for container in template.get("spec", {}).get("containers", []):
     containers.append(patch)
 if not containers:
     raise SystemExit("worker daemonset has no edge/caddy containers")
+identity_containers = [
+    item for item in template.get("spec", {}).get("initContainers", [])
+    if item.get("name") == "edge-workload-identity"
+]
+if len(identity_containers) != 1:
+    raise SystemExit("worker daemonset must have one Edge workload identity init container")
+current_identity_ref = str(identity_containers[0].get("image") or "").strip()
+if current_identity_ref != current_edge_ref:
+    raise SystemExit("worker daemonset main and identity init Edge images are not bound")
+effective_edge_ref = edge_ref or current_edge_ref
+init_containers = [{"name": "edge-workload-identity", "image": effective_edge_ref}]
 slot = str(template_labels.get("fugue.io/edge-slot") or "").strip()
 if slot not in ("a", "b"):
     raise SystemExit("worker daemonset has no exact edge slot label")
@@ -995,17 +1010,17 @@ patch = {
             },
             "spec": {
                 "containers": containers,
+                "initContainers": init_containers,
                 "volumes": [{
-                    "name": "edge-workload-identity",
+                    "name": "edge-workload-identity-source",
                     "downwardAPI": {"items": [
-                        {"path": "edge_id", "fieldRef": {"fieldPath": "metadata.labels["+chr(39)+"fugue.io/edge-id"+chr(39)+"]"}},
                         {"path": "edge_group_id", "fieldRef": {"fieldPath": "metadata.labels["+chr(39)+"fugue.io/edge-group-id"+chr(39)+"]"}},
                         {"path": "slot", "fieldRef": {"fieldPath": "metadata.labels["+chr(39)+"fugue.io/edge-slot"+chr(39)+"]"}},
                         {"path": "instance_uid", "fieldRef": {"fieldPath": "metadata.uid"}},
                         {"path": "release_epoch", "fieldRef": {"fieldPath": "metadata.annotations["+chr(39)+"fugue.io/edge-release-epoch"+chr(39)+"]"}},
                         {"path": "heartbeat_fenced", "fieldRef": {"fieldPath": "metadata.annotations["+chr(39)+"fugue.io/edge-heartbeat-fenced"+chr(39)+"]"}},
                     ]},
-                }],
+                }, {"name": "edge-workload-identity", "emptyDir": {}}],
             },
         },
     },

@@ -291,6 +291,7 @@ func TestDisabledDynamicPublicEdgeWorkerImageOnlyTargetStaysBuiltOnly(t *testing
 	}
 	if len(withoutObserved.Activations) != 0 || withoutEvidence.Complete ||
 		len(withoutEvidence.Unresolved) != 1 ||
+		withoutEvidence.Unresolved[0].Workload.Container != "edge" ||
 		withoutEvidence.Unresolved[0].Reason != ImageActivationGapArtifactNotBuilt {
 		t.Fatalf("production regression was not reproduced: plan=%#v evidence=%#v", withoutObserved, withoutEvidence)
 	}
@@ -306,6 +307,70 @@ func TestDisabledDynamicPublicEdgeWorkerImageOnlyTargetStaysBuiltOnly(t *testing
 	if len(plan.Activations) != 0 || !evidence.Complete || len(evidence.Unresolved) != 0 ||
 		!reflect.DeepEqual(evidence.BuiltOnlyArtifacts, []string{"edge"}) {
 		t.Fatalf("disabled worker image drift was not kept built-only: plan=%#v evidence=%#v", plan, evidence)
+	}
+}
+
+func TestDisabledDynamicPublicEdgeWorkerRejectsSplitEdgeImagePointers(t *testing.T) {
+	name := "fugue-fugue-edge-dynamic-worker-b"
+	target := disabledDynamicWorkerDaemonSet(name, "registry.example/edge@"+md0Digest("9"), "dynamic")
+	target = strings.Replace(target, "registry.example/edge@"+md0Digest("9"), "registry.example/edge@"+md0Digest("8"), 1)
+	input := disabledDynamicWorkerActivationInputForTarget(t, target, DomainAuthoritativeDNS)
+	if _, _, err := BuildImageActivationReportFromManifests(input); err == nil ||
+		!strings.Contains(err.Error(), "main and identity init image pointers are not bound") {
+		t.Fatalf("split main/init Edge image pointers were accepted: %v", err)
+	}
+}
+
+func TestPublicEdgeImageActivationBindsMainAndIdentityInitToOneArtifact(t *testing.T) {
+	name := "fugue-fugue-edge-worker-b"
+	baseDigest := md0Digest("8")
+	targetDigest := md0Digest("9")
+	input := md1ActivationFixture(
+		t,
+		disabledDynamicWorkerDaemonSet(name, "registry.example/edge@"+baseDigest, "dynamic"),
+		disabledDynamicWorkerDaemonSet(name, "registry.example/edge@"+targetDigest, "dynamic"),
+		[]md1OwnershipRule{{name: name, domain: DomainAuthoritativeDNS, kind: "DaemonSet"}},
+		[]BuildArtifact{{
+			Name: "edge", SourceBaseCommit: md0BaseCommit, ArtifactDigest: targetDigest,
+			ProvenanceDigest: md0Digest("1"), PublishedImageRef: "registry.example/edge@" + targetDigest,
+		}},
+	)
+	plan, err := BuildImageActivationPlanFromManifests(input)
+	if err != nil {
+		t.Fatalf("build public Edge activation plan: %v", err)
+	}
+	if len(plan.Activations) != 1 {
+		t.Fatalf("public Edge activation count = %d, want one logical artifact: %#v", len(plan.Activations), plan.Activations)
+	}
+	activation := plan.Activations[0]
+	if activation.ArtifactName != "edge" || activation.ArtifactDigest != targetDigest ||
+		activation.TargetImageRef != "registry.example/edge@"+targetDigest || activation.Workload.Container != "edge" {
+		t.Fatalf("public Edge activation is not one immutable logical artifact: %#v", activation)
+	}
+}
+
+func TestPublicEdgeIdentityInitMigrationDoesNotCreateImageActivation(t *testing.T) {
+	name := "fugue-fugue-edge-worker-b"
+	image := "registry.example/edge@" + md0Digest("8")
+	target := disabledDynamicWorkerDaemonSet(name, image, "dynamic")
+	base := strings.Replace(target, fmt.Sprintf(`      initContainers:
+        - name: edge-workload-identity
+          image: %s
+`, image), "", 1)
+	if base == target {
+		t.Fatal("old Edge fixture still contains the identity init")
+	}
+	input := md1ActivationFixture(
+		t, base, target,
+		[]md1OwnershipRule{{name: name, domain: DomainAuthoritativeDNS, kind: "DaemonSet"}},
+		nil,
+	)
+	plan, evidence, err := BuildImageActivationReportFromManifests(input)
+	if err != nil {
+		t.Fatalf("plan old-to-new Edge identity migration: %v", err)
+	}
+	if len(plan.Activations) != 0 || !evidence.Complete || len(evidence.Unresolved) != 0 || len(evidence.BuiltOnlyArtifacts) != 0 {
+		t.Fatalf("identity-only Edge migration became an image activation: plan=%#v evidence=%#v", plan, evidence)
 	}
 }
 
@@ -391,6 +456,9 @@ spec:
     spec:
       nodeSelector:
         fugue.io/edge-workload: %s
+      initContainers:
+        - name: edge-workload-identity
+          image: %s
       containers:
         - name: edge
           image: %s
@@ -403,7 +471,7 @@ spec:
                   fieldPath: metadata.name
         - name: caddy
           image: caddy:2.10.2-alpine
-`, name, nodeClass, image)
+`, name, nodeClass, image, image)
 }
 
 func disabledDynamicWorkerKubernetesObject(t *testing.T, name, image string) map[string]any {
@@ -432,6 +500,11 @@ func disabledDynamicWorkerKubernetesObject(t *testing.T, name, image string) map
 					"dnsPolicy":    "ClusterFirst", "restartPolicy": "Always", "schedulerName": "default-scheduler",
 					"securityContext": map[string]any{}, "terminationGracePeriodSeconds": float64(30),
 					"enableServiceLinks": true, "serviceAccountName": "default",
+					"initContainers": []any{map[string]any{
+						"name": publicDataPlaneEdgeIdentityContainer, "image": image,
+						"terminationMessagePath": "/dev/termination-log", "terminationMessagePolicy": "File",
+						"resources": map[string]any{},
+					}},
 					"containers": []any{map[string]any{
 						"name": "edge", "image": image, "terminationMessagePath": "/dev/termination-log",
 						"terminationMessagePolicy": "File", "resources": map[string]any{},

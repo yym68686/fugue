@@ -121,7 +121,7 @@ func TestDisabledPublicEdgeWorkerActivationSkipFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			if len(plan.Activations) != 0 || evidence.Complete || len(evidence.Unresolved) != 1 ||
-				evidence.Unresolved[0].Reason != test.reason {
+				evidence.Unresolved[0].Workload.Container != "edge" || evidence.Unresolved[0].Reason != test.reason {
 				t.Fatalf("unsafe disabled-worker skip: plan=%#v evidence=%#v", plan, evidence)
 			}
 		})
@@ -140,7 +140,8 @@ func TestDisabledPublicEdgeWorkerActivationSkipFailsClosed(t *testing.T) {
 			gaps[gap.Workload.Container] = gap.Reason
 		}
 		if len(plan.Activations) != 0 || evidence.Complete || len(evidence.Unresolved) != 2 ||
-			gaps["edge"] != ImageActivationGapArtifactNotBuilt || gaps["caddy"] != ImageActivationGapTargetNotImmutable {
+			gaps["edge"] != ImageActivationGapArtifactNotBuilt ||
+			gaps["caddy"] != ImageActivationGapTargetNotImmutable {
 			t.Fatalf("caddy image drift was hidden: plan=%#v evidence=%#v", plan, evidence)
 		}
 	})
@@ -150,7 +151,7 @@ func TestDisabledPublicEdgeWorkerActivationSkipFailsClosed(t *testing.T) {
 		target = strings.Replace(target, "        - name: caddy\n", "        - name: metrics\n          image: metrics:1\n        - name: caddy\n", 1)
 		input := disabledDynamicWorkerActivationInputForTarget(t, target, DomainAuthoritativeDNS)
 		if _, _, err := BuildImageActivationReportFromManifests(input); err == nil ||
-			!strings.Contains(err.Error(), "exactly the edge and caddy containers") {
+			!strings.Contains(err.Error(), "exactly the edge, caddy, and Edge identity init containers") {
 			t.Fatalf("additional owned image pointer did not fail closed: %v", err)
 		}
 	})

@@ -144,6 +144,10 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 		if !targetIsWorkload {
 			continue
 		}
+		boundPublicEdge, err := validatePublicEdgeArtifactImageBinding(target, targetContainers)
+		if err != nil {
+			return ImageActivationPlan{}, ImageActivationEvidence{}, err
+		}
 		base, baseExists := baseByIdentity[key]
 		baseContainers := map[string]renderedContainer{}
 		if baseExists {
@@ -158,6 +162,9 @@ func BuildImageActivationReportFromManifests(input ImageActivationPlanInput) (Im
 		}
 
 		for _, targetContainer := range sortedRenderedContainers(targetContainers) {
+			if boundPublicEdge && targetContainer.Name == publicDataPlaneEdgeIdentityContainer {
+				continue
+			}
 			baseContainer, baseContainerExists := baseContainers[targetContainer.Name]
 			if baseContainerExists && baseContainer.Image == targetContainer.Image {
 				continue
@@ -336,6 +343,26 @@ func workloadContainers(object manifestObject) (map[string]renderedContainer, bo
 		}
 	}
 	return containers, true, nil
+}
+
+func validatePublicEdgeArtifactImageBinding(object manifestObject, containers map[string]renderedContainer) (bool, error) {
+	if object.Labels["fugue.io/rollout-subsystem"] != "public-data-plane" {
+		return false, nil
+	}
+	mode := object.Labels["fugue.io/rollout-mode"]
+	if mode != "direct-ondelete-protected" && mode != "node-local-blue-green-worker" {
+		return false, nil
+	}
+	edge, edgeExists := containers["edge"]
+	if !edgeExists {
+		return false, nil
+	}
+	identity, identityExists := containers[publicDataPlaneEdgeIdentityContainer]
+	if edge.Pointer != publicDataPlaneEdgeImagePath || !identityExists ||
+		identity.Pointer != publicDataPlaneEdgeIdentityImagePath || identity.Image != edge.Image {
+		return false, fmt.Errorf("public Edge workload %s main and identity init image pointers are not bound", object.Identity.String())
+	}
+	return true, nil
 }
 
 func nestedManifestMap(root map[string]any, path ...string) (map[string]any, bool) {

@@ -62,9 +62,11 @@ func TestPublicDataPlaneAdoptionStage1AndStage2Handoff(t *testing.T) {
 		t.Fatalf("restore patches = %d, want only 3 adoption workers; err=%v", len(patches), err)
 	}
 	for _, patch := range patches {
-		if len(patch.Patch) != 2 || patch.Patch[0].(map[string]any)["op"] != "test" ||
-			patch.Patch[1].(map[string]any)["path"] != "/spec/template/spec/containers/0/image" {
-			t.Fatalf("restore patch is not UID-tested exact edge image: %#v", patch)
+		if len(patch.Patch) != 3 || patch.Patch[0].(map[string]any)["op"] != "test" ||
+			patch.Patch[1].(map[string]any)["path"] != publicDataPlaneEdgeImagePath ||
+			patch.Patch[2].(map[string]any)["path"] != publicDataPlaneEdgeIdentityImagePath ||
+			patch.Patch[1].(map[string]any)["value"] != patch.Patch[2].(map[string]any)["value"] {
+			t.Fatalf("restore patch is not UID-tested exact bound Edge image: %#v", patch)
 		}
 	}
 	if err := VerifyPublicDataPlaneAdoptionRestore(restore, fixture.snapshot, "fugue", "fugue-system", "fugue-fugue"); err != nil {
@@ -454,8 +456,7 @@ func (fixture *publicDataPlaneAdoptionFixture) finalEvidence(t *testing.T) ([]by
 		"fugue-fugue-edge-dynamic-worker-b",
 	} {
 		member := findSnapshotObject(t, document, "DaemonSet", name)
-		containers := member["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
-		containers[0].(map[string]any)["image"] = fixtureRef()
+		setPublicDataPlaneEdgeImages(member, fixtureRef())
 	}
 	snapshot := mustJSON(t, document)
 	observedItems := cloneJSONDocument(t, document)["items"].([]any)
@@ -551,8 +552,7 @@ func newPublicDataPlaneAdoptionFixture(t *testing.T) *publicDataPlaneAdoptionFix
 		delete(metadata, "generation")
 		name := metadata["name"].(string)
 		if strings.HasSuffix(name, "worker-b") {
-			containers := copy["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
-			containers[0].(map[string]any)["image"] = "registry.example/edge:helm-slot-b"
+			setPublicDataPlaneEdgeImages(copy, "registry.example/edge:helm-slot-b")
 		}
 		baseItems = append(baseItems, copy)
 	}
@@ -730,6 +730,7 @@ func publicDataPlaneDaemonSet(name, release, role, slot string, count int64, edg
 		"fugue.io/downtime-class": "online-required",
 	}
 	containers := []any{map[string]any{"name": "front", "image": "registry.example/front:v1"}}
+	var initContainers []any
 	annotations := map[string]any{}
 	if role == "front" {
 		annotations[publicDataPlaneFrontChecksumAnnotation] = "86e41d93a16440747f6c02fea2fd15fc7affc0258d5704c05521362a085c4d6b"
@@ -746,12 +747,19 @@ func publicDataPlaneDaemonSet(name, release, role, slot string, count int64, edg
 			map[string]any{"name": "edge", "image": edgeImage},
 			map[string]any{"name": "caddy", "image": caddyImage},
 		}
+		initContainers = []any{
+			map[string]any{"name": publicDataPlaneEdgeIdentityContainer, "image": edgeImage},
+		}
 		if count > 0 && slot == "b" {
 			annotations["fugue.io/public-data-plane-release-id"] = "pdp-test-" + strings.Repeat("a", 40)
 			annotations["fugue.io/public-data-plane-release-mode"] = "node-local-blue-green-worker"
 		}
 	}
 	labels["fugue.io/rollout-mode"] = mode
+	podSpec := map[string]any{"terminationGracePeriodSeconds": int64(30), "containers": containers}
+	if len(initContainers) != 0 {
+		podSpec["initContainers"] = initContainers
+	}
 	return map[string]any{
 		"apiVersion": "apps/v1", "kind": "DaemonSet",
 		"metadata": map[string]any{
@@ -762,7 +770,7 @@ func publicDataPlaneDaemonSet(name, release, role, slot string, count int64, edg
 			"selector": map[string]any{"matchLabels": map[string]any{"app": name}},
 			"template": map[string]any{
 				"metadata": map[string]any{"labels": map[string]any{"app": name}, "annotations": annotations},
-				"spec":     map[string]any{"terminationGracePeriodSeconds": int64(30), "containers": containers},
+				"spec":     podSpec,
 			},
 		},
 		"status": map[string]any{
@@ -771,6 +779,12 @@ func publicDataPlaneDaemonSet(name, release, role, slot string, count int64, edg
 			"updatedNumberScheduled": count, "numberUnavailable": int64(0), "numberMisscheduled": int64(0),
 		},
 	}
+}
+
+func setPublicDataPlaneEdgeImages(object map[string]any, image string) {
+	podSpec := object["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	podSpec["containers"].([]any)[0].(map[string]any)["image"] = image
+	podSpec["initContainers"].([]any)[0].(map[string]any)["image"] = image
 }
 
 func publicDataPlaneAdoptionOwnership(groups []string) []byte {

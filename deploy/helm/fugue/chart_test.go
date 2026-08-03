@@ -1,9 +1,12 @@
 package fuguechart_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +15,9 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 func TestEdgeActivationSigningProjectionIsDefaultOffAndAPIScoped(t *testing.T) {
@@ -2618,6 +2623,250 @@ func TestEdgeDaemonSetRendersPublicIdentityEnv(t *testing.T) {
 		if strings.Contains(doc, forbidden) {
 			t.Fatalf("edge workload identity must not be caller-controlled env %q:\n%s", forbidden, doc)
 		}
+	}
+}
+
+func TestEdgeWorkloadIdentityUsesSupportedProjectionAndBoundEdgeImage(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	groupValues := filepath.Join(t.TempDir(), "edge-group.yaml")
+	if err := os.WriteFile(groupValues, []byte(`edge:
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      nodeSelector:
+        kubernetes.io/hostname: edge-de
+`), 0o600); err != nil {
+		t.Fatalf("write grouped Edge values: %v", err)
+	}
+
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const image = "registry.example/edge@" + digest
+	profiles := []struct {
+		name string
+		args []string
+	}{
+		{name: "default"},
+		{name: "production-ha", args: []string{"-f", "values-production-ha.yaml"}},
+	}
+	modes := []struct {
+		name          string
+		args          []string
+		expectedNames []string
+	}{
+		{name: "direct", expectedNames: []string{"fugue-fugue-edge"}},
+		{
+			name: "group-direct", args: []string{"-f", groupValues},
+			expectedNames: []string{"fugue-fugue-edge", "fugue-fugue-edge-country-de"},
+		},
+		{
+			name: "blue-green",
+			args: []string{
+				"--set", "edge.caddy.enabled=true",
+				"--set-string", "edge.edgeGroupID=edge-group-country-us",
+				"--set", "edge.blueGreen.enabled=true",
+			},
+			expectedNames: []string{"fugue-fugue-edge-worker-a", "fugue-fugue-edge-worker-b"},
+		},
+	}
+
+	for _, profile := range profiles {
+		for _, mode := range modes {
+			t.Run(profile.name+"/"+mode.name, func(t *testing.T) {
+				args := []string{"template", "fugue", chartDir}
+				args = append(args, profile.args...)
+				args = append(args, mode.args...)
+				args = append(args,
+					"--set-string", "edge.image.repository=registry.example/edge",
+					"--set-string", "edge.image.digest="+digest,
+				)
+				cmd := exec.Command("helm", args...)
+				cmd.Dir = chartDir
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("helm template failed: %v\n%s", err, output)
+				}
+
+				daemonSets := decodeDaemonSets(t, output)
+				for _, name := range mode.expectedNames {
+					daemonSet, ok := daemonSets[name]
+					if !ok {
+						t.Fatalf("rendered manifest missing Edge DaemonSet %s", name)
+					}
+					assertEdgeWorkloadIdentityContract(t, daemonSet, image)
+				}
+				for _, daemonSet := range daemonSets {
+					for _, volume := range daemonSet.Spec.Template.Spec.Volumes {
+						if volume.DownwardAPI == nil {
+							continue
+						}
+						for _, item := range volume.DownwardAPI.Items {
+							if item.FieldRef != nil && item.FieldRef.FieldPath == "spec.nodeName" {
+								t.Fatalf("DaemonSet %s projects unsupported spec.nodeName through DownwardAPI volume %s", daemonSet.Name, volume.Name)
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func decodeDaemonSets(t *testing.T, manifest []byte) map[string]appsv1.DaemonSet {
+	t.Helper()
+	decoder := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(manifest), 4096)
+	daemonSets := map[string]appsv1.DaemonSet{}
+	for {
+		var object map[string]any
+		err := decoder.Decode(&object)
+		if errors.Is(err, io.EOF) {
+			return daemonSets
+		}
+		if err != nil {
+			t.Fatalf("decode rendered manifest: %v", err)
+		}
+		if len(object) == 0 || object["kind"] != "DaemonSet" {
+			continue
+		}
+		encoded, err := json.Marshal(object)
+		if err != nil {
+			t.Fatalf("encode rendered DaemonSet: %v", err)
+		}
+		var daemonSet appsv1.DaemonSet
+		if err := json.Unmarshal(encoded, &daemonSet); err != nil {
+			t.Fatalf("decode rendered DaemonSet: %v", err)
+		}
+		if _, duplicate := daemonSets[daemonSet.Name]; duplicate {
+			t.Fatalf("rendered DaemonSet %s is duplicated", daemonSet.Name)
+		}
+		daemonSets[daemonSet.Name] = daemonSet
+	}
+}
+
+func assertEdgeWorkloadIdentityContract(t *testing.T, daemonSet appsv1.DaemonSet, expectedImage string) {
+	t.Helper()
+	pod := daemonSet.Spec.Template.Spec
+	var edge *corev1.Container
+	for index := range pod.Containers {
+		if pod.Containers[index].Name == "edge" {
+			edge = &pod.Containers[index]
+		}
+	}
+	if edge == nil || edge.Image != expectedImage {
+		t.Fatalf("DaemonSet %s main Edge image is not the expected immutable artifact: %+v", daemonSet.Name, edge)
+	}
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("DaemonSet %s init container count = %d, want 1", daemonSet.Name, len(pod.InitContainers))
+	}
+	init := pod.InitContainers[0]
+	if init.Name != "edge-workload-identity" || init.Image != edge.Image || init.ImagePullPolicy != edge.ImagePullPolicy {
+		t.Fatalf("DaemonSet %s identity init is not bound to the main Edge artifact: init=%+v edge=%+v", daemonSet.Name, init, edge)
+	}
+	if len(init.Env) != 1 || init.Env[0].Name != "FUGUE_EDGE_IDENTITY_NODE_NAME" || init.Env[0].Value != "" ||
+		init.Env[0].ValueFrom == nil || init.Env[0].ValueFrom.FieldRef == nil ||
+		init.Env[0].ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
+		t.Fatalf("DaemonSet %s identity init node binding is invalid: %+v", daemonSet.Name, init.Env)
+	}
+	if len(init.Command) != 2 || init.Command[0] != "/bin/sh" || init.Command[1] != "-ec" || len(init.Args) != 1 {
+		t.Fatalf("DaemonSet %s identity init command carrier is invalid: command=%v args=%v", daemonSet.Name, init.Command, init.Args)
+	}
+	for _, required := range []string{
+		`test -n "${FUGUE_EDGE_IDENTITY_NODE_NAME}"`,
+		`case "${slot}" in a|b|direct)`,
+		`case "${heartbeat_fenced}" in true|false)`,
+		`printf '%s\n' "${FUGUE_EDGE_IDENTITY_NODE_NAME}" >/var/run/fugue/edge-identity/edge_id`,
+	} {
+		if !strings.Contains(init.Args[0], required) {
+			t.Fatalf("DaemonSet %s identity init script is missing %q", daemonSet.Name, required)
+		}
+	}
+	if init.SecurityContext == nil || init.SecurityContext.AllowPrivilegeEscalation == nil || *init.SecurityContext.AllowPrivilegeEscalation ||
+		init.SecurityContext.ReadOnlyRootFilesystem == nil || !*init.SecurityContext.ReadOnlyRootFilesystem ||
+		init.SecurityContext.Privileged == nil || *init.SecurityContext.Privileged ||
+		init.SecurityContext.Capabilities == nil || len(init.SecurityContext.Capabilities.Drop) != 1 || init.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("DaemonSet %s identity init security context is not fail-closed: %+v", daemonSet.Name, init.SecurityContext)
+	}
+	for _, variable := range edge.Env {
+		if strings.HasPrefix(variable.Name, "FUGUE_EDGE_IDENTITY_") {
+			t.Fatalf("DaemonSet %s main Edge container has caller-controlled identity env %s", daemonSet.Name, variable.Name)
+		}
+	}
+
+	wantMounts := map[string]bool{
+		"edge-workload-identity-source": true,
+		"edge-workload-identity":        false,
+	}
+	if len(init.VolumeMounts) != len(wantMounts) {
+		t.Fatalf("DaemonSet %s identity init mounts = %+v", daemonSet.Name, init.VolumeMounts)
+	}
+	for _, mount := range init.VolumeMounts {
+		wantReadOnly, ok := wantMounts[mount.Name]
+		if !ok || mount.ReadOnly != wantReadOnly {
+			t.Fatalf("DaemonSet %s identity init mount is invalid: %+v", daemonSet.Name, mount)
+		}
+	}
+	identityMounts := 0
+	for _, mount := range edge.VolumeMounts {
+		if mount.Name == "edge-workload-identity" {
+			identityMounts++
+			if mount.MountPath != "/var/run/fugue/edge-identity" || !mount.ReadOnly {
+				t.Fatalf("DaemonSet %s main Edge identity mount is not read-only: %+v", daemonSet.Name, mount)
+			}
+		}
+		if mount.Name == "edge-workload-identity-source" {
+			t.Fatalf("DaemonSet %s main Edge container can read the staging identity source", daemonSet.Name)
+		}
+	}
+	if identityMounts != 1 {
+		t.Fatalf("DaemonSet %s main Edge identity mount count = %d, want 1", daemonSet.Name, identityMounts)
+	}
+
+	wantItems := map[string]string{
+		"edge_group_id":    "metadata.labels['fugue.io/edge-group-id']",
+		"slot":             "metadata.labels['fugue.io/edge-slot']",
+		"instance_uid":     "metadata.uid",
+		"release_epoch":    "metadata.annotations['fugue.io/edge-release-epoch']",
+		"heartbeat_fenced": "metadata.annotations['fugue.io/edge-heartbeat-fenced']",
+	}
+	var source, identity *corev1.Volume
+	for index := range pod.Volumes {
+		switch pod.Volumes[index].Name {
+		case "edge-workload-identity-source":
+			source = &pod.Volumes[index]
+		case "edge-workload-identity":
+			identity = &pod.Volumes[index]
+		}
+	}
+	if source == nil || source.DownwardAPI == nil || source.EmptyDir != nil || len(source.DownwardAPI.Items) != len(wantItems) {
+		t.Fatalf("DaemonSet %s identity source volume is invalid: %+v", daemonSet.Name, source)
+	}
+	seenItems := map[string]struct{}{}
+	for _, item := range source.DownwardAPI.Items {
+		wantField, ok := wantItems[item.Path]
+		if !ok || item.FieldRef == nil || item.FieldRef.FieldPath != wantField {
+			t.Fatalf("DaemonSet %s identity source item is invalid: %+v", daemonSet.Name, item)
+		}
+		if _, duplicate := seenItems[item.Path]; duplicate {
+			t.Fatalf("DaemonSet %s identity source item %s is duplicated", daemonSet.Name, item.Path)
+		}
+		seenItems[item.Path] = struct{}{}
+	}
+	if identity == nil || identity.EmptyDir == nil || identity.DownwardAPI != nil {
+		t.Fatalf("DaemonSet %s final identity volume is not an isolated emptyDir: %+v", daemonSet.Name, identity)
+	}
+	labels := daemonSet.Spec.Template.Labels
+	annotations := daemonSet.Spec.Template.Annotations
+	if _, ok := labels["fugue.io/edge-group-id"]; !ok ||
+		(labels["fugue.io/edge-slot"] != "direct" && labels["fugue.io/edge-slot"] != "a" && labels["fugue.io/edge-slot"] != "b") ||
+		annotations["fugue.io/edge-release-epoch"] == "" ||
+		(annotations["fugue.io/edge-heartbeat-fenced"] != "true" && annotations["fugue.io/edge-heartbeat-fenced"] != "false") {
+		t.Fatalf("DaemonSet %s workload identity metadata is incomplete: labels=%v annotations=%v", daemonSet.Name, labels, annotations)
 	}
 }
 

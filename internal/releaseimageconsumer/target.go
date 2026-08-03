@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	lockProducer       = "fugue-release-image-lock"
-	evidenceProducer   = "fugue-release-image-consumer-verifier"
-	registryVerifyMode = "registry_manifest_config_and_layer_get"
-	releaseWorkflow    = "deploy-control-plane"
-	releasePlatform    = "linux/amd64"
+	lockProducer                  = "fugue-release-image-lock"
+	evidenceProducer              = "fugue-release-image-consumer-verifier"
+	registryVerifyMode            = "registry_manifest_config_and_layer_get"
+	releaseWorkflow               = "deploy-control-plane"
+	releasePlatform               = "linux/amd64"
+	edgeWorkloadIdentityContainer = "edge-workload-identity"
 
 	maxLockBytes                = 4 << 20
 	maxHelmReleaseBytes         = 32 << 20
@@ -465,6 +466,7 @@ func verifyTargetObjects(lock Lock, objects, hookObjects []manifestObject, relea
 	}
 
 	classified := make(map[bindingKey]Activation)
+	classifiedInit := make(map[bindingKey]bool)
 	allowedIdentityOccurrences := make(map[string]int)
 	allowedExecutableOccurrences := make(map[string]int)
 	bindings := make([]TargetEvidenceBinding, 0, len(lock.Activations))
@@ -513,11 +515,28 @@ func verifyTargetObjects(lock Lock, objects, hookObjects []manifestObject, relea
 			}
 			binding.Proof = "pod_template_container_image"
 			allowedIdentityOccurrences[container.Image]++
-			bindingKey := bindingKey{Kind: activation.Workload.Kind, Namespace: namespace, Name: activation.Workload.Name, Container: activation.Workload.Container}
-			if _, duplicate := classified[bindingKey]; duplicate {
+			containerKey := bindingKey{Kind: activation.Workload.Kind, Namespace: namespace, Name: activation.Workload.Name, Container: activation.Workload.Container}
+			if _, duplicate := classified[containerKey]; duplicate {
 				return TargetEvidence{}, fmt.Errorf("duplicate classified rendered workload container %s/%s/%s", activation.Workload.Kind, activation.Workload.Name, activation.Workload.Container)
 			}
-			classified[bindingKey] = activation
+			classified[containerKey] = activation
+			classifiedInit[containerKey] = false
+			if isBoundEdgeWorkerActivation(activation) {
+				identity, err := exactInitContainer(object, edgeWorkloadIdentityContainer)
+				if err != nil {
+					return TargetEvidence{}, fmt.Errorf("activation %s/%s Edge identity init: %w", activation.Workload.Kind, activation.Workload.Name, err)
+				}
+				if identity.Image != container.Image || !activationMatchesRenderedRef(activation, identity.Image) {
+					return TargetEvidence{}, fmt.Errorf("activation %s/%s main and identity init image pointers are not bound to the same Edge artifact", activation.Workload.Kind, activation.Workload.Name)
+				}
+				identityKey := bindingKey{Kind: activation.Workload.Kind, Namespace: namespace, Name: activation.Workload.Name, Container: edgeWorkloadIdentityContainer}
+				if _, duplicate := classified[identityKey]; duplicate {
+					return TargetEvidence{}, fmt.Errorf("duplicate classified rendered workload container %s/%s/%s", activation.Workload.Kind, activation.Workload.Name, edgeWorkloadIdentityContainer)
+				}
+				classified[identityKey] = activation
+				classifiedInit[identityKey] = true
+				allowedIdentityOccurrences[identity.Image]++
+			}
 			if strings.HasPrefix(activation.HelmPath, "dns.") {
 				if err := verifyDNSContainer(container, activation); err != nil {
 					return TargetEvidence{}, err
@@ -551,7 +570,8 @@ func verifyTargetObjects(lock Lock, objects, hookObjects []manifestObject, relea
 			}
 			key := bindingKey{Kind: object.Kind, Namespace: object.Namespace, Name: object.Name, Container: container.Name}
 			activation, ok := classified[key]
-			if container.Init || container.Ephemeral || !ok {
+			expectedInit := classifiedInit[key]
+			if container.Ephemeral || !ok || container.Init != expectedInit {
 				containerClass := "container"
 				if container.Init {
 					containerClass = "initContainer"
@@ -636,7 +656,7 @@ func verifyImagePrePullConfigMap(objects map[objectKey]manifestObject, fullname,
 
 func buildExpectedConsumers(objects map[objectKey]manifestObject, fullname, namespace string, groups map[string][]string, topology releaseTopology) (map[string]expectedConsumer, error) {
 	result := make(map[string]expectedConsumer)
-	classifiedContainers := make(map[bindingKey]struct{})
+	classifiedContainers := make(map[bindingKey]bool)
 	addPod := func(component, helmPath, kind, name, container string, enabled bool) error {
 		key := objectKey{Kind: kind, Namespace: namespace, Name: name}
 		object, exists := objects[key]
@@ -663,6 +683,19 @@ func buildExpectedConsumers(objects map[objectKey]manifestObject, fullname, name
 		if _, err := parseImageRef(renderedContainer.Image); err != nil {
 			return fmt.Errorf("authoritative consumer %s/%s container %s has an invalid image reference", kind, name, container)
 		}
+		if component == "edge" && kind == "DaemonSet" && container == "edge" && edgeWorkerPath.MatchString(helmPath) {
+			identity, err := exactInitContainer(object, edgeWorkloadIdentityContainer)
+			if err != nil {
+				return fmt.Errorf("authoritative consumer %s/%s Edge identity init: %w", kind, name, err)
+			}
+			if _, err := parseImageRef(identity.Image); err != nil {
+				return fmt.Errorf("authoritative consumer %s/%s identity init has an invalid image reference", kind, name)
+			}
+			if identity.Image != renderedContainer.Image {
+				return fmt.Errorf("authoritative consumer %s/%s main and identity init image pointers are not bound to the same Edge artifact", kind, name)
+			}
+			classifiedContainers[bindingKey{Kind: kind, Namespace: namespace, Name: name, Container: edgeWorkloadIdentityContainer}] = true
+		}
 		workload := Workload{Kind: kind, Name: name, Container: container}
 		consumer := expectedConsumer{Component: component, HelmPath: helmPath, Workload: workload, SelectedRef: renderedContainer.Image, Proof: "pod_template_container_image"}
 		projection := consumerProjectionKey(component, helmPath, workload)
@@ -670,7 +703,7 @@ func buildExpectedConsumers(objects map[objectKey]manifestObject, fullname, name
 			return fmt.Errorf("authoritative consumer projection is duplicated for %s", helmPath)
 		}
 		result[projection] = consumer
-		classifiedContainers[bindingKey{Kind: kind, Namespace: namespace, Name: name, Container: container}] = struct{}{}
+		classifiedContainers[bindingKey{Kind: kind, Namespace: namespace, Name: name, Container: container}] = false
 		return nil
 	}
 	addDNS := func(helmPath, name string, enabled bool) error {
@@ -778,8 +811,8 @@ func buildExpectedConsumers(objects map[objectKey]manifestObject, fullname, name
 			if container.Name == "app-ssh" || repositoryLooksLikeAppSSH(parsed.Repository) || (len(container.Command) > 0 && strings.HasPrefix(container.Command[0], "/usr/local/bin/fugue-app-ssh")) {
 				return nil, fmt.Errorf("app_ssh is artifact-only but appears in rendered %s/%s", object.Kind, object.Name)
 			}
-			_, known := classifiedContainers[bindingKey{Kind: object.Kind, Namespace: object.Namespace, Name: object.Name, Container: container.Name}]
-			if known && !container.Init && !container.Ephemeral {
+			expectedInit, known := classifiedContainers[bindingKey{Kind: object.Kind, Namespace: object.Namespace, Name: object.Name, Container: container.Name}]
+			if known && !container.Ephemeral && container.Init == expectedInit {
 				continue
 			}
 			if strings.HasPrefix(object.Name, fullname+"-edge-") && (container.Name == "edge" || container.Name == "edge-front" || container.Name == "ssh-front") {
@@ -1657,7 +1690,7 @@ func equalStringCounts(left, right map[string]int) bool {
 
 func isFugueConsumerContainerName(name string) bool {
 	switch name {
-	case "api", "controller", "registry-gc", "registry-janitor", "node-janitor", "topology-labeler", "image-prepull", "telemetry-agent", "image-cache", "edge", "edge-front", "ssh-front", "mesh-recovery", "app-ssh":
+	case "api", "controller", "registry-gc", "registry-janitor", "node-janitor", "topology-labeler", "image-prepull", "telemetry-agent", "image-cache", "edge", edgeWorkloadIdentityContainer, "edge-front", "ssh-front", "mesh-recovery", "app-ssh":
 		return true
 	default:
 		return false
@@ -1677,6 +1710,13 @@ func activationMatchesRenderedRef(activation Activation, rendered string) bool {
 		return rendered == activation.Repository+"@"+activation.Digest && renderedRef.Tag == "" && renderedRef.Digest == activation.Digest
 	}
 	return rendered == activation.Repository+":"+activation.SourceTag && renderedRef.Tag == activation.SourceTag && renderedRef.Digest == ""
+}
+
+func isBoundEdgeWorkerActivation(activation Activation) bool {
+	return activation.Component == "edge" &&
+		activation.Workload.Kind == "DaemonSet" &&
+		activation.Workload.Container == "edge" &&
+		edgeWorkerPath.MatchString(activation.HelmPath)
 }
 
 func semanticDNSContainer(object manifestObject) (manifestContainer, error) {
@@ -2844,6 +2884,19 @@ func exactContainer(object manifestObject, name string) (manifestContainer, erro
 	}
 	if len(matches) != 1 {
 		return manifestContainer{}, fmt.Errorf("expected exactly one regular container named %s, found %d", name, len(matches))
+	}
+	return matches[0], nil
+}
+
+func exactInitContainer(object manifestObject, name string) (manifestContainer, error) {
+	matches := make([]manifestContainer, 0, 1)
+	for _, container := range object.Containers {
+		if container.Init && !container.Ephemeral && container.Name == name {
+			matches = append(matches, container)
+		}
+	}
+	if len(matches) != 1 {
+		return manifestContainer{}, fmt.Errorf("expected exactly one init container named %s, found %d", name, len(matches))
 	}
 	return matches[0], nil
 }

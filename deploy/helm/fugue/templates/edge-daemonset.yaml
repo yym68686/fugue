@@ -68,6 +68,57 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        - name: edge-workload-identity
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.edge.image.repository "tag" .Values.edge.image.tag "digest" .Values.edge.image.digest) | quote }}
+          imagePullPolicy: {{ .Values.edge.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              umask 022
+              test -n "${FUGUE_EDGE_IDENTITY_NODE_NAME}"
+              slot="$(cat /var/run/fugue/edge-identity-source/slot)"
+              instance_uid="$(cat /var/run/fugue/edge-identity-source/instance_uid)"
+              release_epoch="$(cat /var/run/fugue/edge-identity-source/release_epoch)"
+              heartbeat_fenced="$(cat /var/run/fugue/edge-identity-source/heartbeat_fenced)"
+              case "${slot}" in a|b|direct) ;; *) exit 1 ;; esac
+              test -n "${instance_uid}" && test -n "${release_epoch}"
+              case "${heartbeat_fenced}" in true|false) ;; *) exit 1 ;; esac
+              for field in edge_id edge_group_id slot instance_uid release_epoch heartbeat_fenced; do
+                rm -f "/var/run/fugue/edge-identity/${field}"
+              done
+              printf '%s\n' "${FUGUE_EDGE_IDENTITY_NODE_NAME}" >/var/run/fugue/edge-identity/edge_id
+              for field in edge_group_id slot instance_uid release_epoch heartbeat_fenced; do
+                cat "/var/run/fugue/edge-identity-source/${field}" >"/var/run/fugue/edge-identity/${field}"
+              done
+              chmod 0444 /var/run/fugue/edge-identity/edge_id /var/run/fugue/edge-identity/edge_group_id /var/run/fugue/edge-identity/slot /var/run/fugue/edge-identity/instance_uid /var/run/fugue/edge-identity/release_epoch /var/run/fugue/edge-identity/heartbeat_fenced
+          env:
+            - name: FUGUE_EDGE_IDENTITY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: edge-workload-identity-source
+              mountPath: /var/run/fugue/edge-identity-source
+              readOnly: true
+            - name: edge-workload-identity
+              mountPath: /var/run/fugue/edge-identity
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+              ephemeral-storage: 1Mi
+            limits:
+              memory: 32Mi
+              ephemeral-storage: 8Mi
       containers:
         - name: edge
           image: {{ include "fugue.imageRef" (dict "repository" .Values.edge.image.repository "tag" .Values.edge.image.tag "digest" .Values.edge.image.digest) | quote }}
@@ -271,12 +322,9 @@ spec:
             {{- toYaml .Values.edge.caddy.resources | nindent 12 }}
         {{- end }}
       volumes:
-        - name: edge-workload-identity
+        - name: edge-workload-identity-source
           downwardAPI:
             items:
-              - path: edge_id
-                fieldRef:
-                  fieldPath: spec.nodeName
               - path: edge_group_id
                 fieldRef:
                   fieldPath: metadata.labels['fugue.io/edge-group-id']
@@ -292,6 +340,8 @@ spec:
               - path: heartbeat_fenced
                 fieldRef:
                   fieldPath: metadata.annotations['fugue.io/edge-heartbeat-fenced']
+        - name: edge-workload-identity
+          emptyDir: {}
         - name: route-cache
           hostPath:
             path: {{ .Values.edge.persistence.hostPath | quote }}

@@ -382,6 +382,9 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: edge-workload-identity
+          image: registry.example.com/previous-edge:stable
       containers:
         - name: edge
           image: registry.example.com/previous-edge:stable
@@ -413,9 +416,12 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: edge-workload-identity
+          image: %[1]s@%[2]s
       containers:
         - name: edge
-          image: %s@%s
+          image: %[1]s@%[2]s
 `, repository, digest)
 	helm := helmFixture(manifest)
 	helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
@@ -455,9 +461,12 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: edge-workload-identity
+          image: %[1]s:stable
       containers:
         - name: edge
-          image: %s:stable
+          image: %[1]s:stable
 `, repository)
 	helm := helmFixture(manifest)
 	helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
@@ -478,6 +487,55 @@ func TestVerifyTargetRenderRejectsManagedRepositoryInInitContainer(t *testing.T)
 	helm := helmFixture(manifest)
 	if _, err := invokeTarget(t, lock, helm, helm); err == nil || !strings.Contains(err.Error(), "unclassified initContainer") {
 		t.Fatalf("managed initContainer was not rejected: %v", err)
+	}
+}
+
+func TestVerifyTargetRenderBindsEdgeIdentityInitToLogicalActivation(t *testing.T) {
+	lock := testLock()
+	edge := testArtifact("edge", "registry.example.com/fugue-edge", testDigest("7"), testDigest("8"))
+	lock.Artifacts = append(lock.Artifacts, edge)
+	lock.Activations = append(lock.Activations, testBuiltActivation(edge, "edge.image", "DaemonSet", "fugue-fugue-edge", "edge"))
+	manifest := func(identityInit string) string {
+		return baseManifest(lock) + fmt.Sprintf(`---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-fugue-edge
+  namespace: fugue-system
+spec:
+  template:
+    spec:
+      %s
+      containers:
+        - name: edge
+          image: %s
+`, identityInit, edge.ImmutableRef)
+	}
+	wrapper := func(identityInit string) map[string]any {
+		helm := helmFixture(manifest(identityInit))
+		helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
+		return helm
+	}
+	boundInit := fmt.Sprintf("initContainers:\n        - name: %s\n          image: %s", edgeWorkloadIdentityContainer, edge.ImmutableRef)
+	bound := wrapper(boundInit)
+	evidence, err := invokeTarget(t, lock, bound, bound)
+	if err != nil {
+		t.Fatalf("bound Edge identity init was rejected: %v", err)
+	}
+	if len(evidence.Bindings) != len(lock.Activations) {
+		t.Fatalf("identity init created a second logical activation: bindings=%d activations=%d", len(evidence.Bindings), len(lock.Activations))
+	}
+
+	for name, identityInit := range map[string]string{
+		"missing":     "",
+		"split-image": fmt.Sprintf("initContainers:\n        - name: %s\n          image: registry.example.com/fugue-edge@%s", edgeWorkloadIdentityContainer, testDigest("9")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := wrapper(identityInit)
+			if _, err := invokeTarget(t, lock, candidate, candidate); err == nil || !strings.Contains(err.Error(), "identity init") {
+				t.Fatalf("invalid Edge identity init binding was not rejected: %v", err)
+			}
+		})
 	}
 }
 
@@ -1471,9 +1529,12 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: edge-workload-identity
+          image: %[1]s
       containers:
         - name: edge
-          image: %s
+          image: %[1]s
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -1483,9 +1544,12 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: edge-workload-identity
+          image: %[2]s
       containers:
         - name: edge
-          image: %s
+          image: %[2]s
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -1667,9 +1731,12 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: edge-workload-identity
+          image: %[1]s
       containers:
         - name: edge
-          image: %s
+          image: %[1]s
           args:
             - unsafe
 `, edge.ImmutableRef)

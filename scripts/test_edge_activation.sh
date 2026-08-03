@@ -302,7 +302,7 @@ JSON
   kubectl_cmd() {
     case "$*" in
       *"get nodes "*) printf '%s\n' '{"items":[{"metadata":{"name":"edge-us-node"}}]}' ;;
-      *) printf '%s\n' '{"spec":{"template":{"metadata":{"labels":{"fugue.io/edge-slot":"a"}},"spec":{"nodeSelector":{"fugue.io/role.edge":"true"},"containers":[{"name":"edge","env":[{"name":"FUGUE_EDGE_GROUP_ID","value":"edge-group-country-us"}]},{"name":"caddy"}]}}}}' ;;
+      *) printf '%s\n' '{"spec":{"template":{"metadata":{"labels":{"fugue.io/edge-slot":"a"}},"spec":{"nodeSelector":{"fugue.io/role.edge":"true"},"initContainers":[{"name":"edge-workload-identity","image":"registry.example/fugue-edge:current"}],"containers":[{"name":"edge","image":"registry.example/fugue-edge:current","env":[{"name":"FUGUE_EDGE_GROUP_ID","value":"edge-group-country-us"}]},{"name":"caddy"}]}}}}' ;;
     esac
   }
   patch="$(container_patch_for_worker fugue-fugue-edge-worker-a)"
@@ -312,11 +312,26 @@ patch=json.loads(os.environ["PATCH"])["spec"]["template"]
 assert patch["metadata"]["labels"] == {"fugue.io/edge-id":"edge-us-node","fugue.io/edge-group-id":"edge-group-country-us","fugue.io/edge-slot":"a"}
 edge=next(item for item in patch["spec"]["containers"] if item["name"]=="edge")
 assert edge["volumeMounts"] == [{"name":"edge-workload-identity","mountPath":"/var/run/fugue/edge-identity","readOnly":True}]
-volume=patch["spec"]["volumes"][0]
-assert volume["name"] == "edge-workload-identity"
-assert [item["path"] for item in volume["downwardAPI"]["items"]] == ["edge_id","edge_group_id","slot","instance_uid","release_epoch","heartbeat_fenced"]
-assert [item["fieldRef"]["fieldPath"] for item in volume["downwardAPI"]["items"]] == ["metadata.labels['fugue.io/edge-id']","metadata.labels['fugue.io/edge-group-id']","metadata.labels['fugue.io/edge-slot']","metadata.uid","metadata.annotations['fugue.io/edge-release-epoch']","metadata.annotations['fugue.io/edge-heartbeat-fenced']"]
+target="registry.example/fugue-edge@sha256:"+"a"*64
+assert edge["image"] == target
+assert patch["spec"]["initContainers"] == [{"name":"edge-workload-identity","image":target}]
+source, identity=patch["spec"]["volumes"]
+assert source["name"] == "edge-workload-identity-source"
+assert [item["path"] for item in source["downwardAPI"]["items"]] == ["edge_group_id","slot","instance_uid","release_epoch","heartbeat_fenced"]
+assert [item["fieldRef"]["fieldPath"] for item in source["downwardAPI"]["items"]] == ["metadata.labels['fugue.io/edge-group-id']","metadata.labels['fugue.io/edge-slot']","metadata.uid","metadata.annotations['fugue.io/edge-release-epoch']","metadata.annotations['fugue.io/edge-heartbeat-fenced']"]
+assert identity == {"name":"edge-workload-identity","emptyDir":{}}
 PY
+
+  kubectl_cmd() {
+    case "$*" in
+      *"get nodes "*) printf '%s\n' '{"items":[{"metadata":{"name":"edge-us-node"}}]}' ;;
+      *) printf '%s\n' '{"spec":{"template":{"metadata":{"labels":{"fugue.io/edge-slot":"a"}},"spec":{"nodeSelector":{"fugue.io/role.edge":"true"},"initContainers":[{"name":"edge-workload-identity","image":"registry.example/fugue-edge:split"}],"containers":[{"name":"edge","image":"registry.example/fugue-edge:current","env":[{"name":"FUGUE_EDGE_GROUP_ID","value":"edge-group-country-us"}]},{"name":"caddy"}]}}}}' ;;
+    esac
+  }
+  if container_patch_for_worker fugue-fugue-edge-worker-a >/dev/null 2>&1; then
+    echo "worker patch accepted split main/init Edge image pointers" >&2
+    exit 1
+  fi
 
   captured=""
   wait_daemonset_ready() { :; }
