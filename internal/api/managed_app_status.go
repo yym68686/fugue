@@ -1297,7 +1297,7 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 	}
 
 	imageRef := strings.TrimSpace(app.Spec.Image)
-	if imageRef == "" && found {
+	if found {
 		imageRef = strings.TrimSpace(managed.Spec.AppSpec.Image)
 	}
 	if imageRef != "" {
@@ -1325,18 +1325,15 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 			evidence.evidenceSources = append(evidence.evidenceSources, "image_location_store")
 		}
 		if deployment, deploymentExists := snapshot.deployments[deploymentKey]; deploymentExists &&
-			deployment.Metadata.Generation > 0 &&
-			deployment.Status.ObservedGeneration >= deployment.Metadata.Generation &&
-			minObservedReplicaCount(
-				deployment.Status.UpdatedReplicas,
-				deployment.Status.ReadyReplicas,
-				deployment.Status.AvailableReplicas,
-			) > 0 {
+			deploymentCurrentCohortComplete(deployment) {
 			deployedImage := firstDeploymentContainerImage(deployment)
 			if deployedImage != "" {
 				matches := s.observedRuntimeImageRefsEquivalent(app, imageRef, deployedImage)
-				evidence.imagePresent = &matches
-				if !matches {
+				if matches {
+					if evidence.imagePresent == nil {
+						evidence.imagePresent = &matches
+					}
+				} else {
 					evidence.invariantViolations = append(evidence.invariantViolations, "current_image_mismatch")
 				}
 			}
@@ -1356,6 +1353,19 @@ func (s *Server) buildManagedAppRuntimeEvidence(
 		}
 	}
 	return evidence, nil
+}
+
+func deploymentCurrentCohortComplete(deployment kubeDeploymentRuntimeEvidence) bool {
+	if deployment.Metadata.Generation <= 0 ||
+		deployment.Status.ObservedGeneration < deployment.Metadata.Generation ||
+		deployment.Spec.Replicas == nil {
+		return false
+	}
+	desired := *deployment.Spec.Replicas
+	return desired > 0 &&
+		deployment.Status.UpdatedReplicas == desired &&
+		deployment.Status.ReadyReplicas >= desired &&
+		deployment.Status.AvailableReplicas >= desired
 }
 
 func minObservedReplicaCount(values ...int) int {

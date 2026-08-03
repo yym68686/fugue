@@ -456,6 +456,180 @@ func TestManagedAppEvidenceDoesNotCountReadyReplicasFromPreviousRevision(t *test
 	}
 }
 
+func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T) {
+	t.Parallel()
+
+	const (
+		oldImage = "registry.example/demo:v1"
+		newImage = "registry.example/demo:v2"
+	)
+	buildEvidence := func(t *testing.T, managedPhase, deploymentImage string, updated, ready, available int) (model.App, runtime.ManagedAppObject, managedAppRuntimeEvidence) {
+		t.Helper()
+		app := model.App{
+			ID:       "app_image_rollout",
+			TenantID: "tenant_image_rollout",
+			Name:     "image-rollout",
+			Spec: model.AppSpec{
+				Image:     oldImage,
+				Replicas:  3,
+				RuntimeID: model.DefaultManagedRuntimeID,
+			},
+			Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 3},
+		}
+		managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+		if err != nil {
+			t.Fatalf("decode managed app: %v", err)
+		}
+		managed.Spec.AppSpec.Image = newImage
+		managed.Metadata.Generation = 2
+		managed.Status = runtime.ManagedAppStatus{
+			Phase:              managedPhase,
+			DesiredReplicas:    3,
+			ReadyReplicas:      ready,
+			ObservedGeneration: 2,
+		}
+		var deployment kubeDeploymentRuntimeEvidence
+		if err := decodeKubeObject(map[string]any{
+			"metadata": map[string]any{
+				"namespace":  runtime.NamespaceForTenant(app.TenantID),
+				"name":       runtime.RuntimeAppResourceName(app),
+				"generation": 2,
+			},
+			"spec": map[string]any{
+				"replicas": 3,
+				"template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"image": deploymentImage}}}},
+			},
+			"status": map[string]any{
+				"replicas": 3, "updatedReplicas": updated, "readyReplicas": ready,
+				"availableReplicas": available, "observedGeneration": 2,
+			},
+		}, &deployment); err != nil {
+			t.Fatalf("decode deployment: %v", err)
+		}
+		namespace := runtime.NamespaceForTenant(app.TenantID)
+		evidence, err := (&Server{}).buildManagedAppRuntimeEvidence(app, managed, true, managedAppKubeSnapshot{
+			namespaces: map[string]struct{}{namespace: {}},
+			deployments: map[string]kubeDeploymentRuntimeEvidence{
+				kubeNamespacedKey(namespace, runtime.RuntimeAppResourceName(app)): deployment,
+			},
+		})
+		if err != nil {
+			t.Fatalf("build runtime evidence: %v", err)
+		}
+		return app, managed, evidence
+	}
+
+	t.Run("progressing old and new cohorts do not create a mismatch", func(t *testing.T) {
+		app, managed, evidence := buildEvidence(t, runtime.ManagedAppPhaseProgressing, oldImage, 1, 2, 2)
+		if evidence.imageRef != newImage {
+			t.Fatalf("managed app target must win over lagging durable image, got %q", evidence.imageRef)
+		}
+		if slices.Contains(evidence.invariantViolations, "current_image_mismatch") || evidence.imagePresent != nil {
+			t.Fatalf("progressing mixed cohorts must not claim final image consistency: %+v", evidence)
+		}
+		status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
+			ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+			ObservedAt: time.Now().UTC(), ClusterID: "cluster-rollout",
+			PhysicalReplicas: evidence.physicalReplicas, PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
+			ImagePresent: evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+		})
+		if slices.Contains(status.InvariantViolations, "current_image_mismatch") || slices.Contains(status.InvariantViolations, "image_missing") {
+			t.Fatalf("progressing rollout synthesized an image invariant: %+v", status)
+		}
+	})
+
+	t.Run("complete new cohort ignores lagging durable image", func(t *testing.T) {
+		_, _, evidence := buildEvidence(t, runtime.ManagedAppPhaseReady, newImage, 3, 3, 3)
+		if evidence.imageRef != newImage || slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
+			t.Fatalf("complete current cohort must compare to managed target: %+v", evidence)
+		}
+		if evidence.imagePresent == nil || !*evidence.imagePresent {
+			t.Fatalf("complete matching deployment must provide positive image evidence: %+v", evidence)
+		}
+	})
+
+	t.Run("complete wrong cohort reports mismatch without image missing", func(t *testing.T) {
+		app, managed, evidence := buildEvidence(t, runtime.ManagedAppPhaseReady, oldImage, 3, 3, 3)
+		if !slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
+			t.Fatalf("stable wrong cohort must fail closed: %+v", evidence)
+		}
+		if evidence.imagePresent != nil {
+			t.Fatalf("image mismatch is not image-location absence evidence: %+v", evidence)
+		}
+		status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
+			ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+			ObservedAt: time.Now().UTC(), ClusterID: "cluster-rollout",
+			PhysicalReplicas: evidence.physicalReplicas, PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
+			ImagePresent: evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+		})
+		if !slices.Equal(status.InvariantViolations, []string{"current_image_mismatch"}) {
+			t.Fatalf("stable mismatch must not derive image_missing: %+v", status.InvariantViolations)
+		}
+		app = runtime.ApplyAppObservedStatus(app, status)
+		if routeStatus, reason := edgeRouteStatus(app, model.DefaultManagedRuntimeID, true); routeStatus != model.EdgeRouteStatusUnavailable || !strings.Contains(reason, "current_image_mismatch") || strings.Contains(reason, "image_missing") {
+			t.Fatalf("stable mismatch route result changed: status=%q reason=%q", routeStatus, reason)
+		}
+	})
+}
+
+func TestManagedAppEvidenceDoesNotOverrideFreshImageLocationFailure(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	imageRef := "registry.fugue.internal:5000/fugue-apps/image-location@sha256:" + strings.Repeat("d", 64)
+	app := model.App{
+		ID: "app_image_location_failure", TenantID: "tenant_image_location_failure", Name: "image-location-failure",
+		Spec:   model.AppSpec{Image: imageRef, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode managed app: %v", err)
+	}
+	managed.Metadata.Generation = 1
+	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, DesiredReplicas: 1, ReadyReplicas: 1, ObservedGeneration: 1}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID: app.TenantID, AppID: app.ID, ImageRef: imageRef,
+		RuntimeID: model.DefaultManagedRuntimeID, Status: model.ImageLocationStatusFailed,
+	}); err != nil {
+		t.Fatalf("record failed image location: %v", err)
+	}
+	var deployment kubeDeploymentRuntimeEvidence
+	if err := decodeKubeObject(map[string]any{
+		"metadata": map[string]any{"namespace": runtime.NamespaceForTenant(app.TenantID), "name": runtime.RuntimeAppResourceName(app), "generation": 1},
+		"spec":     map[string]any{"replicas": 1, "template": map[string]any{"spec": map[string]any{"containers": []map[string]any{{"image": imageRef}}}}},
+		"status":   map[string]any{"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1, "observedGeneration": 1},
+	}, &deployment); err != nil {
+		t.Fatalf("decode deployment: %v", err)
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	evidence, err := (&Server{store: stateStore}).buildManagedAppRuntimeEvidence(app, managed, true, managedAppKubeSnapshot{
+		namespaces:  map[string]struct{}{namespace: {}},
+		deployments: map[string]kubeDeploymentRuntimeEvidence{kubeNamespacedKey(namespace, runtime.RuntimeAppResourceName(app)): deployment},
+	})
+	if err != nil {
+		t.Fatalf("build runtime evidence: %v", err)
+	}
+	if evidence.imagePresent == nil || *evidence.imagePresent || evidence.imageLocationStatus != model.ImageLocationStatusFailed {
+		t.Fatalf("matching deployment overwrote fresh negative image-location evidence: %+v", evidence)
+	}
+	if slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
+		t.Fatalf("matching deployment must not add mismatch: %+v", evidence.invariantViolations)
+	}
+	status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
+		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
+		ObservedAt: time.Now().UTC(), ClusterID: "cluster-image-location",
+		PhysicalReplicas: evidence.physicalReplicas, PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
+		ImagePresent: evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+	})
+	if !slices.Equal(status.InvariantViolations, []string{"image_missing"}) {
+		t.Fatalf("fresh negative evidence must be the only image_missing source: %+v", status.InvariantViolations)
+	}
+}
+
 func TestOverlayManagedAppStatusesTreatsChildQueryFailureAsUnknown(t *testing.T) {
 	t.Parallel()
 
@@ -1699,8 +1873,8 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsEvidenceFromPreviousAppRev
 	if err != nil {
 		t.Fatalf("build previous-revision evidence: %v", err)
 	}
-	if !slices.Contains(previousEvidence.invariantViolations, "current_image_mismatch") {
-		t.Fatalf("test precondition did not reproduce image mismatch: %+v", previousEvidence)
+	if slices.Contains(previousEvidence.invariantViolations, "current_image_mismatch") || previousEvidence.imagePresent == nil || !*previousEvidence.imagePresent {
+		t.Fatalf("managed target and complete deployment must stay clean while the durable image lags: %+v", previousEvidence)
 	}
 	if previousEvidence.appObservationKey == managedAppRuntimeEvidenceObservationKey(current) {
 		t.Fatal("previous and current app revisions unexpectedly share an observation key")
@@ -1727,7 +1901,7 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsEvidenceFromPreviousAppRev
 	if updated.ObservedStatus == nil || updated.ObservedStatus.Phase != "unknown" || updated.ObservedStatus.Fresh {
 		t.Fatalf("previous-revision evidence must become unknown while it refreshes: %+v", updated.ObservedStatus)
 	}
-	if len(updated.ObservedStatus.InvariantViolations) != 0 || !strings.Contains(updated.ObservedStatus.Message, "different app revision") {
+	if len(updated.ObservedStatus.InvariantViolations) != 0 || slices.Contains(updated.ObservedStatus.InvariantViolations, "image_missing") || !strings.Contains(updated.ObservedStatus.Message, "different app revision") {
 		t.Fatalf("previous-revision contradictions leaked into the current app: %+v", updated.ObservedStatus)
 	}
 	if status, reason := edgeRouteStatus(updated, model.DefaultManagedRuntimeID, true); status != model.EdgeRouteStatusActive || !strings.Contains(reason, "last-known-good") {
@@ -1749,6 +1923,12 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsEvidenceFromPreviousAppRev
 	updated = apiServer.overlayManagedAppStatusesForEdgeRoutesCached([]model.App{current}, runtimes)[0]
 	if updated.ObservedStatus == nil || updated.ObservedStatus.Phase != "deployed" || !updated.ObservedStatus.Fresh {
 		t.Fatalf("current-revision evidence should restore a fresh deployed projection: %+v", updated.ObservedStatus)
+	}
+	if len(updated.ObservedStatus.InvariantViolations) != 0 || slices.Contains(updated.ObservedStatus.InvariantViolations, "image_missing") {
+		t.Fatalf("refreshed current-revision evidence retained a rollout image invariant: %+v", updated.ObservedStatus)
+	}
+	if status, reason := edgeRouteStatus(updated, model.DefaultManagedRuntimeID, true); status != model.EdgeRouteStatusActive || reason != "" {
+		t.Fatalf("refreshed current revision must publish a clean route, got status=%q reason=%q", status, reason)
 	}
 }
 
