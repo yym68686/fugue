@@ -100,16 +100,17 @@ if [[ "$*" == *' get configmap/fugue-fugue-public-data-plane-release '* ]]; then
   exit 0
 fi
 if [[ "$*" == *' get deployment,daemonset,pod '* && "$*" == *'app.kubernetes.io/instance=fugue'* ]]; then
-  cat <<'JSON'
+  legacy_api_image_id_digest="${FAKE_LEGACY_API_IMAGE_ID_DIGEST:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+  cat <<JSON
 {"items":[
-{"kind":"Deployment","metadata":{"name":"fugue-fugue-api","uid":"api-uid","generation":1,"labels":{"app.kubernetes.io/component":"api"}},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"api@sha256:aaa"}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}},
-{"kind":"Deployment","metadata":{"name":"fugue-fugue-controller","uid":"controller-uid","generation":1,"labels":{"app.kubernetes.io/component":"controller"}},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"controller@sha256:bbb"}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}},
+{"kind":"Deployment","metadata":{"name":"fugue-fugue-api","uid":"api-uid","generation":1,"labels":{"app.kubernetes.io/component":"api"}},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"api","image":"registry.example.test/fugue/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}},
+{"kind":"Deployment","metadata":{"name":"fugue-fugue-controller","uid":"controller-uid","generation":1,"labels":{"app.kubernetes.io/component":"controller"}},"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"controller","image":"registry.example.test/fugue/controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}},
 {"kind":"DaemonSet","metadata":{"name":"fugue-fugue-edge-country-us-front","uid":"us-front","generation":1,"labels":{"fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"test.front":"us"}},"template":{"spec":{"containers":[{"name":"edge-front","env":[{"name":"FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE","value":"/state/active-slot"}]}]}}},"status":{"observedGeneration":1,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0}},
 {"kind":"DaemonSet","metadata":{"name":"fugue-fugue-edge-country-us-worker-a","uid":"us-a","generation":1,"labels":{"fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{},"status":{"observedGeneration":1,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0}},
 {"kind":"DaemonSet","metadata":{"name":"fugue-fugue-edge-country-de-front","uid":"de-front","generation":1,"labels":{"fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"test.front":"de"}},"template":{"spec":{"containers":[{"name":"edge-front","env":[{"name":"FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE","value":"/state/active-slot"}]}]}}},"status":{"observedGeneration":1,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0}},
 {"kind":"DaemonSet","metadata":{"name":"fugue-fugue-edge-country-de-worker-a","uid":"de-a","generation":1,"labels":{"fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{},"status":{"observedGeneration":1,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0}},
-{"kind":"Pod","metadata":{"name":"api-1","uid":"api-pod","labels":{"app.kubernetes.io/component":"api"}},"status":{"phase":"Running","containerStatuses":[{"ready":true,"image":"api@sha256:aaa"}]}},
-{"kind":"Pod","metadata":{"name":"controller-1","uid":"controller-pod","labels":{"app.kubernetes.io/component":"controller"}},"status":{"phase":"Running","containerStatuses":[{"ready":true,"image":"controller@sha256:bbb"}]}},
+{"kind":"Pod","metadata":{"name":"api-1","uid":"api-pod","labels":{"app.kubernetes.io/component":"api"}},"spec":{"containers":[{"name":"api","image":"registry.example.test/fugue/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]},"status":{"phase":"Running","containerStatuses":[{"name":"api","ready":true,"image":"sha256:1111111111111111111111111111111111111111111111111111111111111111","imageID":"registry.example.test/fugue/api@${legacy_api_image_id_digest}"}]}},
+{"kind":"Pod","metadata":{"name":"controller-1","uid":"controller-pod","labels":{"app.kubernetes.io/component":"controller"}},"spec":{"containers":[{"name":"controller","image":"registry.example.test/fugue/controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]},"status":{"phase":"Running","containerStatuses":[{"name":"controller","ready":true,"image":"sha256:2222222222222222222222222222222222222222222222222222222222222222","imageID":"docker-pullable://registry.example.test/fugue/controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}},
 {"kind":"Pod","metadata":{"name":"us-front-1","uid":"us-front-pod","labels":{"fugue.io/rollout-subsystem":"public-data-plane","test.front":"us"}},"status":{"phase":"Running","containerStatuses":[{"name":"edge-front","ready":true,"restartCount":0,"image":"front@sha256:ccc"}]}},
 {"kind":"Pod","metadata":{"name":"us-a-1","labels":{"fugue.io/rollout-subsystem":"public-data-plane"}},"status":{"phase":"Running","containerStatuses":[{"ready":true}]}},
 {"kind":"Pod","metadata":{"name":"de-front-1","uid":"de-front-pod","labels":{"fugue.io/rollout-subsystem":"public-data-plane","test.front":"de"}},"status":{"phase":"Running","containerStatuses":[{"name":"edge-front","ready":true,"restartCount":0,"image":"front@sha256:ccc"}]}},
@@ -136,8 +137,9 @@ JSON
 fi
 if [[ "$*" == *' get pods '* && "$*" == *'app.kubernetes.io/instance=edge-control'* ]]; then
   [[ "${installed}" == "1" ]] || { printf '%s\n' '{"items":[]}'; exit 0; }
+  runtime_digest="${FAKE_EDGE_CONTROL_IMAGE_ID_DIGEST:-${live_digest}}"
   cat <<JSON
-{"items":[{"kind":"Pod","metadata":{"name":"edge-control-1","uid":"pod-uid","annotations":{"fugue.pro/source-commit":"${live_source}","fugue.pro/image-digest":"${live_digest}","fugue.pro/edge-control-authority":"none","fugue.pro/edge-control-mode":"boundary-only","fugue.pro/edge-control-publication":"disabled"}},"status":{"phase":"Running","containerStatuses":[{"ready":true,"restartCount":0,"image":"${live_image}@${live_digest}"}]}}]}
+{"items":[{"kind":"Pod","metadata":{"name":"edge-control-1","uid":"pod-uid","annotations":{"fugue.pro/source-commit":"${live_source}","fugue.pro/image-digest":"${live_digest}","fugue.pro/edge-control-authority":"none","fugue.pro/edge-control-mode":"boundary-only","fugue.pro/edge-control-publication":"disabled"}},"spec":{"containers":[{"name":"edge-control","image":"${live_image}@${live_digest}"}]},"status":{"phase":"Running","containerStatuses":[{"name":"edge-control","ready":true,"restartCount":0,"image":"sha256:3333333333333333333333333333333333333333333333333333333333333333","imageID":"containerd://${live_image}@${runtime_digest}"}]}}]}
 JSON
   exit 0
 fi
@@ -209,4 +211,40 @@ assert value["previous_image_digest"]==sys.argv[3]
 assert value["previous_runtime_digest"].startswith("sha256:")
 assert value["helm_revision"]==2 and value["authority"]=="none"
 PY
+
+bad_output="${TMP}/receipt-bad-image-id/receipt.json"
+bad_log="${TMP}/bad-image-id.log"
+if PATH="${BIN}:${PATH}" FAKE_STATE="${STATE}" KUBECTL="${BIN}/kubectl" GITHUB_ACTIONS=true \
+GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=125 GITHUB_RUN_ATTEMPT=1 GITHUB_TOKEN=test-token \
+FAKE_LEGACY_API_IMAGE_ID_DIGEST=sha256:9999999999999999999999999999999999999999999999999999999999999999 \
+FUGUE_EDGE_CONTROL_EXPECTED_SOURCE="${second_source}" FUGUE_EDGE_CONTROL_IMAGE=registry.example.test/fugue/edge-control \
+FUGUE_EDGE_CONTROL_IMAGE_DIGEST="${second_digest}" FUGUE_EDGE_CONTROL_IMAGE_RECEIPT_DIGEST="${receipt_digest}" \
+FUGUE_EDGE_CONTROL_SOURCE_RUN_ID=100 FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_ID=89 \
+FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_DIGEST="${artifact_digest}" FUGUE_EDGE_CONTROL_NAMESPACE=fugue-system \
+FUGUE_EDGE_CONTROL_RELEASE=edge-control FUGUE_LEGACY_RELEASE=fugue FUGUE_LEGACY_RELEASE_FULLNAME=fugue-fugue \
+FUGUE_PRODUCT_HEALTH_URL=https://api.example.test/healthz FUGUE_EDGE_CONTROL_RECEIPT_PATH="${bad_output}" \
+bash "${ROOT}/scripts/deploy_edge_control_shadow.sh" >"${bad_log}" 2>&1; then
+  printf 'mismatched legacy imageID unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q 'legacy api pod is not ready on the deployment image' "${bad_log}"
+[[ "$(<"${STATE}/writes")" == '2' ]]
+
+bad_runtime_output="${TMP}/receipt-bad-runtime-image-id/receipt.json"
+bad_runtime_log="${TMP}/bad-runtime-image-id.log"
+if PATH="${BIN}:${PATH}" FAKE_STATE="${STATE}" KUBECTL="${BIN}/kubectl" GITHUB_ACTIONS=true \
+GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=126 GITHUB_RUN_ATTEMPT=1 GITHUB_TOKEN=test-token \
+FAKE_EDGE_CONTROL_IMAGE_ID_DIGEST=sha256:8888888888888888888888888888888888888888888888888888888888888888 \
+FUGUE_EDGE_CONTROL_EXPECTED_SOURCE="${second_source}" FUGUE_EDGE_CONTROL_IMAGE=registry.example.test/fugue/edge-control \
+FUGUE_EDGE_CONTROL_IMAGE_DIGEST="${second_digest}" FUGUE_EDGE_CONTROL_IMAGE_RECEIPT_DIGEST="${receipt_digest}" \
+FUGUE_EDGE_CONTROL_SOURCE_RUN_ID=100 FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_ID=89 \
+FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_DIGEST="${artifact_digest}" FUGUE_EDGE_CONTROL_NAMESPACE=fugue-system \
+FUGUE_EDGE_CONTROL_RELEASE=edge-control FUGUE_LEGACY_RELEASE=fugue FUGUE_LEGACY_RELEASE_FULLNAME=fugue-fugue \
+FUGUE_PRODUCT_HEALTH_URL=https://api.example.test/healthz FUGUE_EDGE_CONTROL_RECEIPT_PATH="${bad_runtime_output}" \
+bash "${ROOT}/scripts/deploy_edge_control_shadow.sh" >"${bad_runtime_log}" 2>&1; then
+  printf 'mismatched edge-control imageID unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q 'edge-control pod is not pristine and ready' "${bad_runtime_log}"
+[[ "$(<"${STATE}/writes")" == '2' ]]
 printf '[test_deploy_edge_control_shadow] ok\n'

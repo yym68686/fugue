@@ -141,7 +141,7 @@ PY
   done <"${front_plan}"
   [[ -s "${front_observed}" ]] || fail 'front active-slot observation is empty'
   python3 - "${resources}" "${record}" "${status}" "${front_observed}" "${output}" <<'PY'
-import hashlib,json,sys
+import hashlib,json,re,sys
 with open(sys.argv[1],encoding="utf-8") as handle: resources=json.load(handle)
 with open(sys.argv[2],encoding="utf-8") as handle: record=json.load(handle)
 with open(sys.argv[3],encoding="utf-8") as handle: status=json.load(handle)
@@ -159,6 +159,15 @@ by_component={}
 for item in deployments:
     labels=item.get("metadata",{}).get("labels") or {}
     by_component.setdefault(labels.get("app.kubernetes.io/component"),[]).append(item)
+def declared_digest(image):
+    match=re.fullmatch(r"[^@\s]+@(sha256:[0-9a-f]{64})",str(image or ""))
+    return match.group(1) if match else None
+def runtime_digest(image_id):
+    value=str(image_id or "")
+    for prefix in ("docker-pullable://","containerd://"):
+        if value.startswith(prefix): value=value[len(prefix):]; break
+    match=re.fullmatch(r"(?:[^@\s]+@)?(sha256:[0-9a-f]{64})",value)
+    return match.group(1) if match else None
 for component in ("api","controller"):
     selected=by_component.get(component,[])
     if len(selected)!=1: raise SystemExit(f"legacy {component} deployment cardinality drifted")
@@ -169,11 +178,19 @@ for component in ("api","controller"):
         raise SystemExit(f"legacy {component} deployment is not converged")
     selected_pods=[p for p in pods if (p.get("metadata",{}).get("labels") or {}).get("app.kubernetes.io/component")==component]
     if len(selected_pods)!=replicas: raise SystemExit(f"legacy {component} pod cardinality drifted")
-    expected_image=(spec.get("template",{}).get("spec",{}).get("containers") or [{}])[0].get("image")
+    template_containers=spec.get("template",{}).get("spec",{}).get("containers") or []
+    expected=[container for container in template_containers if container.get("name")==component]
+    if len(template_containers)!=1 or len(expected)!=1: raise SystemExit(f"legacy {component} deployment container identity drifted")
+    expected_image=expected[0].get("image"); expected_digest=declared_digest(expected_image)
+    if expected_digest is None: raise SystemExit(f"legacy {component} deployment image is not digest-pinned")
     for pod in selected_pods:
-        pm=pod.get("metadata",{}); ps=pod.get("status",{}); statuses=ps.get("containerStatuses") or []
-        if (pm.get("deletionTimestamp") or ps.get("phase")!="Running" or len(statuses)!=1 or not statuses[0].get("ready") or
-            statuses[0].get("image")!=expected_image):
+        pm=pod.get("metadata",{}); pod_spec=pod.get("spec",{}); ps=pod.get("status",{})
+        pod_containers=pod_spec.get("containers") or []; statuses=ps.get("containerStatuses") or []
+        pod_declared=[container for container in pod_containers if container.get("name")==component]
+        pod_status=[container for container in statuses if container.get("name")==component]
+        if (pm.get("deletionTimestamp") or ps.get("phase")!="Running" or len(pod_containers)!=1 or len(pod_declared)!=1 or
+            pod_declared[0].get("image")!=expected_image or len(statuses)!=1 or len(pod_status)!=1 or
+            not pod_status[0].get("ready") or runtime_digest(pod_status[0].get("imageID"))!=expected_digest):
             raise SystemExit(f"legacy {component} pod is not ready on the deployment image")
 if not daemonsets: raise SystemExit("public data-plane daemonset inventory is empty")
 daemonsets_by_name={x.get("metadata",{}).get("name"):x for x in daemonsets}
@@ -218,8 +235,9 @@ for pod in pods:
     component=labels.get("app.kubernetes.io/component")
     if component not in ("api","controller") and labels.get("fugue.io/rollout-subsystem")!="public-data-plane": continue
     statuses=[]
+    spec_images={container.get("name"):container.get("image") for container in pod.get("spec",{}).get("containers") or []}
     for container in pod.get("status",{}).get("containerStatuses") or []:
-        statuses.append({"name":container.get("name"),"image":container.get("image"),"ready":container.get("ready"),"restart_count":container.get("restartCount")})
+        statuses.append({"name":container.get("name"),"spec_image":spec_images.get(container.get("name")),"status_image":container.get("image"),"image_id":container.get("imageID"),"ready":container.get("ready"),"restart_count":container.get("restartCount")})
     statuses.sort(key=lambda x:str(x["name"]))
     material["pods"].append({"name":meta.get("name"),"uid":meta.get("uid"),"component":component,"statuses":statuses})
 material["pods"].sort(key=lambda x:str(x["name"]))
@@ -255,7 +273,7 @@ PY
     EXPECTED_REPOSITORY="${expected_repository}" EXPECTED_IMAGE="${expected_repository}@${expected_digest}" \
     EXPECTED_DIGEST="${expected_digest}" python3 - \
     "${objects}" "${pods}" "${values}" "${status}" "${output}" <<'PY'
-import hashlib,json,os,sys
+import hashlib,json,os,re,sys
 with open(sys.argv[1],encoding="utf-8") as handle: objects=json.load(handle)
 with open(sys.argv[2],encoding="utf-8") as handle: pods=json.load(handle)
 with open(sys.argv[3],encoding="utf-8") as handle: values=json.load(handle)
@@ -291,9 +309,21 @@ if policy.get("egress")!=[] or policy.get("policyTypes")!=["Ingress","Egress"]:
     raise SystemExit("edge-control egress boundary drifted")
 live=[x for x in pods.get("items",[]) if not x.get("metadata",{}).get("deletionTimestamp")]
 if len(live)!=1: raise SystemExit("edge-control live pod cardinality drifted")
-pod=live[0]; pm=pod.get("metadata",{}); ps=pod.get("status",{}); statuses=ps.get("containerStatuses") or []
-if (ps.get("phase")!="Running" or len(statuses)!=1 or not statuses[0].get("ready") or statuses[0].get("restartCount")!=0 or
-    statuses[0].get("image")!=os.environ["EXPECTED_IMAGE"] or any((pm.get("annotations") or {}).get(k)!=v for k,v in want_annotations.items())):
+pod=live[0]; pm=pod.get("metadata",{}); live_spec=pod.get("spec",{}); ps=pod.get("status",{})
+live_containers=live_spec.get("containers") or []; statuses=ps.get("containerStatuses") or []
+live_declared=[item for item in live_containers if item.get("name")=="edge-control"]
+live_status=[item for item in statuses if item.get("name")=="edge-control"]
+def runtime_digest(image_id):
+    value=str(image_id or "")
+    for prefix in ("docker-pullable://","containerd://"):
+        if value.startswith(prefix): value=value[len(prefix):]; break
+    match=re.fullmatch(r"(?:[^@\s]+@)?(sha256:[0-9a-f]{64})",value)
+    return match.group(1) if match else None
+if (ps.get("phase")!="Running" or len(live_containers)!=1 or len(live_declared)!=1 or
+    live_declared[0].get("image")!=os.environ["EXPECTED_IMAGE"] or len(statuses)!=1 or len(live_status)!=1 or
+    not live_status[0].get("ready") or live_status[0].get("restartCount")!=0 or
+    runtime_digest(live_status[0].get("imageID"))!=os.environ["EXPECTED_DIGEST"] or
+    any((pm.get("annotations") or {}).get(k)!=v for k,v in want_annotations.items())):
     raise SystemExit("edge-control pod is not pristine and ready")
 expected_values={"enabled":True,"image":{"digest":os.environ["EXPECTED_DIGEST"],"repository":os.environ["EXPECTED_REPOSITORY"],"sourceCommit":os.environ["EXPECTED_SOURCE"]}}
 if values!=expected_values: raise SystemExit("edge-control Helm values drifted")
@@ -304,7 +334,7 @@ if runtime!={"schema":"edge-control-boundary/v1","status":"ok","mode":"boundary-
     raise SystemExit("edge-control runtime boundary drifted")
 if 'authority="none",mode="boundary-only"' not in os.environ["METRICS_BODY"]:
     raise SystemExit("edge-control boundary metric drifted")
-material={"deployment":{"uid":meta.get("uid"),"generation":meta.get("generation"),"spec":spec},"pod":{"uid":pm.get("uid"),"image":statuses[0].get("image"),"restart_count":statuses[0].get("restartCount")},"helm_revision":revision,"runtime":runtime}
+material={"deployment":{"uid":meta.get("uid"),"generation":meta.get("generation"),"spec":spec},"pod":{"uid":pm.get("uid"),"spec_image":live_declared[0].get("image"),"status_image":live_status[0].get("image"),"image_id":live_status[0].get("imageID"),"restart_count":live_status[0].get("restartCount")},"helm_revision":revision,"runtime":runtime}
 digest="sha256:"+hashlib.sha256(json.dumps(material,separators=(",",":"),sort_keys=True).encode()).hexdigest()
 value={"schema":"edge-control-shadow-runtime-snapshot/v1","status":"healthy","authority":"none","mode":"boundary-only","publication_enabled":False,"data_plane_dependency":False,"digest":digest,"helm_revision":revision,"deployment_uid":meta.get("uid"),"deployment_generation":meta.get("generation"),"pod_uid":pm.get("uid"),"pod_name":pm.get("name"),"pod_restart_count":0}
 with open(output,"x",encoding="utf-8") as handle:json.dump(value,handle,separators=(",",":"),sort_keys=True);handle.write("\n")
