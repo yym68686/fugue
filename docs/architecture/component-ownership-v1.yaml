@@ -128,6 +128,26 @@ components:
     failureBoundary: edge-dns
     lkgPolicy: required
 
+  - id: edge-control
+    description: Non-authoritative independent boundary for the future group-scoped Edge control service.
+    runtimeKinds: [deployment]
+    ownershipMode: transitional-shared
+    sourceRoots:
+      - cmd/fugue-edge-control
+      - internal/edgecontrol
+      - Dockerfile.edge-control
+      - deploy/helm/fugue-edge-control
+      - scripts/test_edge_control_image.sh
+      - .github/workflows/publish-edge-control-image.yml
+    artifactKinds: [edge-control]
+    releaseLane: edge-control
+    coordinator: release-control
+    ownedState: []
+    contracts: [edge-control-boundary@v1]
+    dependencies: []
+    failureBoundary: edge-control
+    lkgPolicy: required
+
   - id: operator-cli
     description: Versioned operator CLI and generated client surface.
     runtimeKinds: [binary]
@@ -156,7 +176,7 @@ sharedResources:
   - id: registry
     owner: image-plane
     conflictMode: mediated
-    consumers: [control-plane, edge-dns]
+    consumers: [control-plane, edge-control, edge-dns]
   - id: r2-backup-bucket
     owner: backup-storage
     conflictMode: mediated

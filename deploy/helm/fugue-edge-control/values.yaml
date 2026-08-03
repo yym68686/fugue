@@ -1,0 +1,28 @@
+# Boundary atom: disabled renders no Kubernetes objects.
+enabled: false
+replicaCount: 1
+
+image:
+  repository: ""
+  digest: ""
+  sourceCommit: ""
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8092
+
+runtime:
+  shutdownTimeout: 10s
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+imagePullSecrets: []
+nodeSelector: {}
+tolerations: []
+affinity: {}

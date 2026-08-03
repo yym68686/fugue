@@ -18,8 +18,8 @@ func TestRepositoryManifestValidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load repository manifest: %v", err)
 	}
-	if len(manifest.Components) != 7 {
-		t.Fatalf("components = %d, want 7", len(manifest.Components))
+	if len(manifest.Components) != 8 {
+		t.Fatalf("components = %d, want 8", len(manifest.Components))
 	}
 }
 

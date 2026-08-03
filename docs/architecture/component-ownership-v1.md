@@ -25,7 +25,17 @@ Target lanes are:
 - `backup`: R2 lifecycle, backup runs, usage reconciliation, and restore;
 - `node-platform`: node updater and host-level safety;
 - `edge-dns`: edge, front, route, and authoritative DNS;
+- `edge-control`: default-off, non-authoritative boundary for the future
+  group-scoped inventory, epoch, fencing, bundle and recovery authority;
 - `cli`: operator client artifacts.
+
+The initial `edge-control` boundary is deliberately not a serving migration.
+It has its own process, immutable image, chart, resource budget and release
+lane, but `authority=none`: it has no database, Kubernetes token, bundle
+signer, Core API client, or customer data-plane dependency. The existing
+`edge-dns` and Core API paths remain authoritative until later shadow and
+per-group cutover atoms produce independent production evidence. Building or
+publishing the boundary image is not evidence that Edge authority has moved.
 
 This step has no runtime behavior and does not change the legacy `fugue` Helm
 release. `internal/componentmanifest` strictly validates the document and

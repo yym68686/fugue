@@ -34,6 +34,38 @@ func TestPlanRepositoryImageChangeIsShadowOnly(t *testing.T) {
 	}
 }
 
+func TestPlanRepositoryEdgeControlBoundaryIsShadowOnly(t *testing.T) {
+	manifest := loadRepositoryManifest(t)
+	paths := []string{
+		"cmd/fugue-edge-control/main.go",
+		"internal/edgecontrol/boundary.go",
+		"Dockerfile.edge-control",
+		"deploy/helm/fugue-edge-control/values.yaml",
+		"scripts/test_edge_control_image.sh",
+		".github/workflows/publish-edge-control-image.yml",
+	}
+	plan, err := PlanChanges(manifest, paths)
+	if err != nil {
+		t.Fatalf("PlanChanges() error = %v", err)
+	}
+	if plan.DispatchMode != DispatchModeShadow || !plan.RequiresLegacyRelease {
+		t.Fatalf("edge-control boundary plan = mode %q legacy=%v", plan.DispatchMode, plan.RequiresLegacyRelease)
+	}
+	if got, want := impactIDs(plan.ImpactedComponents), []string{"edge-control"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("impacted components = %v, want %v", got, want)
+	}
+	if got, want := resourceIDs(plan.SharedResources), []string{"registry"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("shared resources = %v, want %v", got, want)
+	}
+	coordination, err := BuildShadowCoordinationPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !coordination.ObservationOnly || coordination.ProductionMutationAllowed {
+		t.Fatalf("edge-control boundary can mutate production: %+v", coordination)
+	}
+}
+
 func TestPlanRepositoryReleaseControlOwnsMigrationPlanner(t *testing.T) {
 	manifest := loadRepositoryManifest(t)
 	for _, changedPath := range []string{

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fugue-edge-control
+description: Independently deployable Fugue Edge control service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

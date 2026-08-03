@@ -1,0 +1,114 @@
+name: publish edge-control image
+
+on:
+  push:
+    branches: [main]
+    paths: &edge-control-paths
+      - '.github/workflows/publish-edge-control-image.yml'
+      - 'Dockerfile.edge-control'
+      - 'cmd/fugue-edge-control/**'
+      - 'deploy/helm/fugue-edge-control/**'
+      - 'internal/edgecontrol/**'
+      - 'scripts/test_edge_control_image.sh'
+      - 'go.mod'
+      - 'go.sum'
+  pull_request:
+    paths: *edge-control-paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-control-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.0
+      - name: Verify boundary and chart
+        run: |
+          set -euo pipefail
+          go test ./cmd/fugue-edge-control ./internal/edgecontrol ./deploy/helm/fugue-edge-control
+          go vet ./cmd/fugue-edge-control ./internal/edgecontrol
+          helm lint deploy/helm/fugue-edge-control
+          test -z "$(helm template edge-control deploy/helm/fugue-edge-control)"
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build local verification image
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.edge-control \
+            --build-arg "SOURCE_COMMIT=${GITHUB_SHA}" \
+            --build-arg "SOURCE_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "fugue-edge-control:${GITHUB_SHA}" \
+            --load \
+            .
+          ./scripts/test_edge_control_image.sh "fugue-edge-control:${GITHUB_SHA}" "${GITHUB_SHA}"
+
+  publish:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Login to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable multi-platform image
+        env:
+          RECEIPT_PATH: ${{ runner.temp }}/edge-control-image-receipt.json
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${GITHUB_SHA}" ]]
+          owner_lc="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner_lc}/fugue-edge-control"
+          metadata="${RUNNER_TEMP}/edge-control-image-metadata.json"
+          docker buildx build \
+            --file Dockerfile.edge-control \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "SOURCE_COMMIT=${GITHUB_SHA}" \
+            --build-arg "SOURCE_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "${image}:${GITHUB_SHA}" \
+            --metadata-file "${metadata}" \
+            --push \
+            .
+          IMAGE="${image}" METADATA="${metadata}" RECEIPT_PATH="${RECEIPT_PATH}" python3 - <<'PY'
+          import hashlib,json,os,re
+          with open(os.environ["METADATA"],encoding="utf-8") as h: metadata=json.load(h)
+          digest=metadata.get("containerimage.digest")
+          if not isinstance(digest,str) or re.fullmatch(r"sha256:[0-9a-f]{64}",digest) is None:
+              raise SystemExit("published image digest is invalid")
+          receipt={"schema":"edge-control-image-receipt/v1","source_commit":os.environ["GITHUB_SHA"],"image":os.environ["IMAGE"],"digest":digest,"run_id":int(os.environ["GITHUB_RUN_ID"]),"run_attempt":int(os.environ["GITHUB_RUN_ATTEMPT"])}
+          receipt["receipt_digest"]="sha256:"+hashlib.sha256(json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+          with open(os.environ["RECEIPT_PATH"],"w",encoding="utf-8") as h: json.dump(receipt,h,separators=(",",":"),sort_keys=True); h.write("\n")
+          PY
+      - name: Upload immutable image receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: edge-control-image-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-control-image-receipt.json
+          if-no-files-found: error
+          retention-days: 90

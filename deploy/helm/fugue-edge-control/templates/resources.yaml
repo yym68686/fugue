@@ -1,0 +1,180 @@
+{{- if .Values.enabled -}}
+{{- if ne (toString .Values.replicaCount) "1" -}}
+{{- fail "replicaCount must be exactly 1 until edge-control owns a durable leader lease" -}}
+{{- end -}}
+{{- $repository := trim (required "image.repository is required when edge-control is enabled" .Values.image.repository) -}}
+{{- if or (contains "@" $repository) (contains "://" $repository) (not (regexMatch "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$" $repository)) -}}
+{{- fail "image.repository must be a fully qualified lowercase OCI repository without a tag or digest" -}}
+{{- end -}}
+{{- $digest := trim (required "image.digest is required when edge-control is enabled" .Values.image.digest) -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
+{{- fail "image.digest must be an exact lowercase sha256 digest" -}}
+{{- end -}}
+{{- $sourceCommit := trim (required "image.sourceCommit is required when edge-control is enabled" .Values.image.sourceCommit) -}}
+{{- if not (regexMatch "^[0-9a-f]{40}$" $sourceCommit) -}}
+{{- fail "image.sourceCommit must be an exact lowercase 40-hex commit" -}}
+{{- end -}}
+{{- $port := int .Values.service.port -}}
+{{- if or (lt $port 1024) (gt $port 65535) -}}
+{{- fail "service.port must be between 1024 and 65535" -}}
+{{- end -}}
+{{- $shutdown := trim (toString .Values.runtime.shutdownTimeout) -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,2}s$" $shutdown) -}}
+{{- fail "runtime.shutdownTimeout must be a positive whole-second duration" -}}
+{{- end -}}
+{{- $shutdownSeconds := int (trimSuffix "s" $shutdown) -}}
+{{- if gt $shutdownSeconds 120 -}}
+{{- fail "runtime.shutdownTimeout must not exceed 120s" -}}
+{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "fugue-edge-control.fullname" . }}
+  labels:
+    {{- include "fugue-edge-control.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fugue-edge-control.fullname" . }}
+  labels:
+    {{- include "fugue-edge-control.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "fugue-edge-control.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue-edge-control.selectorLabels" . | nindent 8 }}
+      annotations:
+        fugue.pro/source-commit: {{ $sourceCommit | quote }}
+        fugue.pro/edge-control-authority: "none"
+    spec:
+      serviceAccountName: {{ include "fugue-edge-control.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ add $shutdownSeconds 10 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: edge-control
+          image: {{ printf "%s@%s" $repository $digest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: {{ $port }}
+              protocol: TCP
+          env:
+            - name: FUGUE_EDGE_CONTROL_ENABLED
+              value: "true"
+            - name: FUGUE_EDGE_CONTROL_BIND_ADDR
+              value: {{ printf "0.0.0.0:%d" $port | quote }}
+            - name: FUGUE_EDGE_CONTROL_SHUTDOWN_TIMEOUT
+              value: {{ $shutdown | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fugue-edge-control.fullname" . }}
+  labels:
+    {{- include "fugue-edge-control.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fugue-edge-control.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $port }}
+      targetPort: health
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fugue-edge-control.fullname" . }}
+  labels:
+    {{- include "fugue-edge-control.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "fugue-edge-control.selectorLabels" . | nindent 6 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "fugue-edge-control.fullname" . }}
+  labels:
+    {{- include "fugue-edge-control.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fugue-edge-control.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              fugue.io/edge-control-client: "true"
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+  egress: []
+{{- end }}
