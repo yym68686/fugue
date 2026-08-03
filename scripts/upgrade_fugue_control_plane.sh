@@ -20643,13 +20643,18 @@ run_control_plane_api_hotfix_rollout_v2() {
   # the runner still resets the complete mutation budget before the Lease.
   FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=600
   FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=60
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  KUBECTL="$(detect_kubectl)" || return
+  export KUBECTL
 
   (( $# == 0 )) || return 2
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "b73c87ac966a5405c420620d644f11807109821f" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "7e1db873152a53061bc4d68f3860e6f49acb4902" &&
     "$(git rev-list --parents -n 1 HEAD | awk '{print NF}')" == "2" ]] || return 1
   git merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD || return 1
   [[ "${artifact_file}" == /* && -f "${artifact_file}" && ! -L "${artifact_file}" &&

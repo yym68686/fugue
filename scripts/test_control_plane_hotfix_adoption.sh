@@ -339,8 +339,8 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' 'b73c87ac966a5405c420620d644f11807109821f' ;;
-      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" 'b73c87ac966a5405c420620d644f11807109821f' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' '7e1db873152a53061bc4d68f3860e6f49acb4902' ;;
+      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '7e1db873152a53061bc4d68f3860e6f49acb4902' ;;
       'merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD') : ;;
       'diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD') printf '%s\n' \
         '.github/workflows/deploy-control-plane.yml' \
@@ -377,6 +377,8 @@ PY
   }
   CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH="$(( $(date +%s) + 3600 ))"
   bounded_kubectl() {
+    [[ "${KUBECTL:-}" == kubectl && "${FUGUE_NAMESPACE:-}" == fugue-system &&
+      "${FUGUE_RELEASE_NAME:-}" == fugue && "${FUGUE_RELEASE_FULLNAME:-}" == fugue-fugue ]] || return 1
     case "$*" in
       *'get deployment/fugue-fugue-api -o json') cat <<'JSON'
 {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"generation":7,"name":"fugue-fugue-api","namespace":"fugue-system","resourceVersion":"11","uid":"api-uid"},"spec":{"replicas":2,"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9","name":"api"}]}}},"status":{"availableReplicas":2,"observedGeneration":7,"readyReplicas":2,"replicas":2,"updatedReplicas":2}}
