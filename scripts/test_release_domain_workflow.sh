@@ -120,7 +120,7 @@ dispatch = trigger.fetch("workflow_dispatch")
 inputs = dispatch.fetch("inputs")
 assert_equal(
   inputs.keys,
-  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1", "controller_m16_rollout_v1"],
+  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1", "controller_m16_rollout_v1", "controller_m16_observed_recovery_v1"],
   "dispatch input set",
 )
 expected_sha = inputs.fetch("expected_sha")
@@ -139,7 +139,7 @@ convergence_source = inputs.fetch("convergence_source_run_id")
 assert_equal(convergence_source["required"], false, "convergence source required flag")
 assert_equal(convergence_source["type"], "string", "convergence source type")
 assert_equal(convergence_source["default"], "", "convergence source default")
-for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1", "controller_m16_rollout_v1"]
+for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1", "controller_m16_rollout_v1", "controller_m16_observed_recovery_v1"]
   handoff_input = inputs.fetch(name)
   assert_equal(handoff_input["required"], false, "#{name} required flag")
   assert_equal(handoff_input["type"], "string", "#{name} type")
@@ -194,6 +194,7 @@ guard_step = step(guard, "Guard exact main commit authorization")
   "PUBLIC_DATA_PLANE_ADOPTION_TRACE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json",
   "API_HOTFIX_ROLLOUT_V2" => "${{ inputs.api_hotfix_rollout_v2 }}",
   "CONTROLLER_M16_ROLLOUT_V1" => "${{ inputs.controller_m16_rollout_v1 }}",
+  "CONTROLLER_M16_OBSERVED_RECOVERY_V1" => "${{ inputs.controller_m16_observed_recovery_v1 }}",
 }.each do |name, expected|
   assert_equal(guard_step.fetch("env").fetch(name), expected, "guard #{name} source")
 end
@@ -227,12 +228,48 @@ for fragment in [
   '"${TARGET_SHA}" == \'57dc767999741cea25fe4820a6c9603984dfa0b9\'',
   'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1_58FC',
   '"${TARGET_SHA}" == \'58fc2e560064214e3f329765c9ec7839ee513c27\'',
+  'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717',
+  '"${TARGET_SHA}" == "${EXPECTED_SHA}"',
 ]
   fail_contract("input guard is missing #{fragment.inspect}") unless guard_step.fetch("run").include?(fragment)
 end
 
+observed_recovery = jobs.fetch("recover-controller-m16-observed-state")
+assert_equal(needs(observed_recovery), ["release-input-guard", "release-gate"], "Controller M16 observed recovery dependencies")
+assert_equal(
+  observed_recovery.fetch("if"),
+  "${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}",
+  "Controller M16 observed recovery condition",
+)
+assert_equal(observed_recovery.fetch("environment"), "production", "Controller M16 observed recovery environment")
+observed_identity = step(observed_recovery, "Verify exact Controller M16 observed recovery identity")
+for fragment in [
+  "fbfa707084d429176783354745043b5c12b3b488",
+  "internal/releasedomain/control_plane_hotfix_adoption.go",
+  "scripts/test_control_plane_hotfix_adoption.sh",
+  "deploy/helm/fugue go.mod go.sum scripts/lib",
+]
+  fail_contract("Controller M16 observed recovery identity is missing #{fragment.inspect}") unless observed_identity.fetch("run").include?(fragment)
+end
+observed_run = step(observed_recovery, "Run exact independent Controller M16 observed-state recovery")
+assert_equal(observed_run.fetch("id"), "controller_m16_observed_recovery", "Controller M16 observed recovery step ID")
+assert_equal(observed_run.fetch("env").fetch("FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1"), "true", "Controller M16 observed recovery mode")
+assert_equal(observed_run.fetch("env").fetch("FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM"), "${{ inputs.controller_m16_observed_recovery_v1 }}", "Controller M16 observed recovery authorization")
+assert_equal(observed_run.fetch("env").fetch("FUGUE_API_KEY"), "${{ secrets.FUGUE_API_KEY || '' }}", "Controller M16 observed recovery read-only operation witness credential")
+for forbidden in ["build_control_plane_images", "artifact_reuse", "helm rollback", "edge"]
+  fail_contract("Controller M16 observed recovery workflow contains out-of-scope capability #{forbidden.inspect}") if observed_run.fetch("run").include?(forbidden)
+end
+observed_upload = step(observed_recovery, "Upload sanitized Controller M16 observed recovery evidence")
+assert_equal(observed_upload.fetch("with").fetch("if-no-files-found"), "error", "Controller M16 observed recovery evidence policy")
+
+observed_settle = jobs.fetch("settle-controller-m16-observed-recovery-lane")
+assert_equal(needs(observed_settle), ["recover-controller-m16-observed-state"], "Controller M16 observed recovery settle dependency")
+assert_equal(observed_settle.fetch("if"), "${{ always() && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}", "Controller M16 observed recovery settle condition")
+assert_equal(observed_settle.fetch("permissions"), {"actions" => "write", "contents" => "read"}, "Controller M16 observed recovery settle permissions")
+
 baseline = jobs.fetch("release-baseline")
 assert_equal(needs(baseline), ["release-input-guard"], "release-baseline dependencies")
+assert_equal(baseline.fetch("if"), "${{ inputs.api_hotfix_recovery_only == '' && inputs.controller_m16_observed_recovery_v1 == '' }}", "recovery-only baseline isolation")
 assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
 for job_name in ["release-baseline", "build", "deploy", "record-release-baseline"]
   checkout = step(jobs.fetch(job_name), "Checkout")
@@ -1017,6 +1054,7 @@ assert_equal(needs(freeze), freeze_needs, "freeze finalizer dependencies")
 end
 for fragment in [
   "inputs.api_hotfix_recovery_only == ''",
+  "inputs.controller_m16_observed_recovery_v1 == ''",
   "inputs.historical_controller_build_only_v1 == ''",
   "inputs.controller_m16_rollout_v1",
   "needs.deploy.outputs.image_activation_convergence == 'complete'",
@@ -1034,8 +1072,10 @@ assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}
 allowed_permissions = {
   "release-input-guard" => {"actions" => "read", "contents" => "read"},
   "recover-api-hotfix-fence" => {"contents" => "read"},
+  "recover-controller-m16-observed-state" => {"contents" => "read"},
   "historical-controller-build-only" => {"actions" => "read", "contents" => "read", "packages" => "write"},
   "settle-api-hotfix-recovery-lane" => {"actions" => "write", "contents" => "read"},
+  "settle-controller-m16-observed-recovery-lane" => {"actions" => "write", "contents" => "read"},
   "release-baseline" => {"actions" => "read", "contents" => "read"},
   "release-gate" => {"actions" => "read", "contents" => "read"},
   "build" => {"actions" => "read", "contents" => "read", "packages" => "write"},
@@ -1067,6 +1107,7 @@ allowed_uploads = [
   ["recover-api-hotfix-fence", "${{ runner.temp }}/fugue-api-hotfix-recovery-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
+  ["recover-controller-m16-observed-state", "${{ runner.temp }}/fugue-controller-m16-observed-recovery-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["historical-controller-build-only", "${{ runner.temp }}/fugue-historical-controller-build-only-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ runner.temp }}/fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ runner.temp }}/fugue-controller-m16-v1-${{ github.run_id }}-${{ github.run_attempt }}"],

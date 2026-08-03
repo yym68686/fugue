@@ -109,6 +109,134 @@ grep -Fq 'base:released|base:owned|target:target|hybrid:hybrid' \
   export FUGUE_UPGRADE_LIB_ONLY=true
   # shellcheck source=scripts/upgrade_fugue_control_plane.sh
   source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  recovery_dir="${TMP}/observed-recovery-wal"
+  mkdir -m 700 "${recovery_dir}"
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE="${recovery_dir}/plan.json"
+  cat >"${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" <<'JSON'
+{"policy":"control-plane-controller-m16-observed-recovery-v1","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","nonce":"observed-recovery-nonce","fence":"observed-recovery-fence"}
+JSON
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE="${recovery_dir}/wal.json"
+  control_plane_m16_observed_recovery_write_wal prepared '' "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}"
+  for phase in fence-persisted helm-started commit-unknown helm-committed verified sealed; do
+    cp "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" "${recovery_dir}/previous.json"
+    control_plane_m16_observed_recovery_write_wal "${phase}" "${recovery_dir}/previous.json" "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}"
+  done
+  WAL="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" python3 - <<'PY'
+import hashlib,json,os
+raw=open(os.environ["WAL"],"rb").read(); value=json.loads(raw)
+assert value["kind"]=="ControlPlaneControllerM16ObservedRecoveryWAL"
+assert value["phase"]=="sealed" and value["sequence"]==7
+assert value["helmAttempts"]==1 and value["recoveryRequired"] is False
+digest=value["digest"]; value["digest"]=""
+assert digest=="sha256:"+hashlib.sha256(json.dumps(value,separators=(",",":")).encode()).hexdigest()
+PY
+  cp "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" "${recovery_dir}/previous.json"
+  ! control_plane_m16_observed_recovery_write_wal helm-started "${recovery_dir}/previous.json" "${recovery_dir}/invalid.json"
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  FUGUE_API_KEY=read-only-test-token
+  operations_response='{"operations":[]}'
+  run_with_wall_timeout() {
+    [[ "$1" == 15 && "$2" == curl ]]
+    shift 2
+    local output="" joined=" $* "
+    [[ "${joined}" == *' --data-urlencode status=pending '* ]]
+    [[ "${joined}" == *' --data-urlencode status=running '* ]]
+    [[ "${joined}" == *' --data-urlencode status=waiting-agent '* ]]
+    [[ "${joined}" == *' https://api.fugue.pro/v1/operations '* ]]
+    while (( $# > 0 )); do
+      if [[ "$1" == --output ]]; then output="$2"; break; fi
+      shift
+    done
+    [[ -n "${output}" ]]
+    printf '%s' "${operations_response}" >"${output}"
+  }
+  control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-empty.json"
+  operations_response='{"operations":[{"status":"running"}]}'
+  ! control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-running.json"
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=4
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON='{"metadata":{"annotations":{"fugue.pro/source-commit":"57dc767999741cea25fe4820a6c9603984dfa0b9"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","name":"api"}]}}'
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON='{"metadata":{"annotations":{"fugue.pro/source-commit":"d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","name":"controller"}]}}'
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON='{}'
+  NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=false
+  prepare_helm_post_renderer
+  raw="${TMP}/observed-recovery-double-template.raw.yaml"
+  rendered="${TMP}/observed-recovery-double-template.rendered.yaml"
+  cat >"${raw}" <<'YAML'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+spec:
+  template:
+    metadata:
+      annotations:
+        fugue.pro/source-commit: 57dc767999741cea25fe4820a6c9603984dfa0b9
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603984dfa0b9a277ec0c5d9451472f1a10d362dffb2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-controller
+spec:
+  template:
+    metadata:
+      annotations:
+        fugue.pro/source-commit: d1e7ed9cdedbaa09db9bd78b4e433b94c7357510
+    spec:
+      containers:
+      - name: controller
+        image: ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d
+YAML
+  # The API image in the raw chart must be the fixed immutable 62d image.
+  sed -i.bak 's#sha256:62dffb2b0f881b7acd3f9603984dfa0b9a277ec0c5d9451472f1a10d362dffb2#sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3#' "${raw}"
+  "${HELM_POST_RENDERER_FILE}" <"${raw}" >"${rendered}"
+  [[ "$(grep -c '^  template: {' "${rendered}")" == 2 ]]
+  grep -Fq 'fugue-fugue-api' "${rendered}"
+  grep -Fq 'fugue-fugue-controller' "${rendered}"
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=false
+  ! prepare_helm_post_renderer
+)
+
+observed_recovery_source="$(sed -n '/^run_control_plane_controller_m16_observed_recovery_v1()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+for fragment in \
+  'invocation.json' \
+  'control_plane_m16_observed_recovery_create_configmap' \
+  'control_plane_m16_observed_recovery_attach_lease_plan' \
+  'control_plane_m16_observed_recovery_update_configmap_wal fence-persisted' \
+  'control_plane_m16_observed_recovery_update_configmap_wal helm-started' \
+  'control_plane_release_domain_execute_sealed_helm_upgrade' \
+  'control_plane_m16_observed_recovery_verify_target' \
+  'control_plane_m16_observed_recovery_update_configmap_wal verified' \
+  'verified-before-fence-release.json' \
+  'control_plane_m16_observed_recovery_release_lease' \
+  'control_plane_m16_observed_recovery_update_configmap_wal sealed'; do
+  grep -Fq "${fragment}" <<<"${observed_recovery_source}"
+done
+! grep -Eq 'helm rollback|controller_m16_rollout|artifact|build_control_plane_images' <<<"${observed_recovery_source}"
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
   live_source=a0f5bc0ac36b4e29c4c7928dda1923c2c4727759
   target_source=57dc767999741cea25fe4820a6c9603984dfa0b9
   live_image=ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9

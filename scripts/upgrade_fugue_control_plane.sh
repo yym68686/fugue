@@ -12369,6 +12369,7 @@ prepare_helm_post_renderer() {
   local public_checksums="${PUBLIC_DATA_PLANE_CHECKSUMS_JSON:-}"
   local hotfix_api_template="${CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON:-}"
   local hotfix_controller_template="${CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON:-}"
+  local observed_recovery_mode="${CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE:-false}"
   local public_base_manifest=""
   local registry_deployment=""
   local registry_replicas=""
@@ -12409,14 +12410,16 @@ prepare_helm_post_renderer() {
     }
   fi
   if ! renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" "${public_base_manifest}" \
-    "${hotfix_api_template}" "${hotfix_controller_template}" <<'PY'
+    "${hotfix_api_template}" "${hotfix_controller_template}" "${observed_recovery_mode}" <<'PY'
 import base64
 import json
 import os
 import re
 import sys
 
-registry, raw_checksums, base_manifest_path, raw_api_template, raw_controller_template = sys.argv[1:]
+registry, raw_checksums, base_manifest_path, raw_api_template, raw_controller_template, observed_recovery_mode = sys.argv[1:]
+if observed_recovery_mode not in {"true", "false"}:
+    raise SystemExit(1)
 checksums = json.loads(raw_checksums)
 if not isinstance(checksums, dict):
     raise SystemExit(1)
@@ -12502,7 +12505,7 @@ if raw_api_template:
         raise SystemExit(1)
 controller_template = None
 if raw_controller_template:
-    if raw_api_template:
+    if raw_api_template and observed_recovery_mode != "true":
         raise SystemExit(1)
     controller_template = json.loads(raw_controller_template)
     if not isinstance(controller_template, dict) or set(controller_template) != {"metadata", "spec"}:
@@ -12517,6 +12520,15 @@ if raw_controller_template:
     if len(matches) != 1 or annotations.get("fugue.pro/source-commit") != "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510":
         raise SystemExit(1)
     if matches[0].get("image") != "ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d":
+        raise SystemExit(1)
+if observed_recovery_mode == "true":
+    if api_template is None or controller_template is None:
+        raise SystemExit(1)
+    api_annotations = api_template["metadata"]["annotations"]
+    api_matches = [item for item in api_template["spec"]["containers"] if item.get("name") == "api"]
+    if api_annotations.get("fugue.pro/source-commit") != "57dc767999741cea25fe4820a6c9603984dfa0b9":
+        raise SystemExit(1)
+    if len(api_matches) != 1 or api_matches[0].get("image") != "ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3":
         raise SystemExit(1)
 payload = json.dumps(
     {
@@ -20552,6 +20564,26 @@ print("sha256:"+hashlib.sha256(encoded).hexdigest())
 '
 }
 
+control_plane_m16_observed_recovery_other_workload_digest() {
+  bounded_kubectl 15 -n fugue-system get deployments,daemonsets,statefulsets,pods -o json | python3 -c '
+import hashlib,json,sys
+value=json.load(sys.stdin); result=[]
+for item in value.get("items") or []:
+ metadata=item.get("metadata") or {}; kind=item.get("kind"); name=metadata.get("name")
+ if kind=="Deployment" and name in {"fugue-fugue-api","fugue-fugue-controller"}: continue
+ if kind=="Pod":
+  labels=metadata.get("labels") or {}; component=labels.get("app.kubernetes.io/component")
+  if labels.get("app.kubernetes.io/instance")=="fugue" and component in {"api","controller"}: continue
+  owners=metadata.get("ownerReferences") or []
+  if any(owner.get("controller") is True and owner.get("kind") in {"Job","CronJob"} for owner in owners): continue
+  statuses=(item.get("status") or {}).get("containerStatuses") or []
+  result.append({"kind":"PodImageCohort","ownerReferences":owners,"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")}); continue
+ status=item.get("status") or {}
+ result.append({"apiVersion":item.get("apiVersion"),"kind":kind,"metadata":{key:metadata.get(key) for key in ("annotations","deletionTimestamp","generation","labels","name","namespace","uid")},"spec":item.get("spec"),"status":{key:status.get(key,0) for key in ("availableReplicas","currentNumberScheduled","desiredNumberScheduled","misscheduled","observedGeneration","readyReplicas","replicas","numberAvailable","numberMisscheduled","numberReady","numberUnavailable","updatedNumberScheduled","updatedReplicas","unavailableReplicas")}})
+result.sort(key=lambda item:json.dumps(item,sort_keys=True,separators=(",",":")))
+print("sha256:"+hashlib.sha256(json.dumps(result,sort_keys=True,separators=(",",":")).encode()).hexdigest())'
+}
+
 control_plane_hotfix_verify_prewrite_bindings() {
   local render_directory="$1"
   local lease_state="${2:-released}"
@@ -20977,6 +21009,776 @@ control_plane_hotfix_verify_live_target() {
     [[ "${values_digest}" == "${expected_values}" ]] || return 1
     control_plane_hotfix_verify_kubernetes hybrid hybrid
   fi
+}
+
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP="fugue-fugue-controller-m16-observed-recovery-30836591717"
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE=""
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE=""
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID=""
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_VERSION=""
+
+control_plane_m16_observed_recovery_capture_active_operations() {
+  local output="$1"
+  local token=""
+  [[ -n "${output}" && ! -e "${output}" && ! -L "${output}" ]] || return 1
+  token="$(trim_field "${FUGUE_API_KEY:-}")" || return
+  [[ -n "${token}" ]] || return 1
+  run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 \
+    -H "Authorization: Bearer ${token}" \
+    --get \
+    --data-urlencode status=pending \
+    --data-urlencode status=running \
+    --data-urlencode status=waiting-agent \
+    --data-urlencode limit=1 \
+    --output "${output}" \
+    https://api.fugue.pro/v1/operations || return
+  OUTPUT="${output}" python3 - <<'PY' || return
+import json,os
+with open(os.environ["OUTPUT"],encoding="utf-8") as stream: value=json.load(stream)
+if not isinstance(value,dict) or set(value)!={"operations"} or value["operations"]!=[]: raise SystemExit(1)
+PY
+  chmod 600 "${output}" || return
+}
+
+control_plane_m16_observed_recovery_capture() {
+  local directory="$1"
+  local other_digest=""
+  local pod_names=""
+  [[ ! -e "${directory}" && ! -L "${directory}" ]] || return 1
+  mkdir -m 700 "${directory}" || return
+  run_release_long_command 30 "observed recovery Helm status read" helm status fugue -n fugue-system -o json >"${directory}/helm-status.json" || return
+  run_release_long_command 30 "observed recovery Helm history read" helm history fugue -n fugue-system -o json >"${directory}/helm-history.json" || return
+  run_release_long_command 30 "observed recovery Helm820 manifest read" helm get manifest fugue -n fugue-system --revision 820 >"${directory}/helm-manifest-820.yaml" || return
+  run_release_long_command 30 "observed recovery Helm820 values read" helm get values fugue -n fugue-system --all --revision 820 -o json >"${directory}/helm-values-820.json" || return
+  run_release_long_command 30 "observed recovery Helm822 manifest read" helm get manifest fugue -n fugue-system --revision 822 >"${directory}/helm-manifest-822.yaml" || return
+  run_release_long_command 30 "observed recovery Helm822 values read" helm get values fugue -n fugue-system --all --revision 822 -o json >"${directory}/helm-values-822.json" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/api-deployment.json" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-controller -o json >"${directory}/controller-deployment.json" || return
+  bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/api-pods.json" || return
+  bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=controller -o json >"${directory}/controller-pods.json" || return
+  bounded_kubectl 15 -n fugue-system get service/fugue-fugue -o json >"${directory}/service.json" || return
+  bounded_kubectl 15 -n fugue-system get endpointslice -l kubernetes.io/service-name=fugue-fugue -o json >"${directory}/endpointslices.json" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-controller -o json >"${directory}/controller-leader.json" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${directory}/lease.json" || return
+  pod_names="$(DIRECTORY="${directory}" python3 - <<'PY'
+import json,os,re
+pods=json.load(open(os.path.join(os.environ["DIRECTORY"],"controller-pods.json"),encoding="utf-8")).get("items") or []
+names=sorted((item.get("metadata") or {}).get("name") for item in pods)
+if len(names)!=2 or any(not isinstance(name,str) or re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?",name) is None for name in names): raise SystemExit(1)
+print("\n".join(names))
+PY
+)" || return
+  while IFS= read -r pod_name; do
+    [[ -n "${pod_name}" ]] || continue
+    bounded_kubectl 15 get --raw "/api/v1/namespaces/fugue-system/pods/${pod_name}:9090/proxy/metrics" >"${directory}/metrics-${pod_name}" || return
+  done <<<"${pod_names}"
+  local health_index=0
+  for health_url in https://api.fugue.pro/healthz https://oaix.fugue.pro/healthz https://argus.fugue.pro/healthz https://uni-"api"-web.fugue.pro/healthz; do
+    health_index=$((health_index + 1))
+    run_with_wall_timeout 15 curl --silent --show-error --max-time 10 -o "${directory}/health-${health_index}.body" -w '%{http_code}' "${health_url}" >"${directory}/health-${health_index}.status" || return
+  done
+  control_plane_m16_observed_recovery_capture_active_operations "${directory}/active-operations.json" || return
+  other_digest="$(control_plane_m16_observed_recovery_other_workload_digest)" || return
+  [[ "${other_digest}" == "sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9" ]] || return 1
+  chmod 600 "${directory}"/* || return
+  DIRECTORY="${directory}" OTHER_DIGEST="${other_digest}" python3 - <<'PY'
+import hashlib,json,os,pathlib,re
+root=pathlib.Path(os.environ["DIRECTORY"])
+def load(name): return json.loads((root/name).read_text(encoding="utf-8"))
+def digest(value): return "sha256:"+hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+def file_digest(name): return "sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest()
+def count(status,key):
+    value=status.get(key,0)
+    if type(value) is not int or value<0: raise SystemExit(1)
+    return value
+status=load("helm-status.json"); history=load("helm-history.json")
+if status.get("version")!=822 or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
+hist={int(item.get("revision") or 0):str(item.get("status") or "").lower() for item in history}
+if hist.get(820)!="superseded" or hist.get(821)!="superseded" or hist.get(822)!="deployed": raise SystemExit(1)
+if file_digest("helm-manifest-820.yaml")!="sha256:c329cecdb34afa206284c5b7fcb943b2548fdb66aee45f084a590139181589e9" or file_digest("helm-manifest-822.yaml")!="sha256:c4f4985576b469fe8fba4bea5133b9dfc79002405a166392f75e291d2b560bab": raise SystemExit(1)
+if digest(load("helm-values-820.json"))!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81" or digest(load("helm-values-822.json"))!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81": raise SystemExit(1)
+def deployment(name,uid,rv,generation,source,image,template_digest):
+    value=load(name); md=value.get("metadata") or {}; spec=value.get("spec") or {}; live=value.get("status") or {}; template=spec.get("template") or {}; annotations=(template.get("metadata") or {}).get("annotations") or {}; containers=(template.get("spec") or {}).get("containers") or []
+    component="api" if name.startswith("api-") else "controller"; images=[item.get("image") for item in containers if item.get("name")==component]
+    if md.get("uid")!=uid or md.get("resourceVersion")!=rv or md.get("generation")!=generation or live.get("observedGeneration")!=generation: raise SystemExit(1)
+    if annotations.get("fugue.pro/source-commit")!=source or images!=[image] or digest(template)!=template_digest: raise SystemExit(1)
+    if spec.get("replicas")!=2 or any(count(live,key)!=2 for key in ("replicas","readyReplicas","updatedReplicas","availableReplicas")) or count(live,"unavailableReplicas")!=0: raise SystemExit(1)
+    return value,template
+api,api_template=deployment("api-deployment.json","2141262d-0af5-4727-a357-05aef5705d2d","68219187",718,"57dc767999741cea25fe4820a6c9603984dfa0b9","ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","sha256:32f83c5a3b0174c46ca85f9b480a0426dd9351f74309d212cdedc27111aab578")
+controller,controller_template=deployment("controller-deployment.json","1506c314-3e53-4812-ba06-5a52145e565e","68219303",693,"d1e7ed9cdedbaa09db9bd78b4e433b94c7357510","ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","sha256:956addd69a1e8a4f127f06ef4256774942b5e4e6b4379589fab53b4a0819f5db")
+def ready_images(name,component,want):
+    result=[]
+    for pod in load(name).get("items") or []:
+        ps=pod.get("status") or {}; conditions=ps.get("conditions") or []; states=[item for item in ps.get("containerStatuses") or [] if item.get("name")==component]
+        if ps.get("phase")=="Running" and any(c.get("type")=="Ready" and c.get("status")=="True" for c in conditions):
+            if len(states)!=1 or not states[0].get("ready"): raise SystemExit(1)
+            result.append(states[0].get("imageID"))
+    if len(result)!=2 or not result[0] or any(item!=result[0] for item in result): raise SystemExit(1)
+    if not all(item.endswith(want.split("@",1)[1]) for item in result): raise SystemExit(1)
+    return result[0]
+api_image_id=ready_images("api-pods.json","api","ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3")
+controller_image_id=ready_images("controller-pods.json","controller","ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d")
+service=load("service.json"); sm=service.get("metadata") or {}; selector=(service.get("spec") or {}).get("selector") or {}
+slices=load("endpointslices.json").get("items") or []
+if len(slices)!=1: raise SystemExit(1)
+slice_doc=slices[0]; slice_md=slice_doc.get("metadata") or {}; records=[]; ready=0
+for endpoint in slice_doc.get("endpoints") or []:
+    conditions=endpoint.get("conditions") or {}
+    if conditions.get("ready") is True and conditions.get("serving",True) is True: ready+=len(endpoint.get("addresses") or [])
+    records.append({"addresses":sorted(endpoint.get("addresses") or []),"conditions":conditions,"nodeName":endpoint.get("nodeName"),"targetRef":endpoint.get("targetRef"),"zone":endpoint.get("zone")})
+records.sort(key=lambda value:json.dumps(value,sort_keys=True,separators=(",",":")))
+binding={"addressType":slice_doc.get("addressType"),"endpoints":records,"ports":slice_doc.get("ports") or []}
+if sm.get("name")!="fugue-fugue" or not sm.get("uid") or not sm.get("resourceVersion") or ready!=2: raise SystemExit(1)
+leader=load("controller-leader.json"); lm=leader.get("metadata") or {}; ls=leader.get("spec") or {}; holder=str(ls.get("holderIdentity") or "")
+controller_names=sorted((item.get("metadata") or {}).get("name") for item in load("controller-pods.json").get("items") or [])
+if lm.get("name")!="fugue-fugue-controller" or not lm.get("uid") or not str(lm.get("resourceVersion") or "").isdigit() or holder not in controller_names: raise SystemExit(1)
+metric_names=("fugue_component_info","fugue_controller_leader_election_enabled","fugue_controller_managed_app_reconcile_fallback_interval_seconds","fugue_controller_leader_active"); active=[]
+for pod in controller_names:
+    raw=(root/("metrics-"+pod)).read_text(encoding="utf-8")
+    if 'fugue_component_info{component="controller"} 1.000000' not in raw or any(re.search(r'^'+re.escape(name)+r'(?:\{| )',raw,re.MULTILINE) is None for name in metric_names): raise SystemExit(1)
+    samples=re.findall(r'^fugue_controller_leader_active(?:\{[^\n]*\})? ([01](?:\.0+)?)$',raw,re.MULTILINE)
+    if len(samples)!=1: raise SystemExit(1)
+    if float(samples[0])==1: active.append(pod)
+if active!=[holder]: raise SystemExit(1)
+metrics_digest=digest({"leaderCount":1,"metricNames":list(metric_names),"replicaCount":2})
+health=[]
+urls=["https://api.fugue.pro/healthz","https://oaix.fugue.pro/healthz","https://argus.fugue.pro/healthz","https://uni-"+"api-web.fugue.pro/healthz"]
+for index,url in enumerate(urls,1):
+    status_code=(root/f"health-{index}.status").read_text(encoding="ascii")
+    if status_code!="200": raise SystemExit(1)
+    health.append({"url":url,"status":200,"bodyDigest":file_digest(f"health-{index}.body")})
+health_digest=digest(health)
+operations=load("active-operations.json")
+if set(operations)!={"operations"} or operations["operations"]!=[]: raise SystemExit(1)
+active_operations_digest=digest(operations["operations"])
+if active_operations_digest!="sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945": raise SystemExit(1)
+lease=load("lease.json"); lease_md=lease.get("metadata") or {}; lease_spec=lease.get("spec") or {}; annotations=lease_md.get("annotations") or {}; token=str(annotations.get("fugue.pro/coordination-token") or "")
+if lease_md.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or lease_md.get("resourceVersion")!="68219206" or lease_spec.get("holderIdentity")!="release/30836591717-1" or str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true": raise SystemExit(1)
+token_digest="sha256:"+hashlib.sha256(token.encode()).hexdigest()
+if token_digest!="sha256:5fb35a7ec0f85dd18fbd552c610c0add0e1c015f6417db6bc0c68444e72d9d9a" or set(annotations)!={"fugue.pro/coordination-token","fugue.pro/recovery-required"}: raise SystemExit(1)
+kubernetes={"apiName":"fugue-fugue-api","apiUid":"2141262d-0af5-4727-a357-05aef5705d2d","apiResourceVersion":"68219187","apiGeneration":718,"apiObservedGeneration":718,"apiTemplateDigest":digest(api_template),"apiImageRef":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","apiImageId":api_image_id,"apiHealthDigest":health[0]["bodyDigest"],"apiReplicas":2,"apiReady":2,"apiUpdated":2,"apiAvailable":2,"apiUnavailable":0,"serviceName":"fugue-fugue","serviceUid":sm.get("uid"),"serviceResourceVersion":sm.get("resourceVersion"),"serviceSelectorDigest":digest(selector),"endpointSliceName":slice_md.get("name"),"endpointSliceUid":slice_md.get("uid"),"endpointSliceResourceVersion":slice_md.get("resourceVersion"),"endpointServiceName":"fugue-fugue","endpointBindingDigest":digest(binding),"readyServingEndpoints":2,"controllerName":"fugue-fugue-controller","controllerUid":"1506c314-3e53-4812-ba06-5a52145e565e","controllerResourceVersion":"68219303","controllerGeneration":693,"controllerObservedGeneration":693,"controllerTemplateDigest":digest(controller_template),"controllerImageRef":"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","controllerImageId":controller_image_id,"controllerReplicas":2,"controllerReady":2,"controllerUpdated":2,"controllerAvailable":2,"controllerUnavailable":0,"controllerLeaderLeaseName":"fugue-fugue-controller","controllerLeaderLeaseUid":lm.get("uid"),"controllerLeaderLeaseResourceVersion":lm.get("resourceVersion"),"controllerLeaderHolder":holder,"controllerMetricsDigest":metrics_digest,"controllerLkgDigest":digest({"apiTemplateDigest":digest(api_template),"controllerTemplateDigest":digest(controller_template),"helmRevision":822,"valuesDigest":"sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81"}),"frozenNonApiControllerWorkloadDigest":os.environ["OTHER_DIGEST"],"healthWitnessDigest":health_digest,"activeOperationsDigest":active_operations_digest}
+safe={"helmRecordDigest":digest(status),"kubernetes":kubernetes,"lease":{"namespace":"fugue-system","name":"fugue-fugue-control-plane-db-backup","uid":lease_md.get("uid"),"resourceVersion":lease_md.get("resourceVersion"),"holderIdentity":lease_spec.get("holderIdentity"),"recoveryRequired":True,"coordinationTokenDigest":token_digest},"health":health}
+(root/"snapshot.json").write_text(json.dumps(safe,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+(root/"coordination-token").write_text(token,encoding="utf-8")
+PY
+  chmod 600 "${directory}/snapshot.json" "${directory}/coordination-token" || return
+}
+
+control_plane_m16_observed_recovery_build_raw_target() {
+  local archived_manifest="$1"
+  local observed_manifest="$2"
+  local directory="$3"
+  [[ -f "${archived_manifest}" && ! -L "${archived_manifest}" && -f "${observed_manifest}" && ! -L "${observed_manifest}" ]] || return 1
+  [[ -d "${directory}" && ! -L "${directory}" ]] || return 1
+  ARCHIVED="${archived_manifest}" OBSERVED="${observed_manifest}" DIRECTORY="${directory}" python3 - <<'PY'
+import hashlib, json, os, pathlib
+
+root=pathlib.Path(os.environ["DIRECTORY"])
+archived=pathlib.Path(os.environ["ARCHIVED"]).read_bytes()
+observed=pathlib.Path(os.environ["OBSERVED"]).read_bytes()
+def digest(raw): return "sha256:"+hashlib.sha256(raw).hexdigest()
+if digest(archived)!="sha256:c329cecdb34afa206284c5b7fcb943b2548fdb66aee45f084a590139181589e9": raise SystemExit(1)
+if digest(observed)!="sha256:c4f4985576b469fe8fba4bea5133b9dfc79002405a166392f75e291d2b560bab": raise SystemExit(1)
+def documents(raw): return [part for part in raw.split(b"---\n") if part.strip()]
+def identity(raw):
+    lines=raw.decode("utf-8").splitlines()
+    kind=next((line[6:] for line in lines if line.startswith("kind: ")),"")
+    metadata=next((i for i,line in enumerate(lines) if line=="metadata:"),-1)
+    end=next((i for i,line in enumerate(lines[metadata+1:],metadata+1) if line and not line.startswith(" ")),len(lines))
+    names=[line[8:] for line in lines[metadata+1:end] if line.startswith("  name: ")] if metadata>=0 else []
+    return kind,names[0] if len(names)==1 else ""
+def inline_template(raw,name):
+    if identity(raw)!=("Deployment",name): return None
+    matches=[line for line in raw.decode("utf-8").splitlines() if line.startswith("  template: ")]
+    if len(matches)!=1: raise SystemExit(1)
+    value=json.loads(matches[0][12:])
+    if not isinstance(value,dict) or set(value)!={"metadata","spec"}: raise SystemExit(1)
+    return value
+archived_docs=documents(archived); observed_docs=documents(observed)
+if len(archived_docs)!=85 or len(observed_docs)!=85: raise SystemExit(1)
+archived_api=[item for item in (inline_template(doc,"fugue-fugue-api") for doc in archived_docs) if item is not None]
+observed_controller=[item for item in (inline_template(doc,"fugue-fugue-controller") for doc in observed_docs) if item is not None]
+if len(archived_api)!=1 or len(observed_controller)!=1: raise SystemExit(1)
+api=archived_api[0]; controller=observed_controller[0]
+live=json.loads((root/"second/api-deployment.json").read_text(encoding="utf-8")); live_md=live.get("metadata") or {}; live_spec=live.get("spec") or {}; live_status=live.get("status") or {}; observed_api=live_spec.get("template") or {}; live_annotations=(observed_api.get("metadata") or {}).get("annotations") or {}; live_containers=(observed_api.get("spec") or {}).get("containers") or []
+live_images=[item.get("image") for item in live_containers if item.get("name")=="api"]
+if live_md.get("uid")!="2141262d-0af5-4727-a357-05aef5705d2d" or live_md.get("resourceVersion")!="68219187" or live_md.get("generation")!=718 or live_status.get("observedGeneration")!=718: raise SystemExit(1)
+if live_annotations.get("fugue.pro/source-commit")!="57dc767999741cea25fe4820a6c9603984dfa0b9" or live_images!=["ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3"]: raise SystemExit(1)
+def template_digest(value): return digest(json.dumps(value,ensure_ascii=True,separators=(",",":"),sort_keys=True).encode())
+if template_digest(api)!="sha256:8f968c53573213ee136e1d75b08cd6b9ac8fe2d03c5006769c56ae755c6f5fa2": raise SystemExit(1)
+if template_digest(controller)!="sha256:956addd69a1e8a4f127f06ef4256774942b5e4e6b4379589fab53b4a0819f5db": raise SystemExit(1)
+if template_digest(observed_api)!="sha256:32f83c5a3b0174c46ca85f9b480a0426dd9351f74309d212cdedc27111aab578" or template_digest(observed_api)==template_digest(api): raise SystemExit(1)
+target_docs=[]; changed=[]
+api_line=b"  template: "+json.dumps(api,ensure_ascii=True,separators=(",",":"),sort_keys=True).encode()+b"\n"
+for index,doc in enumerate(observed_docs):
+    if identity(doc)==("Deployment","fugue-fugue-api"):
+        lines=doc.splitlines(keepends=True); matches=[i for i,line in enumerate(lines) if line.startswith(b"  template:")]
+        if len(matches)!=1: raise SystemExit(1)
+        start=matches[0]
+        end=next((i for i,line in enumerate(lines[start+1:],start+1) if line.startswith(b"  ") and not line.startswith(b"    ") and line.strip()),len(lines))
+        updated=b"".join(lines[:start]+[api_line]+lines[end:]); changed.append(index)
+    else: updated=doc
+    target_docs.append(updated)
+if len(changed)!=1: raise SystemExit(1)
+target=b"---\n"+b"---\n".join(target_docs)
+if observed.endswith(b"\n") and not target.endswith(b"\n"): target+=b"\n"
+records=[]
+for index,(before,after) in enumerate(zip(observed_docs,target_docs)):
+    kind,name=identity(before)
+    records.append({"index":index,"kind":kind,"name":name,"observedDigest":digest(before),"targetDigest":digest(after),"changed":before!=after})
+if sum(1 for item in records if item["changed"])!=1: raise SystemExit(1)
+(root/"target-api-template.json").write_text(json.dumps(api,ensure_ascii=True,separators=(",",":"),sort_keys=True),encoding="utf-8")
+(root/"target-controller-template.json").write_text(json.dumps(controller,ensure_ascii=True,separators=(",",":"),sort_keys=True),encoding="utf-8")
+(root/"observed-api-template.json").write_text(json.dumps(observed_api,ensure_ascii=True,separators=(",",":"),sort_keys=True),encoding="utf-8")
+(root/"target.yaml").write_bytes(target)
+(root/"repeated-target.yaml").write_bytes(target)
+(root/"document-digests.json").write_text(json.dumps(records,ensure_ascii=True,separators=(",",":"),sort_keys=True)+"\n",encoding="utf-8")
+PY
+  chmod 600 "${directory}/target-api-template.json" "${directory}/target-controller-template.json" \
+    "${directory}/observed-api-template.json" "${directory}/target.yaml" \
+    "${directory}/repeated-target.yaml" "${directory}/document-digests.json"
+}
+
+control_plane_m16_observed_recovery_write_wal() {
+  local phase="$1"
+  local current="${2:-}"
+  local output="$3"
+  PLAN_FILE="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" CURRENT="${current}" PHASE="${phase}" OUTPUT="${output}" python3 - <<'PY'
+import hashlib,json,os,pathlib
+plan=json.load(open(os.environ["PLAN_FILE"],encoding="utf-8"))
+if plan.get("policy")!="control-plane-controller-m16-observed-recovery-v1": raise SystemExit(1)
+current_path=os.environ["CURRENT"]
+if current_path:
+    wal=json.load(open(current_path,encoding="utf-8"))
+    allowed={"prepared":"fence-persisted","fence-persisted":"helm-started","helm-started":"helm-committed","helm-started:unknown":"commit-unknown","commit-unknown":"helm-committed","helm-committed":"verified","verified":"sealed"}
+    key=wal["phase"]+(":unknown" if os.environ["PHASE"]=="commit-unknown" else "")
+    if allowed.get(key)!=os.environ["PHASE"]: raise SystemExit(1)
+    wal["phase"]=os.environ["PHASE"]
+    wal["sequence"]+=1
+    if wal["phase"]=="helm-started":
+        if wal.get("helmAttempts",0)!=0: raise SystemExit(1)
+        wal["helmAttempts"]=1
+    wal["recoveryRequired"]=wal["phase"]!="sealed"
+else:
+    if os.environ["PHASE"]!="prepared": raise SystemExit(1)
+    wal={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneControllerM16ObservedRecoveryWAL","policy":plan["policy"],"planDigest":plan["digest"],"nonce":plan["nonce"],"fence":plan["fence"],"phase":"prepared","sequence":1,"forwardAttempts":0,"compensationAttempts":0,"recoveryRequired":True,"digest":""}
+ordered={key:wal[key] for key in ("apiVersion","kind","policy","planDigest","nonce","fence","phase","sequence","forwardAttempts","compensationAttempts","recoveryRequired")}
+if wal.get("helmAttempts",0): ordered["helmAttempts"]=wal["helmAttempts"]
+ordered["digest"]=""
+encoded=json.dumps(ordered,ensure_ascii=True,separators=(",",":"),sort_keys=False).encode()
+ordered["digest"]="sha256:"+hashlib.sha256(encoded).hexdigest()
+raw=json.dumps(ordered,ensure_ascii=True,separators=(",",":"),sort_keys=False).encode()+b"\n"
+path=pathlib.Path(os.environ["OUTPUT"])
+temporary=path.with_suffix(path.suffix+".tmp")
+with temporary.open("xb") as stream:
+    stream.write(raw)
+    stream.flush()
+    os.fsync(stream.fileno())
+os.chmod(temporary,0o600)
+os.replace(temporary,path)
+PY
+}
+
+control_plane_m16_observed_recovery_create_configmap() {
+  local directory="$1"
+  local response="${directory}/configmap-created.json"
+  [[ -z "$(bounded_kubectl 15 -n fugue-system get "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" --ignore-not-found -o name)" ]] || return 1
+  bounded_kubectl 15 -n fugue-system create configmap "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" \
+    --from-file=plan.json="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" \
+    --from-file=wal.json="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" \
+    --from-file=target-api-template.json="${directory}/target-api-template.json" \
+    --from-file=target-controller-template.json="${directory}/target-controller-template.json" \
+    --from-file=document-digests.json="${directory}/document-digests.json" \
+    --dry-run=client -o json | bounded_kubectl 15 -n fugue-system create -f - -o json >"${response}" || return
+  chmod 600 "${response}" || return
+  bounded_kubectl 15 -n fugue-system get "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" -o json >"${directory}/configmap-readback.json" || return
+  CREATED="${response}" READBACK="${directory}/configmap-readback.json" PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" WAL="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" DIRECTORY="${directory}" python3 - <<'PY'
+import json,os,pathlib
+created=json.load(open(os.environ["CREATED"],encoding="utf-8"))
+readback=json.load(open(os.environ["READBACK"],encoding="utf-8"))
+md=readback.get("metadata") or {}; data=readback.get("data") or {}
+if md.get("name")!="fugue-fugue-controller-m16-observed-recovery-30836591717" or md.get("namespace")!="fugue-system" or not md.get("uid") or not md.get("resourceVersion"): raise SystemExit(1)
+if (created.get("metadata") or {}).get("uid")!=md.get("uid"): raise SystemExit(1)
+files={"plan.json":os.environ["PLAN"],"wal.json":os.environ["WAL"],"target-api-template.json":os.path.join(os.environ["DIRECTORY"],"target-api-template.json"),"target-controller-template.json":os.path.join(os.environ["DIRECTORY"],"target-controller-template.json"),"document-digests.json":os.path.join(os.environ["DIRECTORY"],"document-digests.json")}
+if set(data)!=set(files): raise SystemExit(1)
+for key,path in files.items():
+    if data[key].encode()!=pathlib.Path(path).read_bytes(): raise SystemExit(1)
+print(md["uid"]+"\t"+md["resourceVersion"])
+PY
+}
+
+control_plane_m16_observed_recovery_update_configmap_wal() {
+  local phase="$1"
+  local directory="$2"
+  local current="${directory}/wal-current.json"
+  local next="${directory}/wal-next.json"
+  local cm="${directory}/configmap-before-wal.json"
+  local patch="${directory}/configmap-wal-patch.json"
+  bounded_kubectl 15 -n fugue-system get "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" -o json >"${cm}" || return
+  CM="${cm}" CURRENT="${current}" python3 - <<'PY'
+import json,os,pathlib
+cm=json.load(open(os.environ["CM"],encoding="utf-8")); raw=(cm.get("data") or {}).get("wal.json")
+if not isinstance(raw,str): raise SystemExit(1)
+pathlib.Path(os.environ["CURRENT"]).write_text(raw,encoding="utf-8")
+PY
+  chmod 600 "${current}" || return
+  control_plane_m16_observed_recovery_write_wal "${phase}" "${current}" "${next}" || return
+  CM="${cm}" CURRENT="${current}" NEXT="${next}" PATCH="${patch}" EXPECTED_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" python3 - <<'PY'
+import json,os,pathlib
+cm=json.load(open(os.environ["CM"],encoding="utf-8")); md=cm.get("metadata") or {}
+if md.get("uid")!=os.environ["EXPECTED_UID"] or not md.get("resourceVersion"): raise SystemExit(1)
+old=pathlib.Path(os.environ["CURRENT"]).read_text(encoding="utf-8"); new=pathlib.Path(os.environ["NEXT"]).read_text(encoding="utf-8")
+patch=[{"op":"test","path":"/metadata/resourceVersion","value":md["resourceVersion"]},{"op":"test","path":"/metadata/uid","value":md["uid"]},{"op":"test","path":"/data/wal.json","value":old},{"op":"replace","path":"/data/wal.json","value":new}]
+pathlib.Path(os.environ["PATCH"]).write_text(json.dumps(patch,separators=(",",":")),encoding="utf-8")
+PY
+  bounded_kubectl 15 -n fugue-system patch "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" --type=json --patch-file "${patch}" -o json >"${directory}/configmap-after-wal.json" || return
+  NEXT="${next}" READBACK="${directory}/configmap-after-wal.json" python3 - <<'PY'
+import json,os,pathlib
+cm=json.load(open(os.environ["READBACK"],encoding="utf-8")); raw=(cm.get("data") or {}).get("wal.json")
+if not isinstance(raw,str) or raw.encode()!=pathlib.Path(os.environ["NEXT"]).read_bytes(): raise SystemExit(1)
+PY
+  cp "${next}" "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" || return
+}
+
+control_plane_m16_observed_recovery_attach_lease_plan() {
+  local lease_file="$1"
+  local directory="$2"
+  local patch="${directory}/lease-plan-patch.json"
+  LEASE="${lease_file}" PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" PATCH="${patch}" CM_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" python3 - <<'PY'
+import hashlib,json,os,pathlib
+lease=json.load(open(os.environ["LEASE"],encoding="utf-8")); plan=json.load(open(os.environ["PLAN"],encoding="utf-8"))
+md=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=dict(md.get("annotations") or {})
+token=str(annotations.get("fugue.pro/coordination-token") or "")
+if md.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or md.get("resourceVersion")!="68219206": raise SystemExit(1)
+if spec.get("holderIdentity")!="release/30836591717-1" or str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true": raise SystemExit(1)
+if "sha256:"+hashlib.sha256(token.encode()).hexdigest()!="sha256:5fb35a7ec0f85dd18fbd552c610c0add0e1c015f6417db6bc0c68444e72d9d9a": raise SystemExit(1)
+if set(annotations)!={"fugue.pro/coordination-token","fugue.pro/recovery-required"}: raise SystemExit(1)
+annotations["fugue.pro/observed-recovery-plan-digest"]=plan["digest"]
+annotations["fugue.pro/observed-recovery-configmap-uid"]=os.environ["CM_UID"]
+patch=[{"op":"test","path":"/metadata/resourceVersion","value":md["resourceVersion"]},{"op":"test","path":"/metadata/uid","value":md["uid"]},{"op":"test","path":"/spec/holderIdentity","value":spec["holderIdentity"]},{"op":"test","path":"/metadata/annotations/fugue.pro~1coordination-token","value":token},{"op":"test","path":"/metadata/annotations/fugue.pro~1recovery-required","value":"true"},{"op":"add","path":"/metadata/annotations","value":annotations}]
+pathlib.Path(os.environ["PATCH"]).write_text(json.dumps(patch,separators=(",",":")),encoding="utf-8")
+PY
+  bounded_kubectl 15 -n fugue-system patch lease/fugue-fugue-control-plane-db-backup --type=json --patch-file "${patch}" -o json >"${directory}/lease-plan-attached.json" || return
+  PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" LEASE="${directory}/lease-plan-attached.json" CM_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" python3 - <<'PY'
+import hashlib,json,os
+plan=json.load(open(os.environ["PLAN"],encoding="utf-8")); lease=json.load(open(os.environ["LEASE"],encoding="utf-8"))
+md=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=md.get("annotations") or {}; token=str(annotations.get("fugue.pro/coordination-token") or "")
+if md.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or spec.get("holderIdentity")!="release/30836591717-1": raise SystemExit(1)
+if annotations.get("fugue.pro/observed-recovery-plan-digest")!=plan["digest"] or annotations.get("fugue.pro/observed-recovery-configmap-uid")!=os.environ["CM_UID"]: raise SystemExit(1)
+if str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true" or "sha256:"+hashlib.sha256(token.encode()).hexdigest()!="sha256:5fb35a7ec0f85dd18fbd552c610c0add0e1c015f6417db6bc0c68444e72d9d9a": raise SystemExit(1)
+PY
+}
+
+control_plane_m16_observed_recovery_release_lease() {
+  local directory="$1"
+  local lease="${directory}/lease-before-release.json"
+  local patch="${directory}/lease-release-patch.json"
+  stop_control_plane_backup_coordination_lease_renewer || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${lease}" || return
+  LEASE="${lease}" PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" CM_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" PATCH="${patch}" python3 - <<'PY'
+import hashlib,json,os,pathlib
+lease=json.load(open(os.environ["LEASE"],encoding="utf-8")); plan=json.load(open(os.environ["PLAN"],encoding="utf-8"))
+md=lease.get("metadata") or {}; spec=lease.get("spec") or {}; annotations=dict(md.get("annotations") or {}); token=str(annotations.get("fugue.pro/coordination-token") or "")
+if md.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or not md.get("resourceVersion") or spec.get("holderIdentity")!="release/30836591717-1": raise SystemExit(1)
+if "sha256:"+hashlib.sha256(token.encode()).hexdigest()!="sha256:5fb35a7ec0f85dd18fbd552c610c0add0e1c015f6417db6bc0c68444e72d9d9a": raise SystemExit(1)
+if annotations.get("fugue.pro/observed-recovery-plan-digest")!=plan["digest"] or annotations.get("fugue.pro/observed-recovery-configmap-uid")!=os.environ["CM_UID"] or str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true": raise SystemExit(1)
+for key in ("fugue.pro/coordination-token","fugue.pro/recovery-required","fugue.pro/observed-recovery-plan-digest","fugue.pro/observed-recovery-configmap-uid"): annotations.pop(key,None)
+patch=[{"op":"test","path":"/metadata/resourceVersion","value":md["resourceVersion"]},{"op":"test","path":"/metadata/uid","value":md["uid"]},{"op":"test","path":"/spec/holderIdentity","value":spec["holderIdentity"]},{"op":"test","path":"/metadata/annotations/fugue.pro~1coordination-token","value":token},{"op":"test","path":"/metadata/annotations/fugue.pro~1observed-recovery-plan-digest","value":plan["digest"]},{"op":"add","path":"/metadata/annotations","value":annotations},{"op":"add","path":"/spec/holderIdentity","value":""},{"op":"add","path":"/spec/leaseDurationSeconds","value":120}]
+pathlib.Path(os.environ["PATCH"]).write_text(json.dumps(patch,separators=(",",":")),encoding="utf-8")
+PY
+  bounded_kubectl 15 -n fugue-system patch lease/fugue-fugue-control-plane-db-backup --type=json --patch-file "${patch}" -o json >"${directory}/lease-released.json" || return
+  LEASE="${directory}/lease-released.json" python3 - <<'PY'
+import json,os
+lease=json.load(open(os.environ["LEASE"],encoding="utf-8")); annotations=(lease.get("metadata") or {}).get("annotations") or {}; holder=str((lease.get("spec") or {}).get("holderIdentity") or "")
+if holder or any(key in annotations for key in ("fugue.pro/coordination-token","fugue.pro/recovery-required","fugue.pro/observed-recovery-plan-digest","fugue.pro/observed-recovery-configmap-uid")): raise SystemExit(1)
+PY
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
+  CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="false"
+}
+
+control_plane_m16_observed_recovery_build_helm_argv() {
+  CONTROL_PLANE_HOTFIX_HELM_ARGV=(
+    helm upgrade fugue deploy/helm/fugue
+    -n fugue-system
+    --reset-then-reuse-values
+    --no-hooks
+    --history-max 20
+    --timeout 10m0s
+    --wait
+  )
+  if [[ -n "${HELM_POST_RENDERER_FILE:-}" ]]; then
+    [[ -x "${HELM_POST_RENDERER_FILE}" ]] || return 1
+    CONTROL_PLANE_HOTFIX_HELM_ARGV+=(--post-renderer "${HELM_POST_RENDERER_FILE}")
+  fi
+}
+
+control_plane_m16_observed_recovery_server_render() {
+  local directory="$1"
+  local prefix="$2"
+  HELM_POST_RENDERER_FILE=""
+  HELM_POST_RENDERER_ARGS=()
+  control_plane_m16_observed_recovery_build_helm_argv || return
+  run_release_long_command 630 "observed recovery deterministic server render" \
+    "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" --dry-run=server --output json >"${directory}/${prefix}.json" || return
+  ENVELOPE="${directory}/${prefix}.json" OUTPUT="${directory}/${prefix}.raw" python3 - <<'PY'
+import json,os,pathlib
+envelope=json.load(open(os.environ["ENVELOPE"],encoding="utf-8")); manifest=envelope.get("manifest")
+if not isinstance(manifest,str) or not manifest.strip(): raise SystemExit(1)
+pathlib.Path(os.environ["OUTPUT"]).write_text(manifest,encoding="utf-8")
+PY
+  chmod 600 "${directory}/${prefix}.json" "${directory}/${prefix}.raw"
+}
+
+control_plane_m16_observed_recovery_prepare_render_set() {
+  local directory="$1"
+  local observed_manifest="${directory}/second/helm-manifest-822.yaml"
+  local renderer_digest=""
+  control_plane_m16_observed_recovery_build_raw_target "${directory}/second/helm-manifest-820.yaml" "${observed_manifest}" "${directory}" || return
+  control_plane_m16_observed_recovery_server_render "${directory}" render-one || return
+  control_plane_m16_observed_recovery_server_render "${directory}" render-two || return
+  cmp -s "${directory}/render-one.raw" "${directory}/render-two.raw" || return 1
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=4
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=false
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${directory}/target-controller-template.json")"
+  CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  control_plane_hotfix_prepare_post_renderer || return
+  "${HELM_POST_RENDERER_FILE}" <"${directory}/render-one.raw" >"${directory}/reconstructed-822.yaml" || return
+  cmp -s "${observed_manifest}" "${directory}/reconstructed-822.yaml" || return 1
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${directory}/target-api-template.json")"
+  CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  control_plane_hotfix_prepare_post_renderer || return
+  "${HELM_POST_RENDERER_FILE}" <"${directory}/render-one.raw" >"${directory}/effective-target.yaml" || return
+  cmp -s "${directory}/target.yaml" "${directory}/effective-target.yaml" || return 1
+  "${HELM_POST_RENDERER_FILE}" <"${directory}/render-two.raw" >"${directory}/effective-repeated-target.yaml" || return
+  cmp -s "${directory}/target.yaml" "${directory}/effective-repeated-target.yaml" || return 1
+  renderer_digest="sha256:$(control_plane_release_sha256_stream <"${HELM_POST_RENDERER_FILE}")" || return
+  printf '%s\n' "${renderer_digest}" >"${directory}/renderer-digest"
+  chmod 600 "${directory}/reconstructed-822.yaml" "${directory}/effective-target.yaml" \
+    "${directory}/effective-repeated-target.yaml" "${directory}/renderer-digest" || return
+}
+
+control_plane_m16_observed_recovery_prepare_sealed_argv() {
+  local directory="$1"
+  local wrapper="${directory}/observed-recovery-post-render.py"
+  local raw_digest="" output_digest="" renderer_digest=""
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=4
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${directory}/target-api-template.json")"
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${directory}/target-controller-template.json")"
+  CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  control_plane_hotfix_prepare_post_renderer || return
+  renderer_digest="sha256:$(control_plane_release_sha256_stream <"${HELM_POST_RENDERER_FILE}")" || return
+  IFS=$'\t' read -r raw_digest output_digest < <(PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" python3 - <<'PY'
+import json,os
+plan=json.load(open(os.environ["PLAN"],encoding="utf-8")); print(plan["rawTargetManifestDigest"]+"\t"+plan["targetPostRenderDigest"])
+PY
+) || return
+  [[ "${renderer_digest}" == "$(<"${directory}/renderer-digest")" ]] || return 1
+  INNER="${HELM_POST_RENDERER_FILE}" RAW_DIGEST="${raw_digest}" OUTPUT_DIGEST="${output_digest}" WRAPPER="${wrapper}" python3 - <<'PY'
+import os,pathlib
+payload='''#!/usr/bin/env python3
+import hashlib,subprocess,sys
+INNER=%r; RAW=%r; OUTPUT=%r
+def digest(value): return "sha256:"+hashlib.sha256(value).hexdigest()
+raw=sys.stdin.buffer.read(33554433)
+if not raw or len(raw)>33554432 or digest(raw)!=RAW: raise SystemExit(1)
+try: result=subprocess.run([INNER],input=raw,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=60,check=False)
+except Exception: raise SystemExit(1)
+if result.returncode!=0 or digest(result.stdout)!=OUTPUT: raise SystemExit(1)
+sys.stdout.buffer.write(result.stdout)
+''' % (os.environ["INNER"],os.environ["RAW_DIGEST"],os.environ["OUTPUT_DIGEST"])
+path=pathlib.Path(os.environ["WRAPPER"])
+with path.open("x",encoding="utf-8") as stream: stream.write(payload)
+os.chmod(path,0o700)
+PY
+  HELM_POST_RENDERER_FILE="${wrapper}"
+  HELM_POST_RENDERER_ARGS=(--post-renderer "${wrapper}")
+  control_plane_m16_observed_recovery_build_helm_argv || return
+  mkdir -m 700 "${directory}/sealed" || return
+  (umask 077; printf '%s\0' "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" >"${directory}/sealed/upgrade-argv.snapshot") || return
+  CONTROL_PLANE_RELEASE_DOMAIN_BUNDLE_DIR="${directory}/sealed"
+  CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_SNAPSHOT="${directory}/sealed/upgrade-argv.snapshot"
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_INPUT_IDENTITIES="${directory}/sealed/argv-input-identities.json"
+  CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_CONTENT_IDENTITY="$(control_plane_release_domain_file_content_identity "${directory}/sealed/upgrade-argv.snapshot")" || return
+  control_plane_release_record_argv_input_identities || return
+  control_plane_release_verify_repository_snapshot "${FUGUE_RELEASE_DOMAIN_BASE_SHA}" "${FUGUE_RELEASE_DOMAIN_TARGET_SHA}" || return
+  { exec 16<&-; } 2>/dev/null || :
+  exec 16<"${directory}/sealed/upgrade-argv.snapshot" || return
+  control_plane_release_domain_verify_open_argv_identity || return
+  CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZED_ARGV_CONTENT_IDENTITY="$(control_plane_release_domain_open_argv_content_identity)" || return
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_AUTHORIZED_ARGV_CONTENT_IDENTITY}" == "${CONTROL_PLANE_RELEASE_DOMAIN_SOURCE_ARGV_CONTENT_IDENTITY}" ]] || return 1
+  CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY=true
+}
+
+control_plane_m16_observed_recovery_build_plan() {
+  local directory="$1"
+  local head_sha="$2"
+  local chart_digest=""
+  cp "${directory}/second/helm-manifest-822.yaml" "${directory}/base.yaml" || return
+  cp "${directory}/second/helm-manifest-820.yaml" "${directory}/hybrid.yaml" || return
+  chmod 600 "${directory}/base.yaml" "${directory}/hybrid.yaml" || return
+  chart_digest="sha256:$(git ls-tree -r HEAD -- deploy/helm/fugue | control_plane_release_sha256_stream)" || return
+  SNAPSHOT="${directory}/second/snapshot.json" ENVELOPE="${directory}/render-one.json" DIRECTORY="${directory}" EXPECTED_SHA="${head_sha}" RUN_ID="${GITHUB_RUN_ID}" CHART_DIGEST="${chart_digest}" python3 - <<'PY'
+import hashlib,json,os,pathlib,secrets
+root=pathlib.Path(os.environ["DIRECTORY"]); snapshot=json.load(open(os.environ["SNAPSHOT"],encoding="utf-8")); envelope=json.load(open(os.environ["ENVELOPE"],encoding="utf-8"))
+def digest(value): return "sha256:"+hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+def file_digest(name): return "sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest()
+values_digest=digest(envelope.get("config"))
+if values_digest!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81": raise SystemExit(1)
+renderer=(root/"renderer-digest").read_text(encoding="ascii").strip()
+value={"planVersion":4,"expectedSha":os.environ["EXPECTED_SHA"],"runId":os.environ["RUN_ID"],"runAttempt":1,"namespace":"fugue-system","releaseName":"fugue","releaseFullname":"fugue-fugue","helmRevision":822,"helmStatus":"deployed","helmRecordDigest":snapshot["helmRecordDigest"],"baseValuesDigest":values_digest,"targetValuesDigest":values_digest,"hybridValuesDigest":values_digest,"rawTargetManifestDigest":file_digest("render-one.raw"),"targetPostRenderDigest":file_digest("target.yaml"),"nonApiEdgeRestorePlanDigest":renderer,"chartTreeDigest":os.environ["CHART_DIGEST"],"fence":secrets.token_hex(24),"nonce":secrets.token_hex(24),"confirm":"CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717","kubernetes":snapshot["kubernetes"],"lease":snapshot["lease"],"originRunId":"30836591717","originRunAttempt":1,"originSourceSha":"fbfa707084d429176783354745043b5c12b3b488","archivedRevision":820,"archivedManifestDigest":"sha256:c329cecdb34afa206284c5b7fcb943b2548fdb66aee45f084a590139181589e9","observedManifestDigest":"sha256:c4f4985576b469fe8fba4bea5133b9dfc79002405a166392f75e291d2b560bab","archivedValuesDigest":values_digest,"observedValuesDigest":values_digest,"recoveryBasis":"independent-observed-state","recoveryConfigMapName":"fugue-fugue-controller-m16-observed-recovery-30836591717"}
+(root/"input.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+PY
+  chmod 600 "${directory}/input.json" || return
+  FUGUE_CONTROL_PLANE_HOTFIX_BUILD_PLAN=true FUGUE_CONTROL_PLANE_HOTFIX_BUILD_DIR="${directory}" \
+    go run ./cmd/fugue-control-plane-hotfix-adoption >"${directory}/plan.json" || return
+  chmod 600 "${directory}/plan.json" || return
+  FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY=true FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
+    go run ./cmd/fugue-control-plane-hotfix-adoption <"${directory}/plan.json" || return
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE="${directory}/plan.json"
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE="${directory}/wal.json"
+  control_plane_m16_observed_recovery_write_wal prepared "" "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" || return
+}
+
+control_plane_m16_observed_recovery_verify_target() {
+  local directory="$1"
+  local before="$2"
+  local other_digest=""
+  mkdir -m 700 "${directory}" || return
+  run_release_long_command 30 "observed recovery Helm823 status read" helm status fugue -n fugue-system -o json >"${directory}/helm-status.json" || return
+  run_release_long_command 30 "observed recovery Helm823 manifest read" helm get manifest fugue -n fugue-system --revision 823 >"${directory}/helm-manifest.yaml" || return
+  run_release_long_command 30 "observed recovery Helm823 values read" helm get values fugue -n fugue-system --all --revision 823 -o json >"${directory}/helm-values.json" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/api-deployment.json" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-controller -o json >"${directory}/controller-deployment.json" || return
+  bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/api-pods.json" || return
+  bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=controller -o json >"${directory}/controller-pods.json" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-controller -o json >"${directory}/controller-leader.json" || return
+  bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${directory}/lease.json" || return
+  local pod_names=""
+  pod_names="$(DIRECTORY="${directory}" python3 - <<'PY'
+import json,os,re
+pods=json.load(open(os.path.join(os.environ["DIRECTORY"],"controller-pods.json"),encoding="utf-8")).get("items") or []
+names=sorted((item.get("metadata") or {}).get("name") for item in pods)
+if len(names)!=2 or any(not isinstance(name,str) or re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?",name) is None for name in names): raise SystemExit(1)
+print("\n".join(names))
+PY
+)" || return
+  while IFS= read -r pod_name; do
+    [[ -n "${pod_name}" ]] || continue
+    bounded_kubectl 15 get --raw "/api/v1/namespaces/fugue-system/pods/${pod_name}:9090/proxy/metrics" >"${directory}/metrics-${pod_name}" || return
+  done <<<"${pod_names}"
+  local health_index=0
+  for health_url in https://api.fugue.pro/healthz https://oaix.fugue.pro/healthz https://argus.fugue.pro/healthz https://uni-"api"-web.fugue.pro/healthz; do
+    health_index=$((health_index + 1))
+    run_with_wall_timeout 15 curl --silent --show-error --max-time 10 -o "${directory}/health-${health_index}.body" -w '%{http_code}' "${health_url}" >"${directory}/health-${health_index}.status" || return
+  done
+  control_plane_m16_observed_recovery_capture_active_operations "${directory}/active-operations.json" || return
+  other_digest="$(control_plane_m16_observed_recovery_other_workload_digest)" || return
+  [[ "${other_digest}" == "sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9" ]] || return 1
+  chmod 600 "${directory}"/* || return
+  DIRECTORY="${directory}" BEFORE="${before}" TARGET="$(dirname "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}")/target.yaml" TARGET_API="$(dirname "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}")/target-api-template.json" PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" CM_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" OTHER_DIGEST="${other_digest}" python3 - <<'PY'
+import hashlib,json,os,pathlib,re
+root=pathlib.Path(os.environ["DIRECTORY"]); before=pathlib.Path(os.environ["BEFORE"])
+def load(path): return json.load(open(path,encoding="utf-8"))
+def digest(value): return "sha256:"+hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+status=load(root/"helm-status.json")
+if status.get("version")!=823 or str((status.get("info") or {}).get("status") or "").lower()!="deployed": raise SystemExit(1)
+if (root/"helm-manifest.yaml").read_bytes()!=pathlib.Path(os.environ["TARGET"]).read_bytes(): raise SystemExit(1)
+if digest(load(root/"helm-values.json"))!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81": raise SystemExit(1)
+expected_api=load(pathlib.Path(os.environ["TARGET_API"])); api=load(root/"api-deployment.json"); controller=load(root/"controller-deployment.json")
+api_md=api.get("metadata") or {}; api_spec=api.get("spec") or {}; api_status=api.get("status") or {}; api_template=api_spec.get("template") or {}; api_ann=(api_template.get("metadata") or {}).get("annotations") or {}; api_images=[item.get("image") for item in (api_template.get("spec") or {}).get("containers") or [] if item.get("name")=="api"]
+if api_md.get("uid")!="2141262d-0af5-4727-a357-05aef5705d2d" or api_md.get("generation")!=719 or api_status.get("observedGeneration")!=719 or api_md.get("resourceVersion")=="68219187": raise SystemExit(1)
+if api_ann.get("fugue.pro/source-commit")!="57dc767999741cea25fe4820a6c9603984dfa0b9" or api_images!=["ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3"] or api_template!=expected_api or digest(api_template)!="sha256:8f968c53573213ee136e1d75b08cd6b9ac8fe2d03c5006769c56ae755c6f5fa2": raise SystemExit(1)
+if api_spec.get("replicas")!=2 or any(int(api_status.get(key) or 0)!=2 for key in ("replicas","readyReplicas","updatedReplicas","availableReplicas")) or int(api_status.get("unavailableReplicas") or 0)!=0: raise SystemExit(1)
+api_ready=[]
+for pod in load(root/"api-pods.json").get("items") or []:
+    ps=pod.get("status") or {}; conditions=ps.get("conditions") or []; states=[item for item in ps.get("containerStatuses") or [] if item.get("name")=="api"]
+    if ps.get("phase")=="Running" and any(item.get("type")=="Ready" and item.get("status")=="True" for item in conditions):
+        if len(states)!=1 or not states[0].get("ready"): raise SystemExit(1)
+        api_ready.append(states[0].get("imageID"))
+if len(api_ready)!=2 or any(not str(item).endswith("sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3") for item in api_ready): raise SystemExit(1)
+cm=controller.get("metadata") or {}; cs=controller.get("spec") or {}; cstatus=controller.get("status") or {}; ct=cs.get("template") or {}; ca=(ct.get("metadata") or {}).get("annotations") or {}; ci=[item.get("image") for item in (ct.get("spec") or {}).get("containers") or [] if item.get("name")=="controller"]
+if cm.get("uid")!="1506c314-3e53-4812-ba06-5a52145e565e" or cm.get("generation")!=693 or cstatus.get("observedGeneration")!=693 or digest(ct)!="sha256:956addd69a1e8a4f127f06ef4256774942b5e4e6b4379589fab53b4a0819f5db": raise SystemExit(1)
+if ca.get("fugue.pro/source-commit")!="d1e7ed9cdedbaa09db9bd78b4e433b94c7357510" or ci!=["ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"] or any(int(cstatus.get(key) or 0)!=2 for key in ("replicas","readyReplicas","updatedReplicas","availableReplicas")): raise SystemExit(1)
+before_pods=sorted((item.get("metadata") or {}).get("name") for item in load(before/"controller-pods.json").get("items") or []); after_pods=sorted((item.get("metadata") or {}).get("name") for item in load(root/"controller-pods.json").get("items") or [])
+if before_pods!=after_pods or len(after_pods)!=2: raise SystemExit(1)
+for pod in load(root/"controller-pods.json").get("items") or []:
+    states=[item for item in (pod.get("status") or {}).get("containerStatuses") or [] if item.get("name")=="controller"]
+    if len(states)!=1 or not states[0].get("ready") or not str(states[0].get("imageID") or "").endswith("sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"): raise SystemExit(1)
+leader=load(root/"controller-leader.json"); holder=str((leader.get("spec") or {}).get("holderIdentity") or "")
+if holder not in after_pods: raise SystemExit(1)
+active=[]
+for pod in after_pods:
+    raw=(root/("metrics-"+pod)).read_text(encoding="utf-8")
+    samples=re.findall(r'^fugue_controller_leader_active(?:\{[^\n]*\})? ([01](?:\.0+)?)$',raw,re.MULTILINE)
+    if len(samples)!=1 or 'fugue_component_info{component="controller"} 1.000000' not in raw: raise SystemExit(1)
+    if float(samples[0])==1: active.append(pod)
+if active!=[holder]: raise SystemExit(1)
+for index in range(1,5):
+    if (root/f"health-{index}.status").read_text(encoding="ascii")!="200": raise SystemExit(1)
+operations=load(root/"active-operations.json")
+if set(operations)!={"operations"} or operations["operations"]!=[] or digest(operations["operations"])!="sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945": raise SystemExit(1)
+lease=load(root/"lease.json"); lm=lease.get("metadata") or {}; ls=lease.get("spec") or {}; la=lm.get("annotations") or {}; plan=load(os.environ["PLAN"])
+if lm.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or ls.get("holderIdentity")!="release/30836591717-1" or str(la.get("fugue.pro/recovery-required") or "").lower()!="true": raise SystemExit(1)
+if la.get("fugue.pro/observed-recovery-plan-digest")!=plan["digest"] or la.get("fugue.pro/observed-recovery-configmap-uid")!=os.environ["CM_UID"]: raise SystemExit(1)
+if os.environ["OTHER_DIGEST"]!="sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9": raise SystemExit(1)
+(root/"verified.json").write_text(json.dumps({"activeOperationsDigest":"sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","apiGeneration":719,"controllerGeneration":693,"controllerPods":after_pods,"helmRevision":823,"otherWorkloadsDigest":os.environ["OTHER_DIGEST"],"status":"verified"},sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+PY
+  chmod 600 "${directory}/verified.json"
+}
+
+control_plane_m16_observed_recovery_seal_receipt() {
+  local directory="$1"
+  local cm="${directory}/configmap-before-receipt.json"
+  local receipt="${directory}/terminal-receipt.json"
+  local patch="${directory}/configmap-receipt-patch.json"
+  bounded_kubectl 15 -n fugue-system get "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" -o json >"${cm}" || return
+  PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" WAL="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" VERIFIED="${directory}/verified.json" RECEIPT="${receipt}" python3 - <<'PY'
+import json,os,pathlib
+plan=json.load(open(os.environ["PLAN"],encoding="utf-8")); wal=json.load(open(os.environ["WAL"],encoding="utf-8")); verified=json.load(open(os.environ["VERIFIED"],encoding="utf-8"))
+if wal.get("phase")!="sealed" or wal.get("recoveryRequired") is not False: raise SystemExit(1)
+receipt={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneControllerM16ObservedRecoveryReceipt","originRunId":"30836591717","originRunAttempt":1,"originSourceSha":"fbfa707084d429176783354745043b5c12b3b488","planDigest":plan["digest"],"walDigest":wal["digest"],"helmRevision":823,"runtimeControllerSource":"d1e7ed9cdedbaa09db9bd78b4e433b94c7357510","runtimeControllerImage":"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","runtimeAPISource":"57dc767999741cea25fe4820a6c9603984dfa0b9","runtimeAPIImage":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","status":"verified-fence-released","verification":verified}
+pathlib.Path(os.environ["RECEIPT"]).write_text(json.dumps(receipt,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+PY
+  chmod 600 "${receipt}" || return
+  CM="${cm}" RECEIPT="${receipt}" PATCH="${patch}" EXPECTED_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" python3 - <<'PY'
+import json,os,pathlib
+cm=json.load(open(os.environ["CM"],encoding="utf-8")); md=cm.get("metadata") or {}; data=cm.get("data") or {}
+if md.get("uid")!=os.environ["EXPECTED_UID"] or not md.get("resourceVersion") or "terminal-receipt.json" in data: raise SystemExit(1)
+raw=pathlib.Path(os.environ["RECEIPT"]).read_text(encoding="utf-8")
+patch=[{"op":"test","path":"/metadata/resourceVersion","value":md["resourceVersion"]},{"op":"test","path":"/metadata/uid","value":md["uid"]},{"op":"add","path":"/data/terminal-receipt.json","value":raw}]
+pathlib.Path(os.environ["PATCH"]).write_text(json.dumps(patch,separators=(",",":")),encoding="utf-8")
+PY
+  bounded_kubectl 15 -n fugue-system patch "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" --type=json --patch-file "${patch}" -o json >"${directory}/configmap-terminal.json" || return
+  RECEIPT="${receipt}" CM="${directory}/configmap-terminal.json" python3 - <<'PY'
+import json,os,pathlib
+cm=json.load(open(os.environ["CM"],encoding="utf-8")); raw=(cm.get("data") or {}).get("terminal-receipt.json")
+if not isinstance(raw,str) or raw.encode()!=pathlib.Path(os.environ["RECEIPT"]).read_bytes(): raise SystemExit(1)
+PY
+}
+
+run_control_plane_controller_m16_observed_recovery_v1() {
+  local evidence_dir="${FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_EVIDENCE_DIR:-}"
+  local work_dir="" head_sha="" changed_files="" fields="" helm_status=0 unknown_recorded=false
+  (( $# == 0 )) || return 2
+  [[ "${FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM:-}" == "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717" ]] || return 1
+  cd "${REPO_ROOT}" || return
+  head_sha="$(git rev-parse --verify HEAD)" || return
+  [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "fbfa707084d429176783354745043b5c12b3b488" && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
+  [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1
+  [[ "${evidence_dir}" == /* && -d "${evidence_dir}" && ! -L "${evidence_dir}" && "$(stat -c '%a' "${evidence_dir}")" == 700 ]] || return 1
+  [[ -z "$(find "${evidence_dir}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || return 1
+  EVIDENCE_DIR="${evidence_dir}" HEAD_SHA="${head_sha}" RUN_ID="${GITHUB_RUN_ID}" python3 - <<'PY'
+import json,os,pathlib
+value={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneControllerM16ObservedRecoveryInvocation","expectedSha":os.environ["HEAD_SHA"],"originRunId":"30836591717","originRunAttempt":1,"originSourceSha":"fbfa707084d429176783354745043b5c12b3b488","observedHelmRevision":822,"workflowRunId":os.environ["RUN_ID"],"workflowRunAttempt":1}
+pathlib.Path(os.environ["EVIDENCE_DIR"],"invocation.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+PY
+  chmod 600 "${evidence_dir}/invocation.json" || return
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_HELM_CHART_PATH=deploy/helm/fugue
+  FUGUE_HELM_TIMEOUT=10m0s
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME=fugue-fugue-control-plane-db-backup
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE=fugue-system
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS=120
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=30
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=15
+  FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"
+  FUGUE_DEPLOY_JOB_BUDGET_SECONDS=1800
+  FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=600
+  FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=60
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0
+  initialize_control_plane_release_job_deadline || return
+  KUBECTL="$(detect_kubectl)" || return
+  export KUBECTL GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
+  FUGUE_RELEASE_DOMAIN_BASE_SHA="${head_sha}"
+  FUGUE_RELEASE_DOMAIN_TARGET_SHA="${head_sha}"
+  PREVIOUS_REVISION=822
+  work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-controller-m16-observed-recovery.XXXXXX")" || return
+  chmod 700 "${work_dir}" || return
+  CONTROL_PLANE_HOTFIX_WORK_DIR="${work_dir}"
+  trap control_plane_hotfix_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  control_plane_m16_observed_recovery_capture "${work_dir}/first" || return
+  control_plane_m16_observed_recovery_capture "${work_dir}/second" || return
+  FIRST="${work_dir}/first/snapshot.json" SECOND="${work_dir}/second/snapshot.json" python3 - <<'PY'
+import json,os
+first=json.load(open(os.environ["FIRST"],encoding="utf-8")); second=json.load(open(os.environ["SECOND"],encoding="utf-8"))
+for value in (first,second):
+    value["kubernetes"].pop("controllerLeaderLeaseResourceVersion",None)
+if first!=second: raise SystemExit(1)
+PY
+  control_plane_m16_observed_recovery_prepare_render_set "${work_dir}" || return
+  control_plane_m16_observed_recovery_build_plan "${work_dir}" "${head_sha}" || return
+  control_plane_m16_observed_recovery_capture "${work_dir}/prewrite" || return
+  SECOND="${work_dir}/second/snapshot.json" PREWRITE="${work_dir}/prewrite/snapshot.json" python3 - <<'PY'
+import json,os
+second=json.load(open(os.environ["SECOND"],encoding="utf-8")); prewrite=json.load(open(os.environ["PREWRITE"],encoding="utf-8"))
+for value in (second,prewrite): value["kubernetes"].pop("controllerLeaderLeaseResourceVersion",None)
+if second!=prewrite: raise SystemExit(1)
+PY
+  cp "${work_dir}/plan.json" "${evidence_dir}/observed-recovery-plan.json" || return
+  cp "${work_dir}/wal.json" "${evidence_dir}/prepared-wal.json" || return
+  cp "${work_dir}/document-digests.json" "${evidence_dir}/document-digests.json" || return
+  cp "${work_dir}/prewrite/snapshot.json" "${evidence_dir}/prewrite-snapshot.json" || return
+  chmod 600 "${evidence_dir}"/* || return
+
+  fields="$(control_plane_m16_observed_recovery_create_configmap "${work_dir}")" || return
+  IFS=$'\t' read -r CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_VERSION extra <<<"${fields}"
+  [[ -z "${extra:-}" && -n "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" && "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_VERSION}" =~ ^[0-9]+$ ]] || return 1
+  control_plane_m16_observed_recovery_attach_lease_plan "${work_dir}/prewrite/lease.json" "${work_dir}" || return
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER="release/30836591717-1"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN="$(<"${work_dir}/prewrite/coordination-token")"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED=true
+  CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=true
+  control_plane_m16_observed_recovery_update_configmap_wal fence-persisted "${work_dir}" || return
+  renew_control_plane_backup_coordination_lease || return
+  start_control_plane_backup_coordination_lease_renewer || return
+  require_control_plane_backup_coordination_or_abort "observed recovery pre-Helm" || return
+  control_plane_m16_observed_recovery_update_configmap_wal helm-started "${work_dir}" || return
+  control_plane_m16_observed_recovery_prepare_sealed_argv "${work_dir}" || return
+  if control_plane_release_domain_execute_sealed_helm_upgrade; then
+    helm_status=0
+  else
+    helm_status=$?
+    control_plane_m16_observed_recovery_update_configmap_wal commit-unknown "${work_dir}" || return
+    unknown_recorded=true
+  fi
+  if ! control_plane_m16_observed_recovery_verify_target "${work_dir}/verified" "${work_dir}/prewrite"; then
+    if [[ "${unknown_recorded}" != true ]]; then
+      control_plane_m16_observed_recovery_update_configmap_wal commit-unknown "${work_dir}" || return
+    fi
+    log_stderr "Controller M16 observed recovery is commit-unknown; retained the new ConfigMap and Lease fence"
+    if (( helm_status == 0 )); then helm_status=1; fi
+    return "${helm_status:-1}"
+  fi
+  control_plane_m16_observed_recovery_update_configmap_wal helm-committed "${work_dir}" || return
+  control_plane_m16_observed_recovery_update_configmap_wal verified "${work_dir}" || return
+  cp "${work_dir}/verified/verified.json" "${evidence_dir}/verified-before-fence-release.json" || return
+  chmod 600 "${evidence_dir}/verified-before-fence-release.json" || return
+  control_plane_m16_observed_recovery_release_lease "${work_dir}" || return
+  control_plane_m16_observed_recovery_update_configmap_wal sealed "${work_dir}" || return
+  control_plane_m16_observed_recovery_seal_receipt "${work_dir}/verified" || return
+  cp "${work_dir}/wal.json" "${evidence_dir}/terminal-wal.json" || return
+  cp "${work_dir}/verified/verified.json" "${evidence_dir}/verified.json" || return
+  cp "${work_dir}/verified/terminal-receipt.json" "${evidence_dir}/terminal-receipt.json" || return
+  cp "${work_dir}/lease-released.json" "${evidence_dir}/lease-released.json" || return
+  chmod 600 "${evidence_dir}"/* || return
+  CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED=false
+  CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+  log "Controller M16 independent observed-state recovery verified at Helm823 and released the retained fence"
 }
 
 control_plane_api_hotfix_recovery_capture() {
@@ -22978,6 +23780,11 @@ fi
 
 if [[ "${FUGUE_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1:-false}" == "true" ]]; then
   run_control_plane_controller_m16_rollout_v1 "$@"
+  exit $?
+fi
+
+if [[ "${FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1:-false}" == "true" ]]; then
+  run_control_plane_controller_m16_observed_recovery_v1 "$@"
   exit $?
 fi
 

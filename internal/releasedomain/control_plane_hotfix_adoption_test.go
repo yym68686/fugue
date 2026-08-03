@@ -1008,3 +1008,211 @@ func hotfixManifest(t *testing.T, source, image, extra string) []byte {
 	}
 	return rendered
 }
+
+func TestBuildControlPlaneControllerM16ObservedRecoveryPlan(t *testing.T) {
+	t.Parallel()
+
+	plan, _ := validBuiltControlPlaneControllerM16ObservedRecoveryPlan(t)
+	if plan.Kind != ControlPlaneControllerM16ObservedRecoveryPlanKind || plan.Policy != ControlPlaneControllerM16ObservedRecoveryPolicyV4 {
+		t.Fatalf("unexpected observed recovery identity: %+v", plan)
+	}
+	if plan.BaseRevision != 822 || plan.TargetRevision != 823 || plan.ArchivedRevision != 820 {
+		t.Fatalf("unexpected observed recovery revisions: %+v", plan)
+	}
+	if plan.RecoveryBasis != "independent-observed-state" || plan.OriginRunID != "30836591717" {
+		t.Fatalf("new plan could masquerade as the missing original WAL: %+v", plan)
+	}
+	if plan.ObservedAPITemplateDigest == plan.TargetAPITemplateDigest || plan.TargetAPITemplateDigest != plan.HybridAPITemplateDigest {
+		t.Fatalf("API recovery template binding is invalid: %+v", plan)
+	}
+	if plan.ObservedControllerTemplateDigest != plan.TargetControllerTemplateDigest {
+		t.Fatalf("Controller would roll during observed recovery: %+v", plan)
+	}
+}
+
+func TestControlPlaneControllerM16ObservedRecoveryRejectsBindingDrift(t *testing.T) {
+	t.Parallel()
+
+	_, valid := validBuiltControlPlaneControllerM16ObservedRecoveryPlan(t)
+	tests := map[string]func(*ControlPlaneHotfixAdoptionInput){
+		"origin run":     func(value *ControlPlaneHotfixAdoptionInput) { value.OriginRunID = "30836591718" },
+		"origin attempt": func(value *ControlPlaneHotfixAdoptionInput) { value.OriginRunAttempt = 2 },
+		"origin SHA":     func(value *ControlPlaneHotfixAdoptionInput) { value.OriginSourceSHA = strings.Repeat("9", 40) },
+		"API UID":        func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.APIUID = "wrong" },
+		"API RV":         func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.APIResourceVersion = "1" },
+		"Controller UID": func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerUID = "wrong" },
+		"Controller RV":  func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerResourceVersion = "1" },
+		"active operation": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.Kubernetes.ActiveOperationsDigest = "sha256:" + strings.Repeat("3", 64)
+		},
+		"Lease UID": func(value *ControlPlaneHotfixAdoptionInput) { value.Lease.UID = "wrong" },
+		"Lease RV":  func(value *ControlPlaneHotfixAdoptionInput) { value.Lease.ResourceVersion = "1" },
+		"Lease token": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.Lease.CoordinationTokenDigest = "sha256:" + strings.Repeat("1", 64)
+		},
+		"Helm revision": func(value *ControlPlaneHotfixAdoptionInput) { value.HelmRevision = 821 },
+		"archive digest": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.ArchivedManifestDigest = "sha256:" + strings.Repeat("2", 64)
+		},
+		"old WAL claim": func(value *ControlPlaneHotfixAdoptionInput) { value.RecoveryBasis = "prior-wal" },
+	}
+	for name, mutate := range tests {
+		name, mutate := name, mutate
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			mutate(&changed)
+			if _, err := BuildControlPlaneHotfixAdoptionPlan(changed); err == nil {
+				t.Fatalf("observed recovery accepted drifted %s", name)
+			}
+		})
+	}
+}
+
+func TestControlPlaneControllerM16ObservedRecoveryWALDurability(t *testing.T) {
+	t.Parallel()
+
+	plan, _ := validBuiltControlPlaneControllerM16ObservedRecoveryPlan(t)
+	wal, err := NewControlPlaneHotfixAdoptionWAL(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wal.Kind != ControlPlaneControllerM16ObservedRecoveryWALKind || wal.Phase != "prepared" || !wal.RecoveryRequired || wal.HelmAttempts != 0 {
+		t.Fatalf("prepared observed recovery WAL is invalid: %+v", wal)
+	}
+	for _, phase := range []string{"fence-persisted", "helm-started", "commit-unknown", "helm-committed", "verified"} {
+		wal, err = AdvanceControlPlaneHotfixAdoptionWAL(wal, phase)
+		if err != nil {
+			t.Fatalf("advance to %s: %v", phase, err)
+		}
+		if !wal.RecoveryRequired {
+			t.Fatalf("fence cleared before terminal verification at %s", phase)
+		}
+	}
+	wal, err = AdvanceControlPlaneHotfixAdoptionWAL(wal, "sealed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wal.RecoveryRequired || wal.HelmAttempts != 1 {
+		t.Fatalf("sealed observed recovery WAL is invalid: %+v", wal)
+	}
+	if _, err := AdvanceControlPlaneHotfixAdoptionWAL(wal, "helm-started"); err == nil {
+		t.Fatal("sealed recovery could execute Helm again")
+	}
+}
+
+func TestControlPlaneControllerM16ObservedRecoveryRawDocuments(t *testing.T) {
+	t.Parallel()
+
+	observed := observedRecoveryRawFixture("current-api", "current-controller", "stable")
+	target := observedRecoveryRawFixture("helm820-api", "current-controller", "stable")
+	if err := verifyObservedRecoveryRawDocumentIsolation(observed, target); err != nil {
+		t.Fatalf("valid raw recovery isolation failed: %v", err)
+	}
+	if err := verifyObservedRecoveryRawDocumentIsolation(observed, observedRecoveryRawFixture("helm820-api", "changed-controller", "stable")); err == nil {
+		t.Fatal("Controller raw document drift was accepted")
+	}
+	if err := verifyObservedRecoveryRawDocumentIsolation(observed, observedRecoveryRawFixture("helm820-api", "current-controller", "changed")); err == nil {
+		t.Fatal("non-API raw document drift was accepted")
+	}
+}
+
+func validBuiltControlPlaneControllerM16ObservedRecoveryPlan(t *testing.T) (ControlPlaneHotfixAdoptionPlan, ControlPlaneHotfixAdoptionInput) {
+	t.Helper()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	observed := observedRecoveryManifest(t, "current-api", "current-controller")
+	archived := observedRecoveryManifest(t, "helm820-api", "old-controller")
+	target := observedRecoveryManifest(t, "helm820-api", "current-controller")
+	controllerDigest, err := hotfixManifestTemplateDigest(observed, "fugue-system", "fugue-fugue-controller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := ControlPlaneHotfixAdoptionInput{
+		PlanVersion: 4, ExpectedSHA: strings.Repeat("1", 40), RunID: "30900000001", RunAttempt: 1,
+		Namespace: "fugue-system", ReleaseName: "fugue", ReleaseFullname: "fugue-fugue",
+		HelmRevision: 822, HelmStatus: "deployed", HelmRecordDigest: digest,
+		BaseValuesDigest:        controlPlaneControllerM16ObservedRecoveryValues,
+		TargetValuesDigest:      controlPlaneControllerM16ObservedRecoveryValues,
+		HybridValuesDigest:      controlPlaneControllerM16ObservedRecoveryValues,
+		RawTargetManifestDigest: digest, TargetPostRenderDigest: digest, NonAPIEdgeRestorePlanDigest: digest,
+		ChartTreeDigest: digest, Fence: "observed-recovery-fence-token", Nonce: "observed-recovery-nonce-token",
+		Confirm:     "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717",
+		OriginRunID: controlPlaneControllerM16ObservedRecoveryOriginRunID, OriginRunAttempt: 1,
+		OriginSourceSHA:  controlPlaneControllerM16ObservedRecoveryOriginSource,
+		ArchivedRevision: 820, ArchivedManifestDigest: controlPlaneControllerM16ObservedRecoveryManifest820,
+		ObservedManifestDigest: controlPlaneControllerM16ObservedRecoveryManifest822,
+		ArchivedValuesDigest:   controlPlaneControllerM16ObservedRecoveryValues,
+		ObservedValuesDigest:   controlPlaneControllerM16ObservedRecoveryValues,
+		RecoveryBasis:          "independent-observed-state", RecoveryConfigMapName: controlPlaneControllerM16ObservedRecoveryConfigMap,
+		Kubernetes: ControlPlaneHotfixKubernetesEvidence{
+			APIName: "fugue-fugue-api", APIUID: controlPlaneControllerM16ObservedRecoveryAPIUID,
+			APIResourceVersion: controlPlaneControllerM16ObservedRecoveryAPIRV, APIGeneration: 718, APIObservedGeneration: 718,
+			APITemplateDigest: controlPlaneControllerM16ObservedRecoveryAPILiveTemplate,
+			APIImageRef:       controlPlaneControllerM16ObservedRecoveryAPIImage, APIImageID: "containerd://api",
+			APIHealthDigest: digest, APIReplicas: 2, APIReady: 2, APIUpdated: 2, APIAvailable: 2,
+			ServiceName: "fugue-fugue", ServiceUID: "service-uid", ServiceResourceVersion: "200", ServiceSelectorDigest: digest,
+			EndpointSliceName: "fugue-fugue-abc", EndpointSliceUID: "slice-uid", EndpointSliceResourceVersion: "300",
+			EndpointServiceName: "fugue-fugue", EndpointBindingDigest: digest, ReadyServingEndpoints: 2,
+			ControllerName: "fugue-fugue-controller", ControllerUID: controlPlaneControllerM16ObservedRecoveryControllerUID,
+			ControllerResourceVersion: controlPlaneControllerM16ObservedRecoveryControllerRV, ControllerGeneration: 693, ControllerObservedGeneration: 693,
+			ControllerTemplateDigest: controllerDigest, ControllerImageRef: controlPlaneControllerM16HybridImageV3, ControllerImageID: "containerd://controller",
+			ControllerReplicas: 2, ControllerReady: 2, ControllerUpdated: 2, ControllerAvailable: 2,
+			ControllerLeaderLeaseName: "fugue-fugue-controller", ControllerLeaderLeaseUID: "leader-uid", ControllerLeaderLeaseVersion: "400",
+			ControllerLeaderHolder: "fugue-fugue-controller-abc", ControllerMetricsDigest: digest, ControllerLKGDigest: digest,
+			FrozenNonAPIControllerDigest: controlPlaneControllerM16ObservedRecoveryOtherWorkloads,
+			HealthWitnessDigest:          digest,
+			ActiveOperationsDigest:       controlPlaneControllerM16ObservedRecoveryNoActiveOperations,
+		},
+		Lease: ControlPlaneHotfixLeaseEvidence{
+			Namespace: "fugue-system", Name: "fugue-fugue-control-plane-db-backup",
+			UID: controlPlaneControllerM16ObservedRecoveryLeaseUID, ResourceVersion: controlPlaneControllerM16ObservedRecoveryLeaseRV,
+			HolderIdentity: controlPlaneControllerM16ObservedRecoveryLeaseHolder, RecoveryRequired: true,
+			CoordinationTokenDigest: controlPlaneControllerM16ObservedRecoveryLeaseTokenDigest,
+		},
+		BaseManifest: observed, TargetManifest: target, RepeatedTarget: append([]byte(nil), target...), HybridManifest: archived,
+	}
+	plan, err := BuildControlPlaneHotfixAdoptionPlan(input)
+	if err != nil {
+		t.Fatalf("build valid observed recovery plan: %v", err)
+	}
+	return plan, input
+}
+
+func observedRecoveryManifest(t *testing.T, apiMarker, controllerMarker string) []byte {
+	t.Helper()
+	objects := hotfixObjects{}
+	api := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "fugue-fugue-api", "namespace": "fugue-system"},
+		"spec": map[string]any{"replicas": 2, "strategy": map[string]any{"type": "RollingUpdate", "rollingUpdate": map[string]any{"maxUnavailable": 0, "maxSurge": 1}}, "template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": controlPlaneAPIHotfixTargetSourceV2, "fixture": apiMarker}}, "spec": map[string]any{"containers": []any{map[string]any{"name": "api", "image": controlPlaneControllerM16ObservedRecoveryAPIImage}}}}},
+	}
+	controller := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "fugue-fugue-controller", "namespace": "fugue-system"},
+		"spec": map[string]any{"replicas": 2, "strategy": map[string]any{"type": "RollingUpdate", "rollingUpdate": map[string]any{"maxUnavailable": 0, "maxSurge": 2}}, "template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": controlPlaneControllerM16HybridSourceV3, "fixture": controllerMarker}}, "spec": map[string]any{"containers": []any{map[string]any{"name": "controller", "image": controlPlaneControllerM16HybridImageV3}}}}},
+	}
+	objects[hotfixObjectKey(api)] = api
+	objects[hotfixObjectKey(controller)] = controller
+	for index := 0; index < controlPlaneHotfixManifestObjects-2; index++ {
+		name := fmt.Sprintf("observed-recovery-%02d", index)
+		object := map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": name, "namespace": "fugue-system"}, "data": map[string]any{"value": name}}
+		objects[hotfixObjectKey(object)] = object
+	}
+	rendered, err := encodeHotfixObjects(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
+}
+
+func observedRecoveryRawFixture(apiMarker, controllerMarker, foreignMarker string) []byte {
+	docs := []string{
+		"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fugue-fugue-api\nspec:\n  template:\n    metadata:\n      annotations:\n        fixture: " + apiMarker + "\n",
+		"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: fugue-fugue-controller\nspec:\n  template:\n    metadata:\n      annotations:\n        fixture: " + controllerMarker + "\n",
+	}
+	for index := 0; index < 83; index++ {
+		marker := "stable"
+		if index == 0 {
+			marker = foreignMarker
+		}
+		docs = append(docs, fmt.Sprintf("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: raw-%02d\ndata:\n  value: %s\n", index, marker))
+	}
+	return []byte("---\n" + strings.Join(docs, "---\n"))
+}

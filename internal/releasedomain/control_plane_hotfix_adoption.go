@@ -18,23 +18,48 @@ import (
 )
 
 const (
-	ControlPlaneHotfixAdoptionAPIVersion    = "release-domain.fugue.dev/v1"
-	ControlPlaneHotfixAdoptionPlanKind      = "ControlPlaneHotfixBaselineAdoptionPlan"
-	ControlPlaneHotfixAdoptionWALKind       = "ControlPlaneHotfixBaselineAdoptionWAL"
-	ControlPlaneHotfixAdoptionPolicy        = "control-plane-hotfix-baseline-adoption-v1"
-	ControlPlaneAPIHotfixRolloutPolicyV2    = "control-plane-api-hotfix-rollout-v2"
-	ControlPlaneControllerM16PolicyV3       = "control-plane-controller-m16-rollout-v1"
-	controlPlaneHotfixManifestObjects       = 79
-	controlPlaneHotfixBaseRevision          = 806
-	controlPlaneAPIHotfixBaseRevisionV2     = 819
-	controlPlaneAPIHotfixTargetSourceV2     = "57dc767999741cea25fe4820a6c9603984dfa0b9"
-	controlPlaneAPIHotfixHybridSourceV2     = "a0f5bc0ac36b4e29c4c7928dda1923c2c4727759"
-	controlPlaneAPIHotfixHybridImageV2      = "ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9"
-	controlPlaneControllerM16BaseRevisionV3 = 820
-	controlPlaneControllerM16TargetSourceV3 = "58fc2e560064214e3f329765c9ec7839ee513c27"
-	controlPlaneControllerM16HybridSourceV3 = "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"
-	controlPlaneControllerM16TargetImageV3  = "ghcr.io/yym68686/fugue-controller@sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df"
-	controlPlaneControllerM16HybridImageV3  = "ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"
+	ControlPlaneHotfixAdoptionAPIVersion                        = "release-domain.fugue.dev/v1"
+	ControlPlaneHotfixAdoptionPlanKind                          = "ControlPlaneHotfixBaselineAdoptionPlan"
+	ControlPlaneHotfixAdoptionWALKind                           = "ControlPlaneHotfixBaselineAdoptionWAL"
+	ControlPlaneHotfixAdoptionPolicy                            = "control-plane-hotfix-baseline-adoption-v1"
+	ControlPlaneAPIHotfixRolloutPolicyV2                        = "control-plane-api-hotfix-rollout-v2"
+	ControlPlaneControllerM16PolicyV3                           = "control-plane-controller-m16-rollout-v1"
+	ControlPlaneControllerM16ObservedRecoveryPolicyV4           = "control-plane-controller-m16-observed-recovery-v1"
+	ControlPlaneControllerM16ObservedRecoveryPlanKind           = "ControlPlaneControllerM16ObservedRecoveryPlan"
+	ControlPlaneControllerM16ObservedRecoveryWALKind            = "ControlPlaneControllerM16ObservedRecoveryWAL"
+	controlPlaneHotfixManifestObjects                           = 79
+	controlPlaneHotfixBaseRevision                              = 806
+	controlPlaneAPIHotfixBaseRevisionV2                         = 819
+	controlPlaneAPIHotfixTargetSourceV2                         = "57dc767999741cea25fe4820a6c9603984dfa0b9"
+	controlPlaneAPIHotfixHybridSourceV2                         = "a0f5bc0ac36b4e29c4c7928dda1923c2c4727759"
+	controlPlaneAPIHotfixHybridImageV2                          = "ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9"
+	controlPlaneControllerM16BaseRevisionV3                     = 820
+	controlPlaneControllerM16TargetSourceV3                     = "58fc2e560064214e3f329765c9ec7839ee513c27"
+	controlPlaneControllerM16HybridSourceV3                     = "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"
+	controlPlaneControllerM16TargetImageV3                      = "ghcr.io/yym68686/fugue-controller@sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df"
+	controlPlaneControllerM16HybridImageV3                      = "ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"
+	controlPlaneControllerM16ObservedRecoveryArchivedRevision   = 820
+	controlPlaneControllerM16ObservedRecoveryBaseRevision       = 822
+	controlPlaneControllerM16ObservedRecoveryOriginRunID        = "30836591717"
+	controlPlaneControllerM16ObservedRecoveryOriginSource       = "fbfa707084d429176783354745043b5c12b3b488"
+	controlPlaneControllerM16ObservedRecoveryManifest820        = "sha256:c329cecdb34afa206284c5b7fcb943b2548fdb66aee45f084a590139181589e9"
+	controlPlaneControllerM16ObservedRecoveryManifest822        = "sha256:c4f4985576b469fe8fba4bea5133b9dfc79002405a166392f75e291d2b560bab"
+	controlPlaneControllerM16ObservedRecoveryValues             = "sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81"
+	controlPlaneControllerM16ObservedRecoveryAPILiveTemplate    = "sha256:32f83c5a3b0174c46ca85f9b480a0426dd9351f74309d212cdedc27111aab578"
+	controlPlaneControllerM16ObservedRecoveryAPITargetTemplate  = "sha256:8f968c53573213ee136e1d75b08cd6b9ac8fe2d03c5006769c56ae755c6f5fa2"
+	controlPlaneControllerM16ObservedRecoveryControllerTemplate = "sha256:956addd69a1e8a4f127f06ef4256774942b5e4e6b4379589fab53b4a0819f5db"
+	controlPlaneControllerM16ObservedRecoveryOtherWorkloads     = "sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9"
+	controlPlaneControllerM16ObservedRecoveryNoActiveOperations = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	controlPlaneControllerM16ObservedRecoveryLeaseUID           = "1f0237f0-1799-4ca7-b8bd-6e32e75e391f"
+	controlPlaneControllerM16ObservedRecoveryLeaseRV            = "68219206"
+	controlPlaneControllerM16ObservedRecoveryLeaseHolder        = "release/30836591717-1"
+	controlPlaneControllerM16ObservedRecoveryLeaseTokenDigest   = "sha256:5fb35a7ec0f85dd18fbd552c610c0add0e1c015f6417db6bc0c68444e72d9d9a"
+	controlPlaneControllerM16ObservedRecoveryAPIUID             = "2141262d-0af5-4727-a357-05aef5705d2d"
+	controlPlaneControllerM16ObservedRecoveryAPIRV              = "68219187"
+	controlPlaneControllerM16ObservedRecoveryControllerUID      = "1506c314-3e53-4812-ba06-5a52145e565e"
+	controlPlaneControllerM16ObservedRecoveryControllerRV       = "68219303"
+	controlPlaneControllerM16ObservedRecoveryAPIImage           = "ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3"
+	controlPlaneControllerM16ObservedRecoveryConfigMap          = "fugue-fugue-controller-m16-observed-recovery-30836591717"
 )
 
 var (
@@ -102,15 +127,19 @@ type ControlPlaneHotfixKubernetesEvidence struct {
 	ControllerMetricsDigest      string `json:"controllerMetricsDigest,omitempty"`
 	ControllerLKGDigest          string `json:"controllerLkgDigest,omitempty"`
 	FrozenNonControllerDigest    string `json:"frozenNonControllerWorkloadDigest,omitempty"`
+	FrozenNonAPIControllerDigest string `json:"frozenNonApiControllerWorkloadDigest,omitempty"`
+	HealthWitnessDigest          string `json:"healthWitnessDigest,omitempty"`
+	ActiveOperationsDigest       string `json:"activeOperationsDigest,omitempty"`
 }
 
 type ControlPlaneHotfixLeaseEvidence struct {
-	Namespace        string `json:"namespace"`
-	Name             string `json:"name"`
-	UID              string `json:"uid"`
-	ResourceVersion  string `json:"resourceVersion"`
-	HolderIdentity   string `json:"holderIdentity"`
-	RecoveryRequired bool   `json:"recoveryRequired"`
+	Namespace               string `json:"namespace"`
+	Name                    string `json:"name"`
+	UID                     string `json:"uid"`
+	ResourceVersion         string `json:"resourceVersion"`
+	HolderIdentity          string `json:"holderIdentity"`
+	RecoveryRequired        bool   `json:"recoveryRequired"`
+	CoordinationTokenDigest string `json:"coordinationTokenDigest,omitempty"`
 }
 
 type ControlPlaneHotfixAdoptionInput struct {
@@ -152,54 +181,76 @@ type ControlPlaneHotfixAdoptionInput struct {
 	TargetManifest               []byte                               `json:"-"`
 	RepeatedTarget               []byte                               `json:"-"`
 	HybridManifest               []byte                               `json:"-"`
+	OriginRunID                  string                               `json:"originRunId,omitempty"`
+	OriginRunAttempt             int                                  `json:"originRunAttempt,omitempty"`
+	OriginSourceSHA              string                               `json:"originSourceSha,omitempty"`
+	ArchivedRevision             int64                                `json:"archivedRevision,omitempty"`
+	ArchivedManifestDigest       string                               `json:"archivedManifestDigest,omitempty"`
+	ObservedManifestDigest       string                               `json:"observedManifestDigest,omitempty"`
+	ArchivedValuesDigest         string                               `json:"archivedValuesDigest,omitempty"`
+	ObservedValuesDigest         string                               `json:"observedValuesDigest,omitempty"`
+	RecoveryBasis                string                               `json:"recoveryBasis,omitempty"`
+	RecoveryConfigMapName        string                               `json:"recoveryConfigMapName,omitempty"`
 }
 
 type ControlPlaneHotfixAdoptionPlan struct {
-	PlanVersion                    int                                  `json:"planVersion,omitempty"`
-	APIVersion                     string                               `json:"apiVersion"`
-	Kind                           string                               `json:"kind"`
-	Policy                         string                               `json:"policy"`
-	ExpectedSHA                    string                               `json:"expectedSha"`
-	RunID                          string                               `json:"runId"`
-	RunAttempt                     int                                  `json:"runAttempt"`
-	Namespace                      string                               `json:"namespace"`
-	ReleaseName                    string                               `json:"releaseName"`
-	ReleaseFullname                string                               `json:"releaseFullname"`
-	BaseRevision                   int64                                `json:"baseRevision"`
-	TargetRevision                 int64                                `json:"targetRevision"`
-	BaseStatus                     string                               `json:"baseStatus"`
-	HelmRecordDigest               string                               `json:"helmRecordDigest"`
-	BaseValuesDigest               string                               `json:"baseValuesDigest"`
-	TargetValuesDigest             string                               `json:"targetValuesDigest"`
-	HybridValuesDigest             string                               `json:"hybridValuesDigest,omitempty"`
-	RawTargetManifestDigest        string                               `json:"rawTargetManifestDigest,omitempty"`
-	RawHybridManifestDigest        string                               `json:"rawHybridManifestDigest,omitempty"`
-	TargetPostRenderDigest         string                               `json:"targetPostRenderDigest,omitempty"`
-	HybridPostRenderDigest         string                               `json:"hybridPostRenderDigest,omitempty"`
-	NonAPIEdgeRestorePlanDigest    string                               `json:"nonApiEdgeRestorePlanDigest,omitempty"`
-	ChartTreeDigest                string                               `json:"chartTreeDigest"`
-	BaseManifestDigest             string                               `json:"baseManifestDigest"`
-	TargetManifestDigest           string                               `json:"targetManifestDigest"`
-	HybridManifestDigest           string                               `json:"hybridManifestDigest"`
-	TargetAPITemplateDigest        string                               `json:"targetApiTemplateDigest"`
-	HybridAPITemplateDigest        string                               `json:"hybridApiTemplateDigest"`
-	TargetControllerTemplateDigest string                               `json:"targetControllerTemplateDigest,omitempty"`
-	HybridControllerTemplateDigest string                               `json:"hybridControllerTemplateDigest,omitempty"`
-	CurrentSource                  string                               `json:"currentSource"`
-	AdoptedSource                  string                               `json:"adoptedSource"`
-	LiveImageRef                   string                               `json:"liveImageRef"`
-	TargetAPIImageRef              string                               `json:"targetApiImageRef,omitempty"`
-	LiveHybridAPIImageRef          string                               `json:"liveHybridApiImageRef,omitempty"`
-	TargetAPIImageID               string                               `json:"targetApiImageId,omitempty"`
-	TargetControllerImageRef       string                               `json:"targetControllerImageRef,omitempty"`
-	LiveHybridControllerImageRef   string                               `json:"liveHybridControllerImageRef,omitempty"`
-	TargetControllerImageID        string                               `json:"targetControllerImageId,omitempty"`
-	Fence                          string                               `json:"fence"`
-	Nonce                          string                               `json:"nonce"`
-	Provenance                     ControlPlaneHotfixProvenance         `json:"provenance"`
-	Kubernetes                     ControlPlaneHotfixKubernetesEvidence `json:"kubernetes"`
-	Lease                          ControlPlaneHotfixLeaseEvidence      `json:"lease"`
-	Digest                         string                               `json:"digest"`
+	PlanVersion                      int                                  `json:"planVersion,omitempty"`
+	APIVersion                       string                               `json:"apiVersion"`
+	Kind                             string                               `json:"kind"`
+	Policy                           string                               `json:"policy"`
+	ExpectedSHA                      string                               `json:"expectedSha"`
+	RunID                            string                               `json:"runId"`
+	RunAttempt                       int                                  `json:"runAttempt"`
+	Namespace                        string                               `json:"namespace"`
+	ReleaseName                      string                               `json:"releaseName"`
+	ReleaseFullname                  string                               `json:"releaseFullname"`
+	BaseRevision                     int64                                `json:"baseRevision"`
+	TargetRevision                   int64                                `json:"targetRevision"`
+	BaseStatus                       string                               `json:"baseStatus"`
+	HelmRecordDigest                 string                               `json:"helmRecordDigest"`
+	BaseValuesDigest                 string                               `json:"baseValuesDigest"`
+	TargetValuesDigest               string                               `json:"targetValuesDigest"`
+	HybridValuesDigest               string                               `json:"hybridValuesDigest,omitempty"`
+	RawTargetManifestDigest          string                               `json:"rawTargetManifestDigest,omitempty"`
+	RawHybridManifestDigest          string                               `json:"rawHybridManifestDigest,omitempty"`
+	TargetPostRenderDigest           string                               `json:"targetPostRenderDigest,omitempty"`
+	HybridPostRenderDigest           string                               `json:"hybridPostRenderDigest,omitempty"`
+	NonAPIEdgeRestorePlanDigest      string                               `json:"nonApiEdgeRestorePlanDigest,omitempty"`
+	ChartTreeDigest                  string                               `json:"chartTreeDigest"`
+	BaseManifestDigest               string                               `json:"baseManifestDigest"`
+	TargetManifestDigest             string                               `json:"targetManifestDigest"`
+	HybridManifestDigest             string                               `json:"hybridManifestDigest"`
+	TargetAPITemplateDigest          string                               `json:"targetApiTemplateDigest"`
+	HybridAPITemplateDigest          string                               `json:"hybridApiTemplateDigest"`
+	TargetControllerTemplateDigest   string                               `json:"targetControllerTemplateDigest,omitempty"`
+	HybridControllerTemplateDigest   string                               `json:"hybridControllerTemplateDigest,omitempty"`
+	CurrentSource                    string                               `json:"currentSource"`
+	AdoptedSource                    string                               `json:"adoptedSource"`
+	LiveImageRef                     string                               `json:"liveImageRef"`
+	TargetAPIImageRef                string                               `json:"targetApiImageRef,omitempty"`
+	LiveHybridAPIImageRef            string                               `json:"liveHybridApiImageRef,omitempty"`
+	TargetAPIImageID                 string                               `json:"targetApiImageId,omitempty"`
+	TargetControllerImageRef         string                               `json:"targetControllerImageRef,omitempty"`
+	LiveHybridControllerImageRef     string                               `json:"liveHybridControllerImageRef,omitempty"`
+	TargetControllerImageID          string                               `json:"targetControllerImageId,omitempty"`
+	Fence                            string                               `json:"fence"`
+	Nonce                            string                               `json:"nonce"`
+	Provenance                       ControlPlaneHotfixProvenance         `json:"provenance"`
+	Kubernetes                       ControlPlaneHotfixKubernetesEvidence `json:"kubernetes"`
+	Lease                            ControlPlaneHotfixLeaseEvidence      `json:"lease"`
+	OriginRunID                      string                               `json:"originRunId,omitempty"`
+	OriginRunAttempt                 int                                  `json:"originRunAttempt,omitempty"`
+	OriginSourceSHA                  string                               `json:"originSourceSha,omitempty"`
+	ArchivedRevision                 int64                                `json:"archivedRevision,omitempty"`
+	ArchivedManifestDigest           string                               `json:"archivedManifestDigest,omitempty"`
+	ObservedManifestDigest           string                               `json:"observedManifestDigest,omitempty"`
+	ArchivedValuesDigest             string                               `json:"archivedValuesDigest,omitempty"`
+	ObservedValuesDigest             string                               `json:"observedValuesDigest,omitempty"`
+	ObservedAPITemplateDigest        string                               `json:"observedApiTemplateDigest,omitempty"`
+	ObservedControllerTemplateDigest string                               `json:"observedControllerTemplateDigest,omitempty"`
+	RecoveryBasis                    string                               `json:"recoveryBasis,omitempty"`
+	RecoveryConfigMapName            string                               `json:"recoveryConfigMapName,omitempty"`
+	Digest                           string                               `json:"digest"`
 }
 
 type ControlPlaneHotfixAdoptionWAL struct {
@@ -214,6 +265,7 @@ type ControlPlaneHotfixAdoptionWAL struct {
 	ForwardAttempts      int    `json:"forwardAttempts"`
 	CompensationAttempts int    `json:"compensationAttempts"`
 	RecoveryRequired     bool   `json:"recoveryRequired"`
+	HelmAttempts         int    `json:"helmAttempts,omitempty"`
 	Digest               string `json:"digest"`
 }
 
@@ -265,18 +317,22 @@ func BuildControlPlaneHotfixAdoptionPlan(input ControlPlaneHotfixAdoptionInput) 
 	if input.PlanVersion == 2 || input.PlanVersion == 3 {
 		observedTemplateDigest = hybridTemplateDigest
 	}
-	if observedTemplateDigest != observedTemplateEvidence {
+	if input.PlanVersion != 4 && observedTemplateDigest != observedTemplateEvidence {
 		return ControlPlaneHotfixAdoptionPlan{}, fmt.Errorf("hotfix live workload template evidence drifted")
 	}
 	policy := ControlPlaneHotfixAdoptionPolicy
+	kind := ControlPlaneHotfixAdoptionPlanKind
 	if input.PlanVersion == 2 {
 		policy = ControlPlaneAPIHotfixRolloutPolicyV2
 	} else if input.PlanVersion == 3 {
 		policy = ControlPlaneControllerM16PolicyV3
+	} else if input.PlanVersion == 4 {
+		policy = ControlPlaneControllerM16ObservedRecoveryPolicyV4
+		kind = ControlPlaneControllerM16ObservedRecoveryPlanKind
 	}
 	plan := ControlPlaneHotfixAdoptionPlan{
 		PlanVersion: input.PlanVersion,
-		APIVersion:  ControlPlaneHotfixAdoptionAPIVersion, Kind: ControlPlaneHotfixAdoptionPlanKind,
+		APIVersion:  ControlPlaneHotfixAdoptionAPIVersion, Kind: kind,
 		Policy: policy, ExpectedSHA: input.ExpectedSHA, RunID: input.RunID,
 		RunAttempt: input.RunAttempt, Namespace: input.Namespace, ReleaseName: input.ReleaseName,
 		ReleaseFullname: input.ReleaseFullname, BaseRevision: input.HelmRevision,
@@ -299,12 +355,51 @@ func BuildControlPlaneHotfixAdoptionPlan(input ControlPlaneHotfixAdoptionInput) 
 		TargetControllerImageID:      input.TargetControllerImageID,
 		Fence:                        input.Fence, Nonce: input.Nonce,
 		Provenance: input.Provenance, Kubernetes: input.Kubernetes, Lease: input.Lease,
+		OriginRunID: input.OriginRunID, OriginRunAttempt: input.OriginRunAttempt,
+		OriginSourceSHA: input.OriginSourceSHA, ArchivedRevision: input.ArchivedRevision,
+		ArchivedManifestDigest: input.ArchivedManifestDigest, ObservedManifestDigest: input.ObservedManifestDigest,
+		ArchivedValuesDigest: input.ArchivedValuesDigest, ObservedValuesDigest: input.ObservedValuesDigest,
+		RecoveryBasis: input.RecoveryBasis, RecoveryConfigMapName: input.RecoveryConfigMapName,
 	}
 	if input.PlanVersion == 3 {
 		plan.TargetAPITemplateDigest = ""
 		plan.HybridAPITemplateDigest = ""
 		plan.TargetControllerTemplateDigest = targetTemplateDigest
 		plan.HybridControllerTemplateDigest = hybridTemplateDigest
+	} else if input.PlanVersion == 4 {
+		observedAPI, digestErr := hotfixManifestTemplateDigest(base, input.Namespace, input.Kubernetes.APIName)
+		if digestErr != nil {
+			return ControlPlaneHotfixAdoptionPlan{}, digestErr
+		}
+		targetAPI, digestErr := hotfixManifestTemplateDigest(target, input.Namespace, input.Kubernetes.APIName)
+		if digestErr != nil {
+			return ControlPlaneHotfixAdoptionPlan{}, digestErr
+		}
+		archivedAPI, digestErr := hotfixManifestTemplateDigest(hybrid, input.Namespace, input.Kubernetes.APIName)
+		if digestErr != nil {
+			return ControlPlaneHotfixAdoptionPlan{}, digestErr
+		}
+		observedController, digestErr := hotfixManifestTemplateDigest(base, input.Namespace, input.Kubernetes.ControllerName)
+		if digestErr != nil {
+			return ControlPlaneHotfixAdoptionPlan{}, digestErr
+		}
+		targetController, digestErr := hotfixManifestTemplateDigest(target, input.Namespace, input.Kubernetes.ControllerName)
+		if digestErr != nil {
+			return ControlPlaneHotfixAdoptionPlan{}, digestErr
+		}
+		archivedController, digestErr := hotfixManifestTemplateDigest(hybrid, input.Namespace, input.Kubernetes.ControllerName)
+		if digestErr != nil {
+			return ControlPlaneHotfixAdoptionPlan{}, digestErr
+		}
+		plan.ObservedAPITemplateDigest = observedAPI
+		plan.TargetAPITemplateDigest = targetAPI
+		plan.HybridAPITemplateDigest = archivedAPI
+		plan.ObservedControllerTemplateDigest = observedController
+		plan.TargetControllerTemplateDigest = targetController
+		plan.HybridControllerTemplateDigest = archivedController
+		if observedController != input.Kubernetes.ControllerTemplateDigest {
+			return ControlPlaneHotfixAdoptionPlan{}, fmt.Errorf("observed recovery live Controller template evidence drifted")
+		}
 	}
 	plan.Digest = controlPlaneHotfixPlanDigest(plan)
 	return plan, nil
@@ -335,7 +430,11 @@ func BuildControlPlaneHotfixAdoptionPlanFromRenderSet(input ControlPlaneHotfixAd
 }
 
 func VerifyControlPlaneHotfixAdoptionPlan(plan ControlPlaneHotfixAdoptionPlan) error {
-	if plan.APIVersion != ControlPlaneHotfixAdoptionAPIVersion || plan.Kind != ControlPlaneHotfixAdoptionPlanKind {
+	wantKind := ControlPlaneHotfixAdoptionPlanKind
+	if plan.PlanVersion == 4 {
+		wantKind = ControlPlaneControllerM16ObservedRecoveryPlanKind
+	}
+	if plan.APIVersion != ControlPlaneHotfixAdoptionAPIVersion || plan.Kind != wantKind {
 		return fmt.Errorf("hotfix plan identity is invalid")
 	}
 	if plan.TargetRevision != plan.BaseRevision+1 || plan.BaseStatus != "deployed" {
@@ -353,23 +452,58 @@ func VerifyControlPlaneHotfixAdoptionPlan(plan ControlPlaneHotfixAdoptionPlan) e
 		if plan.Policy != ControlPlaneControllerM16PolicyV3 || plan.BaseRevision != controlPlaneControllerM16BaseRevisionV3 || plan.CurrentSource != controlPlaneControllerM16HybridSourceV3 || plan.AdoptedSource != controlPlaneControllerM16TargetSourceV3 || plan.TargetControllerImageRef != controlPlaneControllerM16TargetImageV3 || plan.LiveHybridControllerImageRef != controlPlaneControllerM16HybridImageV3 || plan.TargetControllerImageRef == plan.LiveHybridControllerImageRef || plan.TargetAPIImageRef != "" || plan.LiveHybridAPIImageRef != "" || plan.TargetAPIImageID != "" || !hotfixSHA256.MatchString(plan.HybridValuesDigest) || !hotfixSHA256.MatchString(plan.RawTargetManifestDigest) || !hotfixSHA256.MatchString(plan.RawHybridManifestDigest) || !hotfixSHA256.MatchString(plan.TargetPostRenderDigest) || !hotfixSHA256.MatchString(plan.HybridPostRenderDigest) || !hotfixSHA256.MatchString(plan.NonAPIEdgeRestorePlanDigest) {
 			return fmt.Errorf("hotfix v3 Controller identity is invalid")
 		}
+	} else if plan.PlanVersion == 4 {
+		if plan.Policy != ControlPlaneControllerM16ObservedRecoveryPolicyV4 ||
+			plan.BaseRevision != controlPlaneControllerM16ObservedRecoveryBaseRevision ||
+			plan.ArchivedRevision != controlPlaneControllerM16ObservedRecoveryArchivedRevision ||
+			plan.OriginRunID != controlPlaneControllerM16ObservedRecoveryOriginRunID || plan.OriginRunAttempt != 1 ||
+			plan.OriginSourceSHA != controlPlaneControllerM16ObservedRecoveryOriginSource ||
+			plan.ArchivedManifestDigest != controlPlaneControllerM16ObservedRecoveryManifest820 ||
+			plan.ObservedManifestDigest != controlPlaneControllerM16ObservedRecoveryManifest822 ||
+			plan.ArchivedValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			plan.ObservedValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			plan.RecoveryBasis != "independent-observed-state" ||
+			plan.RecoveryConfigMapName != controlPlaneControllerM16ObservedRecoveryConfigMap ||
+			plan.CurrentSource != "" || plan.AdoptedSource != "" || plan.LiveImageRef != "" ||
+			plan.TargetAPIImageRef != "" || plan.LiveHybridAPIImageRef != "" || plan.TargetAPIImageID != "" ||
+			plan.TargetControllerImageRef != "" || plan.LiveHybridControllerImageRef != "" || plan.TargetControllerImageID != "" ||
+			plan.RawHybridManifestDigest != "" || plan.HybridPostRenderDigest != "" ||
+			plan.BaseValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			plan.TargetValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			plan.HybridValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			plan.ObservedAPITemplateDigest == plan.TargetAPITemplateDigest ||
+			plan.TargetControllerTemplateDigest != plan.ObservedControllerTemplateDigest {
+			return fmt.Errorf("hotfix v4 observed recovery identity is invalid")
+		}
 	} else {
 		return fmt.Errorf("hotfix plan version is invalid")
 	}
-	if !hotfixSHA.MatchString(plan.ExpectedSHA) || !hotfixSHA.MatchString(plan.CurrentSource) || !hotfixSHA.MatchString(plan.AdoptedSource) {
+	if !hotfixSHA.MatchString(plan.ExpectedSHA) ||
+		(plan.PlanVersion != 4 && (!hotfixSHA.MatchString(plan.CurrentSource) || !hotfixSHA.MatchString(plan.AdoptedSource))) {
 		return fmt.Errorf("hotfix source identity is invalid")
 	}
 	if !hotfixSHA256.MatchString(plan.HelmRecordDigest) || !hotfixSHA256.MatchString(plan.BaseValuesDigest) || !hotfixSHA256.MatchString(plan.TargetValuesDigest) || !hotfixSHA256.MatchString(plan.ChartTreeDigest) || !hotfixSHA256.MatchString(plan.BaseManifestDigest) || !hotfixSHA256.MatchString(plan.TargetManifestDigest) || !hotfixSHA256.MatchString(plan.HybridManifestDigest) {
 		return fmt.Errorf("hotfix plan digest material is invalid")
 	}
-	if (plan.PlanVersion != 3 && (!hotfixSHA256.MatchString(plan.TargetAPITemplateDigest) || !hotfixSHA256.MatchString(plan.HybridAPITemplateDigest))) ||
-		(plan.PlanVersion == 3 && (!hotfixSHA256.MatchString(plan.TargetControllerTemplateDigest) || !hotfixSHA256.MatchString(plan.HybridControllerTemplateDigest))) {
+	if (plan.PlanVersion != 3 && plan.PlanVersion != 4 && (!hotfixSHA256.MatchString(plan.TargetAPITemplateDigest) || !hotfixSHA256.MatchString(plan.HybridAPITemplateDigest))) ||
+		(plan.PlanVersion == 3 && (!hotfixSHA256.MatchString(plan.TargetControllerTemplateDigest) || !hotfixSHA256.MatchString(plan.HybridControllerTemplateDigest))) ||
+		(plan.PlanVersion == 4 && (!hotfixSHA256.MatchString(plan.ObservedAPITemplateDigest) || !hotfixSHA256.MatchString(plan.TargetAPITemplateDigest) || !hotfixSHA256.MatchString(plan.HybridAPITemplateDigest) || !hotfixSHA256.MatchString(plan.ObservedControllerTemplateDigest) || !hotfixSHA256.MatchString(plan.TargetControllerTemplateDigest) || !hotfixSHA256.MatchString(plan.HybridControllerTemplateDigest))) {
 		return fmt.Errorf("hotfix workload template digest material is invalid")
 	}
-	if err := validateHotfixProvenance(plan.Provenance, plan.AdoptedSource, controlPlaneHotfixTargetImage(plan)); err != nil {
-		return err
+	if plan.PlanVersion == 4 {
+		if plan.Provenance != (ControlPlaneHotfixProvenance{}) {
+			return fmt.Errorf("observed recovery cannot claim build provenance")
+		}
+	} else {
+		if err := validateHotfixProvenance(plan.Provenance, plan.AdoptedSource, controlPlaneHotfixTargetImage(plan)); err != nil {
+			return err
+		}
 	}
-	if plan.PlanVersion == 3 {
+	if plan.PlanVersion == 4 {
+		if err := validateObservedRecoveryKubernetes(plan.Kubernetes, plan.ReleaseFullname); err != nil {
+			return err
+		}
+	} else if plan.PlanVersion == 3 {
 		if err := validateHotfixControllerKubernetes(plan.Kubernetes, plan.ReleaseFullname); err != nil {
 			return err
 		}
@@ -378,14 +512,15 @@ func VerifyControlPlaneHotfixAdoptionPlan(plan ControlPlaneHotfixAdoptionPlan) e
 	}
 	if (plan.PlanVersion == 0 && plan.Kubernetes.FrozenNonAPIWorkloadDigest != "") ||
 		(plan.PlanVersion == 2 && !hotfixSHA256.MatchString(plan.Kubernetes.FrozenNonAPIWorkloadDigest)) ||
-		(plan.PlanVersion == 3 && !hotfixSHA256.MatchString(plan.Kubernetes.FrozenNonControllerDigest)) {
+		(plan.PlanVersion == 3 && !hotfixSHA256.MatchString(plan.Kubernetes.FrozenNonControllerDigest)) ||
+		(plan.PlanVersion == 4 && plan.Kubernetes.FrozenNonAPIControllerDigest != controlPlaneControllerM16ObservedRecoveryOtherWorkloads) {
 		return fmt.Errorf("hotfix non-API workload evidence is invalid")
 	}
 	liveImageRef := plan.Kubernetes.APIImageRef
 	if plan.PlanVersion == 3 {
 		liveImageRef = plan.Kubernetes.ControllerImageRef
 	}
-	if liveImageRef != controlPlaneHotfixHybridImage(plan) {
+	if plan.PlanVersion != 4 && liveImageRef != controlPlaneHotfixHybridImage(plan) {
 		return fmt.Errorf("hotfix Kubernetes evidence does not bind the live image")
 	}
 	if plan.PlanVersion == 2 && !hotfixImageIDMatchesProvenance(plan.TargetAPIImageID, plan.Provenance) {
@@ -394,7 +529,11 @@ func VerifyControlPlaneHotfixAdoptionPlan(plan ControlPlaneHotfixAdoptionPlan) e
 	if plan.PlanVersion == 3 && !hotfixImageIDMatchesProvenance(plan.TargetControllerImageID, plan.Provenance) {
 		return fmt.Errorf("hotfix Controller target image ID does not bind provenance")
 	}
-	if err := validateHotfixLease(plan.Lease, plan.Namespace, plan.ReleaseFullname); err != nil {
+	if plan.PlanVersion == 4 {
+		if err := validateObservedRecoveryLease(plan.Lease, plan.Namespace, plan.ReleaseFullname); err != nil {
+			return err
+		}
+	} else if err := validateHotfixLease(plan.Lease, plan.Namespace, plan.ReleaseFullname); err != nil {
 		return err
 	}
 	if !validHotfixToken(plan.Fence) || !validHotfixToken(plan.Nonce) {
@@ -466,7 +605,13 @@ func NewControlPlaneHotfixAdoptionWAL(plan ControlPlaneHotfixAdoptionPlan) (Cont
 	if err := VerifyControlPlaneHotfixAdoptionPlan(plan); err != nil {
 		return ControlPlaneHotfixAdoptionWAL{}, err
 	}
-	wal := ControlPlaneHotfixAdoptionWAL{APIVersion: ControlPlaneHotfixAdoptionAPIVersion, Kind: ControlPlaneHotfixAdoptionWALKind, Policy: plan.Policy, PlanDigest: plan.Digest, Nonce: plan.Nonce, Fence: plan.Fence, Phase: "prepared", Sequence: 1}
+	kind := ControlPlaneHotfixAdoptionWALKind
+	recoveryRequired := false
+	if plan.PlanVersion == 4 {
+		kind = ControlPlaneControllerM16ObservedRecoveryWALKind
+		recoveryRequired = true
+	}
+	wal := ControlPlaneHotfixAdoptionWAL{APIVersion: ControlPlaneHotfixAdoptionAPIVersion, Kind: kind, Policy: plan.Policy, PlanDigest: plan.Digest, Nonce: plan.Nonce, Fence: plan.Fence, Phase: "prepared", Sequence: 1, RecoveryRequired: recoveryRequired}
 	wal.Digest = controlPlaneHotfixWALDigest(wal)
 	return wal, nil
 }
@@ -474,6 +619,34 @@ func NewControlPlaneHotfixAdoptionWAL(plan ControlPlaneHotfixAdoptionPlan) (Cont
 func AdvanceControlPlaneHotfixAdoptionWAL(wal ControlPlaneHotfixAdoptionWAL, phase string) (ControlPlaneHotfixAdoptionWAL, error) {
 	if err := VerifyControlPlaneHotfixAdoptionWAL(wal); err != nil {
 		return ControlPlaneHotfixAdoptionWAL{}, err
+	}
+	if wal.Policy == ControlPlaneControllerM16ObservedRecoveryPolicyV4 {
+		allowed := map[string]string{
+			"prepared":             "fence-persisted",
+			"fence-persisted":      "helm-started",
+			"helm-started":         "helm-committed",
+			"helm-started:unknown": "commit-unknown",
+			"commit-unknown":       "helm-committed",
+			"helm-committed":       "verified",
+			"verified":             "sealed",
+		}
+		key := wal.Phase
+		if phase == "commit-unknown" {
+			key += ":unknown"
+		}
+		if allowed[key] != phase {
+			return ControlPlaneHotfixAdoptionWAL{}, fmt.Errorf("observed recovery WAL transition %s -> %s is invalid", wal.Phase, phase)
+		}
+		wal.Phase, wal.Sequence = phase, wal.Sequence+1
+		if phase == "helm-started" {
+			if wal.HelmAttempts != 0 {
+				return ControlPlaneHotfixAdoptionWAL{}, fmt.Errorf("observed recovery Helm action was already attempted")
+			}
+			wal.HelmAttempts = 1
+		}
+		wal.RecoveryRequired = phase != "sealed"
+		wal.Digest = controlPlaneHotfixWALDigest(wal)
+		return wal, nil
 	}
 	allowed := map[string]string{
 		"prepared": "prewrite-verified", "prewrite-verified": "forward-started", "forward-started": "forward-committed",
@@ -510,8 +683,31 @@ func AdvanceControlPlaneHotfixAdoptionWAL(wal ControlPlaneHotfixAdoptionWAL, pha
 }
 
 func VerifyControlPlaneHotfixAdoptionWAL(wal ControlPlaneHotfixAdoptionWAL) error {
-	if wal.APIVersion != ControlPlaneHotfixAdoptionAPIVersion || wal.Kind != ControlPlaneHotfixAdoptionWALKind || (wal.Policy != ControlPlaneHotfixAdoptionPolicy && wal.Policy != ControlPlaneAPIHotfixRolloutPolicyV2 && wal.Policy != ControlPlaneControllerM16PolicyV3) || !hotfixSHA256.MatchString(wal.PlanDigest) || !validHotfixToken(wal.Nonce) || !validHotfixToken(wal.Fence) || wal.Sequence < 1 || wal.ForwardAttempts < 0 || wal.ForwardAttempts > 1 || wal.CompensationAttempts < 0 || wal.CompensationAttempts > 1 {
+	wantKind := ControlPlaneHotfixAdoptionWALKind
+	if wal.Policy == ControlPlaneControllerM16ObservedRecoveryPolicyV4 {
+		wantKind = ControlPlaneControllerM16ObservedRecoveryWALKind
+	}
+	if wal.APIVersion != ControlPlaneHotfixAdoptionAPIVersion || wal.Kind != wantKind ||
+		(wal.Policy != ControlPlaneHotfixAdoptionPolicy && wal.Policy != ControlPlaneAPIHotfixRolloutPolicyV2 && wal.Policy != ControlPlaneControllerM16PolicyV3 && wal.Policy != ControlPlaneControllerM16ObservedRecoveryPolicyV4) ||
+		!hotfixSHA256.MatchString(wal.PlanDigest) || !validHotfixToken(wal.Nonce) || !validHotfixToken(wal.Fence) || wal.Sequence < 1 || wal.ForwardAttempts < 0 || wal.ForwardAttempts > 1 || wal.CompensationAttempts < 0 || wal.CompensationAttempts > 1 || wal.HelmAttempts < 0 || wal.HelmAttempts > 1 {
 		return fmt.Errorf("hotfix WAL is invalid")
+	}
+	if wal.Policy == ControlPlaneControllerM16ObservedRecoveryPolicyV4 {
+		validPhase := map[string]bool{"prepared": true, "fence-persisted": true, "helm-started": true, "commit-unknown": true, "helm-committed": true, "verified": true, "sealed": true}
+		validSequence := map[string]map[int]bool{
+			"prepared": {1: true}, "fence-persisted": {2: true}, "helm-started": {3: true},
+			"commit-unknown": {4: true}, "helm-committed": {4: true, 5: true},
+			"verified": {5: true, 6: true}, "sealed": {6: true, 7: true},
+		}
+		if !validPhase[wal.Phase] || wal.ForwardAttempts != 0 || wal.CompensationAttempts != 0 ||
+			!validSequence[wal.Phase][wal.Sequence] ||
+			((wal.Phase == "prepared" || wal.Phase == "fence-persisted") && wal.HelmAttempts != 0) ||
+			(wal.Phase != "prepared" && wal.Phase != "fence-persisted" && wal.HelmAttempts != 1) ||
+			(wal.Phase != "sealed" && !wal.RecoveryRequired) || (wal.Phase == "sealed" && wal.RecoveryRequired) {
+			return fmt.Errorf("observed recovery WAL is invalid")
+		}
+	} else if wal.HelmAttempts != 0 {
+		return fmt.Errorf("hotfix WAL contains observed recovery state")
 	}
 	if wal.Digest != controlPlaneHotfixWALDigest(wal) {
 		return fmt.Errorf("hotfix WAL digest mismatch")
@@ -861,10 +1057,12 @@ func VerifyControlPlaneAPIHotfixPostRender(plan ControlPlaneHotfixAdoptionPlan, 
 func validateControlPlaneHotfixInput(input ControlPlaneHotfixAdoptionInput) error {
 	if (input.PlanVersion == 0 && input.Confirm != "CONFIRM_CONTROL_PLANE_HOTFIX_BASELINE_ADOPTION") ||
 		(input.PlanVersion == 2 && input.Confirm != "CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2") ||
-		(input.PlanVersion == 3 && input.Confirm != "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1") {
+		(input.PlanVersion == 3 && input.Confirm != "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1") ||
+		(input.PlanVersion == 4 && input.Confirm != "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717") {
 		return fmt.Errorf("hotfix confirmation literal is invalid")
 	}
-	if !hotfixSHA.MatchString(input.ExpectedSHA) || !hotfixSHA.MatchString(input.CurrentSource) || !hotfixSHA.MatchString(input.AdoptedSource) || input.CurrentSource == input.AdoptedSource {
+	if !hotfixSHA.MatchString(input.ExpectedSHA) ||
+		(input.PlanVersion != 4 && (!hotfixSHA.MatchString(input.CurrentSource) || !hotfixSHA.MatchString(input.AdoptedSource) || input.CurrentSource == input.AdoptedSource)) {
 		return fmt.Errorf("hotfix source identity is invalid")
 	}
 	if input.RunAttempt != 1 || !positiveDecimal(input.RunID) || input.HelmRevision < 1 || input.HelmStatus != "deployed" {
@@ -882,6 +1080,28 @@ func validateControlPlaneHotfixInput(input ControlPlaneHotfixAdoptionInput) erro
 		if input.HelmRevision != controlPlaneControllerM16BaseRevisionV3 || input.CurrentSource != controlPlaneControllerM16HybridSourceV3 || input.AdoptedSource != controlPlaneControllerM16TargetSourceV3 || input.TargetControllerImageRef != controlPlaneControllerM16TargetImageV3 || input.LiveHybridControllerImageRef != controlPlaneControllerM16HybridImageV3 || input.TargetControllerImageRef == input.LiveHybridControllerImageRef || input.LiveImageRef != "" || input.TargetAPIImageRef != "" || input.LiveHybridAPIImageRef != "" || input.TargetAPIImageID != "" || !hotfixSHA256.MatchString(input.HybridValuesDigest) || !hotfixSHA256.MatchString(input.RawTargetManifestDigest) || !hotfixSHA256.MatchString(input.RawHybridManifestDigest) || !hotfixSHA256.MatchString(input.TargetPostRenderDigest) || !hotfixSHA256.MatchString(input.HybridPostRenderDigest) || !hotfixSHA256.MatchString(input.NonAPIEdgeRestorePlanDigest) {
 			return fmt.Errorf("hotfix v3 Controller input is invalid")
 		}
+	} else if input.PlanVersion == 4 {
+		if input.HelmRevision != controlPlaneControllerM16ObservedRecoveryBaseRevision ||
+			input.ArchivedRevision != controlPlaneControllerM16ObservedRecoveryArchivedRevision ||
+			input.OriginRunID != controlPlaneControllerM16ObservedRecoveryOriginRunID || input.OriginRunAttempt != 1 ||
+			input.OriginSourceSHA != controlPlaneControllerM16ObservedRecoveryOriginSource ||
+			input.ArchivedManifestDigest != controlPlaneControllerM16ObservedRecoveryManifest820 ||
+			input.ObservedManifestDigest != controlPlaneControllerM16ObservedRecoveryManifest822 ||
+			input.ArchivedValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			input.ObservedValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			input.RecoveryBasis != "independent-observed-state" ||
+			input.RecoveryConfigMapName != controlPlaneControllerM16ObservedRecoveryConfigMap ||
+			input.CurrentSource != "" || input.AdoptedSource != "" || input.LiveImageRef != "" ||
+			input.TargetAPIImageRef != "" || input.LiveHybridAPIImageRef != "" || input.TargetAPIImageID != "" ||
+			input.TargetControllerImageRef != "" || input.LiveHybridControllerImageRef != "" || input.TargetControllerImageID != "" ||
+			input.RawHybridManifestDigest != "" || input.HybridPostRenderDigest != "" ||
+			!hotfixSHA256.MatchString(input.RawTargetManifestDigest) || !hotfixSHA256.MatchString(input.TargetPostRenderDigest) ||
+			!hotfixSHA256.MatchString(input.NonAPIEdgeRestorePlanDigest) ||
+			input.BaseValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			input.TargetValuesDigest != controlPlaneControllerM16ObservedRecoveryValues ||
+			input.HybridValuesDigest != controlPlaneControllerM16ObservedRecoveryValues {
+			return fmt.Errorf("hotfix v4 observed recovery input is invalid")
+		}
 	} else {
 		return fmt.Errorf("hotfix plan version is invalid")
 	}
@@ -891,10 +1111,18 @@ func validateControlPlaneHotfixInput(input ControlPlaneHotfixAdoptionInput) erro
 	if !hotfixSHA256.MatchString(input.HelmRecordDigest) || !hotfixSHA256.MatchString(input.BaseValuesDigest) || !hotfixSHA256.MatchString(input.TargetValuesDigest) || !hotfixSHA256.MatchString(input.ChartTreeDigest) || !validHotfixToken(input.Fence) || !validHotfixToken(input.Nonce) {
 		return fmt.Errorf("hotfix binding is invalid")
 	}
-	if err := validateHotfixProvenance(input.Provenance, input.AdoptedSource, controlPlaneHotfixInputTargetImage(input)); err != nil {
+	if input.PlanVersion == 4 {
+		if input.Provenance != (ControlPlaneHotfixProvenance{}) {
+			return fmt.Errorf("observed recovery cannot claim build provenance")
+		}
+	} else if err := validateHotfixProvenance(input.Provenance, input.AdoptedSource, controlPlaneHotfixInputTargetImage(input)); err != nil {
 		return err
 	}
-	if input.PlanVersion == 3 {
+	if input.PlanVersion == 4 {
+		if err := validateObservedRecoveryKubernetes(input.Kubernetes, input.ReleaseFullname); err != nil {
+			return err
+		}
+	} else if input.PlanVersion == 3 {
 		if err := validateHotfixControllerKubernetes(input.Kubernetes, input.ReleaseFullname); err != nil {
 			return err
 		}
@@ -903,14 +1131,15 @@ func validateControlPlaneHotfixInput(input ControlPlaneHotfixAdoptionInput) erro
 	}
 	if (input.PlanVersion == 0 && input.Kubernetes.FrozenNonAPIWorkloadDigest != "") ||
 		(input.PlanVersion == 2 && !hotfixSHA256.MatchString(input.Kubernetes.FrozenNonAPIWorkloadDigest)) ||
-		(input.PlanVersion == 3 && !hotfixSHA256.MatchString(input.Kubernetes.FrozenNonControllerDigest)) {
+		(input.PlanVersion == 3 && !hotfixSHA256.MatchString(input.Kubernetes.FrozenNonControllerDigest)) ||
+		(input.PlanVersion == 4 && input.Kubernetes.FrozenNonAPIControllerDigest != controlPlaneControllerM16ObservedRecoveryOtherWorkloads) {
 		return fmt.Errorf("hotfix non-API workload evidence is invalid")
 	}
 	liveImageRef := input.Kubernetes.APIImageRef
 	if input.PlanVersion == 3 {
 		liveImageRef = input.Kubernetes.ControllerImageRef
 	}
-	if liveImageRef != controlPlaneHotfixInputHybridImage(input) {
+	if input.PlanVersion != 4 && liveImageRef != controlPlaneHotfixInputHybridImage(input) {
 		return fmt.Errorf("hotfix Kubernetes evidence does not bind the live image")
 	}
 	if input.PlanVersion == 2 && !hotfixImageIDMatchesProvenance(input.TargetAPIImageID, input.Provenance) {
@@ -918,6 +1147,9 @@ func validateControlPlaneHotfixInput(input ControlPlaneHotfixAdoptionInput) erro
 	}
 	if input.PlanVersion == 3 && !hotfixImageIDMatchesProvenance(input.TargetControllerImageID, input.Provenance) {
 		return fmt.Errorf("hotfix Controller target image ID does not bind provenance")
+	}
+	if input.PlanVersion == 4 {
+		return validateObservedRecoveryLease(input.Lease, input.Namespace, input.ReleaseFullname)
 	}
 	return validateHotfixLease(input.Lease, input.Namespace, input.ReleaseFullname)
 }
@@ -947,6 +1179,36 @@ func validateHotfixControllerKubernetes(value ControlPlaneHotfixKubernetesEviden
 	return nil
 }
 
+func validateObservedRecoveryKubernetes(value ControlPlaneHotfixKubernetesEvidence, fullname string) error {
+	if value.APIName != fullname+"-api" || value.APIUID != controlPlaneControllerM16ObservedRecoveryAPIUID ||
+		value.APIResourceVersion != controlPlaneControllerM16ObservedRecoveryAPIRV || value.APIGeneration != 718 ||
+		value.APIObservedGeneration != 718 || !hotfixSHA256.MatchString(value.APITemplateDigest) ||
+		value.APIImageRef != controlPlaneControllerM16ObservedRecoveryAPIImage || value.APIImageID == "" ||
+		!hotfixSHA256.MatchString(value.APIHealthDigest) || value.APIReplicas != 2 || value.APIReady != 2 ||
+		value.APIUpdated != 2 || value.APIAvailable != 2 || value.APIUnavailable != 0 ||
+		value.ServiceName != fullname || value.ServiceUID == "" || value.ServiceResourceVersion == "" ||
+		!hotfixSHA256.MatchString(value.ServiceSelectorDigest) || value.EndpointSliceName == "" ||
+		value.EndpointSliceUID == "" || value.EndpointSliceResourceVersion == "" ||
+		value.EndpointServiceName != value.ServiceName || !hotfixSHA256.MatchString(value.EndpointBindingDigest) ||
+		value.ReadyServingEndpoints != 2 {
+		return fmt.Errorf("observed recovery API evidence is not the exact fenced cohort")
+	}
+	if value.ControllerName != fullname+"-controller" || value.ControllerUID != controlPlaneControllerM16ObservedRecoveryControllerUID ||
+		value.ControllerResourceVersion != controlPlaneControllerM16ObservedRecoveryControllerRV || value.ControllerGeneration != 693 ||
+		value.ControllerObservedGeneration != 693 || !hotfixSHA256.MatchString(value.ControllerTemplateDigest) ||
+		value.ControllerImageRef != controlPlaneControllerM16HybridImageV3 || value.ControllerImageID == "" ||
+		value.ControllerReplicas != 2 || value.ControllerReady != 2 || value.ControllerUpdated != 2 ||
+		value.ControllerAvailable != 2 || value.ControllerUnavailable != 0 || value.ControllerLeaderLeaseName != fullname+"-controller" ||
+		value.ControllerLeaderLeaseUID == "" || value.ControllerLeaderLeaseVersion == "" || value.ControllerLeaderHolder == "" ||
+		!hotfixSHA256.MatchString(value.ControllerMetricsDigest) || !hotfixSHA256.MatchString(value.ControllerLKGDigest) ||
+		value.FrozenNonAPIControllerDigest != controlPlaneControllerM16ObservedRecoveryOtherWorkloads ||
+		!hotfixSHA256.MatchString(value.HealthWitnessDigest) ||
+		value.ActiveOperationsDigest != controlPlaneControllerM16ObservedRecoveryNoActiveOperations {
+		return fmt.Errorf("observed recovery Controller or frozen workload evidence is not exact")
+	}
+	return nil
+}
+
 func validateHotfixLease(value ControlPlaneHotfixLeaseEvidence, namespace, fullname string) error {
 	if value.Namespace != namespace || value.Name != fullname+"-control-plane-db-backup" || value.UID == "" || value.ResourceVersion == "" || value.HolderIdentity != "" || value.RecoveryRequired {
 		return fmt.Errorf("hotfix Lease evidence is not an exact reusable shared Lease")
@@ -954,7 +1216,21 @@ func validateHotfixLease(value ControlPlaneHotfixLeaseEvidence, namespace, fulln
 	return nil
 }
 
+func validateObservedRecoveryLease(value ControlPlaneHotfixLeaseEvidence, namespace, fullname string) error {
+	if value.Namespace != namespace || value.Name != fullname+"-control-plane-db-backup" ||
+		value.UID != controlPlaneControllerM16ObservedRecoveryLeaseUID ||
+		value.ResourceVersion != controlPlaneControllerM16ObservedRecoveryLeaseRV ||
+		value.HolderIdentity != controlPlaneControllerM16ObservedRecoveryLeaseHolder || !value.RecoveryRequired ||
+		value.CoordinationTokenDigest != controlPlaneControllerM16ObservedRecoveryLeaseTokenDigest {
+		return fmt.Errorf("observed recovery Lease evidence is not the exact retained fence")
+	}
+	return nil
+}
+
 func verifyHotfixTransition(base, target, hybrid []byte, input ControlPlaneHotfixAdoptionInput) error {
+	if input.PlanVersion == 4 {
+		return verifyObservedRecoveryTransition(base, target, hybrid, input)
+	}
 	baseObjects, err := decodeHotfixObjects(base)
 	if err != nil {
 		return err
@@ -1069,6 +1345,170 @@ func verifyHotfixTransition(base, target, hybrid []byte, input ControlPlaneHotfi
 		return fmt.Errorf("hotfix transition changes a non-API object")
 	}
 	return nil
+}
+
+func verifyObservedRecoveryTransition(observed, target, archived []byte, input ControlPlaneHotfixAdoptionInput) error {
+	observedObjects, err := decodeHotfixObjects(observed)
+	if err != nil {
+		return err
+	}
+	targetObjects, err := decodeHotfixObjects(target)
+	if err != nil {
+		return err
+	}
+	archivedObjects, err := decodeHotfixObjects(archived)
+	if err != nil {
+		return err
+	}
+	if len(observedObjects) != controlPlaneHotfixManifestObjects || len(targetObjects) != len(observedObjects) || len(archivedObjects) != len(observedObjects) {
+		return fmt.Errorf("observed recovery manifest inventory drifted")
+	}
+	observedAPI, err := exactHotfixDeployment(observedObjects, input.Namespace, input.Kubernetes.APIName)
+	if err != nil {
+		return err
+	}
+	targetAPI, err := exactHotfixDeployment(targetObjects, input.Namespace, input.Kubernetes.APIName)
+	if err != nil {
+		return err
+	}
+	archivedAPI, err := exactHotfixDeployment(archivedObjects, input.Namespace, input.Kubernetes.APIName)
+	if err != nil {
+		return err
+	}
+	observedController, err := exactHotfixDeployment(observedObjects, input.Namespace, input.Kubernetes.ControllerName)
+	if err != nil {
+		return err
+	}
+	targetController, err := exactHotfixDeployment(targetObjects, input.Namespace, input.Kubernetes.ControllerName)
+	if err != nil {
+		return err
+	}
+	for _, deployment := range []map[string]any{observedAPI, targetAPI, archivedAPI} {
+		if err := verifyHotfixDeploymentPolicy(deployment, 1); err != nil {
+			return err
+		}
+		source, sourceErr := hotfixSource(deployment)
+		image, imageErr := hotfixImage(deployment)
+		if sourceErr != nil || imageErr != nil || source != controlPlaneAPIHotfixTargetSourceV2 || image != controlPlaneControllerM16ObservedRecoveryAPIImage {
+			return fmt.Errorf("observed recovery API source or immutable image drifted")
+		}
+	}
+	observedAPITemplate, _ := hotfixPodTemplate(observedAPI)
+	targetAPITemplate, _ := hotfixPodTemplate(targetAPI)
+	archivedAPITemplate, _ := hotfixPodTemplate(archivedAPI)
+	if reflectHotfixEqual(observedAPITemplate, targetAPITemplate) || !reflectHotfixEqual(targetAPITemplate, archivedAPITemplate) {
+		return fmt.Errorf("observed recovery API template does not exactly restore Helm820")
+	}
+	observedAPICopy := cloneHotfixObject(observedAPI)
+	copySpec, _ := observedAPICopy["spec"].(map[string]any)
+	copySpec["template"] = cloneHotfixObject(targetAPITemplate)
+	if !reflectHotfixEqual(observedAPICopy, targetAPI) {
+		return fmt.Errorf("observed recovery API changes fields outside the pod template")
+	}
+	if !reflectHotfixEqual(observedController, targetController) {
+		return fmt.Errorf("observed recovery would roll the compensated Controller")
+	}
+	observedControllerSource, sourceErr := hotfixSource(observedController)
+	observedControllerImage, imageErr := hotfixControllerImage(observedController)
+	if sourceErr != nil || imageErr != nil || observedControllerSource != controlPlaneControllerM16HybridSourceV3 || observedControllerImage != controlPlaneControllerM16HybridImageV3 {
+		return fmt.Errorf("observed recovery Controller identity drifted")
+	}
+	delete(observedObjects, hotfixObjectKey(observedAPI))
+	delete(observedObjects, hotfixObjectKey(observedController))
+	delete(targetObjects, hotfixObjectKey(targetAPI))
+	delete(targetObjects, hotfixObjectKey(targetController))
+	if !reflectHotfixEqual(observedObjects, targetObjects) {
+		return fmt.Errorf("observed recovery changes a non-API/Controller object")
+	}
+	return nil
+}
+
+// VerifyControlPlaneControllerM16ObservedRecoveryRawRenderSet proves that the
+// fixed recovery is based on the archived Helm records, is deterministic, and
+// changes only the API Deployment document. Secret bytes are never returned or
+// persisted by this verifier.
+func VerifyControlPlaneControllerM16ObservedRecoveryRawRenderSet(archived, observed, target, repeated []byte) error {
+	if hotfixDigest(archived) != controlPlaneControllerM16ObservedRecoveryManifest820 ||
+		hotfixDigest(observed) != controlPlaneControllerM16ObservedRecoveryManifest822 {
+		return fmt.Errorf("observed recovery archived manifest binding drifted")
+	}
+	if !bytes.Equal(target, repeated) {
+		return fmt.Errorf("observed recovery raw target is not deterministic")
+	}
+	if err := verifyObservedRecoveryRawDocumentIsolation(observed, target); err != nil {
+		return err
+	}
+	archivedCanonical, err := canonicalSecretFreeHotfixManifest(archived)
+	if err != nil {
+		return err
+	}
+	targetCanonical, err := canonicalSecretFreeHotfixManifest(target)
+	if err != nil {
+		return err
+	}
+	archivedTemplate, err := hotfixManifestTemplateDigest(archivedCanonical, "fugue-system", "fugue-fugue-api")
+	if err != nil {
+		return err
+	}
+	targetTemplate, err := hotfixManifestTemplateDigest(targetCanonical, "fugue-system", "fugue-fugue-api")
+	if err != nil {
+		return err
+	}
+	if archivedTemplate != controlPlaneControllerM16ObservedRecoveryAPITargetTemplate || targetTemplate != archivedTemplate {
+		return fmt.Errorf("observed recovery raw API template is not exact Helm820")
+	}
+	return nil
+}
+
+func verifyObservedRecoveryRawDocumentIsolation(observed, target []byte) error {
+	observedDocs := rawHotfixDocuments(observed)
+	targetDocs := rawHotfixDocuments(target)
+	if len(observedDocs) != 85 || len(targetDocs) != 85 {
+		return fmt.Errorf("observed recovery raw document inventory drifted")
+	}
+	changed := 0
+	for index := range observedDocs {
+		if bytes.Equal(observedDocs[index], targetDocs[index]) {
+			continue
+		}
+		observedIdentity, err := rawHotfixDocumentIdentity(observedDocs[index])
+		if err != nil {
+			return err
+		}
+		targetIdentity, err := rawHotfixDocumentIdentity(targetDocs[index])
+		if err != nil {
+			return err
+		}
+		if observedIdentity != "apps/v1|Deployment||fugue-fugue-api" || targetIdentity != observedIdentity {
+			return fmt.Errorf("observed recovery raw target changes document %d outside the API Deployment", index)
+		}
+		changed++
+	}
+	if changed != 1 {
+		return fmt.Errorf("observed recovery raw target must change exactly one API document")
+	}
+	return nil
+}
+
+func rawHotfixDocuments(data []byte) [][]byte {
+	parts := bytes.Split(data, []byte("---\n"))
+	result := make([][]byte, 0, len(parts))
+	for _, part := range parts {
+		if len(bytes.TrimSpace(part)) == 0 {
+			continue
+		}
+		result = append(result, append([]byte(nil), part...))
+	}
+	return result
+}
+
+func rawHotfixDocumentIdentity(data []byte) (string, error) {
+	var value map[string]any
+	if err := yaml.Unmarshal(data, &value); err != nil {
+		return "", err
+	}
+	metadata, _ := value["metadata"].(map[string]any)
+	return stringValue(value["apiVersion"]) + "|" + stringValue(value["kind"]) + "|" + stringValue(metadata["namespace"]) + "|" + stringValue(metadata["name"]), nil
 }
 
 func controlPlaneHotfixInputTargetImage(input ControlPlaneHotfixAdoptionInput) string {

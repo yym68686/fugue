@@ -56,6 +56,11 @@ on:
         required: false
         type: string
         default: ''
+      controller_m16_observed_recovery_v1:
+        description: Exact one-shot independent observed-state recovery for failed Controller M16 run 30836591717
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -114,8 +119,11 @@ jobs:
           API_HOTFIX_RECOVERY_ONLY: ${{ inputs.api_hotfix_recovery_only }}
           ARTIFACT_REUSE_RECEIPT_B64: ${{ inputs.artifact_reuse_receipt_b64 }}
           CONTROLLER_M16_ROLLOUT_V1: ${{ inputs.controller_m16_rollout_v1 }}
+          CONTROLLER_M16_OBSERVED_RECOVERY_V1: ${{ inputs.controller_m16_observed_recovery_v1 }}
+          HISTORICAL_CONTROLLER_BUILD_ONLY_V1: ${{ inputs.historical_controller_build_only_v1 }}
         run: |
           set -euo pipefail
+          CONTROLLER_M16_OBSERVED_RECOVERY_V1="${CONTROLLER_M16_OBSERVED_RECOVERY_V1:-}"
           [[ "${EVENT_NAME}" == "workflow_dispatch" ]]
           [[ "${EVENT_REF}" == "refs/heads/main" ]]
           [[ "${EVENT_REF_NAME}" == "main" ]]
@@ -130,7 +138,7 @@ jobs:
           case "${API_HOTFIX_RECOVERY_ONLY:-}" in
             '') ;;
             CONFIRM_API_HOTFIX_RECOVERY_30804033592)
-              [[ -z "${API_HOTFIX_ROLLOUT_V2}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
+              [[ -z "${API_HOTFIX_ROLLOUT_V2}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" && -z "${CONTROLLER_M16_OBSERVED_RECOVERY_V1}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
               [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
               [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
               ;;
@@ -139,7 +147,7 @@ jobs:
           case "${CONTROLLER_M16_ROLLOUT_V1:-}" in
             '') ;;
             CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1_58FC)
-              [[ -z "${API_HOTFIX_ROLLOUT_V2}" && -z "${API_HOTFIX_RECOVERY_ONLY}" ]]
+              [[ -z "${API_HOTFIX_ROLLOUT_V2}" && -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${CONTROLLER_M16_OBSERVED_RECOVERY_V1}" ]]
               [[ "${TARGET_SHA}" == '58fc2e560064214e3f329765c9ec7839ee513c27' && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]
               [[ -n "${ARTIFACT_REUSE_RECEIPT_B64}" && ${#ARTIFACT_REUSE_RECEIPT_B64} -le 196608 ]]
               [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
@@ -147,17 +155,28 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
+          case "${CONTROLLER_M16_OBSERVED_RECOVERY_V1:-}" in
+            '') ;;
+            CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717)
+              [[ -z "${API_HOTFIX_ROLLOUT_V2}" && -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" ]]
+              [[ -z "${HISTORICAL_CONTROLLER_BUILD_ONLY_V1}" && -z "${ARTIFACT_REUSE_RECEIPT_B64}" ]]
+              [[ "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
+              [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
+              [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
+              ;;
+            *) exit 1 ;;
+          esac
           case "${API_HOTFIX_ROLLOUT_V2:-}" in
             '')
-              if [[ -z "${CONTROLLER_M16_ROLLOUT_V1}" ]]; then
+              if [[ -z "${CONTROLLER_M16_ROLLOUT_V1}" && -z "${CONTROLLER_M16_OBSERVED_RECOVERY_V1}" ]]; then
                 [[ -z "${ARTIFACT_REUSE_RECEIPT_B64}" ]]
               fi
-              if [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]; then
+              if [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" && -z "${CONTROLLER_M16_OBSERVED_RECOVERY_V1}" && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]; then
                 [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
               fi
               ;;
             CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC)
-              [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" ]]
+              [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" && -z "${CONTROLLER_M16_OBSERVED_RECOVERY_V1}" ]]
               [[ "${TARGET_SHA}" == '57dc767999741cea25fe4820a6c9603984dfa0b9' && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]
               [[ -n "${ARTIFACT_REUSE_RECEIPT_B64}" && ${#ARTIFACT_REUSE_RECEIPT_B64} -le 196608 ]]
               [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
@@ -373,6 +392,68 @@ jobs:
           include-hidden-files: false
           overwrite: false
 
+  recover-controller-m16-observed-state:
+    needs:
+      - release-input-guard
+      - release-gate
+    if: ${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}
+    timeout-minutes: 20
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - fugue
+      - control-plane
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact Controller M16 observed recovery implementation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.expected_sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Controller M16 observed recovery identity
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          AUTHORIZATION: ${{ inputs.controller_m16_observed_recovery_v1 }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch && "${GITHUB_REF}" == refs/heads/main && "${GITHUB_RUN_ATTEMPT}" == 1 ]]
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
+          [[ "${AUTHORIZATION}" == CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717 ]]
+          [[ "$(git rev-parse --verify HEAD)" == "${EXPECTED_SHA}" ]]
+          [[ "$(git rev-parse --verify HEAD^)" == fbfa707084d429176783354745043b5c12b3b488 ]]
+          [[ -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]]
+          [[ "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" ]]
+          [[ -z "$(git status --short)" ]]
+
+      - name: Run exact independent Controller M16 observed-state recovery
+        id: controller_m16_observed_recovery
+        env:
+          FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1: 'true'
+          FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM: ${{ inputs.controller_m16_observed_recovery_v1 }}
+          FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_EVIDENCE_DIR: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY || '' }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_EVIDENCE_DIR}"
+          ./scripts/upgrade_fugue_control_plane.sh
+
+      - name: Upload sanitized Controller M16 observed recovery evidence
+        if: ${{ always() && steps.controller_m16_observed_recovery.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-controller-m16-observed-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+          overwrite: false
+
   historical-controller-build-only:
     if: ${{ inputs.historical_controller_build_only_v1 != '' }}
     runs-on: ubuntu-latest
@@ -396,6 +477,7 @@ jobs:
           API_HOTFIX_RECOVERY_ONLY: ${{ inputs.api_hotfix_recovery_only }}
           ARTIFACT_REUSE_RECEIPT_B64: ${{ inputs.artifact_reuse_receipt_b64 }}
           CONTROLLER_M16_ROLLOUT_V1: ${{ inputs.controller_m16_rollout_v1 }}
+          CONTROLLER_M16_OBSERVED_RECOVERY_V1: ${{ inputs.controller_m16_observed_recovery_v1 }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_REF: ${{ github.ref }}
           EVENT_REF_NAME: ${{ github.ref_name }}
@@ -418,7 +500,7 @@ jobs:
           [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
           [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
           [[ -z "${API_HOTFIX_ROLLOUT_V2}" ]]
-          [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${ARTIFACT_REUSE_RECEIPT_B64}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" ]]
+          [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${ARTIFACT_REUSE_RECEIPT_B64}" && -z "${CONTROLLER_M16_ROLLOUT_V1}" && -z "${CONTROLLER_M16_OBSERVED_RECOVERY_V1}" ]]
           remote_main="$(timeout --kill-after=2s 10s gh api \
             "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           [[ "${remote_main}" =~ ^[0-9a-f]{40}$ && "${remote_main}" == "${EXPECTED_SHA}" ]]
@@ -819,8 +901,44 @@ jobs:
           [[ "${state}" == "${desired}" ]]
           printf 'API hotfix recovery lane settled desired=%s mutation_status=%s\n' "${desired}" "${mutation_status}"
 
+  settle-controller-m16-observed-recovery-lane:
+    needs:
+      - recover-controller-m16-observed-state
+    if: ${{ always() && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Settle Controller M16 observed recovery lane
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RECOVERY_RESULT: ${{ needs.recover-controller-m16-observed-state.result }}
+        run: |
+          set -euo pipefail
+          workflow='deploy-control-plane.yml'
+          desired='disabled_manually'
+          endpoint='disable'
+          if [[ "${RECOVERY_RESULT}" == success ]]; then
+            desired='active'
+            endpoint='enable'
+          fi
+          mutation_status=0
+          timeout --kill-after=2s 10s gh api --method PUT \
+            "repos/${REPOSITORY}/actions/workflows/${workflow}/${endpoint}" >/dev/null || mutation_status=$?
+          state=''
+          for attempt in 1 2 3 4 5; do
+            state="$(timeout --kill-after=2s 10s gh api \
+              "repos/${REPOSITORY}/actions/workflows/${workflow}" --jq '.state')" || exit 1
+            [[ "${state}" == "${desired}" ]] && break
+            sleep 1
+          done
+          [[ "${state}" == "${desired}" ]]
+          printf 'Controller M16 observed recovery lane settled desired=%s mutation_status=%s\n' "${desired}" "${mutation_status}"
+
   release-baseline:
-    if: ${{ inputs.api_hotfix_recovery_only == '' }}
+    if: ${{ inputs.api_hotfix_recovery_only == '' && inputs.controller_m16_observed_recovery_v1 == '' }}
     needs:
       - release-input-guard
     runs-on:
@@ -3061,7 +3179,7 @@ jobs:
       - continue-release-convergence
       - record-release-baseline
       - rearm-release-lane-on-success
-    if: ${{ always() && inputs.api_hotfix_recovery_only == '' && inputs.historical_controller_build_only_v1 == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && ((((inputs.api_hotfix_rollout_v2 == '' && inputs.controller_m16_rollout_v1 == '') && needs.record-release-baseline.result != 'success') || ((inputs.api_hotfix_rollout_v2 != '' || inputs.controller_m16_rollout_v1 != '') && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
+    if: ${{ always() && inputs.api_hotfix_recovery_only == '' && inputs.controller_m16_observed_recovery_v1 == '' && inputs.historical_controller_build_only_v1 == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && ((((inputs.api_hotfix_rollout_v2 == '' && inputs.controller_m16_rollout_v1 == '') && needs.record-release-baseline.result != 'success') || ((inputs.api_hotfix_rollout_v2 != '' || inputs.controller_m16_rollout_v1 != '') && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
