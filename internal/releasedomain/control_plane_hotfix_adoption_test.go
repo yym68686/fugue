@@ -1042,6 +1042,12 @@ func TestControlPlaneControllerM16ObservedRecoveryRejectsBindingDrift(t *testing
 		"API RV":         func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.APIResourceVersion = "1" },
 		"Controller UID": func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerUID = "wrong" },
 		"Controller RV":  func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerResourceVersion = "1" },
+		"API health": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.Kubernetes.APIHealthDigest = "sha256:" + strings.Repeat("4", 64)
+		},
+		"health witness": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.Kubernetes.HealthWitnessDigest = "sha256:" + strings.Repeat("5", 64)
+		},
 		"active operation": func(value *ControlPlaneHotfixAdoptionInput) {
 			value.Kubernetes.ActiveOperationsDigest = "sha256:" + strings.Repeat("3", 64)
 		},
@@ -1148,7 +1154,7 @@ func validBuiltControlPlaneControllerM16ObservedRecoveryPlan(t *testing.T) (Cont
 			APIResourceVersion: controlPlaneControllerM16ObservedRecoveryAPIRV, APIGeneration: 718, APIObservedGeneration: 718,
 			APITemplateDigest: controlPlaneControllerM16ObservedRecoveryAPILiveTemplate,
 			APIImageRef:       controlPlaneControllerM16ObservedRecoveryAPIImage, APIImageID: "containerd://api",
-			APIHealthDigest: digest, APIReplicas: 2, APIReady: 2, APIUpdated: 2, APIAvailable: 2,
+			APIHealthDigest: controlPlaneControllerM16ObservedRecoveryAPIHealth, APIReplicas: 2, APIReady: 2, APIUpdated: 2, APIAvailable: 2,
 			ServiceName: "fugue-fugue", ServiceUID: "service-uid", ServiceResourceVersion: "200", ServiceSelectorDigest: digest,
 			EndpointSliceName: "fugue-fugue-abc", EndpointSliceUID: "slice-uid", EndpointSliceResourceVersion: "300",
 			EndpointServiceName: "fugue-fugue", EndpointBindingDigest: digest, ReadyServingEndpoints: 2,
@@ -1159,7 +1165,7 @@ func validBuiltControlPlaneControllerM16ObservedRecoveryPlan(t *testing.T) (Cont
 			ControllerLeaderLeaseName: "fugue-fugue-controller", ControllerLeaderLeaseUID: "leader-uid", ControllerLeaderLeaseVersion: "400",
 			ControllerLeaderHolder: "fugue-fugue-controller-abc", ControllerMetricsDigest: digest, ControllerLKGDigest: digest,
 			FrozenNonAPIControllerDigest: controlPlaneControllerM16ObservedRecoveryOtherWorkloads,
-			HealthWitnessDigest:          digest,
+			HealthWitnessDigest:          controlPlaneControllerM16ObservedRecoveryHealthWitness,
 			ActiveOperationsDigest:       controlPlaneControllerM16ObservedRecoveryNoActiveOperations,
 		},
 		Lease: ControlPlaneHotfixLeaseEvidence{

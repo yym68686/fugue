@@ -50,6 +50,8 @@ const (
 	controlPlaneControllerM16ObservedRecoveryControllerTemplate = "sha256:956addd69a1e8a4f127f06ef4256774942b5e4e6b4379589fab53b4a0819f5db"
 	controlPlaneControllerM16ObservedRecoveryOtherWorkloads     = "sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9"
 	controlPlaneControllerM16ObservedRecoveryNoActiveOperations = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+	controlPlaneControllerM16ObservedRecoveryAPIHealth          = "sha256:a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288"
+	controlPlaneControllerM16ObservedRecoveryHealthWitness      = "sha256:149f3eb74a161c9bdeba82c653246b370a01e1e97d3299f4f7ef608f25e77273"
 	controlPlaneControllerM16ObservedRecoveryLeaseUID           = "1f0237f0-1799-4ca7-b8bd-6e32e75e391f"
 	controlPlaneControllerM16ObservedRecoveryLeaseRV            = "68219206"
 	controlPlaneControllerM16ObservedRecoveryLeaseHolder        = "release/30836591717-1"
@@ -1184,7 +1186,7 @@ func validateObservedRecoveryKubernetes(value ControlPlaneHotfixKubernetesEviden
 		value.APIResourceVersion != controlPlaneControllerM16ObservedRecoveryAPIRV || value.APIGeneration != 718 ||
 		value.APIObservedGeneration != 718 || !hotfixSHA256.MatchString(value.APITemplateDigest) ||
 		value.APIImageRef != controlPlaneControllerM16ObservedRecoveryAPIImage || value.APIImageID == "" ||
-		!hotfixSHA256.MatchString(value.APIHealthDigest) || value.APIReplicas != 2 || value.APIReady != 2 ||
+		value.APIHealthDigest != controlPlaneControllerM16ObservedRecoveryAPIHealth || value.APIReplicas != 2 || value.APIReady != 2 ||
 		value.APIUpdated != 2 || value.APIAvailable != 2 || value.APIUnavailable != 0 ||
 		value.ServiceName != fullname || value.ServiceUID == "" || value.ServiceResourceVersion == "" ||
 		!hotfixSHA256.MatchString(value.ServiceSelectorDigest) || value.EndpointSliceName == "" ||
@@ -1202,7 +1204,7 @@ func validateObservedRecoveryKubernetes(value ControlPlaneHotfixKubernetesEviden
 		value.ControllerLeaderLeaseUID == "" || value.ControllerLeaderLeaseVersion == "" || value.ControllerLeaderHolder == "" ||
 		!hotfixSHA256.MatchString(value.ControllerMetricsDigest) || !hotfixSHA256.MatchString(value.ControllerLKGDigest) ||
 		value.FrozenNonAPIControllerDigest != controlPlaneControllerM16ObservedRecoveryOtherWorkloads ||
-		!hotfixSHA256.MatchString(value.HealthWitnessDigest) ||
+		value.HealthWitnessDigest != controlPlaneControllerM16ObservedRecoveryHealthWitness ||
 		value.ActiveOperationsDigest != controlPlaneControllerM16ObservedRecoveryNoActiveOperations {
 		return fmt.Errorf("observed recovery Controller or frozen workload evidence is not exact")
 	}

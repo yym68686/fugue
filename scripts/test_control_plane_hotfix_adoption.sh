@@ -176,6 +176,42 @@ PY
   export FUGUE_UPGRADE_LIB_ONLY=true
   # shellcheck source=scripts/upgrade_fugue_control_plane.sh
   source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  health_root="${TMP}/observed-recovery-api-health"
+  mkdir -m 700 "${health_root}"
+  printf 200 >"${health_root}/first.status"
+  printf '{"status":"ok"}\n' >"${health_root}/first.body"
+  printf '200' >"${health_root}/second.status"
+  printf '{\n  "status": "ok"\n}\n' >"${health_root}/second.body"
+  printf '{"version":"first","loaded_at":"one","age_ms":1,"counters":{"requests":1}}\n' >"${health_root}/external-first.body"
+  printf '{"version":"second","loaded_at":"two","age_ms":999,"counters":{"requests":42}}\n' >"${health_root}/external-second.body"
+  control_plane_m16_observed_recovery_write_api_health_evidence \
+    "${health_root}/first.status" "${health_root}/first.body" "${health_root}/first.json"
+  control_plane_m16_observed_recovery_write_api_health_evidence \
+    "${health_root}/second.status" "${health_root}/second.body" "${health_root}/second.json"
+  ! cmp -s "${health_root}/external-first.body" "${health_root}/external-second.body"
+  cmp -s "${health_root}/first.json" "${health_root}/second.json"
+  HEALTH="${health_root}/first.json" python3 - <<'PY'
+import json,os
+value=json.load(open(os.environ["HEALTH"],encoding="utf-8"))
+assert value=={
+    "evidence":{"url":"https://api.fugue.pro/healthz","status":200,"bodyDigest":"sha256:a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288"},
+    "witnessDigest":"sha256:149f3eb74a161c9bdeba82c653246b370a01e1e97d3299f4f7ef608f25e77273",
+}
+PY
+  printf 200 >"${health_root}/changed.status"
+  printf '{"status":"degraded"}\n' >"${health_root}/changed.body"
+  ! control_plane_m16_observed_recovery_write_api_health_evidence \
+    "${health_root}/changed.status" "${health_root}/changed.body" "${health_root}/changed.json"
+  printf 503 >"${health_root}/bad-status.status"
+  ! control_plane_m16_observed_recovery_write_api_health_evidence \
+    "${health_root}/bad-status.status" "${health_root}/first.body" "${health_root}/bad-status.json"
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
   CONTROL_PLANE_HOTFIX_PLAN_VERSION=4
   CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
   CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON='{"metadata":{"annotations":{"fugue.pro/source-commit":"57dc767999741cea25fe4820a6c9603984dfa0b9"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","name":"api"}]}}'
@@ -246,18 +282,26 @@ observed_capture_source="$(sed -n '/^control_plane_m16_observed_recovery_capture
 for substage in \
   helm-status helm-history helm-manifest-820 helm-values-820 helm-manifest-822 helm-values-822 \
   api-deployment controller-deployment api-pods controller-pods service endpoint-slice \
-  controller-leader backup-lease metrics health operations other-witness snapshot; do
+  controller-leader backup-lease metrics api-health operations other-witness snapshot; do
   grep -Fq "capture-\${capture}-${substage}" <<<"${observed_capture_source}"
 done
+[[ "$(grep -c 'https://api.fugue.pro/healthz' <<<"${observed_capture_source}")" == 1 ]]
 observed_verify_source="$(sed -n '/^control_plane_m16_observed_recovery_verify_target()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
 for substage in \
   helm-status helm-manifest-823 helm-values-823 api-deployment controller-deployment api-pods \
-  controller-pods controller-leader backup-lease metrics health operations other-witness snapshot; do
+  controller-pods controller-leader backup-lease metrics api-health operations other-witness snapshot; do
   grep -Fq "capture-verified-${substage}" <<<"${observed_verify_source}"
 done
+[[ "$(grep -c 'https://api.fugue.pro/healthz' <<<"${observed_verify_source}")" == 1 ]]
+grep -Fq 'plan_kubernetes.get("apiHealthDigest")' <<<"${observed_verify_source}"
+grep -Fq 'plan_kubernetes.get("healthWitnessDigest")' <<<"${observed_verify_source}"
 for stage in render-set plan prewrite-copy configmap-create lease-attach helm-start helm-execute verify clear complete; do
   grep -Fq "control_plane_m16_observed_recovery_set_stage ${stage}" <<<"${observed_recovery_source}"
 done
+for forbidden in oaix.fugue.pro argus.fugue.pro uni-api-web 0-0; do
+  ! grep -Fq "${forbidden}" "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+done
+grep -Fq 'bytes=0-0' "${ROOT}/scripts/verify_registry_image.py"
 
 (
   cd "${ROOT}"

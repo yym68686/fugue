@@ -244,6 +244,7 @@ assert_equal(
 assert_equal(observed_recovery.fetch("environment"), "production", "Controller M16 observed recovery environment")
 observed_identity = step(observed_recovery, "Verify exact Controller M16 observed recovery identity")
 for fragment in [
+  "d88811c191b40fe5e2a7ce187938f7df0809fa08",
   "168699dff1ef57958b01973d46db3cc92babec30",
   "d412416cbca7094ee19d996f312468f871988fdb",
   "fbfa707084d429176783354745043b5c12b3b488",

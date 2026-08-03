@@ -21025,8 +21025,8 @@ CONTROL_PLANE_M16_OBSERVED_RECOVERY_HELM_ATTEMPTED=false
 
 control_plane_m16_observed_recovery_stage_allowed() {
   local stage="$1"
-  local capture='^capture-(first|second|prewrite)-(helm-status|helm-history|helm-manifest-820|helm-values-820|helm-manifest-822|helm-values-822|api-deployment|controller-deployment|api-pods|controller-pods|service|endpoint-slice|controller-leader|backup-lease|metrics|health-[1-4]|operations|other-witness|snapshot)$'
-  local verified='^capture-verified-(helm-status|helm-manifest-823|helm-values-823|api-deployment|controller-deployment|api-pods|controller-pods|controller-leader|backup-lease|metrics|health-[1-4]|operations|other-witness|snapshot)$'
+  local capture='^capture-(first|second|prewrite)-(helm-status|helm-history|helm-manifest-820|helm-values-820|helm-manifest-822|helm-values-822|api-deployment|controller-deployment|api-pods|controller-pods|service|endpoint-slice|controller-leader|backup-lease|metrics|api-health|operations|other-witness|snapshot)$'
+  local verified='^capture-verified-(helm-status|helm-manifest-823|helm-values-823|api-deployment|controller-deployment|api-pods|controller-pods|controller-leader|backup-lease|metrics|api-health|operations|other-witness|snapshot)$'
   case "${stage}" in
     invocation|capture-compare|render-set|plan|prewrite-compare|prewrite-copy|configmap-create|\
       lease-attach|wal-fence-persist|lease-renew|helm-start|helm-seal|helm-execute|verify|\
@@ -21061,12 +21061,12 @@ capture=(
     r"capture-(?:first|second|prewrite)-(?:helm-status|helm-history|helm-manifest-820|"
     r"helm-values-820|helm-manifest-822|helm-values-822|api-deployment|controller-deployment|"
     r"api-pods|controller-pods|service|endpoint-slice|controller-leader|backup-lease|metrics|"
-    r"health-[1-4]|operations|other-witness|snapshot)"
+    r"api-health|operations|other-witness|snapshot)"
 )
 verified=(
     r"capture-verified-(?:helm-status|helm-manifest-823|helm-values-823|api-deployment|"
     r"controller-deployment|api-pods|controller-pods|controller-leader|backup-lease|metrics|"
-    r"health-[1-4]|operations|other-witness|snapshot)"
+    r"api-health|operations|other-witness|snapshot)"
 )
 lifecycle={
     "invocation","capture-compare","render-set","plan","prewrite-compare","prewrite-copy",
@@ -21188,6 +21188,29 @@ PY
   chmod 600 "${output}" || return
 }
 
+control_plane_m16_observed_recovery_write_api_health_evidence() {
+  local status_file="$1"
+  local body_file="$2"
+  local output="$3"
+  [[ -f "${status_file}" && ! -L "${status_file}" && -f "${body_file}" && ! -L "${body_file}" &&
+    -n "${output}" && ! -e "${output}" && ! -L "${output}" ]] || return 1
+  STATUS_FILE="${status_file}" BODY_FILE="${body_file}" OUTPUT="${output}" python3 - <<'PY' || return
+import hashlib,json,os,pathlib
+status=pathlib.Path(os.environ["STATUS_FILE"]).read_text(encoding="ascii")
+if status!="200": raise SystemExit(1)
+body=json.loads(pathlib.Path(os.environ["BODY_FILE"]).read_bytes())
+canonical=json.dumps(body,ensure_ascii=True,sort_keys=True,separators=(",",":")).encode()
+body_digest="sha256:"+hashlib.sha256(canonical).hexdigest()
+if body_digest!="sha256:a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288": raise SystemExit(1)
+evidence={"url":"https://api.fugue.pro/healthz","status":200,"bodyDigest":body_digest}
+witness_digest="sha256:"+hashlib.sha256(json.dumps(evidence,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+if witness_digest!="sha256:149f3eb74a161c9bdeba82c653246b370a01e1e97d3299f4f7ef608f25e77273": raise SystemExit(1)
+path=pathlib.Path(os.environ["OUTPUT"])
+path.write_text(json.dumps({"evidence":evidence,"witnessDigest":witness_digest},sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+PY
+  chmod 600 "${output}" || return
+}
+
 control_plane_m16_observed_recovery_capture() {
   local directory="$1"
   local capture="$2"
@@ -21237,12 +21260,12 @@ PY
     [[ -n "${pod_name}" ]] || continue
     bounded_kubectl 15 get --raw "/api/v1/namespaces/fugue-system/pods/${pod_name}:9090/proxy/metrics" >"${directory}/metrics-${pod_name}" || return
   done <<<"${pod_names}"
-  local health_index=0
-  for health_url in https://api.fugue.pro/healthz https://oaix.fugue.pro/healthz https://argus.fugue.pro/healthz https://uni-"api"-web.fugue.pro/healthz; do
-    health_index=$((health_index + 1))
-    control_plane_m16_observed_recovery_set_stage "capture-${capture}-health-${health_index}" || return
-    run_with_wall_timeout 15 curl --silent --show-error --max-time 10 -o "${directory}/health-${health_index}.body" -w '%{http_code}' "${health_url}" >"${directory}/health-${health_index}.status" || return
-  done
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-api-health" || return
+  run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 \
+    -o "${directory}/api-health.body" -w '%{http_code}' \
+    https://api.fugue.pro/healthz >"${directory}/api-health.status" || return
+  control_plane_m16_observed_recovery_write_api_health_evidence \
+    "${directory}/api-health.status" "${directory}/api-health.body" "${directory}/api-health.json" || return
   control_plane_m16_observed_recovery_set_stage "capture-${capture}-operations" || return
   control_plane_m16_observed_recovery_capture_active_operations "${directory}/active-operations.json" || return
   control_plane_m16_observed_recovery_set_stage "capture-${capture}-other-witness" || return
@@ -21310,13 +21333,12 @@ for pod in controller_names:
     if float(samples[0])==1: active.append(pod)
 if active!=[holder]: raise SystemExit(1)
 metrics_digest=digest({"leaderCount":1,"metricNames":list(metric_names),"replicaCount":2})
-health=[]
-urls=["https://api.fugue.pro/healthz","https://oaix.fugue.pro/healthz","https://argus.fugue.pro/healthz","https://uni-"+"api-web.fugue.pro/healthz"]
-for index,url in enumerate(urls,1):
-    status_code=(root/f"health-{index}.status").read_text(encoding="ascii")
-    if status_code!="200": raise SystemExit(1)
-    health.append({"url":url,"status":200,"bodyDigest":file_digest(f"health-{index}.body")})
-health_digest=digest(health)
+api_health=load("api-health.json")
+if set(api_health)!={"evidence","witnessDigest"}: raise SystemExit(1)
+health=api_health["evidence"]
+if health!={"url":"https://api.fugue.pro/healthz","status":200,"bodyDigest":"sha256:a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288"}: raise SystemExit(1)
+health_digest=api_health["witnessDigest"]
+if health_digest!="sha256:149f3eb74a161c9bdeba82c653246b370a01e1e97d3299f4f7ef608f25e77273" or digest(health)!=health_digest: raise SystemExit(1)
 operations=load("active-operations.json")
 if set(operations)!={"operations"} or operations["operations"]!=[]: raise SystemExit(1)
 active_operations_digest=digest(operations["operations"])
@@ -21325,7 +21347,7 @@ lease=load("lease.json"); lease_md=lease.get("metadata") or {}; lease_spec=lease
 if lease_md.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or lease_md.get("resourceVersion")!="68219206" or lease_spec.get("holderIdentity")!="release/30836591717-1" or str(annotations.get("fugue.pro/recovery-required") or "").lower()!="true": raise SystemExit(1)
 token_digest="sha256:"+hashlib.sha256(token.encode()).hexdigest()
 if token_digest!="sha256:5fb35a7ec0f85dd18fbd552c610c0add0e1c015f6417db6bc0c68444e72d9d9a" or set(annotations)!={"fugue.pro/coordination-token","fugue.pro/recovery-required"}: raise SystemExit(1)
-kubernetes={"apiName":"fugue-fugue-api","apiUid":"2141262d-0af5-4727-a357-05aef5705d2d","apiResourceVersion":"68219187","apiGeneration":718,"apiObservedGeneration":718,"apiTemplateDigest":digest(api_template),"apiImageRef":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","apiImageId":api_image_id,"apiHealthDigest":health[0]["bodyDigest"],"apiReplicas":2,"apiReady":2,"apiUpdated":2,"apiAvailable":2,"apiUnavailable":0,"serviceName":"fugue-fugue","serviceUid":sm.get("uid"),"serviceResourceVersion":sm.get("resourceVersion"),"serviceSelectorDigest":digest(selector),"endpointSliceName":slice_md.get("name"),"endpointSliceUid":slice_md.get("uid"),"endpointSliceResourceVersion":slice_md.get("resourceVersion"),"endpointServiceName":"fugue-fugue","endpointBindingDigest":digest(binding),"readyServingEndpoints":2,"controllerName":"fugue-fugue-controller","controllerUid":"1506c314-3e53-4812-ba06-5a52145e565e","controllerResourceVersion":"68219303","controllerGeneration":693,"controllerObservedGeneration":693,"controllerTemplateDigest":digest(controller_template),"controllerImageRef":"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","controllerImageId":controller_image_id,"controllerReplicas":2,"controllerReady":2,"controllerUpdated":2,"controllerAvailable":2,"controllerUnavailable":0,"controllerLeaderLeaseName":"fugue-fugue-controller","controllerLeaderLeaseUid":lm.get("uid"),"controllerLeaderLeaseResourceVersion":lm.get("resourceVersion"),"controllerLeaderHolder":holder,"controllerMetricsDigest":metrics_digest,"controllerLkgDigest":digest({"apiTemplateDigest":digest(api_template),"controllerTemplateDigest":digest(controller_template),"helmRevision":822,"valuesDigest":"sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81"}),"frozenNonApiControllerWorkloadDigest":os.environ["OTHER_DIGEST"],"healthWitnessDigest":health_digest,"activeOperationsDigest":active_operations_digest}
+kubernetes={"apiName":"fugue-fugue-api","apiUid":"2141262d-0af5-4727-a357-05aef5705d2d","apiResourceVersion":"68219187","apiGeneration":718,"apiObservedGeneration":718,"apiTemplateDigest":digest(api_template),"apiImageRef":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","apiImageId":api_image_id,"apiHealthDigest":health["bodyDigest"],"apiReplicas":2,"apiReady":2,"apiUpdated":2,"apiAvailable":2,"apiUnavailable":0,"serviceName":"fugue-fugue","serviceUid":sm.get("uid"),"serviceResourceVersion":sm.get("resourceVersion"),"serviceSelectorDigest":digest(selector),"endpointSliceName":slice_md.get("name"),"endpointSliceUid":slice_md.get("uid"),"endpointSliceResourceVersion":slice_md.get("resourceVersion"),"endpointServiceName":"fugue-fugue","endpointBindingDigest":digest(binding),"readyServingEndpoints":2,"controllerName":"fugue-fugue-controller","controllerUid":"1506c314-3e53-4812-ba06-5a52145e565e","controllerResourceVersion":"68219303","controllerGeneration":693,"controllerObservedGeneration":693,"controllerTemplateDigest":digest(controller_template),"controllerImageRef":"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","controllerImageId":controller_image_id,"controllerReplicas":2,"controllerReady":2,"controllerUpdated":2,"controllerAvailable":2,"controllerUnavailable":0,"controllerLeaderLeaseName":"fugue-fugue-controller","controllerLeaderLeaseUid":lm.get("uid"),"controllerLeaderLeaseResourceVersion":lm.get("resourceVersion"),"controllerLeaderHolder":holder,"controllerMetricsDigest":metrics_digest,"controllerLkgDigest":digest({"apiTemplateDigest":digest(api_template),"controllerTemplateDigest":digest(controller_template),"helmRevision":822,"valuesDigest":"sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81"}),"frozenNonApiControllerWorkloadDigest":os.environ["OTHER_DIGEST"],"healthWitnessDigest":health_digest,"activeOperationsDigest":active_operations_digest}
 safe={"helmRecordDigest":digest(status),"kubernetes":kubernetes,"lease":{"namespace":"fugue-system","name":"fugue-fugue-control-plane-db-backup","uid":lease_md.get("uid"),"resourceVersion":lease_md.get("resourceVersion"),"holderIdentity":lease_spec.get("holderIdentity"),"recoveryRequired":True,"coordinationTokenDigest":token_digest},"health":health}
 (root/"snapshot.json").write_text(json.dumps(safe,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
 (root/"coordination-token").write_text(token,encoding="utf-8")
@@ -21748,12 +21770,12 @@ PY
     [[ -n "${pod_name}" ]] || continue
     bounded_kubectl 15 get --raw "/api/v1/namespaces/fugue-system/pods/${pod_name}:9090/proxy/metrics" >"${directory}/metrics-${pod_name}" || return
   done <<<"${pod_names}"
-  local health_index=0
-  for health_url in https://api.fugue.pro/healthz https://oaix.fugue.pro/healthz https://argus.fugue.pro/healthz https://uni-"api"-web.fugue.pro/healthz; do
-    health_index=$((health_index + 1))
-    control_plane_m16_observed_recovery_set_stage "capture-verified-health-${health_index}" || return
-    run_with_wall_timeout 15 curl --silent --show-error --max-time 10 -o "${directory}/health-${health_index}.body" -w '%{http_code}' "${health_url}" >"${directory}/health-${health_index}.status" || return
-  done
+  control_plane_m16_observed_recovery_set_stage capture-verified-api-health || return
+  run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 \
+    -o "${directory}/api-health.body" -w '%{http_code}' \
+    https://api.fugue.pro/healthz >"${directory}/api-health.status" || return
+  control_plane_m16_observed_recovery_write_api_health_evidence \
+    "${directory}/api-health.status" "${directory}/api-health.body" "${directory}/api-health.json" || return
   control_plane_m16_observed_recovery_set_stage capture-verified-operations || return
   control_plane_m16_observed_recovery_capture_active_operations "${directory}/active-operations.json" || return
   control_plane_m16_observed_recovery_set_stage capture-verified-other-witness || return
@@ -21799,11 +21821,16 @@ for pod in after_pods:
     if len(samples)!=1 or 'fugue_component_info{component="controller"} 1.000000' not in raw: raise SystemExit(1)
     if float(samples[0])==1: active.append(pod)
 if active!=[holder]: raise SystemExit(1)
-for index in range(1,5):
-    if (root/f"health-{index}.status").read_text(encoding="ascii")!="200": raise SystemExit(1)
+plan=load(os.environ["PLAN"]); api_health=load(root/"api-health.json")
+if set(api_health)!={"evidence","witnessDigest"}: raise SystemExit(1)
+health=api_health["evidence"]; health_digest=api_health["witnessDigest"]
+if health!={"url":"https://api.fugue.pro/healthz","status":200,"bodyDigest":"sha256:a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288"}: raise SystemExit(1)
+if health_digest!="sha256:149f3eb74a161c9bdeba82c653246b370a01e1e97d3299f4f7ef608f25e77273" or digest(health)!=health_digest: raise SystemExit(1)
+plan_kubernetes=plan.get("kubernetes") or {}
+if plan_kubernetes.get("apiHealthDigest")!=health["bodyDigest"] or plan_kubernetes.get("healthWitnessDigest")!=health_digest: raise SystemExit(1)
 operations=load(root/"active-operations.json")
 if set(operations)!={"operations"} or operations["operations"]!=[] or digest(operations["operations"])!="sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945": raise SystemExit(1)
-lease=load(root/"lease.json"); lm=lease.get("metadata") or {}; ls=lease.get("spec") or {}; la=lm.get("annotations") or {}; plan=load(os.environ["PLAN"])
+lease=load(root/"lease.json"); lm=lease.get("metadata") or {}; ls=lease.get("spec") or {}; la=lm.get("annotations") or {}
 if lm.get("uid")!="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" or ls.get("holderIdentity")!="release/30836591717-1" or str(la.get("fugue.pro/recovery-required") or "").lower()!="true": raise SystemExit(1)
 if la.get("fugue.pro/observed-recovery-plan-digest")!=plan["digest"] or la.get("fugue.pro/observed-recovery-configmap-uid")!=os.environ["CM_UID"]: raise SystemExit(1)
 if os.environ["OTHER_DIGEST"]!="sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9": raise SystemExit(1)
@@ -21850,10 +21877,11 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 3 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 4 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1
