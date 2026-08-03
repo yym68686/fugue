@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "e9430e7d097c11ecd62a10f53823c7deeda6e2c7069758e93f918ecba9a5b738")
+	assertWorkflowSourceDigest(t, data, "3db4041d64ac1ca58fca539900daa1391a8f4382fac9efb0b640840422e0b1d5")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2871,14 +2871,14 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
 		"release-input-guard/Guard exact main commit authorization":                         "04d81d2c70ad3ece441c515bdc0d8508b1d0e0b33a36f27cac7f45c273edfd9c",
-		"recover-api-hotfix-fence/Verify exact recovery implementation identity":            "9dd6db80e9a679c24460ac04219ae72107c70f9d4583bc4886e63fdf7143e53b",
+		"recover-api-hotfix-fence/Verify exact recovery implementation identity":            "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
 		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":     "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
 		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                   "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
 		"release-baseline/Resolve release-domain baseline":                                  "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
 		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-baseline/Verify exact API hotfix runtime closure":                          "58b3823f6a0def01ca5cb10852985a0b83de9de567b6b1fa1b0cb3a1a93d887b",
+		"release-baseline/Verify exact API hotfix runtime closure":                          "491a04c7454cf3b908b796d7b7238b88f08ae45612c0994783151fdb450ee105",
 		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
 		"release-gate/Verify exact API hotfix product receipt":                              "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
 		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
@@ -2900,7 +2900,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Explain runner and fail closed target":                                      "1731c0653bfe39738df9b79b1deafd74e1454c815ed2aa816454b9b83713f0d0",
 		"deploy/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
-		"deploy/Roll out exact API hotfix with hybrid compensation":                         "e046718aed6f5132c8954c375856c1435cfa378d98b9493b8742bf651f75dd93",
+		"deploy/Roll out exact API hotfix with hybrid compensation":                         "88e24f910736b2cd3468b5c98320fafb4e7dd1de422e209123d7a679901f3b43",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"continue-release-convergence/Dispatch exact release convergence successor":         "510c424625aa4b352c3fdacfbca149f8e784760da4971977cbe5f487fddcdfb9",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "007dfc7144f11bc1cc0a7b62994c4efee969679de1a185913489ec5d42b592e7",
@@ -3228,7 +3228,17 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("API hotfix recovery checkout drifted: %+v", recoveryCheckout)
 	}
 	recoveryIdentity := workflowStepByName(t, recovery, "Verify exact recovery implementation identity")
-	for _, required := range []string{"CONFIRM_API_HOTFIX_RECOVERY_30804033592", "1188a37ff87e0117abd548da107f4d9f1f7c24fd", "c12f9548f4e15464cc572189d4b3381c7e1b9a03", "d4b5ed71838d48766fa5704a27f46fcb578bf2f4", "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49", "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184", "git diff --numstat", "scripts/upgrade_fugue_control_plane.sh"} {
+	for _, required := range []string{
+		"CONFIRM_API_HOTFIX_RECOVERY_30804033592",
+		"00eb43b0e97b6daa2357e88ea7e8d53d69e3364d", "9d5fea041f79e26d4ccd0bb70b460d150d14bcda",
+		"7c6085bfc3e7dd3d3c49a501da6ccf9c10742bfc", "14d598030b574d009a058a736a92d5dd05f951c6",
+		"1188a37ff87e0117abd548da107f4d9f1f7c24fd", "c12f9548f4e15464cc572189d4b3381c7e1b9a03",
+		"d4b5ed71838d48766fa5704a27f46fcb578bf2f4", "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49",
+		"9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184", "rev-list --count", "== 9", "git diff --numstat",
+		"scripts/build_control_plane_images.sh", "scripts/test_control_plane_build_reuse.py",
+		"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py",
+		"scripts/upgrade_fugue_control_plane.sh",
+	} {
 		if !strings.Contains(recoveryIdentity.Run, required) {
 			t.Fatalf("API hotfix recovery identity must contain %q", required)
 		}
@@ -3486,10 +3496,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759", "57dc767999741cea25fe4820a6c9603984dfa0b9",
 		"5a3b09c571601993367c50561b257dd6b9e743ca",
-		"9d5fea041f79e26d4ccd0bb70b460d150d14bcda",
-		`rev-list --count "${target_source}..${EXPECTED_SHA}")" == '14'`,
+		"00eb43b0e97b6daa2357e88ea7e8d53d69e3364d",
+		`rev-list --count "${target_source}..${EXPECTED_SHA}")" == '15'`,
 		`M\tinternal/api/managed_app_status.go`, `M\tinternal/api/managed_app_status_test.go`,
 		`.github/workflows/deploy-control-plane.yml`, `scripts/upgrade_fugue_control_plane.sh`,
+		`internal/platformsafety/release_workflow_test.go`,
+		`internal/releasedomain/control_plane_hotfix_adoption.go`,
+		`internal/releasedomain/control_plane_hotfix_adoption_test.go`,
 		`scripts/build_control_plane_images.sh`, `scripts/test_control_plane_build_reuse.py`,
 		`scripts/test_verify_registry_image.py`, `scripts/verify_registry_image.py`,
 	} {
@@ -3950,7 +3963,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC", "57dc767999741cea25fe4820a6c9603984dfa0b9",
 		"FUGUE_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2=true", "FUGUE_CONTROL_PLANE_API_HOTFIX_ARTIFACT_FILE",
-		"capture_non_api", "deployments,daemonsets,statefulsets,pods", "PodImageCohort", "imageID", "cmp -s", "$'820\\tdeployed'",
+		"capture_non_api", "deployments,daemonsets,statefulsets,pods", "PodImageCohort", "imageID",
+		`owner.get("controller") is True`, `{"Job", "CronJob"}`, `"ownerReferences": owners`, "cmp -s", "$'820\\tdeployed'",
 		"image-activation-convergence=complete", "pending-activation-artifacts=",
 	} {
 		if !strings.Contains(hotfixRollout.Run, required) {

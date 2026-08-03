@@ -465,12 +465,16 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' 1188a37ff87e0117abd548da107f4d9f1f7c24fd ;;
-      'rev-parse --verify HEAD^^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
-      'rev-parse --verify HEAD^^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
-      'rev-parse --verify HEAD^^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
-      'rev-parse --verify HEAD^^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
-      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '5\n' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' 00eb43b0e97b6daa2357e88ea7e8d53d69e3364d ;;
+      'rev-parse --verify HEAD^^') printf '%s\n' 9d5fea041f79e26d4ccd0bb70b460d150d14bcda ;;
+      'rev-parse --verify HEAD^^^') printf '%s\n' 7c6085bfc3e7dd3d3c49a501da6ccf9c10742bfc ;;
+      'rev-parse --verify HEAD^^^^') printf '%s\n' 14d598030b574d009a058a736a92d5dd05f951c6 ;;
+      'rev-parse --verify HEAD^^^^^') printf '%s\n' 1188a37ff87e0117abd548da107f4d9f1f7c24fd ;;
+      'rev-parse --verify HEAD^^^^^^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
+      'rev-parse --verify HEAD^^^^^^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
+      'rev-parse --verify HEAD^^^^^^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
+      'rev-parse --verify HEAD^^^^^^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '9\n' ;;
       'rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') : ;;
       'diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '%s\n' internal/platformsafety/release_workflow_test.go ;;
       'diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '1\t0\t%s\n' internal/platformsafety/release_workflow_test.go ;;
@@ -480,8 +484,12 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
         'internal/platformsafety/release_workflow_test.go' \
         'internal/releasedomain/control_plane_hotfix_adoption.go' \
         'internal/releasedomain/control_plane_hotfix_adoption_test.go' \
+        'scripts/build_control_plane_images.sh' \
+        'scripts/test_control_plane_build_reuse.py' \
         'scripts/test_control_plane_hotfix_adoption.sh' \
-        'scripts/upgrade_fugue_control_plane.sh' ;;
+        'scripts/test_verify_registry_image.py' \
+        'scripts/upgrade_fugue_control_plane.sh' \
+        'scripts/verify_registry_image.py' ;;
       'diff --name-only 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD -- deploy/helm/fugue go.mod go.sum') : ;;
       'ls-tree -r HEAD -- deploy/helm/fugue') printf '100644 blob %040d\tdeploy/helm/fugue/values.yaml\n' 1 ;;
       *) command git "$@" ;;
@@ -653,12 +661,16 @@ PY
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%040d\n' 7 ;;
-      'rev-parse --verify HEAD^') printf '%s\n' 1188a37ff87e0117abd548da107f4d9f1f7c24fd ;;
-      'rev-parse --verify HEAD^^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
-      'rev-parse --verify HEAD^^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
-      'rev-parse --verify HEAD^^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
-      'rev-parse --verify HEAD^^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
-      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '5\n' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' 00eb43b0e97b6daa2357e88ea7e8d53d69e3364d ;;
+      'rev-parse --verify HEAD^^') printf '%s\n' 9d5fea041f79e26d4ccd0bb70b460d150d14bcda ;;
+      'rev-parse --verify HEAD^^^') printf '%s\n' 7c6085bfc3e7dd3d3c49a501da6ccf9c10742bfc ;;
+      'rev-parse --verify HEAD^^^^') printf '%s\n' 14d598030b574d009a058a736a92d5dd05f951c6 ;;
+      'rev-parse --verify HEAD^^^^^') printf '%s\n' 1188a37ff87e0117abd548da107f4d9f1f7c24fd ;;
+      'rev-parse --verify HEAD^^^^^^') printf '%s\n' c12f9548f4e15464cc572189d4b3381c7e1b9a03 ;;
+      'rev-parse --verify HEAD^^^^^^^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
+      'rev-parse --verify HEAD^^^^^^^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
+      'rev-parse --verify HEAD^^^^^^^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '9\n' ;;
       'rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') : ;;
       'diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '%s\n' internal/platformsafety/release_workflow_test.go ;;
       'diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '1\t0\t%s\n' internal/platformsafety/release_workflow_test.go ;;
@@ -667,8 +679,12 @@ PY
         internal/platformsafety/release_workflow_test.go \
         internal/releasedomain/control_plane_hotfix_adoption.go \
         internal/releasedomain/control_plane_hotfix_adoption_test.go \
+        scripts/build_control_plane_images.sh \
+        scripts/test_control_plane_build_reuse.py \
         scripts/test_control_plane_hotfix_adoption.sh \
-        scripts/upgrade_fugue_control_plane.sh ;;
+        scripts/test_verify_registry_image.py \
+        scripts/upgrade_fugue_control_plane.sh \
+        scripts/verify_registry_image.py ;;
       'status --short') : ;;
       *) return 1 ;;
     esac
