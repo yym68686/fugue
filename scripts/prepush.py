@@ -216,6 +216,7 @@ def main() -> int:
     checks: dict[str, dict[str, object]] = {}
 
     tasks: dict[str, list[str] | None] = {
+        "compile-all": ["go", "build", "./..."],
         "openapi-generated": [
             "go", "run", "./cmd/fugue-openapi-gen", "-spec", "openapi/openapi.yaml",
             "-routes-out", "internal/api/routes_gen.go", "-spec-out", "internal/apispec/spec_gen.go", "-check",
@@ -261,11 +262,6 @@ def main() -> int:
             break
         status, output = check(remaining)
         record(name, before, status, output)
-
-    if not failures:
-        before = time.monotonic()
-        status, output = run(["go", "build", "./..."], deadline - before)
-        record("compile-all", before, status, output)
 
     if not failures:
         def execute(command: list[str]) -> tuple[int, str, float]:

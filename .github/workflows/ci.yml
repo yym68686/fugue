@@ -33,7 +33,7 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           changed="$(git diff --name-only "${base}...HEAD" --)"
-          if grep -Eq '^((\.github/(actions/operational-domain-guarded-deploy|workflows/(ci|deploy-control-plane))|cmd/fugue-release-domain-evidence|deploy/helm/fugue|internal/releasedomain|scripts/(build_control_plane_images|lib/control_plane_release_domain_production|upgrade_fugue_control_plane))(/|\.|$)|Makefile$)' <<<"${changed}"; then
+          if grep -Eq '^((\.github/(actions/operational-domain-guarded-deploy|workflows/(ci|deploy-control-plane))|cmd/fugue-release-domain-evidence|deploy/helm/fugue|internal/releasedomain|scripts/(build_control_plane_images|lib/control_plane_release_domain_production|upgrade_fugue_control_plane))(/|\.|$)|scripts/(prepush|test_prepush)\.py$|Makefile$)' <<<"${changed}"; then
             echo 'release=true' >>"${GITHUB_OUTPUT}"
           else
             echo 'release=false' >>"${GITHUB_OUTPUT}"
