@@ -614,7 +614,8 @@ func knownPlatformConsumerComponent(component string) bool {
 		model.PlatformConsumerComponentCaddyEdgeFront,
 		model.PlatformConsumerComponentNodeUpdater,
 		model.PlatformConsumerComponentNodeGuardian,
-		model.PlatformConsumerComponentRuntimeAgent:
+		model.PlatformConsumerComponentRuntimeAgent,
+		model.PlatformConsumerComponentEdgeControl:
 		return true
 	default:
 		return false
@@ -625,7 +626,7 @@ func normalizedPlatformIdentityArtifactKinds(values []string) []string {
 	out := make([]string, 0, len(values))
 	seen := map[string]struct{}{}
 	for _, value := range values {
-		value = normalizeExpectedConsumerArtifactKind(value)
+		value = normalizePlatformIdentityArtifactKind(value)
 		if value == "" {
 			continue
 		}
@@ -637,6 +638,14 @@ func normalizedPlatformIdentityArtifactKinds(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func normalizePlatformIdentityArtifactKind(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == model.PlatformArtifactKindEdgeRouteIntent {
+		return value
+	}
+	return normalizeExpectedConsumerArtifactKind(value)
 }
 
 func normalizedPlatformIdentityStrings(values []string) []string {

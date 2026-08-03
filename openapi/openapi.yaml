@@ -250,6 +250,34 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/route-intents:
+    get:
+      operationId: edgeRouteIntents
+      summary: Edge Route Intents
+      description: >-
+        Returns Core's inventory-independent desired-route projection. Only the
+        edge-control component identity with global edge_route_intent capability
+        is accepted; tenant and platform-admin API keys are not accepted.
+      tags: [Edge]
+      x-fugue-handler: handleEdgeRouteIntents
+      security:
+        - PlatformComponentBearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          headers:
+            ETag:
+              schema:
+                type: string
+            X-Fugue-Route-Intent-Generation:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeRouteIntentSnapshot"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/routes:
     get:
       operationId: edgeRoutes
@@ -13551,6 +13579,142 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CachePolicy"
+    EdgeRouteIntentSnapshot:
+      type: object
+      additionalProperties: false
+      required: [schema_version, generation, generated_at, routes, tls_allowlist]
+      properties:
+        schema_version:
+          type: string
+          enum: [edge-route-intent/v1]
+        generation:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRouteIntent"
+        tls_allowlist:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeTLSAllowlistEntry"
+        cache_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/CachePolicy"
+    EdgeRouteIntent:
+      type: object
+      additionalProperties: false
+      required:
+        - generation
+        - hostname
+        - route_kind
+        - app_id
+        - tenant_id
+        - runtime_id
+        - target_group_mode
+        - route_policy
+        - upstream_kind
+        - service_port
+        - tls_policy
+        - streaming
+        - origin_status
+        - created_at
+        - updated_at
+      properties:
+        generation:
+          type: string
+        hostname:
+          type: string
+        path_prefix:
+          type: string
+        route_kind:
+          type: string
+          enum: [platform, custom-domain, platform-domain, platform-route, control-plane-api]
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        runtime_id:
+          type: string
+        runtime_type:
+          type: string
+        runtime_edge_group_id:
+          type: string
+          description: Core locality hint; this is not an Edge Control selection.
+        runtime_cluster_node:
+          type: string
+        target_group_mode:
+          type: string
+          enum: [all_groups, pinned_group]
+        pinned_edge_group_id:
+          type: string
+        excluded_edge_ids:
+          type: array
+          items:
+            type: string
+        excluded_edge_group_ids:
+          type: array
+          items:
+            type: string
+        exclusion_reason:
+          type: string
+        exclusion_expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        exclusion_lifecycle:
+          type: string
+          enum: [clear, active, expiring_1h, expiring_24h, expired_hold, legacy_hold]
+        min_healthy_edge_nodes:
+          type: integer
+          format: int32
+        route_policy:
+          type: string
+          enum: [route_a_only, edge_canary, edge_enabled]
+        upstream_kind:
+          type: string
+          enum: [kubernetes-service, mesh]
+        upstream_scope:
+          type: string
+          enum: [local-service, cluster, mesh]
+        upstream_url:
+          type: string
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRouteUpstream"
+        service_port:
+          type: integer
+          format: int32
+        tls_policy:
+          type: string
+          enum: [platform, custom-domain]
+        cache_policy_id:
+          type: string
+        cache_namespace:
+          type: string
+        deployment_generation:
+          type: string
+        request_body_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRequestBodyPolicy"
+        streaming:
+          type: boolean
+        origin_status:
+          type: string
+          enum: [active, disabled, unavailable, runtime-missing]
+        origin_status_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     EdgeSSHRouteBundle:
       type: object
       additionalProperties: false

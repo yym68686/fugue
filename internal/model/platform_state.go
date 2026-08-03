@@ -22,8 +22,12 @@ const (
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"
 	PlatformArtifactKindGatePolicyRegistry        = "gate_policy_registry"
 	PlatformArtifactKindAutomaticActionContracts  = "automatic_action_contracts"
-	PlatformComponentPlanObserveScope             = "component_plan.observe"
-	PlatformComponentPlanObservationReason        = "release-control component plan shadow observation"
+	// PlatformArtifactKindEdgeRouteIntent is a read-only component identity
+	// capability. It is intentionally not accepted by the platform artifact
+	// store: RouteIntent publication gets its own outbox and ledger boundary.
+	PlatformArtifactKindEdgeRouteIntent    = "edge_route_intent"
+	PlatformComponentPlanObserveScope      = "component_plan.observe"
+	PlatformComponentPlanObservationReason = "release-control component plan shadow observation"
 
 	PlatformArtifactStatusDraft     = "draft"
 	PlatformArtifactStatusValidated = "validated"
@@ -55,6 +59,7 @@ const (
 	PlatformConsumerComponentNodeUpdater    = "node-updater"
 	PlatformConsumerComponentNodeGuardian   = "node-guardian"
 	PlatformConsumerComponentRuntimeAgent   = "runtime-agent"
+	PlatformConsumerComponentEdgeControl    = "edge-control"
 
 	PlatformConsumerProtocolVersionV1 = "v1"
 	PlatformConsumerSchemaVersionV1   = "v1"

@@ -2,6 +2,7 @@ package platformcontrol
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,37 @@ func TestPlatformComponentIdentitySupportsSigningKeyRotation(t *testing.T) {
 	delete(rotated.Keys, "identity-key-2")
 	if _, err := ParsePlatformComponentIdentity(rotated, token, now.Add(2*time.Minute)); !errors.Is(err, ErrPlatformComponentIdentityInvalid) {
 		t.Fatalf("removed verification key must revoke its tokens, got %v", err)
+	}
+}
+
+func TestPlatformComponentIdentityAllowsRouteIntentWithoutConvergenceArtifact(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 3, 2, 0, 0, 0, time.UTC)
+	claims := PlatformComponentIdentityClaims{
+		CredentialID:  "edge-control-route-intent-reader",
+		Component:     model.PlatformConsumerComponentEdgeControl,
+		NodeID:        "edge-control-shadow-1",
+		ScopeKey:      "global",
+		ArtifactKinds: []string{model.PlatformArtifactKindEdgeRouteIntent},
+	}
+	token, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), claims, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("issue edge-control route intent identity: %v", err)
+	}
+	parsed, err := ParsePlatformComponentIdentity(platformComponentTestKeyring(), token, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("parse edge-control route intent identity: %v", err)
+	}
+	if parsed.Component != model.PlatformConsumerComponentEdgeControl || !strings.EqualFold(parsed.ScopeKey, "global") || !reflect.DeepEqual(parsed.ArtifactKinds, []string{model.PlatformArtifactKindEdgeRouteIntent}) {
+		t.Fatalf("unexpected route intent identity claims: %+v", parsed)
+	}
+	if _, err := BuildExpectedConsumerSet(ExpectedConsumerSetBuildRequest{
+		ArtifactKind: model.PlatformArtifactKindEdgeRouteIntent,
+		Generation:   "routeintents_test",
+		PreparedAt:   now,
+	}); err == nil {
+		t.Fatal("route intent identity capability must not enter the legacy expected-consumer ledger")
 	}
 }
 

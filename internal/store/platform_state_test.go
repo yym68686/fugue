@@ -21,6 +21,25 @@ func configureTestPlatformArtifactSigning(s *Store) {
 	))
 }
 
+func TestPlatformArtifactStoreRejectsRouteIntentIdentityCapability(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	if normalized := NormalizePlatformArtifactKind(model.PlatformArtifactKindEdgeRouteIntent); normalized != "" {
+		t.Fatalf("route intent identity capability normalized as legacy platform artifact %q", normalized)
+	}
+	if _, err := s.CreatePlatformArtifact(model.PlatformArtifact{
+		ArtifactKind: model.PlatformArtifactKindEdgeRouteIntent,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Content:      map[string]any{"routes": []any{}},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("route intent entered legacy platform artifact store: %v", err)
+	}
+}
+
 func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 	t.Parallel()
 
