@@ -7,15 +7,18 @@ WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/deploy-control-plane.yml"
 OPERATIONAL_ACTION_FILE="${REPO_ROOT}/.github/actions/operational-domain-guarded-deploy/action.yml"
 ADOPTION_WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/adopt-public-data-plane-helm-baseline.yml"
 RECOVERY_WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/recover-public-data-plane-helm-adoption.yml"
+UPGRADE_SCRIPT_FILE="${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
-ruby - "${WORKFLOW_FILE}" "${OPERATIONAL_ACTION_FILE}" "${ADOPTION_WORKFLOW_FILE}" "${RECOVERY_WORKFLOW_FILE}" <<'RUBY'
+ruby - "${WORKFLOW_FILE}" "${OPERATIONAL_ACTION_FILE}" "${ADOPTION_WORKFLOW_FILE}" "${RECOVERY_WORKFLOW_FILE}" "${UPGRADE_SCRIPT_FILE}" <<'RUBY'
 require "yaml"
 
 workflow_path = ARGV.fetch(0)
 operational_action_path = ARGV.fetch(1)
 adoption_workflow_path = ARGV.fetch(2)
 recovery_workflow_path = ARGV.fetch(3)
+upgrade_script_path = ARGV.fetch(4)
 source = File.read(workflow_path, encoding: "UTF-8")
+upgrade_source = File.read(upgrade_script_path, encoding: "UTF-8")
 workflow = YAML.safe_load(source, aliases: false)
 operational_action = YAML.safe_load(File.read(operational_action_path, encoding: "UTF-8"), aliases: false)
 adoption_workflow = YAML.safe_load(File.read(adoption_workflow_path, encoding: "UTF-8"), aliases: false)
@@ -117,7 +120,7 @@ dispatch = trigger.fetch("workflow_dispatch")
 inputs = dispatch.fetch("inputs")
 assert_equal(
   inputs.keys,
-  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1"],
+  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1", "controller_m16_rollout_v1"],
   "dispatch input set",
 )
 expected_sha = inputs.fetch("expected_sha")
@@ -136,7 +139,7 @@ convergence_source = inputs.fetch("convergence_source_run_id")
 assert_equal(convergence_source["required"], false, "convergence source required flag")
 assert_equal(convergence_source["type"], "string", "convergence source type")
 assert_equal(convergence_source["default"], "", "convergence source default")
-for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1"]
+for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1", "controller_m16_rollout_v1"]
   handoff_input = inputs.fetch(name)
   assert_equal(handoff_input["required"], false, "#{name} required flag")
   assert_equal(handoff_input["type"], "string", "#{name} type")
@@ -190,6 +193,7 @@ guard_step = step(guard, "Guard exact main commit authorization")
   "PUBLIC_DATA_PLANE_ADOPTION_BASELINE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json",
   "PUBLIC_DATA_PLANE_ADOPTION_TRACE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json",
   "API_HOTFIX_ROLLOUT_V2" => "${{ inputs.api_hotfix_rollout_v2 }}",
+  "CONTROLLER_M16_ROLLOUT_V1" => "${{ inputs.controller_m16_rollout_v1 }}",
 }.each do |name, expected|
   assert_equal(guard_step.fetch("env").fetch(name), expected, "guard #{name} source")
 end
@@ -221,6 +225,8 @@ for fragment in [
   '"${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$',
   'CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC',
   '"${TARGET_SHA}" == \'57dc767999741cea25fe4820a6c9603984dfa0b9\'',
+  'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1_58FC',
+  '"${TARGET_SHA}" == \'58fc2e560064214e3f329765c9ec7839ee513c27\'',
 ]
   fail_contract("input guard is missing #{fragment.inspect}") unless guard_step.fetch("run").include?(fragment)
 end
@@ -230,12 +236,28 @@ assert_equal(needs(baseline), ["release-input-guard"], "release-baseline depende
 assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
 for job_name in ["release-baseline", "build", "deploy", "record-release-baseline"]
   checkout = step(jobs.fetch(job_name), "Checkout")
-  expected_ref = job_name == "deploy" ? "${{ inputs.api_hotfix_rollout_v2 != '' && inputs.expected_sha || inputs.target_sha }}" : "${{ inputs.target_sha }}"
+  expected_ref = job_name == "deploy" ? "${{ (inputs.api_hotfix_rollout_v2 != '' || inputs.controller_m16_rollout_v1 != '') && inputs.expected_sha || inputs.target_sha }}" : "${{ inputs.target_sha }}"
   assert_equal(checkout.fetch("with").fetch("ref"), expected_ref, "#{job_name} target checkout")
 end
 stage1_planner_gate = step(baseline, "Verify Stage1 handoff before release planning")
 for fragment in ["canonicalize-secret-free", "verify-stage2"]
   fail_contract("Stage1 planner gate is missing #{fragment.inspect}") unless stage1_planner_gate.fetch("run").include?(fragment)
+end
+controller_m16_baseline = step(baseline, "Verify exact Controller M16 runtime closure")
+for fragment in [
+  "M\\tdeploy/helm/fugue/chart_test.go",
+  "M\\tdeploy/helm/fugue/templates/edge-bluegreen-daemonsets.yaml",
+  "M\\tdeploy/helm/fugue/templates/edge-daemonset.yaml",
+  "M\\tdeploy/helm/fugue/templates/edge-group-daemonsets.yaml",
+  "deploy/helm/fugue/templates/controller-deployment.yaml deploy/helm/fugue/values.yaml deploy/helm/fugue/values-production-ha.yaml go.mod go.sum",
+]
+  fail_contract("Controller M16 chart closure is missing #{fragment.inspect}") unless controller_m16_baseline.fetch("run").include?(fragment)
+end
+for fragment in [
+  "git diff --name-status 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD -- deploy/helm/fugue go.mod go.sum",
+  "deploy/helm/fugue/templates/controller-deployment.yaml deploy/helm/fugue/values.yaml deploy/helm/fugue/values-production-ha.yaml go.mod go.sum",
+]
+  fail_contract("Controller M16 sealed runtime chart closure is missing #{fragment.inspect}") unless upgrade_source.include?(fragment)
 end
 assert_equal(
   baseline.fetch("outputs").fetch("domain_base_sha"),
@@ -297,7 +319,7 @@ assert_equal(
 gate = jobs.fetch("release-gate")
 assert_equal(needs(gate), ["release-input-guard"], "release-gate dependencies")
 assert_equal(gate.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-gate permissions")
-assert_equal(Array(gate["steps"]).length, 2, "release-gate exact receipt step inventory")
+assert_equal(Array(gate["steps"]).length, 3, "release-gate exact receipt step inventory")
 receipt = step(gate, "Verify exact source CI receipt")
 for fragment in [
   "actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100",
@@ -316,6 +338,11 @@ assert_equal(hotfix_receipt.fetch("if"), "${{ inputs.api_hotfix_rollout_v2 != ''
 for fragment in ["30788130816", "57dc767999741cea25fe4820a6c9603984dfa0b9", ".github/workflows/ci.yml"]
   fail_contract("API hotfix receipt is missing #{fragment.inspect}") unless hotfix_receipt.fetch("run").include?(fragment)
 end
+m16_receipt = step(gate, "Verify exact M16 Controller build-only product receipt")
+assert_equal(m16_receipt.fetch("if"), "${{ inputs.controller_m16_rollout_v1 != '' }}", "Controller M16 receipt condition")
+for fragment in ["30824899056", "8860449968", "sha256:08a7ddbaa41d26dd0f124c5981ed8af322f373dfab79815c9df1a6a3c6f44db7"]
+  fail_contract("Controller M16 product receipt is missing #{fragment.inspect}") unless m16_receipt.fetch("run").include?(fragment)
+end
 
 build = jobs.fetch("build")
 assert_equal(build["permissions"], {"actions" => "read", "contents" => "read", "packages" => "write"}, "build permissions")
@@ -327,6 +354,19 @@ assert_equal(
   download_authorization.fetch("with"),
   "build convergence authorization download contract",
 )
+m16_download = step(build, "Download exact M16 Controller build-only receipt")
+assert_equal(m16_download.fetch("if"), "${{ inputs.controller_m16_rollout_v1 != '' }}", "Controller M16 receipt download condition")
+assert_equal(m16_download.fetch("with").fetch("run-id"), "30824899056", "Controller M16 receipt source run")
+m16_plan = step(build, "Verify exact Controller M16 image plan and receipt")
+for fragment in [
+  "f0e20caa59be4bea2459403f09e6cbd0a0c60fe69178cb1346a766b6a8cb7a3a",
+  "05138686d8fa09945a1f158f15e056620a390ea9a277ec0c5d9451472f1a10d3",
+  "sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df",
+  "activation_target_count",
+  "production_mutation_attempted",
+]
+  fail_contract("Controller M16 image plan is missing #{fragment.inspect}") unless m16_plan.fetch("run").include?(fragment)
+end
 build_plan = step(build, "Compute image build plan")
 assert_equal(
   build_plan.fetch("env").fetch("FUGUE_RELEASE_IMAGE_CACHE_CONVERGENCE"),
@@ -484,6 +524,10 @@ api_hotfix_only = {
   "Roll out exact API hotfix with hybrid compensation" => "${{ inputs.api_hotfix_rollout_v2 != '' }}",
   "Upload exact API hotfix terminal evidence" => "${{ steps.api_hotfix_rollout.outcome == 'success' }}",
 }
+controller_m16_only = {
+  "Roll out exact Controller M16 with hybrid compensation" => "${{ inputs.controller_m16_rollout_v1 != '' }}",
+  "Upload exact Controller M16 terminal evidence" => "${{ steps.controller_m16_rollout.outcome == 'success' }}",
+}
 Array(deploy["steps"]).each do |candidate|
   name = candidate.fetch("name")
   condition = candidate["if"].to_s
@@ -491,9 +535,23 @@ Array(deploy["steps"]).each do |candidate|
     assert_equal(condition, genesis_reachable.fetch(name), "genesis-reachable #{name} condition")
   elsif api_hotfix_only.key?(name)
     assert_equal(condition, api_hotfix_only.fetch(name), "API-hotfix-only #{name} condition")
+  elsif controller_m16_only.key?(name)
+    assert_equal(condition, controller_m16_only.fetch(name), "Controller-M16-only #{name} condition")
   elsif !condition.include?("needs.release-baseline.outputs.is_genesis != 'true'")
     fail_contract("unreviewed deploy step #{name.inspect} is reachable from genesis")
   end
+end
+
+controller_m16_rollout = step(deploy, "Roll out exact Controller M16 with hybrid compensation")
+for fragment in [
+  "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1_58FC",
+  "58fc2e560064214e3f329765c9ec7839ee513c27",
+  "sha256:05138686d8fa09945a1f158f15e056620a390ea9a277ec0c5d9451472f1a10d3",
+  "FUGUE_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1=true",
+  "FUGUE_CONTROL_PLANE_CONTROLLER_M16_ARTIFACT_FILE",
+  "821\\tdeployed",
+]
+  fail_contract("Controller M16 rollout is missing #{fragment.inspect}") unless controller_m16_rollout.fetch("run").include?(fragment)
 end
 assert_equal(
   Array(deploy["steps"]).map { |candidate| candidate.fetch("name") }.select { |name| genesis_reachable.key?(name) },
@@ -689,7 +747,7 @@ end
 deploy_uploads = Array(deploy["steps"]).select { |candidate| candidate["uses"].to_s.start_with?("actions/upload-artifact@") }
 assert_equal(
   deploy_uploads.map { |candidate| candidate.fetch("name") },
-  ["Upload exact API hotfix terminal evidence", "Upload release-domain public evidence"],
+  ["Upload exact API hotfix terminal evidence", "Upload exact Controller M16 terminal evidence", "Upload release-domain public evidence"],
   "outer deploy artifact upload inventory",
 )
 
@@ -743,7 +801,7 @@ assert_equal(
 assert_equal(record["permissions"], {"contents" => "write"}, "record-release-baseline permissions")
 assert_equal(
   record["if"],
-  "${{ always() && inputs.api_hotfix_rollout_v2 == '' && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}",
+  "${{ always() && inputs.api_hotfix_rollout_v2 == '' && inputs.controller_m16_rollout_v1 == '' && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}",
   "record-release-baseline success condition",
 )
 assert_equal(record.fetch("steps").length, 2, "record baseline exact step inventory")
@@ -908,6 +966,8 @@ for fragment in [
   "for attempt in 1 2 3 4 5",
   '"${state_after}" == \'disabled_manually\'',
   '"${settled}" == \'true\'',
+  "CONTROLLER_M16_ROLLOUT_V1",
+  "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1_58FC",
   '"rearm_ref_mutation_attempted": False',
   '"rearm_runtime_mutation_attempted": False',
   '"rearm_cluster_mutation_attempted": False',
@@ -945,6 +1005,7 @@ end
 for fragment in [
   "inputs.api_hotfix_recovery_only == ''",
   "inputs.historical_controller_build_only_v1 == ''",
+  "inputs.controller_m16_rollout_v1",
   "needs.deploy.outputs.image_activation_convergence == 'complete'",
   "needs.record-release-baseline.result != 'success'",
   "needs.rearm-release-lane-on-success.result != 'success'",
@@ -995,6 +1056,7 @@ allowed_uploads = [
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
   ["historical-controller-build-only", "${{ runner.temp }}/fugue-historical-controller-build-only-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ runner.temp }}/fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}"],
+  ["deploy", "${{ runner.temp }}/fugue-controller-m16-v1-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
   ["continue-release-convergence", "${{ runner.temp }}/fugue-release-convergence-successor/successor.json"],
   ["rearm-release-lane-on-success", "${{ runner.temp }}/fugue-release-lane-success-rearm/success-rearm.json"],

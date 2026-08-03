@@ -1,6 +1,7 @@
 package releasedomain
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -318,6 +319,181 @@ func TestControlPlaneAPIHotfixRolloutV2WALReopensWithDistinctImageBindings(t *te
 	}
 	if wal.Phase != "compensation-started" || wal.ForwardAttempts != 1 || wal.CompensationAttempts != 1 || !wal.RecoveryRequired {
 		t.Fatalf("v2 WAL reopen lost action fencing: %+v", wal)
+	}
+}
+
+func TestControlPlaneControllerM16RolloutV3BindsPlanRenderWALAndCompensation(t *testing.T) {
+	t.Parallel()
+
+	plan, input := validBuiltControlPlaneControllerM16V3Plan(t)
+	if err := VerifyControlPlaneHotfixAdoptionPlan(plan); err != nil {
+		t.Fatalf("verify Controller M16 v3 plan: %v", err)
+	}
+	if plan.PlanVersion != 3 || plan.Policy != ControlPlaneControllerM16PolicyV3 ||
+		plan.BaseRevision != 820 || plan.TargetRevision != 821 ||
+		plan.CurrentSource != controlPlaneControllerM16HybridSourceV3 || plan.AdoptedSource != controlPlaneControllerM16TargetSourceV3 ||
+		plan.TargetControllerImageRef != controlPlaneControllerM16TargetImageV3 || plan.LiveHybridControllerImageRef != controlPlaneControllerM16HybridImageV3 ||
+		plan.TargetControllerImageID != input.TargetControllerImageID || plan.TargetAPIImageRef != "" || plan.LiveHybridAPIImageRef != "" || plan.TargetAPIImageID != "" ||
+		plan.TargetControllerTemplateDigest == plan.HybridControllerTemplateDigest || plan.TargetAPITemplateDigest != "" || plan.HybridAPITemplateDigest != "" {
+		t.Fatalf("Controller M16 v3 plan lost its fixed placement identity: %+v", plan)
+	}
+	if err := VerifyControlPlaneHotfixRenderSet(plan, input.BaseManifest, input.TargetManifest, input.RepeatedTarget, input.HybridManifest); err != nil {
+		t.Fatalf("verify Controller M16 render set: %v", err)
+	}
+	forward, err := RenderControlPlaneHotfixTransaction(input.TargetManifest, plan, "forward")
+	if err != nil || hotfixDigest(forward) != plan.TargetManifestDigest {
+		t.Fatalf("Controller M16 forward render: digest=%s err=%v", hotfixDigest(forward), err)
+	}
+	compensated, err := RenderControlPlaneHotfixTransaction(input.BaseManifest, plan, "compensate")
+	if err != nil || hotfixDigest(compensated) != plan.HybridManifestDigest || !bytes.Equal(compensated, input.HybridManifest) {
+		t.Fatalf("Controller M16 compensation did not restore exact d1e/e636 bytes: digest=%s err=%v", hotfixDigest(compensated), err)
+	}
+
+	wal, err := NewControlPlaneHotfixAdoptionWAL(plan)
+	if err != nil {
+		t.Fatalf("new Controller M16 WAL: %v", err)
+	}
+	for _, phase := range []string{"prewrite-verified", "forward-started", "compensation-started", "compensated"} {
+		encoded, marshalErr := json.Marshal(wal)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		var reopened ControlPlaneHotfixAdoptionWAL
+		if unmarshalErr := json.Unmarshal(encoded, &reopened); unmarshalErr != nil {
+			t.Fatal(unmarshalErr)
+		}
+		if verifyErr := VerifyControlPlaneHotfixAdoptionWAL(reopened); verifyErr != nil ||
+			reopened.Policy != ControlPlaneControllerM16PolicyV3 || reopened.PlanDigest != plan.Digest {
+			t.Fatalf("reopened Controller M16 WAL lost its exact plan binding: wal=%+v err=%v", reopened, verifyErr)
+		}
+		wal, err = AdvanceControlPlaneHotfixAdoptionWAL(reopened, phase)
+		if err != nil {
+			t.Fatalf("advance Controller M16 WAL to %s: %v", phase, err)
+		}
+	}
+	if wal.Phase != "compensated" || wal.ForwardAttempts != 1 || wal.CompensationAttempts != 1 || wal.RecoveryRequired {
+		t.Fatalf("Controller M16 WAL lost exact compensation fencing: %+v", wal)
+	}
+	if _, err := ExecuteControlPlaneHotfixAdoption(context.Background(), plan, &hotfixExecutionRuntime{}, ControlPlaneHotfixExecutionOptions{}); err == nil ||
+		!strings.Contains(err.Error(), "sealed production shell runtime") {
+		t.Fatalf("Controller M16 escaped its fixed sealed runtime: %v", err)
+	}
+}
+
+func TestControlPlaneControllerM16RolloutV3RejectsIdentityRenderAndCompensationDrift(t *testing.T) {
+	t.Parallel()
+
+	_, input := validBuiltControlPlaneControllerM16V3Plan(t)
+	inputTests := map[string]func(*ControlPlaneHotfixAdoptionInput){
+		"wrong target source": func(value *ControlPlaneHotfixAdoptionInput) { value.AdoptedSource = strings.Repeat("4", 40) },
+		"wrong hybrid source": func(value *ControlPlaneHotfixAdoptionInput) { value.CurrentSource = strings.Repeat("5", 40) },
+		"wrong Helm base":     func(value *ControlPlaneHotfixAdoptionInput) { value.HelmRevision = 819 },
+		"same image": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetControllerImageRef = value.LiveHybridControllerImageRef
+		},
+		"wrong target image": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetControllerImageRef = "ghcr.io/yym68686/fugue-controller@sha256:" + strings.Repeat("1", 64)
+		},
+		"live image drift": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.Kubernetes.ControllerImageRef = value.TargetControllerImageRef
+		},
+		"target imageID drift": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetControllerImageID = "containerd://sha256:" + strings.Repeat("1", 64)
+		},
+		"API target pointer": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetAPIImageRef = "ghcr.io/example/api@sha256:" + strings.Repeat("1", 64)
+		},
+		"Controller identity":   func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerUID = "" },
+		"Controller generation": func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerObservedGeneration-- },
+		"Controller readiness":  func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerReady = 1 },
+		"leader Lease":          func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerLeaderHolder = "" },
+		"metrics witness":       func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerMetricsDigest = "" },
+		"LKG witness":           func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.ControllerLKGDigest = "" },
+		"non-Controller freeze": func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.FrozenNonControllerDigest = "" },
+		"nondeterministic target": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.RepeatedTarget = controllerM16ManifestWithForeignObjectDrift(t, value.RepeatedTarget)
+		},
+		"target foreign drift": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetManifest = controllerM16ManifestWithForeignObjectDrift(t, value.TargetManifest)
+			value.RepeatedTarget = value.TargetManifest
+		},
+		"hybrid foreign drift": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.HybridManifest = controllerM16ManifestWithForeignObjectDrift(t, value.HybridManifest)
+		},
+		"wrong rolling strategy": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.BaseManifest = mutateControllerM16Deployment(t, value.BaseManifest, func(deployment map[string]any) {
+				deployment["spec"].(map[string]any)["strategy"].(map[string]any)["rollingUpdate"].(map[string]any)["maxSurge"] = 1
+			})
+		},
+		"target third pointer": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetManifest = mutateControllerM16Deployment(t, value.TargetManifest, func(deployment map[string]any) {
+				deployment["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)["fugue.pro/unexpected"] = "drift"
+			})
+			value.RepeatedTarget = value.TargetManifest
+		},
+		"compensation third pointer": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.HybridManifest = mutateControllerM16Deployment(t, value.HybridManifest, func(deployment map[string]any) {
+				deployment["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)["fugue.pro/unexpected"] = "drift"
+			})
+		},
+	}
+	for name, mutate := range inputTests {
+		name, mutate := name, mutate
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			changed := input
+			mutate(&changed)
+			if _, err := BuildControlPlaneHotfixAdoptionPlan(changed); err == nil {
+				t.Fatalf("Controller M16 accepted %s drift", name)
+			}
+		})
+	}
+
+	plan, validInput := validBuiltControlPlaneControllerM16V3Plan(t)
+	planTests := map[string]func(*ControlPlaneHotfixAdoptionPlan){
+		"revision":        func(value *ControlPlaneHotfixAdoptionPlan) { value.TargetRevision++ },
+		"target template": func(value *ControlPlaneHotfixAdoptionPlan) { value.TargetControllerTemplateDigest = "" },
+		"hybrid image": func(value *ControlPlaneHotfixAdoptionPlan) {
+			value.LiveHybridControllerImageRef = value.TargetControllerImageRef
+		},
+		"API image authority": func(value *ControlPlaneHotfixAdoptionPlan) {
+			value.TargetAPIImageRef = "ghcr.io/example/api@sha256:" + strings.Repeat("1", 64)
+		},
+		"provenance": func(value *ControlPlaneHotfixAdoptionPlan) {
+			value.Provenance.IndexDigest = "sha256:" + strings.Repeat("1", 64)
+		},
+		"leader identity":       func(value *ControlPlaneHotfixAdoptionPlan) { value.Kubernetes.ControllerLeaderLeaseUID = "" },
+		"frozen non-Controller": func(value *ControlPlaneHotfixAdoptionPlan) { value.Kubernetes.FrozenNonControllerDigest = "" },
+	}
+	for name, mutate := range planTests {
+		name, mutate := name, mutate
+		t.Run("verify plan "+name, func(t *testing.T) {
+			t.Parallel()
+			changed := plan
+			mutate(&changed)
+			changed.Digest = controlPlaneHotfixPlanDigest(changed)
+			if err := VerifyControlPlaneHotfixAdoptionPlan(changed); err == nil {
+				t.Fatalf("Controller M16 plan accepted %s drift", name)
+			}
+		})
+	}
+	if _, err := RenderControlPlaneHotfixTransaction(validInput.BaseManifest, plan, "forward"); err == nil {
+		t.Fatal("Controller M16 forward accepted base bytes")
+	}
+	if _, err := RenderControlPlaneHotfixTransaction(validInput.TargetManifest, plan, "compensate"); err == nil {
+		t.Fatal("Controller M16 compensation accepted target bytes as its base")
+	}
+	if err := VerifyControlPlaneHotfixRenderSet(plan, validInput.BaseManifest, validInput.TargetManifest, controllerM16ManifestWithForeignObjectDrift(t, validInput.RepeatedTarget), validInput.HybridManifest); err == nil {
+		t.Fatal("Controller M16 render verifier accepted nondeterministic target bytes")
+	}
+	wal, err := NewControlPlaneHotfixAdoptionWAL(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal.Policy = "control-plane-generic-component-rollout"
+	wal.Digest = controlPlaneHotfixWALDigest(wal)
+	if err := VerifyControlPlaneHotfixAdoptionWAL(wal); err == nil {
+		t.Fatal("Controller M16 WAL accepted an unreviewed generic policy")
 	}
 }
 
@@ -639,6 +815,141 @@ func validBuiltControlPlaneAPIHotfixV2Plan(t *testing.T) (ControlPlaneHotfixAdop
 		t.Fatalf("build valid v2 hotfix plan: %v", err)
 	}
 	return plan, input
+}
+
+func validBuiltControlPlaneControllerM16V3Plan(t *testing.T) (ControlPlaneHotfixAdoptionPlan, ControlPlaneHotfixAdoptionInput) {
+	t.Helper()
+	seed := validControlPlaneHotfixExecutionPlan()
+	targetIndex := "sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df"
+	input := ControlPlaneHotfixAdoptionInput{
+		PlanVersion: 3,
+		ExpectedSHA: seed.ExpectedSHA, RunID: "30824899056", RunAttempt: 1,
+		Namespace: seed.Namespace, ReleaseName: seed.ReleaseName, ReleaseFullname: seed.ReleaseFullname,
+		HelmRevision: controlPlaneControllerM16BaseRevisionV3, HelmStatus: seed.BaseStatus,
+		HelmRecordDigest: seed.HelmRecordDigest, BaseValuesDigest: seed.BaseValuesDigest,
+		TargetValuesDigest: "sha256:" + strings.Repeat("1", 64), HybridValuesDigest: "sha256:" + strings.Repeat("2", 64),
+		RawTargetManifestDigest: "sha256:" + strings.Repeat("3", 64), RawHybridManifestDigest: "sha256:" + strings.Repeat("4", 64),
+		TargetPostRenderDigest: "sha256:" + strings.Repeat("5", 64), HybridPostRenderDigest: "sha256:" + strings.Repeat("6", 64),
+		NonAPIEdgeRestorePlanDigest: "sha256:" + strings.Repeat("7", 64), ChartTreeDigest: seed.ChartTreeDigest,
+		CurrentSource: controlPlaneControllerM16HybridSourceV3, AdoptedSource: controlPlaneControllerM16TargetSourceV3,
+		TargetControllerImageRef: controlPlaneControllerM16TargetImageV3, LiveHybridControllerImageRef: controlPlaneControllerM16HybridImageV3,
+		TargetControllerImageID: "docker-pullable://ghcr.io/yym68686/fugue-controller@" + targetIndex,
+		Fence:                   seed.Fence, Nonce: seed.Nonce, Confirm: "CONFIRM_CONTROL_PLANE_CONTROLLER_M16_ROLLOUT_V1",
+		Provenance: ControlPlaneHotfixProvenance{
+			BuildRunID: "30824899056", BuildRunAttempt: 1,
+			ArtifactName: "fugue-historical-controller-build-only-58fc", ArtifactDigest: "sha256:" + strings.Repeat("8", 64),
+			Repository: "ghcr.io/yym68686/fugue-controller", IndexDigest: targetIndex,
+			PlatformManifestDigest: "sha256:7fa0ec2c4dbe4d7570ef595b006411efba9f4fbba1caf1571611265a018fbc00",
+			ConfigDigest:           "sha256:7db86a97c096224cae83a3865dccdc7973ca71cef359653d76e31bc22aee7b06",
+			OCIRevision:            controlPlaneControllerM16TargetSourceV3, Verified: true,
+		},
+		Kubernetes: seed.Kubernetes,
+		Lease:      seed.Lease,
+	}
+	input.Kubernetes.ControllerName = input.ReleaseFullname + "-controller"
+	input.Kubernetes.ControllerUID = "controller-uid"
+	input.Kubernetes.ControllerResourceVersion = "67714132"
+	input.Kubernetes.ControllerGeneration = 691
+	input.Kubernetes.ControllerObservedGeneration = 691
+	input.Kubernetes.ControllerImageRef = input.LiveHybridControllerImageRef
+	input.Kubernetes.ControllerImageID = "containerd://sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"
+	input.Kubernetes.ControllerReplicas = 2
+	input.Kubernetes.ControllerReady = 2
+	input.Kubernetes.ControllerUpdated = 2
+	input.Kubernetes.ControllerAvailable = 2
+	input.Kubernetes.ControllerUnavailable = 0
+	input.Kubernetes.ControllerLeaderLeaseName = input.ReleaseFullname + "-controller"
+	input.Kubernetes.ControllerLeaderLeaseUID = "controller-leader-lease-uid"
+	input.Kubernetes.ControllerLeaderLeaseVersion = "67714200"
+	input.Kubernetes.ControllerLeaderHolder = "fugue-fugue-controller-7c7785b56-abcde"
+	input.Kubernetes.ControllerMetricsDigest = "sha256:" + strings.Repeat("9", 64)
+	input.Kubernetes.ControllerLKGDigest = "sha256:" + strings.Repeat("a", 64)
+	input.Kubernetes.FrozenNonControllerDigest = "sha256:" + strings.Repeat("b", 64)
+	input.BaseManifest = controllerM16Manifest(t, input.CurrentSource, input.LiveHybridControllerImageRef)
+	input.TargetManifest = controllerM16Manifest(t, input.AdoptedSource, input.TargetControllerImageRef)
+	input.RepeatedTarget = append([]byte(nil), input.TargetManifest...)
+	input.HybridManifest = controllerM16Manifest(t, input.CurrentSource, input.LiveHybridControllerImageRef)
+	hybridTemplateDigest, err := hotfixManifestTemplateDigest(input.HybridManifest, input.Namespace, input.Kubernetes.ControllerName)
+	if err != nil {
+		t.Fatalf("digest Controller M16 hybrid template: %v", err)
+	}
+	input.Kubernetes.ControllerTemplateDigest = hybridTemplateDigest
+	plan, err := BuildControlPlaneHotfixAdoptionPlan(input)
+	if err != nil {
+		t.Fatalf("build valid Controller M16 v3 plan: %v", err)
+	}
+	return plan, input
+}
+
+func controllerM16Manifest(t *testing.T, source, image string) []byte {
+	t.Helper()
+	objects := hotfixObjects{}
+	deployment := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{"name": "fugue-fugue-controller", "namespace": "fugue-system"},
+		"spec": map[string]any{
+			"replicas": 2,
+			"strategy": map[string]any{"type": "RollingUpdate", "rollingUpdate": map[string]any{"maxUnavailable": 0, "maxSurge": 2}},
+			"template": map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": source}},
+				"spec":     map[string]any{"containers": []any{map[string]any{"name": "controller", "image": image}}},
+			},
+		},
+	}
+	objects[hotfixObjectKey(deployment)] = deployment
+	for index := 0; index < controlPlaneHotfixManifestObjects-1; index++ {
+		name := fmt.Sprintf("controller-m16-fixture-%02d", index)
+		object := map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": name, "namespace": "fugue-system"},
+			"data":     map[string]any{"value": name},
+		}
+		objects[hotfixObjectKey(object)] = object
+	}
+	rendered, err := encodeHotfixObjects(objects)
+	if err != nil {
+		t.Fatalf("encode Controller M16 manifest: %v", err)
+	}
+	return rendered
+}
+
+func mutateControllerM16Deployment(t *testing.T, manifest []byte, mutate func(map[string]any)) []byte {
+	t.Helper()
+	objects, err := decodeHotfixObjects(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := exactHotfixDeployment(objects, "fugue-system", "fugue-fugue-controller")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(deployment)
+	objects[hotfixObjectKey(deployment)] = deployment
+	rendered, err := encodeHotfixObjects(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
+}
+
+func controllerM16ManifestWithForeignObjectDrift(t *testing.T, manifest []byte) []byte {
+	t.Helper()
+	objects, err := decodeHotfixObjects(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, object := range objects {
+		if object["kind"] == "ConfigMap" {
+			object["data"] = map[string]any{"value": "drifted"}
+			objects[key] = object
+			break
+		}
+	}
+	rendered, err := encodeHotfixObjects(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
 }
 
 func hotfixManifestWithForeignObjectDrift(t *testing.T, manifest []byte) []byte {
