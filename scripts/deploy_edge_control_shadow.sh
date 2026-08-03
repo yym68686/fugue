@@ -305,7 +305,7 @@ service=by_kind["Service"][0].get("spec",{})
 if service.get("type")!="ClusterIP" or service.get("externalIPs") or service.get("externalName"):
     raise SystemExit("edge-control service escaped cluster-local boundary")
 policy=by_kind["NetworkPolicy"][0].get("spec",{})
-if policy.get("egress")!=[] or policy.get("policyTypes")!=["Ingress","Egress"]:
+if policy.get("egress",[])!=[] or policy.get("policyTypes")!=["Ingress","Egress"]:
     raise SystemExit("edge-control egress boundary drifted")
 live=[x for x in pods.get("items",[]) if not x.get("metadata",{}).get("deletionTimestamp")]
 if len(live)!=1: raise SystemExit("edge-control live pod cardinality drifted")

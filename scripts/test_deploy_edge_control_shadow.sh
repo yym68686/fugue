@@ -124,13 +124,18 @@ if [[ "$*" == *' get serviceaccount,deployment,service,poddisruptionbudget,netwo
     [[ "$*" == *' -o name'* ]] || printf '%s\n' '{"items":[]}'
     exit 0
   fi
+  if [[ "${FAKE_EDGE_CONTROL_EGRESS_RULE:-}" == 'true' ]]; then
+    network_policy_egress=',"egress":[{"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}]}]'
+  else
+    network_policy_egress=''
+  fi
   cat <<JSON
 {"items":[
 {"kind":"ServiceAccount","metadata":{"name":"edge-control-fugue-edge-control"},"automountServiceAccountToken":false},
 {"kind":"Deployment","metadata":{"name":"edge-control-fugue-edge-control","uid":"deploy-uid","generation":1},"spec":{"replicas":1,"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"${live_source}","fugue.pro/image-digest":"${live_digest}","fugue.pro/edge-control-authority":"none","fugue.pro/edge-control-mode":"boundary-only","fugue.pro/edge-control-publication":"disabled"}},"spec":{"automountServiceAccountToken":false,"containers":[{"name":"edge-control","image":"${live_image}@${live_digest}","env":[{"name":"FUGUE_EDGE_CONTROL_ENABLED","value":"true"},{"name":"FUGUE_EDGE_CONTROL_BIND_ADDR","value":"0.0.0.0:8092"},{"name":"FUGUE_EDGE_CONTROL_SHUTDOWN_TIMEOUT","value":"10s"}]}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}},
 {"kind":"Service","metadata":{"name":"edge-control-fugue-edge-control"},"spec":{"type":"ClusterIP"}},
 {"kind":"PodDisruptionBudget","metadata":{"name":"edge-control-fugue-edge-control"},"spec":{"minAvailable":1}},
-{"kind":"NetworkPolicy","metadata":{"name":"edge-control-fugue-edge-control"},"spec":{"policyTypes":["Ingress","Egress"],"egress":[]}}
+{"kind":"NetworkPolicy","metadata":{"name":"edge-control-fugue-edge-control"},"spec":{"policyTypes":["Ingress","Egress"]${network_policy_egress}}}
 ]}
 JSON
   exit 0
@@ -246,5 +251,23 @@ bash "${ROOT}/scripts/deploy_edge_control_shadow.sh" >"${bad_runtime_log}" 2>&1;
   exit 1
 fi
 grep -q 'edge-control pod is not pristine and ready' "${bad_runtime_log}"
+[[ "$(<"${STATE}/writes")" == '2' ]]
+
+bad_egress_output="${TMP}/receipt-bad-egress/receipt.json"
+bad_egress_log="${TMP}/bad-egress.log"
+if PATH="${BIN}:${PATH}" FAKE_STATE="${STATE}" KUBECTL="${BIN}/kubectl" GITHUB_ACTIONS=true \
+GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=127 GITHUB_RUN_ATTEMPT=1 GITHUB_TOKEN=test-token \
+FAKE_EDGE_CONTROL_EGRESS_RULE=true \
+FUGUE_EDGE_CONTROL_EXPECTED_SOURCE="${second_source}" FUGUE_EDGE_CONTROL_IMAGE=registry.example.test/fugue/edge-control \
+FUGUE_EDGE_CONTROL_IMAGE_DIGEST="${second_digest}" FUGUE_EDGE_CONTROL_IMAGE_RECEIPT_DIGEST="${receipt_digest}" \
+FUGUE_EDGE_CONTROL_SOURCE_RUN_ID=100 FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_ID=89 \
+FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_DIGEST="${artifact_digest}" FUGUE_EDGE_CONTROL_NAMESPACE=fugue-system \
+FUGUE_EDGE_CONTROL_RELEASE=edge-control FUGUE_LEGACY_RELEASE=fugue FUGUE_LEGACY_RELEASE_FULLNAME=fugue-fugue \
+FUGUE_PRODUCT_HEALTH_URL=https://api.example.test/healthz FUGUE_EDGE_CONTROL_RECEIPT_PATH="${bad_egress_output}" \
+bash "${ROOT}/scripts/deploy_edge_control_shadow.sh" >"${bad_egress_log}" 2>&1; then
+  printf 'non-empty edge-control egress unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q 'edge-control egress boundary drifted' "${bad_egress_log}"
 [[ "$(<"${STATE}/writes")" == '2' ]]
 printf '[test_deploy_edge_control_shadow] ok\n'
