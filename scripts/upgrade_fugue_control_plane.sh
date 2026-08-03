@@ -21369,12 +21369,52 @@ PY
   chmod 600 "${directory}/snapshot.json" "${directory}/coordination-token" || return
 }
 
+control_plane_m16_observed_recovery_normalize_target_terminal_lf() {
+  local observed=""
+  local candidate=""
+  local output=""
+  (( $# == 3 )) || return 2
+  observed="$1"
+  candidate="$2"
+  output="$3"
+  [[ -s "${observed}" && -f "${observed}" && ! -L "${observed}" &&
+    -s "${candidate}" && -f "${candidate}" && ! -L "${candidate}" &&
+    ! -e "${output}" && ! -L "${output}" ]] || return 1
+  OBSERVED="${observed}" CANDIDATE="${candidate}" OUTPUT="${output}" python3 - <<'PY'
+import os,pathlib
+
+observed=pathlib.Path(os.environ["OBSERVED"]).read_bytes()
+candidate=pathlib.Path(os.environ["CANDIDATE"]).read_bytes()
+output=pathlib.Path(os.environ["OUTPUT"])
+def fixed_double_lf(raw):
+    return len(raw)>=3 and b"\r" not in raw and raw.endswith(b"\n\n") and raw[-3] not in (10,13)
+if not fixed_double_lf(observed) or not fixed_double_lf(candidate):
+    raise SystemExit(1)
+normalized=candidate[:-1]
+if len(normalized)<2 or not normalized.endswith(b"\n") or normalized[-2] in (10,13):
+    raise SystemExit(1)
+try:
+    with output.open("xb") as stream:
+        stream.write(normalized)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(output,0o600)
+except Exception:
+    try: output.unlink()
+    except FileNotFoundError: pass
+    raise
+PY
+}
+
 control_plane_m16_observed_recovery_build_raw_target() {
   local archived_manifest="$1"
   local observed_manifest="$2"
   local directory="$3"
+  local candidate="${directory}/target-candidate.yaml"
   [[ -f "${archived_manifest}" && ! -L "${archived_manifest}" && -f "${observed_manifest}" && ! -L "${observed_manifest}" ]] || return 1
-  [[ -d "${directory}" && ! -L "${directory}" ]] || return 1
+  [[ -d "${directory}" && ! -L "${directory}" && ! -e "${candidate}" && ! -L "${candidate}" &&
+    ! -e "${directory}/target.yaml" && ! -L "${directory}/target.yaml" &&
+    ! -e "${directory}/repeated-target.yaml" && ! -L "${directory}/repeated-target.yaml" ]] || return 1
   ARCHIVED="${archived_manifest}" OBSERVED="${observed_manifest}" DIRECTORY="${directory}" python3 - <<'PY'
 import hashlib, json, os, pathlib
 
@@ -21435,10 +21475,20 @@ if sum(1 for item in records if item["changed"])!=1: raise SystemExit(1)
 (root/"target-api-template.json").write_text(json.dumps(api,ensure_ascii=True,separators=(",",":"),sort_keys=True),encoding="utf-8")
 (root/"target-controller-template.json").write_text(json.dumps(controller,ensure_ascii=True,separators=(",",":"),sort_keys=True),encoding="utf-8")
 (root/"observed-api-template.json").write_text(json.dumps(observed_api,ensure_ascii=True,separators=(",",":"),sort_keys=True),encoding="utf-8")
-(root/"target.yaml").write_bytes(target)
-(root/"repeated-target.yaml").write_bytes(target)
+(root/"target-candidate.yaml").write_bytes(target)
 (root/"document-digests.json").write_text(json.dumps(records,ensure_ascii=True,separators=(",",":"),sort_keys=True)+"\n",encoding="utf-8")
 PY
+  if ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${observed_manifest}" "${candidate}" "${directory}/target.yaml"; then
+    rm -f -- "${candidate}" "${directory}/target.yaml" "${directory}/repeated-target.yaml"
+    return 1
+  fi
+  if ! cp -- "${directory}/target.yaml" "${directory}/repeated-target.yaml" ||
+    ! cmp -s "${directory}/target.yaml" "${directory}/repeated-target.yaml"; then
+    rm -f -- "${candidate}" "${directory}/target.yaml" "${directory}/repeated-target.yaml"
+    return 1
+  fi
+  rm -f -- "${candidate}" || return
   chmod 600 "${directory}/target-api-template.json" "${directory}/target-controller-template.json" \
     "${directory}/observed-api-template.json" "${directory}/target.yaml" \
     "${directory}/repeated-target.yaml" "${directory}/document-digests.json"
@@ -21937,15 +21987,16 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
-    "$(git rev-parse --verify HEAD^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
-    "$(git rev-parse --verify HEAD^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
-    "$(git rev-parse --verify HEAD^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 8 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619" &&
+    "$(git rev-parse --verify HEAD^^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
+    "$(git rev-parse --verify HEAD^^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 9 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1

@@ -109,6 +109,65 @@ grep -Fq 'base:released|base:owned|target:target|hybrid:hybrid' \
   export FUGUE_UPGRADE_LIB_ONLY=true
   # shellcheck source=scripts/upgrade_fugue_control_plane.sh
   source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  normalize_root="${TMP}/observed-recovery-target-terminal-lf"
+  mkdir -m 700 "${normalize_root}"
+  printf 'stable\n\n' >"${normalize_root}/observed.yaml"
+  printf 'target\n\n' >"${normalize_root}/candidate.yaml"
+  control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${normalize_root}/observed.yaml" "${normalize_root}/candidate.yaml" \
+    "${normalize_root}/target.yaml"
+  NORMALIZED="${normalize_root}/target.yaml" python3 - <<'PY'
+import os,pathlib,stat
+path=pathlib.Path(os.environ["NORMALIZED"])
+raw=path.read_bytes()
+assert raw==b"target\n"
+assert raw.endswith(b"\n") and raw[-2] not in (10,13)
+assert stat.S_IMODE(path.stat().st_mode)==0o600
+PY
+
+  printf 'target' >"${normalize_root}/candidate-zero-lf.yaml"
+  ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${normalize_root}/observed.yaml" "${normalize_root}/candidate-zero-lf.yaml" \
+    "${normalize_root}/target-zero-lf.yaml"
+  printf 'target\n' >"${normalize_root}/candidate-one-lf.yaml"
+  ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${normalize_root}/observed.yaml" "${normalize_root}/candidate-one-lf.yaml" \
+    "${normalize_root}/target-one-lf.yaml"
+  printf 'target\n\n\n' >"${normalize_root}/candidate-three-lf.yaml"
+  ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${normalize_root}/observed.yaml" "${normalize_root}/candidate-three-lf.yaml" \
+    "${normalize_root}/target-three-lf.yaml"
+  printf 'target\r\n\n' >"${normalize_root}/candidate-cr.yaml"
+  ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${normalize_root}/observed.yaml" "${normalize_root}/candidate-cr.yaml" \
+    "${normalize_root}/target-cr.yaml"
+  printf 'target\n ' >"${normalize_root}/candidate-other-tail.yaml"
+  ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+    "${normalize_root}/observed.yaml" "${normalize_root}/candidate-other-tail.yaml" \
+    "${normalize_root}/target-other-tail.yaml"
+
+  for observed_shape in zero one three cr other; do
+    case "${observed_shape}" in
+      zero) printf stable >"${normalize_root}/observed-${observed_shape}.yaml" ;;
+      one) printf 'stable\n' >"${normalize_root}/observed-${observed_shape}.yaml" ;;
+      three) printf 'stable\n\n\n' >"${normalize_root}/observed-${observed_shape}.yaml" ;;
+      cr) printf 'stable\r\n\n' >"${normalize_root}/observed-${observed_shape}.yaml" ;;
+      other) printf 'stable\n ' >"${normalize_root}/observed-${observed_shape}.yaml" ;;
+    esac
+    ! control_plane_m16_observed_recovery_normalize_target_terminal_lf \
+      "${normalize_root}/observed-${observed_shape}.yaml" "${normalize_root}/candidate.yaml" \
+      "${normalize_root}/target-observed-${observed_shape}.yaml"
+  done
+  ! grep -Fq 'rstrip' <(sed -n \
+    '/^control_plane_m16_observed_recovery_normalize_target_terminal_lf()/,/^}/p' \
+    "${ROOT}/scripts/upgrade_fugue_control_plane.sh")
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
   recovery_dir="${TMP}/observed-recovery-wal"
   mkdir -m 700 "${recovery_dir}"
   CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE="${recovery_dir}/plan.json"
@@ -564,6 +623,11 @@ grep -Fq 'control_plane_m16_observed_recovery_assert_base_revision || return' <<
 [[ "$(grep -c '^  cmp -s "${directory}/target.yaml" ' <<<"${observed_render_source}")" == 2 ]]
 [[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
 [[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
+observed_raw_target_source="$(sed -n '/^control_plane_m16_observed_recovery_build_raw_target()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+grep -Fq '(root/"target-candidate.yaml").write_bytes(target)' <<<"${observed_raw_target_source}"
+grep -Fq 'control_plane_m16_observed_recovery_normalize_target_terminal_lf \' <<<"${observed_raw_target_source}"
+! grep -Fq '(root/"target.yaml").write_bytes(target)' <<<"${observed_raw_target_source}"
+! grep -Fq 'rstrip' <<<"${observed_raw_target_source}"
 observed_seal_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_sealed_argv()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
 [[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_seal_source}")" == 1 ]]
 [[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_seal_source}")" == 2 ]]
