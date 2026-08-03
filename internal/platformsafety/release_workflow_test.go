@@ -5083,6 +5083,7 @@ func TestControlPlaneReleaseConvergenceAuthorizationHarness(t *testing.T) {
 				"PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST=",
 				"PUBLIC_DATA_PLANE_ADOPTION_BASELINE="+filepath.Join(tempDir, "stage1-baseline.json"),
 				"PUBLIC_DATA_PLANE_ADOPTION_TRACE="+filepath.Join(tempDir, "stage1-trace.json"),
+				"API_HOTFIX_RECOVERY_ONLY=",
 				"CONVERGENCE_SOURCE_RUN_ID="+test.sourceID,
 				"CONVERGENCE_AUTHORIZATION_FILE="+proofPath,
 				"GH_TOKEN=test",
