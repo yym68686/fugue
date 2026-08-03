@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "b9f815cd41479abd1e65c787c297bac363ca7f71fca51d9e1abd5b7775522d64")
+	assertWorkflowSourceDigest(t, data, "05d34c9f73b31d6826c273bb8d02c67076e73e95ca38a1f0ce2c312fcec01536")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2879,7 +2879,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"release-baseline/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                               "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
 		"release-baseline/Verify exact API hotfix runtime closure":                                    "491a04c7454cf3b908b796d7b7238b88f08ae45612c0994783151fdb450ee105",
-		"release-baseline/Verify exact Controller M16 runtime closure":                                "a5feb3238dbbd0f675f51c06d23abba480c69f00c3b428f7854def039f12c583",
+		"release-baseline/Verify exact Controller M16 runtime closure":                                "df771713ba9459f8f361ba04419ef8c69b2f162e1af2c3a7290af806fe06dc4e",
 		"release-gate/Verify exact source CI receipt":                                                 "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
 		"release-gate/Verify exact API hotfix product receipt":                                        "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
 		"release-gate/Verify exact M16 Controller build-only product receipt":                         "d67426ed8b1b03d144db9c3aa0955adf30ab3c06062e914ae98fbfb466802c35",
@@ -3792,10 +3792,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	for _, required := range []string{
 		"d1e7ed9cdedbaa09db9bd78b4e433b94c7357510", "58fc2e560064214e3f329765c9ec7839ee513c27",
-		"ffd634a135114268156652c8d671231cb50c45fb", `rev-list --count "${tooling_parent}..${EXPECTED_SHA}")" == '1'`,
+		"ffd634a135114268156652c8d671231cb50c45fb", "353cc7e4f417fca51e14483bc292c79e0ba7941a",
+		"db9c05d53c8a34d215687471e625af1a0bed7757", `rev-list --count "${tooling_base}..${EXPECTED_SHA}")" == '3'`,
+		`git diff --name-only "${tooling_parent}..${EXPECTED_SHA}"`, `git diff --name-only "${m16_source}..${tooling_parent}"`,
 		`.github/workflows/deploy-control-plane.yml`, `internal/platformsafety/release_workflow_test.go`,
 		`internal/releasedomain/control_plane_hotfix_adoption.go`, `internal/releasedomain/control_plane_hotfix_adoption_test.go`,
-		`scripts/test_release_domain_workflow.sh`, `scripts/upgrade_fugue_control_plane.sh`,
+		`scripts/prepush.py`, `scripts/test_prepush.py`, `scripts/test_release_domain_workflow.sh`, `scripts/upgrade_fugue_control_plane.sh`,
 		`M\tinternal/controller/app_database_switchover.go`, `A\tinternal/store/managed_postgres_placement.go`,
 		`M\tdeploy/helm/fugue/chart_test.go`, `M\tdeploy/helm/fugue/templates/edge-bluegreen-daemonsets.yaml`,
 		`M\tdeploy/helm/fugue/templates/edge-daemonset.yaml`, `M\tdeploy/helm/fugue/templates/edge-group-daemonsets.yaml`,

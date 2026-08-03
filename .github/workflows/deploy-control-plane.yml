@@ -1066,15 +1066,22 @@ jobs:
           set -euo pipefail
           readonly live_source='d1e7ed9cdedbaa09db9bd78b4e433b94c7357510'
           readonly target_source='58fc2e560064214e3f329765c9ec7839ee513c27'
-          readonly tooling_parent='ffd634a135114268156652c8d671231cb50c45fb'
+          readonly tooling_base='ffd634a135114268156652c8d671231cb50c45fb'
+          readonly m16_source='353cc7e4f417fca51e14483bc292c79e0ba7941a'
+          readonly tooling_parent='db9c05d53c8a34d215687471e625af1a0bed7757'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
           git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
           [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
-          [[ "$(git rev-list --count "${tooling_parent}..${EXPECTED_SHA}")" == '1' ]]
-          [[ -z "$(git rev-list --merges "${tooling_parent}..${EXPECTED_SHA}")" ]]
-          [[ "$(git diff --name-only "${tooling_parent}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ "$(git rev-parse --verify "${tooling_parent}^")" == "${m16_source}" ]]
+          [[ "$(git rev-parse --verify "${m16_source}^")" == "${tooling_base}" ]]
+          [[ "$(git rev-list --count "${tooling_base}..${EXPECTED_SHA}")" == '3' ]]
+          [[ -z "$(git rev-list --merges "${tooling_base}..${EXPECTED_SHA}")" ]]
+          [[ "$(git diff --name-only "${tooling_parent}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ "$(git diff --name-only "${m16_source}..${tooling_parent}")" == $'scripts/prepush.py\nscripts/test_prepush.py' ]]
+          [[ "$(git diff --name-only "${tooling_base}..${m16_source}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ "$(git diff --name-only "${tooling_base}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/prepush.py\nscripts/test_prepush.py\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
           runtime_diff="$(git diff --name-status "${live_source}..${target_source}" -- internal/controller internal/store)"
           [[ "${runtime_diff}" == $'M\tinternal/controller/app_database_switchover.go\nM\tinternal/controller/app_database_switchover_test.go\nM\tinternal/controller/controller.go\nM\tinternal/controller/managed_app_reconciler.go\nM\tinternal/controller/postgres_runtime_alignment.go\nM\tinternal/controller/postgres_runtime_alignment_test.go\nA\tinternal/store/managed_postgres_placement.go\nA\tinternal/store/managed_postgres_placement_pg.go\nA\tinternal/store/managed_postgres_placement_pg_test.go\nA\tinternal/store/managed_postgres_placement_test.go' ]]
           chart_drift="$(git diff --name-status "${target_source}..${EXPECTED_SHA}" -- deploy/helm/fugue go.mod go.sum)"

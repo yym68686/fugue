@@ -21383,10 +21383,15 @@ run_control_plane_controller_m16_rollout_v1() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "ffd634a135114268156652c8d671231cb50c45fb" &&
-    "$(git rev-list --count ffd634a135114268156652c8d671231cb50c45fb..HEAD)" == "1" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "db9c05d53c8a34d215687471e625af1a0bed7757" &&
+    "$(git rev-parse --verify HEAD^^)" == "353cc7e4f417fca51e14483bc292c79e0ba7941a" &&
+    "$(git rev-parse --verify HEAD^^^)" == "ffd634a135114268156652c8d671231cb50c45fb" &&
+    "$(git rev-list --count ffd634a135114268156652c8d671231cb50c45fb..HEAD)" == "3" &&
     -z "$(git rev-list --merges ffd634a135114268156652c8d671231cb50c45fb..HEAD)" ]] || return 1
-  [[ "$(git diff --name-only ffd634a135114268156652c8d671231cb50c45fb HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only db9c05d53c8a34d215687471e625af1a0bed7757 HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only 353cc7e4f417fca51e14483bc292c79e0ba7941a db9c05d53c8a34d215687471e625af1a0bed7757)" == $'scripts/prepush.py\nscripts/test_prepush.py' ]] || return 1
+  [[ "$(git diff --name-only ffd634a135114268156652c8d671231cb50c45fb 353cc7e4f417fca51e14483bc292c79e0ba7941a)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only ffd634a135114268156652c8d671231cb50c45fb HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/prepush.py\nscripts/test_prepush.py\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   git merge-base --is-ancestor 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD || return 1
   [[ "$(git diff --name-status 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD -- deploy/helm/fugue go.mod go.sum)" == $'M\tdeploy/helm/fugue/chart_test.go\nM\tdeploy/helm/fugue/templates/edge-bluegreen-daemonsets.yaml\nM\tdeploy/helm/fugue/templates/edge-daemonset.yaml\nM\tdeploy/helm/fugue/templates/edge-group-daemonsets.yaml' ]] || return 1
   [[ -z "$(git diff --name-only 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD -- deploy/helm/fugue/templates/controller-deployment.yaml deploy/helm/fugue/values.yaml deploy/helm/fugue/values-production-ha.yaml go.mod go.sum)" ]] || return 1
