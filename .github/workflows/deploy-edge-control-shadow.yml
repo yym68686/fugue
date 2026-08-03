@@ -49,7 +49,7 @@ jobs:
           SOURCE_EVENT: ${{ github.event.workflow_run.event }}
           SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           SOURCE_WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${GITHUB_EVENT_NAME}" == 'workflow_run' ]]
@@ -60,19 +60,31 @@ jobs:
           [[ "${SOURCE_HEAD_BRANCH}" == 'main' && "${SOURCE_EVENT}" == 'push' ]]
           [[ "${SOURCE_CONCLUSION}" == 'success' ]]
           [[ "${SOURCE_WORKFLOW_PATH}" == '.github/workflows/publish-edge-control-image.yml' ]]
+          [[ -n "${GITHUB_TOKEN}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${SOURCE_HEAD_SHA}" ]]
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
           read -r commit parent extra <<<"$(git rev-list --parents -n 1 "${SOURCE_HEAD_SHA}")"
           [[ "${commit}" == "${SOURCE_HEAD_SHA}" && "${parent}" =~ ^[0-9a-f]{40}$ && -z "${extra:-}" ]]
 
-          remote_main="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          readonly evidence_dir="${RUNNER_TEMP}/edge-control-shadow-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 0700 "${evidence_dir}"
+          github_api() {
+            local path="$1"
+            curl --fail --silent --show-error --location --max-time 10 \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/${path}"
+          }
+          github_api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" >"${evidence_dir}/main.json"
+          remote_main="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' \
+            "${evidence_dir}/main.json")"
           [[ "${remote_main}" == "${SOURCE_HEAD_SHA}" ]]
-          source_run="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
-          SOURCE_RUN="${source_run}" python3 - <<'PY'
-          import json, os
-          value=json.loads(os.environ["SOURCE_RUN"])
+          github_api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" >"${evidence_dir}/source-run.json"
+          python3 - "${evidence_dir}/source-run.json" <<'PY'
+          import json, os, sys
+          value=json.load(open(sys.argv[1],encoding="utf-8"))
           expected={
               "id":int(os.environ["SOURCE_RUN_ID"]), "run_attempt":1, "event":"push",
               "head_branch":"main", "head_sha":os.environ["SOURCE_HEAD_SHA"],
@@ -84,15 +96,17 @@ jobs:
           PY
 
           wait_for_gate() {
-            local workflow="$1" deadline now payload result
+            local workflow="$1" deadline now payload_file result
+            payload_file="${evidence_dir}/gate-${workflow}.json"
             deadline=$(( $(date +%s) + 1200 ))
             while true; do
-              payload="$(timeout --kill-after=2s 10s gh api \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&event=push&per_page=100")"
-              result="$(PAYLOAD="${payload}" EXPECTED_SHA="${SOURCE_HEAD_SHA}" python3 - <<'PY'
-          import json,os
-          runs=[r for r in json.loads(os.environ["PAYLOAD"]).get("workflow_runs",[])
-                if r.get("head_sha")==os.environ["EXPECTED_SHA"] and r.get("run_attempt")==1
+              github_api \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=main&event=push&per_page=100" \
+                >"${payload_file}"
+              result="$(python3 - "${payload_file}" "${SOURCE_HEAD_SHA}" <<'PY'
+          import json,sys
+          runs=[r for r in json.load(open(sys.argv[1],encoding="utf-8")).get("workflow_runs",[])
+                if r.get("head_sha")==sys.argv[2] and r.get("run_attempt")==1
                 and r.get("event")=="push" and r.get("head_branch")=="main"]
           if len(runs)!=1: print("cardinality"); raise SystemExit
           run=runs[0]
@@ -114,10 +128,11 @@ jobs:
           wait_for_gate ci.yml
 
           for state in in_progress queued; do
-            runs="$(timeout --kill-after=2s 10s gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${state}&per_page=100")"
-            RUNS="${runs}" THIS_RUN="${GITHUB_RUN_ID}" python3 - <<'PY'
-          import json,os
+            runs_file="${evidence_dir}/runs-${state}.json"
+            github_api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?status=${state}&per_page=100" >"${runs_file}"
+            python3 - "${runs_file}" "${GITHUB_RUN_ID}" <<'PY'
+          import json,sys
           blocked={
               ".github/workflows/deploy-control-plane.yml",
               ".github/workflows/release-public-data-plane.yml",
@@ -125,20 +140,19 @@ jobs:
               ".github/workflows/recover-public-data-plane-helm-adoption.yml",
               ".github/workflows/remediate-edge-inactive-slot.yml",
           }
-          conflicts=[r for r in json.loads(os.environ["RUNS"]).get("workflow_runs",[])
-                     if str(r.get("id"))!=os.environ["THIS_RUN"] and r.get("path") in blocked]
+          conflicts=[r for r in json.load(open(sys.argv[1],encoding="utf-8")).get("workflow_runs",[])
+                     if str(r.get("id"))!=sys.argv[2] and r.get("path") in blocked]
           if conflicts: raise SystemExit("another production cluster mutation lane is active")
           PY
           done
 
-          evidence_dir="${RUNNER_TEMP}/edge-control-shadow-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          install -d -m 0700 "${evidence_dir}"
-          artifacts="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100")"
-          artifact_fields="$(ARTIFACTS="${artifacts}" python3 - <<'PY'
-          import json,os,re
+          github_api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" \
+            >"${evidence_dir}/artifacts.json"
+          artifact_fields="$(python3 - "${evidence_dir}/artifacts.json" <<'PY'
+          import json,os,re,sys
           name=f"edge-control-image-{os.environ['SOURCE_HEAD_SHA']}-1"
-          matches=[a for a in json.loads(os.environ["ARTIFACTS"]).get("artifacts",[])
+          matches=[a for a in json.load(open(sys.argv[1],encoding="utf-8")).get("artifacts",[])
                    if a.get("name")==name and a.get("expired") is False]
           if len(matches)!=1: raise SystemExit("image receipt artifact cardinality drifted")
           item=matches[0]; digest=item.get("digest")
@@ -152,8 +166,12 @@ jobs:
           )"
           IFS=$'\t' read -r artifact_id artifact_digest extra <<<"${artifact_fields}"
           [[ "${artifact_id}" =~ ^[1-9][0-9]*$ && "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ && -z "${extra:-}" ]]
-          timeout --kill-after=5s 30s gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" >"${evidence_dir}/receipt.zip"
+          curl --fail --silent --show-error --location --max-time 30 \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output "${evidence_dir}/receipt.zip" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip"
           [[ "sha256:$(sha256sum "${evidence_dir}/receipt.zip" | awk '{print $1}')" == "${artifact_digest}" ]]
 
           owner_lc="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
@@ -208,11 +226,20 @@ jobs:
           FUGUE_LEGACY_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
           FUGUE_PRODUCT_HEALTH_URL: ${{ vars.FUGUE_API_URL || 'https://api.fugue.pro' }}/healthz
           FUGUE_EDGE_CONTROL_RECEIPT_PATH: ${{ runner.temp }}/edge-control-shadow-result/receipt.json
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          remote_main="$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          readonly prewrite_dir="${RUNNER_TEMP}/edge-control-shadow-prewrite-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 0700 "${prewrite_dir}"
+          curl --fail --silent --show-error --location --max-time 10 \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output "${prewrite_dir}/main.json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/heads/main"
+          remote_main="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' \
+            "${prewrite_dir}/main.json")"
           [[ "${remote_main}" == "${FUGUE_EDGE_CONTROL_EXPECTED_SOURCE}" ]]
           ./scripts/deploy_edge_control_shadow.sh
 

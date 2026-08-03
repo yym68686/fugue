@@ -63,6 +63,7 @@ func TestEdgeControlShadowWorkflowIsExactReceiptDrivenAndCredentialFree(t *testi
 		"SOURCE_WORKFLOW_PATH", "SOURCE_RUN_ATTEMPT", "remote_main", "wait_for_gate ci.yml",
 		"source_artifact_digest", "deploy_edge_control_shadow.sh",
 		"fugue-edge-control-shadow-production-v1", "edge-control-shadow-result/receipt.json",
+		"https://api.github.com/", "Authorization: Bearer", "curl --fail --silent --show-error --location",
 	} {
 		if !strings.Contains(raw, required) {
 			t.Fatalf("shadow workflow missing %q", required)
@@ -70,7 +71,8 @@ func TestEdgeControlShadowWorkflowIsExactReceiptDrivenAndCredentialFree(t *testi
 	}
 	for _, forbidden := range []string{
 		"secrets.", "FUGUE_API_KEY", "FUGUE_BOOTSTRAP_KEY", "FUGUE_DATABASE_URL", "FUGUE_BUNDLE_SIGNING_KEY",
-		"helm uninstall", "kubectl delete", "kubectl patch",
+		"helm uninstall", "kubectl delete", "kubectl patch", "gh " + "api",
+		"PAYLOAD=", "RUNS=", "SOURCE_RUN=", "ARTIFACTS=", "REMOTE_MAIN_JSON=",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("shadow workflow gained forbidden capability %q", forbidden)
@@ -111,7 +113,7 @@ func TestEdgeControlShadowDeployScriptIsSingleWriteAndFailClosed(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"helm uninstall", "helm rollback", "kubectl delete", "kubectl patch", "kube delete", "kube patch",
-		"FUGUE_API_KEY", "FUGUE_BOOTSTRAP_KEY", "FUGUE_DATABASE_URL", "FUGUE_BUNDLE_SIGNING_KEY",
+		"FUGUE_API_KEY", "FUGUE_BOOTSTRAP_KEY", "FUGUE_DATABASE_URL", "FUGUE_BUNDLE_SIGNING_KEY", "gh " + "api",
 	} {
 		if strings.Contains(raw, forbidden) {
 			t.Fatalf("shadow deploy script gained forbidden capability %q", forbidden)

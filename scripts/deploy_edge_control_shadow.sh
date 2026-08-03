@@ -40,7 +40,6 @@ umask 077
 command -v helm >/dev/null || fail 'helm is required'
 command -v python3 >/dev/null || fail 'python3 is required'
 command -v curl >/dev/null || fail 'curl is required'
-command -v gh >/dev/null || fail 'gh is required for the final prewrite CAS'
 if [[ -n "${KUBECTL:-}" ]]; then
   read -r -a KUBE <<<"${KUBECTL}"
 elif command -v kubectl >/dev/null; then
@@ -52,19 +51,32 @@ else
 fi
 kube() { "${KUBE[@]}" "$@"; }
 
+github_api_read() {
+  local path="$1"
+  curl --fail --silent --show-error --location --max-time 10 \
+    --header 'Accept: application/vnd.github+json' \
+    --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+    --header 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/${path}"
+}
+
 verify_github_prewrite() {
-  local remote_main runs state
+  local remote_main runs_file state
   [[ "${GITHUB_ACTIONS:-}" == 'true' ]] || fail 'production shadow release must run in GitHub Actions'
   [[ "${GITHUB_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail 'GitHub repository identity is invalid'
   [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ && "${GITHUB_RUN_ATTEMPT:-}" == '1' ]] || fail 'GitHub run identity is invalid'
-  remote_main="$(timeout --kill-after=2s 10s gh api \
-    "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || fail 'could not read main before Helm write'
+  [[ -n "${GITHUB_TOKEN:-}" ]] || fail 'GitHub token is required for the final prewrite CAS'
+  github_api_read "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" >"${WORK_DIR}/github-main.json" || fail 'could not read main before Helm write'
+  remote_main="$(python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["object"]["sha"])' \
+    "${WORK_DIR}/github-main.json")" || fail 'could not decode main before Helm write'
   [[ "${remote_main}" == "${EXPECTED_SOURCE}" ]] || fail 'main moved before Helm write'
   for state in in_progress queued; do
-    runs="$(timeout --kill-after=2s 10s gh api \
-      "repos/${GITHUB_REPOSITORY}/actions/runs?status=${state}&per_page=100")" || fail 'could not read production workflow state'
-    RUNS="${runs}" THIS_RUN="${GITHUB_RUN_ID}" python3 - <<'PY'
-import json,os
+    runs_file="${WORK_DIR}/github-runs-${state}.json"
+    github_api_read \
+      "repos/${GITHUB_REPOSITORY}/actions/runs?status=${state}&per_page=100" >"${runs_file}" || fail 'could not read production workflow state'
+    python3 - "${runs_file}" "${GITHUB_RUN_ID}" <<'PY'
+import json,sys
 blocked={
  ".github/workflows/deploy-control-plane.yml",
  ".github/workflows/release-public-data-plane.yml",
@@ -72,8 +84,8 @@ blocked={
  ".github/workflows/recover-public-data-plane-helm-adoption.yml",
  ".github/workflows/remediate-edge-inactive-slot.yml",
 }
-conflicts=[r for r in json.loads(os.environ["RUNS"]).get("workflow_runs",[])
-           if str(r.get("id"))!=os.environ["THIS_RUN"] and r.get("path") in blocked]
+conflicts=[r for r in json.load(open(sys.argv[1],encoding="utf-8")).get("workflow_runs",[])
+           if str(r.get("id"))!=sys.argv[2] and r.get("path") in blocked]
 if conflicts: raise SystemExit("another production cluster mutation lane became active")
 PY
   done

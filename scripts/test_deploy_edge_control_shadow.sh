@@ -18,7 +18,18 @@ printf '\n' >"${STATE}/digest"
 
 cat >"${BIN}/curl" <<'SH'
 #!/usr/bin/env bash
-exit 0
+set -euo pipefail
+args="$*"
+if [[ "${args}" == *'/git/ref/heads/main'* ]]; then
+  printf '{"object":{"sha":"%s"}}\n' "${FUGUE_EDGE_CONTROL_EXPECTED_SOURCE}"
+elif [[ "${args}" == *'/actions/runs?status='* ]]; then
+  printf '%s\n' '{"workflow_runs":[]}'
+elif [[ "${args}" == *'api.example.test/healthz'* ]]; then
+  :
+else
+  printf 'unexpected curl command: %s\n' "${args}" >&2
+  exit 1
+fi
 SH
 cat >"${BIN}/sleep" <<'SH'
 #!/usr/bin/env bash
@@ -30,14 +41,6 @@ set -euo pipefail
 if [[ "${1:-}" == --kill-after=* ]]; then shift; fi
 [[ "${1:-}" =~ ^[1-9][0-9]*s$ ]] && shift
 exec "$@"
-SH
-cat >"${BIN}/gh" <<'SH'
-#!/usr/bin/env bash
-if [[ "$*" == *'/git/ref/heads/main'* ]]; then
-  printf '%s\n' "${FUGUE_EDGE_CONTROL_EXPECTED_SOURCE}"
-else
-  printf '%s\n' '{"workflow_runs":[]}'
-fi
 SH
 cat >"${BIN}/helm" <<'SH'
 #!/usr/bin/env bash
@@ -160,7 +163,7 @@ artifact_digest='sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 receipt_digest='sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
 output="${TMP}/receipt/receipt.json"
 PATH="${BIN}:${PATH}" FAKE_STATE="${STATE}" KUBECTL="${BIN}/kubectl" GITHUB_ACTIONS=true \
-GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 \
+GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=123 GITHUB_RUN_ATTEMPT=1 GITHUB_TOKEN=test-token \
 FUGUE_EDGE_CONTROL_EXPECTED_SOURCE="${source_commit}" FUGUE_EDGE_CONTROL_IMAGE=registry.example.test/fugue/edge-control \
 FUGUE_EDGE_CONTROL_IMAGE_DIGEST="${image_digest}" FUGUE_EDGE_CONTROL_IMAGE_RECEIPT_DIGEST="${receipt_digest}" \
 FUGUE_EDGE_CONTROL_SOURCE_RUN_ID=99 FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_ID=88 \
@@ -186,7 +189,7 @@ second_source='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
 second_digest='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
 second_output="${TMP}/receipt-upgrade/receipt.json"
 PATH="${BIN}:${PATH}" FAKE_STATE="${STATE}" KUBECTL="${BIN}/kubectl" GITHUB_ACTIONS=true \
-GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 \
+GITHUB_REPOSITORY=example/fugue GITHUB_RUN_ID=124 GITHUB_RUN_ATTEMPT=1 GITHUB_TOKEN=test-token \
 FUGUE_EDGE_CONTROL_EXPECTED_SOURCE="${second_source}" FUGUE_EDGE_CONTROL_IMAGE=registry.example.test/fugue/edge-control \
 FUGUE_EDGE_CONTROL_IMAGE_DIGEST="${second_digest}" FUGUE_EDGE_CONTROL_IMAGE_RECEIPT_DIGEST="${receipt_digest}" \
 FUGUE_EDGE_CONTROL_SOURCE_RUN_ID=100 FUGUE_EDGE_CONTROL_SOURCE_ARTIFACT_ID=89 \
