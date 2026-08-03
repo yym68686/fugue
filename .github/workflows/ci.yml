@@ -3,12 +3,18 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '23 18 * * *'
+  workflow_dispatch:
 
 jobs:
-  test:
+  prepush:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
@@ -16,4 +22,40 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
-      - run: go test ./...
+      - name: Classify release-related changes
+        id: changes
+        env:
+          PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          set -euo pipefail
+          base="${PREPUSH_BASE_REF}"
+          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == '0000000000000000000000000000000000000000' ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          changed="$(git diff --name-only "${base}...HEAD" --)"
+          if grep -Eq '^((\.github/(actions/operational-domain-guarded-deploy|workflows/(ci|deploy-control-plane))|cmd/fugue-release-domain-evidence|deploy/helm/fugue|internal/releasedomain|scripts/(build_control_plane_images|lib/control_plane_release_domain_production|upgrade_fugue_control_plane))(/|\.|$)|Makefile$)' <<<"${changed}"; then
+            echo 'release=true' >>"${GITHUB_OUTPUT}"
+          else
+            echo 'release=false' >>"${GITHUB_OUTPUT}"
+          fi
+      - name: Run bounded pre-push gate
+        env:
+          PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          PREPUSH_RECEIPT: ${{ runner.temp }}/fugue-prepush-receipt.json
+        run: make prepush
+      - name: Verify release preflight fixture
+        if: steps.changes.outputs.release == 'true'
+        env:
+          RECEIPT: ${{ runner.temp }}/fugue-release-preflight-receipt.json
+        run: make release-preflight SNAPSHOT="${GITHUB_WORKSPACE}/cmd/fugue-release-domain-evidence/testdata/release-preflight" RECEIPT="${RECEIPT}"
+
+  audit:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Run full audit suite
+        run: make test
