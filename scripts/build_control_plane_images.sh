@@ -429,6 +429,10 @@ PY
 
 targets="$(trim_field "${FUGUE_CONTROL_PLANE_IMAGE_TARGETS:-}")"
 if [[ -n "${FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE:-}" ]]; then
+	[[ -z "${FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE:-}" ]] || {
+		printf 'build receipt reuse cannot overlap convergence authorization reuse\n' >&2
+		exit 1
+	}
   reuse_authorized_image_cache_artifact
   exit 0
 fi
@@ -483,6 +487,8 @@ repositories=()
 dockerfiles=()
 digests=()
 historical_incident_reuse=false
+canonical_receipt_reuse=false
+canonical_receipt_file="$(trim_field "${FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE:-}")"
 seen_targets=' '
 for target in ${targets}; do
   repo_var="$(image_repository_var "${target}")" || {
@@ -502,7 +508,114 @@ for target in ${targets}; do
   dockerfiles+=("$(image_dockerfile "${target}")")
 done
 
-if [[ -n "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN:-}" ]]; then
+if [[ -n "${canonical_receipt_file}" ]]; then
+	[[ -f "${canonical_receipt_file}" && ! -L "${canonical_receipt_file}" ]] || {
+		printf 'canonical build receipt must be a regular non-symlink file\n' >&2
+		exit 1
+	}
+	receipt_digests_file="${metadata_dir}/receipt-digests"
+	receipt_arguments=()
+	for index in "${!names[@]}"; do
+		receipt_arguments+=("${names[${index}]}" "${repositories[${index}]}")
+	done
+	python3 - "${canonical_receipt_file}" "${FUGUE_IMAGE_TAG}" "${receipt_digests_file}" "${receipt_arguments[@]}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+receipt_path, revision, digest_path, *arguments = sys.argv[1:]
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+ARTIFACT_KEYS = {
+    "component", "config_digest", "immutable_ref", "oci_revision",
+    "platform_manifest_digest", "repository", "source_tag", "top_digest",
+    "verification",
+}
+
+if SHA_RE.fullmatch(revision) is None or not arguments or len(arguments) % 2:
+    raise SystemExit("build-receipt-revision-or-targets-invalid")
+path = Path(receipt_path)
+info = path.lstat()
+if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022:
+    raise SystemExit("build-receipt-permissions-invalid")
+raw = path.read_bytes()
+if not raw or len(raw) > 128 * 1024:
+    raise SystemExit("build-receipt-size-invalid")
+
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate key {key}")
+        value[key] = item
+    return value
+
+try:
+    artifacts = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+    )
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    raise SystemExit(f"build-receipt-json-invalid: {exc}") from exc
+if type(artifacts) is not list:
+    raise SystemExit("build-receipt-schema-type-invalid")
+canonical = json.dumps(artifacts, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
+if raw != canonical:
+    raise SystemExit("build-receipt-canonical-bytes-invalid")
+expected = dict(zip(arguments[0::2], arguments[1::2]))
+if len(expected) != len(arguments) // 2 or len(artifacts) != len(expected):
+    raise SystemExit("build-receipt-artifact-set-missing")
+if [item.get("component") for item in artifacts if type(item) is dict] != sorted(expected):
+    raise SystemExit("build-receipt-component-order-invalid")
+by_component = {}
+for artifact in artifacts:
+    if type(artifact) is not dict or set(artifact) != ARTIFACT_KEYS:
+        raise SystemExit("build-receipt-artifact-shape-invalid")
+    if any(type(value) is not str for value in artifact.values()):
+        raise SystemExit("build-receipt-artifact-type-invalid")
+    component = artifact["component"]
+    if component in by_component or component not in expected:
+        raise SystemExit("build-receipt-artifact-component-invalid")
+    repository = expected[component]
+    if artifact["repository"] != repository:
+        raise SystemExit(f"build-receipt-repository-mismatch:{component}")
+    if artifact["source_tag"] != revision or artifact["oci_revision"] != revision:
+        raise SystemExit(f"build-receipt-stale:{component}")
+    for field in ("top_digest", "config_digest", "platform_manifest_digest"):
+        if DIGEST_RE.fullmatch(artifact[field]) is None:
+            raise SystemExit(f"build-receipt-digest-invalid:{component}:{field}")
+    if artifact["immutable_ref"] != f'{repository}@{artifact["top_digest"]}':
+        raise SystemExit(f"build-receipt-immutable-ref-mismatch:{component}")
+    if artifact["verification"] != "registry_manifest_config_and_layer_get":
+        raise SystemExit(f"build-receipt-verification-mismatch:{component}")
+    by_component[component] = artifact
+if set(by_component) != set(expected):
+    raise SystemExit("build-receipt-artifact-set-missing")
+Path(digest_path).write_text(
+    "".join(by_component[component]["top_digest"] + "\n" for component in arguments[0::2]),
+    encoding="ascii",
+)
+PY
+	digests=()
+	while IFS= read -r digest; do
+		digests+=("${digest}")
+	done <"${receipt_digests_file}"
+	[[ "${#digests[@]}" == "${#names[@]}" ]] || {
+		printf 'build-receipt-artifact-set-missing\n' >&2
+		exit 1
+	}
+	canonical_receipt_reuse=true
+	printf 'reusing exact canonical build receipt; rebuild and push are disabled\n'
+fi
+
+if [[ "${canonical_receipt_reuse}" == true && -n "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN:-}" ]]; then
+	printf 'canonical receipt reuse cannot overlap historical incident reuse\n' >&2
+	exit 1
+elif [[ -n "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN:-}" ]]; then
   [[ "${targets}" == "api controller telemetry_agent edge" ]] || {
     printf 'historical incident reuse requires the exact four image targets\n' >&2
     exit 1
@@ -574,7 +687,7 @@ PY
     "sha256:d85c269268335f32f93d4253dc2331ffa4f48bc197e3005e2835a2dec1483f1b"
   )
   printf 'reusing exact historical incident artifacts; rebuild and push are disabled\n'
-else
+elif [[ "${canonical_receipt_reuse}" != true ]]; then
   for index in "${!names[@]}"; do
     target="${names[${index}]}"
     repository="${repositories[${index}]}"
@@ -614,7 +727,7 @@ if [[ "${rc}" -ne 0 ]]; then
   exit "${rc}"
 fi
 
-if [[ "${historical_incident_reuse}" != true ]]; then
+if [[ "${historical_incident_reuse}" != true && "${canonical_receipt_reuse}" != true ]]; then
   for target in "${names[@]}"; do
     metadata_file="${metadata_dir}/${target}.json"
     if ! digest="$(image_digest_from_metadata "${metadata_file}")"; then
@@ -631,6 +744,11 @@ if [[ "${rc}" -ne 0 ]]; then
 fi
 
 verification_files=()
+registry_verifier="${FUGUE_REGISTRY_IMAGE_VERIFIER:-${REPO_ROOT}/scripts/verify_registry_image.py}"
+[[ -f "${registry_verifier}" && ! -L "${registry_verifier}" ]] || {
+	printf 'registry image verifier must be a regular non-symlink file\n' >&2
+	exit 1
+}
 for index in "${!names[@]}"; do
   target="${names[${index}]}"
   repository="${repositories[${index}]}"
@@ -638,14 +756,26 @@ for index in "${!names[@]}"; do
   verification_file="${metadata_dir}/${target}.verified.json"
   verification_files+=("${verification_file}")
   printf 'verifying %s -> %s@%s\n' "${target}" "${repository}" "${digest}"
-  if [[ "${historical_incident_reuse}" == true ]]; then
-    python3 "${REPO_ROOT}/scripts/verify_registry_image.py" \
+  if [[ "${canonical_receipt_reuse}" == true ]]; then
+    python3 "${registry_verifier}" \
+      --image "${repository}@${digest}" \
+      --platform linux/amd64 \
+      --expected-revision "${FUGUE_IMAGE_TAG}" \
+      --metadata-only \
+      --timeout-seconds 18 \
+      --request-timeout-seconds 5 \
+      --max-attempts 2 \
+      --retry-delay-seconds 0.1 \
+      >"${verification_file}" &
+    pids+=("$!")
+  elif [[ "${historical_incident_reuse}" == true ]]; then
+    python3 "${registry_verifier}" \
       --image "${repository}@${digest}" \
       --platform linux/amd64 \
       --expected-revision "${FUGUE_IMAGE_TAG}" \
       >"${verification_file}" &
     pids+=("$!")
-  elif ! python3 "${REPO_ROOT}/scripts/verify_registry_image.py" \
+  elif ! python3 "${registry_verifier}" \
     --image "${repository}@${digest}" \
     --platform linux/amd64 \
     --expected-revision "${FUGUE_IMAGE_TAG}" \
@@ -654,11 +784,11 @@ for index in "${!names[@]}"; do
     exit 1
   fi
 done
-if [[ "${historical_incident_reuse}" == true ]]; then
+if [[ "${historical_incident_reuse}" == true || "${canonical_receipt_reuse}" == true ]]; then
   rc=0
   for index in "${!pids[@]}"; do
     if ! wait "${pids[${index}]}"; then
-      printf 'historical incident registry verification failed: %s\n' "${names[${index}]}" >&2
+      printf 'registry-reverification-failed:%s\n' "${names[${index}]}" >&2
       rc=1
     fi
     pids[${index}]=''
@@ -680,6 +810,7 @@ for index in "${!names[@]}"; do
 done
 
 python3 - \
+  "${canonical_receipt_reuse}" \
   "${FUGUE_IMAGE_TAG}" \
   "${verified_artifacts_file}" \
   "${verified_artifacts_digest_file}" \
@@ -692,6 +823,7 @@ import sys
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 VERIFICATION = "registry_manifest_config_and_layer_get"
+METADATA_VERIFICATION = "registry_manifest_config_get"
 EXPECTED_FIELDS = {
     "blob_count",
     "config_digest",
@@ -729,7 +861,9 @@ def load_verification(path):
     )
 
 
-revision, artifacts_path, digest_path, *arguments = sys.argv[1:]
+reuse_mode, revision, artifacts_path, digest_path, *arguments = sys.argv[1:]
+if reuse_mode not in {"true", "false"}:
+    raise SystemExit("canonical receipt reuse mode must be true or false")
 if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
     raise SystemExit("image revision must be a complete lowercase 40-character Git revision")
 if not arguments or len(arguments) % 4 != 0:
@@ -766,7 +900,8 @@ for offset in range(0, len(arguments), 4):
         raise SystemExit(f"verifier output platform does not match linux/amd64 for {component}")
     if result["oci_revision"] != revision:
         raise SystemExit(f"verifier output revision does not match the build revision for {component}")
-    if result["verification"] != VERIFICATION:
+    expected_method = METADATA_VERIFICATION if reuse_mode == "true" else VERIFICATION
+    if result["verification"] != expected_method:
         raise SystemExit(f"verifier output method is invalid for {component}")
     manifest_digest = result["manifest_digest"]
     config_digest = result["config_digest"]
@@ -807,6 +942,11 @@ if [[ "${historical_incident_reuse}" == true ]]; then
     printf 'historical incident verified artifact provenance changed\n' >&2
     exit 1
   }
+fi
+
+if [[ "${canonical_receipt_reuse}" == true ]] && ! cmp -s "${verified_artifacts_file}" "${canonical_receipt_file}"; then
+	printf 'registry-reverification-receipt-mismatch\n' >&2
+	exit 1
 fi
 
 staged_output="${metadata_dir}/outputs"

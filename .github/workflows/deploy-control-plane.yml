@@ -41,6 +41,11 @@ on:
         required: false
         type: string
         default: ''
+      artifact_reuse_receipt_b64:
+        description: Base64 of one existing canonical exact-SHA build receipt; invalid or incomplete receipts fail without rebuilding
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -96,6 +101,7 @@ jobs:
           PUBLIC_DATA_PLANE_ADOPTION_TRACE: ${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json
           API_HOTFIX_ROLLOUT_V2: ${{ inputs.api_hotfix_rollout_v2 }}
           API_HOTFIX_RECOVERY_ONLY: ${{ inputs.api_hotfix_recovery_only }}
+          ARTIFACT_REUSE_RECEIPT_B64: ${{ inputs.artifact_reuse_receipt_b64 }}
         run: |
           set -euo pipefail
           [[ "${EVENT_NAME}" == "workflow_dispatch" ]]
@@ -120,6 +126,7 @@ jobs:
           esac
           case "${API_HOTFIX_ROLLOUT_V2:-}" in
             '')
+              [[ -z "${ARTIFACT_REUSE_RECEIPT_B64}" ]]
               if [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]; then
                 [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
               fi
@@ -127,6 +134,7 @@ jobs:
             CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC)
               [[ -z "${API_HOTFIX_RECOVERY_ONLY}" ]]
               [[ "${TARGET_SHA}" == '57dc767999741cea25fe4820a6c9603984dfa0b9' && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]
+              [[ -n "${ARTIFACT_REUSE_RECEIPT_B64}" && ${#ARTIFACT_REUSE_RECEIPT_B64} -le 196608 ]]
               [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
               [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
               ;;
@@ -585,12 +593,12 @@ jobs:
           readonly live_source='a0f5bc0ac36b4e29c4c7928dda1923c2c4727759'
           readonly target_source='57dc767999741cea25fe4820a6c9603984dfa0b9'
           readonly tooling_root='5a3b09c571601993367c50561b257dd6b9e743ca'
-          readonly tooling_parent='1188a37ff87e0117abd548da107f4d9f1f7c24fd'
+          readonly tooling_parent='14d598030b574d009a058a736a92d5dd05f951c6'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
           git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
-          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '11' ]]
+          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '12' ]]
           [[ "$(git rev-list --parents -n 1 "${EXPECTED_SHA}" | awk '{print NF}')" == '2' ]]
           [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
           [[ "$(git rev-parse --verify "${tooling_root}^")" == "${target_source}" ]]
@@ -691,7 +699,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout current artifact verifier
-        if: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}
+        if: ${{ inputs.target_sha != inputs.expected_sha }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.expected_sha }}
@@ -718,8 +726,37 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.convergence_source_run_id }}
 
+      - name: Materialize exact canonical build receipt
+        if: ${{ inputs.artifact_reuse_receipt_b64 != '' }}
+        env:
+          RECEIPT_B64: ${{ inputs.artifact_reuse_receipt_b64 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import binascii
+          import os
+          from pathlib import Path
+
+          encoded = os.environ["RECEIPT_B64"]
+          if not encoded or len(encoded) > 196608 or any(character.isspace() for character in encoded):
+              raise SystemExit("build-receipt-base64-input-invalid")
+          try:
+              receipt = base64.b64decode(encoded, validate=True)
+          except binascii.Error as exc:
+              raise SystemExit("build-receipt-base64-input-invalid") from exc
+          if not receipt or len(receipt) > 128 * 1024:
+              raise SystemExit("build-receipt-size-invalid")
+          directory = Path(os.environ["RUNNER_TEMP"]) / "fugue-build-reuse"
+          directory.mkdir(mode=0o700)
+          output = directory / "receipt.json"
+          with output.open("xb") as handle:
+              os.chmod(output, 0o600)
+              handle.write(receipt)
+          PY
+
       - name: Setup Go
-        if: ${{ inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '' }}
+        if: ${{ inputs.artifact_reuse_receipt_b64 == '' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
@@ -846,11 +883,11 @@ jobs:
           done
 
       - name: Setup Docker Buildx
-        if: ${{ steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
+        if: ${{ inputs.artifact_reuse_receipt_b64 == '' && steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to GHCR
-        if: ${{ steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
+        if: ${{ inputs.artifact_reuse_receipt_b64 == '' && steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
@@ -873,8 +910,12 @@ jobs:
           FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE: ${{ inputs.image_cache_convergence && format('{0}/fugue-release-convergence-authorization/successor.json', runner.temp) || '' }}
           FUGUE_CONVERGENCE_SOURCE_RUN_ID: ${{ inputs.convergence_source_run_id }}
           FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' && format('{0}/fugue-historical-incident-build/build-artifact-plan.json', runner.temp) || '' }}
+          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE: ${{ inputs.artifact_reuse_receipt_b64 != '' && format('{0}/fugue-build-reuse/receipt.json', runner.temp) || '' }}
+          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE: ${{ inputs.artifact_reuse_receipt_b64 != '' && 'true' || 'false' }}
         run: |
-          if [[ "${{ inputs.target_sha }}" != "${{ inputs.expected_sha }}" && "${{ inputs.api_hotfix_rollout_v2 }}" == '' ]]; then
+          if [[ "${FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE}" == 'true' ]]; then
+            timeout --signal=TERM --kill-after=1s 19s ./current-release-tools/scripts/build_control_plane_images.sh
+          elif [[ "${{ inputs.target_sha }}" != "${{ inputs.expected_sha }}" && "${{ inputs.api_hotfix_rollout_v2 }}" == '' ]]; then
             ./current-release-tools/scripts/build_control_plane_images.sh
           else
             ./scripts/build_control_plane_images.sh

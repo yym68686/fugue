@@ -432,7 +432,7 @@ def image_revision(image_config):
     return revision
 
 
-def verify_image(client, top_digest, platform, expected_revision=None):
+def verify_image(client, top_digest, platform, expected_revision=None, metadata_only=False):
     os_name, architecture, variant = platform
     top_document, media_type, _ = client.manifest(top_digest)
     index_digest = ""
@@ -490,8 +490,9 @@ def verify_image(client, top_digest, platform, expected_revision=None):
         if digest in layer_digests:
             raise VerificationError(f"image manifest repeats layer digest {digest}")
         layer_digests.add(digest)
-        client.blob(digest, size, False)
-        client.probe_blob_get(digest, size)
+        if not metadata_only:
+            client.blob(digest, size, False)
+            client.probe_blob_get(digest, size)
         total_layer_bytes += size
 
     return {
@@ -500,11 +501,15 @@ def verify_image(client, top_digest, platform, expected_revision=None):
         "index_digest": index_digest,
         "manifest_digest": manifest_digest,
         "oci_revision": oci_revision,
-        "layer_get_probe_count": len(layers),
+        "layer_get_probe_count": 0 if metadata_only else len(layers),
         "platform": "/".join(item for item in platform if item),
         "request_count": client.request_count,
         "total_layer_bytes": total_layer_bytes,
-        "verification": "registry_manifest_config_and_layer_get",
+        "verification": (
+            "registry_manifest_config_get"
+            if metadata_only
+            else "registry_manifest_config_and_layer_get"
+        ),
     }
 
 
@@ -536,6 +541,11 @@ def main():
         default=0.25,
         help="Initial bounded exponential retry delay",
     )
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="GET the top/platform manifests and config without probing OCI layer blobs",
+    )
     parser.add_argument("--insecure", action="store_true", help="Allow HTTP and unverified TLS for local tests only")
     args = parser.parse_args()
 
@@ -561,7 +571,7 @@ def main():
             args.retry_delay_seconds,
             args.insecure,
         )
-        result = verify_image(client, digest, platform, args.expected_revision)
+        result = verify_image(client, digest, platform, args.expected_revision, args.metadata_only)
         result["image"] = args.image
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     except VerificationError as exc:

@@ -261,6 +261,22 @@ class RegistryImageVerificationTests(unittest.TestCase):
         self.assertIn(("HEAD", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
         self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
 
+    def test_metadata_only_gets_manifests_and_config_without_layer_transport(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, extra_args=["--metadata-only"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["index_digest"], fixture.index_digest)
+        self.assertEqual(payload["manifest_digest"], fixture.manifest_digest)
+        self.assertEqual(payload["config_digest"], fixture.config_digest)
+        self.assertEqual(payload["layer_get_probe_count"], 0)
+        self.assertEqual(payload["verification"], "registry_manifest_config_get")
+        self.assertIn(("GET", f"/v2/acme/image/manifests/{fixture.index_digest}"), fixture.requests)
+        self.assertIn(("GET", f"/v2/acme/image/manifests/{fixture.manifest_digest}"), fixture.requests)
+        self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.config_digest}"), fixture.requests)
+        self.assertNotIn(("HEAD", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+        self.assertNotIn(("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+
     def test_expected_oci_revision_passes(self):
         fixture = RegistryFixture()
         result = run_verifier(fixture, expected_revision=fixture.revision)
