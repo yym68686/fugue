@@ -12367,6 +12367,7 @@ live_deployment_replicas() {
 
 prepare_helm_post_renderer() {
   local public_checksums="${PUBLIC_DATA_PLANE_CHECKSUMS_JSON:-}"
+  local hotfix_api_template="${CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON:-}"
   local public_base_manifest=""
   local registry_deployment=""
   local registry_replicas=""
@@ -12406,14 +12407,15 @@ prepare_helm_post_renderer() {
       return 1
     }
   fi
-  if ! renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" "${public_base_manifest}" <<'PY'
+  if ! renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" "${public_base_manifest}" \
+    "${hotfix_api_template}" <<'PY'
 import base64
 import json
 import os
 import re
 import sys
 
-registry, raw_checksums, base_manifest_path = sys.argv[1:]
+registry, raw_checksums, base_manifest_path, raw_api_template = sys.argv[1:]
 checksums = json.loads(raw_checksums)
 if not isinstance(checksums, dict):
     raise SystemExit(1)
@@ -12483,8 +12485,23 @@ if checksums:
         raise SystemExit(1)
 elif base_manifest_path:
     raise SystemExit(1)
+api_template = None
+if raw_api_template:
+    api_template = json.loads(raw_api_template)
+    if not isinstance(api_template, dict) or set(api_template) != {"metadata", "spec"}:
+        raise SystemExit(1)
+    metadata = api_template.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    spec = api_template.get("spec")
+    containers = spec.get("containers") if isinstance(spec, dict) else None
+    if not isinstance(annotations, dict) or not isinstance(containers, list):
+        raise SystemExit(1)
+    matches = [item for item in containers if isinstance(item, dict) and item.get("name") == "api"]
+    if len(matches) != 1:
+        raise SystemExit(1)
 payload = json.dumps(
     {
+        "apiTemplate": api_template,
         "publicDataPlaneChecksums": checksums,
         "publicDataPlaneObjects": preserved_objects,
         "registryDeployment": registry,
@@ -12501,7 +12518,7 @@ PY
   fi
   [[ -z "${public_base_manifest}" ]] || rm -f "${public_base_manifest}"
   [[ -n "${renderer_config_b64}" ]] || return 1
-  if [[ -z "${registry_deployment}" && "${public_checksums}" == '{}' ]]; then
+  if [[ -z "${registry_deployment}" && "${public_checksums}" == '{}' && -z "${hotfix_api_template}" ]]; then
     return 0
   fi
 
@@ -12515,6 +12532,7 @@ config = json.loads(base64.b64decode(CONFIG_B64, validate=True).decode("utf-8"))
 target_name = config["registryDeployment"]
 checksums = config["publicDataPlaneChecksums"]
 preserved_objects = config["publicDataPlaneObjects"]
+api_template = config["apiTemplate"]
 source = sys.stdin.read()
 lines = source.splitlines()
 documents = []
@@ -12529,6 +12547,7 @@ if document:
     documents.append(document)
 
 seen_public_objects = set()
+seen_api = 0
 rendered = []
 
 for document in documents:
@@ -12561,6 +12580,40 @@ for document in documents:
         document = list(base_document)
         seen_public_objects.add(name)
 
+    if api_template is not None and kind == "Deployment" and name == "fugue-fugue-api":
+        source_matches = [
+            re.fullmatch(r'\s+fugue\.pro/source-commit:\s*["\']?([0-9a-f]{40})["\']?', line)
+            for line in document
+        ]
+        source_values = [match.group(1) for match in source_matches if match]
+        image_matches = [
+            re.fullmatch(r'\s+-?\s*image:\s*["\']?(ghcr\.io/yym68686/fugue-api@sha256:[0-9a-f]{64})["\']?', line)
+            for line in document
+        ]
+        image_values = [match.group(1) for match in image_matches if match]
+        template_matches = [index for index, line in enumerate(document) if line.startswith("  template:")]
+        if len(template_matches) != 1 or len(source_values) != 1 or len(image_values) != 1 or seen_api:
+            raise SystemExit(1)
+        template = json.loads(json.dumps(api_template, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+        template["metadata"]["annotations"]["fugue.pro/source-commit"] = source_values[0]
+        api_containers = [item for item in template["spec"]["containers"] if item.get("name") == "api"]
+        if len(api_containers) != 1:
+            raise SystemExit(1)
+        api_containers[0]["image"] = image_values[0]
+        template_index = template_matches[0]
+        template_end = next(
+            (
+                index
+                for index, line in enumerate(document[template_index + 1 :], template_index + 1)
+                if line.startswith("  ") and not line.startswith("    ") and line.strip()
+            ),
+            len(document),
+        )
+        document = document[:template_index] + [
+            "  template: " + json.dumps(template, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        ] + document[template_end:]
+        seen_api += 1
+
     if target_name and name == target_name and kind == "Deployment":
         if spec_index < 0:
             raise SystemExit(1)
@@ -12576,7 +12629,7 @@ for document in documents:
             document.insert(spec_index + 1, "  replicas: 0")
     rendered.extend(document)
 
-if seen_public_objects != set(checksums) or set(preserved_objects) != set(checksums):
+if seen_public_objects != set(checksums) or set(preserved_objects) != set(checksums) or seen_api != (1 if api_template is not None else 0):
     raise SystemExit(1)
 sys.stdout.write("\n".join(rendered))
 if source.endswith("\n"):
@@ -20022,6 +20075,7 @@ CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED="false"
 CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED="false"
 CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
 CONTROL_PLANE_HOTFIX_INNER_RENDERER_FILE=""
+CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
 
 control_plane_hotfix_write_wal() {
   local phase="$1"
@@ -20277,16 +20331,44 @@ PY
   chmod 600 "${output}"
 }
 
+control_plane_hotfix_bind_live_api_template() {
+  local deployment_file="$1"
+  [[ "${CONTROL_PLANE_HOTFIX_PLAN_VERSION:-0}" == "2" && -f "${deployment_file}" && ! -L "${deployment_file}" ]] || return 1
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(DEPLOYMENT_FILE="${deployment_file}" python3 - <<'PY'
+import json, os
+with open(os.environ["DEPLOYMENT_FILE"], encoding="utf-8") as stream:
+    deployment=json.load(stream)
+metadata=deployment.get("metadata") or {}
+spec=deployment.get("spec") or {}
+template=spec.get("template") or {}
+annotations=(template.get("metadata") or {}).get("annotations") or {}
+containers=(template.get("spec") or {}).get("containers") or []
+images=[item.get("image") for item in containers if item.get("name")=="api"]
+if metadata.get("name")!="fugue-fugue-api" or annotations.get("fugue.pro/source-commit")!="a0f5bc0ac36b4e29c4c7928dda1923c2c4727759":
+    raise SystemExit(1)
+if images != ["ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9"]:
+    raise SystemExit(1)
+print(json.dumps(template, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+)" || return
+  [[ -n "${CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON}" ]] || return 1
+}
+
 control_plane_hotfix_capture_render_set() {
   local directory="$1"
   mkdir -m 700 "${directory}" || return
   CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/live-api-deployment.json" || return
+  chmod 600 "${directory}/live-api-deployment.json" || return
+  control_plane_hotfix_bind_live_api_template "${directory}/live-api-deployment.json" || return
   run_release_long_command 30 "control-plane hotfix base manifest read" \
-    helm get manifest fugue -n fugue-system --revision "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" >"${directory}/base.yaml" || return
-  chmod 600 "${directory}/base.yaml" || return
+    helm get manifest fugue -n fugue-system --revision "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" >"${directory}/base.yaml.raw" || return
+  chmod 600 "${directory}/base.yaml.raw" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${directory}/target.yaml" "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${directory}/repeated-target.yaml" "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_CURRENT_SOURCE}" "${directory}/hybrid.yaml" "${CONTROL_PLANE_HOTFIX_HYBRID_IMAGE_DIGEST}" || return
+  cp "${directory}/hybrid.yaml" "${directory}/base.yaml" || return
+  chmod 600 "${directory}/base.yaml" || return
   FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY=true \
     FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
     go run ./cmd/fugue-control-plane-hotfix-adoption <"${CONTROL_PLANE_HOTFIX_PLAN_FILE}"
@@ -20654,7 +20736,7 @@ run_control_plane_api_hotfix_rollout_v2() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "7e1db873152a53061bc4d68f3860e6f49acb4902" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "76153c632a302c3ed11fd9151a0658c8a2d37e7f" &&
     "$(git rev-list --parents -n 1 HEAD | awk '{print NF}')" == "2" ]] || return 1
   git merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD || return 1
   [[ "${artifact_file}" == /* && -f "${artifact_file}" && ! -L "${artifact_file}" &&
@@ -20717,19 +20799,24 @@ PY
     "${target_image}" == "ghcr.io/yym68686/fugue-api@${target_digest}" ]] || return 1
   CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST="${target_digest}"
 
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${build_dir}/deployment.json" || return
+  chmod 600 "${build_dir}/deployment.json" || return
+  control_plane_hotfix_bind_live_api_template "${build_dir}/deployment.json" || return
   run_release_long_command 30 "API hotfix v2 Helm status read" \
     helm status fugue -n fugue-system -o json >"${build_dir}/helm-status.json" || return
   run_release_long_command 30 "API hotfix v2 Helm values read" \
     helm get values fugue -n fugue-system --all --revision 817 -o json >"${build_dir}/helm-values.json" || return
   run_release_long_command 30 "API hotfix v2 base manifest read" \
-    helm get manifest fugue -n fugue-system --revision 817 >"${build_dir}/base.yaml" || return
+    helm get manifest fugue -n fugue-system --revision 817 >"${build_dir}/base.yaml.raw" || return
+  chmod 600 "${build_dir}/base.yaml.raw" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${build_dir}/target.yaml" "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${build_dir}/repeated-target.yaml" "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_CURRENT_SOURCE}" "${build_dir}/hybrid.yaml" "${CONTROL_PLANE_HOTFIX_HYBRID_IMAGE_DIGEST}" || return
+  cp "${build_dir}/hybrid.yaml" "${build_dir}/base.yaml" || return
+  chmod 600 "${build_dir}/base.yaml" || return
 
   KUBECTL="$(detect_kubectl)" || return
   export KUBECTL
-  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${build_dir}/deployment.json" || return
   bounded_kubectl 15 -n fugue-system get service/fugue-fugue -o json >"${build_dir}/service.json" || return
   bounded_kubectl 15 -n fugue-system get endpointslice -l kubernetes.io/service-name=fugue-fugue -o json >"${build_dir}/endpointslices.json" || return
   bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${build_dir}/pods.json" || return

@@ -619,9 +619,12 @@ func validBuiltControlPlaneAPIHotfixV2Plan(t *testing.T) (ControlPlaneHotfixAdop
 	input.TargetPostRenderDigest = "sha256:" + strings.Repeat("3", 64)
 	input.HybridPostRenderDigest = "sha256:" + strings.Repeat("4", 64)
 	input.NonAPIEdgeRestorePlanDigest = "sha256:" + strings.Repeat("5", 64)
-	input.BaseManifest = hotfixManifest(t, strings.Repeat("0", 40), "ghcr.io/yym68686/fugue-api@sha256:"+strings.Repeat("6", 64), "")
-	input.TargetManifest = hotfixManifest(t, input.AdoptedSource, input.TargetAPIImageRef, "")
-	input.HybridManifest = hotfixManifest(t, input.CurrentSource, input.LiveHybridAPIImageRef, "")
+	// V2 uses the frozen live LKG PodTemplate as its effective transaction
+	// base. The emergency annotation models live-only material that is absent
+	// from the Helm817 chart render and must survive both directions.
+	input.BaseManifest = hotfixManifest(t, input.CurrentSource, input.LiveHybridAPIImageRef, "preserved-live")
+	input.TargetManifest = hotfixManifest(t, input.AdoptedSource, input.TargetAPIImageRef, "preserved-live")
+	input.HybridManifest = hotfixManifest(t, input.CurrentSource, input.LiveHybridAPIImageRef, "preserved-live")
 	input.RepeatedTarget = append([]byte(nil), input.TargetManifest...)
 	hybridTemplateDigest, err := hotfixManifestTemplateDigest(input.HybridManifest, input.Namespace, input.Kubernetes.APIName)
 	if err != nil {

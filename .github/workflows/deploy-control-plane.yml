@@ -464,12 +464,12 @@ jobs:
           readonly live_source='a0f5bc0ac36b4e29c4c7928dda1923c2c4727759'
           readonly target_source='57dc767999741cea25fe4820a6c9603984dfa0b9'
           readonly tooling_root='5a3b09c571601993367c50561b257dd6b9e743ca'
-          readonly tooling_parent='7e1db873152a53061bc4d68f3860e6f49acb4902'
+          readonly tooling_parent='76153c632a302c3ed11fd9151a0658c8a2d37e7f'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
           git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
-          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '4' ]]
+          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '5' ]]
           [[ "$(git rev-list --parents -n 1 "${EXPECTED_SHA}" | awk '{print NF}')" == '2' ]]
           [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
           [[ "$(git rev-parse --verify "${tooling_root}^")" == "${target_source}" ]]

@@ -105,6 +105,68 @@ ACTUAL="$(cut -d'|' -f2- "${LOG}")"
   export FUGUE_UPGRADE_LIB_ONLY=true
   # shellcheck source=scripts/upgrade_fugue_control_plane.sh
   source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  live_source=a0f5bc0ac36b4e29c4c7928dda1923c2c4727759
+  target_source=57dc767999741cea25fe4820a6c9603984dfa0b9
+  live_image=ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9
+  target_image=ghcr.io/yym68686/fugue-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(LIVE_SOURCE="${live_source}" LIVE_IMAGE="${live_image}" python3 - <<'PY'
+import json, os
+print(json.dumps({
+    "metadata":{"annotations":{"fugue.io/emergency-hotfix":"true","fugue.pro/source-commit":os.environ["LIVE_SOURCE"]}},
+    "spec":{"containers":[{"image":os.environ["LIVE_IMAGE"],"imagePullPolicy":"IfNotPresent","name":"api"}],"dnsPolicy":"ClusterFirst","restartPolicy":"Always"},
+},sort_keys=True,separators=(",",":")))
+PY
+)"
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON='{}'
+  NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=false
+  prepare_helm_post_renderer
+  raw="${TMP}/api-template-raw.yaml"
+  rendered="${TMP}/api-template-rendered.yaml"
+  cat >"${raw}" <<'YAML'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+  namespace: fugue-system
+spec:
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        fugue.pro/source-commit: 57dc767999741cea25fe4820a6c9603984dfa0b9
+    spec:
+      containers:
+      - image: ghcr.io/yym68686/fugue-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        name: api
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: untouched
+  namespace: fugue-system
+data:
+  value: exact
+YAML
+  "${HELM_POST_RENDERER_FILE}" <"${raw}" >"${rendered}"
+  RENDERED="${rendered}" TARGET_SOURCE="${target_source}" TARGET_IMAGE="${target_image}" python3 - <<'PY'
+import json, os, re
+raw=open(os.environ["RENDERED"],encoding="utf-8").read()
+match=re.search(r'^  template: (\{.*\})$',raw,re.MULTILINE)
+assert match
+template=json.loads(match.group(1))
+assert template["metadata"]["annotations"] == {"fugue.io/emergency-hotfix":"true","fugue.pro/source-commit":os.environ["TARGET_SOURCE"]}
+assert template["spec"] == {"containers":[{"image":os.environ["TARGET_IMAGE"],"imagePullPolicy":"IfNotPresent","name":"api"}],"dnsPolicy":"ClusterFirst","restartPolicy":"Always"}
+assert raw.endswith('data:\n  value: exact\n')
+PY
+  rm -f -- "${HELM_POST_RENDERER_FILE}"
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
   contract="${TMP}/post-render-contract"
   mkdir -m 700 "${contract}"
   printf 'raw-target\n' >"${contract}/raw-target"
@@ -339,8 +401,8 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' '7e1db873152a53061bc4d68f3860e6f49acb4902' ;;
-      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '7e1db873152a53061bc4d68f3860e6f49acb4902' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' '76153c632a302c3ed11fd9151a0658c8a2d37e7f' ;;
+      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '76153c632a302c3ed11fd9151a0658c8a2d37e7f' ;;
       'merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD') : ;;
       'diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD') printf '%s\n' \
         '.github/workflows/deploy-control-plane.yml' \
