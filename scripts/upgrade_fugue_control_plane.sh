@@ -20396,7 +20396,7 @@ for item in value.get("items") or []:
         result.append({"kind":"PodImageCohort","ownerReferences":metadata.get("ownerReferences") or [],"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")})
         continue
     status=item.get("status") or {}
-    result.append({"apiVersion":item.get("apiVersion"),"kind":kind,"metadata":{key:metadata.get(key) for key in ("annotations","deletionTimestamp","generation","labels","name","namespace","resourceVersion","uid")},"spec":item.get("spec"),"status":{key:status.get(key,0) for key in ("availableReplicas","currentNumberScheduled","desiredNumberScheduled","misscheduled","observedGeneration","readyReplicas","replicas","numberAvailable","numberMisscheduled","numberReady","numberUnavailable","updatedNumberScheduled","updatedReplicas","unavailableReplicas")}})
+    result.append({"apiVersion":item.get("apiVersion"),"kind":kind,"metadata":{key:metadata.get(key) for key in ("annotations","deletionTimestamp","generation","labels","name","namespace","uid")},"spec":item.get("spec"),"status":{key:status.get(key,0) for key in ("availableReplicas","currentNumberScheduled","desiredNumberScheduled","misscheduled","observedGeneration","readyReplicas","replicas","numberAvailable","numberMisscheduled","numberReady","numberUnavailable","updatedNumberScheduled","updatedReplicas","unavailableReplicas")}})
 result.sort(key=lambda item:json.dumps(item,sort_keys=True,separators=(",", ":")))
 encoded=json.dumps(result,sort_keys=True,separators=(",", ":")).encode()
 print("sha256:"+hashlib.sha256(encoded).hexdigest())
@@ -20714,6 +20714,189 @@ control_plane_hotfix_verify_live_target() {
   fi
 }
 
+control_plane_api_hotfix_recovery_capture() {
+  local directory="$1"
+  local lease_mode="$2"
+  local lease_json=""
+  local token=""
+
+  case "${lease_mode}" in held|released) ;; *) return 2 ;; esac
+  [[ ! -e "${directory}" && ! -L "${directory}" ]] || return 1
+  mkdir -m 700 "${directory}" || return
+  run_release_long_command 30 "API hotfix recovery Helm status read" \
+    helm status fugue -n fugue-system -o json >"${directory}/helm-status.json" || return
+  run_release_long_command 30 "API hotfix recovery Helm history read" \
+    helm history fugue -n fugue-system -o json >"${directory}/helm-history.json" || return
+  run_release_long_command 30 "API hotfix recovery Helm817 manifest read" \
+    helm get manifest fugue -n fugue-system --revision 817 >"${directory}/helm-manifest-817.yaml" || return
+  run_release_long_command 30 "API hotfix recovery Helm817 values read" \
+    helm get values fugue -n fugue-system --revision 817 -o json >"${directory}/helm-values-817.json" || return
+  run_release_long_command 30 "API hotfix recovery Helm manifest read" \
+    helm get manifest fugue -n fugue-system --revision 819 >"${directory}/helm-manifest.yaml" || return
+  run_release_long_command 30 "API hotfix recovery Helm values read" \
+    helm get values fugue -n fugue-system --revision 819 -o json >"${directory}/helm-values.json" || return
+  bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/deployment.json" || return
+  bounded_kubectl 15 -n fugue-system get service/fugue-fugue -o json >"${directory}/service.json" || return
+  bounded_kubectl 15 -n fugue-system get endpointslice \
+    -l kubernetes.io/service-name=fugue-fugue -o json >"${directory}/endpointslices.json" || return
+  bounded_kubectl 15 -n fugue-system get pods \
+    -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/api-pods.json" || return
+  bounded_kubectl 15 -n fugue-system get deployments,daemonsets,statefulsets,pods -o json >"${directory}/workloads.json" || return
+  run_with_wall_timeout 15 curl --fail --silent --show-error --max-time 10 \
+    "${FUGUE_SMOKE_URL}" >"${directory}/health" || return
+  lease_json="$(control_plane_backup_coordination_lease_json)" || return
+  chmod 600 "${directory}"/* || return
+  token="$(DIRECTORY="${directory}" LEASE_MODE="${lease_mode}" LEASE_JSON="${lease_json}" python3 - <<'PY'
+import hashlib, json, os, pathlib
+
+root=pathlib.Path(os.environ["DIRECTORY"])
+def load(name):
+    with open(root/name, encoding="utf-8") as stream: return json.load(stream)
+def digest(value):
+    encoded=json.dumps(value,sort_keys=True,separators=(",",":")).encode()
+    return "sha256:"+hashlib.sha256(encoded).hexdigest()
+def require(condition, reason):
+    if not condition: raise SystemExit("API hotfix recovery evidence mismatch: "+reason)
+
+status=load("helm-status.json"); history=load("helm-history.json")
+require(status.get("version")==819 and (status.get("info") or {}).get("status")=="deployed", "helm_status")
+hist={int(item.get("revision") or 0):str(item.get("status") or "").lower() for item in history}
+require(hist.get(817)=="superseded" and hist.get(818)=="superseded" and hist.get(819)=="deployed", "helm_history")
+require("sha256:"+hashlib.sha256((root/"helm-manifest-817.yaml").read_bytes()).hexdigest()=="sha256:bc37b4f086c77b27dca1b456b15c0c4784162830a81456aff5387c110361efb2", "helm817_manifest")
+require(digest(load("helm-values-817.json"))=="sha256:a7e97eeedafe4616032df9845ccff551d4621fbb77a7e7122b0a4eeceb1328cb", "helm817_values")
+require("sha256:"+hashlib.sha256((root/"helm-manifest.yaml").read_bytes()).hexdigest()=="sha256:f3bcdaf48110a9b777c595af381fb854c056c13d14a4dbd1428000b630cddba7", "helm_manifest")
+require(digest(load("helm-values.json"))=="sha256:88f0dca3d69f5963a98852b11647e292ea879edddee77d756d617a478fc0c754", "helm_values")
+
+deployment=load("deployment.json"); metadata=deployment.get("metadata") or {}; spec=deployment.get("spec") or {}; runtime=deployment.get("status") or {}
+template=spec.get("template") or {}; annotations=(template.get("metadata") or {}).get("annotations") or {}
+images=[item.get("image") for item in (template.get("spec") or {}).get("containers") or [] if item.get("name")=="api"]
+require(metadata.get("name")=="fugue-fugue-api" and metadata.get("uid")=="2141262d-0af5-4727-a357-05aef5705d2d" and metadata.get("resourceVersion")=="68098527", "api_identity")
+require(metadata.get("generation")==716 and runtime.get("observedGeneration")==716, "api_generation")
+require(annotations.get("fugue.pro/source-commit")=="a0f5bc0ac36b4e29c4c7928dda1923c2c4727759", "api_source")
+require(images==["ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9"], "api_image")
+require(digest(template)=="sha256:f18a2fbc86fe2596dbd21fe03d160367d45955a36be9d5989a3f29bc5180d864", "api_template")
+require(spec.get("replicas")==2 and all(int(runtime.get(key) or 0)==2 for key in ("replicas","readyReplicas","updatedReplicas","availableReplicas")) and int(runtime.get("unavailableReplicas") or 0)==0, "api_replicas")
+
+pods=[]
+for item in load("api-pods.json").get("items") or []:
+    pod_status=item.get("status") or {}; conditions=pod_status.get("conditions") or []
+    containers=[entry for entry in pod_status.get("containerStatuses") or [] if entry.get("name")=="api"]
+    if pod_status.get("phase")=="Running" and any(c.get("type")=="Ready" and c.get("status")=="True" for c in conditions) and len(containers)==1:
+        pods.append(containers[0].get("imageID"))
+require(pods==["ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9"]*2, "api_pod_image_ids")
+
+service=load("service.json"); sm=service.get("metadata") or {}
+require(sm.get("uid")=="3a952d4a-7c67-4ee4-9187-59ba0c5cdacf" and sm.get("resourceVersion")=="116075", "service_identity")
+require(digest((service.get("spec") or {}).get("selector") or {})=="sha256:67b6e69172eecad87125e05a88c1f34c69a4a8d2b77c9d10c52238820197cea1", "service_selector")
+slices=load("endpointslices.json").get("items") or []
+require(len(slices)==1 and (slices[0].get("metadata") or {}).get("uid")=="2540e4a8-4c6c-4a25-9633-51abc4e75fa3" and (slices[0].get("metadata") or {}).get("resourceVersion")=="68098525", "endpoint_identity")
+ready=sum(len(item.get("addresses") or []) for item in slices[0].get("endpoints") or [] if (item.get("conditions") or {}).get("ready") is True and (item.get("conditions") or {}).get("serving",True) is True)
+require(ready==2, "endpoint_readiness")
+require("sha256:"+hashlib.sha256((root/"health").read_bytes()).hexdigest()=="sha256:6489d6d7a33c5d40e18fc61eeb6c34c341279ee61816394dde5189aa4ad8fae5", "api_health")
+
+workloads=load("workloads.json"); semantic=[]
+for item in workloads.get("items") or []:
+    md=item.get("metadata") or {}; kind=item.get("kind")
+    if kind=="Deployment" and md.get("name")=="fugue-fugue-api": continue
+    if kind=="Pod":
+        labels=md.get("labels") or {}
+        if labels.get("app.kubernetes.io/component")=="api" and labels.get("app.kubernetes.io/instance")=="fugue": continue
+        statuses=(item.get("status") or {}).get("containerStatuses") or []
+        semantic.append({"kind":"PodImageCohort","ownerReferences":md.get("ownerReferences") or [],"phase":(item.get("status") or {}).get("phase"),"containers":sorted(({"name":entry.get("name"),"imageID":entry.get("imageID"),"ready":entry.get("ready")} for entry in statuses),key=lambda entry:entry["name"] or "")})
+        continue
+    live_status=item.get("status") or {}
+    semantic.append({"apiVersion":item.get("apiVersion"),"kind":kind,"metadata":{key:md.get(key) for key in ("annotations","deletionTimestamp","generation","labels","name","namespace","uid")},"spec":item.get("spec"),"status":{key:live_status.get(key,0) for key in ("availableReplicas","currentNumberScheduled","desiredNumberScheduled","misscheduled","observedGeneration","readyReplicas","replicas","numberAvailable","numberMisscheduled","numberReady","numberUnavailable","updatedNumberScheduled","updatedReplicas","unavailableReplicas")}})
+semantic.sort(key=lambda item:json.dumps(item,sort_keys=True,separators=(",",":")))
+require(digest(semantic)=="sha256:6b17b9bc5ceed8cec0d4fe20bd3dced845d06209497a9e262576a254c54b8f42", "non_api_semantic_witness")
+
+lease=json.loads(os.environ["LEASE_JSON"]); lm=lease.get("metadata") or {}; la=lm.get("annotations") or {}; ls=lease.get("spec") or {}
+require(lm.get("uid")=="1f0237f0-1799-4ca7-b8bd-6e32e75e391f" and not lm.get("deletionTimestamp") and int(ls.get("leaseDurationSeconds") or 0)==120, "lease_identity")
+if os.environ["LEASE_MODE"]=="held":
+    require(lm.get("resourceVersion")=="68098371" and ls.get("holderIdentity")=="release/30804033592-1" and str(la.get("fugue.pro/recovery-required") or "").lower()=="true" and bool(la.get("fugue.pro/coordination-token")), "lease_fence")
+    token=str(la["fugue.pro/coordination-token"])
+else:
+    require(not str(ls.get("holderIdentity") or "") and "fugue.pro/recovery-required" not in la and "fugue.pro/coordination-token" not in la, "lease_released")
+    token="-"
+lkg={"apiTemplateDigest":digest(template),"helm817ManifestDigest":"sha256:"+hashlib.sha256((root/"helm-manifest-817.yaml").read_bytes()).hexdigest(),"helm819ManifestDigest":"sha256:"+hashlib.sha256((root/"helm-manifest.yaml").read_bytes()).hexdigest(),"helmRevision":819,"nonApiSemanticDigest":digest(semantic)}
+(root/"lkg.json").write_text(json.dumps(lkg,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+(root/"lease-safe.json").write_text(json.dumps({"mode":os.environ["LEASE_MODE"],"resourceVersion":lm.get("resourceVersion"),"uid":lm.get("uid")},sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+print(token)
+PY
+)" || return
+  chmod 600 "${directory}/lkg.json" "${directory}/lease-safe.json" || return
+  CONTROL_PLANE_HOTFIX_RECOVERY_CAPTURED_TOKEN="${token}"
+}
+
+run_control_plane_api_hotfix_recovery_only() {
+  local work_dir="" evidence_dir="${FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_EVIDENCE_DIR:-}"
+  local first_token="" second_token="" head_sha="" changed_files=""
+  (( $# == 0 )) || return 2
+  [[ "${FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_CONFIRM:-}" == "CONFIRM_API_HOTFIX_RECOVERY_30804033592" ]] || return 1
+  cd "${REPO_ROOT}" || return
+  head_sha="$(git rev-parse --verify HEAD)" || return
+  [[ "${GITHUB_SHA:-}" == "${head_sha}" && "$(git rev-parse --verify HEAD^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" ]] || return 1
+  changed_files="$(git diff --name-only HEAD^ HEAD)" || return
+  [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ -z "$(git status --short)" ]] || return 1
+  [[ "${FUGUE_SMOKE_URL:-}" == "https://api.fugue.pro/healthz" ]] || return 1
+  [[ "${evidence_dir}" == /* && -d "${evidence_dir}" && ! -L "${evidence_dir}" && "$(stat -c '%a' "${evidence_dir}")" == 700 ]] || return 1
+  [[ -z "$(find "${evidence_dir}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || return 1
+  KUBECTL="$(detect_kubectl)" || return
+  export KUBECTL
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME="fugue-fugue-control-plane-db-backup"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE="fugue-system"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS=120
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=15
+  work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-api-hotfix-recovery.XXXXXX")" || return
+  chmod 700 "${work_dir}" || return
+  trap 'rm -rf -- "${work_dir}"' RETURN
+  control_plane_api_hotfix_recovery_capture "${work_dir}/first" held || return
+  first_token="${CONTROL_PLANE_HOTFIX_RECOVERY_CAPTURED_TOKEN}"
+  control_plane_api_hotfix_recovery_capture "${work_dir}/second" held || return
+  second_token="${CONTROL_PLANE_HOTFIX_RECOVERY_CAPTURED_TOKEN}"
+  cmp -s "${work_dir}/first/lkg.json" "${work_dir}/second/lkg.json" || return 1
+  cmp -s "${work_dir}/first/lease-safe.json" "${work_dir}/second/lease-safe.json" || return 1
+  [[ -n "${first_token}" && "${first_token}" == "${second_token}" ]] || return 1
+  cp "${work_dir}/second/lkg.json" "${evidence_dir}/before-lkg.json" || return
+  cp "${work_dir}/second/lease-safe.json" "${evidence_dir}/before-lease.json" || return
+  HEAD_SHA="${head_sha}" OUTPUT="${evidence_dir}/context.json" python3 - <<'PY'
+import json, os
+with open(os.environ["OUTPUT"], "x", encoding="utf-8") as stream:
+    json.dump({"originRunId":"30804033592","originRunAttempt":1,"sourceSha":os.environ["HEAD_SHA"]},stream,sort_keys=True,separators=(",",":"))
+    stream.write("\n")
+PY
+  chmod 600 "${evidence_dir}"/* || return
+
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="true"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER="release/30804033592-1"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN="${second_token}"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_STOP_FILE=""
+  release_control_plane_backup_coordination_lease || return
+  HEAD_SHA="${head_sha}" OUTPUT="${evidence_dir}/lease-cas-cleared.json" python3 - <<'PY'
+import json, os
+with open(os.environ["OUTPUT"], "x", encoding="utf-8") as stream:
+    json.dump({"originRunId":"30804033592","originRunAttempt":1,"sourceSha":os.environ["HEAD_SHA"],"status":"lease_owner_cas_response_verified"},stream,sort_keys=True,separators=(",",":"))
+    stream.write("\n")
+PY
+  chmod 600 "${evidence_dir}/lease-cas-cleared.json" || return
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN=""
+  CONTROL_PLANE_HOTFIX_RECOVERY_CAPTURED_TOKEN=""
+  first_token=""; second_token=""
+  control_plane_api_hotfix_recovery_capture "${work_dir}/released" released || return
+  cmp -s "${work_dir}/first/lkg.json" "${work_dir}/released/lkg.json" || return 1
+  cp "${work_dir}/released/lkg.json" "${evidence_dir}/after-lkg.json" || return
+  cp "${work_dir}/released/lease-safe.json" "${evidence_dir}/after-lease.json" || return
+  HEAD_SHA="${head_sha}" OUTPUT="${evidence_dir}/receipt.json" python3 - <<'PY'
+import json, os
+with open(os.environ["OUTPUT"], "x", encoding="utf-8") as stream:
+    json.dump({"originRunId":"30804033592","originRunAttempt":1,"sourceSha":os.environ["HEAD_SHA"],"status":"lkg_verified_and_recovery_fence_cleared"},stream,sort_keys=True,separators=(",",":"))
+    stream.write("\n")
+PY
+  chmod 600 "${evidence_dir}"/* || return
+  log "verified exact API hotfix LKG and owner-CAS cleared recovery fence for origin run 30804033592"
+}
+
 run_control_plane_api_hotfix_rollout_v2() {
   local artifact_file="${FUGUE_CONTROL_PLANE_API_HOTFIX_ARTIFACT_FILE:-}"
   local artifact_digest="${FUGUE_CONTROL_PLANE_API_HOTFIX_ARTIFACT_DIGEST:-}"
@@ -20742,7 +20925,7 @@ run_control_plane_api_hotfix_rollout_v2() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "7668839a3c462e3b3e0336e6efea4d8ed21ab4dc" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
     "$(git rev-list --parents -n 1 HEAD | awk '{print NF}')" == "2" ]] || return 1
   git merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD || return 1
   [[ "${artifact_file}" == /* && -f "${artifact_file}" && ! -L "${artifact_file}" &&
@@ -20756,7 +20939,7 @@ run_control_plane_api_hotfix_rollout_v2() {
   build_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-api-hotfix-v2-plan.XXXXXX")" || return
   chmod 700 "${build_dir}" || return
   trap 'rm -rf -- "${build_dir}"' RETURN
-  CONTROL_PLANE_HOTFIX_BASE_REVISION=817
+  CONTROL_PLANE_HOTFIX_BASE_REVISION=819
   CONTROL_PLANE_HOTFIX_PLAN_VERSION=2
   CONTROL_PLANE_HOTFIX_CURRENT_SOURCE=a0f5bc0ac36b4e29c4c7928dda1923c2c4727759
   CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE=57dc767999741cea25fe4820a6c9603984dfa0b9
@@ -20795,7 +20978,7 @@ for key in ("top_digest", "platform_manifest_digest", "config_digest"):
 if artifact["immutable_ref"] != artifact["repository"] + "@" + artifact["top_digest"]:
     raise SystemExit(1)
 pathlib.Path(sys.argv[1]).write_text(
-    "\t".join((artifact["top_digest"], artifact["immutable_ref"], artifact["repository"] + "@" + artifact["platform_manifest_digest"], artifact["platform_manifest_digest"], artifact["config_digest"])) + "\n",
+    "\t".join((artifact["top_digest"], artifact["immutable_ref"], artifact["immutable_ref"], artifact["platform_manifest_digest"], artifact["config_digest"])) + "\n",
     encoding="ascii",
 )
 PY
@@ -20811,9 +20994,9 @@ PY
   run_release_long_command 30 "API hotfix v2 Helm status read" \
     helm status fugue -n fugue-system -o json >"${build_dir}/helm-status.json" || return
   run_release_long_command 30 "API hotfix v2 Helm values read" \
-    helm get values fugue -n fugue-system --all --revision 817 -o json >"${build_dir}/helm-values.json" || return
+    helm get values fugue -n fugue-system --all --revision 819 -o json >"${build_dir}/helm-values.json" || return
   run_release_long_command 30 "API hotfix v2 base manifest read" \
-    helm get manifest fugue -n fugue-system --revision 817 >"${build_dir}/base.yaml.raw" || return
+    helm get manifest fugue -n fugue-system --revision 819 >"${build_dir}/base.yaml.raw" || return
   chmod 600 "${build_dir}/base.yaml.raw" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${build_dir}/target.yaml" "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" || return
   control_plane_hotfix_render "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" "${build_dir}/repeated-target.yaml" "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" || return
@@ -20867,7 +21050,7 @@ slices = load("endpointslices.json").get("items") or []
 pods = load("pods.json").get("items") or []
 lease = load("lease.json")
 info = status.get("info") or {}
-if status.get("version") != 817 or str(info.get("status") or "").lower() != "deployed":
+if status.get("version") != 819 or str(info.get("status") or "").lower() != "deployed":
     raise SystemExit(1)
 metadata = deployment.get("metadata") or {}
 spec = deployment.get("spec") or {}
@@ -20927,7 +21110,7 @@ input_value = {
     "planVersion": 2,
     "expectedSha": os.environ["EXPECTED_SHA"], "runId": os.environ["RUN_ID"], "runAttempt": 1,
     "namespace": "fugue-system", "releaseName": "fugue", "releaseFullname": "fugue-fugue",
-    "helmRevision": 817, "helmStatus": "deployed", "helmRecordDigest": digest(status),
+    "helmRevision": 819, "helmStatus": "deployed", "helmRecordDigest": digest(status),
     "baseValuesDigest": digest(values), "targetValuesDigest": digest(target_envelope.get("config")),
     "hybridValuesDigest": digest(hybrid_envelope.get("config")), "chartTreeDigest": os.environ["CHART_DIGEST"],
     "rawTargetManifestDigest": file_digest("target.yaml.raw"),
@@ -21011,8 +21194,8 @@ PY
         "${CONTROL_PLANE_HOTFIX_TARGET_IMAGE_DIGEST}" == "${CONTROL_PLANE_HOTFIX_HYBRID_IMAGE_DIGEST}" ]] || return 1
       ;;
     2:control-plane-api-hotfix-rollout-v2)
-      [[ "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "817" &&
-        "${CONTROL_PLANE_HOTFIX_TARGET_REVISION}" == "818" &&
+      [[ "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "819" &&
+        "${CONTROL_PLANE_HOTFIX_TARGET_REVISION}" == "820" &&
         "${CONTROL_PLANE_HOTFIX_CURRENT_SOURCE}" == "a0f5bc0ac36b4e29c4c7928dda1923c2c4727759" &&
         "${CONTROL_PLANE_HOTFIX_ADOPTED_SOURCE}" == "57dc767999741cea25fe4820a6c9603984dfa0b9" &&
         "${CONTROL_PLANE_HOTFIX_HYBRID_IMAGE_DIGEST}" == "sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9" &&
@@ -22310,6 +22493,11 @@ fi
 
 if [[ "${FUGUE_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2:-false}" == "true" ]]; then
   run_control_plane_api_hotfix_rollout_v2 "$@"
+  exit $?
+fi
+
+if [[ "${FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_ONLY:-false}" == "true" ]]; then
+  run_control_plane_api_hotfix_recovery_only "$@"
   exit $?
 fi
 

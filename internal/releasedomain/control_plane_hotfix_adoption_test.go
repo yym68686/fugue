@@ -262,6 +262,9 @@ func TestControlPlaneAPIHotfixRolloutV2RejectsIdentityAndManifestDrift(t *testin
 		"target imageID drift": func(value *ControlPlaneHotfixAdoptionInput) {
 			value.TargetAPIImageID = "containerd://sha256:" + strings.Repeat("1", 64)
 		},
+		"platform manifest is not the CRI imageID": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetAPIImageID = "docker-pullable://ghcr.io/yym68686/fugue-api@" + value.Provenance.PlatformManifestDigest
+		},
 	}
 	for name, mutate := range tests {
 		name, mutate := name, mutate
@@ -324,7 +327,7 @@ func TestControlPlaneAPIHotfixPostRenderBindsRawRestoreAndEffectiveBytes(t *test
 	plan, input := validBuiltControlPlaneAPIHotfixV2Plan(t)
 	rawTarget := []byte("raw-target-render\n")
 	rawHybrid := []byte("raw-hybrid-render\n")
-	restore := []byte("sealed-helm817-nine-object-restore-plan\n")
+	restore := []byte("sealed-helm819-nine-object-restore-plan\n")
 	plan.RawTargetManifestDigest = hotfixDigest(rawTarget)
 	plan.RawHybridManifestDigest = hotfixDigest(rawHybrid)
 	plan.TargetPostRenderDigest = hotfixDigest(input.TargetManifest)
@@ -589,7 +592,7 @@ func validBuiltControlPlaneAPIHotfixV2Plan(t *testing.T) (ControlPlaneHotfixAdop
 	targetIndex := "sha256:" + strings.Repeat("8", 64)
 	targetPlatform := "sha256:" + strings.Repeat("9", 64)
 	targetImage := "ghcr.io/yym68686/fugue-api@" + targetIndex
-	targetImageID := "docker-pullable://ghcr.io/yym68686/fugue-api@" + targetPlatform
+	targetImageID := "docker-pullable://ghcr.io/yym68686/fugue-api@" + targetIndex
 	input := ControlPlaneHotfixAdoptionInput{
 		PlanVersion: 2,
 		ExpectedSHA: seed.ExpectedSHA, RunID: seed.RunID, RunAttempt: seed.RunAttempt,
@@ -621,7 +624,7 @@ func validBuiltControlPlaneAPIHotfixV2Plan(t *testing.T) (ControlPlaneHotfixAdop
 	input.NonAPIEdgeRestorePlanDigest = "sha256:" + strings.Repeat("5", 64)
 	// V2 uses the frozen live LKG PodTemplate as its effective transaction
 	// base. The emergency annotation models live-only material that is absent
-	// from the Helm817 chart render and must survive both directions.
+	// from the Helm819 chart render and must survive both directions.
 	input.BaseManifest = hotfixManifest(t, input.CurrentSource, input.LiveHybridAPIImageRef, "preserved-live")
 	input.TargetManifest = hotfixManifest(t, input.AdoptedSource, input.TargetAPIImageRef, "preserved-live")
 	input.HybridManifest = hotfixManifest(t, input.CurrentSource, input.LiveHybridAPIImageRef, "preserved-live")

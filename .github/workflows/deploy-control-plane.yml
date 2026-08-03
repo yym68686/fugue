@@ -36,6 +36,11 @@ on:
         required: false
         type: string
         default: ''
+      api_hotfix_recovery_only:
+        description: Exact one-shot recovery authorization for failed API hotfix run 30804033592
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -90,6 +95,7 @@ jobs:
           PUBLIC_DATA_PLANE_ADOPTION_BASELINE: ${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json
           PUBLIC_DATA_PLANE_ADOPTION_TRACE: ${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json
           API_HOTFIX_ROLLOUT_V2: ${{ inputs.api_hotfix_rollout_v2 }}
+          API_HOTFIX_RECOVERY_ONLY: ${{ inputs.api_hotfix_recovery_only }}
         run: |
           set -euo pipefail
           [[ "${EVENT_NAME}" == "workflow_dispatch" ]]
@@ -103,13 +109,23 @@ jobs:
           [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+          case "${API_HOTFIX_RECOVERY_ONLY:-}" in
+            '') ;;
+            CONFIRM_API_HOTFIX_RECOVERY_30804033592)
+              [[ -z "${API_HOTFIX_ROLLOUT_V2}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
+              [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
+              [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
+              ;;
+            *) exit 1 ;;
+          esac
           case "${API_HOTFIX_ROLLOUT_V2:-}" in
             '')
-              if [[ "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]; then
+              if [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]; then
                 [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
               fi
               ;;
             CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC)
+              [[ -z "${API_HOTFIX_RECOVERY_ONLY}" ]]
               [[ "${TARGET_SHA}" == '57dc767999741cea25fe4820a6c9603984dfa0b9' && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]
               [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
               [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
@@ -251,7 +267,98 @@ jobs:
             *) exit 1 ;;
           esac
 
+  recover-api-hotfix-fence:
+    needs:
+      - release-input-guard
+      - release-gate
+    if: ${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && inputs.api_hotfix_recovery_only == 'CONFIRM_API_HOTFIX_RECOVERY_30804033592' }}
+    timeout-minutes: 15
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - fugue
+      - control-plane
+    environment: production
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout exact recovery implementation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.expected_sha }}
+          fetch-depth: 0
+
+      - name: Verify exact recovery implementation identity
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          AUTHORIZATION: ${{ inputs.api_hotfix_recovery_only }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch && "${GITHUB_REF}" == refs/heads/main && "${GITHUB_RUN_ATTEMPT}" == 1 ]]
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
+          [[ "${AUTHORIZATION}" == CONFIRM_API_HOTFIX_RECOVERY_30804033592 ]]
+          [[ "$(git rev-parse --verify HEAD)" == "${EXPECTED_SHA}" ]]
+          [[ "$(git rev-parse --verify HEAD^)" == 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ]]
+          [[ "$(git diff --name-only HEAD^ HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+
+      - name: Verify LKG and clear exact API hotfix recovery fence
+        id: recovery
+        env:
+          FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_ONLY: 'true'
+          FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_CONFIRM: ${{ inputs.api_hotfix_recovery_only }}
+          FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_EVIDENCE_DIR: ${{ runner.temp }}/fugue-api-hotfix-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          FUGUE_SMOKE_URL: https://${{ vars.FUGUE_API_PUBLIC_DOMAIN }}/healthz
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "${FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_EVIDENCE_DIR}"
+          ./scripts/upgrade_fugue_control_plane.sh
+
+      - name: Upload sanitized API hotfix recovery evidence
+        id: recovery_evidence
+        if: ${{ always() && steps.recovery.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-api-hotfix-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-api-hotfix-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+          overwrite: false
+
+      - name: Settle API hotfix recovery lane
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RECOVERY_OUTCOME: ${{ steps.recovery.outcome }}
+          EVIDENCE_OUTCOME: ${{ steps.recovery_evidence.outcome }}
+        run: |
+          set -euo pipefail
+          workflow='deploy-control-plane.yml'
+          desired='disabled_manually'
+          endpoint='disable'
+          if [[ "${RECOVERY_OUTCOME}" == success && "${EVIDENCE_OUTCOME}" == success ]]; then
+            desired='active'
+            endpoint='enable'
+          fi
+          mutation_status=0
+          timeout --kill-after=2s 10s gh api --method PUT \
+            "repos/${REPOSITORY}/actions/workflows/${workflow}/${endpoint}" >/dev/null || mutation_status=$?
+          state=''
+          for attempt in 1 2 3 4 5; do
+            state="$(timeout --kill-after=2s 10s gh api \
+              "repos/${REPOSITORY}/actions/workflows/${workflow}" --jq '.state')" || exit 1
+            [[ "${state}" == "${desired}" ]] && break
+            sleep 1
+          done
+          [[ "${state}" == "${desired}" ]]
+          printf 'API hotfix recovery lane settled desired=%s mutation_status=%s\n' "${desired}" "${mutation_status}"
+
   release-baseline:
+    if: ${{ inputs.api_hotfix_recovery_only == '' }}
     needs:
       - release-input-guard
     runs-on:
@@ -464,7 +571,7 @@ jobs:
           readonly live_source='a0f5bc0ac36b4e29c4c7928dda1923c2c4727759'
           readonly target_source='57dc767999741cea25fe4820a6c9603984dfa0b9'
           readonly tooling_root='5a3b09c571601993367c50561b257dd6b9e743ca'
-          readonly tooling_parent='7668839a3c462e3b3e0336e6efea4d8ed21ab4dc'
+          readonly tooling_parent='9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
@@ -1258,7 +1365,7 @@ jobs:
             ./scripts/upgrade_fugue_control_plane.sh
           capture_non_api "${evidence_dir}/non-api-after.json"
           cmp -s "${evidence_dir}/non-api-before.json" "${evidence_dir}/non-api-after.json"
-          [[ "$(helm status fugue -n fugue-system -o json | python3 -c 'import json,sys; value=json.load(sys.stdin); print(str(value.get("version"))+"\t"+str((value.get("info") or {}).get("status")))')" == $'818\tdeployed' ]]
+          [[ "$(helm status fugue -n fugue-system -o json | python3 -c 'import json,sys; value=json.load(sys.stdin); print(str(value.get("version"))+"\t"+str((value.get("info") or {}).get("status")))')" == $'820\tdeployed' ]]
           {
             printf 'image-activation-convergence=complete\n'
             printf 'pending-activation-artifacts=\n'
@@ -2273,7 +2380,7 @@ jobs:
       - continue-release-convergence
       - record-release-baseline
       - rearm-release-lane-on-success
-    if: ${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
+    if: ${{ always() && inputs.api_hotfix_recovery_only == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
     runs-on: ubuntu-latest
     permissions:
       actions: write

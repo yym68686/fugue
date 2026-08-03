@@ -299,8 +299,8 @@ plan = {
     "namespace": "fugue-system",
     "releaseName": "fugue",
     "releaseFullname": "fugue-fugue",
-    "baseRevision": 817,
-    "targetRevision": 818,
+    "baseRevision": 819,
+    "targetRevision": 820,
     "currentSource": os.environ["CURRENT_SOURCE"],
     "adoptedSource": os.environ["ADOPTED_SOURCE"],
     "targetApiImageRef": "ghcr.io/yym68686/fugue-api@" + os.environ["TARGET_DIGEST"],
@@ -380,7 +380,7 @@ PY
   fi
 )
 
-V2_EXPECTED=$'deadline\ncapture\nbindings:released\nkubernetes:base\nwal:prepared\nacquire\nrequire\ncapture\nbindings:owned\nkubernetes:base\nwal:prewrite-verified\narm\nwal:forward-started\npreserve\nexecute\nverify:target:818:target.yaml\nrequire\nwal:compensation-started\npreserve\nexecute\nverify:hybrid:819:hybrid.yaml\nwal:compensated\npublish:compensated\nrelease'
+V2_EXPECTED=$'deadline\ncapture\nbindings:released\nkubernetes:base\nwal:prepared\nacquire\nrequire\ncapture\nbindings:owned\nkubernetes:base\nwal:prewrite-verified\narm\nwal:forward-started\npreserve\nexecute\nverify:target:820:target.yaml\nrequire\nwal:compensation-started\npreserve\nexecute\nverify:hybrid:821:hybrid.yaml\nwal:compensated\npublish:compensated\nrelease'
 [[ "$(cut -d'|' -f2- "${LOG}")" == "${V2_EXPECTED}" ]]
 grep -Fxq "api.image.tag=${ADOPTED_SOURCE}" "${TMP}/argv-v2-0"
 grep -Fxq "api.image.digest=${TARGET_DIGEST}" "${TMP}/argv-v2-0"
@@ -465,8 +465,8 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' '7668839a3c462e3b3e0336e6efea4d8ed21ab4dc' ;;
-      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '7668839a3c462e3b3e0336e6efea4d8ed21ab4dc' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' '9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184' ;;
+      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184' ;;
       'merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD') : ;;
       'diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD') printf '%s\n' \
         '.github/workflows/deploy-control-plane.yml' \
@@ -485,9 +485,9 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   run_release_long_command() {
     shift 2
     case "$*" in
-      'helm status fugue -n fugue-system -o json') printf '%s\n' '{"info":{"status":"deployed"},"version":817}' ;;
-      'helm get values fugue -n fugue-system --all --revision 817 -o json') printf '%s\n' '{}' ;;
-      'helm get manifest fugue -n fugue-system --revision 817') printf '%s\n' 'apiVersion: v1' ;;
+      'helm status fugue -n fugue-system -o json') printf '%s\n' '{"info":{"status":"deployed"},"version":819}' ;;
+      'helm get values fugue -n fugue-system --all --revision 819 -o json') printf '%s\n' '{}' ;;
+      'helm get manifest fugue -n fugue-system --revision 819') printf '%s\n' 'apiVersion: v1' ;;
       *) return 1 ;;
     esac
   }
@@ -524,7 +524,7 @@ JSON
     INPUT="${FUGUE_CONTROL_PLANE_HOTFIX_BUILD_DIR}/input.json" EXPECTED_ARTIFACT="${BUILDER_ARTIFACT_DIGEST}" python3 - <<'PY'
 import json, os
 value=json.load(open(os.environ["INPUT"],encoding="utf-8"))
-assert value["planVersion"] == 2 and value["helmRevision"] == 817
+assert value["planVersion"] == 2 and value["helmRevision"] == 819
 assert value["currentSource"] == "a0f5bc0ac36b4e29c4c7928dda1923c2c4727759"
 assert value["adoptedSource"] == "57dc767999741cea25fe4820a6c9603984dfa0b9"
 assert value["provenance"]["artifactDigest"] == os.environ["EXPECTED_ARTIFACT"]
@@ -549,5 +549,118 @@ PY
 )
 [[ "$(cat "${BUILDER_TMP}/result")" == builder-executed ]]
 [[ -z "$(find "${BUILDER_TMP}" -maxdepth 1 -type d -name 'fugue-api-hotfix-v2-plan.*' -print -quit)" ]]
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+  fixture_variant=base
+  bounded_kubectl() {
+    [[ "$*" == *'get deployments,daemonsets,statefulsets,pods -o json' ]] || return 1
+    VARIANT="${fixture_variant}" python3 - <<'PY'
+import json, os
+variant=os.environ["VARIANT"]
+deployment={"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/source-commit":"a"*40},"generation":9,"labels":{"app":"controller"},"name":"controller","namespace":"fugue-system","resourceVersion":"100","uid":"controller-uid"},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"example/controller@sha256:"+"a"*64,"name":"controller"}]}}},"status":{"availableReplicas":1,"observedGeneration":9,"readyReplicas":1,"updatedReplicas":1}}
+pod={"apiVersion":"v1","kind":"Pod","metadata":{"labels":{"app.kubernetes.io/component":"controller"},"ownerReferences":[{"kind":"ReplicaSet","name":"controller-rs","uid":"rs-uid"}],"resourceVersion":"200","uid":"pod-uid"},"status":{"phase":"Running","containerStatuses":[{"imageID":"example/controller@sha256:"+"a"*64,"name":"controller","ready":True}]}}
+daemonset={"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"generation":4,"labels":{"app":"cache"},"name":"cache","namespace":"fugue-system","resourceVersion":"300","uid":"cache-uid"},"spec":{"selector":{"matchLabels":{"app":"cache"}},"template":{"metadata":{"labels":{"app":"cache"}},"spec":{"containers":[{"image":"example/cache@sha256:"+"c"*64,"name":"cache"}]}}},"status":{"currentNumberScheduled":1,"desiredNumberScheduled":1,"numberAvailable":1,"numberMisscheduled":0,"numberReady":1,"numberUnavailable":0,"observedGeneration":4,"updatedNumberScheduled":1}}
+if variant == "volatile":
+    deployment["metadata"]["resourceVersion"]="101"
+    pod["metadata"]["resourceVersion"]="201"
+    daemonset["metadata"]["resourceVersion"]="301"
+elif variant == "spec-drift":
+    deployment["spec"]["replicas"]=2
+elif variant == "uid-drift":
+    deployment["metadata"]["uid"]="replacement-controller-uid"
+elif variant == "ready-drift":
+    deployment["status"]["readyReplicas"]=0
+elif variant == "available-drift":
+    deployment["status"]["availableReplicas"]=0
+elif variant == "unavailable-drift":
+    deployment["status"]["unavailableReplicas"]=1
+elif variant == "observed-drift":
+    deployment["status"]["observedGeneration"]=8
+elif variant == "desired-drift":
+    daemonset["status"]["desiredNumberScheduled"]=2
+elif variant == "pod-drift":
+    pod["status"]["containerStatuses"][0]["imageID"]="example/controller@sha256:"+"b"*64
+print(json.dumps({"items":[deployment,daemonset,pod]},separators=(",",":")))
+PY
+  }
+
+  base="$(control_plane_hotfix_non_api_workload_digest)"
+  fixture_variant=volatile
+  [[ "$(control_plane_hotfix_non_api_workload_digest)" == "${base}" ]]
+  fixture_variant=spec-drift
+  [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
+  fixture_variant=uid-drift
+  [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
+  for fixture_variant in ready-drift available-drift unavailable-drift observed-drift desired-drift; do
+    [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
+  done
+  fixture_variant=pod-drift
+  [[ "$(control_plane_hotfix_non_api_workload_digest)" != "${base}" ]]
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  recovery_root="${TMP}/recovery-only"
+  install -d -m 700 "${recovery_root}"
+  install -d -m 700 "${recovery_root}/evidence"
+  recovery_log="${recovery_root}/calls"
+  : >"${recovery_log}"
+  git() {
+    case "$*" in
+      'rev-parse --verify HEAD') printf '%040d\n' 7 ;;
+      'rev-parse --verify HEAD^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'diff --name-only HEAD^ HEAD') printf '%s\n' \
+        .github/workflows/deploy-control-plane.yml \
+        internal/platformsafety/release_workflow_test.go \
+        internal/releasedomain/control_plane_hotfix_adoption.go \
+        internal/releasedomain/control_plane_hotfix_adoption_test.go \
+        scripts/test_control_plane_hotfix_adoption.sh \
+        scripts/upgrade_fugue_control_plane.sh ;;
+      'status --short') : ;;
+      *) return 1 ;;
+    esac
+  }
+  stat() {
+    if [[ "$1" == -c && "$2" == %a && "$3" == "${recovery_root}/evidence" ]]; then
+      printf '700\n'
+    else
+      command stat "$@"
+    fi
+  }
+  detect_kubectl() { printf kubectl; }
+  control_plane_api_hotfix_recovery_capture() {
+    local directory="$1" mode="$2"
+    install -d -m 700 "${directory}"
+    printf '%s\n' '{"lkg":"exact"}' >"${directory}/lkg.json"
+    printf '{"lease":"%s"}\n' "${mode}" >"${directory}/lease-safe.json"
+    CONTROL_PLANE_HOTFIX_RECOVERY_CAPTURED_TOKEN="$([[ "${mode}" == held ]] && printf '%s' 0123456789abcdef0123456789abcdef || printf '%s' -)"
+    printf 'capture:%s\n' "${mode}" >>"${recovery_log}"
+  }
+  release_control_plane_backup_coordination_lease() {
+    [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == true ]]
+    [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" == release/30804033592-1 ]]
+    [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" == 0123456789abcdef0123456789abcdef ]]
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=false
+    printf 'release\n' >>"${recovery_log}"
+  }
+  export GITHUB_SHA="$(printf '%040d' 7)" RUNNER_TEMP="${recovery_root}"
+  export FUGUE_SMOKE_URL=https://api.fugue.pro/healthz
+  export FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_CONFIRM=CONFIRM_API_HOTFIX_RECOVERY_30804033592
+  export FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_EVIDENCE_DIR="${recovery_root}/evidence"
+  run_control_plane_api_hotfix_recovery_only
+  [[ "$(cat "${recovery_log}")" == $'capture:held\ncapture:held\nrelease\ncapture:released' ]]
+  recovery_source="$(declare -f run_control_plane_api_hotfix_recovery_only)"
+  [[ "${recovery_source}" != *'helm upgrade'* && "${recovery_source}" != *'kubectl patch deployment'* ]]
+  [[ "$(find "${recovery_root}/evidence" -maxdepth 1 -type f | wc -l | tr -d ' ')" == 7 ]]
+  ! grep -R -Fq 0123456789abcdef0123456789abcdef "${recovery_root}/evidence"
+)
 
 printf '[test_control_plane_hotfix_adoption] fixed single-shell Lease/FD16/Helm transaction passed\n'

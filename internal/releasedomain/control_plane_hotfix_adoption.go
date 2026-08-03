@@ -25,7 +25,7 @@ const (
 	ControlPlaneAPIHotfixRolloutPolicyV2 = "control-plane-api-hotfix-rollout-v2"
 	controlPlaneHotfixManifestObjects    = 79
 	controlPlaneHotfixBaseRevision       = 806
-	controlPlaneAPIHotfixBaseRevisionV2  = 817
+	controlPlaneAPIHotfixBaseRevisionV2  = 819
 	controlPlaneAPIHotfixTargetSourceV2  = "57dc767999741cea25fe4820a6c9603984dfa0b9"
 	controlPlaneAPIHotfixHybridSourceV2  = "a0f5bc0ac36b4e29c4c7928dda1923c2c4727759"
 	controlPlaneAPIHotfixHybridImageV2   = "ghcr.io/yym68686/fugue-api@sha256:7eb7e7682d44c3f283cd347e032de6fac2f6304221fbf72dfa788845950ccfd9"
@@ -743,7 +743,7 @@ func RenderControlPlaneHotfixTransaction(rendered []byte, plan ControlPlaneHotfi
 }
 
 // VerifyControlPlaneAPIHotfixPostRender binds the exact server-render bytes,
-// the fixed Helm817 non-API restore plan, and the effective manifest bytes.
+// the fixed Helm819 non-API restore plan, and the effective manifest bytes.
 // The effective manifest is independently verified by the plan as an exact
 // two-pointer API transition.
 func VerifyControlPlaneAPIHotfixPostRender(plan ControlPlaneHotfixAdoptionPlan, mode string, rawInput, restorePlan, effectiveOutput []byte) error {
@@ -971,10 +971,10 @@ func controlPlaneHotfixHybridImage(plan ControlPlaneHotfixAdoptionPlan) string {
 }
 
 func hotfixImageIDMatchesProvenance(imageID string, provenance ControlPlaneHotfixProvenance) bool {
-	if imageID == "" || !hotfixSHA256.MatchString(provenance.PlatformManifestDigest) {
+	if imageID == "" || !hotfixSHA256.MatchString(provenance.IndexDigest) {
 		return false
 	}
-	return strings.HasSuffix(imageID, "@"+provenance.PlatformManifestDigest) || strings.HasSuffix(imageID, "://"+provenance.PlatformManifestDigest)
+	return strings.HasSuffix(imageID, "@"+provenance.IndexDigest) || strings.HasSuffix(imageID, "://"+provenance.IndexDigest)
 }
 
 type hotfixObjects map[string]map[string]any
