@@ -21016,6 +21016,149 @@ CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE=""
 CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE=""
 CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID=""
 CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_VERSION=""
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_EVIDENCE_DIR=""
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_STAGE=""
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_ARMED=false
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_PRODUCTION_WRITE_ATTEMPTED=false
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED=false
+CONTROL_PLANE_M16_OBSERVED_RECOVERY_HELM_ATTEMPTED=false
+
+control_plane_m16_observed_recovery_stage_allowed() {
+  local stage="$1"
+  local capture='^capture-(first|second|prewrite)-(helm-status|helm-history|helm-manifest-820|helm-values-820|helm-manifest-822|helm-values-822|api-deployment|controller-deployment|api-pods|controller-pods|service|endpoint-slice|controller-leader|backup-lease|metrics|health-[1-4]|operations|other-witness|snapshot)$'
+  local verified='^capture-verified-(helm-status|helm-manifest-823|helm-values-823|api-deployment|controller-deployment|api-pods|controller-pods|controller-leader|backup-lease|metrics|health-[1-4]|operations|other-witness|snapshot)$'
+  case "${stage}" in
+    invocation|capture-compare|render-set|plan|prewrite-compare|prewrite-copy|configmap-create|\
+      lease-attach|wal-fence-persist|lease-renew|helm-start|helm-seal|helm-execute|verify|\
+      wal-commit-unknown|wal-commit|clear|terminal-evidence|complete) return 0 ;;
+  esac
+  [[ "${stage}" =~ ${capture} || "${stage}" =~ ${verified} ]]
+}
+
+control_plane_m16_observed_recovery_initialize_diagnostics() {
+  local evidence_dir="$1"
+  [[ "${evidence_dir}" == /* && -d "${evidence_dir}" && ! -L "${evidence_dir}" ]] || return 1
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_EVIDENCE_DIR="${evidence_dir}"
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_STAGE="invocation"
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_ARMED=true
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_PRODUCTION_WRITE_ATTEMPTED=false
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED=false
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_HELM_ATTEMPTED=false
+  control_plane_m16_observed_recovery_set_stage invocation
+}
+
+control_plane_m16_observed_recovery_set_stage() {
+  local stage="$1"
+  local evidence_dir="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_EVIDENCE_DIR:-}"
+  [[ "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_ARMED:-false}" == true ]] || return 0
+  control_plane_m16_observed_recovery_stage_allowed "${stage}" || return 1
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_STAGE="${stage}"
+  EVIDENCE_DIR="${evidence_dir}" STAGE="${stage}" python3 - <<'PY'
+import json,os,pathlib,re,stat,tempfile
+root=pathlib.Path(os.environ["EVIDENCE_DIR"])
+stage=os.environ["STAGE"]
+capture=(
+    r"capture-(?:first|second|prewrite)-(?:helm-status|helm-history|helm-manifest-820|"
+    r"helm-values-820|helm-manifest-822|helm-values-822|api-deployment|controller-deployment|"
+    r"api-pods|controller-pods|service|endpoint-slice|controller-leader|backup-lease|metrics|"
+    r"health-[1-4]|operations|other-witness|snapshot)"
+)
+verified=(
+    r"capture-verified-(?:helm-status|helm-manifest-823|helm-values-823|api-deployment|"
+    r"controller-deployment|api-pods|controller-pods|controller-leader|backup-lease|metrics|"
+    r"health-[1-4]|operations|other-witness|snapshot)"
+)
+lifecycle={
+    "invocation","capture-compare","render-set","plan","prewrite-compare","prewrite-copy",
+    "configmap-create","lease-attach","wal-fence-persist","lease-renew","helm-start",
+    "helm-seal","helm-execute","verify","wal-commit-unknown","wal-commit","clear",
+    "terminal-evidence","complete",
+}
+if stage not in lifecycle and re.fullmatch(capture,stage) is None and re.fullmatch(verified,stage) is None:
+    raise SystemExit(1)
+if not root.is_dir() or root.is_symlink() or stat.S_IMODE(root.stat().st_mode)!=0o700: raise SystemExit(1)
+target=root/"stage.json"
+if target.is_symlink(): raise SystemExit(1)
+raw=(json.dumps({"stage":stage},sort_keys=True,separators=(",",":"))+"\n").encode()
+fd,temporary=tempfile.mkstemp(prefix=".stage.json.",dir=root)
+try:
+    os.fchmod(fd,0o600)
+    with os.fdopen(fd,"wb",closefd=True) as stream:
+        stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary,target)
+finally:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+PY
+}
+
+control_plane_m16_observed_recovery_refresh_diagnostic_write_flags() {
+  local observed=""
+  [[ "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PRODUCTION_WRITE_ATTEMPTED:-false}" == true &&
+    "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED:-false}" != true &&
+    -n "${KUBECTL:-}" ]] || return 0
+  observed="$(bounded_kubectl 15 -n fugue-system get \
+    "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" --ignore-not-found -o name 2>/dev/null)" || return 0
+  if [[ "${observed}" == "configmap/${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP}" ]]; then
+    CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED=true
+  fi
+}
+
+control_plane_m16_observed_recovery_write_failure() {
+  local exit_code="$1"
+  local evidence_dir="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_EVIDENCE_DIR:-}"
+  [[ "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_ARMED:-false}" == true ]] || return 0
+  [[ "${exit_code}" =~ ^[1-9][0-9]*$ && "${exit_code}" -le 255 ]] || return 1
+  control_plane_m16_observed_recovery_stage_allowed \
+    "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_STAGE}" || return 1
+  control_plane_m16_observed_recovery_refresh_diagnostic_write_flags
+  EVIDENCE_DIR="${evidence_dir}" \
+    STAGE="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_DIAGNOSTIC_STAGE}" \
+    EXIT_CODE="${exit_code}" \
+    PRODUCTION_WRITE_ATTEMPTED="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PRODUCTION_WRITE_ATTEMPTED}" \
+    CONFIGMAP_CREATED="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED}" \
+    HELM_ATTEMPTED="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_HELM_ATTEMPTED}" python3 - <<'PY'
+import json,os,pathlib,stat,tempfile
+root=pathlib.Path(os.environ["EVIDENCE_DIR"])
+if not root.is_dir() or root.is_symlink() or stat.S_IMODE(root.stat().st_mode)!=0o700: raise SystemExit(1)
+def boolean(name):
+    value=os.environ[name]
+    if value not in {"true","false"}: raise SystemExit(1)
+    return value=="true"
+value={
+    "stage":os.environ["STAGE"],
+    "exitCode":int(os.environ["EXIT_CODE"]),
+    "productionWriteAttempted":boolean("PRODUCTION_WRITE_ATTEMPTED"),
+    "configMapCreated":boolean("CONFIGMAP_CREATED"),
+    "helmAttempted":boolean("HELM_ATTEMPTED"),
+}
+target=root/"failure.json"
+if target.is_symlink(): raise SystemExit(1)
+raw=(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n").encode()
+if target.exists():
+    if target.read_bytes()!=raw: raise SystemExit(1)
+    raise SystemExit(0)
+fd,temporary=tempfile.mkstemp(prefix=".failure.json.",dir=root)
+try:
+    os.fchmod(fd,0o600)
+    with os.fdopen(fd,"wb",closefd=True) as stream:
+        stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary,target)
+finally:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+PY
+}
+
+control_plane_m16_observed_recovery_exit_handler() {
+  local exit_code="$1"
+  if (( exit_code != 0 )); then
+    control_plane_m16_observed_recovery_write_failure "${exit_code}" || :
+  fi
+  set +e
+  ( exit "${exit_code}" )
+  control_plane_hotfix_cleanup
+}
 
 control_plane_m16_observed_recovery_capture_active_operations() {
   local output="$1"
@@ -21047,23 +21190,39 @@ PY
 
 control_plane_m16_observed_recovery_capture() {
   local directory="$1"
+  local capture="$2"
   local other_digest=""
   local pod_names=""
+  [[ "${capture}" =~ ^(first|second|prewrite)$ ]] || return 2
   [[ ! -e "${directory}" && ! -L "${directory}" ]] || return 1
   mkdir -m 700 "${directory}" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-helm-status" || return
   run_release_long_command 30 "observed recovery Helm status read" helm status fugue -n fugue-system -o json >"${directory}/helm-status.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-helm-history" || return
   run_release_long_command 30 "observed recovery Helm history read" helm history fugue -n fugue-system -o json >"${directory}/helm-history.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-helm-manifest-820" || return
   run_release_long_command 30 "observed recovery Helm820 manifest read" helm get manifest fugue -n fugue-system --revision 820 >"${directory}/helm-manifest-820.yaml" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-helm-values-820" || return
   run_release_long_command 30 "observed recovery Helm820 values read" helm get values fugue -n fugue-system --all --revision 820 -o json >"${directory}/helm-values-820.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-helm-manifest-822" || return
   run_release_long_command 30 "observed recovery Helm822 manifest read" helm get manifest fugue -n fugue-system --revision 822 >"${directory}/helm-manifest-822.yaml" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-helm-values-822" || return
   run_release_long_command 30 "observed recovery Helm822 values read" helm get values fugue -n fugue-system --all --revision 822 -o json >"${directory}/helm-values-822.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-api-deployment" || return
   bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/api-deployment.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-controller-deployment" || return
   bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-controller -o json >"${directory}/controller-deployment.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-api-pods" || return
   bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/api-pods.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-controller-pods" || return
   bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=controller -o json >"${directory}/controller-pods.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-service" || return
   bounded_kubectl 15 -n fugue-system get service/fugue-fugue -o json >"${directory}/service.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-endpoint-slice" || return
   bounded_kubectl 15 -n fugue-system get endpointslice -l kubernetes.io/service-name=fugue-fugue -o json >"${directory}/endpointslices.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-controller-leader" || return
   bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-controller -o json >"${directory}/controller-leader.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-backup-lease" || return
   bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${directory}/lease.json" || return
   pod_names="$(DIRECTORY="${directory}" python3 - <<'PY'
 import json,os,re
@@ -21073,6 +21232,7 @@ if len(names)!=2 or any(not isinstance(name,str) or re.fullmatch(r"[a-z0-9]([-a-
 print("\n".join(names))
 PY
 )" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-metrics" || return
   while IFS= read -r pod_name; do
     [[ -n "${pod_name}" ]] || continue
     bounded_kubectl 15 get --raw "/api/v1/namespaces/fugue-system/pods/${pod_name}:9090/proxy/metrics" >"${directory}/metrics-${pod_name}" || return
@@ -21080,12 +21240,16 @@ PY
   local health_index=0
   for health_url in https://api.fugue.pro/healthz https://oaix.fugue.pro/healthz https://argus.fugue.pro/healthz https://uni-"api"-web.fugue.pro/healthz; do
     health_index=$((health_index + 1))
+    control_plane_m16_observed_recovery_set_stage "capture-${capture}-health-${health_index}" || return
     run_with_wall_timeout 15 curl --silent --show-error --max-time 10 -o "${directory}/health-${health_index}.body" -w '%{http_code}' "${health_url}" >"${directory}/health-${health_index}.status" || return
   done
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-operations" || return
   control_plane_m16_observed_recovery_capture_active_operations "${directory}/active-operations.json" || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-other-witness" || return
   other_digest="$(control_plane_m16_observed_recovery_other_workload_digest)" || return
   [[ "${other_digest}" == "sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9" ]] || return 1
   chmod 600 "${directory}"/* || return
+  control_plane_m16_observed_recovery_set_stage "capture-${capture}-snapshot" || return
   DIRECTORY="${directory}" OTHER_DIGEST="${other_digest}" python3 - <<'PY'
 import hashlib,json,os,pathlib,re
 root=pathlib.Path(os.environ["DIRECTORY"])
@@ -21552,14 +21716,23 @@ control_plane_m16_observed_recovery_verify_target() {
   local before="$2"
   local other_digest=""
   mkdir -m 700 "${directory}" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-helm-status || return
   run_release_long_command 30 "observed recovery Helm823 status read" helm status fugue -n fugue-system -o json >"${directory}/helm-status.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-helm-manifest-823 || return
   run_release_long_command 30 "observed recovery Helm823 manifest read" helm get manifest fugue -n fugue-system --revision 823 >"${directory}/helm-manifest.yaml" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-helm-values-823 || return
   run_release_long_command 30 "observed recovery Helm823 values read" helm get values fugue -n fugue-system --all --revision 823 -o json >"${directory}/helm-values.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-api-deployment || return
   bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-api -o json >"${directory}/api-deployment.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-controller-deployment || return
   bounded_kubectl 15 -n fugue-system get deployment/fugue-fugue-controller -o json >"${directory}/controller-deployment.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-api-pods || return
   bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=api -o json >"${directory}/api-pods.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-controller-pods || return
   bounded_kubectl 15 -n fugue-system get pods -l app.kubernetes.io/instance=fugue,app.kubernetes.io/component=controller -o json >"${directory}/controller-pods.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-controller-leader || return
   bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-controller -o json >"${directory}/controller-leader.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-backup-lease || return
   bounded_kubectl 15 -n fugue-system get lease/fugue-fugue-control-plane-db-backup -o json >"${directory}/lease.json" || return
   local pod_names=""
   pod_names="$(DIRECTORY="${directory}" python3 - <<'PY'
@@ -21570,6 +21743,7 @@ if len(names)!=2 or any(not isinstance(name,str) or re.fullmatch(r"[a-z0-9]([-a-
 print("\n".join(names))
 PY
 )" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-metrics || return
   while IFS= read -r pod_name; do
     [[ -n "${pod_name}" ]] || continue
     bounded_kubectl 15 get --raw "/api/v1/namespaces/fugue-system/pods/${pod_name}:9090/proxy/metrics" >"${directory}/metrics-${pod_name}" || return
@@ -21577,12 +21751,16 @@ PY
   local health_index=0
   for health_url in https://api.fugue.pro/healthz https://oaix.fugue.pro/healthz https://argus.fugue.pro/healthz https://uni-"api"-web.fugue.pro/healthz; do
     health_index=$((health_index + 1))
+    control_plane_m16_observed_recovery_set_stage "capture-verified-health-${health_index}" || return
     run_with_wall_timeout 15 curl --silent --show-error --max-time 10 -o "${directory}/health-${health_index}.body" -w '%{http_code}' "${health_url}" >"${directory}/health-${health_index}.status" || return
   done
+  control_plane_m16_observed_recovery_set_stage capture-verified-operations || return
   control_plane_m16_observed_recovery_capture_active_operations "${directory}/active-operations.json" || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-other-witness || return
   other_digest="$(control_plane_m16_observed_recovery_other_workload_digest)" || return
   [[ "${other_digest}" == "sha256:1c5a45444e755c2c43ae66db24e646f0b2aa0c2593b7a7bd0fa6ae94c0dd4bf9" ]] || return 1
   chmod 600 "${directory}"/* || return
+  control_plane_m16_observed_recovery_set_stage capture-verified-snapshot || return
   DIRECTORY="${directory}" BEFORE="${before}" TARGET="$(dirname "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}")/target.yaml" TARGET_API="$(dirname "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}")/target-api-template.json" PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" CM_UID="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" OTHER_DIGEST="${other_digest}" python3 - <<'PY'
 import hashlib,json,os,pathlib,re
 root=pathlib.Path(os.environ["DIRECTORY"]); before=pathlib.Path(os.environ["BEFORE"])
@@ -21672,8 +21850,10 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "d412416cbca7094ee19d996f312468f871988fdb" && "$(git rev-parse --verify HEAD^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 2 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 3 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1
@@ -21685,6 +21865,8 @@ value={"apiVersion":"release-domain.fugue.dev/v1","kind":"ControlPlaneController
 pathlib.Path(os.environ["EVIDENCE_DIR"],"invocation.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
 PY
   chmod 600 "${evidence_dir}/invocation.json" || return
+  trap 'control_plane_m16_observed_recovery_exit_handler "$?"' EXIT
+  control_plane_m16_observed_recovery_initialize_diagnostics "${evidence_dir}" || return
   FUGUE_NAMESPACE=fugue-system
   FUGUE_RELEASE_NAME=fugue
   FUGUE_RELEASE_FULLNAME=fugue-fugue
@@ -21709,13 +21891,13 @@ PY
   work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-controller-m16-observed-recovery.XXXXXX")" || return
   chmod 700 "${work_dir}" || return
   CONTROL_PLANE_HOTFIX_WORK_DIR="${work_dir}"
-  trap control_plane_hotfix_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  control_plane_m16_observed_recovery_capture "${work_dir}/first" || return
-  control_plane_m16_observed_recovery_capture "${work_dir}/second" || return
+  control_plane_m16_observed_recovery_capture "${work_dir}/first" first || return
+  control_plane_m16_observed_recovery_capture "${work_dir}/second" second || return
+  control_plane_m16_observed_recovery_set_stage capture-compare || return
   FIRST="${work_dir}/first/snapshot.json" SECOND="${work_dir}/second/snapshot.json" python3 - <<'PY'
 import json,os
 first=json.load(open(os.environ["FIRST"],encoding="utf-8")); second=json.load(open(os.environ["SECOND"],encoding="utf-8"))
@@ -21723,57 +21905,77 @@ for value in (first,second):
     value["kubernetes"].pop("controllerLeaderLeaseResourceVersion",None)
 if first!=second: raise SystemExit(1)
 PY
+  control_plane_m16_observed_recovery_set_stage render-set || return
   control_plane_m16_observed_recovery_prepare_render_set "${work_dir}" || return
+  control_plane_m16_observed_recovery_set_stage plan || return
   control_plane_m16_observed_recovery_build_plan "${work_dir}" "${head_sha}" || return
-  control_plane_m16_observed_recovery_capture "${work_dir}/prewrite" || return
+  control_plane_m16_observed_recovery_capture "${work_dir}/prewrite" prewrite || return
+  control_plane_m16_observed_recovery_set_stage prewrite-compare || return
   SECOND="${work_dir}/second/snapshot.json" PREWRITE="${work_dir}/prewrite/snapshot.json" python3 - <<'PY'
 import json,os
 second=json.load(open(os.environ["SECOND"],encoding="utf-8")); prewrite=json.load(open(os.environ["PREWRITE"],encoding="utf-8"))
 for value in (second,prewrite): value["kubernetes"].pop("controllerLeaderLeaseResourceVersion",None)
 if second!=prewrite: raise SystemExit(1)
 PY
+  control_plane_m16_observed_recovery_set_stage prewrite-copy || return
   cp "${work_dir}/plan.json" "${evidence_dir}/observed-recovery-plan.json" || return
   cp "${work_dir}/wal.json" "${evidence_dir}/prepared-wal.json" || return
   cp "${work_dir}/document-digests.json" "${evidence_dir}/document-digests.json" || return
   cp "${work_dir}/prewrite/snapshot.json" "${evidence_dir}/prewrite-snapshot.json" || return
   chmod 600 "${evidence_dir}"/* || return
 
+  control_plane_m16_observed_recovery_set_stage configmap-create || return
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_PRODUCTION_WRITE_ATTEMPTED=true
   fields="$(control_plane_m16_observed_recovery_create_configmap "${work_dir}")" || return
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED=true
   IFS=$'\t' read -r CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_VERSION extra <<<"${fields}"
   [[ -z "${extra:-}" && -n "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_UID}" && "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_VERSION}" =~ ^[0-9]+$ ]] || return 1
+  control_plane_m16_observed_recovery_set_stage lease-attach || return
   control_plane_m16_observed_recovery_attach_lease_plan "${work_dir}/prewrite/lease.json" "${work_dir}" || return
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER="release/30836591717-1"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN="$(<"${work_dir}/prewrite/coordination-token")"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
   CONTROL_PLANE_HOTFIX_LEASE_ACQUIRED=true
   CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=true
+  control_plane_m16_observed_recovery_set_stage wal-fence-persist || return
   control_plane_m16_observed_recovery_update_configmap_wal fence-persisted "${work_dir}" || return
+  control_plane_m16_observed_recovery_set_stage lease-renew || return
   renew_control_plane_backup_coordination_lease || return
   start_control_plane_backup_coordination_lease_renewer || return
   require_control_plane_backup_coordination_or_abort "observed recovery pre-Helm" || return
+  control_plane_m16_observed_recovery_set_stage helm-start || return
   control_plane_m16_observed_recovery_update_configmap_wal helm-started "${work_dir}" || return
+  control_plane_m16_observed_recovery_set_stage helm-seal || return
   control_plane_m16_observed_recovery_prepare_sealed_argv "${work_dir}" || return
+  control_plane_m16_observed_recovery_set_stage helm-execute || return
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_HELM_ATTEMPTED=true
   if control_plane_release_domain_execute_sealed_helm_upgrade; then
     helm_status=0
   else
     helm_status=$?
+    control_plane_m16_observed_recovery_set_stage wal-commit-unknown || return
     control_plane_m16_observed_recovery_update_configmap_wal commit-unknown "${work_dir}" || return
     unknown_recorded=true
   fi
+  control_plane_m16_observed_recovery_set_stage verify || return
   if ! control_plane_m16_observed_recovery_verify_target "${work_dir}/verified" "${work_dir}/prewrite"; then
     if [[ "${unknown_recorded}" != true ]]; then
+      control_plane_m16_observed_recovery_set_stage wal-commit-unknown || return
       control_plane_m16_observed_recovery_update_configmap_wal commit-unknown "${work_dir}" || return
     fi
     log_stderr "Controller M16 observed recovery is commit-unknown; retained the new ConfigMap and Lease fence"
     if (( helm_status == 0 )); then helm_status=1; fi
     return "${helm_status:-1}"
   fi
+  control_plane_m16_observed_recovery_set_stage wal-commit || return
   control_plane_m16_observed_recovery_update_configmap_wal helm-committed "${work_dir}" || return
   control_plane_m16_observed_recovery_update_configmap_wal verified "${work_dir}" || return
   cp "${work_dir}/verified/verified.json" "${evidence_dir}/verified-before-fence-release.json" || return
   chmod 600 "${evidence_dir}/verified-before-fence-release.json" || return
+  control_plane_m16_observed_recovery_set_stage clear || return
   control_plane_m16_observed_recovery_release_lease "${work_dir}" || return
   control_plane_m16_observed_recovery_update_configmap_wal sealed "${work_dir}" || return
+  control_plane_m16_observed_recovery_set_stage terminal-evidence || return
   control_plane_m16_observed_recovery_seal_receipt "${work_dir}/verified" || return
   cp "${work_dir}/wal.json" "${evidence_dir}/terminal-wal.json" || return
   cp "${work_dir}/verified/verified.json" "${evidence_dir}/verified.json" || return
@@ -21784,6 +21986,7 @@ PY
   CONTROL_PLANE_HOTFIX_RECOVERY_REQUIRED=false
   CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false
   CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+  control_plane_m16_observed_recovery_set_stage complete || return
   log "Controller M16 independent observed-state recovery verified at Helm823 and released the retained fence"
 }
 

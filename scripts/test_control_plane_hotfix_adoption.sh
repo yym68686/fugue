@@ -242,6 +242,102 @@ for fragment in \
 done
 ! grep -Eq 'helm rollback|controller_m16_rollout|artifact|build_control_plane_images' <<<"${observed_recovery_source}"
 
+observed_capture_source="$(sed -n '/^control_plane_m16_observed_recovery_capture()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+for substage in \
+  helm-status helm-history helm-manifest-820 helm-values-820 helm-manifest-822 helm-values-822 \
+  api-deployment controller-deployment api-pods controller-pods service endpoint-slice \
+  controller-leader backup-lease metrics health operations other-witness snapshot; do
+  grep -Fq "capture-\${capture}-${substage}" <<<"${observed_capture_source}"
+done
+observed_verify_source="$(sed -n '/^control_plane_m16_observed_recovery_verify_target()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+for substage in \
+  helm-status helm-manifest-823 helm-values-823 api-deployment controller-deployment api-pods \
+  controller-pods controller-leader backup-lease metrics health operations other-witness snapshot; do
+  grep -Fq "capture-verified-${substage}" <<<"${observed_verify_source}"
+done
+for stage in render-set plan prewrite-copy configmap-create lease-attach helm-start helm-execute verify clear complete; do
+  grep -Fq "control_plane_m16_observed_recovery_set_stage ${stage}" <<<"${observed_recovery_source}"
+done
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  diagnostic_root="${TMP}/observed-recovery-diagnostics"
+  mkdir -m 700 "${diagnostic_root}"
+  export FUGUE_API_KEY='diagnostic-secret-api-key-must-not-leak'
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN='diagnostic-secret-lease-token-must-not-leak'
+  KUBECTL=""
+
+  for diagnostic_failure_stage in capture-first-helm-status render-set plan; do
+    evidence_dir="${diagnostic_root}/${diagnostic_failure_stage}"
+    mkdir -m 700 "${evidence_dir}"
+    set +e
+    (
+      CONTROL_PLANE_HOTFIX_WORK_DIR=""
+      control_plane_m16_observed_recovery_initialize_diagnostics "${evidence_dir}"
+      trap 'control_plane_m16_observed_recovery_exit_handler "$?"' EXIT
+      control_plane_m16_observed_recovery_set_stage "${diagnostic_failure_stage}"
+      exit 37
+    )
+    diagnostic_status=$?
+    set -e
+    [[ "${diagnostic_status}" == 37 ]]
+    EVIDENCE="${diagnostic_root}/${diagnostic_failure_stage}" EXPECTED_STAGE="${diagnostic_failure_stage}" python3 - <<'PY'
+import json,os,pathlib
+root=pathlib.Path(os.environ["EVIDENCE"])
+stage=json.loads((root/"stage.json").read_text(encoding="utf-8"))
+failure=json.loads((root/"failure.json").read_text(encoding="utf-8"))
+assert stage=={"stage":os.environ["EXPECTED_STAGE"]}
+assert failure=={
+    "stage":os.environ["EXPECTED_STAGE"],
+    "exitCode":37,
+    "productionWriteAttempted":False,
+    "configMapCreated":False,
+    "helmAttempted":False,
+}
+assert (root/"stage.json").stat().st_mode & 0o777 == 0o600
+assert (root/"failure.json").stat().st_mode & 0o777 == 0o600
+assert not list(root.glob(".stage.json.*"))
+assert not list(root.glob(".failure.json.*"))
+PY
+    ! grep -R -Fq 'diagnostic-secret-api-key-must-not-leak' "${diagnostic_root}/${diagnostic_failure_stage}"
+    ! grep -R -Fq 'diagnostic-secret-lease-token-must-not-leak' "${diagnostic_root}/${diagnostic_failure_stage}"
+  done
+
+  success_evidence="${diagnostic_root}/success"
+  (
+    CONTROL_PLANE_HOTFIX_WORK_DIR=""
+    mkdir -m 700 "${success_evidence}"
+    control_plane_m16_observed_recovery_initialize_diagnostics "${success_evidence}"
+    trap 'control_plane_m16_observed_recovery_exit_handler "$?"' EXIT
+    control_plane_m16_observed_recovery_set_stage terminal-evidence
+    control_plane_m16_observed_recovery_set_stage complete
+  )
+  [[ "$(<"${success_evidence}/stage.json")" == '{"stage":"complete"}' ]]
+  [[ ! -e "${success_evidence}/failure.json" ]]
+
+  write_evidence="${diagnostic_root}/write-attempt"
+  mkdir -m 700 "${write_evidence}"
+  control_plane_m16_observed_recovery_initialize_diagnostics "${write_evidence}"
+  control_plane_m16_observed_recovery_set_stage helm-execute
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_PRODUCTION_WRITE_ATTEMPTED=true
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_CONFIGMAP_CREATED=true
+  CONTROL_PLANE_M16_OBSERVED_RECOVERY_HELM_ATTEMPTED=true
+  control_plane_m16_observed_recovery_write_failure 71
+  EVIDENCE="${write_evidence}" python3 - <<'PY'
+import json,os,pathlib
+value=json.loads(pathlib.Path(os.environ["EVIDENCE"],"failure.json").read_text(encoding="utf-8"))
+assert value=={"stage":"helm-execute","exitCode":71,"productionWriteAttempted":True,"configMapCreated":True,"helmAttempted":True}
+PY
+  ! control_plane_m16_observed_recovery_set_stage 'capture-first-secret-shaped-stage'
+)
+
+grep -Fq 'control_plane_m16_observed_recovery_set_stage complete' <<<"${observed_recovery_source}"
+grep -Fq 'control_plane_m16_observed_recovery_exit_handler "$?"' <<<"${observed_recovery_source}"
+grep -Fq 'run_control_plane_controller_m16_observed_recovery_v1 "$@"' "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
 (
   cd "${ROOT}"
   export FUGUE_UPGRADE_LIB_ONLY=true
