@@ -463,20 +463,21 @@ jobs:
           set -euo pipefail
           readonly live_source='a0f5bc0ac36b4e29c4c7928dda1923c2c4727759'
           readonly target_source='57dc767999741cea25fe4820a6c9603984dfa0b9'
-          readonly tooling_parent='5a3b09c571601993367c50561b257dd6b9e743ca'
+          readonly tooling_root='5a3b09c571601993367c50561b257dd6b9e743ca'
+          readonly tooling_parent='b73c87ac966a5405c420620d644f11807109821f'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
           git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
-          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '2' ]]
+          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '3' ]]
           [[ "$(git rev-list --parents -n 1 "${EXPECTED_SHA}" | awk '{print NF}')" == '2' ]]
           [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
-          [[ "$(git rev-parse --verify "${tooling_parent}^")" == "${target_source}" ]]
+          [[ "$(git rev-parse --verify "${tooling_root}^")" == "${target_source}" ]]
           runtime_diff="$(git diff --name-status "${live_source}..${target_source}" -- \
             internal/api internal/runtime internal/model internal/store go.mod go.sum deploy/helm/fugue)"
           [[ "${runtime_diff}" == $'M\tinternal/api/managed_app_status.go\nM\tinternal/api/managed_app_status_test.go' ]]
           [[ -z "$(git diff --name-only "${live_source}..${target_source}" -- deploy/helm/fugue go.mod go.sum)" ]]
-          release_diff="$(git diff --name-only "${tooling_parent}..${EXPECTED_SHA}")"
+          release_diff="$(git diff --name-only "${tooling_root}..${EXPECTED_SHA}")"
           [[ "${release_diff}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
           [[ -z "$(git diff --name-only "${target_source}..${EXPECTED_SHA}" -- deploy/helm/fugue go.mod go.sum)" ]]
           {

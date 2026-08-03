@@ -20637,12 +20637,19 @@ run_control_plane_api_hotfix_rollout_v2() {
   local target_image_id=""
   local non_api_workload_digest=""
 
+  # The builder performs bounded read-only Helm/Kubernetes calls before the
+  # transaction runner installs its shorter hotfix budget. Initialize only
+  # the rollback/artifact reserves needed by that shared budget guard here;
+  # the runner still resets the complete mutation budget before the Lease.
+  FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=600
+  FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=60
+
   (( $# == 0 )) || return 2
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "5a3b09c571601993367c50561b257dd6b9e743ca" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "b73c87ac966a5405c420620d644f11807109821f" &&
     "$(git rev-list --parents -n 1 HEAD | awk '{print NF}')" == "2" ]] || return 1
   git merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD || return 1
   [[ "${artifact_file}" == /* && -f "${artifact_file}" && ! -L "${artifact_file}" &&
@@ -20650,7 +20657,7 @@ run_control_plane_api_hotfix_rollout_v2() {
     "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
   [[ "${FUGUE_SMOKE_URL:-}" == https://* && "${FUGUE_SMOKE_URL}" != *[[:space:]]* ]] || return 1
 
-  [[ "$(git diff --name-only HEAD^ HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD -- deploy/helm/fugue go.mod go.sum)" ]] || return 1
 
   build_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-api-hotfix-v2-plan.XXXXXX")" || return

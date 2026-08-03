@@ -284,6 +284,7 @@ grep -Fxq "api.image.digest=${HYBRID_DIGEST}" "${TMP}/argv-v2-1"
   helm_current_revision() { printf '807\n'; }
   control_plane_hotfix_verify_kubernetes() { :; }
   run_release_long_command() {
+    require_release_forward_budget 30 "builder read-only fixture" || return
     shift 2
     printf '%s\n' "$*" >>"${TMP}/readback-argv"
     case "$*" in
@@ -338,10 +339,10 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' '5a3b09c571601993367c50561b257dd6b9e743ca' ;;
-      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '5a3b09c571601993367c50561b257dd6b9e743ca' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' 'b73c87ac966a5405c420620d644f11807109821f' ;;
+      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" 'b73c87ac966a5405c420620d644f11807109821f' ;;
       'merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD') : ;;
-      'diff --name-only HEAD^ HEAD') printf '%s\n' \
+      'diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD') printf '%s\n' \
         '.github/workflows/deploy-control-plane.yml' \
         'internal/platformsafety/release_workflow_test.go' \
         'internal/releasedomain/control_plane_hotfix_adoption.go' \
@@ -374,6 +375,7 @@ import json, os
 json.dump({"config":{"api":{"image":{"digest":os.environ["DIGEST"],"tag":os.environ["SOURCE"]}}},"manifest":"fixture"},open(os.environ["OUTPUT"],"w"),sort_keys=True,separators=(",", ":"))
 PY
   }
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH="$(( $(date +%s) + 3600 ))"
   bounded_kubectl() {
     case "$*" in
       *'get deployment/fugue-fugue-api -o json') cat <<'JSON'
