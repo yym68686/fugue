@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "68e1f293a3bd0acb3501dc47400cc92b0b8f69c7d40137bb3ffa9045d8171ce6")
+	assertWorkflowSourceDigest(t, data, "14a66e44a909c02675736e1bc503291d60b9e8546c679f0fc880a7def355a625")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2871,14 +2871,14 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
 		"release-input-guard/Guard exact main commit authorization":                         "43462cd88fc7d11c852de316bbfbf0a1415e42ecf19032e1664529e678ce2c6d",
-		"recover-api-hotfix-fence/Verify exact recovery implementation identity":            "1382902ee17afb42d47586481bacdb18ff51731bafa52c9331e7d36b909f0235",
+		"recover-api-hotfix-fence/Verify exact recovery implementation identity":            "81a8640b10b565827b28a17ce4a5a8715f2809e17e0600ecc3d69a421442583a",
 		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":     "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
-		"recover-api-hotfix-fence/Settle API hotfix recovery lane":                          "891cab92ef167608ff24078c3494aa8c0321edb9d48922436cc7a84bcf2218d8",
+		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                   "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
 		"release-baseline/Resolve release-domain baseline":                                  "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
 		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-baseline/Verify exact API hotfix runtime closure":                          "787ce94bd2e1c9b26b088ccfcbe85f047896d518ceffe1c36827f622e2aa58e7",
+		"release-baseline/Verify exact API hotfix runtime closure":                          "16ef81b8639f0911b218d6e709be48f090c3bc6845c863fad98946ec05020784",
 		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
 		"release-gate/Verify exact API hotfix product receipt":                              "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
 		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
@@ -2925,7 +2925,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "env", "run"},
 				{"name", "id", "env", "run"},
 				{"name", "id", "if", "uses", "with"},
-				{"name", "if", "env", "run"},
+			},
+		},
+		"settle-api-hotfix-recovery-lane": {
+			Keys: []string{"needs", "if", "runs-on", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "env", "run"},
 			},
 		},
 		"release-baseline": {
@@ -3192,7 +3197,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if recovery.If != recoveryCondition || recovery.Environment != "production" || recovery.TimeoutMinutes != 15 {
 		t.Fatalf("API hotfix recovery job boundary drifted: %+v", recovery)
 	}
-	if !reflect.DeepEqual(recovery.Permissions, map[string]string{"actions": "write", "contents": "read"}) {
+	if !reflect.DeepEqual(recovery.Permissions, map[string]string{"contents": "read"}) {
 		t.Fatalf("API hotfix recovery permissions drifted: %v", recovery.Permissions)
 	}
 	var recoveryRunner []string
@@ -3207,7 +3212,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("API hotfix recovery checkout drifted: %+v", recoveryCheckout)
 	}
 	recoveryIdentity := workflowStepByName(t, recovery, "Verify exact recovery implementation identity")
-	for _, required := range []string{"CONFIRM_API_HOTFIX_RECOVERY_30804033592", "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184", "scripts/upgrade_fugue_control_plane.sh"} {
+	for _, required := range []string{"CONFIRM_API_HOTFIX_RECOVERY_30804033592", "d4b5ed71838d48766fa5704a27f46fcb578bf2f4", "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49", "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184", "git diff --numstat", "scripts/upgrade_fugue_control_plane.sh"} {
 		if !strings.Contains(recoveryIdentity.Run, required) {
 			t.Fatalf("API hotfix recovery identity must contain %q", required)
 		}
@@ -3225,9 +3230,20 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if recoveryUpload.ID != "recovery_evidence" || recoveryUpload.If != "${{ always() && steps.recovery.outcome != 'skipped' }}" || recoveryUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" || recoveryUpload.With["if-no-files-found"] != "error" || recoveryUpload.With["include-hidden-files"] != "false" {
 		t.Fatalf("API hotfix recovery evidence upload drifted: %+v", recoveryUpload)
 	}
-	recoverySettle := workflowStepByName(t, recovery, "Settle API hotfix recovery lane")
-	for _, required := range []string{"steps.recovery.outcome", "steps.recovery_evidence.outcome", "endpoint='enable'", "endpoint='disable'", "disabled_manually", "active"} {
-		if !strings.Contains(recoverySettle.If+recoverySettle.Run+fmt.Sprint(recoverySettle.Env), required) {
+	settle, ok := workflow.Jobs["settle-api-hotfix-recovery-lane"]
+	if !ok || !containsWorkflowNeed(settle.Needs, "recover-api-hotfix-fence") || len(settle.Needs) != 1 {
+		t.Fatalf("API hotfix recovery lane finalizer dependency drifted: %+v", settle)
+	}
+	if settle.If != "${{ always() && inputs.api_hotfix_recovery_only == 'CONFIRM_API_HOTFIX_RECOVERY_30804033592' }}" || !reflect.DeepEqual(settle.Permissions, map[string]string{"actions": "write", "contents": "read"}) {
+		t.Fatalf("API hotfix recovery lane finalizer boundary drifted: %+v", settle)
+	}
+	var settleRunner string
+	if err := settle.RunsOn.Decode(&settleRunner); err != nil || settleRunner != "ubuntu-latest" {
+		t.Fatalf("API hotfix recovery lane finalizer runner drifted: %q err=%v", settleRunner, err)
+	}
+	recoverySettle := workflowStepByName(t, settle, "Settle API hotfix recovery lane")
+	for _, required := range []string{"${{ needs.recover-api-hotfix-fence.result }}", "endpoint='enable'", "endpoint='disable'", "disabled_manually", "active", "gh api --method PUT"} {
+		if !strings.Contains(recoverySettle.Run+fmt.Sprint(recoverySettle.Env), required) {
 			t.Fatalf("API hotfix recovery lane settlement must contain %q", required)
 		}
 	}
@@ -3454,7 +3470,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759", "57dc767999741cea25fe4820a6c9603984dfa0b9",
 		"5a3b09c571601993367c50561b257dd6b9e743ca",
-		"9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184",
+		"d4b5ed71838d48766fa5704a27f46fcb578bf2f4",
+		`rev-list --count "${target_source}..${EXPECTED_SHA}")" == '9'`,
 		`M\tinternal/api/managed_app_status.go`, `M\tinternal/api/managed_app_status_test.go`,
 		`.github/workflows/deploy-control-plane.yml`, `scripts/upgrade_fugue_control_plane.sh`,
 	} {
@@ -4464,7 +4481,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("workflow default permissions must be contents:read only: got %v want %v", got, want)
 	}
 	for jobName, job := range workflow.Jobs {
-		if jobName != "freeze-release-lane-on-failure" && jobName != "rearm-release-lane-on-success" && jobName != "recover-api-hotfix-fence" &&
+		if jobName != "freeze-release-lane-on-failure" && jobName != "rearm-release-lane-on-success" && jobName != "settle-api-hotfix-recovery-lane" &&
 			jobName != "continue-release-convergence" && job.Permissions["actions"] == "write" {
 			t.Fatalf("job %s must not receive actions:write", jobName)
 		}

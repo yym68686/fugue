@@ -20834,8 +20834,15 @@ run_control_plane_api_hotfix_recovery_only() {
   [[ "${FUGUE_CONTROL_PLANE_API_HOTFIX_RECOVERY_CONFIRM:-}" == "CONFIRM_API_HOTFIX_RECOVERY_30804033592" ]] || return 1
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
-  [[ "${GITHUB_SHA:-}" == "${head_sha}" && "$(git rev-parse --verify HEAD^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" ]] || return 1
-  changed_files="$(git diff --name-only HEAD^ HEAD)" || return
+  [[ "${GITHUB_SHA:-}" == "${head_sha}" &&
+    "$(git rev-parse --verify HEAD^)" == "d4b5ed71838d48766fa5704a27f46fcb578bf2f4" &&
+    "$(git rev-parse --verify HEAD^^)" == "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49" &&
+    "$(git rev-parse --verify HEAD^^^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
+    "$(git rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" == "3" &&
+    -z "$(git rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" ]] || return 1
+  [[ "$(git diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == "internal/platformsafety/release_workflow_test.go" &&
+    "$(git diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == $'1\t0\tinternal/platformsafety/release_workflow_test.go' ]] || return 1
+  changed_files="$(git diff --name-only 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git status --short)" ]] || return 1
   [[ "${FUGUE_SMOKE_URL:-}" == "https://api.fugue.pro/healthz" ]] || return 1
@@ -20925,8 +20932,13 @@ run_control_plane_api_hotfix_rollout_v2() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
-    "$(git rev-list --parents -n 1 HEAD | awk '{print NF}')" == "2" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "d4b5ed71838d48766fa5704a27f46fcb578bf2f4" &&
+    "$(git rev-parse --verify HEAD^^)" == "120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49" &&
+    "$(git rev-parse --verify HEAD^^^)" == "9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184" &&
+    "$(git rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" == "3" &&
+    -z "$(git rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD)" ]] || return 1
+  [[ "$(git diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == "internal/platformsafety/release_workflow_test.go" &&
+    "$(git diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4)" == $'1\t0\tinternal/platformsafety/release_workflow_test.go' ]] || return 1
   git merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD || return 1
   [[ "${artifact_file}" == /* && -f "${artifact_file}" && ! -L "${artifact_file}" &&
     "$(stat -c '%a' "${artifact_file}")" == "600" &&

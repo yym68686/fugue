@@ -465,8 +465,13 @@ BUILDER_ARTIFACT_DIGEST="sha256:$(shasum -a 256 "${BUILDER_ARTIFACT}" | awk '{pr
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%s\n' "${builder_head}" ;;
-      'rev-parse --verify HEAD^') printf '%s\n' '9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184' ;;
-      'rev-list --parents -n 1 HEAD') printf '%s %s\n' "${builder_head}" '9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184' ;;
+      'rev-parse --verify HEAD^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
+      'rev-parse --verify HEAD^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
+      'rev-parse --verify HEAD^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '3\n' ;;
+      'rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') : ;;
+      'diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '%s\n' internal/platformsafety/release_workflow_test.go ;;
+      'diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '1\t0\t%s\n' internal/platformsafety/release_workflow_test.go ;;
       'merge-base --is-ancestor 57dc767999741cea25fe4820a6c9603984dfa0b9 HEAD') : ;;
       'diff --name-only 5a3b09c571601993367c50561b257dd6b9e743ca HEAD') printf '%s\n' \
         '.github/workflows/deploy-control-plane.yml' \
@@ -616,8 +621,14 @@ PY
   git() {
     case "$*" in
       'rev-parse --verify HEAD') printf '%040d\n' 7 ;;
-      'rev-parse --verify HEAD^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
-      'diff --name-only HEAD^ HEAD') printf '%s\n' \
+      'rev-parse --verify HEAD^') printf '%s\n' d4b5ed71838d48766fa5704a27f46fcb578bf2f4 ;;
+      'rev-parse --verify HEAD^^') printf '%s\n' 120966a4af9b7c8cfcb2c3b6b94e38504ddbbd49 ;;
+      'rev-parse --verify HEAD^^^') printf '%s\n' 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 ;;
+      'rev-list --count 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') printf '3\n' ;;
+      'rev-list --merges 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184..HEAD') : ;;
+      'diff --name-only d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '%s\n' internal/platformsafety/release_workflow_test.go ;;
+      'diff --numstat d4b5ed71838d48766fa5704a27f46fcb578bf2f4^ d4b5ed71838d48766fa5704a27f46fcb578bf2f4') printf '1\t0\t%s\n' internal/platformsafety/release_workflow_test.go ;;
+      'diff --name-only 9bf7e478af8d7b9dacedaa20f4f6c31ccc97e184 HEAD') printf '%s\n' \
         .github/workflows/deploy-control-plane.yml \
         internal/platformsafety/release_workflow_test.go \
         internal/releasedomain/control_plane_hotfix_adoption.go \
