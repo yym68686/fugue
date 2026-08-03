@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "54409bab535779d488fefe7c89370f71d2e24289374e631f6052839b0df57e87")
+	assertWorkflowSourceDigest(t, data, "e9430e7d097c11ecd62a10f53823c7deeda6e2c7069758e93f918ecba9a5b738")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2878,7 +2878,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-baseline/Verify exact API hotfix runtime closure":                          "02d96f816ef4b8a30b098279d12b2e21678fef3c3035a9ba3ef84dd447063094",
+		"release-baseline/Verify exact API hotfix runtime closure":                          "58b3823f6a0def01ca5cb10852985a0b83de9de567b6b1fa1b0cb3a1a93d887b",
 		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
 		"release-gate/Verify exact API hotfix product receipt":                              "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
 		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
@@ -3486,10 +3486,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759", "57dc767999741cea25fe4820a6c9603984dfa0b9",
 		"5a3b09c571601993367c50561b257dd6b9e743ca",
-		"14d598030b574d009a058a736a92d5dd05f951c6",
-		`rev-list --count "${target_source}..${EXPECTED_SHA}")" == '12'`,
+		"9d5fea041f79e26d4ccd0bb70b460d150d14bcda",
+		`rev-list --count "${target_source}..${EXPECTED_SHA}")" == '14'`,
 		`M\tinternal/api/managed_app_status.go`, `M\tinternal/api/managed_app_status_test.go`,
 		`.github/workflows/deploy-control-plane.yml`, `scripts/upgrade_fugue_control_plane.sh`,
+		`scripts/build_control_plane_images.sh`, `scripts/test_control_plane_build_reuse.py`,
+		`scripts/test_verify_registry_image.py`, `scripts/verify_registry_image.py`,
 	} {
 		if !strings.Contains(hotfixBaseline.Run, required) {
 			t.Fatalf("API hotfix baseline gate must contain %q", required)
