@@ -57,7 +57,10 @@ spec:
         {{- include "fugue-edge-control.selectorLabels" . | nindent 8 }}
       annotations:
         fugue.pro/source-commit: {{ $sourceCommit | quote }}
+        fugue.pro/image-digest: {{ $digest | quote }}
         fugue.pro/edge-control-authority: "none"
+        fugue.pro/edge-control-mode: "boundary-only"
+        fugue.pro/edge-control-publication: "disabled"
     spec:
       serviceAccountName: {{ include "fugue-edge-control.fullname" . }}
       automountServiceAccountToken: false
@@ -149,7 +152,7 @@ metadata:
   labels:
     {{- include "fugue-edge-control.labels" . | nindent 4 }}
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       {{- include "fugue-edge-control.selectorLabels" . | nindent 6 }}

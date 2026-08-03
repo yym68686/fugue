@@ -37,13 +37,21 @@ signer, Core API client, or customer data-plane dependency. The existing
 per-group cutover atoms produce independent production evidence. Building or
 publishing the boundary image is not evidence that Edge authority has moved.
 
-This step has no runtime behavior and does not change the legacy `fugue` Helm
-release. `internal/componentmanifest` strictly validates the document and
-rejects ambiguous source, artifact, state, dependency, or shared-resource
-ownership. Future steps will wire that validator into release planning, then
-move one lane at a time from `transitional-shared` to `independent` after
-contract, LKG, rollback, and production health evidence are present. The
-required evidence is defined in
+The boundary-shadow atom installs that exact image as a production shadow
+through `deploy-edge-control-shadow.yml`. The release remains `authority=none`,
+has no credentials or outbound network access, and is not on a customer request
+path. Its independent Helm history and release receipt prove only that the
+process/release failure-domain boundary is deployable; they are not evidence of
+inventory, epoch, bundle, signing, or recovery authority migration.
+
+The initial default-off image atom had no runtime behavior. The boundary-shadow
+atom adds only the separate `edge-control` Helm release and does not change the
+legacy `fugue` Helm release. `internal/componentmanifest` strictly validates
+the document and rejects ambiguous source, artifact, state, dependency, or
+shared-resource ownership. Future steps will wire that validator into release
+planning, then move one lane at a time from `transitional-shared` to
+`independent` after contract, LKG, rollback, and production health evidence are
+present. The required evidence is defined in
 [`microservices-migration-acceptance-v1.md`](microservices-migration-acceptance-v1.md).
 
 `componentmanifest.PlanChanges` is the shadow planner for that future release

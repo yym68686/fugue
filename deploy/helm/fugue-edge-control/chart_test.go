@@ -114,8 +114,17 @@ func TestEnabledBoundaryIsHardenedAndNonAuthoritative(t *testing.T) {
 	if got := deployment.Spec.Template.Annotations["fugue.pro/source-commit"]; got != testSource {
 		t.Fatalf("source annotation = %q, want %q", got, testSource)
 	}
+	if got := deployment.Spec.Template.Annotations["fugue.pro/image-digest"]; got != testDigest {
+		t.Fatalf("image digest annotation = %q, want %q", got, testDigest)
+	}
 	if got := deployment.Spec.Template.Annotations["fugue.pro/edge-control-authority"]; got != "none" {
 		t.Fatalf("authority annotation = %q, want none", got)
+	}
+	if got := deployment.Spec.Template.Annotations["fugue.pro/edge-control-mode"]; got != "boundary-only" {
+		t.Fatalf("mode annotation = %q, want boundary-only", got)
+	}
+	if got := deployment.Spec.Template.Annotations["fugue.pro/edge-control-publication"]; got != "disabled" {
+		t.Fatalf("publication annotation = %q, want disabled", got)
 	}
 
 	var service corev1.Service
@@ -125,8 +134,8 @@ func TestEnabledBoundaryIsHardenedAndNonAuthoritative(t *testing.T) {
 	}
 	var pdb policyv1.PodDisruptionBudget
 	decodeTyped(t, objectByKind(t, objects, "PodDisruptionBudget"), &pdb)
-	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntValue() != 1 {
-		t.Fatalf("PDB does not preserve the only shadow replica: %+v", pdb.Spec)
+	if pdb.Spec.MaxUnavailable == nil || pdb.Spec.MaxUnavailable.IntValue() != 1 || pdb.Spec.MinAvailable != nil {
+		t.Fatalf("non-authoritative shadow PDB must not block node maintenance: %+v", pdb.Spec)
 	}
 	var networkPolicy networkingv1.NetworkPolicy
 	decodeTyped(t, objectByKind(t, objects, "NetworkPolicy"), &networkPolicy)

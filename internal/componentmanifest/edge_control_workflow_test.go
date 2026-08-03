@@ -59,7 +59,9 @@ func TestEdgeControlImageWorkflowPublishesOnlyAnImmutableImage(t *testing.T) {
 	raw := string(data)
 	for _, required := range []string{
 		"Dockerfile.edge-control", "cmd/fugue-edge-control/**", "internal/edgecontrol/**",
-		"deploy/helm/fugue-edge-control/**", "scripts/test_edge_control_image.sh",
+		"deploy/helm/fugue-edge-control/**", "scripts/test_edge_control_image.sh", "scripts/deploy_edge_control_shadow.sh",
+		"scripts/test_deploy_edge_control_shadow.sh",
+		".github/workflows/deploy-edge-control-shadow.yml",
 		"--platform linux/amd64,linux/arm64", "--push", "edge-control-image-receipt/v1",
 	} {
 		if !strings.Contains(raw, required) {
