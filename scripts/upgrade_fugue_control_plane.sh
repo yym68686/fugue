@@ -21033,9 +21033,14 @@ control_plane_m16_observed_recovery_capture_active_operations() {
     --output "${output}" \
     https://api.fugue.pro/v1/operations || return
   OUTPUT="${output}" python3 - <<'PY' || return
-import json,os
-with open(os.environ["OUTPUT"],encoding="utf-8") as stream: value=json.load(stream)
-if not isinstance(value,dict) or set(value)!={"operations"} or value["operations"]!=[]: raise SystemExit(1)
+import json,os,pathlib
+path=pathlib.Path(os.environ["OUTPUT"])
+with path.open(encoding="utf-8") as stream: value=json.load(stream)
+if not isinstance(value,dict) or set(value)!={"operations"}: raise SystemExit(1)
+operations=value["operations"]
+if operations is None: operations=[]
+if not isinstance(operations,list) or operations: raise SystemExit(1)
+path.write_text(json.dumps({"operations":operations},sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
 PY
   chmod 600 "${output}" || return
 }
@@ -21667,7 +21672,8 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "fbfa707084d429176783354745043b5c12b3b488" && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "d412416cbca7094ee19d996f312468f871988fdb" && "$(git rev-parse --verify HEAD^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 2 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1

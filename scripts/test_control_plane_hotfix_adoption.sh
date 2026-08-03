@@ -140,7 +140,7 @@ PY
   # shellcheck source=scripts/upgrade_fugue_control_plane.sh
   source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
   FUGUE_API_KEY=read-only-test-token
-  operations_response='{"operations":[]}'
+  operations_response='{"operations":null}'
   run_with_wall_timeout() {
     [[ "$1" == 15 && "$2" == curl ]]
     shift 2
@@ -156,9 +156,19 @@ PY
     [[ -n "${output}" ]]
     printf '%s' "${operations_response}" >"${output}"
   }
+  control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-null.json"
+  [[ "$(<"${TMP}/active-operations-null.json")" == '{"operations":[]}' ]]
+  operations_response='{"operations":[]}'
   control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-empty.json"
+  cmp -s "${TMP}/active-operations-null.json" "${TMP}/active-operations-empty.json"
   operations_response='{"operations":[{"status":"running"}]}'
   ! control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-running.json"
+  operations_response='{}'
+  ! control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-missing.json"
+  operations_response='{"operations":{}}'
+  ! control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-object.json"
+  operations_response='{"operations":[],"extra":true}'
+  ! control_plane_m16_observed_recovery_capture_active_operations "${TMP}/active-operations-extra.json"
 )
 
 (
