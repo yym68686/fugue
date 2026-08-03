@@ -21652,6 +21652,27 @@ control_plane_m16_observed_recovery_assert_base_revision() {
     "${PREVIOUS_REVISION:-}" == "${observed_helm_revision}" ]] || return 1
 }
 
+control_plane_m16_observed_recovery_compare_reconstructed_base() {
+  local observed=""
+  local reconstructed=""
+  (( $# == 2 )) || return 2
+  observed="$1"
+  reconstructed="$2"
+  [[ -s "${observed}" && -f "${observed}" && ! -L "${observed}" &&
+    -s "${reconstructed}" && -f "${reconstructed}" && ! -L "${reconstructed}" ]] || return 1
+  OBSERVED="${observed}" RECONSTRUCTED="${reconstructed}" python3 - <<'PY'
+import os,pathlib
+observed=pathlib.Path(os.environ["OBSERVED"]).read_bytes()
+reconstructed=pathlib.Path(os.environ["RECONSTRUCTED"]).read_bytes()
+if observed==reconstructed:
+    raise SystemExit(0)
+if b"\r" in reconstructed or not reconstructed.endswith(b"\n") or reconstructed.endswith(b"\n\n"):
+    raise SystemExit(1)
+if observed!=reconstructed+b"\n":
+    raise SystemExit(1)
+PY
+}
+
 control_plane_m16_observed_recovery_prepare_render_set() {
   local directory="$1"
   local observed_manifest="${directory}/second/helm-manifest-822.yaml"
@@ -21669,7 +21690,8 @@ control_plane_m16_observed_recovery_prepare_render_set() {
   control_plane_hotfix_prepare_post_renderer || return
   control_plane_m16_observed_recovery_assert_renderer || return
   "${HELM_POST_RENDERER_FILE}" <"${directory}/render-one.raw" >"${directory}/reconstructed-822.yaml" || return
-  cmp -s "${observed_manifest}" "${directory}/reconstructed-822.yaml" || return 1
+  control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${observed_manifest}" "${directory}/reconstructed-822.yaml" || return
   CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
   CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${directory}/target-api-template.json")"
   CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
@@ -21915,14 +21937,15 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
-    "$(git rev-parse --verify HEAD^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
-    "$(git rev-parse --verify HEAD^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 7 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
+    "$(git rev-parse --verify HEAD^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
+    "$(git rev-parse --verify HEAD^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 8 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1

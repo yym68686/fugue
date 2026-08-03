@@ -449,6 +449,7 @@ PY
     local directory="$1"
     mkdir -m 700 -p "${directory}/second"
     cp "${fixture_root}/helm822-observed.yaml" "${directory}/second/helm-manifest-822.yaml"
+    printf '\n' >>"${directory}/second/helm-manifest-822.yaml"
     cp "${fixture_root}/helm822-observed.yaml" "${directory}/second/helm-manifest-820.yaml"
   }
   control_plane_m16_observed_recovery_build_raw_target() {
@@ -465,6 +466,64 @@ PY
     chmod 600 "${directory}/${prefix}.raw"
   }
 
+  compare_root="${fixture_root}/reconstructed-base-compare"
+  mkdir -m 700 "${compare_root}"
+  cat >"${compare_root}/reconstructed.yaml" <<'YAML'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stable
+data:
+  value: stable
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stable-secret
+data:
+  value: c3RhYmxl
+YAML
+  cp "${compare_root}/reconstructed.yaml" "${compare_root}/observed-exact.yaml"
+  control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-exact.yaml" "${compare_root}/reconstructed.yaml"
+  cp "${compare_root}/reconstructed.yaml" "${compare_root}/observed-extra-one-lf.yaml"
+  printf '\n' >>"${compare_root}/observed-extra-one-lf.yaml"
+  control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-extra-one-lf.yaml" "${compare_root}/reconstructed.yaml"
+  cp "${compare_root}/reconstructed.yaml" "${compare_root}/reverse-reconstructed.yaml"
+  printf '\n' >>"${compare_root}/reverse-reconstructed.yaml"
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/reconstructed.yaml" "${compare_root}/reverse-reconstructed.yaml"
+  cp "${compare_root}/reconstructed.yaml" "${compare_root}/observed-extra-multi-lf.yaml"
+  printf '\n\n' >>"${compare_root}/observed-extra-multi-lf.yaml"
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-extra-multi-lf.yaml" "${compare_root}/reconstructed.yaml"
+  cp "${compare_root}/reconstructed.yaml" "${compare_root}/observed-extra-space.yaml"
+  printf ' ' >>"${compare_root}/observed-extra-space.yaml"
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-extra-space.yaml" "${compare_root}/reconstructed.yaml"
+  sed 's/value: stable/value: changed/' "${compare_root}/reconstructed.yaml" >"${compare_root}/observed-object-mutation.yaml"
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-object-mutation.yaml" "${compare_root}/reconstructed.yaml"
+  COMPARE_ROOT="${compare_root}" python3 - <<'PY'
+import os,pathlib
+root=pathlib.Path(os.environ["COMPARE_ROOT"])
+raw=(root/"reconstructed.yaml").read_bytes()
+documents=[item for item in raw.split(b"---\n") if item.strip()]
+assert len(documents)==2
+(root/"observed-order-mutation.yaml").write_bytes(b"---\n"+documents[1]+b"---\n"+documents[0])
+(root/"reconstructed-crlf.yaml").write_bytes(raw.replace(b"\n",b"\r\n"))
+(root/"observed-crlf-extra-lf.yaml").write_bytes((root/"reconstructed-crlf.yaml").read_bytes()+b"\n")
+PY
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-order-mutation.yaml" "${compare_root}/reconstructed.yaml"
+  sed 's/value: c3RhYmxl/value: Y2hhbmdlZA==/' "${compare_root}/reconstructed.yaml" >"${compare_root}/observed-secret-mutation.yaml"
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-secret-mutation.yaml" "${compare_root}/reconstructed.yaml"
+  ! control_plane_m16_observed_recovery_compare_reconstructed_base \
+    "${compare_root}/observed-crlf-extra-lf.yaml" "${compare_root}/reconstructed-crlf.yaml"
+
   render_set_root="${fixture_root}/render-set-positive"
   prepare_observed_recovery_render_fixture "${render_set_root}"
   PREVIOUS_REVISION=822
@@ -472,6 +531,7 @@ PY
   control_plane_m16_observed_recovery_prepare_render_set "${render_set_root}"
   cmp -s "${fixture_root}/helm822-observed.yaml" "${render_set_root}/reconstructed-822.yaml"
   cmp -s "${fixture_root}/helm823-target.yaml" "${render_set_root}/effective-target.yaml"
+  cmp -s "${fixture_root}/helm823-target.yaml" "${render_set_root}/effective-repeated-target.yaml"
 
   for invalid_base in unset empty 821; do
     invalid_root="${fixture_root}/render-set-invalid-${invalid_base}"
@@ -500,6 +560,8 @@ grep -Fq 'CONTROL_PLANE_HOTFIX_BASE_REVISION=822' <<<"${observed_recovery_source
 grep -Fq 'control_plane_m16_observed_recovery_assert_base_revision || return' <<<"${observed_recovery_source}"
 observed_render_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_render_set()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
 grep -Fq 'control_plane_m16_observed_recovery_assert_base_revision || return' <<<"${observed_render_source}"
+[[ "$(grep -c '^  control_plane_m16_observed_recovery_compare_reconstructed_base \\' <<<"${observed_render_source}")" == 1 ]]
+[[ "$(grep -c '^  cmp -s "${directory}/target.yaml" ' <<<"${observed_render_source}")" == 2 ]]
 [[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
 [[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
 observed_seal_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_sealed_argv()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
