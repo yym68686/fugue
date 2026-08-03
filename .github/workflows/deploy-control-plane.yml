@@ -1069,19 +1069,22 @@ jobs:
           readonly tooling_base='ffd634a135114268156652c8d671231cb50c45fb'
           readonly m16_source='353cc7e4f417fca51e14483bc292c79e0ba7941a'
           readonly tooling_parent='db9c05d53c8a34d215687471e625af1a0bed7757'
+          readonly history_parent='973cb7d4b62abfb34b67aed5900ad179634ee134'
           [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
           [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
           git merge-base --is-ancestor "${live_source}" "${target_source}"
           git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
-          [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
+          [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${history_parent}" ]]
+          [[ "$(git rev-parse --verify "${history_parent}^")" == "${tooling_parent}" ]]
           [[ "$(git rev-parse --verify "${tooling_parent}^")" == "${m16_source}" ]]
           [[ "$(git rev-parse --verify "${m16_source}^")" == "${tooling_base}" ]]
-          [[ "$(git rev-list --count "${tooling_base}..${EXPECTED_SHA}")" == '3' ]]
+          [[ "$(git rev-list --count "${tooling_base}..${EXPECTED_SHA}")" == '4' ]]
           [[ -z "$(git rev-list --merges "${tooling_base}..${EXPECTED_SHA}")" ]]
-          [[ "$(git diff --name-only "${tooling_parent}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ "$(git diff --name-only "${history_parent}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ "$(git diff --name-only "${tooling_parent}..${history_parent}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
           [[ "$(git diff --name-only "${m16_source}..${tooling_parent}")" == $'scripts/prepush.py\nscripts/test_prepush.py' ]]
           [[ "$(git diff --name-only "${tooling_base}..${m16_source}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
-          [[ "$(git diff --name-only "${tooling_base}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/prepush.py\nscripts/test_prepush.py\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ "$(git diff --name-only "${tooling_base}..${EXPECTED_SHA}")" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/prepush.py\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_prepush.py\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
           runtime_diff="$(git diff --name-status "${live_source}..${target_source}" -- internal/controller internal/store)"
           [[ "${runtime_diff}" == $'M\tinternal/controller/app_database_switchover.go\nM\tinternal/controller/app_database_switchover_test.go\nM\tinternal/controller/controller.go\nM\tinternal/controller/managed_app_reconciler.go\nM\tinternal/controller/postgres_runtime_alignment.go\nM\tinternal/controller/postgres_runtime_alignment_test.go\nA\tinternal/store/managed_postgres_placement.go\nA\tinternal/store/managed_postgres_placement_pg.go\nA\tinternal/store/managed_postgres_placement_pg_test.go\nA\tinternal/store/managed_postgres_placement_test.go' ]]
           chart_drift="$(git diff --name-status "${target_source}..${EXPECTED_SHA}" -- deploy/helm/fugue go.mod go.sum)"

@@ -247,7 +247,11 @@ controller_m16_baseline = step(baseline, "Verify exact Controller M16 runtime cl
 for fragment in [
   "353cc7e4f417fca51e14483bc292c79e0ba7941a",
   "db9c05d53c8a34d215687471e625af1a0bed7757",
+  "973cb7d4b62abfb34b67aed5900ad179634ee134",
+  %q!rev-list --count "${tooling_base}..${EXPECTED_SHA}")" == '4'!,
   'rev-list --count "${tooling_base}..${EXPECTED_SHA}"',
+  'git diff --name-only "${history_parent}..${EXPECTED_SHA}"',
+  "scripts/test_control_plane_hotfix_adoption.sh",
   'git diff --name-only "${m16_source}..${tooling_parent}"',
   "scripts/prepush.py\\nscripts/test_prepush.py",
   "M\\tdeploy/helm/fugue/chart_test.go",
@@ -259,8 +263,9 @@ for fragment in [
   fail_contract("Controller M16 chart closure is missing #{fragment.inspect}") unless controller_m16_baseline.fetch("run").include?(fragment)
 end
 for fragment in [
-  '"$(git rev-parse --verify HEAD^)" == "db9c05d53c8a34d215687471e625af1a0bed7757"',
-  '"$(git rev-parse --verify HEAD^^)" == "353cc7e4f417fca51e14483bc292c79e0ba7941a"',
+  '"$(git rev-parse --verify HEAD^)" == "973cb7d4b62abfb34b67aed5900ad179634ee134"',
+  '"$(git rev-parse --verify HEAD^^)" == "db9c05d53c8a34d215687471e625af1a0bed7757"',
+  "scripts/test_control_plane_hotfix_adoption.sh",
   "scripts/prepush.py\\nscripts/test_prepush.py",
   "git diff --name-status 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD -- deploy/helm/fugue go.mod go.sum",
   "deploy/helm/fugue/templates/controller-deployment.yaml deploy/helm/fugue/values.yaml deploy/helm/fugue/values-production-ha.yaml go.mod go.sum",

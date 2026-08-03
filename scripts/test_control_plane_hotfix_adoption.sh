@@ -171,6 +171,133 @@ PY
   export FUGUE_UPGRADE_LIB_ONLY=true
   # shellcheck source=scripts/upgrade_fugue_control_plane.sh
   source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  live_source=d1e7ed9cdedbaa09db9bd78b4e433b94c7357510
+  target_source=58fc2e560064214e3f329765c9ec7839ee513c27
+  live_image=ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d
+  target_image=ghcr.io/yym68686/fugue-controller@sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=3
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(LIVE_SOURCE="${live_source}" LIVE_IMAGE="${live_image}" python3 - <<'PY'
+import json, os
+print(json.dumps({
+    "metadata":{"annotations":{"fugue.io/controller-live":"exact","fugue.pro/source-commit":os.environ["LIVE_SOURCE"]}},
+    "spec":{"containers":[{"args":["serve"],"image":os.environ["LIVE_IMAGE"],"imagePullPolicy":"IfNotPresent","name":"controller"}],"dnsPolicy":"ClusterFirst","restartPolicy":"Always"},
+},sort_keys=True,separators=(",",":")))
+PY
+)"
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON='{}'
+  NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=false
+  prepare_helm_post_renderer
+  target_raw="${TMP}/controller-template-target-raw.yaml"
+  hybrid_raw="${TMP}/controller-template-hybrid-raw.yaml"
+  target_rendered="${TMP}/controller-template-target-rendered.yaml"
+  hybrid_rendered="${TMP}/controller-template-hybrid-rendered.yaml"
+  write_controller_fixture() {
+    local source="$1" image="$2" output="$3"
+    cat >"${output}" <<YAML
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-controller
+  namespace: fugue-system
+spec:
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        fugue.pro/source-commit: ${source}
+    spec:
+      containers:
+      - name: controller
+        image: ${image}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+  namespace: fugue-system
+spec:
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        fugue.pro/source-commit: 57dc767999741cea25fe4820a6c9603984dfa0b9
+    spec:
+      containers:
+      - image: ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3
+        name: api
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: untouched-controller-m16
+  namespace: fugue-system
+data:
+  value: exact
+YAML
+  }
+  write_controller_fixture "${target_source}" "${target_image}" "${target_raw}"
+  write_controller_fixture "${live_source}" "${live_image}" "${hybrid_raw}"
+  "${HELM_POST_RENDERER_FILE}" <"${target_raw}" >"${target_rendered}"
+  "${HELM_POST_RENDERER_FILE}" <"${hybrid_raw}" >"${hybrid_rendered}"
+  LIVE_TEMPLATE="${CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON}" \
+    TARGET_SOURCE="${target_source}" TARGET_IMAGE="${target_image}" \
+    TARGET_RAW="${target_raw}" TARGET_RENDERED="${target_rendered}" \
+    HYBRID_RAW="${hybrid_raw}" HYBRID_RENDERED="${hybrid_rendered}" python3 - <<'PY'
+import copy, hashlib, json, os, re
+
+def documents(path):
+    raw=open(path,encoding="utf-8").read()
+    return ["---\n"+item for item in raw.split("---\n") if item]
+
+def named(path):
+    result={}
+    for document in documents(path):
+        match=re.search(r'^  name: ([^\n]+)$',document,re.MULTILINE)
+        assert match and match.group(1) not in result
+        result[match.group(1)]=document
+    return result
+
+def template(document):
+    match=re.search(r'^  template: (\{.*\})$',document,re.MULTILINE)
+    assert match
+    return json.loads(match.group(1))
+
+def digest(value):
+    raw=json.dumps(value,sort_keys=True,separators=(",",":")).encode()
+    return "sha256:"+hashlib.sha256(raw).hexdigest()
+
+target_raw=named(os.environ["TARGET_RAW"]); target=named(os.environ["TARGET_RENDERED"])
+hybrid_raw=named(os.environ["HYBRID_RAW"]); hybrid=named(os.environ["HYBRID_RENDERED"])
+for name in ("fugue-fugue-api","untouched-controller-m16"):
+    assert target[name] == target_raw[name]
+    assert hybrid[name] == hybrid_raw[name]
+live=json.loads(os.environ["LIVE_TEMPLATE"])
+want_target=copy.deepcopy(live)
+want_target["metadata"]["annotations"]["fugue.pro/source-commit"]=os.environ["TARGET_SOURCE"]
+matches=[item for item in want_target["spec"]["containers"] if item.get("name")=="controller"]
+assert len(matches)==1
+matches[0]["image"]=os.environ["TARGET_IMAGE"]
+got_target=template(target["fugue-fugue-controller"])
+got_hybrid=template(hybrid["fugue-fugue-controller"])
+assert got_target == want_target
+assert got_hybrid == live
+assert digest(got_target) != digest(got_hybrid)
+assert digest(got_hybrid) == digest(live)
+PY
+  if sed 's/      - name: controller/      - name: unknown-controller/' "${hybrid_raw}" |
+    "${HELM_POST_RENDERER_FILE}" >/dev/null 2>&1; then
+    exit 1
+  fi
+  rm -f -- "${HELM_POST_RENDERER_FILE}"
+)
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
   fixture="${TMP}/kubernetes-observation-fixture"
   mkdir -m 700 "${fixture}"
   cat >"${fixture}/deployment.json" <<'JSON'

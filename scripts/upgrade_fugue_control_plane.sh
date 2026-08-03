@@ -12368,6 +12368,7 @@ live_deployment_replicas() {
 prepare_helm_post_renderer() {
   local public_checksums="${PUBLIC_DATA_PLANE_CHECKSUMS_JSON:-}"
   local hotfix_api_template="${CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON:-}"
+  local hotfix_controller_template="${CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON:-}"
   local public_base_manifest=""
   local registry_deployment=""
   local registry_replicas=""
@@ -12408,14 +12409,14 @@ prepare_helm_post_renderer() {
     }
   fi
   if ! renderer_config_b64="$(python3 - "${registry_deployment}" "${public_checksums}" "${public_base_manifest}" \
-    "${hotfix_api_template}" <<'PY'
+    "${hotfix_api_template}" "${hotfix_controller_template}" <<'PY'
 import base64
 import json
 import os
 import re
 import sys
 
-registry, raw_checksums, base_manifest_path, raw_api_template = sys.argv[1:]
+registry, raw_checksums, base_manifest_path, raw_api_template, raw_controller_template = sys.argv[1:]
 checksums = json.loads(raw_checksums)
 if not isinstance(checksums, dict):
     raise SystemExit(1)
@@ -12499,9 +12500,28 @@ if raw_api_template:
     matches = [item for item in containers if isinstance(item, dict) and item.get("name") == "api"]
     if len(matches) != 1:
         raise SystemExit(1)
+controller_template = None
+if raw_controller_template:
+    if raw_api_template:
+        raise SystemExit(1)
+    controller_template = json.loads(raw_controller_template)
+    if not isinstance(controller_template, dict) or set(controller_template) != {"metadata", "spec"}:
+        raise SystemExit(1)
+    metadata = controller_template.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    spec = controller_template.get("spec")
+    containers = spec.get("containers") if isinstance(spec, dict) else None
+    if not isinstance(annotations, dict) or not isinstance(containers, list):
+        raise SystemExit(1)
+    matches = [item for item in containers if isinstance(item, dict) and item.get("name") == "controller"]
+    if len(matches) != 1 or annotations.get("fugue.pro/source-commit") != "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510":
+        raise SystemExit(1)
+    if matches[0].get("image") != "ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d":
+        raise SystemExit(1)
 payload = json.dumps(
     {
         "apiTemplate": api_template,
+        "controllerTemplate": controller_template,
         "publicDataPlaneChecksums": checksums,
         "publicDataPlaneObjects": preserved_objects,
         "registryDeployment": registry,
@@ -12518,7 +12538,8 @@ PY
   fi
   [[ -z "${public_base_manifest}" ]] || rm -f "${public_base_manifest}"
   [[ -n "${renderer_config_b64}" ]] || return 1
-  if [[ -z "${registry_deployment}" && "${public_checksums}" == '{}' && -z "${hotfix_api_template}" ]]; then
+  if [[ -z "${registry_deployment}" && "${public_checksums}" == '{}' && -z "${hotfix_api_template}" &&
+    -z "${hotfix_controller_template}" ]]; then
     return 0
   fi
 
@@ -12533,6 +12554,7 @@ target_name = config["registryDeployment"]
 checksums = config["publicDataPlaneChecksums"]
 preserved_objects = config["publicDataPlaneObjects"]
 api_template = config["apiTemplate"]
+controller_template = config["controllerTemplate"]
 source = sys.stdin.read()
 lines = source.splitlines()
 documents = []
@@ -12548,6 +12570,7 @@ if document:
 
 seen_public_objects = set()
 seen_api = 0
+seen_controller = 0
 rendered = []
 
 for document in documents:
@@ -12614,6 +12637,57 @@ for document in documents:
         ] + document[template_end:]
         seen_api += 1
 
+    if controller_template is not None and kind == "Deployment" and name == "fugue-fugue-controller":
+        source_matches = [
+            re.fullmatch(r'\s+fugue\.pro/source-commit:\s*["\']?([0-9a-f]{40})["\']?', line)
+            for line in document
+        ]
+        source_values = [match.group(1) for match in source_matches if match]
+        image_matches = [
+            re.fullmatch(r'\s+-?\s*image:\s*["\']?(ghcr\.io/yym68686/fugue-controller@sha256:[0-9a-f]{64})["\']?', line)
+            for line in document
+        ]
+        image_values = [match.group(1) for match in image_matches if match]
+        container_names = [
+            line for line in document
+            if re.fullmatch(r'\s+-?\s*name:\s*["\']?controller["\']?', line)
+        ]
+        template_matches = [index for index, line in enumerate(document) if line.startswith("  template:")]
+        allowed = {
+            (
+                "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
+                "ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",
+            ),
+            (
+                "58fc2e560064214e3f329765c9ec7839ee513c27",
+                "ghcr.io/yym68686/fugue-controller@sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df",
+            ),
+        }
+        if (
+            len(template_matches) != 1 or len(source_values) != 1 or len(image_values) != 1
+            or len(container_names) != 1 or seen_controller or (source_values[0], image_values[0]) not in allowed
+        ):
+            raise SystemExit(1)
+        template = json.loads(json.dumps(controller_template, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+        template["metadata"]["annotations"]["fugue.pro/source-commit"] = source_values[0]
+        controller_containers = [item for item in template["spec"]["containers"] if item.get("name") == "controller"]
+        if len(controller_containers) != 1:
+            raise SystemExit(1)
+        controller_containers[0]["image"] = image_values[0]
+        template_index = template_matches[0]
+        template_end = next(
+            (
+                index
+                for index, line in enumerate(document[template_index + 1 :], template_index + 1)
+                if line.startswith("  ") and not line.startswith("    ") and line.strip()
+            ),
+            len(document),
+        )
+        document = document[:template_index] + [
+            "  template: " + json.dumps(template, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        ] + document[template_end:]
+        seen_controller += 1
+
     if target_name and name == target_name and kind == "Deployment":
         if spec_index < 0:
             raise SystemExit(1)
@@ -12629,7 +12703,11 @@ for document in documents:
             document.insert(spec_index + 1, "  replicas: 0")
     rendered.extend(document)
 
-if seen_public_objects != set(checksums) or set(preserved_objects) != set(checksums) or seen_api != (1 if api_template is not None else 0):
+if (
+    seen_public_objects != set(checksums) or set(preserved_objects) != set(checksums)
+    or seen_api != (1 if api_template is not None else 0)
+    or seen_controller != (1 if controller_template is not None else 0)
+):
     raise SystemExit(1)
 sys.stdout.write("\n".join(rendered))
 if source.endswith("\n"):
@@ -21383,15 +21461,17 @@ run_control_plane_controller_m16_rollout_v1() {
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
     "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "db9c05d53c8a34d215687471e625af1a0bed7757" &&
-    "$(git rev-parse --verify HEAD^^)" == "353cc7e4f417fca51e14483bc292c79e0ba7941a" &&
-    "$(git rev-parse --verify HEAD^^^)" == "ffd634a135114268156652c8d671231cb50c45fb" &&
-    "$(git rev-list --count ffd634a135114268156652c8d671231cb50c45fb..HEAD)" == "3" &&
+  [[ "$(git rev-parse --verify HEAD^)" == "973cb7d4b62abfb34b67aed5900ad179634ee134" &&
+    "$(git rev-parse --verify HEAD^^)" == "db9c05d53c8a34d215687471e625af1a0bed7757" &&
+    "$(git rev-parse --verify HEAD^^^)" == "353cc7e4f417fca51e14483bc292c79e0ba7941a" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "ffd634a135114268156652c8d671231cb50c45fb" &&
+    "$(git rev-list --count ffd634a135114268156652c8d671231cb50c45fb..HEAD)" == "4" &&
     -z "$(git rev-list --merges ffd634a135114268156652c8d671231cb50c45fb..HEAD)" ]] || return 1
-  [[ "$(git diff --name-only db9c05d53c8a34d215687471e625af1a0bed7757 HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only 973cb7d4b62abfb34b67aed5900ad179634ee134 HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only db9c05d53c8a34d215687471e625af1a0bed7757 973cb7d4b62abfb34b67aed5900ad179634ee134)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ "$(git diff --name-only 353cc7e4f417fca51e14483bc292c79e0ba7941a db9c05d53c8a34d215687471e625af1a0bed7757)" == $'scripts/prepush.py\nscripts/test_prepush.py' ]] || return 1
   [[ "$(git diff --name-only ffd634a135114268156652c8d671231cb50c45fb 353cc7e4f417fca51e14483bc292c79e0ba7941a)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
-  [[ "$(git diff --name-only ffd634a135114268156652c8d671231cb50c45fb HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/prepush.py\nscripts/test_prepush.py\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
+  [[ "$(git diff --name-only ffd634a135114268156652c8d671231cb50c45fb HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/prepush.py\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_prepush.py\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   git merge-base --is-ancestor 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD || return 1
   [[ "$(git diff --name-status 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD -- deploy/helm/fugue go.mod go.sum)" == $'M\tdeploy/helm/fugue/chart_test.go\nM\tdeploy/helm/fugue/templates/edge-bluegreen-daemonsets.yaml\nM\tdeploy/helm/fugue/templates/edge-daemonset.yaml\nM\tdeploy/helm/fugue/templates/edge-group-daemonsets.yaml' ]] || return 1
   [[ -z "$(git diff --name-only 58fc2e560064214e3f329765c9ec7839ee513c27 HEAD -- deploy/helm/fugue/templates/controller-deployment.yaml deploy/helm/fugue/values.yaml deploy/helm/fugue/values-production-ha.yaml go.mod go.sum)" ]] || return 1
