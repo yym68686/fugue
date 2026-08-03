@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "10da1833b021e9c6371ed348e9918e9fe310922fdcfd8a9b24985d98979a4a1e")
+	assertWorkflowSourceDigest(t, data, "5d375f4a2bdb4d8d2dd95aa17d6038dae41b1c6b8b3ba3b9a98f4fda6bcc1c65")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2870,16 +2870,19 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                         "de92429028992e91fef3853ab8f70d898b44c21b67c5f4289273f3362a202153",
+		"release-input-guard/Guard exact main commit authorization":                         "a066a3c8376a37fbb254ee794ad3300b9c0b933be99563f89caf4deb6f063338",
 		"release-baseline/Resolve release-domain baseline":                                  "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
 		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
 		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
+		"release-baseline/Verify exact API hotfix runtime closure":                          "cb95258324c379ac0ab5ffd9a78f0d7eabc379a11713e5dd700eb437c86a1618",
 		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
+		"release-gate/Verify exact API hotfix product receipt":                              "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
 		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
-		"build/Compute image build plan":                                                    "ed9f833cf35832ec4d6d3362ebb5844bef787f5554faccabfdf04fa360d7b051",
+		"build/Compute image build plan":                                                    "0994dc9ede63c38e4d18548f762445aa29ab084474498112ba597e478e5bcb34",
 		"build/Verify exact historical incident image plan":                                 "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
-		"build/Publish verified control-plane image provenance":                             "8f188857beb59ed38aa7c3bb427b4cc4c2a5f1f6aa7df0c91211d23642f3589d",
+		"build/Verify exact API hotfix image plan":                                          "d5b258401587abc13c630536f8ec36cbdae46203b3308ace9bfd1ed5c40f9a97",
+		"build/Publish verified control-plane image provenance":                             "b4782333131b6466fd39b1e2a70c9e0fca9e85d7af02ac3128c6ec3c6fc71bd3",
 		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
 		"deploy/Prepare exact current tooling for historical runtime evidence":              "15cd94ec3a12647dc78e51695e2ce52ee7ed2b8a29ee2cf63e9df945e6d7c33a",
 		"deploy/Build private release-domain tools":                                         "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
@@ -2893,10 +2896,11 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Explain runner and fail closed target":                                      "1731c0653bfe39738df9b79b1deafd74e1454c815ed2aa816454b9b83713f0d0",
 		"deploy/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
+		"deploy/Roll out exact API hotfix with hybrid compensation":                         "99b0dc3a35bd25d17b4291f520639a9ed5b4a9c7a93ac45909616f5ce62e236f",
 		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
 		"continue-release-convergence/Dispatch exact release convergence successor":         "510c424625aa4b352c3fdacfbca149f8e784760da4971977cbe5f487fddcdfb9",
 		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "007dfc7144f11bc1cc0a7b62994c4efee969679de1a185913489ec5d42b592e7",
-		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "45c936e0acd042ba3f4e9a88249f49912b4825e52df413e2020d4a2224d1f8d2",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "a02d80a1b11f8087ec74498fe2ca437016a8fa513d62102438e14c0f4acf2759",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
@@ -2919,14 +2923,16 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "if", "uses", "with"},
 				{"name", "if", "env", "run"},
 				{"name", "id", "env", "run"},
-				{"name", "id", "env", "run"},
-				{"name", "id", "env", "run"},
+				{"name", "id", "if", "env", "run"},
+				{"name", "id", "if", "env", "run"},
+				{"name", "id", "if", "env", "run"},
 			},
 		},
 		"release-gate": {
 			Keys: []string{"needs", "permissions", "runs-on", "steps"},
 			StepKeys: [][]string{
 				{"name", "env", "run"},
+				{"name", "if", "env", "run"},
 			},
 		},
 		"build": {
@@ -2939,6 +2945,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "if", "uses", "with"},
 				{"name", "id", "env", "run"},
 				{"name", "id", "env", "run"},
+				{"name", "if", "env", "run"},
 				{"name", "if", "env", "run"},
 				{"name", "if", "uses"},
 				{"name", "if", "uses", "with"},
@@ -2963,6 +2970,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "if", "env", "run"},
 				{"name", "id", "if", "env", "run"},
 				{"name", "if", "env", "run"},
+				{"name", "id", "if", "env", "run"},
+				{"name", "if", "uses", "with"},
 				{"name", "id", "if", "env", "uses"},
 				{"name", "if", "env", "run"},
 				{"name", "if", "run"},
@@ -3003,7 +3012,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if workflow.On.WorkflowDispatch == nil {
 		t.Fatal("control-plane workflow must support workflow_dispatch")
 	}
-	if len(workflow.On.WorkflowDispatch.Inputs) != 6 {
+	if len(workflow.On.WorkflowDispatch.Inputs) != 7 {
 		t.Fatalf("workflow_dispatch input inventory drifted: %+v", workflow.On.WorkflowDispatch.Inputs)
 	}
 	expectedSHAInput, ok := workflow.On.WorkflowDispatch.Inputs["expected_sha"]
@@ -3063,6 +3072,17 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("%s must be an optional empty-default string: %+v", inputName, input)
 		}
 	}
+	hotfixInputNode, exists := workflow.On.WorkflowDispatch.Inputs["api_hotfix_rollout_v2"]
+	if !exists {
+		t.Fatal("workflow_dispatch must define api_hotfix_rollout_v2")
+	}
+	var hotfixInput releaseWorkflowDispatchInput
+	if err := hotfixInputNode.Decode(&hotfixInput); err != nil {
+		t.Fatalf("decode api_hotfix_rollout_v2 input: %v", err)
+	}
+	if hotfixInput.Required || hotfixInput.Type != "string" || hotfixInput.Default != "" {
+		t.Fatalf("api_hotfix_rollout_v2 must be an optional empty-default string: %+v", hotfixInput)
+	}
 	workflowSource := string(data)
 	if strings.Contains(workflowSource, "existing_image_tag") || len(workflow.On.Push.Paths) != 0 {
 		t.Fatal("control-plane release must be dispatch-only without an image bypass")
@@ -3108,6 +3128,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST": "${{ inputs.public_data_plane_adoption_baseline_digest }}",
 		"PUBLIC_DATA_PLANE_ADOPTION_BASELINE":        "${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json",
 		"PUBLIC_DATA_PLANE_ADOPTION_TRACE":           "${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json",
+		"API_HOTFIX_ROLLOUT_V2":                      "${{ inputs.api_hotfix_rollout_v2 }}",
 	} {
 		if got := guard.Env[key]; got != want {
 			t.Fatalf("release input guard env %s drifted: got %q want %q", key, got, want)
@@ -3125,6 +3146,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		`"${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" =~ ^[1-9][0-9]*$`,
 		`"${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$`,
 		"if raw != canonical:",
+		`CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC`,
+		`"${TARGET_SHA}" == '57dc767999741cea25fe4820a6c9603984dfa0b9'`,
+		`"${IMAGE_CACHE_CONVERGENCE}" == 'false'`,
 	} {
 		if !strings.Contains(guard.Run, required) {
 			t.Fatalf("release input guard must contain %q", required)
@@ -3141,8 +3165,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := gate.Permissions, map[string]string{"actions": "read", "contents": "read"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("release-gate permissions drifted: got %v want %v", got, want)
 	}
-	if len(gate.Steps) != 1 {
-		t.Fatalf("release-gate must contain only the exact source CI receipt: %+v", gate.Steps)
+	if len(gate.Steps) != 2 {
+		t.Fatalf("release-gate must contain the tooling and exact product CI receipts: %+v", gate.Steps)
 	}
 	receipt := workflowStepByName(t, gate, "Verify exact source CI receipt")
 	if got, want := receipt.Env, map[string]string{
@@ -3170,6 +3194,17 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("release-gate reruns source CI command %q", forbidden)
 		}
 	}
+	hotfixReceipt := workflowStepByName(t, gate, "Verify exact API hotfix product receipt")
+	if hotfixReceipt.If != "${{ inputs.api_hotfix_rollout_v2 != '' }}" ||
+		hotfixReceipt.Env["GH_TOKEN"] != "${{ github.token }}" ||
+		hotfixReceipt.Env["REPOSITORY"] != "${{ github.repository }}" {
+		t.Fatalf("API hotfix product receipt boundary drifted: %+v", hotfixReceipt)
+	}
+	for _, required := range []string{"30788130816", "57dc767999741cea25fe4820a6c9603984dfa0b9", ".github/workflows/ci.yml"} {
+		if !strings.Contains(hotfixReceipt.Run, required) {
+			t.Fatalf("API hotfix product receipt must bind %q", required)
+		}
+	}
 
 	baseline, ok := workflow.Jobs["release-baseline"]
 	if !ok {
@@ -3178,9 +3213,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for key, want := range map[string]string{
 		"domain_base_sha":         "${{ steps.domain_baseline.outputs.domain_base_sha }}",
 		"baseline_ref_object_sha": "${{ steps.domain_baseline.outputs.baseline_ref_object_sha }}",
-		"changed_files":           "${{ steps.release_changes.outputs.changed_files }}",
-		"baseline_refs":           "${{ steps.release_changes.outputs.baseline_refs }}",
-		"target_ref":              "${{ steps.release_changes.outputs.target_ref }}",
+		"changed_files":           "${{ steps.api_hotfix_baseline.outputs.changed_files || steps.release_changes.outputs.changed_files }}",
+		"baseline_refs":           "${{ steps.api_hotfix_baseline.outputs.baseline_refs || steps.release_changes.outputs.baseline_refs }}",
+		"target_ref":              "${{ steps.api_hotfix_baseline.outputs.target_ref || steps.release_changes.outputs.target_ref }}",
 	} {
 		if got := baseline.Outputs[key]; got != want {
 			t.Fatalf("release baseline output %s drifted: got %q want %q", key, got, want)
@@ -3196,7 +3231,11 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if checkout.Uses != checkoutAction {
 			t.Fatalf("%s checkout must use the pinned action: got %q want %q", jobName, checkout.Uses, checkoutAction)
 		}
-		if got, want := checkout.With["ref"], "${{ inputs.target_sha }}"; got != want {
+		want := "${{ inputs.target_sha }}"
+		if jobName == "deploy" {
+			want = "${{ inputs.api_hotfix_rollout_v2 != '' && inputs.expected_sha || inputs.target_sha }}"
+		}
+		if got := checkout.With["ref"]; got != want {
 			t.Fatalf("%s checkout must bind the exact runtime target: got %q want %q", jobName, got, want)
 		}
 	}
@@ -3216,10 +3255,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 					t.Fatalf("step %s/%s uses an unapproved checkout action: %q", jobName, step.Name, step.Uses)
 				}
 				want := "${{ inputs.target_sha }}"
+				if jobName == "deploy" && step.Name == "Checkout" {
+					want = "${{ inputs.api_hotfix_rollout_v2 != '' && inputs.expected_sha || inputs.target_sha }}"
+				}
 				if jobName == "build" && step.Name == "Checkout current artifact verifier" {
 					want = "${{ inputs.expected_sha }}"
 					currentToolingCheckoutCount++
-					if step.If != "${{ inputs.target_sha != inputs.expected_sha }}" ||
+					if step.If != "${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}" ||
 						step.With["path"] != "current-release-tools" || step.With["fetch-depth"] != "1" {
 						t.Fatalf("historical artifact verifier checkout is not exact: %#v", step)
 					}
@@ -3319,6 +3361,23 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := baselineChanges.Env["FUGUE_RELEASE_BASE_REFS"], "${{ steps.live_images.outputs.release_baseline_tags }}"; got != want {
 		t.Fatalf("release image diff must retain the live deployed image baselines: got %q want %q", got, want)
 	}
+	if baselineLiveImages.If != "${{ inputs.api_hotfix_rollout_v2 == '' }}" || baselineChanges.If != "${{ inputs.api_hotfix_rollout_v2 == '' }}" {
+		t.Fatalf("ordinary baseline resolution is not isolated from API hotfix mode: live=%q changes=%q", baselineLiveImages.If, baselineChanges.If)
+	}
+	hotfixBaseline := workflowStepByName(t, baseline, "Verify exact API hotfix runtime closure")
+	if hotfixBaseline.ID != "api_hotfix_baseline" || hotfixBaseline.If != "${{ inputs.api_hotfix_rollout_v2 != '' }}" {
+		t.Fatalf("API hotfix baseline gate drifted: %+v", hotfixBaseline)
+	}
+	for _, required := range []string{
+		"a0f5bc0ac36b4e29c4c7928dda1923c2c4727759", "57dc767999741cea25fe4820a6c9603984dfa0b9",
+		"5a3b09c571601993367c50561b257dd6b9e743ca",
+		`M\tinternal/api/managed_app_status.go`, `M\tinternal/api/managed_app_status_test.go`,
+		`.github/workflows/deploy-control-plane.yml`, `scripts/upgrade_fugue_control_plane.sh`,
+	} {
+		if !strings.Contains(hotfixBaseline.Run, required) {
+			t.Fatalf("API hotfix baseline gate must contain %q", required)
+		}
+	}
 
 	build, ok := workflow.Jobs["build"]
 	if !ok || !containsWorkflowNeed(build.Needs, "release-baseline") || !containsWorkflowNeed(build.Needs, "release-gate") {
@@ -3390,7 +3449,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 	historicalPlan := workflowStepByName(t, build, "Verify exact historical incident image plan")
-	if historicalPlan.If != "${{ inputs.target_sha != inputs.expected_sha }}" {
+	if historicalPlan.If != "${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}" {
 		t.Fatalf("historical incident plan condition drifted: %q", historicalPlan.If)
 	}
 	for key, want := range map[string]string{
@@ -3420,8 +3479,21 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("historical incident plan must contain %q", required)
 		}
 	}
+	hotfixPlan := workflowStepByName(t, build, "Verify exact API hotfix image plan")
+	if hotfixPlan.If != "${{ inputs.api_hotfix_rollout_v2 != '' }}" {
+		t.Fatalf("API hotfix image-plan condition drifted: %q", hotfixPlan.If)
+	}
+	for _, required := range []string{
+		`"${BUILD_API}" == 'true'`, `"${IMAGE_TARGETS}" == 'api'`, `"${IMAGE_TARGET_COUNT}" == '1'`,
+		`"${BUILD_CONTROLLER}"`, `"${BUILD_DRAIN_AGENT}"`, `"${BUILD_TELEMETRY_AGENT}"`,
+		`"${BUILD_IMAGE_CACHE}"`, `"${BUILD_EDGE}"`, `"${BUILD_APP_SSH}"`, `"${value}" == 'false'`,
+	} {
+		if !strings.Contains(hotfixPlan.Run, required) {
+			t.Fatalf("API hotfix image plan must contain %q", required)
+		}
+	}
 	historicalReceipt := workflowStepByName(t, build, "Download exact historical incident build receipt")
-	if historicalReceipt.If != "${{ inputs.target_sha != inputs.expected_sha }}" ||
+	if historicalReceipt.If != "${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}" ||
 		historicalReceipt.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" {
 		t.Fatalf("historical incident receipt download is not exact: %#v", historicalReceipt)
 	}
@@ -3434,12 +3506,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("historical incident receipt %s drifted: got %q want %q", key, got, want)
 		}
 	}
-	if setup := workflowStepByName(t, build, "Setup Go"); setup.If != "${{ inputs.target_sha == inputs.expected_sha }}" {
+	if setup := workflowStepByName(t, build, "Setup Go"); setup.If != "${{ inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '' }}" {
 		t.Fatalf("historical reuse must skip Setup Go: %q", setup.If)
 	}
 	for _, name := range []string{"Setup Docker Buildx", "Login to GHCR"} {
 		step := workflowStepByName(t, build, name)
-		if step.If != "${{ steps.plan.outputs.target_count != '0' && inputs.target_sha == inputs.expected_sha }}" {
+		if step.If != "${{ steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}" {
 			t.Fatalf("historical reuse must skip %s: %q", name, step.If)
 		}
 	}
@@ -3460,7 +3532,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"FUGUE_IMAGE_CACHE_IMAGE_BASE_REF":                   "${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}",
 		"FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE": "${{ inputs.image_cache_convergence && format('{0}/fugue-release-convergence-authorization/successor.json', runner.temp) || '' }}",
 		"FUGUE_CONVERGENCE_SOURCE_RUN_ID":                    "${{ inputs.convergence_source_run_id }}",
-		"FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN": "${{ inputs.target_sha != inputs.expected_sha && format('{0}/fugue-historical-incident-build/build-artifact-plan.json', runner.temp) || '' }}",
+		"FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN": "${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' && format('{0}/fugue-historical-incident-build/build-artifact-plan.json', runner.temp) || '' }}",
 	} {
 		if got := buildProvenance.Env[key]; got != want {
 			t.Fatalf("image provenance convergence env %s drifted: got %q want %q", key, got, want)
@@ -3489,8 +3561,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("deploy permissions drifted: got %v want %v", got, want)
 	}
 	wantDeployOutputs := map[string]string{
-		"image_activation_convergence": "${{ needs.release-baseline.outputs.is_genesis == 'true' && 'complete' || steps.guarded_deploy.outputs.image-activation-convergence }}",
-		"pending_activation_artifacts": "${{ steps.guarded_deploy.outputs.pending-activation-artifacts }}",
+		"image_activation_convergence": "${{ inputs.api_hotfix_rollout_v2 != '' && steps.api_hotfix_rollout.outputs.image-activation-convergence || (needs.release-baseline.outputs.is_genesis == 'true' && 'complete' || steps.guarded_deploy.outputs.image-activation-convergence) }}",
+		"pending_activation_artifacts": "${{ inputs.api_hotfix_rollout_v2 != '' && steps.api_hotfix_rollout.outputs.pending-activation-artifacts || steps.guarded_deploy.outputs.pending-activation-artifacts }}",
 	}
 	if !reflect.DeepEqual(deploy.Outputs, wantDeployOutputs) {
 		t.Fatalf("deploy convergence outputs drifted: got %v want %v", deploy.Outputs, wantDeployOutputs)
@@ -3527,7 +3599,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 	currentTooling := workflowStepByName(t, deploy, "Prepare exact current tooling for historical runtime evidence")
-	if currentTooling.ID != "current_tooling" || currentTooling.If != "${{ inputs.target_sha != inputs.expected_sha && needs.release-baseline.outputs.is_genesis != 'true' }}" {
+	if currentTooling.ID != "current_tooling" || currentTooling.If != "${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' && needs.release-baseline.outputs.is_genesis != 'true' }}" {
 		t.Fatalf("historical current-tooling gate drifted: %#v", currentTooling)
 	}
 	for key, want := range map[string]string{
@@ -3685,7 +3757,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 
 	statefulGuard := workflowStepByName(t, deploy, "Guard stateful component files")
-	const nonGenesisCondition = "${{ needs.release-baseline.outputs.is_genesis != 'true' }}"
+	const nonGenesisCondition = "${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}"
 	crdSync := workflowStepByName(t, deploy, "Synchronize additive ManagedApp CRD schema")
 	if strings.TrimSpace(crdSync.If) != nonGenesisCondition {
 		t.Fatalf("managed app CRD sync must run only for ordinary releases: %q", crdSync.If)
@@ -3694,11 +3766,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("managed app CRD sync must use the reviewed bounded script: %q", crdSync.Run)
 	}
 	genesisReachable := map[string]string{
-		"Checkout":                              "",
-		"Setup Go":                              "",
-		"Build private release-domain tools":    "",
-		"Write genesis public release evidence": "${{ needs.release-baseline.outputs.is_genesis == 'true' }}",
-		"Upload release-domain public evidence": "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}",
+		"Checkout":                                           "",
+		"Setup Go":                                           "",
+		"Build private release-domain tools":                 "",
+		"Write genesis public release evidence":              "${{ needs.release-baseline.outputs.is_genesis == 'true' }}",
+		"Upload release-domain public evidence":              "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}",
+		"Roll out exact API hotfix with hybrid compensation": "${{ inputs.api_hotfix_rollout_v2 != '' }}",
+		"Upload exact API hotfix terminal evidence":          "${{ steps.api_hotfix_rollout.outcome == 'success' }}",
 	}
 	for _, candidate := range deploy.Steps {
 		if want, allowed := genesisReachable[candidate.Name]; allowed {
@@ -3734,6 +3808,43 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	if got, want := deployLiveImages.Env["GITHUB_SHA"], "${{ inputs.target_sha }}"; got != want {
 		t.Fatalf("deploy live image resolver runtime revision drifted: got %q want %q", got, want)
+	}
+	hotfixRollout := workflowStepByName(t, deploy, "Roll out exact API hotfix with hybrid compensation")
+	if hotfixRollout.ID != "api_hotfix_rollout" || hotfixRollout.If != "${{ inputs.api_hotfix_rollout_v2 != '' }}" {
+		t.Fatalf("API hotfix rollout boundary drifted: %+v", hotfixRollout)
+	}
+	for key, want := range map[string]string{
+		"EXPECTED_SHA": "${{ inputs.expected_sha }}", "TARGET_SHA": "${{ inputs.target_sha }}",
+		"AUTHORIZATION":                                 "${{ inputs.api_hotfix_rollout_v2 }}",
+		"VERIFIED_ARTIFACTS":                            "${{ needs.build.outputs.verified_image_artifacts_json }}",
+		"VERIFIED_ARTIFACTS_DIGEST":                     "${{ needs.build.outputs.verified_image_artifacts_digest }}",
+		"FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE":          "preserve",
+		"FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE": "false",
+	} {
+		if got := hotfixRollout.Env[key]; got != want {
+			t.Fatalf("API hotfix rollout env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{
+		"CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC", "57dc767999741cea25fe4820a6c9603984dfa0b9",
+		"FUGUE_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2=true", "FUGUE_CONTROL_PLANE_API_HOTFIX_ARTIFACT_FILE",
+		"capture_non_api", "deployments,daemonsets,statefulsets,pods", "PodImageCohort", "imageID", "cmp -s", "$'818\\tdeployed'",
+		"image-activation-convergence=complete", "pending-activation-artifacts=",
+	} {
+		if !strings.Contains(hotfixRollout.Run, required) {
+			t.Fatalf("API hotfix rollout must contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{"FUGUE_API_KEY", "FUGUE_BOOTSTRAP_KEY", "FUGUE_EDGE_ACTIVATION_PLAN_SIGNING_KEY", "fugue app ", "workflow_dispatch"} {
+		if strings.Contains(hotfixRollout.Run, forbidden) {
+			t.Fatalf("API hotfix rollout contains out-of-scope capability %q", forbidden)
+		}
+	}
+	hotfixUpload := workflowStepByName(t, deploy, "Upload exact API hotfix terminal evidence")
+	if hotfixUpload.If != "${{ steps.api_hotfix_rollout.outcome == 'success' }}" ||
+		hotfixUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		hotfixUpload.With["if-no-files-found"] != "error" || hotfixUpload.With["retention-days"] != "90" {
+		t.Fatalf("API hotfix evidence upload drifted: %+v", hotfixUpload)
 	}
 
 	upgrade := workflowStepByName(t, deploy, "Upgrade Fugue control plane through uploaded operational evidence")
@@ -4048,7 +4159,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	assertWorkflowMappingKeys(t, recordStepsNode.Content[0], "name", "uses", "with")
 	assertWorkflowMappingKeys(t, recordStepsNode.Content[1], "name", "env", "run")
-	const recordBaselineCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}"
+	const recordBaselineCondition = "${{ always() && inputs.api_hotfix_rollout_v2 == '' && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}"
 	if recordBaseline.If != recordBaselineCondition {
 		t.Fatalf("record-release-baseline success condition drifted: got %q want %q", recordBaseline.If, recordBaselineCondition)
 	}
@@ -4159,7 +4270,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if len(successRearm.Needs) != len(wantSuccessNeeds) {
 		t.Fatalf("successful lane rearm has unexpected dependencies: %v", successRearm.Needs)
 	}
-	const successRearmCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' && needs.record-release-baseline.result == 'success' }}"
+	const successRearmCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' && (inputs.api_hotfix_rollout_v2 != '' || needs.record-release-baseline.result == 'success') }}"
 	if successRearm.If != successRearmCondition {
 		t.Fatalf("successful lane rearm condition drifted: got %q want %q", successRearm.If, successRearmCondition)
 	}
@@ -4183,6 +4294,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"BUILD_RESULT":                   "${{ needs.build.result }}",
 		"DEPLOY_RESULT":                  "${{ needs.deploy.result }}",
 		"RECORD_RELEASE_BASELINE_RESULT": "${{ needs.record-release-baseline.result }}",
+		"API_HOTFIX_ROLLOUT_V2":          "${{ inputs.api_hotfix_rollout_v2 }}",
 		"GH_TOKEN":                       "${{ github.token }}",
 		"REPOSITORY":                     "${{ github.repository }}",
 	} {
@@ -4211,6 +4323,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"for attempt in 1 2 3 4 5",
 		`"${state_after}" == 'disabled_manually'`,
 		`"${settled}" == 'true'`,
+		`"${RECORD_RELEASE_BASELINE_RESULT}" == 'skipped'`,
+		`CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC`,
 		`"rearm_ref_mutation_attempted": False`,
 		`"rearm_runtime_mutation_attempted": False`,
 		`"rearm_cluster_mutation_attempted": False`,
@@ -4249,7 +4363,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if len(freeze.Needs) != 8 {
 		t.Fatalf("release-lane freeze finalizer has unexpected dependencies: %v", freeze.Needs)
 	}
-	const freezeCondition = "${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (needs.record-release-baseline.result != 'success' || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}"
+	const freezeCondition = "${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}"
 	if freeze.If != freezeCondition {
 		t.Fatalf("release-lane freeze condition drifted: got %q want %q", freeze.If, freezeCondition)
 	}

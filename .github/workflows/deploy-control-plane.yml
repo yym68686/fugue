@@ -31,6 +31,11 @@ on:
         required: false
         type: string
         default: ''
+      api_hotfix_rollout_v2:
+        description: Exact short-lived authorization for the fixed API-only 57dc rollout transaction
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -84,6 +89,7 @@ jobs:
           PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
           PUBLIC_DATA_PLANE_ADOPTION_BASELINE: ${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json
           PUBLIC_DATA_PLANE_ADOPTION_TRACE: ${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json
+          API_HOTFIX_ROLLOUT_V2: ${{ inputs.api_hotfix_rollout_v2 }}
         run: |
           set -euo pipefail
           [[ "${EVENT_NAME}" == "workflow_dispatch" ]]
@@ -97,6 +103,19 @@ jobs:
           [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_NUMBER}" =~ ^[1-9][0-9]*$ ]]
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+          case "${API_HOTFIX_ROLLOUT_V2:-}" in
+            '')
+              if [[ "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]; then
+                [[ "${TARGET_SHA}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
+              fi
+              ;;
+            CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC)
+              [[ "${TARGET_SHA}" == '57dc767999741cea25fe4820a6c9603984dfa0b9' && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]
+              [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
+              [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
+              ;;
+            *) exit 1 ;;
+          esac
           remote_main="$(timeout --kill-after=2s 10s gh api \
             "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           [[ "${remote_main}" =~ ^[0-9a-f]{40}$ && "${remote_main}" == "${EXPECTED_SHA}" ]]
@@ -249,10 +268,10 @@ jobs:
       baseline_ref_object_sha: ${{ steps.domain_baseline.outputs.baseline_ref_object_sha }}
       is_genesis: ${{ steps.domain_baseline.outputs.is_genesis }}
       genesis_parent_sha: ${{ steps.domain_baseline.outputs.genesis_parent_sha }}
-      changed_files: ${{ steps.release_changes.outputs.changed_files }}
-      baseline_refs: ${{ steps.release_changes.outputs.baseline_refs }}
-      source: ${{ steps.release_changes.outputs.source }}
-      target_ref: ${{ steps.release_changes.outputs.target_ref }}
+      changed_files: ${{ steps.api_hotfix_baseline.outputs.changed_files || steps.release_changes.outputs.changed_files }}
+      baseline_refs: ${{ steps.api_hotfix_baseline.outputs.baseline_refs || steps.release_changes.outputs.baseline_refs }}
+      source: ${{ steps.api_hotfix_baseline.outputs.source || steps.release_changes.outputs.source }}
+      target_ref: ${{ steps.api_hotfix_baseline.outputs.target_ref || steps.release_changes.outputs.target_ref }}
       api_image_baseline_ref: ${{ steps.live_images.outputs.api_image_baseline_ref }}
       api_image_helm_drift: ${{ steps.live_images.outputs.api_image_helm_drift }}
       controller_image_baseline_ref: ${{ steps.live_images.outputs.controller_image_baseline_ref }}
@@ -415,6 +434,7 @@ jobs:
 
       - name: Resolve live image metadata
         id: live_images
+        if: ${{ inputs.api_hotfix_rollout_v2 == '' }}
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
@@ -426,11 +446,45 @@ jobs:
 
       - name: Compute live-to-target release changed files
         id: release_changes
+        if: ${{ inputs.api_hotfix_rollout_v2 == '' }}
         env:
           FUGUE_RELEASE_TARGET_REF: ${{ inputs.target_sha }}
           FUGUE_RELEASE_BASE_REFS: ${{ steps.live_images.outputs.release_baseline_tags }}
           FUGUE_RELEASE_REQUIRE_BASELINE: "true"
         run: ./scripts/compute_release_changed_files_from_live.sh
+
+      - name: Verify exact API hotfix runtime closure
+        id: api_hotfix_baseline
+        if: ${{ inputs.api_hotfix_rollout_v2 != '' }}
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          readonly live_source='a0f5bc0ac36b4e29c4c7928dda1923c2c4727759'
+          readonly target_source='57dc767999741cea25fe4820a6c9603984dfa0b9'
+          readonly tooling_parent='5a3b09c571601993367c50561b257dd6b9e743ca'
+          [[ "${TARGET_SHA}" == "${target_source}" && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${target_source}" ]]
+          git merge-base --is-ancestor "${live_source}" "${target_source}"
+          git merge-base --is-ancestor "${target_source}" "${EXPECTED_SHA}"
+          [[ "$(git rev-list --count "${target_source}..${EXPECTED_SHA}")" == '2' ]]
+          [[ "$(git rev-list --parents -n 1 "${EXPECTED_SHA}" | awk '{print NF}')" == '2' ]]
+          [[ "$(git rev-parse --verify "${EXPECTED_SHA}^")" == "${tooling_parent}" ]]
+          [[ "$(git rev-parse --verify "${tooling_parent}^")" == "${target_source}" ]]
+          runtime_diff="$(git diff --name-status "${live_source}..${target_source}" -- \
+            internal/api internal/runtime internal/model internal/store go.mod go.sum deploy/helm/fugue)"
+          [[ "${runtime_diff}" == $'M\tinternal/api/managed_app_status.go\nM\tinternal/api/managed_app_status_test.go' ]]
+          [[ -z "$(git diff --name-only "${live_source}..${target_source}" -- deploy/helm/fugue go.mod go.sum)" ]]
+          release_diff="$(git diff --name-only "${tooling_parent}..${EXPECTED_SHA}")"
+          [[ "${release_diff}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ -z "$(git diff --name-only "${target_source}..${EXPECTED_SHA}" -- deploy/helm/fugue go.mod go.sum)" ]]
+          {
+            printf 'changed_files=%s\n' "${runtime_diff//$'\n'/ }"
+            printf 'baseline_refs=%s\n' "${live_source}"
+            printf 'source=%s\n' "${live_source}"
+            printf 'target_ref=%s\n' "${target_source}"
+          } >>"${GITHUB_OUTPUT}"
 
   release-gate:
     needs:
@@ -458,6 +512,18 @@ jobs:
           [[ "${ci_attempt}" == '1' && "${ci_event}" == 'push' && "${ci_branch}" == 'main' ]]
           [[ "${ci_sha}" == "${EXPECTED_SHA}" && "${ci_status}" == 'completed' && "${ci_conclusion}" == 'success' ]]
           [[ "${ci_path}" == '.github/workflows/ci.yml' ]]
+
+      - name: Verify exact API hotfix product receipt
+        if: ${{ inputs.api_hotfix_rollout_v2 != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          receipt="$(timeout --kill-after=2s 10s gh api \
+            "repos/${REPOSITORY}/actions/runs/30788130816" \
+            --jq '[.id,.run_attempt,.event,.head_branch,.head_sha,.status,.conclusion,.path] | @tsv')"
+          [[ "${receipt}" == $'30788130816\t1\tpush\tmain\t57dc767999741cea25fe4820a6c9603984dfa0b9\tcompleted\tsuccess\t.github/workflows/ci.yml' ]]
 
   build:
     needs:
@@ -503,7 +569,7 @@ jobs:
           fetch-depth: 0
 
       - name: Checkout current artifact verifier
-        if: ${{ inputs.target_sha != inputs.expected_sha }}
+        if: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.expected_sha }}
@@ -511,7 +577,7 @@ jobs:
           fetch-depth: 1
 
       - name: Download exact historical incident build receipt
-        if: ${{ inputs.target_sha != inputs.expected_sha }}
+        if: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: fugue-control-plane-build-activation-evidence-30741102194-1
@@ -531,7 +597,7 @@ jobs:
           run-id: ${{ inputs.convergence_source_run_id }}
 
       - name: Setup Go
-        if: ${{ inputs.target_sha == inputs.expected_sha }}
+        if: ${{ inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '' }}
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
@@ -573,7 +639,21 @@ jobs:
           FUGUE_EDGE_IMAGE_BASE_REF: ${{ needs.release-baseline.outputs.edge_image_baseline_ref }}
           FUGUE_EDGE_IMAGE_HELM_DRIFT: ${{ needs.release-baseline.outputs.edge_image_helm_drift }}
         run: |
-          if [[ "${{ inputs.target_sha }}" != "${{ inputs.expected_sha }}" ]]; then
+          if [[ "${{ inputs.api_hotfix_rollout_v2 }}" != '' ]]; then
+            [[ "${{ inputs.api_hotfix_rollout_v2 }}" == 'CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC' ]]
+            [[ "${{ inputs.target_sha }}" == '57dc767999741cea25fe4820a6c9603984dfa0b9' ]]
+            {
+              printf 'build_api=true\n'
+              printf 'build_controller=false\n'
+              printf 'build_drain_agent=false\n'
+              printf 'build_telemetry_agent=false\n'
+              printf 'build_image_cache=false\n'
+              printf 'build_edge=false\n'
+              printf 'build_app_ssh=false\n'
+              printf 'target_count=1\n'
+              printf 'targets=api\n'
+            } >> "${GITHUB_OUTPUT}"
+          elif [[ "${{ inputs.target_sha }}" != "${{ inputs.expected_sha }}" ]]; then
             [[ "${{ inputs.target_sha }}" == 'd1e7ed9cdedbaa09db9bd78b4e433b94c7357510' ]]
             {
               printf 'build_api=true\n'
@@ -591,7 +671,7 @@ jobs:
           fi
 
       - name: Verify exact historical incident image plan
-        if: ${{ inputs.target_sha != inputs.expected_sha }}
+        if: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' }}
         env:
           TARGET_SHA: ${{ inputs.target_sha }}
           BUILD_API: ${{ steps.plan.outputs.build_api }}
@@ -623,12 +703,32 @@ jobs:
             --jq '.jobs[] | select(.name == "build") | [.run_attempt,.status,.conclusion] | @tsv')"
           [[ "${build_jobs}" == $'1\tcompleted\tsuccess' ]]
 
+      - name: Verify exact API hotfix image plan
+        if: ${{ inputs.api_hotfix_rollout_v2 != '' }}
+        env:
+          BUILD_API: ${{ steps.plan.outputs.build_api }}
+          BUILD_CONTROLLER: ${{ steps.plan.outputs.build_controller }}
+          BUILD_DRAIN_AGENT: ${{ steps.plan.outputs.build_drain_agent }}
+          BUILD_TELEMETRY_AGENT: ${{ steps.plan.outputs.build_telemetry_agent }}
+          BUILD_IMAGE_CACHE: ${{ steps.plan.outputs.build_image_cache }}
+          BUILD_EDGE: ${{ steps.plan.outputs.build_edge }}
+          BUILD_APP_SSH: ${{ steps.plan.outputs.build_app_ssh }}
+          IMAGE_TARGETS: ${{ steps.plan.outputs.targets }}
+          IMAGE_TARGET_COUNT: ${{ steps.plan.outputs.target_count }}
+        run: |
+          set -euo pipefail
+          [[ "${BUILD_API}" == 'true' && "${IMAGE_TARGETS}" == 'api' && "${IMAGE_TARGET_COUNT}" == '1' ]]
+          for value in "${BUILD_CONTROLLER}" "${BUILD_DRAIN_AGENT}" "${BUILD_TELEMETRY_AGENT}" \
+            "${BUILD_IMAGE_CACHE}" "${BUILD_EDGE}" "${BUILD_APP_SSH}"; do
+            [[ "${value}" == 'false' ]]
+          done
+
       - name: Setup Docker Buildx
-        if: ${{ steps.plan.outputs.target_count != '0' && inputs.target_sha == inputs.expected_sha }}
+        if: ${{ steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to GHCR
-        if: ${{ steps.plan.outputs.target_count != '0' && inputs.target_sha == inputs.expected_sha }}
+        if: ${{ steps.plan.outputs.target_count != '0' && (inputs.target_sha == inputs.expected_sha || inputs.api_hotfix_rollout_v2 != '') }}
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
@@ -650,9 +750,9 @@ jobs:
           FUGUE_APP_SSH_IMAGE_REPOSITORY: ${{ steps.meta.outputs.app_ssh_image_repository }}
           FUGUE_CONTROL_PLANE_IMAGE_REUSE_AUTHORIZATION_FILE: ${{ inputs.image_cache_convergence && format('{0}/fugue-release-convergence-authorization/successor.json', runner.temp) || '' }}
           FUGUE_CONVERGENCE_SOURCE_RUN_ID: ${{ inputs.convergence_source_run_id }}
-          FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN: ${{ inputs.target_sha != inputs.expected_sha && format('{0}/fugue-historical-incident-build/build-artifact-plan.json', runner.temp) || '' }}
+          FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' && format('{0}/fugue-historical-incident-build/build-artifact-plan.json', runner.temp) || '' }}
         run: |
-          if [[ "${{ inputs.target_sha }}" != "${{ inputs.expected_sha }}" ]]; then
+          if [[ "${{ inputs.target_sha }}" != "${{ inputs.expected_sha }}" && "${{ inputs.api_hotfix_rollout_v2 }}" == '' ]]; then
             ./current-release-tools/scripts/build_control_plane_images.sh
           else
             ./scripts/build_control_plane_images.sh
@@ -680,8 +780,8 @@ jobs:
       actions: read
       contents: read
     outputs:
-      image_activation_convergence: ${{ needs.release-baseline.outputs.is_genesis == 'true' && 'complete' || steps.guarded_deploy.outputs.image-activation-convergence }}
-      pending_activation_artifacts: ${{ steps.guarded_deploy.outputs.pending-activation-artifacts }}
+      image_activation_convergence: ${{ inputs.api_hotfix_rollout_v2 != '' && steps.api_hotfix_rollout.outputs.image-activation-convergence || (needs.release-baseline.outputs.is_genesis == 'true' && 'complete' || steps.guarded_deploy.outputs.image-activation-convergence) }}
+      pending_activation_artifacts: ${{ inputs.api_hotfix_rollout_v2 != '' && steps.api_hotfix_rollout.outputs.pending-activation-artifacts || steps.guarded_deploy.outputs.pending-activation-artifacts }}
     steps:
       - name: Record deploy job budget origin
         if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
@@ -698,12 +798,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.target_sha }}
+          ref: ${{ inputs.api_hotfix_rollout_v2 != '' && inputs.expected_sha || inputs.target_sha }}
           fetch-depth: 0
 
       - name: Prepare exact current tooling for historical runtime evidence
         id: current_tooling
-        if: ${{ inputs.target_sha != inputs.expected_sha && needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' && needs.release-baseline.outputs.is_genesis != 'true' }}
         env:
           SOURCE_SHA: ${{ inputs.expected_sha }}
           TARGET_SHA: ${{ inputs.target_sha }}
@@ -949,7 +1049,7 @@ jobs:
           [[ "$(stat -c '%a' "${public_evidence}")" == '600' ]]
 
       - name: Guard stateful component files
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         env:
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
@@ -962,15 +1062,15 @@ jobs:
           fi
 
       - name: Synchronize additive ManagedApp CRD schema
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         run: bash ./scripts/sync_managed_app_crd.sh
 
       - name: Prepare authoritative DNS DiG runtime
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         run: ./scripts/prepare_authoritative_dns_dig.sh
 
       - name: Verify local deploy prerequisites
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         run: |
           command -v helm
           command -v curl
@@ -984,7 +1084,7 @@ jobs:
           fi
 
       - name: Explain runner and fail closed target
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
@@ -1034,7 +1134,7 @@ jobs:
 
       - name: Resolve live image metadata
         id: live_images
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
@@ -1050,7 +1150,7 @@ jobs:
         run: ./scripts/resolve_control_plane_live_images.sh
 
       - name: Prove explicitly authorized stale pre-Helm release recovery
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE != '' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' && vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE != '' }}
         env:
           GITHUB_SHA: ${{ inputs.target_sha }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -1082,9 +1182,101 @@ jobs:
             --namespace "${FUGUE_NAMESPACE}" \
             --output "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"
 
+      - name: Roll out exact API hotfix with hybrid compensation
+        id: api_hotfix_rollout
+        if: ${{ inputs.api_hotfix_rollout_v2 != '' }}
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          AUTHORIZATION: ${{ inputs.api_hotfix_rollout_v2 }}
+          VERIFIED_ARTIFACTS: ${{ needs.build.outputs.verified_image_artifacts_json }}
+          VERIFIED_ARTIFACTS_DIGEST: ${{ needs.build.outputs.verified_image_artifacts_digest }}
+          FUGUE_API_PUBLIC_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN || '' }}
+          FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE: preserve
+          FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE: 'false'
+          FUGUE_CONTROL_PLANE_HOTFIX_EVIDENCE_DIR: ${{ runner.temp }}/fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${TARGET_SHA}" == '57dc767999741cea25fe4820a6c9603984dfa0b9' ]]
+          [[ "${AUTHORIZATION}" == 'CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC' ]]
+          [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE}" == 'preserve' && "${FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE}" == 'false' ]]
+          [[ "${FUGUE_API_PUBLIC_DOMAIN}" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]
+          evidence_dir="${RUNNER_TEMP}/fugue-api-hotfix-v2-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          ARTIFACTS="${VERIFIED_ARTIFACTS}" OUTPUT="${evidence_dir}/verified-artifacts.json" python3 - <<'PY'
+          import json, os, pathlib
+          value = json.loads(os.environ["ARTIFACTS"])
+          pathlib.Path(os.environ["OUTPUT"]).write_bytes(json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode())
+          PY
+          chmod 0600 "${evidence_dir}/verified-artifacts.json"
+          if command -v kubectl >/dev/null 2>&1; then
+            KUBECTL=(kubectl)
+          else
+            KUBECTL=(k3s kubectl)
+          fi
+          capture_non_api() {
+            local output="$1"
+            local raw="${output}.raw"
+            "${KUBECTL[@]}" -n fugue-system get deployments,daemonsets,statefulsets,pods -o json >"${raw}"
+            python3 - "${raw}" "${output}" <<'PY'
+          import json, pathlib, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          result = []
+          for item in value.get("items") or []:
+              metadata = item.get("metadata") or {}
+              if item.get("kind") == "Deployment" and metadata.get("name") == "fugue-fugue-api":
+                  continue
+              if item.get("kind") == "Pod":
+                  labels = metadata.get("labels") or {}
+                  if labels.get("app.kubernetes.io/component") == "api" and labels.get("app.kubernetes.io/instance") == "fugue":
+                      continue
+                  statuses = (item.get("status") or {}).get("containerStatuses") or []
+                  result.append({
+                      "kind": "PodImageCohort",
+                      "ownerReferences": metadata.get("ownerReferences") or [],
+                      "phase": (item.get("status") or {}).get("phase"),
+                      "containers": sorted(({"name": status.get("name"), "imageID": status.get("imageID"), "ready": status.get("ready")} for status in statuses), key=lambda value: value["name"] or ""),
+                  })
+                  continue
+              result.append({
+                  "apiVersion": item.get("apiVersion"), "kind": item.get("kind"),
+                  "metadata": {key: metadata.get(key) for key in ("annotations", "deletionTimestamp", "generation", "labels", "name", "namespace", "uid")},
+                  "spec": item.get("spec"),
+              })
+          result.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+          pathlib.Path(sys.argv[2]).write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+          PY
+            rm -f "${raw}"
+          }
+          capture_non_api "${evidence_dir}/non-api-before.json"
+          FUGUE_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2=true \
+            FUGUE_CONTROL_PLANE_API_HOTFIX_ARTIFACT_FILE="${evidence_dir}/verified-artifacts.json" \
+            FUGUE_CONTROL_PLANE_API_HOTFIX_ARTIFACT_DIGEST="${VERIFIED_ARTIFACTS_DIGEST}" \
+            FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz" \
+            ./scripts/upgrade_fugue_control_plane.sh
+          capture_non_api "${evidence_dir}/non-api-after.json"
+          cmp -s "${evidence_dir}/non-api-before.json" "${evidence_dir}/non-api-after.json"
+          [[ "$(helm status fugue -n fugue-system -o json | python3 -c 'import json,sys; value=json.load(sys.stdin); print(str(value.get("version"))+"\t"+str((value.get("info") or {}).get("status")))')" == $'818\tdeployed' ]]
+          {
+            printf 'image-activation-convergence=complete\n'
+            printf 'pending-activation-artifacts=\n'
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Upload exact API hotfix terminal evidence
+        if: ${{ steps.api_hotfix_rollout.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+          overwrite: false
+
       - name: Upgrade Fugue control plane through uploaded operational evidence
         id: guarded_deploy
-        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && inputs.api_hotfix_rollout_v2 == '' }}
         # Edge fan-out now happens inside the upgrade script using the
         # control-plane automation secret, so the workflow only needs one
         # deploy entrypoint.
@@ -1354,7 +1546,7 @@ jobs:
         uses: ./.github/actions/operational-domain-guarded-deploy
 
       - name: Restore exact historical runtime checkout
-        if: ${{ always() && steps.current_tooling.outcome == 'success' && inputs.target_sha != inputs.expected_sha && needs.release-baseline.outputs.is_genesis != 'true' }}
+        if: ${{ always() && steps.current_tooling.outcome == 'success' && inputs.target_sha != inputs.expected_sha && inputs.api_hotfix_rollout_v2 == '' && needs.release-baseline.outputs.is_genesis != 'true' }}
         env:
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
@@ -1567,7 +1759,7 @@ jobs:
       - release-gate
       - build
       - deploy
-    if: ${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}
+    if: ${{ always() && inputs.api_hotfix_rollout_v2 == '' && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1851,7 +2043,7 @@ jobs:
       - build
       - deploy
       - record-release-baseline
-    if: ${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' && needs.record-release-baseline.result == 'success' }}
+    if: ${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' && (inputs.api_hotfix_rollout_v2 != '' || needs.record-release-baseline.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
@@ -1869,6 +2061,7 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           RECORD_RELEASE_BASELINE_RESULT: ${{ needs.record-release-baseline.result }}
+          API_HOTFIX_ROLLOUT_V2: ${{ inputs.api_hotfix_rollout_v2 }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -1881,9 +2074,14 @@ jobs:
           [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
-          for result in "${RELEASE_INPUT_GUARD_RESULT}" "${RELEASE_BASELINE_RESULT}" "${RELEASE_GATE_RESULT}" "${BUILD_RESULT}" "${DEPLOY_RESULT}" "${RECORD_RELEASE_BASELINE_RESULT}"; do
+          for result in "${RELEASE_INPUT_GUARD_RESULT}" "${RELEASE_BASELINE_RESULT}" "${RELEASE_GATE_RESULT}" "${BUILD_RESULT}" "${DEPLOY_RESULT}"; do
             [[ "${result}" == 'success' ]] || exit 1
           done
+          if [[ -n "${API_HOTFIX_ROLLOUT_V2:-}" ]]; then
+            [[ "${API_HOTFIX_ROLLOUT_V2}" == 'CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC' && "${RECORD_RELEASE_BASELINE_RESULT}" == 'skipped' ]]
+          else
+            [[ "${RECORD_RELEASE_BASELINE_RESULT}" == 'success' ]]
+          fi
 
           main_head="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
           baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${REPOSITORY}/git/ref/heads/fugue-control-plane-release-baseline" --jq '.object.sha')" || exit 1
@@ -2074,7 +2272,7 @@ jobs:
       - continue-release-convergence
       - record-release-baseline
       - rearm-release-lane-on-success
-    if: ${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (needs.record-release-baseline.result != 'success' || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
+    if: ${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
     runs-on: ubuntu-latest
     permissions:
       actions: write

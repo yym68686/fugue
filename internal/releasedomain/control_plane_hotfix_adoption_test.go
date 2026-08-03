@@ -2,6 +2,7 @@ package releasedomain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -194,6 +195,163 @@ func TestBuildControlPlaneHotfixAdoptionPlanAllowsOnlyTheTwoAPIPointers(t *testi
 	}
 }
 
+func TestControlPlaneAPIHotfixRolloutV2BindsDistinctForwardAndHybridImages(t *testing.T) {
+	t.Parallel()
+
+	plan, input := validBuiltControlPlaneAPIHotfixV2Plan(t)
+	if err := VerifyControlPlaneHotfixAdoptionPlan(plan); err != nil {
+		t.Fatalf("verify v2 plan: %v", err)
+	}
+	if plan.PlanVersion != 2 || plan.Policy != ControlPlaneAPIHotfixRolloutPolicyV2 || plan.TargetAPIImageRef == plan.LiveHybridAPIImageRef {
+		t.Fatalf("v2 image identities are not distinct: %+v", plan)
+	}
+	forward, err := RenderControlPlaneHotfixTransaction(input.TargetManifest, plan, "forward")
+	if err != nil || hotfixDigest(forward) != plan.TargetManifestDigest {
+		t.Fatalf("v2 forward render failed: digest=%s err=%v", hotfixDigest(forward), err)
+	}
+	compensated, err := RenderControlPlaneHotfixTransaction(input.BaseManifest, plan, "compensate")
+	if err != nil || hotfixDigest(compensated) != plan.HybridManifestDigest {
+		t.Fatalf("v2 compensation did not restore the live hybrid: digest=%s err=%v", hotfixDigest(compensated), err)
+	}
+
+	base := baseControlPlaneHotfixObservation(plan)
+	target := targetControlPlaneHotfixObservation(plan)
+	hybrid := hybridControlPlaneHotfixObservation(plan)
+	if target.LiveImageRef != plan.TargetAPIImageRef || target.APIImageID != plan.TargetAPIImageID ||
+		hybrid.LiveImageRef != plan.LiveHybridAPIImageRef || hybrid.APIImageID != plan.Kubernetes.APIImageID {
+		t.Fatalf("v2 observations do not bind phase-specific images: target=%+v hybrid=%+v", target, hybrid)
+	}
+	runtime := &hotfixExecutionRuntime{
+		observations:     []ControlPlaneHotfixObservation{base, base, target, hybrid},
+		forwardResult:    ControlPlaneHotfixCommitUnknown,
+		compensateResult: ControlPlaneHotfixCommitUnknown,
+	}
+	target.Kubernetes.APIReady = 1
+	runtime.observations[2] = target
+	result, err := ExecuteControlPlaneHotfixAdoption(context.Background(), plan, runtime, ControlPlaneHotfixExecutionOptions{})
+	if err == nil || result.Status != "compensated" || result.WAL.RecoveryRequired || runtime.forwardCalls != 1 || runtime.compensateCalls != 1 {
+		t.Fatalf("v2 commit-unknown did not reconcile through exact hybrid compensation: result=%+v err=%v runtime=%+v", result, err, runtime)
+	}
+
+	target = targetControlPlaneHotfixObservation(plan)
+	target.Kubernetes.APIReady = 1
+	hybrid = hybridControlPlaneHotfixObservation(plan)
+	hybrid.Kubernetes.APIReady = 1
+	runtime = &hotfixExecutionRuntime{
+		observations:     []ControlPlaneHotfixObservation{base, base, target, hybrid},
+		forwardResult:    ControlPlaneHotfixCommitUnknown,
+		compensateResult: ControlPlaneHotfixCommitUnknown,
+	}
+	result, err = ExecuteControlPlaneHotfixAdoption(context.Background(), plan, runtime, ControlPlaneHotfixExecutionOptions{})
+	if err == nil || result.Status != "recovery-required" || !result.WAL.RecoveryRequired || result.WAL.Phase != "compensation-started" || runtime.forwardCalls != 1 || runtime.compensateCalls != 1 {
+		t.Fatalf("v2 ambiguous compensation did not retain the exact recovery fence: result=%+v err=%v runtime=%+v", result, err, runtime)
+	}
+}
+
+func TestControlPlaneAPIHotfixRolloutV2RejectsIdentityAndManifestDrift(t *testing.T) {
+	t.Parallel()
+
+	_, input := validBuiltControlPlaneAPIHotfixV2Plan(t)
+	tests := map[string]func(*ControlPlaneHotfixAdoptionInput){
+		"same image":          func(value *ControlPlaneHotfixAdoptionInput) { value.TargetAPIImageRef = value.LiveHybridAPIImageRef },
+		"wrong target source": func(value *ControlPlaneHotfixAdoptionInput) { value.AdoptedSource = strings.Repeat("4", 40) },
+		"wrong hybrid source": func(value *ControlPlaneHotfixAdoptionInput) { value.CurrentSource = strings.Repeat("5", 40) },
+		"wrong Helm base":     func(value *ControlPlaneHotfixAdoptionInput) { value.HelmRevision = 818 },
+		"live prestate drift": func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.APIImageRef = value.TargetAPIImageRef },
+		"non-API drift":       func(value *ControlPlaneHotfixAdoptionInput) { value.Kubernetes.FrozenNonAPIWorkloadDigest = "" },
+		"target imageID drift": func(value *ControlPlaneHotfixAdoptionInput) {
+			value.TargetAPIImageID = "containerd://sha256:" + strings.Repeat("1", 64)
+		},
+	}
+	for name, mutate := range tests {
+		name, mutate := name, mutate
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			changed := input
+			mutate(&changed)
+			if _, err := BuildControlPlaneHotfixAdoptionPlan(changed); err == nil {
+				t.Fatalf("v2 %s drift was accepted", name)
+			}
+		})
+	}
+
+	changed := input
+	changed.HybridManifest = hotfixManifest(t, changed.CurrentSource, changed.LiveHybridAPIImageRef, "third-pointer")
+	if _, err := BuildControlPlaneHotfixAdoptionPlan(changed); err == nil || !strings.Contains(err.Error(), "non-image pointer") {
+		t.Fatalf("v2 hybrid third pointer was accepted: %v", err)
+	}
+	changed = input
+	changed.TargetManifest = hotfixManifestWithForeignObjectDrift(t, changed.TargetManifest)
+	changed.RepeatedTarget = changed.TargetManifest
+	if _, err := BuildControlPlaneHotfixAdoptionPlan(changed); err == nil || !strings.Contains(err.Error(), "non-API object") {
+		t.Fatalf("v2 non-API drift was accepted: %v", err)
+	}
+}
+
+func TestControlPlaneAPIHotfixRolloutV2WALReopensWithDistinctImageBindings(t *testing.T) {
+	t.Parallel()
+
+	plan, _ := validBuiltControlPlaneAPIHotfixV2Plan(t)
+	wal, err := NewControlPlaneHotfixAdoptionWAL(plan)
+	if err != nil {
+		t.Fatalf("new v2 WAL: %v", err)
+	}
+	for _, phase := range []string{"prewrite-verified", "forward-started", "compensation-started"} {
+		encoded, marshalErr := json.Marshal(wal)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		var reopened ControlPlaneHotfixAdoptionWAL
+		if unmarshalErr := json.Unmarshal(encoded, &reopened); unmarshalErr != nil {
+			t.Fatal(unmarshalErr)
+		}
+		if verifyErr := VerifyControlPlaneHotfixAdoptionWAL(reopened); verifyErr != nil || reopened.Policy != ControlPlaneAPIHotfixRolloutPolicyV2 || reopened.PlanDigest != plan.Digest {
+			t.Fatalf("reopened v2 WAL lost its exact plan binding: wal=%+v err=%v", reopened, verifyErr)
+		}
+		wal, err = AdvanceControlPlaneHotfixAdoptionWAL(reopened, phase)
+		if err != nil {
+			t.Fatalf("advance reopened v2 WAL to %s: %v", phase, err)
+		}
+	}
+	if wal.Phase != "compensation-started" || wal.ForwardAttempts != 1 || wal.CompensationAttempts != 1 || !wal.RecoveryRequired {
+		t.Fatalf("v2 WAL reopen lost action fencing: %+v", wal)
+	}
+}
+
+func TestControlPlaneAPIHotfixPostRenderBindsRawRestoreAndEffectiveBytes(t *testing.T) {
+	t.Parallel()
+
+	plan, input := validBuiltControlPlaneAPIHotfixV2Plan(t)
+	rawTarget := []byte("raw-target-render\n")
+	rawHybrid := []byte("raw-hybrid-render\n")
+	restore := []byte("sealed-helm817-nine-object-restore-plan\n")
+	plan.RawTargetManifestDigest = hotfixDigest(rawTarget)
+	plan.RawHybridManifestDigest = hotfixDigest(rawHybrid)
+	plan.TargetPostRenderDigest = hotfixDigest(input.TargetManifest)
+	plan.HybridPostRenderDigest = hotfixDigest(input.HybridManifest)
+	plan.NonAPIEdgeRestorePlanDigest = hotfixDigest(restore)
+	plan.Digest = controlPlaneHotfixPlanDigest(plan)
+	if err := VerifyControlPlaneAPIHotfixPostRender(plan, "forward", rawTarget, restore, input.TargetManifest); err != nil {
+		t.Fatalf("verify forward post-render: %v", err)
+	}
+	if err := VerifyControlPlaneAPIHotfixPostRender(plan, "compensate", rawHybrid, restore, input.HybridManifest); err != nil {
+		t.Fatalf("verify compensation post-render: %v", err)
+	}
+	tests := map[string]struct{ raw, restore, output []byte }{
+		"raw":     {append(append([]byte(nil), rawTarget...), 'x'), restore, input.TargetManifest},
+		"restore": {rawTarget, append(append([]byte(nil), restore...), 'x'), input.TargetManifest},
+		"output":  {rawTarget, restore, append(append([]byte(nil), input.TargetManifest...), 'x')},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			if err := VerifyControlPlaneAPIHotfixPostRender(plan, "forward", test.raw, test.restore, test.output); err == nil {
+				t.Fatalf("post-render accepted %s drift", name)
+			}
+		})
+	}
+}
+
 func TestVerifyControlPlaneHotfixAdoptionPlanBindsEveryAuthority(t *testing.T) {
 	t.Parallel()
 
@@ -347,7 +505,7 @@ func baseControlPlaneHotfixObservation(plan ControlPlaneHotfixAdoptionPlan) Cont
 		HelmRecordDigest: plan.HelmRecordDigest,
 		ManifestDigest:   plan.BaseManifestDigest, ValuesDigest: plan.BaseValuesDigest,
 		ChartTreeDigest: plan.ChartTreeDigest, Source: plan.CurrentSource,
-		LiveImageRef: plan.LiveImageRef, APIImageID: plan.Kubernetes.APIImageID,
+		LiveImageRef: controlPlaneHotfixHybridImage(plan), APIImageID: plan.Kubernetes.APIImageID,
 		Kubernetes: plan.Kubernetes, APIHealthStatus: 200, APIHealthDigest: plan.Kubernetes.APIHealthDigest,
 	}
 }
@@ -358,6 +516,12 @@ func targetControlPlaneHotfixObservation(plan ControlPlaneHotfixAdoptionPlan) Co
 	observation.ManifestDigest = plan.TargetManifestDigest
 	observation.ValuesDigest = plan.TargetValuesDigest
 	observation.Source = plan.AdoptedSource
+	observation.LiveImageRef = controlPlaneHotfixTargetImage(plan)
+	if plan.PlanVersion == 2 {
+		observation.APIImageID = plan.TargetAPIImageID
+		observation.Kubernetes.APIImageRef = plan.TargetAPIImageRef
+		observation.Kubernetes.APIImageID = plan.TargetAPIImageID
+	}
 	observation.Kubernetes.APIGeneration++
 	observation.Kubernetes.APIObservedGeneration++
 	observation.Kubernetes.APITemplateDigest = plan.TargetAPITemplateDigest
@@ -372,7 +536,14 @@ func hybridControlPlaneHotfixObservation(plan ControlPlaneHotfixAdoptionPlan) Co
 	observation.HelmRevision++
 	observation.ManifestDigest = plan.HybridManifestDigest
 	observation.ValuesDigest = plan.BaseValuesDigest
+	if plan.PlanVersion == 2 {
+		observation.ValuesDigest = plan.HybridValuesDigest
+	}
 	observation.Source = plan.CurrentSource
+	observation.LiveImageRef = controlPlaneHotfixHybridImage(plan)
+	observation.APIImageID = plan.Kubernetes.APIImageID
+	observation.Kubernetes.APIImageRef = controlPlaneHotfixHybridImage(plan)
+	observation.Kubernetes.APIImageID = plan.Kubernetes.APIImageID
 	observation.Kubernetes.APIGeneration++
 	observation.Kubernetes.APIObservedGeneration++
 	observation.Kubernetes.APITemplateDigest = plan.HybridAPITemplateDigest
@@ -410,6 +581,79 @@ func validBuiltControlPlaneHotfixPlan(t *testing.T) (ControlPlaneHotfixAdoptionP
 		t.Fatalf("build valid hotfix plan: %v", err)
 	}
 	return plan, input
+}
+
+func validBuiltControlPlaneAPIHotfixV2Plan(t *testing.T) (ControlPlaneHotfixAdoptionPlan, ControlPlaneHotfixAdoptionInput) {
+	t.Helper()
+	seed := validControlPlaneHotfixExecutionPlan()
+	targetIndex := "sha256:" + strings.Repeat("8", 64)
+	targetPlatform := "sha256:" + strings.Repeat("9", 64)
+	targetImage := "ghcr.io/yym68686/fugue-api@" + targetIndex
+	targetImageID := "docker-pullable://ghcr.io/yym68686/fugue-api@" + targetPlatform
+	input := ControlPlaneHotfixAdoptionInput{
+		PlanVersion: 2,
+		ExpectedSHA: seed.ExpectedSHA, RunID: seed.RunID, RunAttempt: seed.RunAttempt,
+		Namespace: seed.Namespace, ReleaseName: seed.ReleaseName, ReleaseFullname: seed.ReleaseFullname,
+		HelmRevision: controlPlaneAPIHotfixBaseRevisionV2, HelmStatus: seed.BaseStatus,
+		HelmRecordDigest: seed.HelmRecordDigest, BaseValuesDigest: seed.BaseValuesDigest,
+		TargetValuesDigest: seed.TargetValuesDigest, HybridValuesDigest: "sha256:" + strings.Repeat("b", 64),
+		ChartTreeDigest: seed.ChartTreeDigest,
+		CurrentSource:   controlPlaneAPIHotfixHybridSourceV2, AdoptedSource: controlPlaneAPIHotfixTargetSourceV2,
+		TargetAPIImageRef: targetImage, LiveHybridAPIImageRef: controlPlaneAPIHotfixHybridImageV2,
+		TargetAPIImageID: targetImageID, Fence: seed.Fence, Nonce: seed.Nonce,
+		Confirm: "CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2",
+		Provenance: ControlPlaneHotfixProvenance{
+			BuildRunID: seed.Provenance.BuildRunID, BuildRunAttempt: 1,
+			ArtifactName: "fugue-api-hotfix-v2", ArtifactDigest: seed.Provenance.ArtifactDigest,
+			Repository: "ghcr.io/yym68686/fugue-api", IndexDigest: targetIndex,
+			PlatformManifestDigest: targetPlatform, ConfigDigest: seed.Provenance.ConfigDigest,
+			OCIRevision: controlPlaneAPIHotfixTargetSourceV2, Verified: true,
+		},
+		Kubernetes: seed.Kubernetes,
+		Lease:      seed.Lease,
+	}
+	input.Kubernetes.APIImageRef = input.LiveHybridAPIImageRef
+	input.Kubernetes.FrozenNonAPIWorkloadDigest = "sha256:" + strings.Repeat("e", 64)
+	input.RawTargetManifestDigest = "sha256:" + strings.Repeat("1", 64)
+	input.RawHybridManifestDigest = "sha256:" + strings.Repeat("2", 64)
+	input.TargetPostRenderDigest = "sha256:" + strings.Repeat("3", 64)
+	input.HybridPostRenderDigest = "sha256:" + strings.Repeat("4", 64)
+	input.NonAPIEdgeRestorePlanDigest = "sha256:" + strings.Repeat("5", 64)
+	input.BaseManifest = hotfixManifest(t, strings.Repeat("0", 40), "ghcr.io/yym68686/fugue-api@sha256:"+strings.Repeat("6", 64), "")
+	input.TargetManifest = hotfixManifest(t, input.AdoptedSource, input.TargetAPIImageRef, "")
+	input.HybridManifest = hotfixManifest(t, input.CurrentSource, input.LiveHybridAPIImageRef, "")
+	input.RepeatedTarget = append([]byte(nil), input.TargetManifest...)
+	hybridTemplateDigest, err := hotfixManifestTemplateDigest(input.HybridManifest, input.Namespace, input.Kubernetes.APIName)
+	if err != nil {
+		t.Fatalf("digest v2 hybrid template: %v", err)
+	}
+	input.Kubernetes.APITemplateDigest = hybridTemplateDigest
+	plan, err := BuildControlPlaneHotfixAdoptionPlan(input)
+	if err != nil {
+		t.Fatalf("build valid v2 hotfix plan: %v", err)
+	}
+	return plan, input
+}
+
+func hotfixManifestWithForeignObjectDrift(t *testing.T, manifest []byte) []byte {
+	t.Helper()
+	objects, err := decodeHotfixObjects(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, object := range objects {
+		if object["kind"] != "ConfigMap" {
+			continue
+		}
+		object["data"] = map[string]any{"value": "drifted"}
+		objects[key] = object
+		break
+	}
+	rendered, err := encodeHotfixObjects(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
 }
 
 func hotfixManifest(t *testing.T, source, image, extra string) []byte {
