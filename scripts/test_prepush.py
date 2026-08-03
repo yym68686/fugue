@@ -78,6 +78,80 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
 
+    def test_test_only_package_selects_exact_current_tests(self) -> None:
+        diff = b"\n".join(
+            (
+                b"@@ -2855 +2855 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {",
+                b"@@ -5699 +5700 @@ func TestControlPlaneReleaseConvergenceAuthorizationHarness(t *testing.T) {",
+            )
+        )
+        with mock.patch.object(prepush, "unified_diff_for_path", return_value=diff):
+            commands = prepush.affected_test_commands(
+                "HEAD^", ["internal/platformsafety/release_workflow_test.go"]
+            )
+        self.assertEqual(
+            commands,
+            [[
+                "go", "test", "./internal/platformsafety", "-run",
+                "^(TestControlPlaneDeployRequiresInternalReleaseGate|"
+                "TestControlPlaneReleaseConvergenceAuthorizationHarness)$",
+            ]],
+        )
+
+    def test_helper_or_global_hunk_falls_back_to_full_package(self) -> None:
+        for header in (
+            b"@@ -12 +12 @@ func helper(t *testing.T) {",
+            b"@@ -1 +1 @@",
+        ):
+            with self.subTest(header=header):
+                with mock.patch.object(prepush, "unified_diff_for_path", return_value=header):
+                    commands = prepush.affected_test_commands(
+                        "HEAD^", ["internal/example/example_test.go"]
+                    )
+                self.assertEqual(commands, [["go", "test", "./internal/example"]])
+
+    def test_non_test_go_change_runs_full_package(self) -> None:
+        with mock.patch.object(prepush, "unified_diff_for_path") as unified:
+            commands = prepush.affected_test_commands(
+                "HEAD^", ["internal/releasedomain/control_plane_hotfix_adoption.go"]
+            )
+        unified.assert_not_called()
+        self.assertEqual(commands, [["go", "test", "./internal/releasedomain"]])
+
+    def test_near_miss_test_name_falls_back_to_full_package(self) -> None:
+        diff = b"@@ -12 +12 @@ func Testhelper(t *testing.T) {"
+        with mock.patch.object(prepush, "unified_diff_for_path", return_value=diff):
+            commands = prepush.affected_test_commands(
+                "HEAD^", ["internal/example/example_test.go"]
+            )
+        self.assertEqual(commands, [["go", "test", "./internal/example"]])
+
+    def test_package_tests_overlap_and_aggregate_failures(self) -> None:
+        barrier = threading.Barrier(2)
+        intervals = {}
+
+        def fake_run(command, _timeout):
+            package = command[2]
+            started = time.monotonic()
+            barrier.wait(timeout=2)
+            ended = time.monotonic()
+            intervals[package] = (started, ended)
+            if package == "./internal/a":
+                return 7, "a failed"
+            return 9, "b failed"
+
+        commands = [
+            ["go", "test", "./internal/a"],
+            ["go", "test", "./internal/b"],
+        ]
+        with mock.patch.object(prepush, "run", side_effect=fake_run):
+            status, output = prepush.run_test_commands(commands, time.monotonic() + 2)
+        self.assertEqual(status, 7)
+        self.assertLess(intervals["./internal/a"][0], intervals["./internal/b"][1])
+        self.assertLess(intervals["./internal/b"][0], intervals["./internal/a"][1])
+        self.assertIn("$ go test ./internal/a\na failed", output)
+        self.assertIn("$ go test ./internal/b\nb failed", output)
+
     def test_parallel_task_failure_still_fails_closed(self) -> None:
         def fake_run(command, _timeout):
             if command == ["go", "build", "./..."]:

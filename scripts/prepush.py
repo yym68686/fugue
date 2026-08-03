@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,10 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
+TEST_HUNK_RE = re.compile(
+    r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ func "
+    r"(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\("
+)
 
 
 def run(command: list[str], timeout: float) -> tuple[int, str]:
@@ -87,6 +92,89 @@ def affected_packages(paths: list[str]) -> list[str]:
         parent = Path(name).parent.as_posix()
         packages.add("." if parent == "." else f"./{parent}")
     return sorted(packages)
+
+
+def unified_diff_for_path(base: str, name: str) -> bytes:
+    output = bytearray()
+    if git_output(["rev-parse", base]).strip() != git_output(["rev-parse", "HEAD"]).strip():
+        output.extend(git_output(["diff", "--unified=0", "--no-ext-diff", f"{base}...HEAD", "--", name]))
+    output.extend(git_output(["diff", "--unified=0", "--no-ext-diff", "HEAD", "--", name]))
+    return bytes(output)
+
+
+def exact_test_names_from_diff(diff: bytes) -> set[str] | None:
+    headers = [line.decode("utf-8", "replace") for line in diff.splitlines() if line.startswith(b"@@")]
+    if not headers:
+        return None
+    names = set()
+    for header in headers:
+        match = TEST_HUNK_RE.match(header)
+        if match is None:
+            return None
+        names.add(match.group(1))
+    return names or None
+
+
+def affected_test_commands(base: str, paths: list[str]) -> list[list[str]]:
+    package_files: dict[str, list[str]] = {}
+    for name in paths:
+        if not name.endswith(".go"):
+            continue
+        parent = Path(name).parent.as_posix()
+        package = "." if parent == "." else f"./{parent}"
+        package_files.setdefault(package, []).append(name)
+
+    commands = []
+    for package in sorted(package_files):
+        files = package_files[package]
+        if any(not name.endswith("_test.go") for name in files):
+            commands.append(["go", "test", package])
+            continue
+        names = set()
+        for name in files:
+            selected = exact_test_names_from_diff(unified_diff_for_path(base, name))
+            if selected is None:
+                names.clear()
+                break
+            names.update(selected)
+        if not names:
+            commands.append(["go", "test", package])
+            continue
+        pattern = "^(" + "|".join(re.escape(name) for name in sorted(names)) + ")$"
+        commands.append(["go", "test", package, "-run", pattern])
+    return commands
+
+
+def run_test_commands(commands: list[list[str]], deadline: float) -> tuple[int, str]:
+    if not commands:
+        return 0, ""
+    results: list[tuple[int, str] | None] = [None] * len(commands)
+
+    def execute(index: int, command: list[str]) -> tuple[int, int, str]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return index, 124, "pre-push deadline exceeded"
+        status, output = run(command, remaining)
+        return index, status, output
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(commands)) as executor:
+        futures = [executor.submit(execute, index, command) for index, command in enumerate(commands)]
+        for future in concurrent.futures.as_completed(futures):
+            index, status, output = future.result()
+            results[index] = (status, output)
+
+    failures = []
+    for command, result in zip(commands, results):
+        if result is None:
+            failures.append((124, command, "affected test command result is missing"))
+            continue
+        status, output = result
+        if status != 0:
+            failures.append((status, command, output))
+    if not failures:
+        return 0, ""
+    output = "\n".join(f"$ {' '.join(command)}\n{text}".rstrip() for _, command, text in failures)
+    return failures[0][0], output
 
 
 def diff_check(base: str, paths: list[str], timeout: float) -> tuple[int, str]:
@@ -213,6 +301,7 @@ def main() -> int:
     base = resolve_base()
     paths = changed_files(base)
     packages = affected_packages(paths)
+    test_commands = affected_test_commands(base, paths)
     checks: dict[str, dict[str, object]] = {}
 
     tasks: dict[str, list[str] | None] = {
@@ -223,7 +312,7 @@ def main() -> int:
         ],
     }
     if packages:
-        tasks["affected-tests"] = ["go", "test", *packages]
+        tasks["affected-tests"] = None
         tasks["affected-vet"] = ["go", "vet", *packages]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
         tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
@@ -264,13 +353,18 @@ def main() -> int:
         record(name, before, status, output)
 
     if not failures:
-        def execute(command: list[str]) -> tuple[int, str, float]:
+        def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
             before = time.monotonic()
-            status, output = run(command, deadline - before)
+            if name == "affected-tests":
+                status, output = run_test_commands(test_commands, deadline)
+            elif command is None:
+                status, output = 124, f"pre-push task {name} has no command"
+            else:
+                status, output = run(command, deadline - before)
             return status, output, before
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = {executor.submit(execute, command): name for name, command in tasks.items() if command is not None}
+            futures = {executor.submit(execute, name, command): name for name, command in tasks.items()}
             for future in concurrent.futures.as_completed(futures):
                 name = futures[future]
                 status, output, before = future.result()
