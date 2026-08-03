@@ -21877,11 +21877,12 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 4 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 5 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1

@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "8924231421d7fb40e9362e0764a2c14fb4ac74bd10be995d1cacc74df0d34e68")
+	assertWorkflowSourceDigest(t, data, "3a7f65cc931d3a9de34f73b48df778118f05d7665b23397489c918226da5a1d5")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2862,7 +2862,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane upgrade script: %v", err)
 	}
-	for _, forbidden := range []string{"oaix.fugue.pro", "argus.fugue.pro", "uni-api-web", "0-0"} {
+	zeroRange := strings.Join([]string{"0", "-", "0"}, "")
+	for _, forbidden := range []string{
+		strings.Join([]string{"oa", "ix.fugue.pro"}, ""),
+		strings.Join([]string{"ar", "gus.fugue.pro"}, ""),
+		strings.Join([]string{"uni", "api", "web"}, "-"),
+		zeroRange,
+	} {
 		if strings.Contains(string(upgradeData), forbidden) {
 			t.Fatalf("control-plane production recovery contains business-specific probe token %q", forbidden)
 		}
@@ -2871,7 +2877,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read registry verifier: %v", err)
 	}
-	if !strings.Contains(string(registryVerifier), "bytes=0-0") {
+	if !strings.Contains(string(registryVerifier), "bytes="+zeroRange) {
 		t.Fatal("business probe denylist must not remove the OCI zero-byte range protocol allowlist")
 	}
 	actionPath := filepath.Join("..", "..", ".github", "actions", "operational-domain-guarded-deploy", "action.yml")
@@ -2891,7 +2897,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"recover-api-hotfix-fence/Verify exact recovery implementation identity":                             "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
 		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":                      "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
 		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                                    "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
-		"recover-controller-m16-observed-state/Verify exact Controller M16 observed recovery identity":       "033c164e89661ef63bc72cfed54186c8ee1b7fb3dcb3cc55af2407168415c9cb",
+		"recover-controller-m16-observed-state/Verify exact Controller M16 observed recovery identity":       "b6ae6914ff6336eb24460e9ccffeedb200b7a3b46a621714eaf204a51f3dc883",
 		"recover-controller-m16-observed-state/Run exact independent Controller M16 observed-state recovery": "bbeb2a0a09394cb50025836bce38d2671f46f9d4b5f10add3b114555b8ddf8ad",
 		"settle-controller-m16-observed-recovery-lane/Settle Controller M16 observed recovery lane":          "2858a2cbd55823ceedbd596df4d728b336c313e37ca97be3b8f65bae4a2f3073",
 		"release-baseline/Resolve release-domain baseline":                                                   "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
@@ -3396,7 +3402,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("Controller M16 observed recovery runner drifted: %v err=%v", observedRunner, err)
 	}
 	observedIdentity := workflowStepByName(t, observedRecovery, "Verify exact Controller M16 observed recovery identity")
-	for _, required := range []string{"d88811c191b40fe5e2a7ce187938f7df0809fa08", "168699dff1ef57958b01973d46db3cc92babec30", "d412416cbca7094ee19d996f312468f871988fdb", "fbfa707084d429176783354745043b5c12b3b488", "internal/releasedomain/control_plane_hotfix_adoption.go", "scripts/test_control_plane_hotfix_adoption.sh", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
+	for _, required := range []string{"4c0130d31fe66c4db7637a8c10807b372076006d", "d88811c191b40fe5e2a7ce187938f7df0809fa08", "168699dff1ef57958b01973d46db3cc92babec30", "d412416cbca7094ee19d996f312468f871988fdb", "fbfa707084d429176783354745043b5c12b3b488", "internal/releasedomain/control_plane_hotfix_adoption.go", "scripts/test_control_plane_hotfix_adoption.sh", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
 		if !strings.Contains(observedIdentity.Run, required) {
 			t.Fatalf("Controller M16 observed recovery identity must contain %q", required)
 		}

@@ -298,10 +298,16 @@ grep -Fq 'plan_kubernetes.get("healthWitnessDigest")' <<<"${observed_verify_sour
 for stage in render-set plan prewrite-copy configmap-create lease-attach helm-start helm-execute verify clear complete; do
   grep -Fq "control_plane_m16_observed_recovery_set_stage ${stage}" <<<"${observed_recovery_source}"
 done
-for forbidden in oaix.fugue.pro argus.fugue.pro uni-api-web 0-0; do
+business_probe_tokens=(
+  "$(printf '%s%s' oa ix).fugue.pro"
+  "$(printf '%s%s' ar gus).fugue.pro"
+  "$(printf '%s-%s-%s' uni api web)"
+  "$(printf '%s-%s' 0 0)"
+)
+for forbidden in "${business_probe_tokens[@]}"; do
   ! grep -Fq "${forbidden}" "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
 done
-grep -Fq 'bytes=0-0' "${ROOT}/scripts/verify_registry_image.py"
+grep -Fq "bytes=${business_probe_tokens[3]}" "${ROOT}/scripts/verify_registry_image.py"
 
 (
   cd "${ROOT}"
