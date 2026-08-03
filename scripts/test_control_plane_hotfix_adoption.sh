@@ -261,7 +261,198 @@ YAML
   ! prepare_helm_post_renderer
 )
 
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  fixture_root="${TMP}/observed-recovery-real-prepare"
+  mkdir -m 700 "${fixture_root}"
+  FIXTURE_ROOT="${fixture_root}" python3 - <<'PY'
+import hashlib,json,os,pathlib
+
+root=pathlib.Path(os.environ["FIXTURE_ROOT"])
+api_source="57dc767999741cea25fe4820a6c9603984dfa0b9"
+api_image="ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3"
+controller_source="d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"
+controller_image="ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"
+documents=[]
+daemonsets=[]
+for index in range(9):
+    name=f"fugue-public-fixture-{index}"
+    mode="node-local-blue-green-front" if index%2==0 else "node-local-blue-green-worker"
+    key="checksum/edge-blue-green-front" if index%2==0 else "checksum/edge-blue-green-worker"
+    checksum=hashlib.sha256(name.encode()).hexdigest()
+    documents.append(f'''---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {name}
+  namespace: fugue-system
+spec:
+  template:
+    metadata:
+      annotations:
+        {key}: {checksum}
+    spec:
+      containers:
+      - name: edge
+        image: ghcr.io/example/edge:fixture
+''')
+    daemonsets.append({
+        "metadata":{"name":name,"labels":{"app.kubernetes.io/instance":"fugue","fugue.io/rollout-mode":mode,"fugue.io/rollout-subsystem":"public-data-plane"}},
+        "spec":{"template":{"metadata":{"annotations":{key:checksum}}}},
+    })
+documents.append(f'''---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+  namespace: fugue-system
+spec:
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        fixture: helm822
+        fugue.pro/source-commit: {api_source}
+    spec:
+      containers:
+      - name: api
+        image: {api_image}
+''')
+documents.append(f'''---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-controller
+  namespace: fugue-system
+spec:
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        fixture: server-render
+        fugue.pro/source-commit: {controller_source}
+    spec:
+      containers:
+      - name: controller
+        image: {controller_image}
+''')
+for index in range(74):
+    documents.append(f'''---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observed-recovery-fixture-{index:02d}
+  namespace: fugue-system
+data:
+  value: stable-{index:02d}
+''')
+assert len(documents)==85
+(root/"helm822-server-render.yaml").write_text("".join(documents),encoding="utf-8")
+(root/"daemonsets.json").write_text(json.dumps({"items":daemonsets},sort_keys=True,separators=(",",":")),encoding="utf-8")
+api_template={"metadata":{"annotations":{"fixture":"helm820","fugue.pro/source-commit":api_source}},"spec":{"containers":[{"image":api_image,"name":"api"}]}}
+controller_template={"metadata":{"annotations":{"fixture":"helm822","fugue.pro/source-commit":controller_source}},"spec":{"containers":[{"image":controller_image,"name":"controller"}]}}
+(root/"helm820-api-template.json").write_text(json.dumps(api_template,sort_keys=True,separators=(",",":")),encoding="utf-8")
+(root/"helm822-controller-template.json").write_text(json.dumps(controller_template,sort_keys=True,separators=(",",":")),encoding="utf-8")
+PY
+  bounded_kubectl() {
+    [[ "$*" == '15 -n fugue-system get daemonsets -o json' ]]
+    command cat "${fixture_root}/daemonsets.json"
+  }
+  run_release_long_command() {
+    [[ " $* " == *' helm get manifest fugue -n fugue-system --revision 822 '* ]]
+    command cat "${fixture_root}/helm822-server-render.yaml"
+  }
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_NAMESPACE=fugue-system
+  CONTROL_PLANE_HOTFIX_BASE_REVISION=822
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=4
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${fixture_root}/helm822-controller-template.json")"
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=false
+  control_plane_hotfix_prepare_post_renderer
+  control_plane_m16_observed_recovery_assert_renderer
+  "${HELM_POST_RENDERER_FILE}" <"${fixture_root}/helm822-server-render.yaml" >"${fixture_root}/helm822-observed.yaml"
+
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${fixture_root}/helm820-api-template.json")"
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
+  CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  control_plane_hotfix_prepare_post_renderer
+  control_plane_m16_observed_recovery_assert_renderer
+  "${HELM_POST_RENDERER_FILE}" <"${fixture_root}/helm822-server-render.yaml" >"${fixture_root}/helm823-target.yaml"
+  OBSERVED="${fixture_root}/helm822-observed.yaml" TARGET="${fixture_root}/helm823-target.yaml" python3 - <<'PY'
+import os,pathlib,re
+def documents(path):
+    raw=pathlib.Path(path).read_bytes()
+    return [item for item in raw.split(b"---\n") if item.strip()]
+observed=documents(os.environ["OBSERVED"]); target=documents(os.environ["TARGET"])
+assert len(observed)==85 and len(target)==85
+changed=[index for index,(before,after) in enumerate(zip(observed,target)) if before!=after]
+assert len(changed)==1
+document=target[changed[0]].decode()
+assert re.search(r"^kind: Deployment$",document,re.MULTILINE)
+assert re.search(r"^  name: fugue-fugue-api$",document,re.MULTILINE)
+assert '"fixture":"helm820"' in document
+assert b'fixture: helm822' in observed[changed[0]]
+PY
+
+  valid_renderer="${HELM_POST_RENDERER_FILE}"
+  chmod 0755 "${valid_renderer}"
+  ! control_plane_m16_observed_recovery_assert_renderer
+  chmod 0700 "${valid_renderer}"
+  control_plane_m16_observed_recovery_assert_renderer
+  chmod 0600 "${valid_renderer}"
+  ! control_plane_m16_observed_recovery_assert_renderer
+  chmod 0700 "${valid_renderer}"
+  ln -s "${valid_renderer}" "${fixture_root}/renderer-link"
+  HELM_POST_RENDERER_FILE="${fixture_root}/renderer-link"
+  HELM_POST_RENDERER_ARGS=(--post-renderer "${HELM_POST_RENDERER_FILE}")
+  ! control_plane_m16_observed_recovery_assert_renderer
+  HELM_POST_RENDERER_FILE=""
+  HELM_POST_RENDERER_ARGS=()
+  ! control_plane_m16_observed_recovery_assert_renderer
+  HELM_POST_RENDERER_FILE=relative-renderer
+  HELM_POST_RENDERER_ARGS=(--post-renderer "${HELM_POST_RENDERER_FILE}")
+  ! control_plane_m16_observed_recovery_assert_renderer
+
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=4
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=invalid
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${fixture_root}/helm820-api-template.json")"
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${fixture_root}/helm822-controller-template.json")"
+  ! control_plane_hotfix_prepare_post_renderer
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
+  ! control_plane_hotfix_prepare_post_renderer
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${fixture_root}/helm820-api-template.json")"
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON=""
+  ! control_plane_hotfix_prepare_post_renderer
+
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=2
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=false
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON=""
+  CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  control_plane_hotfix_prepare_post_renderer
+  [[ -x "${HELM_POST_RENDERER_FILE}" ]]
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=3
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${fixture_root}/helm822-controller-template.json")"
+  CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
+  control_plane_hotfix_prepare_post_renderer
+  [[ -x "${HELM_POST_RENDERER_FILE}" ]]
+  CONTROL_PLANE_HOTFIX_PLAN_VERSION=1
+  control_plane_hotfix_prepare_post_renderer
+  [[ -z "${HELM_POST_RENDERER_FILE}" && "${#HELM_POST_RENDERER_ARGS[@]}" == 0 ]]
+)
+
 observed_recovery_source="$(sed -n '/^run_control_plane_controller_m16_observed_recovery_v1()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+observed_render_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_render_set()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+[[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
+[[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_render_source}")" == 2 ]]
+observed_seal_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_sealed_argv()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+[[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_seal_source}")" == 1 ]]
+[[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_seal_source}")" == 2 ]]
 for fragment in \
   'invocation.json' \
   'control_plane_m16_observed_recovery_create_configmap' \

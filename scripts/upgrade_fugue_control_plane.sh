@@ -20313,9 +20313,10 @@ control_plane_hotfix_build_helm_argv() {
 control_plane_hotfix_prepare_post_renderer() {
   local daemonsets_json=""
   local checksum_records=""
+  local plan_version="${CONTROL_PLANE_HOTFIX_PLAN_VERSION:-0}"
+  local observed_recovery_mode="${CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE:-false}"
 
-  if [[ "${CONTROL_PLANE_HOTFIX_PLAN_VERSION:-0}" != "2" &&
-    "${CONTROL_PLANE_HOTFIX_PLAN_VERSION:-0}" != "3" ]]; then
+  if [[ "${plan_version}" != "2" && "${plan_version}" != "3" && "${plan_version}" != "4" ]]; then
     HELM_POST_RENDERER_FILE=""
     HELM_POST_RENDERER_ARGS=()
     return 0
@@ -20324,6 +20325,19 @@ control_plane_hotfix_prepare_post_renderer() {
     rm -f -- "${HELM_POST_RENDERER_FILE}" || return
   HELM_POST_RENDERER_FILE=""
   HELM_POST_RENDERER_ARGS=()
+  if [[ "${plan_version}" == "4" ]]; then
+    case "${observed_recovery_mode}" in
+      false)
+        [[ -z "${CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON:-}" &&
+          -n "${CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON:-}" ]] || return 1
+        ;;
+      true)
+        [[ -n "${CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON:-}" &&
+          -n "${CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON:-}" ]] || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  fi
   daemonsets_json="$(bounded_kubectl 15 -n fugue-system get daemonsets -o json)" || return
   checksum_records="$(public_data_plane_checksum_records_from_daemonset_snapshot "${daemonsets_json}")" || return
   CHECKSUMS="${checksum_records}" python3 -c 'import json,os; value=json.loads(os.environ["CHECKSUMS"]); assert len(value)==9' || return
@@ -21620,6 +21634,17 @@ PY
   chmod 600 "${directory}/${prefix}.json" "${directory}/${prefix}.raw"
 }
 
+control_plane_m16_observed_recovery_assert_renderer() {
+  local renderer="${HELM_POST_RENDERER_FILE:-}"
+  local mode=""
+  [[ "${renderer}" == /* && -f "${renderer}" && ! -L "${renderer}" && -x "${renderer}" ]] || return 1
+  mode="$(stat -c '%a' -- "${renderer}" 2>/dev/null || stat -f '%Lp' "${renderer}" 2>/dev/null)" || return
+  [[ "${mode}" == "700" ]] || return 1
+  [[ "${#HELM_POST_RENDERER_ARGS[@]}" == 2 &&
+    "${HELM_POST_RENDERER_ARGS[0]}" == "--post-renderer" &&
+    "${HELM_POST_RENDERER_ARGS[1]}" == "${renderer}" ]] || return 1
+}
+
 control_plane_m16_observed_recovery_prepare_render_set() {
   local directory="$1"
   local observed_manifest="${directory}/second/helm-manifest-822.yaml"
@@ -21634,12 +21659,14 @@ control_plane_m16_observed_recovery_prepare_render_set() {
   CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${directory}/target-controller-template.json")"
   CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
   control_plane_hotfix_prepare_post_renderer || return
+  control_plane_m16_observed_recovery_assert_renderer || return
   "${HELM_POST_RENDERER_FILE}" <"${directory}/render-one.raw" >"${directory}/reconstructed-822.yaml" || return
   cmp -s "${observed_manifest}" "${directory}/reconstructed-822.yaml" || return 1
   CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=true
   CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="$(<"${directory}/target-api-template.json")"
   CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
   control_plane_hotfix_prepare_post_renderer || return
+  control_plane_m16_observed_recovery_assert_renderer || return
   "${HELM_POST_RENDERER_FILE}" <"${directory}/render-one.raw" >"${directory}/effective-target.yaml" || return
   cmp -s "${directory}/target.yaml" "${directory}/effective-target.yaml" || return 1
   "${HELM_POST_RENDERER_FILE}" <"${directory}/render-two.raw" >"${directory}/effective-repeated-target.yaml" || return
@@ -21660,6 +21687,7 @@ control_plane_m16_observed_recovery_prepare_sealed_argv() {
   CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="$(<"${directory}/target-controller-template.json")"
   CONTROL_PLANE_HOTFIX_EDGE_RESTORE_PLAN_DIGEST=""
   control_plane_hotfix_prepare_post_renderer || return
+  control_plane_m16_observed_recovery_assert_renderer || return
   renderer_digest="sha256:$(control_plane_release_sha256_stream <"${HELM_POST_RENDERER_FILE}")" || return
   IFS=$'\t' read -r raw_digest output_digest < <(PLAN="${CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE}" python3 - <<'PY'
 import json,os
@@ -21686,6 +21714,7 @@ os.chmod(path,0o700)
 PY
   HELM_POST_RENDERER_FILE="${wrapper}"
   HELM_POST_RENDERER_ARGS=(--post-renderer "${wrapper}")
+  control_plane_m16_observed_recovery_assert_renderer || return
   control_plane_m16_observed_recovery_build_helm_argv || return
   mkdir -m 700 "${directory}/sealed" || return
   (umask 077; printf '%s\0' "${CONTROL_PLANE_HOTFIX_HELM_ARGV[@]}" >"${directory}/sealed/upgrade-argv.snapshot") || return
@@ -21877,12 +21906,13 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
-    "$(git rev-parse --verify HEAD^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 5 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
+    "$(git rev-parse --verify HEAD^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 6 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1
