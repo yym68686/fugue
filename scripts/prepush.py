@@ -39,9 +39,7 @@ def run(command: list[str], timeout: float) -> tuple[int, str]:
 
 
 def command_env() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment.setdefault("GOCACHE", str(ROOT / ".gocache"))
-    return environment
+    return os.environ.copy()
 
 
 def git_output(arguments: list[str]) -> bytes:

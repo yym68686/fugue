@@ -8,6 +8,13 @@ from scripts import prepush
 
 
 class CanonicalReceiptTest(unittest.TestCase):
+    def test_command_environment_preserves_default_and_explicit_go_cache(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn("GOCACHE", prepush.command_env())
+        explicit = "/tmp/fugue-explicit-go-cache"
+        with mock.patch.dict(os.environ, {"GOCACHE": explicit}, clear=True):
+            self.assertEqual(prepush.command_env()["GOCACHE"], explicit)
+
     def test_rejects_tuple_readback_for_json_array(self) -> None:
         with self.assertRaisesRegex(TypeError, "tuple"):
             prepush.validate_json_value({"images": ("api", "edge")}, "$")
