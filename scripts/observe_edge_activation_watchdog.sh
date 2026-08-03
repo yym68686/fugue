@@ -37,8 +37,19 @@ eligibility_output="$(FUGUE_EDGE_WATCHDOG_NOW="${FUGUE_EDGE_WATCHDOG_NOW:-}" pyt
 import datetime,json,os,sys
 with open(sys.argv[1],encoding="utf-8") as h: value=json.load(h)
 activation=value.get("activation") or {}
-if activation.get("schema")!="edge-activation/v1" or activation.get("phase")!="active-epoch-enforced" or activation.get("route_authority")!="active-epoch":
-    raise SystemExit("edge activation is not in the enforced terminal phase")
+if activation.get("schema")!="edge-activation/v1":
+    raise SystemExit("edge activation schema is invalid")
+phase=activation.get("phase")
+authority=activation.get("route_authority")
+if phase=="legacy-authoritative":
+    if authority!="legacy" or (value.get("active_epochs") or []) or (activation.get("expected_instances") or []):
+        raise SystemExit("legacy edge activation terminal state is inconsistent")
+    generation=activation.get("generation")
+    if not isinstance(generation,int) or generation<=0:
+        raise SystemExit("legacy edge activation generation is invalid")
+    print("legacy-authoritative\t"+str(generation)); raise SystemExit(0)
+if phase!="active-epoch-enforced" or authority!="active-epoch":
+    raise SystemExit("edge activation is not in a terminal authoritative phase")
 release=str(activation.get("release_id") or "")
 if not release: raise SystemExit("edge activation release identity is missing")
 raw=activation.get("soak_started_at")
@@ -61,6 +72,16 @@ print("due\t"+release)
 PY
 )"
 IFS=$'\t' read -r eligibility release_epoch <<<"${eligibility_output}"
+if [[ "${eligibility}" == "legacy-authoritative" ]]; then
+  ACTIVATION_GENERATION="${release_epoch}" python3 - "${evidence_json}" <<'PY'
+import hashlib,json,os,sys
+material={"schema":"edge-activation-watchdog/v1","status":"legacy-authoritative","activation_generation":int(os.environ["ACTIVATION_GENERATION"])}
+material["digest"]="sha256:"+hashlib.sha256(json.dumps(material,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+with open(sys.argv[1],"w",encoding="utf-8") as h: json.dump(material,h,separators=(",",":"),sort_keys=True); h.write("\n")
+PY
+  printf '[edge_activation_watchdog] legacy-authoritative\n'
+  exit 0
+fi
 if [[ "${eligibility}" == "not-due" ]]; then
   printf '{"schema":"edge-activation-watchdog/v1","status":"not-due"}\n' >"${evidence_json}"
   exit 0

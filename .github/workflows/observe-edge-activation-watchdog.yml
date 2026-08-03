@@ -15,6 +15,7 @@ concurrency:
 jobs:
   observe:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     steps:
       - name: Checkout exact main observation policy
@@ -24,8 +25,8 @@ jobs:
           fetch-depth: 1
       - name: Observe delayed edge activation
         env:
-          FUGUE_EDGE_ACTIVATION_API_URL: ${{ vars.FUGUE_API_URL }}
-          FUGUE_EDGE_ACTIVATION_API_KEY: ${{ secrets.FUGUE_BOOTSTRAP_KEY }}
+          FUGUE_EDGE_ACTIVATION_API_URL: ${{ vars.FUGUE_API_URL || 'https://api.fugue.pro' }}
+          FUGUE_EDGE_ACTIVATION_API_KEY: ${{ secrets.FUGUE_BOOTSTRAP_KEY || secrets.FUGUE_API_KEY }}
           FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR: ${{ runner.temp }}/edge-activation-watchdog
         run: ./scripts/observe_edge_activation_watchdog.sh
       - name: Upload bounded watchdog evidence

@@ -53,6 +53,75 @@ assert value["platform_evidence_digest"].startswith("sha256:")
 assert "responses_http" not in value
 PY
 
+cat >"${TMP}/bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while (($#)); do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    --config|--write-out) shift 2 ;;
+    https://*) shift ;;
+    *) shift ;;
+  esac
+done
+cat >"${output}" <<'JSON'
+{"activation":{"schema":"edge-activation/v1","phase":"legacy-authoritative","route_authority":"legacy","generation":19,"expected_instances":[]},"instances":[],"active_epochs":[]}
+JSON
+printf 200
+MOCK
+chmod +x "${TMP}/bin/curl"
+export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz
+export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/legacy"
+bash "${ROOT}/scripts/observe_edge_activation_watchdog.sh" | grep -Fx '[edge_activation_watchdog] legacy-authoritative'
+python3 - "${TMP}/legacy/evidence.json" <<'PY'
+import json,sys
+value=json.load(open(sys.argv[1]))
+assert value["schema"]=="edge-activation-watchdog/v1"
+assert value["status"]=="legacy-authoritative"
+assert value["activation_generation"]==19
+assert value["digest"].startswith("sha256:")
+PY
+
+sed -i.bak 's/"active_epochs":\[\]/"active_epochs":[{"edge_group_id":"edge-group-country-us"}]/' "${TMP}/bin/curl"
+rm -f "${TMP}/bin/curl.bak"
+export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz
+export FUGUE_EDGE_WATCHDOG_EVIDENCE_DIR="${TMP}/legacy-inconsistent"
+if bash "${ROOT}/scripts/observe_edge_activation_watchdog.sh" >/dev/null 2>&1; then
+  echo "inconsistent legacy authority must fail closed" >&2; exit 1
+fi
+
+cat >"${TMP}/bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+url=""
+while (($#)); do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    --config|--data-urlencode|--write-out) shift 2 ;;
+    --get) shift ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "${url}" in
+  */v1/admin/edge/activation)
+    cat >"${output}" <<JSON
+{"activation":{"schema":"edge-activation/v1","phase":"active-epoch-enforced","route_authority":"active-epoch","generation":5,"release_id":"release-b","plan_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","soak_started_at":"2026-08-01T00:00:00Z","expected_instances":[{"edge_id":"edge-de","edge_group_id":"edge-group-de","slot":"b","instance_uid":"pod-b","release_epoch":"release-b"}]},"instances":[{"edge_id":"edge-de","edge_group_id":"edge-group-de","slot":"b","instance_uid":"pod-b","release_epoch":"release-b","effective_healthy":${MOCK_HEALTHY:-true},"failure_class":"","node":{"draining":false,"tls_status":"ready"}}]}
+JSON
+    ;;
+  */v1/admin/edge/release-evidence)
+    cat >"${output}" <<JSON
+{"schema":"platform-release-evidence/v1","status":"${MOCK_PLATFORM_STATUS:-passed}","reason":"${MOCK_PLATFORM_REASON:-active cohort and platform requests passed}","release_epoch":"release-b","evidence_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","metrics":{"request_count":12,"hard_failure_count":${MOCK_HARD_FAILURES:-0},"origin_connected_application_5xx_count":${MOCK_APPLICATION_5XX:-4},"platform_error_classes":["origin_connected_application_5xx"]}}
+JSON
+    ;;
+  *) echo "unexpected URL ${url}" >&2; exit 97 ;;
+esac
+printf 200
+MOCK
+chmod +x "${TMP}/bin/curl"
+
 # The API has already classified connected application 5xx as non-platform;
 # the watchdog consumes the resulting passed evidence without business replay.
 export FUGUE_EDGE_ACTIVATION_API_KEY=bootstrap_abcdefghijklmnopqrstuvwxyz

@@ -209,8 +209,13 @@ func TestEdgeActivationWatchdogIsReportOnlyAndDelayed(t *testing.T) {
 		t.Fatalf("watchdog capability boundary drifted: %+v %+v", workflow.Permissions, workflow.Concurrency)
 	}
 	job := workflow.Jobs["observe"]
-	if job.Environment != "" || len(job.Steps) != 3 {
+	if job.Environment != "production" || len(job.Steps) != 3 {
 		t.Fatalf("watchdog must be a three-step report-only job: %+v", job)
+	}
+	observe := job.Steps[1]
+	if observe.Env["FUGUE_EDGE_ACTIVATION_API_URL"] != "${{ vars.FUGUE_API_URL || 'https://api.fugue.pro' }}" ||
+		observe.Env["FUGUE_EDGE_ACTIVATION_API_KEY"] != "${{ secrets.FUGUE_BOOTSTRAP_KEY || secrets.FUGUE_API_KEY }}" {
+		t.Fatalf("watchdog production read credential projection drifted: %+v", observe.Env)
 	}
 	for _, forbidden := range []string{"kubectl", "helm", "workflow_dispatch", "contents: write"} {
 		if forbidden == "workflow_dispatch" {
@@ -225,7 +230,7 @@ func TestEdgeActivationWatchdogIsReportOnlyAndDelayed(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(script)
-	if !strings.Contains(source, "age < 24*3600") || !strings.Contains(source, "active-epoch-enforced") || !strings.Contains(source, "/v1/admin/edge/release-evidence") {
+	if !strings.Contains(source, "age < 24*3600") || !strings.Contains(source, "active-epoch-enforced") || !strings.Contains(source, "legacy-authoritative") || !strings.Contains(source, "/v1/admin/edge/release-evidence") {
 		t.Fatal("watchdog delayed identity/platform evidence contract drifted")
 	}
 	for _, forbidden := range []string{legacyResponsePath, strings.ToUpper(legacySynthetic), "PLATFORM_EVIDENCE_URL", "PLATFORM_EVIDENCE_TOKEN", "PLATFORM_EVIDENCE_MODEL"} {
