@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "3db4041d64ac1ca58fca539900daa1391a8f4382fac9efb0b640840422e0b1d5")
+	assertWorkflowSourceDigest(t, data, "2825a3813b9dc300837f043c0a8a5c6eb6517194aab75c90c631eed3c973bef3")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2870,49 +2870,55 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                         "04d81d2c70ad3ece441c515bdc0d8508b1d0e0b33a36f27cac7f45c273edfd9c",
-		"recover-api-hotfix-fence/Verify exact recovery implementation identity":            "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
-		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":     "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
-		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                   "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
-		"release-baseline/Resolve release-domain baseline":                                  "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
-		"release-baseline/Verify Stage1 handoff before release planning":                    "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
-		"release-baseline/Resolve live image metadata":                                      "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
-		"release-baseline/Compute live-to-target release changed files":                     "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-baseline/Verify exact API hotfix runtime closure":                          "491a04c7454cf3b908b796d7b7238b88f08ae45612c0994783151fdb450ee105",
-		"release-gate/Verify exact source CI receipt":                                       "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
-		"release-gate/Verify exact API hotfix product receipt":                              "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
-		"build/Compute image metadata":                                                      "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
-		"build/Compute image build plan":                                                    "0994dc9ede63c38e4d18548f762445aa29ab084474498112ba597e478e5bcb34",
-		"build/Verify exact historical incident image plan":                                 "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
-		"build/Verify exact API hotfix image plan":                                          "d5b258401587abc13c630536f8ec36cbdae46203b3308ace9bfd1ed5c40f9a97",
-		"build/Materialize exact canonical build receipt":                                   "2d6ecd17bcd49b56c15cf1ab4e3a2569b88db8b4e63b6499ccc63f87cedd5889",
-		"build/Publish verified control-plane image provenance":                             "59d409f80ffd29294fb36e374a4607eccd486ce180b5543cea02bb2382aca379",
-		"deploy/Record deploy job budget origin":                                            "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
-		"deploy/Prepare exact current tooling for historical runtime evidence":              "15cd94ec3a12647dc78e51695e2ce52ee7ed2b8a29ee2cf63e9df945e6d7c33a",
-		"deploy/Build private release-domain tools":                                         "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
-		"deploy/Restore exact historical runtime checkout":                                  "72a75a948848c5b0bf2042e66c5849835fedcd7e311c91910cd73287d77c9142",
-		"deploy/Reverify Stage1 handoff at deploy prewrite":                                 "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
-		"deploy/Write genesis public release evidence":                                      "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
-		"deploy/Guard stateful component files":                                             "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
-		"deploy/Synchronize additive ManagedApp CRD schema":                                 "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",
-		"deploy/Prepare authoritative DNS DiG runtime":                                      "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
-		"deploy/Verify local deploy prerequisites":                                          "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
-		"deploy/Explain runner and fail closed target":                                      "1731c0653bfe39738df9b79b1deafd74e1454c815ed2aa816454b9b83713f0d0",
-		"deploy/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
-		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
-		"deploy/Roll out exact API hotfix with hybrid compensation":                         "88e24f910736b2cd3468b5c98320fafb4e7dd1de422e209123d7a679901f3b43",
-		"deploy/Remove stale release recovery proof":                                        "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
-		"continue-release-convergence/Dispatch exact release convergence successor":         "510c424625aa4b352c3fdacfbca149f8e784760da4971977cbe5f487fddcdfb9",
-		"record-release-baseline/Advance dedicated forward-only release baseline branch":    "007dfc7144f11bc1cc0a7b62994c4efee969679de1a185913489ec5d42b592e7",
-		"rearm-release-lane-on-success/Disable successful release lane with exact readback": "a02d80a1b11f8087ec74498fe2ca437016a8fa513d62102438e14c0f4acf2759",
-		"freeze-release-lane-on-failure/Record release lane freeze evidence":                "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
-		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":        "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
-		"freeze-release-lane-on-failure/Require release lane freeze evidence":               "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
+		"release-input-guard/Guard exact main commit authorization":                                   "04d81d2c70ad3ece441c515bdc0d8508b1d0e0b33a36f27cac7f45c273edfd9c",
+		"recover-api-hotfix-fence/Verify exact recovery implementation identity":                      "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
+		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":               "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
+		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                             "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
+		"release-baseline/Resolve release-domain baseline":                                            "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
+		"release-baseline/Verify Stage1 handoff before release planning":                              "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
+		"release-baseline/Resolve live image metadata":                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"release-baseline/Compute live-to-target release changed files":                               "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
+		"release-baseline/Verify exact API hotfix runtime closure":                                    "491a04c7454cf3b908b796d7b7238b88f08ae45612c0994783151fdb450ee105",
+		"release-gate/Verify exact source CI receipt":                                                 "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
+		"release-gate/Verify exact API hotfix product receipt":                                        "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
+		"build/Compute image metadata":                                                                "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
+		"build/Compute image build plan":                                                              "0994dc9ede63c38e4d18548f762445aa29ab084474498112ba597e478e5bcb34",
+		"build/Verify exact historical incident image plan":                                           "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
+		"build/Verify exact API hotfix image plan":                                                    "d5b258401587abc13c630536f8ec36cbdae46203b3308ace9bfd1ed5c40f9a97",
+		"build/Materialize exact canonical build receipt":                                             "2d6ecd17bcd49b56c15cf1ab4e3a2569b88db8b4e63b6499ccc63f87cedd5889",
+		"build/Publish verified control-plane image provenance":                                       "59d409f80ffd29294fb36e374a4607eccd486ce180b5543cea02bb2382aca379",
+		"deploy/Record deploy job budget origin":                                                      "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
+		"deploy/Prepare exact current tooling for historical runtime evidence":                        "15cd94ec3a12647dc78e51695e2ce52ee7ed2b8a29ee2cf63e9df945e6d7c33a",
+		"deploy/Build private release-domain tools":                                                   "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
+		"deploy/Restore exact historical runtime checkout":                                            "72a75a948848c5b0bf2042e66c5849835fedcd7e311c91910cd73287d77c9142",
+		"deploy/Reverify Stage1 handoff at deploy prewrite":                                           "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
+		"deploy/Write genesis public release evidence":                                                "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
+		"deploy/Guard stateful component files":                                                       "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
+		"deploy/Synchronize additive ManagedApp CRD schema":                                           "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",
+		"deploy/Prepare authoritative DNS DiG runtime":                                                "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
+		"deploy/Verify local deploy prerequisites":                                                    "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
+		"deploy/Explain runner and fail closed target":                                                "1731c0653bfe39738df9b79b1deafd74e1454c815ed2aa816454b9b83713f0d0",
+		"deploy/Resolve live image metadata":                                                          "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                          "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
+		"deploy/Roll out exact API hotfix with hybrid compensation":                                   "88e24f910736b2cd3468b5c98320fafb4e7dd1de422e209123d7a679901f3b43",
+		"deploy/Remove stale release recovery proof":                                                  "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
+		"continue-release-convergence/Dispatch exact release convergence successor":                   "510c424625aa4b352c3fdacfbca149f8e784760da4971977cbe5f487fddcdfb9",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch":              "007dfc7144f11bc1cc0a7b62994c4efee969679de1a185913489ec5d42b592e7",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback":           "a02d80a1b11f8087ec74498fe2ca437016a8fa513d62102438e14c0f4acf2759",
+		"freeze-release-lane-on-failure/Record release lane freeze evidence":                          "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
+		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":                  "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
+		"freeze-release-lane-on-failure/Require release lane freeze evidence":                         "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
+		"historical-controller-build-only/Bind exact historical Controller build-only plan":           "39ba749973f0f699062fbf7347a2d5335b66fa55a917a711279914796bae8933",
+		"historical-controller-build-only/Build and verify exact historical Controller artifact":      "945d58db0d33901ea33a593d552079e806c6408b4b8070340a4d67b87bb23dd5",
+		"historical-controller-build-only/Guard exact historical Controller build-only authorization": "3ffd2a4374026026f199e472bff6052fea5f26c5e0bcc190ac515eb48e9069d0",
+		"historical-controller-build-only/Initialize exact historical Controller receipt directory":   "433f13dfa97a749a480ada6c1d4dca23ddb615d4e12fa37d9ff868ea8dd5e9d9",
+		"historical-controller-build-only/Require exact historical Controller build-only success":     "4c29c0165ec22321ed267ff97dd249bf5c35999e013d01d362b543520d4fa2ca",
+		"historical-controller-build-only/Seal verified or quarantined historical Controller receipt": "8ae7ea1c81494ebe8e0e62cdea24770f54b938b94aaf5e3c59115e5a22afcd51",
 	})
 	workflowJobsNode := workflowMappingValue(t, workflowRootNode, "jobs")
 	assertWorkflowJobNodeContracts(t, workflowJobsNode, map[string]workflowJobNodeContract{
 		"release-input-guard": {
-			Keys: []string{"runs-on", "permissions", "steps"},
+			Keys: []string{"if", "runs-on", "permissions", "steps"},
 			StepKeys: [][]string{
 				{"name", "if", "uses", "with"},
 				{"name", "if", "uses", "with"},
@@ -2932,6 +2938,21 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			Keys: []string{"needs", "if", "runs-on", "permissions", "steps"},
 			StepKeys: [][]string{
 				{"name", "env", "run"},
+			},
+		},
+		"historical-controller-build-only": {
+			Keys: []string{"if", "runs-on", "timeout-minutes", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "env", "run"},
+				{"name", "id", "run"},
+				{"name", "uses", "with"},
+				{"name", "id", "run"},
+				{"name", "uses"},
+				{"name", "uses", "with"},
+				{"name", "id", "continue-on-error", "env", "run"},
+				{"name", "id", "if", "env", "run"},
+				{"name", "id", "if", "uses", "with"},
+				{"name", "if", "env", "run"},
 			},
 		},
 		"release-baseline": {
@@ -3032,7 +3053,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if workflow.On.WorkflowDispatch == nil {
 		t.Fatal("control-plane workflow must support workflow_dispatch")
 	}
-	if len(workflow.On.WorkflowDispatch.Inputs) != 9 {
+	if len(workflow.On.WorkflowDispatch.Inputs) != 10 {
 		t.Fatalf("workflow_dispatch input inventory drifted: %+v", workflow.On.WorkflowDispatch.Inputs)
 	}
 	expectedSHAInput, ok := workflow.On.WorkflowDispatch.Inputs["expected_sha"]
@@ -3125,6 +3146,17 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if reuseInput.Required || reuseInput.Type != "string" || reuseInput.Default != "" {
 		t.Fatalf("artifact_reuse_receipt_b64 must be an optional empty-default string: %+v", reuseInput)
 	}
+	historicalControllerInputNode, exists := workflow.On.WorkflowDispatch.Inputs["historical_controller_build_only_v1"]
+	if !exists {
+		t.Fatal("workflow_dispatch must define historical_controller_build_only_v1")
+	}
+	var historicalControllerInput releaseWorkflowDispatchInput
+	if err := historicalControllerInputNode.Decode(&historicalControllerInput); err != nil {
+		t.Fatalf("decode historical_controller_build_only_v1 input: %v", err)
+	}
+	if historicalControllerInput.Required || historicalControllerInput.Type != "string" || historicalControllerInput.Default != "" {
+		t.Fatalf("historical_controller_build_only_v1 must be an optional empty-default string: %+v", historicalControllerInput)
+	}
 	workflowSource := string(data)
 	if strings.Contains(workflowSource, "existing_image_tag") || len(workflow.On.Push.Paths) != 0 {
 		t.Fatal("control-plane release must be dispatch-only without an image bypass")
@@ -3133,6 +3165,10 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	inputGuard, ok := workflow.Jobs["release-input-guard"]
 	if !ok {
 		t.Fatal("control-plane workflow must define release-input-guard")
+	}
+	const ordinaryReleaseCondition = "${{ inputs.historical_controller_build_only_v1 == '' }}"
+	if inputGuard.If != ordinaryReleaseCondition {
+		t.Fatalf("ordinary release input guard must be default-on and isolated from fixed build-only mode: got %q want %q", inputGuard.If, ordinaryReleaseCondition)
 	}
 	if got, want := inputGuard.Permissions, map[string]string{"actions": "read", "contents": "read"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("release input guard permissions drifted: got %v want %v", got, want)
@@ -3274,6 +3310,206 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 
+	historicalBuildOnly, ok := workflow.Jobs["historical-controller-build-only"]
+	if !ok {
+		t.Fatal("control-plane workflow must define the fixed historical Controller build-only job")
+	}
+	if historicalBuildOnly.If != "${{ inputs.historical_controller_build_only_v1 != '' }}" ||
+		len(historicalBuildOnly.Needs) != 0 || historicalBuildOnly.Environment != "" ||
+		historicalBuildOnly.TimeoutMinutes != 90 || historicalBuildOnly.ContinueOnError {
+		t.Fatalf("fixed historical Controller build-only job boundary drifted: %+v", historicalBuildOnly)
+	}
+	var historicalBuildOnlyRunner string
+	if err := historicalBuildOnly.RunsOn.Decode(&historicalBuildOnlyRunner); err != nil {
+		t.Fatalf("decode fixed historical Controller build-only runner: %v", err)
+	}
+	if historicalBuildOnlyRunner != "ubuntu-latest" {
+		t.Fatalf("fixed historical Controller build-only must use a hosted runner: %q", historicalBuildOnlyRunner)
+	}
+	if got, want := historicalBuildOnly.Permissions, map[string]string{"actions": "read", "contents": "read", "packages": "write"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fixed historical Controller build-only permissions drifted: got %v want %v", got, want)
+	}
+	historicalGuard := workflowStepByName(t, historicalBuildOnly, "Guard exact historical Controller build-only authorization")
+	for key, want := range map[string]string{
+		"AUTHORIZATION":                              "${{ inputs.historical_controller_build_only_v1 }}",
+		"EXPECTED_SHA":                               "${{ inputs.expected_sha }}",
+		"ACTUAL_SHA":                                 "${{ github.sha }}",
+		"TARGET_SHA":                                 "${{ inputs.target_sha }}",
+		"IMAGE_CACHE_CONVERGENCE":                    "${{ inputs.image_cache_convergence && 'true' || 'false' }}",
+		"CONVERGENCE_SOURCE_RUN_ID":                  "${{ inputs.convergence_source_run_id }}",
+		"PUBLIC_DATA_PLANE_ADOPTION_RUN_ID":          "${{ inputs.public_data_plane_adoption_run_id }}",
+		"PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST": "${{ inputs.public_data_plane_adoption_baseline_digest }}",
+		"API_HOTFIX_ROLLOUT_V2":                      "${{ inputs.api_hotfix_rollout_v2 }}",
+		"API_HOTFIX_RECOVERY_ONLY":                   "${{ inputs.api_hotfix_recovery_only }}",
+		"ARTIFACT_REUSE_RECEIPT_B64":                 "${{ inputs.artifact_reuse_receipt_b64 }}",
+		"EVENT_NAME":                                 "${{ github.event_name }}",
+		"EVENT_REF":                                  "${{ github.ref }}",
+		"EVENT_REF_NAME":                             "${{ github.ref_name }}",
+		"EVENT_REF_TYPE":                             "${{ github.ref_type }}",
+		"RUN_ID":                                     "${{ github.run_id }}",
+		"RUN_ATTEMPT":                                "${{ github.run_attempt }}",
+		"GH_TOKEN":                                   "${{ github.token }}",
+		"REPOSITORY":                                 "${{ github.repository }}",
+	} {
+		if got := historicalGuard.Env[key]; got != want {
+			t.Fatalf("fixed historical Controller guard env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	if len(historicalGuard.Env) != 19 {
+		t.Fatalf("fixed historical Controller guard env inventory drifted: %+v", historicalGuard.Env)
+	}
+	for _, required := range []string{
+		"CONFIRM_EXACT58FC_HISTORICAL_CONTROLLER_BUILD_ONLY_V1",
+		"58fc2e560064214e3f329765c9ec7839ee513c27",
+		`"${EVENT_REF}" == 'refs/heads/main'`,
+		`"${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${ACTUAL_SHA}" == "${EXPECTED_SHA}"`,
+		`"${RUN_ID}" =~ ^[1-9][0-9]*$ && "${RUN_ATTEMPT}" == '1'`,
+		`"${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}"`,
+		`[[ -z "${API_HOTFIX_ROLLOUT_V2}" ]]`,
+		`[[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${ARTIFACT_REUSE_RECEIPT_B64}" ]]`,
+		`"repos/${REPOSITORY}/git/ref/heads/main"`,
+		`"${remote_main}" =~ ^[0-9a-f]{40}$ && "${remote_main}" == "${EXPECTED_SHA}"`,
+	} {
+		if !strings.Contains(historicalGuard.Run, required) {
+			t.Fatalf("fixed historical Controller guard must contain %q", required)
+		}
+	}
+
+	historicalInitialize := workflowStepByName(t, historicalBuildOnly, "Initialize exact historical Controller receipt directory")
+	if historicalInitialize.ID != "initialize" || !strings.Contains(historicalInitialize.Run, "fugue-historical-controller-build-only-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}") ||
+		!strings.Contains(historicalInitialize.Run, "install -d -m 0700") {
+		t.Fatalf("fixed historical Controller receipt initialization drifted: %+v", historicalInitialize)
+	}
+	historicalCheckout := workflowStepByName(t, historicalBuildOnly, "Checkout exact historical Controller source")
+	if historicalCheckout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+		!reflect.DeepEqual(historicalCheckout.With, map[string]string{
+			"ref": "${{ inputs.target_sha }}", "fetch-depth": "0", "persist-credentials": "false",
+		}) {
+		t.Fatalf("fixed historical Controller checkout drifted: %+v", historicalCheckout)
+	}
+	historicalBuildOnlyPlan := workflowStepByName(t, historicalBuildOnly, "Bind exact historical Controller build-only plan")
+	if historicalBuildOnlyPlan.ID != "plan" {
+		t.Fatalf("fixed historical Controller plan id drifted: %+v", historicalBuildOnlyPlan)
+	}
+	for _, required := range []string{"build_targets=controller", "build_target_count=1", "target_count=0"} {
+		if !strings.Contains(historicalBuildOnlyPlan.Run, required) {
+			t.Fatalf("fixed historical Controller plan must contain %q", required)
+		}
+	}
+	if step := workflowStepByName(t, historicalBuildOnly, "Setup exact historical Controller Buildx"); step.Uses != "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" {
+		t.Fatalf("fixed historical Controller Buildx setup drifted: %+v", step)
+	}
+	historicalLogin := workflowStepByName(t, historicalBuildOnly, "Login to GHCR for exact historical Controller")
+	if historicalLogin.Uses != "docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0" ||
+		historicalLogin.With["registry"] != "ghcr.io" || historicalLogin.With["password"] != "${{ secrets.GITHUB_TOKEN }}" {
+		t.Fatalf("fixed historical Controller registry login drifted: %+v", historicalLogin)
+	}
+	historicalBuild := workflowStepByName(t, historicalBuildOnly, "Build and verify exact historical Controller artifact")
+	if historicalBuild.ID != "build_images" || !historicalBuild.ContinueOnError {
+		t.Fatalf("fixed historical Controller build must defer failure until quarantine evidence is uploaded: %+v", historicalBuild)
+	}
+	for key, want := range map[string]string{
+		"EXPECTED_MAIN_SHA":                 "${{ inputs.expected_sha }}",
+		"TARGET_SHA":                        "${{ inputs.target_sha }}",
+		"GH_TOKEN":                          "${{ github.token }}",
+		"REPOSITORY":                        "${{ github.repository }}",
+		"BUILD_TARGET_COUNT":                "${{ steps.plan.outputs.build_target_count }}",
+		"ACTIVATION_TARGET_COUNT":           "${{ steps.plan.outputs.target_count }}",
+		"FUGUE_CONTROL_PLANE_IMAGE_TARGETS": "${{ steps.plan.outputs.build_targets }}",
+		"FUGUE_IMAGE_TAG":                   "58fc2e560064214e3f329765c9ec7839ee513c27",
+		"FUGUE_CONTROLLER_IMAGE_REPOSITORY": "ghcr.io/yym68686/fugue-controller",
+	} {
+		if got := historicalBuild.Env[key]; got != want {
+			t.Fatalf("fixed historical Controller build env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	if len(historicalBuild.Env) != 9 {
+		t.Fatalf("fixed historical Controller build env inventory drifted: %+v", historicalBuild.Env)
+	}
+	for _, required := range []string{
+		"0cbb953d3985b5cb4ca547a83e25013942232883",
+		"dcb8be5d58a06f43308aeea85d2dc3b8abab34f9",
+		"89c0b0333844342b8d62bc27df1a7119b9f52c06ab7be1e6a3ecfc7134d6a470",
+		"37b1bd7640849cc5b1a77d69680ddfa195bc61b5",
+		"242548c1fe274575da5a83121141f28bd8927e092b7c827fc86097334c1455c6",
+		"33eef7fd57bd5ce44bb1ebca113cadd988c7e7da",
+		"caa94e5c8603335265f8ccf83d52f9712730ee273e6eb55799719f875f545114",
+		`git symbolic-ref -q HEAD`,
+		`git diff --quiet --ignore-submodules --`,
+		`git status --porcelain=v1 --untracked-files=all`,
+		`buildx imagetools inspect "${mutable_ref}"`,
+		`grep -Eiq '(manifest unknown|not found)'`,
+		"type=gha,scope=fugue-control-plane-controller,mode=max,ignore-error=true",
+		`[[ "${removed_cache_export}" == '1' ]]`,
+		`[[ "${argument}" != --cache-to && "${argument}" != --cache-to=* ]]`,
+		`printf 'registry_write_completed`,
+		`PATH="${shim_dir}:${PATH}" ./scripts/build_control_plane_images.sh`,
+		`[[ "${ACTIVATION_TARGET_COUNT}" == '0' ]]`,
+	} {
+		if !strings.Contains(historicalBuild.Run, required) {
+			t.Fatalf("fixed historical Controller build must contain %q", required)
+		}
+	}
+	orderedBuildMarkers := []string{
+		`[[ "$(git rev-parse --verify 'HEAD^{tree}')" == "${exact_tree}" ]]`,
+		`buildx imagetools inspect "${mutable_ref}"`,
+		`prewrite_main="$(timeout --kill-after=2s 10s gh api`,
+		`PATH="${shim_dir}:${PATH}" ./scripts/build_control_plane_images.sh`,
+	}
+	previousIndex := -1
+	for _, marker := range orderedBuildMarkers {
+		index := strings.LastIndex(historicalBuild.Run, marker)
+		if index <= previousIndex {
+			t.Fatalf("fixed historical Controller prewrite order drifted at %q: previous=%d current=%d", marker, previousIndex, index)
+		}
+		previousIndex = index
+	}
+	if strings.Count(historicalBuild.Run, `./scripts/build_control_plane_images.sh`) != 1 {
+		t.Fatalf("fixed historical Controller build must invoke the exact source-tree script once")
+	}
+	for _, forbidden := range []string{"kubectl ", "k3s kubectl", "helm ", "gh workflow", "--method DELETE", "packages/delete", "docker image rm"} {
+		if strings.Contains(historicalBuild.Run, forbidden) {
+			t.Fatalf("fixed historical Controller build contains out-of-scope mutation %q", forbidden)
+		}
+	}
+
+	historicalSeal := workflowStepByName(t, historicalBuildOnly, "Seal verified or quarantined historical Controller receipt")
+	if historicalSeal.ID != "seal_receipt" || historicalSeal.If != "${{ always() && steps.initialize.outcome == 'success' }}" {
+		t.Fatalf("fixed historical Controller receipt seal boundary drifted: %+v", historicalSeal)
+	}
+	for _, required := range []string{
+		"HistoricalControllerBuildOnlyReceipt", "HistoricalControllerBuildOnlyQuarantineReceipt",
+		`"activation_target_count": 0`, `"build_target_count": 1`,
+		`"automatic_registry_deletion_attempted": False`, `"production_mutation_attempted": False`,
+		`"registry_preflight": registry_preflight`, "registry_manifest_config_and_layer_get", "verified-image-artifacts.json",
+		`buildx imagetools inspect "${mutable_ref}"`, "not_published_after_write_attempt", "write_attempt_uninspectable",
+		`"status": "quarantined" if write_attempted`,
+	} {
+		if !strings.Contains(historicalSeal.Run, required) {
+			t.Fatalf("fixed historical Controller receipt seal must contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{"--method DELETE", "packages/delete", "kubectl ", "helm ", "git push"} {
+		if strings.Contains(historicalSeal.Run, forbidden) {
+			t.Fatalf("fixed historical Controller receipt seal contains forbidden cleanup %q", forbidden)
+		}
+	}
+	historicalUpload := workflowStepByName(t, historicalBuildOnly, "Upload exact historical Controller build-only receipt")
+	if historicalUpload.ID != "upload_receipt" ||
+		historicalUpload.If != "${{ always() && steps.seal_receipt.outputs.receipt_ready == 'true' }}" ||
+		historicalUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		historicalUpload.With["name"] != "fugue-historical-controller-build-only-58fc-${{ github.run_id }}-${{ github.run_attempt }}" ||
+		historicalUpload.With["if-no-files-found"] != "error" || historicalUpload.With["overwrite"] != "false" {
+		t.Fatalf("fixed historical Controller receipt upload drifted: %+v", historicalUpload)
+	}
+	historicalRequire := workflowStepByName(t, historicalBuildOnly, "Require exact historical Controller build-only success")
+	if historicalRequire.If != "${{ always() && steps.initialize.outcome == 'success' }}" ||
+		!strings.Contains(historicalRequire.Run, `"${BUILD_OUTCOME}" == 'success'`) ||
+		!strings.Contains(historicalRequire.Run, `"${RECEIPT_OUTCOME}" == 'success'`) ||
+		!strings.Contains(historicalRequire.Run, `"${UPLOAD_OUTCOME}" == 'success'`) {
+		t.Fatalf("fixed historical Controller terminal gate drifted: %+v", historicalRequire)
+	}
+
 	gate, ok := workflow.Jobs["release-gate"]
 	if !ok {
 		t.Fatal("control-plane workflow must define release-gate")
@@ -3397,7 +3633,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			}
 		}
 	}
-	if checkoutCount != 6 || currentToolingCheckoutCount != 1 {
+	if checkoutCount != 7 || currentToolingCheckoutCount != 1 {
 		t.Fatalf("control-plane workflow checkout closure drifted: total=%d current-tooling=%d", checkoutCount, currentToolingCheckoutCount)
 	}
 
@@ -4499,7 +4735,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if len(freeze.Needs) != 8 {
 		t.Fatalf("release-lane freeze finalizer has unexpected dependencies: %v", freeze.Needs)
 	}
-	const freezeCondition = "${{ always() && inputs.api_hotfix_recovery_only == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}"
+	const freezeCondition = "${{ always() && inputs.api_hotfix_recovery_only == '' && inputs.historical_controller_build_only_v1 == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}"
 	if freeze.If != freezeCondition {
 		t.Fatalf("release-lane freeze condition drifted: got %q want %q", freeze.If, freezeCondition)
 	}
@@ -4574,6 +4810,187 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	requireFreezeEvidence := workflowStepByName(t, freeze, "Require release lane freeze evidence")
 	if got, want := requireFreezeEvidence.If, "${{ always() && steps.freeze_evidence_upload.outcome != 'success' }}"; got != want {
 		t.Fatalf("release-lane evidence failure condition drifted: got %q want %q", got, want)
+	}
+}
+
+func TestHistoricalControllerBuildOnlyScriptMock(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", "scripts", "test_historical_controller_build_only.sh")
+	command := exec.Command("bash", path)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("historical Controller build-only mock failed: %v output=%s", err, output)
+	}
+	if !strings.Contains(string(output), "historical Controller build-only mock test passed") {
+		t.Fatalf("historical Controller build-only mock success marker is absent: %s", output)
+	}
+}
+
+func TestHistoricalControllerBuildOnlyReceiptHarness(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	seal := workflowStepByName(t, workflow.Jobs["historical-controller-build-only"], "Seal verified or quarantined historical Controller receipt")
+	const (
+		targetSHA      = "58fc2e560064214e3f329765c9ec7839ee513c27"
+		mainSHA        = "7668839a3c462e3b3e0336e6efea4d8ed21ab4dc"
+		topDigest      = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		platformDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		configDigest   = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	artifact := map[string]any{
+		"component":                "controller",
+		"config_digest":            configDigest,
+		"immutable_ref":            "ghcr.io/yym68686/fugue-controller@" + topDigest,
+		"oci_revision":             targetSHA,
+		"platform_manifest_digest": platformDigest,
+		"repository":               "ghcr.io/yym68686/fugue-controller",
+		"source_tag":               targetSHA,
+		"top_digest":               topDigest,
+		"verification":             "registry_manifest_config_and_layer_get",
+	}
+	artifactBytes, err := json.Marshal([]map[string]any{artifact})
+	if err != nil {
+		t.Fatalf("marshal historical Controller artifact fixture: %v", err)
+	}
+	artifactDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(artifactBytes))
+
+	tests := []struct {
+		name                 string
+		buildOutcome         string
+		writeState           string
+		wantKind             string
+		wantStatus           string
+		wantQuarantineDigest any
+	}{
+		{
+			name:                 "verified",
+			buildOutcome:         "success",
+			writeState:           "registry_write_completed",
+			wantKind:             "HistoricalControllerBuildOnlyReceipt",
+			wantStatus:           "verified",
+			wantQuarantineDigest: nil,
+		},
+		{
+			name:                 "post-push failure is quarantined",
+			buildOutcome:         "failure",
+			writeState:           "registry_write_completed",
+			wantKind:             "HistoricalControllerBuildOnlyQuarantineReceipt",
+			wantStatus:           "quarantined",
+			wantQuarantineDigest: topDigest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testRoot := t.TempDir()
+			receiptDir := filepath.Join(testRoot, "receipt")
+			if err := os.Mkdir(receiptDir, 0o700); err != nil {
+				t.Fatalf("create receipt harness directory: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(receiptDir, "observed-main-sha"), []byte(mainSHA), 0o600); err != nil {
+				t.Fatalf("write observed main fixture: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(receiptDir, "registry-preflight.status"), []byte("tag_absent\n"), 0o600); err != nil {
+				t.Fatalf("write registry preflight fixture: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(receiptDir, "registry-write.state"), []byte(test.writeState+"\n"), 0o600); err != nil {
+				t.Fatalf("write registry state fixture: %v", err)
+			}
+			binDir := filepath.Join(testRoot, "bin")
+			if err := os.Mkdir(binDir, 0o700); err != nil {
+				t.Fatalf("create receipt harness bin: %v", err)
+			}
+			dockerCall := filepath.Join(testRoot, "docker-call")
+			dockerScript := `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "buildx imagetools inspect ghcr.io/yym68686/fugue-controller:58fc2e560064214e3f329765c9ec7839ee513c27" ]]
+printf '%s\n' "$*" >"${FUGUE_RECEIPT_TEST_DOCKER_CALL}"
+printf 'Name: ghcr.io/yym68686/fugue-controller:58fc2e560064214e3f329765c9ec7839ee513c27\nDigest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+`
+			if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerScript), 0o700); err != nil {
+				t.Fatalf("write receipt harness docker: %v", err)
+			}
+			githubOutput := filepath.Join(testRoot, "github-output")
+			command := exec.Command("bash", "-c", seal.Run)
+			command.Env = append(os.Environ(),
+				"PATH="+binDir+":"+os.Getenv("PATH"),
+				"FUGUE_HISTORICAL_CONTROLLER_RECEIPT_DIR="+receiptDir,
+				"FUGUE_RECEIPT_TEST_DOCKER_CALL="+dockerCall,
+				"GITHUB_OUTPUT="+githubOutput,
+				"BUILD_OUTCOME="+test.buildOutcome,
+				"CONTROLLER_IMAGE_DIGEST="+map[bool]string{true: topDigest, false: ""}[test.buildOutcome == "success"],
+				"VERIFIED_IMAGE_ARTIFACTS_JSON="+map[bool]string{true: string(artifactBytes), false: ""}[test.buildOutcome == "success"],
+				"VERIFIED_IMAGE_ARTIFACTS_DIGEST="+map[bool]string{true: artifactDigest, false: ""}[test.buildOutcome == "success"],
+				"EXPECTED_MAIN_SHA="+mainSHA,
+				"TARGET_SHA="+targetSHA,
+				"RUN_ID=123456",
+				"RUN_ATTEMPT=1",
+				"REPOSITORY=yym68686/fugue",
+			)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("run historical Controller receipt harness: %v output=%s", err, output)
+			}
+			raw, err := os.ReadFile(filepath.Join(receiptDir, "receipt.json"))
+			if err != nil {
+				t.Fatalf("read historical Controller receipt: %v", err)
+			}
+			var receipt map[string]any
+			if err := json.Unmarshal(raw, &receipt); err != nil {
+				t.Fatalf("decode historical Controller receipt: %v", err)
+			}
+			canonical, err := json.Marshal(receipt)
+			if err != nil {
+				t.Fatalf("marshal historical Controller receipt: %v", err)
+			}
+			if string(raw) != string(canonical)+"\n" {
+				t.Fatalf("historical Controller receipt bytes are not canonical: %s", raw)
+			}
+			for key, want := range map[string]any{
+				"kind":                                  test.wantKind,
+				"status":                                test.wantStatus,
+				"activation_eligible":                   false,
+				"activation_target_count":               float64(0),
+				"automatic_registry_deletion_attempted": false,
+				"build_target_count":                    float64(1),
+				"production_mutation_attempted":         false,
+				"registry_preflight":                    "tag_absent",
+				"source_commit":                         targetSHA,
+				"source_tree":                           "0cbb953d3985b5cb4ca547a83e25013942232883",
+				"observed_main_sha":                     mainSHA,
+			} {
+				if got := receipt[key]; !reflect.DeepEqual(got, want) {
+					t.Fatalf("historical Controller receipt %s drifted: got %#v want %#v", key, got, want)
+				}
+			}
+			if got := receipt["quarantined_top_digest"]; !reflect.DeepEqual(got, test.wantQuarantineDigest) {
+				t.Fatalf("historical Controller quarantine digest drifted: got %#v want %#v", got, test.wantQuarantineDigest)
+			}
+			githubOutputBytes, err := os.ReadFile(githubOutput)
+			if err != nil || string(githubOutputBytes) != "receipt_ready=true\n" {
+				t.Fatalf("historical Controller receipt output drifted: err=%v output=%q", err, githubOutputBytes)
+			}
+			if test.buildOutcome == "success" {
+				if _, err := os.Stat(dockerCall); !os.IsNotExist(err) {
+					t.Fatalf("verified receipt must not repeat registry inspection: %v", err)
+				}
+				verified, err := os.ReadFile(filepath.Join(receiptDir, "verified-image-artifacts.json"))
+				if err != nil || string(verified) != string(artifactBytes) {
+					t.Fatalf("verified Controller artifacts drifted: err=%v value=%s", err, verified)
+				}
+			} else if _, err := os.Stat(dockerCall); err != nil {
+				t.Fatalf("quarantine receipt must inspect the post-push tag: %v", err)
+			}
+		})
 	}
 }
 

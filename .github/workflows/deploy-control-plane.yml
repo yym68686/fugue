@@ -46,6 +46,11 @@ on:
         required: false
         type: string
         default: ''
+      historical_controller_build_only_v1:
+        description: Exact short-lived authorization for the fixed 58fc Controller build-only transaction
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -56,6 +61,7 @@ concurrency:
 
 jobs:
   release-input-guard:
+    if: ${{ inputs.historical_controller_build_only_v1 == '' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -348,6 +354,414 @@ jobs:
           include-hidden-files: false
           overwrite: false
 
+  historical-controller-build-only:
+    if: ${{ inputs.historical_controller_build_only_v1 != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    steps:
+      - name: Guard exact historical Controller build-only authorization
+        env:
+          AUTHORIZATION: ${{ inputs.historical_controller_build_only_v1 }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          ACTUAL_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          IMAGE_CACHE_CONVERGENCE: ${{ inputs.image_cache_convergence && 'true' || 'false' }}
+          CONVERGENCE_SOURCE_RUN_ID: ${{ inputs.convergence_source_run_id }}
+          PUBLIC_DATA_PLANE_ADOPTION_RUN_ID: ${{ inputs.public_data_plane_adoption_run_id }}
+          PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST: ${{ inputs.public_data_plane_adoption_baseline_digest }}
+          API_HOTFIX_ROLLOUT_V2: ${{ inputs.api_hotfix_rollout_v2 }}
+          API_HOTFIX_RECOVERY_ONLY: ${{ inputs.api_hotfix_recovery_only }}
+          ARTIFACT_REUSE_RECEIPT_B64: ${{ inputs.artifact_reuse_receipt_b64 }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
+          EVENT_REF_TYPE: ${{ github.ref_type }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          readonly exact_authorization='CONFIRM_EXACT58FC_HISTORICAL_CONTROLLER_BUILD_ONLY_V1'
+          readonly exact_target='58fc2e560064214e3f329765c9ec7839ee513c27'
+          [[ "${AUTHORIZATION}" == "${exact_authorization}" ]]
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' ]]
+          [[ "${EVENT_REF}" == 'refs/heads/main' && "${EVENT_REF_NAME}" == 'main' && "${EVENT_REF_TYPE}" == 'branch' ]]
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${ACTUAL_SHA}" == "${EXPECTED_SHA}" ]]
+          [[ "${TARGET_SHA}" == "${exact_target}" && "${TARGET_SHA}" != "${EXPECTED_SHA}" ]]
+          [[ "${RUN_ID}" =~ ^[1-9][0-9]*$ && "${RUN_ATTEMPT}" == '1' ]]
+          [[ "${REPOSITORY}" == 'yym68686/fugue' ]]
+          [[ "${IMAGE_CACHE_CONVERGENCE}" == 'false' && -z "${CONVERGENCE_SOURCE_RUN_ID}" ]]
+          [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]
+          [[ -z "${API_HOTFIX_ROLLOUT_V2}" ]]
+          [[ -z "${API_HOTFIX_RECOVERY_ONLY}" && -z "${ARTIFACT_REUSE_RECEIPT_B64}" ]]
+          remote_main="$(timeout --kill-after=2s 10s gh api \
+            "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${remote_main}" =~ ^[0-9a-f]{40}$ && "${remote_main}" == "${EXPECTED_SHA}" ]]
+
+      - name: Initialize exact historical Controller receipt directory
+        id: initialize
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP}/fugue-historical-controller-build-only-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "${receipt_dir}" && ! -L "${receipt_dir}" ]]
+          install -d -m 0700 "${receipt_dir}"
+          printf 'FUGUE_HISTORICAL_CONTROLLER_RECEIPT_DIR=%s\n' "${receipt_dir}" >>"${GITHUB_ENV}"
+
+      - name: Checkout exact historical Controller source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind exact historical Controller build-only plan
+        id: plan
+        run: |
+          set -euo pipefail
+          {
+            printf 'build_targets=controller\n'
+            printf 'build_target_count=1\n'
+            printf 'target_count=0\n'
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Setup exact historical Controller Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Login to GHCR for exact historical Controller
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and verify exact historical Controller artifact
+        id: build_images
+        continue-on-error: true
+        env:
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BUILD_TARGET_COUNT: ${{ steps.plan.outputs.build_target_count }}
+          ACTIVATION_TARGET_COUNT: ${{ steps.plan.outputs.target_count }}
+          FUGUE_CONTROL_PLANE_IMAGE_TARGETS: ${{ steps.plan.outputs.build_targets }}
+          FUGUE_IMAGE_TAG: 58fc2e560064214e3f329765c9ec7839ee513c27
+          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ghcr.io/yym68686/fugue-controller
+        run: |
+          set -euo pipefail
+          readonly exact_target='58fc2e560064214e3f329765c9ec7839ee513c27'
+          readonly exact_tree='0cbb953d3985b5cb4ca547a83e25013942232883'
+          readonly exact_dockerfile_blob='dcb8be5d58a06f43308aeea85d2dc3b8abab34f9'
+          readonly exact_dockerfile_sha256='89c0b0333844342b8d62bc27df1a7119b9f52c06ab7be1e6a3ecfc7134d6a470'
+          readonly exact_script_blob='37b1bd7640849cc5b1a77d69680ddfa195bc61b5'
+          readonly exact_script_sha256='242548c1fe274575da5a83121141f28bd8927e092b7c827fc86097334c1455c6'
+          readonly exact_verifier_blob='33eef7fd57bd5ce44bb1ebca113cadd988c7e7da'
+          readonly exact_verifier_sha256='caa94e5c8603335265f8ccf83d52f9712730ee273e6eb55799719f875f545114'
+          readonly mutable_ref="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${exact_target}"
+          readonly receipt_dir="${FUGUE_HISTORICAL_CONTROLLER_RECEIPT_DIR}"
+
+          [[ "${TARGET_SHA}" == "${exact_target}" && "${FUGUE_IMAGE_TAG}" == "${exact_target}" ]]
+          [[ "${FUGUE_CONTROL_PLANE_IMAGE_TARGETS}" == 'controller' && "${BUILD_TARGET_COUNT}" == '1' ]]
+          [[ "${ACTIVATION_TARGET_COUNT}" == '0' ]]
+          [[ "${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" == 'ghcr.io/yym68686/fugue-controller' ]]
+          [[ "${REPOSITORY}" == 'yym68686/fugue' ]]
+          [[ "${EXPECTED_MAIN_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          remote_main="$(timeout --kill-after=2s 10s gh api \
+            "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${remote_main}" == "${EXPECTED_MAIN_SHA}" ]]
+          printf '%s' "${remote_main}" >"${receipt_dir}/observed-main-sha"
+          timeout --kill-after=5s 60s git fetch --no-tags origin "${EXPECTED_MAIN_SHA}"
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_MAIN_SHA}" ]]
+          git merge-base --is-ancestor "${exact_target}" "${EXPECTED_MAIN_SHA}"
+
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${exact_target}" ]]
+          if git symbolic-ref -q HEAD >/dev/null; then
+            printf 'exact historical Controller checkout must be detached\n' >&2
+            exit 1
+          fi
+          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "${exact_tree}" ]]
+          [[ "$(git rev-parse --verify 'HEAD:Dockerfile.controller')" == "${exact_dockerfile_blob}" ]]
+          [[ "$(git rev-parse --verify 'HEAD:scripts/build_control_plane_images.sh')" == "${exact_script_blob}" ]]
+          [[ "$(git rev-parse --verify 'HEAD:scripts/verify_registry_image.py')" == "${exact_verifier_blob}" ]]
+          [[ "$(sha256sum Dockerfile.controller | awk '{print $1}')" == "${exact_dockerfile_sha256}" ]]
+          [[ "$(sha256sum scripts/build_control_plane_images.sh | awk '{print $1}')" == "${exact_script_sha256}" ]]
+          [[ "$(sha256sum scripts/verify_registry_image.py | awk '{print $1}')" == "${exact_verifier_sha256}" ]]
+          git diff --quiet --ignore-submodules --
+          git diff --cached --quiet --ignore-submodules --
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+          real_docker="$(command -v docker)"
+          [[ "${real_docker}" == /* && -x "${real_docker}" ]]
+          shim_dir="${RUNNER_TEMP}/fugue-exact58fc-docker-shim-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "${shim_dir}" && ! -L "${shim_dir}" ]]
+          install -d -m 0700 "${shim_dir}"
+          cat >"${shim_dir}/docker" <<'SHIM'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [[ "$#" -ge 2 && "$1" == 'buildx' && "$2" == 'build' ]]
+          forwarded=("$1" "$2")
+          shift 2
+          removed_cache_export=0
+          while [[ "$#" -gt 0 ]]; do
+            case "$1" in
+              --cache-to)
+                [[ "$#" -ge 2 ]]
+                [[ "$2" == 'type=gha,scope=fugue-control-plane-controller,mode=max,ignore-error=true' ]]
+                removed_cache_export=$((removed_cache_export + 1))
+                shift 2
+                ;;
+              --cache-to=*)
+                [[ "$1" == '--cache-to=type=gha,scope=fugue-control-plane-controller,mode=max,ignore-error=true' ]]
+                removed_cache_export=$((removed_cache_export + 1))
+                shift
+                ;;
+              *)
+                forwarded+=("$1")
+                shift
+                ;;
+            esac
+          done
+          [[ "${removed_cache_export}" == '1' ]]
+          for argument in "${forwarded[@]}"; do
+            [[ "${argument}" != --cache-to && "${argument}" != --cache-to=* ]]
+          done
+          {
+            printf 'cache_export_removed=%s\n' "${removed_cache_export}"
+            printf 'forwarded_argument=%q\n' "${forwarded[@]}"
+          } >"${FUGUE_DOCKER_SHIM_AUDIT}"
+          printf 'registry_write_entered\n' >"${FUGUE_DOCKER_WRITE_STATE}"
+          set +e
+          "${FUGUE_REAL_DOCKER}" "${forwarded[@]}"
+          status=$?
+          set -e
+          if [[ "${status}" == '0' ]]; then
+            printf 'registry_write_completed\n' >"${FUGUE_DOCKER_WRITE_STATE}"
+          fi
+          exit "${status}"
+          SHIM
+          chmod 0700 "${shim_dir}/docker"
+
+          export FUGUE_REAL_DOCKER="${real_docker}"
+          export FUGUE_DOCKER_SHIM_AUDIT="${receipt_dir}/docker-build-audit.log"
+          export FUGUE_DOCKER_WRITE_STATE="${receipt_dir}/registry-write.state"
+
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${exact_target}" ]]
+          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "${exact_tree}" ]]
+          [[ "$(git rev-parse --verify 'HEAD:Dockerfile.controller')" == "${exact_dockerfile_blob}" ]]
+          [[ "$(git rev-parse --verify 'HEAD:scripts/build_control_plane_images.sh')" == "${exact_script_blob}" ]]
+          [[ "$(git rev-parse --verify 'HEAD:scripts/verify_registry_image.py')" == "${exact_verifier_blob}" ]]
+          [[ "$(sha256sum Dockerfile.controller | awk '{print $1}')" == "${exact_dockerfile_sha256}" ]]
+          [[ "$(sha256sum scripts/build_control_plane_images.sh | awk '{print $1}')" == "${exact_script_sha256}" ]]
+          [[ "$(sha256sum scripts/verify_registry_image.py | awk '{print $1}')" == "${exact_verifier_sha256}" ]]
+          git diff --quiet --ignore-submodules --
+          git diff --cached --quiet --ignore-submodules --
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          set +e
+          "${real_docker}" buildx imagetools inspect "${mutable_ref}" \
+            >"${receipt_dir}/registry-preflight.log" 2>&1
+          preflight_status=$?
+          set -e
+          [[ "${preflight_status}" -ne 0 ]]
+          grep -Eiq '(manifest unknown|not found)' "${receipt_dir}/registry-preflight.log"
+          printf 'tag_absent\n' >"${receipt_dir}/registry-preflight.status"
+          prewrite_main="$(timeout --kill-after=2s 10s gh api \
+            "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${prewrite_main}" == "${EXPECTED_MAIN_SHA}" ]]
+          printf '%s' "${prewrite_main}" >"${receipt_dir}/observed-main-sha"
+
+          set +e
+          PATH="${shim_dir}:${PATH}" ./scripts/build_control_plane_images.sh
+          build_status=$?
+          set -e
+          [[ -f "${FUGUE_DOCKER_SHIM_AUDIT}" && ! -L "${FUGUE_DOCKER_SHIM_AUDIT}" ]]
+          [[ "$(grep -c '^cache_export_removed=1$' "${FUGUE_DOCKER_SHIM_AUDIT}")" == '1' ]]
+          if [[ "${build_status}" == '0' ]]; then
+            [[ "$(cat "${FUGUE_DOCKER_WRITE_STATE}")" == 'registry_write_completed' ]]
+          fi
+          exit "${build_status}"
+
+      - name: Seal verified or quarantined historical Controller receipt
+        id: seal_receipt
+        if: ${{ always() && steps.initialize.outcome == 'success' }}
+        env:
+          BUILD_OUTCOME: ${{ steps.build_images.outcome }}
+          CONTROLLER_IMAGE_DIGEST: ${{ steps.build_images.outputs.controller_image_digest }}
+          VERIFIED_IMAGE_ARTIFACTS_JSON: ${{ steps.build_images.outputs.verified_image_artifacts_json }}
+          VERIFIED_IMAGE_ARTIFACTS_DIGEST: ${{ steps.build_images.outputs.verified_image_artifacts_digest }}
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          readonly receipt_dir="${FUGUE_HISTORICAL_CONTROLLER_RECEIPT_DIR}"
+          readonly image_repository='ghcr.io/yym68686/fugue-controller'
+          readonly mutable_ref="${image_repository}:58fc2e560064214e3f329765c9ec7839ee513c27"
+          registry_write_state='not_entered'
+          if [[ -f "${receipt_dir}/registry-write.state" && ! -L "${receipt_dir}/registry-write.state" ]]; then
+            registry_write_state="$(cat "${receipt_dir}/registry-write.state")"
+          fi
+          recovered_top_digest=''
+          registry_inspect_status='not_attempted'
+          if [[ "${BUILD_OUTCOME}" != 'success' && \
+            ("${registry_write_state}" == 'registry_write_entered' || "${registry_write_state}" == 'registry_write_completed') ]]; then
+            set +e
+            docker buildx imagetools inspect "${mutable_ref}" >"${receipt_dir}/quarantine-registry-inspect.log" 2>&1
+            inspect_status=$?
+            set -e
+            if [[ "${inspect_status}" == '0' ]]; then
+              registry_inspect_status='published_inspected'
+              recovered_top_digest="$(awk '$1 == "Digest:" && $2 ~ /^sha256:[0-9a-f]{64}$/ {print $2; exit}' \
+                "${receipt_dir}/quarantine-registry-inspect.log")"
+              [[ "${recovered_top_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            elif grep -Eiq '(manifest unknown|not found)' "${receipt_dir}/quarantine-registry-inspect.log"; then
+              registry_inspect_status='not_published_after_write_attempt'
+            else
+              registry_inspect_status='write_attempt_uninspectable'
+            fi
+          fi
+          export REGISTRY_WRITE_STATE="${registry_write_state}"
+          export REGISTRY_INSPECT_STATUS="${registry_inspect_status}"
+          export RECOVERED_TOP_DIGEST="${recovered_top_digest}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          receipt_dir = Path(os.environ["FUGUE_HISTORICAL_CONTROLLER_RECEIPT_DIR"])
+          build_outcome = os.environ["BUILD_OUTCOME"]
+          target = "58fc2e560064214e3f329765c9ec7839ee513c27"
+          image_repository = "ghcr.io/yym68686/fugue-controller"
+          digest_re = re.compile(r"sha256:[0-9a-f]{64}")
+          observed_main_path = receipt_dir / "observed-main-sha"
+          observed_main = observed_main_path.read_text(encoding="ascii") if observed_main_path.is_file() else None
+          preflight_path = receipt_dir / "registry-preflight.status"
+          registry_preflight = preflight_path.read_text(encoding="ascii").strip() if preflight_path.is_file() else None
+          common = {
+              "activation_eligible": False,
+              "activation_target_count": 0,
+              "automatic_registry_deletion_attempted": False,
+              "build_target_count": 1,
+              "build_targets": ["controller"],
+              "dockerfile_blob": "dcb8be5d58a06f43308aeea85d2dc3b8abab34f9",
+              "dockerfile_sha256": "sha256:89c0b0333844342b8d62bc27df1a7119b9f52c06ab7be1e6a3ecfc7134d6a470",
+              "expected_main_sha": os.environ["EXPECTED_MAIN_SHA"],
+              "observed_main_sha": observed_main,
+              "production_mutation_attempted": False,
+              "registry_preflight": registry_preflight,
+              "registry_repository": image_repository,
+              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
+              "run_id": int(os.environ["RUN_ID"]),
+              "schema_version": 1,
+              "script_blob": "37b1bd7640849cc5b1a77d69680ddfa195bc61b5",
+              "script_sha256": "sha256:242548c1fe274575da5a83121141f28bd8927e092b7c827fc86097334c1455c6",
+              "source_commit": target,
+              "source_tree": "0cbb953d3985b5cb4ca547a83e25013942232883",
+              "target_sha": os.environ["TARGET_SHA"],
+              "verifier_blob": "33eef7fd57bd5ce44bb1ebca113cadd988c7e7da",
+              "verifier_sha256": "sha256:caa94e5c8603335265f8ccf83d52f9712730ee273e6eb55799719f875f545114",
+              "workflow": "deploy-control-plane",
+          }
+          if re.fullmatch(r"[0-9a-f]{40}", common["expected_main_sha"] or "") is None or common["target_sha"] != target:
+              raise SystemExit("historical Controller receipt identity is invalid")
+          if common["run_attempt"] != 1 or os.environ["REPOSITORY"] != "yym68686/fugue":
+              raise SystemExit("historical Controller receipt run identity is invalid")
+
+          if build_outcome == "success":
+              if observed_main != common["expected_main_sha"] or registry_preflight != "tag_absent":
+                  raise SystemExit("historical Controller prewrite receipt is invalid")
+              raw = os.environ["VERIFIED_IMAGE_ARTIFACTS_JSON"]
+              artifacts = json.loads(raw)
+              canonical = json.dumps(artifacts, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+              if raw != canonical or type(artifacts) is not list or len(artifacts) != 1:
+                  raise SystemExit("historical Controller verified artifact inventory is not canonical singleton JSON")
+              artifact = artifacts[0]
+              expected_keys = {
+                  "component", "config_digest", "immutable_ref", "oci_revision",
+                  "platform_manifest_digest", "repository", "source_tag", "top_digest", "verification",
+              }
+              if type(artifact) is not dict or set(artifact) != expected_keys:
+                  raise SystemExit("historical Controller artifact shape is invalid")
+              if artifact["component"] != "controller" or artifact["repository"] != image_repository:
+                  raise SystemExit("historical Controller artifact identity is invalid")
+              if artifact["source_tag"] != target or artifact["oci_revision"] != target:
+                  raise SystemExit("historical Controller artifact source binding is invalid")
+              for field in ("top_digest", "platform_manifest_digest", "config_digest"):
+                  if digest_re.fullmatch(artifact[field] or "") is None:
+                      raise SystemExit(f"historical Controller artifact {field} is invalid")
+              if artifact["immutable_ref"] != f'{image_repository}@{artifact["top_digest"]}':
+                  raise SystemExit("historical Controller immutable ref is invalid")
+              if artifact["verification"] != "registry_manifest_config_and_layer_get":
+                  raise SystemExit("historical Controller verification method is invalid")
+              if os.environ["CONTROLLER_IMAGE_DIGEST"] != artifact["top_digest"]:
+                  raise SystemExit("historical Controller top digest output drifted")
+              provenance = "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+              if os.environ["VERIFIED_IMAGE_ARTIFACTS_DIGEST"] != provenance:
+                  raise SystemExit("historical Controller provenance digest is invalid")
+              (receipt_dir / "verified-image-artifacts.json").write_bytes(canonical.encode())
+              (receipt_dir / "verified-image-artifacts.digest").write_text(provenance, encoding="ascii")
+              receipt = common | {
+                  "artifact": artifact,
+                  "build_outcome": "success",
+                  "kind": "HistoricalControllerBuildOnlyReceipt",
+                  "registry_artifact_state": "verified",
+                  "status": "verified",
+                  "verified_image_artifacts_digest": provenance,
+              }
+          else:
+              write_state = os.environ["REGISTRY_WRITE_STATE"]
+              inspect_state = os.environ["REGISTRY_INSPECT_STATUS"]
+              recovered = os.environ["RECOVERED_TOP_DIGEST"]
+              write_attempted = write_state in {"registry_write_entered", "registry_write_completed"}
+              if write_attempted and registry_preflight != "tag_absent":
+                  raise SystemExit("historical Controller write attempt lacks an absent-tag preflight")
+              if recovered and digest_re.fullmatch(recovered) is None:
+                  raise SystemExit("quarantined Controller digest is invalid")
+              receipt = common | {
+                  "build_outcome": build_outcome,
+                  "kind": "HistoricalControllerBuildOnlyQuarantineReceipt" if write_attempted else "HistoricalControllerBuildOnlyFailureReceipt",
+                  "quarantined_top_digest": recovered or None,
+                  "registry_artifact_state": inspect_state if write_attempted else write_state,
+                  "status": "quarantined" if write_attempted else "failed_before_registry_write",
+                  "verified_image_artifacts_digest": None,
+              }
+          payload = json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+          (receipt_dir / "receipt.json").write_bytes(payload)
+          PY
+          chmod 0600 "${receipt_dir}"/*
+          printf 'receipt_ready=true\n' >>"${GITHUB_OUTPUT}"
+
+      - name: Upload exact historical Controller build-only receipt
+        id: upload_receipt
+        if: ${{ always() && steps.seal_receipt.outputs.receipt_ready == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-historical-controller-build-only-58fc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-historical-controller-build-only-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+          overwrite: false
+
+      - name: Require exact historical Controller build-only success
+        if: ${{ always() && steps.initialize.outcome == 'success' }}
+        env:
+          BUILD_OUTCOME: ${{ steps.build_images.outcome }}
+          RECEIPT_OUTCOME: ${{ steps.seal_receipt.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload_receipt.outcome }}
+        run: |
+          set -euo pipefail
+          [[ "${BUILD_OUTCOME}" == 'success' ]]
+          [[ "${RECEIPT_OUTCOME}" == 'success' ]]
+          [[ "${UPLOAD_OUTCOME}" == 'success' ]]
 
   settle-api-hotfix-recovery-lane:
     needs:
@@ -2444,7 +2858,7 @@ jobs:
       - continue-release-convergence
       - record-release-baseline
       - rearm-release-lane-on-success
-    if: ${{ always() && inputs.api_hotfix_recovery_only == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
+    if: ${{ always() && inputs.api_hotfix_recovery_only == '' && inputs.historical_controller_build_only_v1 == '' && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || (needs.deploy.outputs.image_activation_convergence == 'complete' && (((inputs.api_hotfix_rollout_v2 == '' && needs.record-release-baseline.result != 'success') || (inputs.api_hotfix_rollout_v2 != '' && needs.record-release-baseline.result != 'skipped')) || needs.rearm-release-lane-on-success.result != 'success')) || (needs.deploy.outputs.image_activation_convergence == 'pending' && needs.continue-release-convergence.result != 'success') || (needs.deploy.outputs.image_activation_convergence != 'complete' && needs.deploy.outputs.image_activation_convergence != 'pending')) }}
     runs-on: ubuntu-latest
     permissions:
       actions: write

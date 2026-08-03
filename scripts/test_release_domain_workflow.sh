@@ -117,7 +117,7 @@ dispatch = trigger.fetch("workflow_dispatch")
 inputs = dispatch.fetch("inputs")
 assert_equal(
   inputs.keys,
-  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"],
+  ["expected_sha", "target_sha", "image_cache_convergence", "convergence_source_run_id", "public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1"],
   "dispatch input set",
 )
 expected_sha = inputs.fetch("expected_sha")
@@ -136,7 +136,7 @@ convergence_source = inputs.fetch("convergence_source_run_id")
 assert_equal(convergence_source["required"], false, "convergence source required flag")
 assert_equal(convergence_source["type"], "string", "convergence source type")
 assert_equal(convergence_source["default"], "", "convergence source default")
-for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest"]
+for name in ["public_data_plane_adoption_run_id", "public_data_plane_adoption_baseline_digest", "api_hotfix_rollout_v2", "api_hotfix_recovery_only", "artifact_reuse_receipt_b64", "historical_controller_build_only_v1"]
   handoff_input = inputs.fetch(name)
   assert_equal(handoff_input["required"], false, "#{name} required flag")
   assert_equal(handoff_input["type"], "string", "#{name} type")
@@ -148,6 +148,7 @@ jobs = workflow.fetch("jobs")
 
 guard = jobs.fetch("release-input-guard")
 assert_equal(needs(guard), [], "input guard dependencies")
+assert_equal(guard.fetch("if"), "${{ inputs.historical_controller_build_only_v1 == '' }}", "ordinary input guard fixed build-only isolation")
 assert_equal(guard.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "input guard permissions")
 stage1_handoff = step(guard, "Download exact public data-plane Stage1 handoff")
 assert_equal(stage1_handoff.fetch("if"), "${{ inputs.public_data_plane_adoption_run_id != '' }}", "Stage1 handoff condition")
@@ -188,6 +189,7 @@ guard_step = step(guard, "Guard exact main commit authorization")
   "PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST" => "${{ inputs.public_data_plane_adoption_baseline_digest }}",
   "PUBLIC_DATA_PLANE_ADOPTION_BASELINE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/stage1-baseline.json",
   "PUBLIC_DATA_PLANE_ADOPTION_TRACE" => "${{ runner.temp }}/public-data-plane-stage1-handoff/execution-trace.json",
+  "API_HOTFIX_ROLLOUT_V2" => "${{ inputs.api_hotfix_rollout_v2 }}",
 }.each do |name, expected|
   assert_equal(guard_step.fetch("env").fetch(name), expected, "guard #{name} source")
 end
@@ -217,6 +219,8 @@ for fragment in [
   'if [[ -z "${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" && -z "${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" ]]',
   '"${PUBLIC_DATA_PLANE_ADOPTION_RUN_ID}" =~ ^[1-9][0-9]*$',
   '"${PUBLIC_DATA_PLANE_ADOPTION_BASELINE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$',
+  'CONFIRM_CONTROL_PLANE_API_HOTFIX_ROLLOUT_V2_57DC',
+  '"${TARGET_SHA}" == \'57dc767999741cea25fe4820a6c9603984dfa0b9\'',
 ]
   fail_contract("input guard is missing #{fragment.inspect}") unless guard_step.fetch("run").include?(fragment)
 end
@@ -226,7 +230,8 @@ assert_equal(needs(baseline), ["release-input-guard"], "release-baseline depende
 assert_equal(baseline.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-baseline permissions")
 for job_name in ["release-baseline", "build", "deploy", "record-release-baseline"]
   checkout = step(jobs.fetch(job_name), "Checkout")
-  assert_equal(checkout.fetch("with").fetch("ref"), "${{ inputs.target_sha }}", "#{job_name} target checkout")
+  expected_ref = job_name == "deploy" ? "${{ inputs.api_hotfix_rollout_v2 != '' && inputs.expected_sha || inputs.target_sha }}" : "${{ inputs.target_sha }}"
+  assert_equal(checkout.fetch("with").fetch("ref"), expected_ref, "#{job_name} target checkout")
 end
 stage1_planner_gate = step(baseline, "Verify Stage1 handoff before release planning")
 for fragment in ["canonicalize-secret-free", "verify-stage2"]
@@ -292,7 +297,7 @@ assert_equal(
 gate = jobs.fetch("release-gate")
 assert_equal(needs(gate), ["release-input-guard"], "release-gate dependencies")
 assert_equal(gate.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "release-gate permissions")
-assert_equal(Array(gate["steps"]).length, 1, "release-gate exact receipt step inventory")
+assert_equal(Array(gate["steps"]).length, 2, "release-gate exact receipt step inventory")
 receipt = step(gate, "Verify exact source CI receipt")
 for fragment in [
   "actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100",
@@ -305,6 +310,11 @@ for fragment in [
 end
 for forbidden in ["test_release_domain_safety.sh", "test_node_local_dns_release.sh", "test_verify_stale_release_recovery.py", "go test ./..."]
   fail_contract("release gate reruns source CI command #{forbidden.inspect}") if receipt.fetch("run").include?(forbidden)
+end
+hotfix_receipt = step(gate, "Verify exact API hotfix product receipt")
+assert_equal(hotfix_receipt.fetch("if"), "${{ inputs.api_hotfix_rollout_v2 != '' }}", "API hotfix receipt condition")
+for fragment in ["30788130816", "57dc767999741cea25fe4820a6c9603984dfa0b9", ".github/workflows/ci.yml"]
+  fail_contract("API hotfix receipt is missing #{fragment.inspect}") unless hotfix_receipt.fetch("run").include?(fragment)
 end
 
 build = jobs.fetch("build")
@@ -470,11 +480,17 @@ genesis_reachable = {
   "Write genesis public release evidence" => "${{ needs.release-baseline.outputs.is_genesis == 'true' }}",
   "Upload release-domain public evidence" => "${{ always() && (steps.genesis_evidence.outcome == 'success' || steps.guarded_deploy.outcome == 'success') }}",
 }
+api_hotfix_only = {
+  "Roll out exact API hotfix with hybrid compensation" => "${{ inputs.api_hotfix_rollout_v2 != '' }}",
+  "Upload exact API hotfix terminal evidence" => "${{ steps.api_hotfix_rollout.outcome == 'success' }}",
+}
 Array(deploy["steps"]).each do |candidate|
   name = candidate.fetch("name")
   condition = candidate["if"].to_s
   if genesis_reachable.key?(name)
     assert_equal(condition, genesis_reachable.fetch(name), "genesis-reachable #{name} condition")
+  elsif api_hotfix_only.key?(name)
+    assert_equal(condition, api_hotfix_only.fetch(name), "API-hotfix-only #{name} condition")
   elsif !condition.include?("needs.release-baseline.outputs.is_genesis != 'true'")
     fail_contract("unreviewed deploy step #{name.inspect} is reachable from genesis")
   end
@@ -671,7 +687,11 @@ for fragment in [
   fail_contract("image convergence step is missing #{fragment.inspect}") unless convergence.fetch("run").include?(fragment)
 end
 deploy_uploads = Array(deploy["steps"]).select { |candidate| candidate["uses"].to_s.start_with?("actions/upload-artifact@") }
-assert_equal(deploy_uploads.length, 1, "outer deploy artifact upload count")
+assert_equal(
+  deploy_uploads.map { |candidate| candidate.fetch("name") },
+  ["Upload exact API hotfix terminal evidence", "Upload release-domain public evidence"],
+  "outer deploy artifact upload inventory",
+)
 
 continuation = jobs.fetch("continue-release-convergence")
 assert_equal(
@@ -723,7 +743,7 @@ assert_equal(
 assert_equal(record["permissions"], {"contents" => "write"}, "record-release-baseline permissions")
 assert_equal(
   record["if"],
-  "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}",
+  "${{ always() && inputs.api_hotfix_rollout_v2 == '' && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' && needs.deploy.outputs.image_activation_convergence == 'complete' }}",
   "record-release-baseline success condition",
 )
 assert_equal(record.fetch("steps").length, 2, "record baseline exact step inventory")
@@ -923,6 +943,8 @@ assert_equal(needs(freeze), freeze_needs, "freeze finalizer dependencies")
   fail_contract("freeze condition omits #{job_name}") unless freeze.fetch("if").include?("needs.#{job_name}.result != 'success'")
 end
 for fragment in [
+  "inputs.api_hotfix_recovery_only == ''",
+  "inputs.historical_controller_build_only_v1 == ''",
   "needs.deploy.outputs.image_activation_convergence == 'complete'",
   "needs.record-release-baseline.result != 'success'",
   "needs.rearm-release-lane-on-success.result != 'success'",
@@ -937,6 +959,9 @@ assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}
 
 allowed_permissions = {
   "release-input-guard" => {"actions" => "read", "contents" => "read"},
+  "recover-api-hotfix-fence" => {"contents" => "read"},
+  "historical-controller-build-only" => {"actions" => "read", "contents" => "read", "packages" => "write"},
+  "settle-api-hotfix-recovery-lane" => {"actions" => "write", "contents" => "read"},
   "release-baseline" => {"actions" => "read", "contents" => "read"},
   "release-gate" => {"actions" => "read", "contents" => "read"},
   "build" => {"actions" => "read", "contents" => "read", "packages" => "write"},
@@ -965,9 +990,12 @@ all_uploads.insert(
   ["deploy", activation_upload.fetch("with").fetch("path")],
 )
 allowed_uploads = [
-  ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
+  ["recover-api-hotfix-fence", "${{ runner.temp }}/fugue-api-hotfix-recovery-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
+  ["historical-controller-build-only", "${{ runner.temp }}/fugue-historical-controller-build-only-${{ github.run_id }}-${{ github.run_attempt }}"],
+  ["deploy", "${{ runner.temp }}/fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}"],
+  ["deploy", "${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json"],
   ["continue-release-convergence", "${{ runner.temp }}/fugue-release-convergence-successor/successor.json"],
   ["rearm-release-lane-on-success", "${{ runner.temp }}/fugue-release-lane-success-rearm/success-rearm.json"],
   ["freeze-release-lane-on-failure", "${{ runner.temp }}/fugue-release-lane-freeze/lane-freeze.json"],
