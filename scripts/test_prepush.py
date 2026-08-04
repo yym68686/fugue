@@ -81,7 +81,32 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["prepush-receipt-tests"]["status"], "pass")
 
-    def test_go_dependent_tasks_start_only_after_compile_success(self) -> None:
+    def test_compile_and_affected_tests_overlap(self) -> None:
+        barrier = threading.Barrier(2)
+        intervals = {}
+
+        def fake_run(command, _timeout):
+            key = None
+            if command == ["go", "build", "-p", "4", "./..."]:
+                key = "compile-all"
+            elif command[:2] == ["go", "test"]:
+                key = "affected-tests"
+            if key is None:
+                return 0, ""
+            started = time.monotonic()
+            barrier.wait(timeout=2)
+            ended = time.monotonic()
+            intervals[key] = (started, ended)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(fake_run)
+        self.assertEqual(result, 0)
+        self.assertLess(intervals["compile-all"][0], intervals["affected-tests"][1])
+        self.assertLess(intervals["affected-tests"][0], intervals["compile-all"][1])
+        self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
+
+    def test_other_go_tasks_start_only_after_compile_success(self) -> None:
         compile_finished = threading.Event()
         dependent_observations = []
 
@@ -90,16 +115,60 @@ class CanonicalReceiptTest(unittest.TestCase):
                 time.sleep(0.01)
                 compile_finished.set()
                 return 0, ""
-            if command and command[0] == "go":
+            if command and command[0] == "go" and command[:2] != ["go", "test"]:
                 dependent_observations.append(compile_finished.is_set())
             return 0, ""
 
         result, receipt = self.run_main_with_fake(fake_run)
         self.assertEqual(result, 0)
-        self.assertEqual(len(dependent_observations), 3)
+        self.assertEqual(len(dependent_observations), 2)
         self.assertTrue(all(dependent_observations))
-        for name in ("affected-tests", "affected-vet", "openapi-generated"):
+        for name in ("affected-vet", "openapi-generated"):
             self.assertEqual(receipt["checks"][name]["status"], "pass")
+
+    def test_helm_checks_start_only_after_compile_success(self) -> None:
+        compile_finished = threading.Event()
+        helm_observations = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                time.sleep(0.01)
+                compile_finished.set()
+                return 0, ""
+            if command[0] == "helm" or command[:3] == [
+                "go", "test", "./cmd/fugue-release-domain-evidence",
+            ]:
+                helm_observations.append(compile_finished.is_set())
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["deploy/helm/fugue/values.yaml"],
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(helm_observations, [True, True, True, True])
+        self.assertEqual(receipt["checks"]["helm-lint-render"]["status"], "pass")
+
+    def test_compile_failure_does_not_start_helm_checks(self) -> None:
+        helm_commands = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                return 9, "compile failed"
+            if command[0] == "helm":
+                helm_commands.append(command)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["deploy/helm/fugue/values.yaml"],
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(helm_commands, [])
+        self.assertEqual(
+            receipt["checks"]["helm-lint-render"],
+            {"durationMs": 0, "status": "skipped"},
+        )
 
     def test_compile_failure_does_not_start_go_dependent_tasks(self) -> None:
         dependent_commands = []
@@ -107,7 +176,7 @@ class CanonicalReceiptTest(unittest.TestCase):
         def fake_run(command, _timeout):
             if command == ["go", "build", "-p", "4", "./..."]:
                 return 9, "compile failed"
-            if command and command[0] == "go":
+            if command and command[0] == "go" and command[:2] != ["go", "test"]:
                 dependent_commands.append(command)
             return 0, ""
 
@@ -116,7 +185,8 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(dependent_commands, [])
         self.assertEqual(receipt["status"], "fail")
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "fail")
-        for name in ("affected-tests", "affected-vet", "openapi-generated"):
+        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
+        for name in ("affected-vet", "openapi-generated"):
             self.assertEqual(receipt["checks"][name], {"durationMs": 0, "status": "skipped"})
 
     def test_telemetry_declarative_shell_change_selects_focused_contract(self) -> None:

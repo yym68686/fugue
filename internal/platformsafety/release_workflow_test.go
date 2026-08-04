@@ -5600,7 +5600,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",
 			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
 			"fieldManager":                "fugue-controller-declarative",
-			"intentGeneration":            float64(1),
+			"intentGeneration":            float64(2),
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",

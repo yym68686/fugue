@@ -221,6 +221,7 @@ def shell_syntax_check(paths: list[str], timeout: float) -> tuple[int, str]:
 
 
 def helm_check(timeout: float) -> tuple[int, str]:
+    deadline = time.monotonic() + max(0.0, timeout)
     commands = [
         ["helm", "lint", "deploy/helm/fugue"],
         ["helm", "template", "fugue", "deploy/helm/fugue", "--namespace", "fugue-system"],
@@ -234,7 +235,10 @@ def helm_check(timeout: float) -> tuple[int, str]:
         ],
     ]
     for command in commands:
-        status, output = run(command, timeout)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 124, "pre-push deadline exceeded"
+        status, output = run(command, remaining)
         if status != 0:
             return status, output
     return 0, ""
@@ -313,7 +317,6 @@ def main() -> int:
     }
     non_go_tasks: dict[str, list[str] | None] = {}
     if packages:
-        go_dependent_tasks["affected-tests"] = None
         go_dependent_tasks["affected-vet"] = ["go", "vet", *packages]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
         non_go_tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
@@ -349,7 +352,7 @@ def main() -> int:
         "shell-syntax": lambda remaining: shell_syntax_check(paths, remaining),
     }
     if any(name.startswith("deploy/helm/fugue/") for name in paths):
-        local_checks["helm-lint-render"] = helm_check
+        go_dependent_tasks["helm-lint-render"] = None
 
     failures: list[tuple[str, str]] = []
 
@@ -362,16 +365,21 @@ def main() -> int:
         before = time.monotonic()
         if name == "affected-tests":
             status, output = run_test_commands(test_commands, deadline)
+        elif name == "helm-lint-render":
+            status, output = helm_check(deadline - before)
         elif command is None:
             status, output = 124, f"pre-push task {name} has no command"
         else:
             status, output = run(command, deadline - before)
         return status, output, before
 
-    phase_one_workers = 1 + len(non_go_tasks)
+    phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=phase_one_workers) as phase_one:
         compile_name, compile_command = compile_task
         compile_future = phase_one.submit(execute, compile_name, compile_command)
+        affected_futures = {}
+        if test_commands:
+            affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
         non_go_futures = {
             phase_one.submit(execute, name, command): name
             for name, command in non_go_tasks.items()
@@ -397,7 +405,7 @@ def main() -> int:
                     go_phase.submit(execute, name, command): name
                     for name, command in go_dependent_tasks.items()
                 }
-                all_futures = {**non_go_futures, **go_futures}
+                all_futures = {**affected_futures, **non_go_futures, **go_futures}
                 for future in concurrent.futures.as_completed(all_futures):
                     name = all_futures[future]
                     status, output, before = future.result()
@@ -405,8 +413,9 @@ def main() -> int:
         else:
             for name in go_dependent_tasks:
                 checks[name] = {"durationMs": 0, "status": "skipped"}
-            for future in concurrent.futures.as_completed(non_go_futures):
-                name = non_go_futures[future]
+            phase_one_futures = {**affected_futures, **non_go_futures}
+            for future in concurrent.futures.as_completed(phase_one_futures):
+                name = phase_one_futures[future]
                 status, output, before = future.result()
                 record(name, before, status, output)
 
