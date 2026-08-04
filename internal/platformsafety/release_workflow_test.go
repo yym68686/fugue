@@ -5476,35 +5476,64 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("Controller build is reachable outside the successful push planner: %+v", build)
 		}
 		if !reflect.DeepEqual([]string(build.Needs), []string{"prepush"}) ||
-			build.Permissions["packages"] != "write" || build.Permissions["contents"] != "read" {
+			build.Permissions["actions"] != "read" || build.Permissions["contents"] != "read" ||
+			build.Permissions["packages"] != "" {
 			t.Fatalf("Controller build dependency or permissions drifted: needs=%v permissions=%v", build.Needs, build.Permissions)
 		}
-		sourceCheckout := workflowStepByName(t, build, "Checkout detached exact Controller source")
-		if sourceCheckout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
-			sourceCheckout.With["ref"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
-			sourceCheckout.With["path"] != ".fugue-controller-source" ||
-			sourceCheckout.With["fetch-depth"] != "1" || sourceCheckout.With["persist-credentials"] != "false" {
-			t.Fatalf("Controller desired source checkout is not detached/exact/bounded: %+v", sourceCheckout)
+		if build.Outputs["image_digest"] != "${{ steps.publish.outputs.controller_image_digest }}" ||
+			build.Outputs["receipt_digest"] != "${{ steps.publish.outputs.verified_image_artifacts_digest }}" {
+			t.Fatalf("Controller reuse outputs do not preserve the build interface: %+v", build.Outputs)
 		}
-		publish := workflowStepByName(t, build, "Build and fresh-verify immutable Controller image")
-		if publish.Run != "./scripts/build_control_plane_images.sh" ||
-			publish.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"] != "controller" ||
-			publish.Env["FUGUE_IMAGE_TAG"] != "${{ github.sha }}" ||
-			publish.Env["FUGUE_IMAGE_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
-			publish.Env["FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT"] != "${{ github.workspace }}/.fugue-controller-source" ||
-			publish.Env["FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT"] != "true" {
-			t.Fatalf("Controller build does not use the singleton immutable builder: %+v", publish)
+		download := workflowStepByName(t, build, "Download exact historical Controller build receipt")
+		if download.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+			download.With["name"] != "fugue-controller-build-5966e295d9f9bf4a65c690108084c2018f945a75" ||
+			download.With["path"] != "${{ runner.temp }}/fugue-controller-build-source" ||
+			download.With["github-token"] != "${{ github.token }}" || download.With["run-id"] != "30900532415" {
+			t.Fatalf("Controller historical receipt download is not exact: %+v", download)
 		}
-		materialize := workflowStepByName(t, build, "Materialize canonical build receipt")
+		verifyHistorical := workflowStepByName(t, build, "Verify exact historical Controller receipt binding")
 		for _, required := range []string{
-			"controller-build-receipt-source-identity-invalid",
-			`artifact.get("source_tag") != config_sha`,
-			`artifact.get("oci_revision") != desired_source_sha`,
-			`"component": "controller"`,
-			"ComponentBuildReceiptBinding",
+			"controller-historical-artifact-file-set-invalid",
+			"sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e",
+			"sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
+			"sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
+			"sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
+			`"configSha": "5966e295d9f9bf4a65c690108084c2018f945a75"`,
+			`"desiredSourceSha": "58fc2e560064214e3f329765c9ec7839ee513c27"`,
+		} {
+			if !strings.Contains(verifyHistorical.Run, required) {
+				t.Fatalf("Controller historical receipt verification is missing %q", required)
+			}
+		}
+		publish := workflowStepByName(t, build, "Fresh registry GET from exact historical Controller receipt")
+		if publish.Run != "timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh" ||
+			publish.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"] != "controller" ||
+			publish.Env["FUGUE_IMAGE_TAG"] != "5966e295d9f9bf4a65c690108084c2018f945a75" ||
+			publish.Env["FUGUE_IMAGE_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			publish.Env["FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE"] != "${{ runner.temp }}/fugue-controller-build-source/receipt.json" ||
+			publish.Env["FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE"] != "true" {
+			t.Fatalf("Controller build does not use exact fresh registry receipt reuse: %+v", publish)
+		}
+		materialize := workflowStepByName(t, build, "Seal unchanged Controller receipt for current run")
+		for _, required := range []string{
+			"controller-reused-receipt-output-bytes-mismatch",
+			"controller-reused-receipt-output-digest-mismatch",
+			"controller-reused-image-output-digest-mismatch",
+			`install -m 0600 "${source_dir}/receipt.json"`,
+			`install -m 0600 "${source_dir}/binding.json"`,
+			`cmp -s "${source_dir}/receipt.json"`,
+			`cmp -s "${source_dir}/binding.json"`,
 		} {
 			if !strings.Contains(materialize.Run, required) {
 				t.Fatalf("Controller build receipt binding is missing %q", required)
+			}
+		}
+		for _, step := range build.Steps {
+			if step.Name == "Checkout detached exact Controller source" ||
+				step.Name == "Setup Docker Buildx" || step.Name == "Login to GHCR" ||
+				strings.Contains(step.Uses, "setup-buildx") || strings.Contains(step.Uses, "login-action") ||
+				strings.Contains(step.Run, "FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT") {
+				t.Fatalf("Controller reuse job must not rebuild or log into the registry: %+v", step)
 			}
 		}
 
@@ -5523,6 +5552,20 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 		if deploy.If != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.controller-build.result == 'success' && needs.prepush.outputs.controller_release == 'true' }}" {
 			t.Fatalf("Controller deploy is reachable outside successful push/build gates: %q", deploy.If)
+		}
+		binding := workflowStepByName(t, deploy, "Verify historical artifact binding and current config separation")
+		if binding.Env["CURRENT_CONFIG_SHA"] != "${{ github.sha }}" ||
+			binding.Env["ARTIFACT_CONFIG_SHA"] != "5966e295d9f9bf4a65c690108084c2018f945a75" ||
+			!strings.Contains(binding.Run, `[[ "${CURRENT_CONFIG_SHA}" != "${ARTIFACT_CONFIG_SHA}" ]]`) ||
+			!strings.Contains(binding.Run, `"configSha": os.environ["ARTIFACT_CONFIG_SHA"]`) ||
+			!strings.Contains(binding.Run, "controller-build-receipt-canonical-artifact-mismatch") {
+			t.Fatalf("Controller deploy does not separate historical artifact identity from current config: %+v", binding)
+		}
+		registryReadback := workflowStepByName(t, deploy, "Fresh registry GET and canonical receipt readback")
+		if registryReadback.Env["FUGUE_IMAGE_TAG"] != "5966e295d9f9bf4a65c690108084c2018f945a75" ||
+			registryReadback.Env["FUGUE_IMAGE_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			registryReadback.Env["FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE"] != "true" {
+			t.Fatalf("Controller deploy registry readback is not bound to the historical receipt: %+v", registryReadback)
 		}
 		render := workflowStepByName(t, deploy, "Render digest-pinned forward and exact live LKG manifests")
 		for _, required := range []string{
@@ -5543,13 +5586,54 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if strings.Contains(render.Run, `git archive "${lkg_source_sha}" deploy/kustomize/controller`) {
 			t.Fatal("first Controller migration must not claim a nonexistent historical declarative overlay")
 		}
-		apply := workflowStepByName(t, deploy, "Apply Controller with single-writer proof and exact live LKG rollback")
-		if apply.Env["FUGUE_CONTROLLER_API_DEPLOYMENT"] != "fugue-fugue-api" ||
-			apply.Env["FUGUE_CONTROLLER_LEADER_LEASE"] != "fugue-fugue-controller" ||
-			apply.Env["FUGUE_CONTROLLER_SOURCE_SHA"] != "${{ github.sha }}" ||
-			apply.Env["FUGUE_CONTROLLER_OCI_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
-			!strings.Contains(apply.Run, "./scripts/apply_controller_declarative.sh") {
-			t.Fatalf("Controller apply is not bound to the exact declarative driver: %+v", apply)
+		prepare := workflowStepByName(t, deploy, "Prepare durable Controller observed-state plan")
+		if prepare.ID != "prepare" ||
+			prepare.Env["FUGUE_CONTROLLER_DECLARATIVE_MODE"] != "prepare" ||
+			prepare.Env["FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR"] != "${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}" ||
+			prepare.Env["FUGUE_CONTROLLER_SOURCE_SHA"] != "${{ github.sha }}" ||
+			prepare.Env["FUGUE_CONTROLLER_OCI_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" {
+			t.Fatalf("Controller prepare is not bound to the current config and immutable runtime: %+v", prepare)
+		}
+		for _, required := range []string{
+			"controller-observed-plan-directory-invalid",
+			"controller-observed-plan-file-set-invalid",
+			"controller-observed-plan-copied-input-drift",
+			"controller-observed-plan-current-config-invalid",
+			"controller-observed-plan-run-identity-invalid",
+			"controller-observed-plan-artifact-invalid",
+			"controller-observed-plan-receipt-invalid",
+			`"productionWriteAttempted": False`,
+			`embedded_digest = plan.pop("planDigest", None)`,
+		} {
+			if !strings.Contains(prepare.Run, required) {
+				t.Fatalf("Controller prepare proof is missing %q", required)
+			}
+		}
+		uploadPlan := workflowStepByName(t, deploy, "Upload durable Controller observed-state plan")
+		if uploadPlan.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+			uploadPlan.With["name"] != "fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}" ||
+			uploadPlan.With["path"] != "${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}" ||
+			uploadPlan.With["if-no-files-found"] != "error" || uploadPlan.With["overwrite"] != "false" {
+			t.Fatalf("Controller observed plan is not durably uploaded before execute: %+v", uploadPlan)
+		}
+		execute := workflowStepByName(t, deploy, "Execute Controller plan with exact live LKG compensation")
+		if execute.Env["FUGUE_CONTROLLER_DECLARATIVE_MODE"] != "execute" ||
+			execute.Env["FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST"] != "${{ steps.prepare.outputs.plan_digest }}" ||
+			execute.Env["FUGUE_CONTROLLER_BUILD_RECEIPT_FILE"] != "${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}/artifact-receipt.json" ||
+			execute.Env["FUGUE_CONTROLLER_BUILD_BINDING_FILE"] != "${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}/artifact-binding.json" ||
+			execute.Env["FUGUE_CONTROLLER_SOURCE_SHA"] != "${{ github.sha }}" ||
+			execute.Env["FUGUE_CONTROLLER_OCI_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			!strings.Contains(execute.Run, `"${plan_dir}/forward.json" "${plan_dir}/lkg.json"`) {
+			t.Fatalf("Controller execute is not restricted to the uploaded plan directory and digest: %+v", execute)
+		}
+		stepPosition := map[string]int{}
+		for index, step := range deploy.Steps {
+			stepPosition[step.Name] = index
+		}
+		if !(stepPosition["Render digest-pinned forward and exact live LKG manifests"] < stepPosition[prepare.Name] &&
+			stepPosition[prepare.Name] < stepPosition[uploadPlan.Name] &&
+			stepPosition[uploadPlan.Name] < stepPosition[execute.Name]) {
+			t.Fatalf("Controller prepare/upload/execute order is invalid: %+v", stepPosition)
 		}
 		for _, step := range deploy.Steps {
 			if step.Name == "Setup Go" || strings.Contains(step.Uses, "setup-buildx") || strings.Contains(step.Uses, "login-action") {
@@ -5562,6 +5646,11 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, required := range []string{
+			`FUGUE_CONTROLLER_DECLARATIVE_MODE`,
+			`execute-forward-not-from-plan-artifact`,
+			`execute-observed-state-cas-mismatch`,
+			`arm_control_plane_release_recovery_fence`,
+			`release_verified_recovery_fence`,
 			`prepare_helm_post_renderer`,
 			`CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="${HANDOFF_API_TEMPLATE_JSON}"`,
 			`CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="${HANDOFF_CONTROLLER_TEMPLATE_JSON}"`,
@@ -5600,7 +5689,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",
 			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
 			"fieldManager":                "fugue-controller-declarative",
-			"intentGeneration":            float64(2),
+			"intentGeneration":            float64(4),
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",

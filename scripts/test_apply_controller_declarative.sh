@@ -34,7 +34,24 @@ case "${1:-} ${2:-}" in
     if [[ "${HELM_REVISION_DRIFT:-false}" == true && "${count}" -eq 2 ]]; then
       revision="$((revision + 1))"
     fi
-    printf '{"info":{"status":"deployed"},"version":%s}\n' "${revision}"
+    if [[ -n "${HELM_STATUS_TOTAL_BYTES:-}" ]]; then
+      python3 - "${revision}" "${HELM_STATUS_TOTAL_BYTES}" <<'PY'
+import sys
+
+revision = int(sys.argv[1])
+target_size = int(sys.argv[2])
+prefix = b'{"chart":"fugue-redacted","info":{"status":"deployed"},"manifest":"'
+suffix = (
+    f'","name":"fugue","namespace":"fugue-system","version":{revision}}}\n'
+).encode("ascii")
+padding_size = target_size - len(prefix) - len(suffix)
+if padding_size < 0:
+    raise SystemExit("helm status fixture target size invalid")
+sys.stdout.buffer.write(prefix + (b"x" * padding_size) + suffix)
+PY
+    else
+      printf '{"info":{"status":"deployed"},"version":%s}\n' "${revision}"
+    fi
     ;;
   "get manifest")
     revision=''
@@ -49,9 +66,14 @@ case "${1:-} ${2:-}" in
     done
     if [[ "${revision}" == 822 ]]; then
       cat "${FIXTURE_ROOT}/legacy-base-manifest.yaml"
+    elif [[ "${revision}" == 824 && -f "${FIXTURE_ROOT}/helm824-archive.yaml" ]]; then
+      cat "${FIXTURE_ROOT}/helm824-archive.yaml"
     else
       cat "${FIXTURE_ROOT}/helm-manifest.yaml"
     fi
+    ;;
+  "get values")
+    printf '%s\n' '{}'
     ;;
   "upgrade fugue")
     ownership=''
@@ -111,14 +133,22 @@ metadata["annotations"]["fugue.pro/controller-ownership"] = "helm"
 metadata.setdefault("labels", {})["app.kubernetes.io/managed-by"] = "Helm"
 path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
 PY
-      printf '%s\n' 823 >"${FIXTURE_ROOT}/helm-revision"
+      revision=823
+      if [[ -f "${FIXTURE_ROOT}/helm824-archive.yaml" ]]; then
+        revision="$(( $(cat "${FIXTURE_ROOT}/helm-revision") + 1 ))"
+      fi
+      printf '%s\n' "${revision}" >"${FIXTURE_ROOT}/helm-revision"
       [[ "${HELM_STAGE1_FAIL_MODE:-}" != committed ]] || exit 42
     else
       if [[ "${HELM_STAGE2_FAIL_MODE:-}" == old ]]; then
         exit 43
       fi
       cp "${rendered}" "${FIXTURE_ROOT}/helm-manifest.yaml"
-      printf '%s\n' 824 >"${FIXTURE_ROOT}/helm-revision"
+      revision=824
+      if [[ -f "${FIXTURE_ROOT}/helm824-archive.yaml" ]]; then
+        revision="$(( $(cat "${FIXTURE_ROOT}/helm-revision") + 1 ))"
+      fi
+      printf '%s\n' "${revision}" >"${FIXTURE_ROOT}/helm-revision"
       [[ "${HELM_STAGE2_FAIL_MODE:-}" != committed ]] || exit 44
     fi
     ;;
@@ -132,6 +162,66 @@ SH
 cat >"${FIXTURE_ROOT}/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == -n && "${3:-}" == get && "${4:-}" == lease/fugue-fugue-control-plane-db-backup ]]; then
+  cat "${FIXTURE_ROOT}/coordination-lease.json"
+  exit 0
+fi
+if [[ "${1:-}" == -n && "${3:-}" == patch && "${4:-}" == lease/fugue-fugue-control-plane-db-backup ]]; then
+  patch=''
+  output=false
+  while (($#)); do
+    case "$1" in
+      -p) patch="$2"; shift 2 ;;
+      -o) [[ "$2" == json ]] && output=true; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  PATCH_JSON="${patch}" python3 - "${FIXTURE_ROOT}/coordination-lease.json" "${FIXTURE_ROOT}/commands.log" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+path, log = map(Path, sys.argv[1:])
+value = json.loads(path.read_text())
+operations = json.loads(os.environ["PATCH_JSON"])
+for operation in operations:
+    if operation.get("op") == "test":
+        continue
+    pointer = operation["path"]
+    replacement = operation.get("value")
+    if pointer == "/metadata/annotations":
+        value["metadata"]["annotations"] = replacement
+    elif pointer == "/spec/holderIdentity":
+        value["spec"]["holderIdentity"] = replacement
+    elif pointer == "/spec/leaseDurationSeconds":
+        value["spec"]["leaseDurationSeconds"] = replacement
+    elif pointer == "/spec/acquireTime":
+        value["spec"]["acquireTime"] = replacement
+    elif pointer == "/spec/renewTime":
+        value["spec"]["renewTime"] = replacement
+    elif pointer == "/spec/leaseTransitions":
+        value["spec"]["leaseTransitions"] = replacement
+    else:
+        raise SystemExit("unexpected coordination Lease patch")
+value["metadata"]["resourceVersion"] = str(int(value["metadata"]["resourceVersion"]) + 1)
+path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
+annotations = value["metadata"].get("annotations") or {}
+holder = value["spec"].get("holderIdentity") or ""
+if not holder:
+    event = "lease:release"
+elif str(annotations.get("fugue.pro/recovery-required") or "").lower() == "true":
+    event = "lease:arm"
+elif "fugue.pro/coordination-token" in annotations:
+    event = "lease:acquire"
+else:
+    event = "lease:update"
+with log.open("a") as stream:
+    stream.write(event + "\n")
+print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+  exit 0
+fi
 if [[ "${1:-}" == "get" && "${2:-}" == "daemonsets" ]]; then
   count="$(( $(cat "${FIXTURE_ROOT}/daemonset-read-count") + 1 ))"
   printf '%s\n' "${count}" >"${FIXTURE_ROOT}/daemonset-read-count"
@@ -364,6 +454,7 @@ value["spec"]["template"]["metadata"]["annotations"]["fugue.pro/source-commit"] 
 if live == "true":
     metadata["resourceVersion"] = "101"
     metadata["uid"] = "controller-uid-1"
+    metadata["generation"] = 693
     if owner == "declarative":
         metadata["managedFields"] = [{"manager": "fugue-controller-declarative"}]
     value["status"] = {
@@ -387,29 +478,56 @@ import sys
 
 root = Path(os.environ["FIXTURE_ROOT"])
 controller_source, controller_image = sys.argv[1:]
+# Bounded, secret-free projection of the production Helm 824 Controller
+# template captured at sha256:956addd69a1e8a4f127f06ef4256774942b5e4e6b4379589fab53b4a0819f5db.
+# It retains the exact inline-template shape that failed in run 30900532415
+# without copying Secret data or unrelated control-plane objects.
 controller_template = {
     "metadata": {
         "annotations": {
+            "checksum/config-secret": "8f538b8565433669aff91f642a5ee8f88dc794ad319f14d96b589cdf37b8b0ba",
+            "checksum/platform-component-identity-secret": "0e6edc316f3687de42074ea90dc24489144dd078379d86db24da800ec185ce52",
             "fugue.pro/source-commit": controller_source,
-            "kubectl.kubernetes.io/restartedAt": "2026-01-01T00:00:00Z",
+            "kubectl.kubernetes.io/restartedAt": "2026-05-14T19:32:20Z",
         },
-        "labels": {"app.kubernetes.io/component": "controller"},
+        "labels": {
+            "app.kubernetes.io/component": "controller",
+            "app.kubernetes.io/instance": "fugue",
+            "app.kubernetes.io/name": "fugue",
+        },
     },
     "spec": {
         "containers": [
             {
-                "env": [{"name": "SYNTHETIC_STABLE", "value": "true"}],
+                "env": [
+                    {"name": "FUGUE_CONTROLLER_METRICS_BIND_ADDR", "value": ":9090"},
+                    {
+                        "name": "FUGUE_DATABASE_URL",
+                        "valueFrom": {
+                            "secretKeyRef": {
+                                "key": "FUGUE_DATABASE_URL",
+                                "name": "fugue-fugue-config",
+                            }
+                        },
+                    },
+                ],
                 "image": controller_image,
+                "imagePullPolicy": "IfNotPresent",
                 "name": "controller",
+                "ports": [{"containerPort": 9090, "name": "metrics", "protocol": "TCP"}],
+                "resources": {},
+                "volumeMounts": [{"mountPath": "/var/lib/fugue", "name": "data"}],
             }
         ],
-        "serviceAccountName": "synthetic-controller",
+        "serviceAccountName": "fugue-fugue-sa",
+        "terminationGracePeriodSeconds": 30,
+        "volumes": [{"emptyDir": {}, "name": "data"}],
     },
 }
 controller = {
     "apiVersion": "apps/v1",
     "kind": "Deployment",
-    "metadata": {"name": "fugue-fugue-controller", "namespace": "fugue-system"},
+    "metadata": {"generation": 693, "name": "fugue-fugue-controller", "namespace": "fugue-system", "resourceVersion": "201", "uid": "controller-uid-1"},
     "spec": {"template": controller_template},
 }
 (root / "controller.json").write_text(
@@ -436,7 +554,7 @@ api_template = {
     json.dumps({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
-        "metadata": {"name": "fugue-fugue-api", "namespace": "fugue-system"},
+        "metadata": {"generation": 718, "name": "fugue-fugue-api", "namespace": "fugue-system", "resourceVersion": "301", "uid": "api-uid-1"},
         "spec": {"template": api_template},
     }, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
     encoding="ascii",
@@ -550,6 +668,8 @@ PY
 }
 
 reset_fixture() {
+  rm -f "${FIXTURE_ROOT}/helm824-archive.yaml"
+  rm -rf "${FIXTURE_ROOT}/observed-plan"
   : >"${FIXTURE_ROOT}/commands.log"
   : >"${FIXTURE_ROOT}/live-reads.log"
   : >"${FIXTURE_ROOT}/renderer.log"
@@ -558,6 +678,9 @@ reset_fixture() {
   printf '%s\n' 0 >"${FIXTURE_ROOT}/helm-status-count"
   printf '%s\n' 0 >"${FIXTURE_ROOT}/daemonset-read-count"
   printf '%s\n' 0 >"${FIXTURE_ROOT}/controller-read-count"
+  cat >"${FIXTURE_ROOT}/coordination-lease.json" <<'JSON'
+{"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"annotations":{},"name":"fugue-fugue-control-plane-db-backup","namespace":"fugue-system","resourceVersion":"401","uid":"coordination-lease-uid-1"},"spec":{"holderIdentity":"","leaseDurationSeconds":120,"leaseTransitions":0}}
+JSON
   write_handoff_support_fixtures
   cat >"${FIXTURE_ROOT}/helm-manifest.yaml" <<'YAML'
 ---
@@ -647,9 +770,48 @@ PY
   write_manifest "${FIXTURE_ROOT}/forward-live.json" "${REPOSITORY}@${FORWARD_DIGEST}" "${SOURCE_SHA}" "${SOURCE_SHA}" declarative true false
   write_manifest "${FIXTURE_ROOT}/lkg-live.json" "${REPOSITORY}@${LKG_DIGEST}" "${LKG_SOURCE_SHA}" "${LKG_OCI_REVISION}" declarative true false
   write_manifest "${FIXTURE_ROOT}/live.json" "${REPOSITORY}@${LKG_DIGEST}" "" "${LKG_OCI_REVISION}" helm true true
+  python3 - "${FIXTURE_ROOT}" "${REPOSITORY}" "${FORWARD_DIGEST}" "${SOURCE_SHA}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+repository, digest, revision = sys.argv[2:]
+receipt = [{
+    "component": "controller",
+    "config_digest": "sha256:" + "3" * 64,
+    "immutable_ref": f"{repository}@{digest}",
+    "oci_revision": revision,
+    "platform_manifest_digest": "sha256:" + "4" * 64,
+    "repository": repository,
+    "source_tag": revision,
+    "top_digest": digest,
+    "verification": "registry_manifest_config_and_layer_get",
+}]
+receipt_bytes = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("ascii")
+(root / "artifact-receipt.json").write_bytes(receipt_bytes)
+binding = {
+    "apiVersion": "release.fugue.dev/v1",
+    "artifactReceiptDigest": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest(),
+    "component": "controller",
+    "configSha": revision,
+    "desiredSourceSha": revision,
+    "kind": "ComponentBuildReceiptBinding",
+}
+(root / "artifact-binding.json").write_text(json.dumps(binding, separators=(",", ":"), sort_keys=True))
+PY
+  chmod 0600 "${FIXTURE_ROOT}/artifact-receipt.json" "${FIXTURE_ROOT}/artifact-binding.json"
 }
 
-run_apply() {
+run_apply_phase() {
+  local mode="$1"
+  local plan_dir="$2"
+  local forward="$3"
+  local lkg="$4"
+  local receipt="$5"
+  local binding="$6"
+  local plan_digest="${7:-}"
   env \
     PATH="${FIXTURE_ROOT}/bin:${PATH}" \
     FIXTURE_ROOT="${FIXTURE_ROOT}" \
@@ -666,11 +828,74 @@ run_apply() {
     FUGUE_CONTROLLER_LKG_SOURCE_SHA="${LKG_SOURCE_SHA}" \
     FUGUE_CONTROLLER_OCI_REVISION="${SOURCE_SHA}" \
     FUGUE_CONTROLLER_LKG_OCI_REVISION="${TEST_LKG_OCI_REVISION:-${LKG_OCI_REVISION}}" \
-    bash "${SCRIPT}" "${FIXTURE_ROOT}/forward.json" "${FIXTURE_ROOT}/lkg.json"
+    FUGUE_CONTROLLER_DECLARATIVE_MODE="${mode}" \
+    FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR="${plan_dir}" \
+    FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST="${plan_digest}" \
+    FUGUE_CONTROLLER_BUILD_RECEIPT_FILE="${receipt}" \
+    FUGUE_CONTROLLER_BUILD_BINDING_FILE="${binding}" \
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=1 \
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS=1 \
+    FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=30 \
+    HELM_STATUS_TOTAL_BYTES="${HELM_STATUS_TOTAL_BYTES:-}" \
+    GITHUB_RUN_ID=30900532415 \
+    GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_SHA="${SOURCE_SHA}" \
+    bash "${SCRIPT}" "${forward}" "${lkg}"
+}
+
+prepare_apply_plan() {
+  local canonical_fixture_root=""
+  canonical_fixture_root="$(cd "${FIXTURE_ROOT}" && pwd -P)"
+  local plan_dir="${canonical_fixture_root}/observed-plan"
+  local prepare_log="${FIXTURE_ROOT}/prepare.log"
+  if ! grep -Fq '# Source: fugue/templates/controller-deployment.yaml' "${FIXTURE_ROOT}/helm-manifest.yaml" &&
+    ! grep -Fq 'synthetic-public-edge-1' "${FIXTURE_ROOT}/helm-manifest.yaml"; then
+    {
+      cat "${FIXTURE_ROOT}/helm-manifest.yaml"
+      cat "${FIXTURE_ROOT}/preserved-other.yaml"
+    } >"${FIXTURE_ROOT}/helm-manifest-with-platform-witnesses.yaml"
+    mv "${FIXTURE_ROOT}/helm-manifest-with-platform-witnesses.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
+  fi
+  run_apply_phase prepare "${plan_dir}" \
+    "${FIXTURE_ROOT}/forward.json" "${FIXTURE_ROOT}/lkg.json" \
+    "${FIXTURE_ROOT}/artifact-receipt.json" "${FIXTURE_ROOT}/artifact-binding.json" >"${prepare_log}" || return $?
+}
+
+run_apply() {
+  local canonical_fixture_root=""
+  canonical_fixture_root="$(cd "${FIXTURE_ROOT}" && pwd -P)"
+  local plan_dir="${canonical_fixture_root}/observed-plan"
+  prepare_apply_plan || return $?
+  : >"${FIXTURE_ROOT}/commands.log"
+  : >"${FIXTURE_ROOT}/live-reads.log"
+  : >"${FIXTURE_ROOT}/renderer.log"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/helm-status-count"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/daemonset-read-count"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/controller-read-count"
+  run_apply_phase execute "${plan_dir}" \
+    "${plan_dir}/forward.json" "${plan_dir}/lkg.json" \
+    "${plan_dir}/artifact-receipt.json" "${plan_dir}/artifact-binding.json" \
+    "$(<"${plan_dir}/plan.digest")"
 }
 
 run_core_cases() (
 prepare_parallel_case_root core
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+HELM_STATUS_TOTAL_BYTES=1813937 prepare_apply_plan
+grep -Eq '^controller-declarative:prepared plan=sha256:[0-9a-f]{64}$' "${FIXTURE_ROOT}/prepare.log"
+test -s "${FIXTURE_ROOT}/observed-plan/prepare-receipt.json"
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+if HELM_STATUS_TOTAL_BYTES=4194305 run_apply >"${FIXTURE_ROOT}/helm-status-oversize.log" 2>&1; then
+  printf 'Helm status above 4 MiB was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'helm-status-size-invalid' "${FIXTURE_ROOT}/helm-status-oversize.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 reset_fixture
 cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
@@ -699,7 +924,10 @@ PY
 reset_fixture
 cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
 run_apply >"${FIXTURE_ROOT}/declarative-resume.log"
-[[ "$(cat "${FIXTURE_ROOT}/commands.log")" == $'dry-run:forward.json\ndry-run:lkg.json\napply:forward' ]]
+[[ "$(grep -E '^(dry-run|apply):' "${FIXTURE_ROOT}/commands.log")" == $'dry-run:forward.json\ndry-run:lkg.json\napply:forward' ]]
+[[ "$(grep '^lease:' "${FIXTURE_ROOT}/commands.log")" == $'lease:acquire\nlease:arm\nlease:release' ]]
+grep -Eq '^controller-declarative:prepared plan=sha256:[0-9a-f]{64}$' "${FIXTURE_ROOT}/prepare.log"
+test -s "${FIXTURE_ROOT}/observed-plan/prepare-receipt.json"
 [[ "$(grep -c '^deployment-read:true$' "${FIXTURE_ROOT}/live-reads.log")" -eq 3 ]]
 ! grep -Fq '^deployment-read:false$' "${FIXTURE_ROOT}/live-reads.log"
 ! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
@@ -725,8 +953,12 @@ grep -Fq 'live-lkg-not-proven' "${FIXTURE_ROOT}/declarative-missing-manager.log"
 ! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
 run_apply >"${FIXTURE_ROOT}/success.log"
-[[ "$(cat "${FIXTURE_ROOT}/commands.log")" == $'dry-run:forward.json\ndry-run:lkg.json\napply:forward' ]]
+[[ "$(grep -E '^(dry-run|apply):' "${FIXTURE_ROOT}/commands.log")" == $'dry-run:forward.json\ndry-run:lkg.json\napply:forward' ]]
+[[ "$(grep '^lease:' "${FIXTURE_ROOT}/commands.log")" == $'lease:acquire\nlease:arm\nlease:release' ]]
+grep -Eq '^controller-declarative:prepared plan=sha256:[0-9a-f]{64}$' "${FIXTURE_ROOT}/prepare.log"
+test -s "${FIXTURE_ROOT}/observed-plan/prepare-receipt.json"
 
 reset_fixture
 cp "${FIXTURE_ROOT}/stage-helm-preserved-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
@@ -775,6 +1007,7 @@ grep -Fq 'initial-transition-proof-failed' "${FIXTURE_ROOT}/lkg-env-drift.log"
 ! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
 if HEALTH_FAIL=true run_apply >"${FIXTURE_ROOT}/rollback.log" 2>&1; then
   printf 'failed health gate incorrectly reported success\n' >&2
   exit 1
@@ -801,8 +1034,61 @@ prepare_legacy_bootstrap() {
   write_manifest "${FIXTURE_ROOT}/live.json" "${REPOSITORY}@${LKG_DIGEST}" "" "${LKG_OCI_REVISION}" legacy true false
 }
 
+prepare_helm824_inline_snapshot_bootstrap() {
+  prepare_legacy_bootstrap
+  printf '%s\n' 824 >"${FIXTURE_ROOT}/helm-revision"
+  python3 - "${FIXTURE_ROOT}/helm-manifest.yaml" "${FIXTURE_ROOT}/controller.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+manifest_path, controller_path = map(Path, sys.argv[1:])
+raw = manifest_path.read_text(encoding="utf-8")
+lines = raw.splitlines()
+controller = json.loads(controller_path.read_bytes())
+template = controller["spec"]["template"]
+canonical = json.dumps(template, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+starts = [index for index, line in enumerate(lines) if line == "---"]
+starts.append(len(lines))
+found = 0
+for position in range(len(starts) - 1):
+    begin, end = starts[position], starts[position + 1]
+    document = lines[begin:end]
+    if "# Source: fugue/templates/controller-deployment.yaml" not in document:
+        continue
+    matches = [index for index, line in enumerate(document) if line == "  template:"]
+    if len(matches) != 1:
+        raise SystemExit("redacted Helm824 Controller template fixture is invalid")
+    template_begin = matches[0]
+    template_end = next(
+        (
+            index
+            for index, line in enumerate(document[template_begin + 1 :], template_begin + 1)
+            if line.startswith("  ") and not line.startswith("    ") and line.strip()
+        ),
+        len(document),
+    )
+    lines[begin + template_begin : begin + template_end] = ["  template: " + canonical]
+    found += 1
+if found != 1:
+    raise SystemExit("redacted Helm824 Controller document fixture is absent")
+manifest_path.write_text("\n".join(lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
+PY
+  cp "${FIXTURE_ROOT}/helm-manifest.yaml" "${FIXTURE_ROOT}/helm824-archive.yaml"
+}
+
 run_handoff_cases() (
 prepare_parallel_case_root handoff
+
+prepare_helm824_inline_snapshot_bootstrap
+if ! run_apply >"${FIXTURE_ROOT}/helm824-inline-current.log" 2>&1; then
+  printf 'redacted Helm824 inline Controller snapshot was not renderer-idempotent: ' >&2
+  tail -n 1 "${FIXTURE_ROOT}/helm824-inline-current.log" >&2
+  exit 1
+fi
+[[ "$(grep -c '^helm-stage:helm$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
+[[ "$(grep -c '^helm-stage:declarative$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
+grep -Fxq 'apply:forward' "${FIXTURE_ROOT}/commands.log"
 
 prepare_legacy_bootstrap
 [[ "$(grep -c 'synthetic.test/unreleased-template: true' "${FIXTURE_ROOT}/stage-helm-manifest.yaml")" -eq 11 ]]
@@ -872,7 +1158,7 @@ if EDGE_CHECKSUM_DRIFT=true run_apply >"${FIXTURE_ROOT}/edge-drift.log" 2>&1; th
   printf 'Edge checksum drift was not rejected before Helm write\n' >&2
   exit 1
 fi
-grep -Fq 'helm-handoff-sealed-input-drift-before-stage1' "${FIXTURE_ROOT}/edge-drift.log"
+grep -Fq 'observed-plan-live-drift-before-seal' "${FIXTURE_ROOT}/edge-drift.log"
 ! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
 ! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
@@ -881,7 +1167,7 @@ if CONTROLLER_TEMPLATE_DRIFT=true run_apply >"${FIXTURE_ROOT}/controller-drift.l
   printf 'Controller template drift was not rejected before Helm write\n' >&2
   exit 1
 fi
-grep -Fq 'helm-handoff-sealed-input-drift-before-stage1' "${FIXTURE_ROOT}/controller-drift.log"
+grep -Fq 'observed-plan-live-drift-before-seal' "${FIXTURE_ROOT}/controller-drift.log"
 ! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
 ! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
@@ -890,7 +1176,7 @@ if HELM_REVISION_DRIFT=true run_apply >"${FIXTURE_ROOT}/helm-revision-drift.log"
   printf 'Helm revision drift was not rejected before Helm write\n' >&2
   exit 1
 fi
-grep -Fq 'helm-handoff-sealed-input-drift-before-stage1' "${FIXTURE_ROOT}/helm-revision-drift.log"
+grep -Fq 'observed-plan-live-drift-before-seal' "${FIXTURE_ROOT}/helm-revision-drift.log"
 ! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
 ! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
@@ -1066,6 +1352,7 @@ grep -Fxq 'apply:forward' "${FIXTURE_ROOT}/commands.log"
 )
 
 case_pids=()
+case_names=()
 for case_name in \
   run_core_cases \
   run_handoff_cases \
@@ -1073,13 +1360,18 @@ for case_name in \
   run_commit_unknown_cases; do
   "${case_name}" &
   case_pids+=("$!")
+  case_names+=("${case_name}")
 done
 case_status=0
-for case_pid in "${case_pids[@]}"; do
+for case_index in "${!case_pids[@]}"; do
+  case_pid="${case_pids[${case_index}]}"
   if ! wait "${case_pid}"; then
+    printf 'controller declarative case failed: %s\n' "${case_names[${case_index}]}" >&2
     case_status=1
   fi
 done
-[[ "${case_status}" -eq 0 ]]
+if [[ "${case_status}" -ne 0 ]]; then
+  exit "${case_status}"
+fi
 
 printf 'controller declarative apply tests passed\n'

@@ -313,9 +313,81 @@ YAML
   # The API image in the raw chart must be the fixed immutable 62d image.
   sed -i.bak 's#sha256:62dffb2b0f881b7acd3f9603984dfa0b9a277ec0c5d9451472f1a10d362dffb2#sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3#' "${raw}"
   "${HELM_POST_RENDERER_FILE}" <"${raw}" >"${rendered}"
-  [[ "$(grep -c '^  template: {' "${rendered}")" == 2 ]]
-  grep -Fq 'fugue-fugue-api' "${rendered}"
-  grep -Fq 'fugue-fugue-controller' "${rendered}"
+  expected="${TMP}/observed-recovery-double-template.expected.yaml"
+  cat >"${expected}" <<'YAML'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+spec:
+  template: {"metadata":{"annotations":{"fugue.pro/source-commit":"57dc767999741cea25fe4820a6c9603984dfa0b9"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-api@sha256:62dffb2b0f881b7acd3f9603a0f5d35974f3f0c94852f9c17fcb98b74672c8a3","name":"api"}]}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-controller
+spec:
+  template: {"metadata":{"annotations":{"fugue.pro/source-commit":"d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"}},"spec":{"containers":[{"image":"ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d","name":"controller"}]}}
+YAML
+  cmp -s "${expected}" "${rendered}"
+  repeated="${TMP}/observed-recovery-double-template.repeated.yaml"
+  "${HELM_POST_RENDERER_FILE}" <"${rendered}" >"${repeated}"
+  cmp -s "${rendered}" "${repeated}"
+  RENDERED="${rendered}" ROOT="${TMP}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+source = Path(os.environ["RENDERED"]).read_text(encoding="utf-8")
+root = Path(os.environ["ROOT"])
+
+def mutate(name, mutation):
+    lines = source.splitlines()
+    identity = f"  name: {name}"
+    matches = [index for index, line in enumerate(lines) if line == identity]
+    if len(matches) != 1:
+        raise SystemExit("inline renderer identity fixture invalid")
+    template_index = next(
+        index for index in range(matches[0] + 1, len(lines))
+        if lines[index].startswith("  template: ")
+    )
+    raw = lines[template_index][len("  template: "):]
+    template = json.loads(raw)
+    lines[template_index] = "  template: " + mutation(template, raw)
+    return "\n".join(lines) + "\n"
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+def api_tamper(template, _raw):
+    template["metadata"]["annotations"]["unexpected"] = "tampered"
+    return canonical(template)
+
+def controller_extra(template, _raw):
+    template["spec"]["containers"].append(dict(template["spec"]["containers"][0]))
+    return canonical(template)
+
+def noncanonical(_template, raw):
+    return " " + raw
+
+def duplicate_metadata(template, _raw):
+    metadata = canonical(template["metadata"])
+    spec = canonical(template["spec"])
+    return "{" + f'"metadata":{metadata},"metadata":{metadata},"spec":{spec}' + "}"
+
+for filename, name, mutation in (
+    ("inline-api-tampered.yaml", "fugue-fugue-api", api_tamper),
+    ("inline-controller-extra.yaml", "fugue-fugue-controller", controller_extra),
+    ("inline-api-noncanonical.yaml", "fugue-fugue-api", noncanonical),
+    ("inline-controller-duplicate-key.yaml", "fugue-fugue-controller", duplicate_metadata),
+):
+    (root / filename).write_text(mutate(name, mutation), encoding="utf-8")
+PY
+  ! "${HELM_POST_RENDERER_FILE}" <"${TMP}/inline-api-tampered.yaml" >/dev/null
+  ! "${HELM_POST_RENDERER_FILE}" <"${TMP}/inline-controller-extra.yaml" >/dev/null
+  ! "${HELM_POST_RENDERER_FILE}" <"${TMP}/inline-api-noncanonical.yaml" >/dev/null
+  ! "${HELM_POST_RENDERER_FILE}" <"${TMP}/inline-controller-duplicate-key.yaml" >/dev/null
   CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=false
   ! prepare_helm_post_renderer
 )

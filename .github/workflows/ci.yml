@@ -588,8 +588,8 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.controller_release == 'true' }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
-      packages: write
     outputs:
       image_repository: ${{ steps.meta.outputs.image_repository }}
       image_digest: ${{ steps.publish.outputs.controller_image_digest }}
@@ -653,88 +653,123 @@ jobs:
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           [[ "${owner}" =~ ^[a-z0-9][a-z0-9-]*$ ]]
           echo "image_repository=ghcr.io/${owner}/fugue-controller" >>"${GITHUB_OUTPUT}"
-      - name: Checkout detached exact Controller source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Download exact historical Controller build receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          ref: ${{ steps.intent.outputs.desired_source_sha }}
-          fetch-depth: 1
-          path: .fugue-controller-source
-          persist-credentials: false
-          clean: true
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and fresh-verify immutable Controller image
+          name: fugue-controller-build-5966e295d9f9bf4a65c690108084c2018f945a75
+          path: ${{ runner.temp }}/fugue-controller-build-source
+          github-token: ${{ github.token }}
+          run-id: '30900532415'
+      - name: Verify exact historical Controller receipt binding
+        env:
+          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
+          IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          [[ "${GITHUB_SHA}" != 5966e295d9f9bf4a65c690108084c2018f945a75 ]]
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build-source"
+          receipt_path = root / "receipt.json"
+          binding_path = root / "binding.json"
+          if {path.name for path in root.iterdir()} != {"binding.json", "receipt.json"}:
+              raise SystemExit("controller-historical-artifact-file-set-invalid")
+          for path, maximum in ((receipt_path, 128 * 1024), (binding_path, 16 * 1024)):
+              info = path.lstat()
+              if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                  raise SystemExit("controller-historical-artifact-file-invalid")
+              if info.st_size < 1 or info.st_size > maximum:
+                  raise SystemExit("controller-historical-artifact-size-invalid")
+          receipt_raw = receipt_path.read_bytes()
+          receipt = json.loads(receipt_raw)
+          canonical_receipt = json.dumps(
+              receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("ascii")
+          if receipt_raw != canonical_receipt or type(receipt) is not list or len(receipt) != 1:
+              raise SystemExit("controller-historical-receipt-canonical-shape-invalid")
+          expected_artifact = {
+              "component": "controller",
+              "config_digest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
+              "immutable_ref": "ghcr.io/yym68686/fugue-controller@sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
+              "oci_revision": "58fc2e560064214e3f329765c9ec7839ee513c27",
+              "platform_manifest_digest": "sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
+              "repository": "ghcr.io/yym68686/fugue-controller",
+              "source_tag": "5966e295d9f9bf4a65c690108084c2018f945a75",
+              "top_digest": "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
+              "verification": "registry_manifest_config_and_layer_get",
+          }
+          if receipt[0] != expected_artifact:
+              raise SystemExit("controller-historical-receipt-artifact-invalid")
+          receipt_digest = "sha256:" + hashlib.sha256(receipt_raw).hexdigest()
+          if receipt_digest != "sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e":
+              raise SystemExit("controller-historical-receipt-digest-invalid")
+          binding_raw = binding_path.read_bytes()
+          binding = json.loads(binding_raw)
+          canonical_binding = json.dumps(
+              binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("ascii")
+          expected_binding = {
+              "apiVersion": "release.fugue.dev/v1",
+              "artifactReceiptDigest": receipt_digest,
+              "component": "controller",
+              "configSha": "5966e295d9f9bf4a65c690108084c2018f945a75",
+              "desiredSourceSha": "58fc2e560064214e3f329765c9ec7839ee513c27",
+              "kind": "ComponentBuildReceiptBinding",
+          }
+          if binding_raw != canonical_binding or binding != expected_binding:
+              raise SystemExit("controller-historical-receipt-binding-invalid")
+          if os.environ["DESIRED_SOURCE_SHA"] != expected_binding["desiredSourceSha"]:
+              raise SystemExit("controller-historical-desired-source-intent-mismatch")
+          if os.environ["IMAGE_REPOSITORY"] != expected_artifact["repository"]:
+              raise SystemExit("controller-historical-repository-intent-mismatch")
+          PY
+      - name: Fresh registry GET from exact historical Controller receipt
         id: publish
         env:
           FUGUE_CONTROL_PLANE_IMAGE_TARGETS: controller
-          FUGUE_IMAGE_TAG: ${{ github.sha }}
+          FUGUE_IMAGE_TAG: 5966e295d9f9bf4a65c690108084c2018f945a75
           FUGUE_IMAGE_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
-          FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT: ${{ github.workspace }}/.fugue-controller-source
-          FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT: "true"
-          FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
-          FUGUE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/build_control_plane_images.sh
-      - name: Materialize canonical build receipt
+          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-build-source/receipt.json
+          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE: "true"
+        run: timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh
+      - name: Seal unchanged Controller receipt for current run
         env:
           RECEIPT_JSON: ${{ steps.publish.outputs.verified_image_artifacts_json }}
           RECEIPT_DIGEST: ${{ steps.publish.outputs.verified_image_artifacts_digest }}
-          CONFIG_SHA: ${{ github.sha }}
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
+          CONTROLLER_IMAGE_DIGEST: ${{ steps.publish.outputs.controller_image_digest }}
         run: |
           set -euo pipefail
+          source_dir="${RUNNER_TEMP}/fugue-controller-build-source"
+          target_dir="${RUNNER_TEMP}/fugue-controller-build"
+          [[ ! -e "${target_dir}" && ! -L "${target_dir}" ]]
           install -d -m 0700 "${RUNNER_TEMP}/fugue-controller-build"
           python3 - <<'PY'
           import hashlib
           import json
           import os
           from pathlib import Path
-          import re
 
-          raw = os.environ["RECEIPT_JSON"].encode("ascii")
-          digest = os.environ["RECEIPT_DIGEST"]
-          config_sha = os.environ["CONFIG_SHA"]
-          desired_source_sha = os.environ["DESIRED_SOURCE_SHA"]
-          if re.fullmatch(r"[0-9a-f]{40}", config_sha) is None:
-              raise SystemExit("controller-build-config-sha-invalid")
-          if re.fullmatch(r"[0-9a-f]{40}", desired_source_sha) is None:
-              raise SystemExit("controller-build-desired-source-sha-invalid")
-          value = json.loads(raw)
-          canonical = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
-          if raw != canonical or type(value) is not list or len(value) != 1:
-              raise SystemExit("controller-build-receipt-canonical-shape-invalid")
-          artifact = value[0]
-          if type(artifact) is not dict or artifact.get("component") != "controller":
-              raise SystemExit("controller-build-receipt-component-invalid")
-          if artifact.get("source_tag") != config_sha or artifact.get("oci_revision") != desired_source_sha:
-              raise SystemExit("controller-build-receipt-source-identity-invalid")
-          actual = "sha256:" + hashlib.sha256(canonical).hexdigest()
-          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or digest != actual:
-              raise SystemExit("controller-build-receipt-digest-invalid")
-          path = Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build" / "receipt.json"
-          path.write_bytes(canonical)
-          os.chmod(path, 0o600)
-          binding = {
-              "apiVersion": "release.fugue.dev/v1",
-              "artifactReceiptDigest": digest,
-              "component": "controller",
-              "configSha": config_sha,
-              "desiredSourceSha": desired_source_sha,
-              "kind": "ComponentBuildReceiptBinding",
-          }
-          binding_bytes = json.dumps(
-              binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          binding_path = path.with_name("binding.json")
-          binding_path.write_bytes(binding_bytes)
-          os.chmod(binding_path, 0o600)
+          source = Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build-source" / "receipt.json"
+          raw = source.read_bytes()
+          if os.environ["RECEIPT_JSON"].encode("ascii") != raw:
+              raise SystemExit("controller-reused-receipt-output-bytes-mismatch")
+          digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+          if digest != os.environ["RECEIPT_DIGEST"] or digest != "sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e":
+              raise SystemExit("controller-reused-receipt-output-digest-mismatch")
+          if os.environ["CONTROLLER_IMAGE_DIGEST"] != "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98":
+              raise SystemExit("controller-reused-image-output-digest-mismatch")
           PY
+          install -m 0600 "${source_dir}/receipt.json" "${target_dir}/receipt.json"
+          install -m 0600 "${source_dir}/binding.json" "${target_dir}/binding.json"
+          cmp -s "${source_dir}/receipt.json" "${target_dir}/receipt.json"
+          cmp -s "${source_dir}/binding.json" "${target_dir}/binding.json"
       - name: Upload canonical Controller build receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -823,13 +858,17 @@ jobs:
         with:
           name: fugue-controller-build-${{ github.sha }}
           path: ${{ runner.temp }}/fugue-controller-build
-      - name: Verify canonical config and source receipt binding
+      - name: Verify historical artifact binding and current config separation
         env:
-          CONFIG_SHA: ${{ github.sha }}
+          CURRENT_CONFIG_SHA: ${{ github.sha }}
+          ARTIFACT_CONFIG_SHA: 5966e295d9f9bf4a65c690108084c2018f945a75
           DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
           RECEIPT_DIGEST: ${{ needs.controller-build.outputs.receipt_digest }}
         run: |
           set -euo pipefail
+          [[ "${CURRENT_CONFIG_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${CURRENT_CONFIG_SHA}" ]]
+          [[ "${ARTIFACT_CONFIG_SHA}" == 5966e295d9f9bf4a65c690108084c2018f945a75 ]]
+          [[ "${CURRENT_CONFIG_SHA}" != "${ARTIFACT_CONFIG_SHA}" ]]
           python3 - <<'PY'
           import hashlib
           import json
@@ -851,12 +890,29 @@ jobs:
           ).encode("ascii")
           if binding_bytes != canonical_binding:
               raise SystemExit("controller-build-binding-noncanonical")
+          receipt_value = json.loads(receipt_bytes)
+          canonical_receipt = json.dumps(
+              receipt_value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("ascii")
+          expected_artifact = {
+              "component": "controller",
+              "config_digest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
+              "immutable_ref": "ghcr.io/yym68686/fugue-controller@sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
+              "oci_revision": "58fc2e560064214e3f329765c9ec7839ee513c27",
+              "platform_manifest_digest": "sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
+              "repository": "ghcr.io/yym68686/fugue-controller",
+              "source_tag": "5966e295d9f9bf4a65c690108084c2018f945a75",
+              "top_digest": "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
+              "verification": "registry_manifest_config_and_layer_get",
+          }
+          if receipt_bytes != canonical_receipt or receipt_value != [expected_artifact]:
+              raise SystemExit("controller-build-receipt-canonical-artifact-mismatch")
           receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
           expected = {
               "apiVersion": "release.fugue.dev/v1",
               "artifactReceiptDigest": os.environ["RECEIPT_DIGEST"],
               "component": "controller",
-              "configSha": os.environ["CONFIG_SHA"],
+              "configSha": os.environ["ARTIFACT_CONFIG_SHA"],
               "desiredSourceSha": os.environ["DESIRED_SOURCE_SHA"],
               "kind": "ComponentBuildReceiptBinding",
           }
@@ -867,7 +923,7 @@ jobs:
         id: receipt
         env:
           FUGUE_CONTROL_PLANE_IMAGE_TARGETS: controller
-          FUGUE_IMAGE_TAG: ${{ github.sha }}
+          FUGUE_IMAGE_TAG: 5966e295d9f9bf4a65c690108084c2018f945a75
           FUGUE_IMAGE_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
           FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-build/receipt.json
@@ -1058,7 +1114,8 @@ jobs:
             echo "lkg_source_sha=${lkg_source_sha}"
             echo "lkg_oci_revision=${lkg_oci_revision}"
           } >>"${GITHUB_OUTPUT}"
-      - name: Apply Controller with single-writer proof and exact live LKG rollback
+      - name: Prepare durable Controller observed-state plan
+        id: prepare
         env:
           FUGUE_CONTROLLER_NAMESPACE: fugue-system
           FUGUE_CONTROLLER_HELM_RELEASE: fugue
@@ -1073,7 +1130,139 @@ jobs:
           FUGUE_CONTROLLER_LKG_SOURCE_SHA: ${{ steps.manifests.outputs.lkg_source_sha }}
           FUGUE_CONTROLLER_OCI_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
           FUGUE_CONTROLLER_LKG_OCI_REVISION: ${{ steps.manifests.outputs.lkg_oci_revision }}
-        run: ./scripts/apply_controller_declarative.sh "${{ steps.manifests.outputs.forward_manifest }}" "${{ steps.manifests.outputs.lkg_manifest }}"
+          FUGUE_CONTROLLER_DECLARATIVE_MODE: prepare
+          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST: ''
+          FUGUE_CONTROLLER_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-build/receipt.json
+          FUGUE_CONTROLLER_BUILD_BINDING_FILE: ${{ runner.temp }}/fugue-controller-build/binding.json
+          FORWARD_MANIFEST: ${{ steps.manifests.outputs.forward_manifest }}
+          LKG_MANIFEST: ${{ steps.manifests.outputs.lkg_manifest }}
+        run: |
+          set -euo pipefail
+          plan_dir="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR}"
+          [[ ! -e "${plan_dir}" && ! -L "${plan_dir}" ]]
+          ./scripts/apply_controller_declarative.sh "${FORWARD_MANIFEST}" "${LKG_MANIFEST}"
+          PLAN_DIR="${plan_dir}" CURRENT_CONFIG_SHA="${GITHUB_SHA}" \
+            CURRENT_RUN_ID="${GITHUB_RUN_ID}" CURRENT_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+
+          root = Path(os.environ["PLAN_DIR"])
+          info = root.lstat()
+          if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+              raise SystemExit("controller-observed-plan-directory-invalid")
+          expected_files = {
+              "artifact-binding.json",
+              "artifact-receipt.json",
+              "forward.json",
+              "lkg.json",
+              "plan.digest",
+              "plan.json",
+              "prepare-receipt.json",
+          }
+          if {path.name for path in root.iterdir()} != expected_files:
+              raise SystemExit("controller-observed-plan-file-set-invalid")
+          for path in root.iterdir():
+              file_info = path.lstat()
+              if not stat.S_ISREG(file_info.st_mode) or stat.S_ISLNK(file_info.st_mode) or stat.S_IMODE(file_info.st_mode) != 0o600:
+                  raise SystemExit("controller-observed-plan-file-mode-invalid")
+          for copied, source in (
+              (root / "forward.json", Path(os.environ["FORWARD_MANIFEST"])),
+              (root / "lkg.json", Path(os.environ["LKG_MANIFEST"])),
+              (root / "artifact-receipt.json", Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build" / "receipt.json"),
+              (root / "artifact-binding.json", Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build" / "binding.json"),
+          ):
+              if copied.read_bytes() != source.read_bytes():
+                  raise SystemExit("controller-observed-plan-copied-input-drift")
+          plan_raw = (root / "plan.json").read_bytes()
+          plan = json.loads(plan_raw)
+          canonical_plan = json.dumps(
+              plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("ascii")
+          if plan_raw != canonical_plan:
+              raise SystemExit("controller-observed-plan-noncanonical")
+          embedded_digest = plan.pop("planDigest", None)
+          unsigned = json.dumps(
+              plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("ascii")
+          actual_digest = "sha256:" + hashlib.sha256(unsigned).hexdigest()
+          sidecar_digest = (root / "plan.digest").read_text().strip()
+          if embedded_digest != actual_digest or sidecar_digest != actual_digest:
+              raise SystemExit("controller-observed-plan-digest-invalid")
+          if plan.get("kind") != "ControllerDeclarativeObservedStateRecoveryPlan":
+              raise SystemExit("controller-observed-plan-kind-invalid")
+          if plan.get("configSha") != os.environ["CURRENT_CONFIG_SHA"]:
+              raise SystemExit("controller-observed-plan-current-config-invalid")
+          if plan.get("runId") != int(os.environ["CURRENT_RUN_ID"]) or plan.get("runAttempt") != int(os.environ["CURRENT_RUN_ATTEMPT"]):
+              raise SystemExit("controller-observed-plan-run-identity-invalid")
+          if (plan.get("helm") or {}).get("revision") != 824:
+              raise SystemExit("controller-observed-plan-helm-revision-invalid")
+          expected_artifact = {
+              "configDigest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
+              "platformManifestDigest": "sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
+              "receiptDigest": "sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e",
+              "sourceTag": "5966e295d9f9bf4a65c690108084c2018f945a75",
+              "topDigest": "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
+          }
+          if plan.get("artifact") != expected_artifact:
+              raise SystemExit("controller-observed-plan-artifact-invalid")
+          receipt_raw = (root / "prepare-receipt.json").read_bytes()
+          receipt = json.loads(receipt_raw)
+          canonical_receipt = json.dumps(
+              receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+          ).encode("ascii")
+          expected_receipt = {
+              "apiVersion": "release.fugue.dev/v1",
+              "configSha": os.environ["CURRENT_CONFIG_SHA"],
+              "kind": "ControllerDeclarativePrepareReceipt",
+              "planDigest": actual_digest,
+              "productionWriteAttempted": False,
+              "runAttempt": int(os.environ["CURRENT_RUN_ATTEMPT"]),
+              "runId": int(os.environ["CURRENT_RUN_ID"]),
+              "status": "prepared-and-durable-before-write",
+          }
+          if receipt_raw != canonical_receipt or receipt != expected_receipt:
+              raise SystemExit("controller-observed-plan-receipt-invalid")
+          PY
+      - name: Upload durable Controller observed-state plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+          overwrite: false
+      - name: Execute Controller plan with exact live LKG compensation
+        env:
+          FUGUE_CONTROLLER_NAMESPACE: fugue-system
+          FUGUE_CONTROLLER_HELM_RELEASE: fugue
+          FUGUE_CONTROLLER_HELM_CHART: ${{ github.workspace }}/deploy/helm/fugue
+          FUGUE_CONTROLLER_DEPLOYMENT: fugue-fugue-controller
+          FUGUE_CONTROLLER_API_DEPLOYMENT: fugue-fugue-api
+          FUGUE_CONTROLLER_LEADER_LEASE: fugue-fugue-controller
+          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
+          FUGUE_CONTROLLER_IMAGE_DIGEST: ${{ needs.controller-build.outputs.image_digest }}
+          FUGUE_CONTROLLER_LKG_IMAGE_DIGEST: ${{ steps.manifests.outputs.lkg_digest }}
+          FUGUE_CONTROLLER_SOURCE_SHA: ${{ github.sha }}
+          FUGUE_CONTROLLER_LKG_SOURCE_SHA: ${{ steps.manifests.outputs.lkg_source_sha }}
+          FUGUE_CONTROLLER_OCI_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
+          FUGUE_CONTROLLER_LKG_OCI_REVISION: ${{ steps.manifests.outputs.lkg_oci_revision }}
+          FUGUE_CONTROLLER_DECLARATIVE_MODE: execute
+          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST: ${{ steps.prepare.outputs.plan_digest }}
+          FUGUE_CONTROLLER_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}/artifact-receipt.json
+          FUGUE_CONTROLLER_BUILD_BINDING_FILE: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}/artifact-binding.json
+        run: |
+          set -euo pipefail
+          plan_dir="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR}"
+          [[ "${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          ./scripts/apply_controller_declarative.sh \
+            "${plan_dir}/forward.json" "${plan_dir}/lkg.json"
 
   audit:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

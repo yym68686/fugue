@@ -17,6 +17,8 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
+DEFAULT_MAX_ELAPSED_SECONDS = 60.0
+CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS = 120.0
 TEST_HUNK_RE = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ func "
     r"(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\("
@@ -45,6 +47,25 @@ def run(command: list[str], timeout: float) -> tuple[int, str]:
 
 def command_env() -> dict[str, str]:
     return os.environ.copy()
+
+
+def task_timeout_seconds(name: str, remaining: float) -> float:
+    if name == "controller-declarative-tests":
+        return CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS
+    return remaining
+
+
+def elapsed_timeout_seconds(check_names: set[str]) -> float:
+    if "controller-declarative-tests" in check_names:
+        return CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS
+    return DEFAULT_MAX_ELAPSED_SECONDS
+
+
+def elapsed_timeout_exceeded(check_names: set[str], elapsed_ms: int) -> bool:
+    limit_ms = round(elapsed_timeout_seconds(check_names) * 1000)
+    if "controller-declarative-tests" in check_names:
+        return elapsed_ms > limit_ms
+    return elapsed_ms >= limit_ms
 
 
 def git_output(arguments: list[str]) -> bytes:
@@ -370,7 +391,7 @@ def main() -> int:
         elif command is None:
             status, output = 124, f"pre-push task {name} has no command"
         else:
-            status, output = run(command, deadline - before)
+            status, output = run(command, task_timeout_seconds(name, deadline - before))
         return status, output, before
 
     phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
@@ -445,8 +466,9 @@ def main() -> int:
             if output.strip():
                 print(output.rstrip(), file=sys.stderr)
         return 1
-    if elapsed_ms >= 60_000:
-        print(f"prepush exceeded 60s: {elapsed_ms}ms", file=sys.stderr)
+    elapsed_limit_seconds = elapsed_timeout_seconds(set(checks))
+    if elapsed_timeout_exceeded(set(checks), elapsed_ms):
+        print(f"prepush exceeded {elapsed_limit_seconds:g}s: {elapsed_ms}ms", file=sys.stderr)
         return 1
     return 0
 

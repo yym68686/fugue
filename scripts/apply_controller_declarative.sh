@@ -5,6 +5,11 @@ umask 077
 
 readonly FORWARD_MANIFEST="${1:-}"
 readonly LKG_MANIFEST="${2:-}"
+readonly EXECUTION_MODE="${FUGUE_CONTROLLER_DECLARATIVE_MODE:-}"
+readonly PLAN_DIR="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR:-}"
+readonly EXPECTED_PLAN_DIGEST="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST:-}"
+readonly BUILD_RECEIPT_FILE="${FUGUE_CONTROLLER_BUILD_RECEIPT_FILE:-}"
+readonly BUILD_BINDING_FILE="${FUGUE_CONTROLLER_BUILD_BINDING_FILE:-}"
 readonly NAMESPACE="${FUGUE_CONTROLLER_NAMESPACE:-}"
 readonly HELM_RELEASE="${FUGUE_CONTROLLER_HELM_RELEASE:-}"
 readonly HELM_CHART="${FUGUE_CONTROLLER_HELM_CHART:-}"
@@ -44,6 +49,14 @@ fail() {
 KUBECTL=kubectl
 FUGUE_RELEASE_NAME="${HELM_RELEASE}"
 FUGUE_NAMESPACE="${NAMESPACE}"
+FUGUE_RELEASE_FULLNAME="${HELM_RELEASE}-${HELM_RELEASE}"
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS:-120}"
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS:-5}"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME:-${HELM_RELEASE}-${HELM_RELEASE}-control-plane-db-backup}"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE:-${NAMESPACE}}"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS:-120}"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS:-30}"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
 HANDOFF_RENDERER_PREPARED=false
 HANDOFF_BASE_REVISION=""
 HANDOFF_BASE_MANIFEST_DIGEST=""
@@ -69,6 +82,13 @@ HANDOFF_STAGE2_RENDERER_DIGEST=""
 [[ "${LKG_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail 'lkg-source-sha-invalid'
 [[ "${OCI_REVISION}" =~ ^[0-9a-f]{40}$ ]] || fail 'oci-revision-invalid'
 [[ "${LKG_OCI_REVISION}" =~ ^[0-9a-f]{40}$ ]] || fail 'lkg-oci-revision-invalid'
+[[ "${EXECUTION_MODE}" == prepare || "${EXECUTION_MODE}" == execute ]] || fail 'execution-mode-invalid'
+[[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] ||
+  fail 'actions-run-identity-invalid'
+[[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || fail 'config-sha-invalid'
+[[ -n "${PLAN_DIR}" && "${PLAN_DIR}" == /* && ! -L "${PLAN_DIR}" ]] || fail 'plan-directory-invalid'
+[[ -f "${BUILD_RECEIPT_FILE}" && ! -L "${BUILD_RECEIPT_FILE}" ]] || fail 'build-receipt-invalid'
+[[ -f "${BUILD_BINDING_FILE}" && ! -L "${BUILD_BINDING_FILE}" ]] || fail 'build-binding-invalid'
 
 validate_input_file() {
   local path="$1"
@@ -93,12 +113,32 @@ PY
 
 validate_input_file "${FORWARD_MANIFEST}" forward
 validate_input_file "${LKG_MANIFEST}" lkg
+if [[ "${EXECUTION_MODE}" == execute ]]; then
+  [[ "${EXPECTED_PLAN_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'execute-plan-digest-invalid'
+  [[ "$(cd "$(dirname "${FORWARD_MANIFEST}")" && pwd -P)/$(basename "${FORWARD_MANIFEST}")" == "${PLAN_DIR}/forward.json" ]] ||
+    fail 'execute-forward-not-from-plan-artifact'
+  [[ "$(cd "$(dirname "${LKG_MANIFEST}")" && pwd -P)/$(basename "${LKG_MANIFEST}")" == "${PLAN_DIR}/lkg.json" ]] ||
+    fail 'execute-lkg-not-from-plan-artifact'
+  [[ "${BUILD_RECEIPT_FILE}" == "${PLAN_DIR}/artifact-receipt.json" ]] || fail 'execute-receipt-not-from-plan-artifact'
+  [[ "${BUILD_BINDING_FILE}" == "${PLAN_DIR}/artifact-binding.json" ]] || fail 'execute-binding-not-from-plan-artifact'
+fi
 
 readonly WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-controller-ssa.XXXXXX")"
 cleanup() {
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == true ]]; then
+    stop_control_plane_backup_coordination_lease_renewer || true
+    printf 'controller-declarative:recovery-fence-retained holder=%s\n' \
+      "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER:-unknown}" >&2
+  fi
   rm -rf "${WORK_DIR}"
 }
 trap cleanup EXIT
+
+capture_coordination_lease() {
+  local output="$1"
+  kubectl -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+    get "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" -o json >"${output}"
+}
 
 helm_revision() {
   local output="$1"
@@ -109,7 +149,7 @@ from pathlib import Path
 import sys
 
 raw = Path(sys.argv[1]).read_bytes()
-if not raw or len(raw) > 1024 * 1024:
+if not raw or len(raw) > 4 * 1024 * 1024:
     raise SystemExit("helm-status-size-invalid")
 value = json.loads(raw)
 if type(value) is not dict or value.get("info", {}).get("status") != "deployed":
@@ -589,6 +629,273 @@ if normalized(sys.argv[1]) != normalized(sys.argv[2]):
 PY
 }
 
+materialize_observed_state_plan() {
+  local output="$1"
+  local helm_status_file="$2"
+  local helm_manifest_file="$3"
+  local helm_values_file="$4"
+  local controller_file="$5"
+  local api_file="$6"
+  local lease_file="$7"
+  local stage1_file="$8"
+  local stage2_file="$9"
+  PLAN_OUTPUT="${output}" HELM_STATUS_FILE="${helm_status_file}" \
+    HELM_MANIFEST_FILE="${helm_manifest_file}" HELM_VALUES_FILE="${helm_values_file}" \
+    CONTROLLER_FILE="${controller_file}" API_FILE="${api_file}" LEASE_FILE="${lease_file}" \
+    STAGE1_FILE="${stage1_file}" STAGE2_FILE="${stage2_file}" \
+    FORWARD_FILE="${FORWARD_MANIFEST}" LKG_FILE="${LKG_MANIFEST}" \
+    PLAN_BUILD_RECEIPT_FILE="${BUILD_RECEIPT_FILE}" PLAN_BUILD_BINDING_FILE="${BUILD_BINDING_FILE}" \
+    EDGE_JSON="${HANDOFF_PUBLIC_CHECKSUMS_JSON}" \
+    STAGE1_RENDERER_DIGEST="${HANDOFF_STAGE1_RENDERER_DIGEST}" \
+    STAGE2_RENDERER_DIGEST="${HANDOFF_STAGE2_RENDERER_DIGEST}" \
+    CONTROLLER_NAME="${DEPLOYMENT}" API_NAME="${API_DEPLOYMENT}" \
+    PLAN_NAMESPACE="${NAMESPACE}" PLAN_IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" \
+    PLAN_FORWARD_DIGEST="${FORWARD_DIGEST}" PLAN_LKG_DIGEST="${LKG_DIGEST}" \
+    PLAN_OCI_REVISION="${OCI_REVISION}" PLAN_LKG_OCI_REVISION="${LKG_OCI_REVISION}" \
+    CONFIG_SHA="${GITHUB_SHA}" RUN_ID="${GITHUB_RUN_ID}" RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+
+def read(path, maximum):
+    value = Path(path).read_bytes()
+    if not value or len(value) > maximum:
+        raise SystemExit("observed-plan-input-size-invalid")
+    return value
+
+def load(path, maximum):
+    return json.loads(read(path, maximum))
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
+
+def digest(raw):
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+def deployment_identity(path, expected_name, expected_repository, expected_digest, expected_revision=None):
+    value = load(path, 2 * 1024 * 1024)
+    metadata = value.get("metadata") if type(value) is dict else None
+    spec = value.get("spec") if type(value) is dict else None
+    if value.get("apiVersion") != "apps/v1" or value.get("kind") != "Deployment":
+        raise SystemExit("observed-plan-deployment-kind-invalid")
+    if type(metadata) is not dict or metadata.get("namespace") != os.environ["PLAN_NAMESPACE"] or metadata.get("name") != expected_name:
+        raise SystemExit("observed-plan-deployment-identity-invalid")
+    uid = metadata.get("uid")
+    resource_version = metadata.get("resourceVersion")
+    generation = metadata.get("generation")
+    if not isinstance(uid, str) or not uid or not isinstance(resource_version, str) or not resource_version:
+        raise SystemExit("observed-plan-deployment-cas-invalid")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise SystemExit("observed-plan-deployment-generation-invalid")
+    template = spec.get("template") if type(spec) is dict else None
+    if type(template) is not dict:
+        raise SystemExit("observed-plan-deployment-template-invalid")
+    containers = (template.get("spec") or {}).get("containers")
+    expected_container = "controller" if expected_name == os.environ["CONTROLLER_NAME"] else "api"
+    matches = [item for item in containers or [] if type(item) is dict and item.get("name") == expected_container]
+    if len(matches) != 1:
+        raise SystemExit("observed-plan-deployment-container-invalid")
+    image = matches[0].get("image")
+    if image != f"{expected_repository}@{expected_digest}":
+        raise SystemExit("observed-plan-deployment-image-invalid")
+    source = ((template.get("metadata") or {}).get("annotations") or {}).get("fugue.pro/source-commit")
+    if expected_revision is not None and source not in (None, expected_revision):
+        raise SystemExit("observed-plan-deployment-source-invalid")
+    return {
+        "generation": generation,
+        "image": image,
+        "resourceVersion": resource_version,
+        "sourceCommit": source or expected_revision,
+        "templateDigest": digest(canonical(template)),
+        "uid": uid,
+    }
+
+status = load(os.environ["HELM_STATUS_FILE"], 4 * 1024 * 1024)
+revision = status.get("version")
+if status.get("info", {}).get("status") != "deployed" or isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+    raise SystemExit("observed-plan-helm-revision-invalid")
+manifest = read(os.environ["HELM_MANIFEST_FILE"], 4 * 1024 * 1024)
+values = load(os.environ["HELM_VALUES_FILE"], 2 * 1024 * 1024)
+receipt_raw = read(os.environ["PLAN_BUILD_RECEIPT_FILE"], 128 * 1024)
+receipt = json.loads(receipt_raw)
+binding_raw = read(os.environ["PLAN_BUILD_BINDING_FILE"], 16 * 1024)
+binding = json.loads(binding_raw)
+if receipt_raw != canonical(receipt) or binding_raw != canonical(binding):
+    raise SystemExit("observed-plan-build-receipt-noncanonical")
+if type(receipt) is not list or len(receipt) != 1 or type(receipt[0]) is not dict:
+    raise SystemExit("observed-plan-build-receipt-shape-invalid")
+artifact = receipt[0]
+receipt_digest = digest(receipt_raw)
+if binding != {
+    "apiVersion": "release.fugue.dev/v1",
+    "artifactReceiptDigest": receipt_digest,
+    "component": "controller",
+    "configSha": artifact.get("source_tag"),
+    "desiredSourceSha": artifact.get("oci_revision"),
+    "kind": "ComponentBuildReceiptBinding",
+}:
+    raise SystemExit("observed-plan-build-binding-invalid")
+if (
+    artifact.get("component") != "controller"
+    or artifact.get("repository") != os.environ["PLAN_IMAGE_REPOSITORY"]
+    or artifact.get("top_digest") != os.environ["PLAN_FORWARD_DIGEST"]
+    or artifact.get("immutable_ref") != f'{os.environ["PLAN_IMAGE_REPOSITORY"]}@{os.environ["PLAN_FORWARD_DIGEST"]}'
+    or artifact.get("oci_revision") != os.environ["PLAN_OCI_REVISION"]
+    or artifact.get("verification") != "registry_manifest_config_and_layer_get"
+):
+    raise SystemExit("observed-plan-build-artifact-invalid")
+for key in ("config_digest", "platform_manifest_digest"):
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get(key) or "")) is None:
+        raise SystemExit("observed-plan-build-artifact-digest-invalid")
+
+controller = deployment_identity(
+    os.environ["CONTROLLER_FILE"], os.environ["CONTROLLER_NAME"],
+    os.environ["PLAN_IMAGE_REPOSITORY"], os.environ["PLAN_LKG_DIGEST"], os.environ["PLAN_LKG_OCI_REVISION"],
+)
+api_value = load(os.environ["API_FILE"], 2 * 1024 * 1024)
+api_containers = (((api_value.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+api_matches = [item for item in api_containers if type(item) is dict and item.get("name") == "api"]
+if len(api_matches) != 1 or "@sha256:" not in str(api_matches[0].get("image") or ""):
+    raise SystemExit("observed-plan-api-image-invalid")
+api_repository, api_digest = api_matches[0]["image"].rsplit("@", 1)
+api = deployment_identity(os.environ["API_FILE"], os.environ["API_NAME"], api_repository, api_digest)
+
+lease = load(os.environ["LEASE_FILE"], 1024 * 1024)
+lease_metadata = lease.get("metadata") if type(lease) is dict else None
+lease_spec = lease.get("spec") if type(lease) is dict else None
+annotations = (lease_metadata or {}).get("annotations") or {}
+if lease.get("apiVersion") != "coordination.k8s.io/v1" or lease.get("kind") != "Lease":
+    raise SystemExit("observed-plan-lease-kind-invalid")
+if not isinstance((lease_metadata or {}).get("uid"), str) or not isinstance((lease_metadata or {}).get("resourceVersion"), str):
+    raise SystemExit("observed-plan-lease-cas-invalid")
+if str((lease_spec or {}).get("holderIdentity") or "") or "fugue.pro/coordination-token" in annotations or str(annotations.get("fugue.pro/recovery-required") or "").lower() == "true":
+    raise SystemExit("observed-plan-lease-not-clear")
+
+edge = json.loads(os.environ["EDGE_JSON"])
+if type(edge) is not dict or len(edge) != 9:
+    raise SystemExit("observed-plan-edge-inventory-invalid")
+plan = {
+    "apiVersion": "release.fugue.dev/v1",
+    "artifact": {
+        "configDigest": artifact["config_digest"],
+        "platformManifestDigest": artifact["platform_manifest_digest"],
+        "receiptDigest": receipt_digest,
+        "sourceTag": artifact["source_tag"],
+        "topDigest": artifact["top_digest"],
+    },
+    "configSha": os.environ["CONFIG_SHA"],
+    "controller": controller,
+    "api": api,
+    "edgeWitnessDigest": digest(canonical(edge)),
+    "helm": {
+        "manifestDigest": digest(manifest),
+        "revision": revision,
+        "valuesDigest": digest(canonical(values)),
+    },
+    "kind": "ControllerDeclarativeObservedStateRecoveryPlan",
+    "lease": {
+        "resourceVersion": lease_metadata["resourceVersion"],
+        "uid": lease_metadata["uid"],
+    },
+    "manifests": {
+        "forwardDigest": digest(read(os.environ["FORWARD_FILE"], 2 * 1024 * 1024)),
+        "lkgDigest": digest(read(os.environ["LKG_FILE"], 2 * 1024 * 1024)),
+        "stage1Digest": digest(read(os.environ["STAGE1_FILE"], 4 * 1024 * 1024)),
+        "stage2Digest": digest(read(os.environ["STAGE2_FILE"], 4 * 1024 * 1024)),
+    },
+    "renderers": {
+        "stage1Digest": "sha256:" + os.environ["STAGE1_RENDERER_DIGEST"],
+        "stage2Digest": "sha256:" + os.environ["STAGE2_RENDERER_DIGEST"],
+    },
+    "runAttempt": int(os.environ["RUN_ATTEMPT"]),
+    "runId": int(os.environ["RUN_ID"]),
+}
+unsigned = canonical(plan)
+plan["planDigest"] = digest(unsigned)
+path = Path(os.environ["PLAN_OUTPUT"])
+path.write_bytes(canonical(plan))
+path.chmod(0o600)
+PY
+}
+
+seal_or_verify_observed_state_plan() {
+  local stage1_file="${WORK_DIR}/helm-stage1-rendered.yaml"
+  local stage2_file="${WORK_DIR}/helm-stage2-rendered.yaml"
+  local lease_file="${WORK_DIR}/plan-coordination-lease.json"
+  local values_file="${WORK_DIR}/initial-helm-values.json"
+  local candidate="${WORK_DIR}/observed-state-plan.json"
+  local plan_digest=""
+
+  verify_handoff_renderer_inputs "${HANDOFF_BASE_REVISION}" plan-prewrite ||
+    fail 'observed-plan-live-drift-before-seal'
+  helm get values "${HELM_RELEASE}" --namespace "${NAMESPACE}" --revision "${HANDOFF_BASE_REVISION}" \
+    --all --output json >"${values_file}" || fail 'observed-plan-helm-values-unavailable'
+  capture_coordination_lease "${lease_file}" || fail 'observed-plan-lease-unavailable'
+  materialize_observed_state_plan "${candidate}" \
+    "${WORK_DIR}/initial-helm-status.json" "${WORK_DIR}/initial-helm-manifest.yaml" "${values_file}" \
+    "${WORK_DIR}/initial-live.json" "${WORK_DIR}/initial-api.json" "${lease_file}" \
+    "${stage1_file}" "${stage2_file}" || fail 'observed-plan-construction-failed'
+  plan_digest="$(python3 - "${candidate}" <<'PY'
+import json
+from pathlib import Path
+import sys
+print(json.loads(Path(sys.argv[1]).read_bytes())["planDigest"])
+PY
+)"
+  [[ "${plan_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'observed-plan-digest-invalid'
+
+  if [[ "${EXECUTION_MODE}" == prepare ]]; then
+    [[ ! -e "${PLAN_DIR}" ]] || fail 'prepare-plan-directory-exists'
+    install -d -m 0700 "${PLAN_DIR}"
+    install -m 0600 "${candidate}" "${PLAN_DIR}/plan.json"
+    install -m 0600 "${FORWARD_MANIFEST}" "${PLAN_DIR}/forward.json"
+    install -m 0600 "${LKG_MANIFEST}" "${PLAN_DIR}/lkg.json"
+    install -m 0600 "${BUILD_RECEIPT_FILE}" "${PLAN_DIR}/artifact-receipt.json"
+    install -m 0600 "${BUILD_BINDING_FILE}" "${PLAN_DIR}/artifact-binding.json"
+    printf '%s\n' "${plan_digest}" >"${PLAN_DIR}/plan.digest"
+    chmod 0600 "${PLAN_DIR}/plan.digest"
+    PLAN_DIGEST="${plan_digest}" PLAN_RECEIPT="${PLAN_DIR}/prepare-receipt.json" \
+      CONFIG_SHA="${GITHUB_SHA}" RUN_ID="${GITHUB_RUN_ID}" RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+value = {
+    "apiVersion": "release.fugue.dev/v1",
+    "configSha": os.environ["CONFIG_SHA"],
+    "kind": "ControllerDeclarativePrepareReceipt",
+    "planDigest": os.environ["PLAN_DIGEST"],
+    "productionWriteAttempted": False,
+    "runAttempt": int(os.environ["RUN_ATTEMPT"]),
+    "runId": int(os.environ["RUN_ID"]),
+    "status": "prepared-and-durable-before-write",
+}
+path = Path(os.environ["PLAN_RECEIPT"])
+path.write_text(json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True), encoding="ascii")
+path.chmod(0o600)
+PY
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+      printf 'plan_digest=%s\n' "${plan_digest}" >>"${GITHUB_OUTPUT}"
+    fi
+    printf 'controller-declarative:prepared plan=%s\n' "${plan_digest}"
+    return 10
+  fi
+
+  [[ "${EXPECTED_PLAN_DIGEST}" == "${plan_digest}" ]] || fail 'execute-plan-digest-input-mismatch'
+  [[ -f "${PLAN_DIR}/plan.json" && ! -L "${PLAN_DIR}/plan.json" ]] || fail 'execute-plan-file-invalid'
+  cmp -s "${candidate}" "${PLAN_DIR}/plan.json" || fail 'execute-observed-state-cas-mismatch'
+  [[ "$(<"${PLAN_DIR}/plan.digest")" == "${plan_digest}" ]] || fail 'execute-plan-sidecar-mismatch'
+}
+
+release_verified_recovery_fence() {
+  require_control_plane_backup_coordination_or_abort 'verified Controller terminal state before Lease release'
+  release_control_plane_backup_coordination_lease || fail 'coordination-lease-release-failed'
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="false"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="verified-terminal-released"
+}
+
 run_helm_stage() {
   local ownership="$1"
   select_handoff_renderer "${ownership}" || return 1
@@ -639,6 +946,18 @@ bootstrap_helm_ownership() {
     "${preserved_current_manifest}" "${stage1_manifest}" "${stage2_manifest}" "${current_owner}" ||
     fail 'helm-handoff-render-proof-failed'
 
+  local plan_status=0
+  seal_or_verify_observed_state_plan || plan_status=$?
+  if [[ "${plan_status}" -eq 10 && "${EXECUTION_MODE}" == prepare ]]; then
+    exit 0
+  fi
+  [[ "${plan_status}" -eq 0 ]] || fail "observed-plan-seal-failed:rc=${plan_status}"
+  acquire_control_plane_backup_coordination_lease || fail 'coordination-lease-acquire-failed'
+  require_control_plane_backup_coordination_or_abort 'Controller declarative recovery fence arm'
+  arm_control_plane_release_recovery_fence 'controller-declarative-before-helm' ||
+    fail 'coordination-recovery-fence-arm-failed'
+  require_control_plane_backup_coordination_or_abort 'Controller declarative Helm handoff'
+
   local stage2_expected_revision="${HANDOFF_BASE_REVISION}"
   if [[ "${current_owner}" == legacy ]]; then
     verify_handoff_renderer_inputs "${HANDOFF_BASE_REVISION}" stage1-prewrite ||
@@ -657,6 +976,7 @@ bootstrap_helm_ownership() {
     elif compare_helm_manifest_bytes "${current_manifest}" "${WORK_DIR}/stage1-observed-helm-manifest.yaml" &&
       validate_live "${WORK_DIR}/stage1-live.json" "${LKG_DIGEST}" legacy "${LKG_OCI_REVISION}" >/dev/null; then
       assert_live_continuity "${baseline_fingerprint}" stage1-safe-old-owner
+      release_verified_recovery_fence
       fail "helm-stage1-not-committed:rc=${stage1_rc}"
     else
       fail "helm-stage1-commit-unknown-unreconciled:rc=${stage1_rc}"
@@ -665,6 +985,7 @@ bootstrap_helm_ownership() {
 
   verify_handoff_renderer_inputs "${stage2_expected_revision}" stage2-prewrite ||
     fail 'helm-handoff-sealed-input-drift-before-stage2'
+  require_control_plane_backup_coordination_or_abort 'Controller declarative Helm ownership omit'
   stage2_rc=0
   run_helm_stage declarative || stage2_rc=$?
   stage2_capture="$(capture_helm_desired stage2-observed)" ||
@@ -1032,8 +1353,24 @@ if [[ "${initial_helm##*$'\t'}" == true ]]; then
   initial_resource_version="$(validate_live "${WORK_DIR}/initial-live.json" "${LKG_DIGEST}" handoff "${LKG_OCI_REVISION}")" ||
     fail 'post-bootstrap-live-invalid'
   expected_initial_owner=handoff
-elif [[ "${initial_owner_mode}" == legacy ]]; then
-  fail 'helm-omitted-deployment-without-keep-handoff'
+elif [[ "${initial_owner_mode}" == declarative ]]; then
+  initial_helm_revision="${initial_helm%%$'\t'*}"
+  prepare_handoff_renderer "${initial_helm_revision}" "${WORK_DIR}/initial-helm-manifest.yaml" ||
+    fail 'declarative-resume-renderer-preparation-failed'
+  install -m 0600 "${WORK_DIR}/initial-helm-manifest.yaml" "${WORK_DIR}/helm-stage1-rendered.yaml"
+  install -m 0600 "${WORK_DIR}/initial-helm-manifest.yaml" "${WORK_DIR}/helm-stage2-rendered.yaml"
+  resume_plan_status=0
+  seal_or_verify_observed_state_plan || resume_plan_status=$?
+  if [[ "${resume_plan_status}" -eq 10 && "${EXECUTION_MODE}" == prepare ]]; then
+    exit 0
+  fi
+  [[ "${resume_plan_status}" -eq 0 ]] || fail "declarative-resume-plan-seal-failed:rc=${resume_plan_status}"
+  acquire_control_plane_backup_coordination_lease || fail 'coordination-lease-acquire-failed'
+  require_control_plane_backup_coordination_or_abort 'Controller declarative resume recovery fence arm'
+  arm_control_plane_release_recovery_fence 'controller-declarative-resume-before-ssa' ||
+    fail 'coordination-recovery-fence-arm-failed'
+else
+  fail 'controller-migration-already-omitted-or-unsafe'
 fi
 readonly INITIAL_HELM="${initial_helm}"
 readonly INITIAL_RESOURCE_VERSION="${initial_resource_version}"
@@ -1050,16 +1387,34 @@ readonly PREWRITE_RESOURCE_VERSION="${prewrite_resource_version}"
 validate_transition_proof "${WORK_DIR}/prewrite-live.json" prewrite ||
   fail 'prewrite-transition-proof-failed'
 
+require_control_plane_backup_coordination_or_abort 'Controller declarative forward SSA'
 apply_status=0
 kubectl apply --server-side --force-conflicts --field-manager="${FIELD_MANAGER}" \
   --filename "${FORWARD_MANIFEST}" >/dev/null || apply_status=$?
-if [[ "${apply_status}" -ne 0 ]] || ! verify_rollout "${FORWARD_DIGEST}" forward "${OCI_REVISION}"; then
-  printf 'controller-declarative:forward-failed; restoring exact Git LKG\n' >&2
-  kubectl apply --server-side --force-conflicts --field-manager="${FIELD_MANAGER}" \
-    --filename "${LKG_MANIFEST}" >/dev/null || fail 'lkg-rollback-apply-failed'
-  verify_rollout "${LKG_DIGEST}" lkg "${LKG_OCI_REVISION}" || fail 'lkg-rollback-verification-failed'
-  fail 'forward-rollout-failed-lkg-restored'
+if [[ "${apply_status}" -eq 0 ]] && verify_rollout "${FORWARD_DIGEST}" forward "${OCI_REVISION}"; then
+  release_verified_recovery_fence
+  printf 'controller-declarative:success source=%s image=%s@%s\n' \
+    "${SOURCE_SHA}" "${IMAGE_REPOSITORY}" "${FORWARD_DIGEST}"
+  exit 0
+fi
+if [[ "${apply_status}" -ne 0 ]] && verify_rollout "${FORWARD_DIGEST}" forward "${OCI_REVISION}"; then
+  printf 'controller-declarative:forward-commit-unknown-reconciled\n' >&2
+  release_verified_recovery_fence
+  printf 'controller-declarative:success source=%s image=%s@%s\n' \
+    "${SOURCE_SHA}" "${IMAGE_REPOSITORY}" "${FORWARD_DIGEST}"
+  exit 0
 fi
 
-printf 'controller-declarative:success source=%s image=%s@%s\n' \
-  "${SOURCE_SHA}" "${IMAGE_REPOSITORY}" "${FORWARD_DIGEST}"
+require_control_plane_backup_coordination_or_abort 'Controller declarative exact LKG compensation'
+printf 'controller-declarative:forward-unproven; restoring exact Git LKG\n' >&2
+lkg_apply_status=0
+kubectl apply --server-side --force-conflicts --field-manager="${FIELD_MANAGER}" \
+  --filename "${LKG_MANIFEST}" >/dev/null || lkg_apply_status=$?
+if verify_rollout "${LKG_DIGEST}" lkg "${LKG_OCI_REVISION}"; then
+  [[ "${lkg_apply_status}" -eq 0 ]] || printf 'controller-declarative:lkg-commit-unknown-reconciled\n' >&2
+  release_verified_recovery_fence
+  fail 'forward-rollout-failed-lkg-restored'
+else
+  printf 'controller-declarative:forward-failed; restoring exact Git LKG\n' >&2
+  fail "lkg-compensation-commit-unknown-unreconciled:rc=${lkg_apply_status}"
+fi

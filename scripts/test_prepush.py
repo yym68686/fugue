@@ -212,9 +212,12 @@ class CanonicalReceiptTest(unittest.TestCase):
 
     def test_controller_declarative_shell_change_selects_focused_contract(self) -> None:
         commands = []
+        controller_timeouts = []
 
-        def fake_run(command, _timeout):
+        def fake_run(command, timeout):
             commands.append(command)
+            if command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
+                controller_timeouts.append(timeout)
             return 0, ""
 
         result, receipt = self.run_main_with_fake(
@@ -229,6 +232,10 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(
             receipt["checks"]["controller-declarative-tests"]["status"],
             "pass",
+        )
+        self.assertEqual(
+            controller_timeouts,
+            [prepush.CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS],
         )
 
     def test_test_only_package_selects_exact_current_tests(self) -> None:
@@ -332,9 +339,10 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["telemetry-declarative-tests"]["status"], "fail")
 
     def test_non_go_controller_failure_still_fails_closed(self) -> None:
-        def fake_run(command, _timeout):
+        def fake_run(command, timeout):
             if command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
-                return 8, "controller failed"
+                self.assertEqual(timeout, prepush.CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS)
+                return 124, f"command exceeded {timeout:.1f}s"
             return 0, ""
 
         result, receipt = self.run_main_with_fake(
@@ -348,6 +356,24 @@ class CanonicalReceiptTest(unittest.TestCase):
 
     def test_default_deadline_and_receipt_schema_are_unchanged(self) -> None:
         self.assertEqual(prepush.DEFAULT_TIMEOUT_SECONDS, 55.0)
+        self.assertEqual(prepush.DEFAULT_MAX_ELAPSED_SECONDS, 60.0)
+        self.assertEqual(prepush.CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS, 120.0)
+        self.assertEqual(
+            prepush.task_timeout_seconds("controller-declarative-tests", 55.0),
+            120.0,
+        )
+        for name in ("compile-all", "affected-tests", "telemetry-declarative-tests"):
+            self.assertEqual(prepush.task_timeout_seconds(name, 55.0), 55.0)
+        self.assertEqual(prepush.elapsed_timeout_seconds({"compile-all"}), 60.0)
+        self.assertEqual(
+            prepush.elapsed_timeout_seconds({"compile-all", "controller-declarative-tests"}),
+            120.0,
+        )
+        self.assertFalse(prepush.elapsed_timeout_exceeded({"compile-all"}, 59_999))
+        self.assertTrue(prepush.elapsed_timeout_exceeded({"compile-all"}, 60_000))
+        controller_checks = {"compile-all", "controller-declarative-tests"}
+        self.assertFalse(prepush.elapsed_timeout_exceeded(controller_checks, 120_000))
+        self.assertTrue(prepush.elapsed_timeout_exceeded(controller_checks, 120_001))
 
         result, receipt = self.run_main_with_fake(lambda _command, _timeout: (0, ""))
         self.assertEqual(result, 0)

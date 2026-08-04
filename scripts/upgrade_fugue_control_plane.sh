@@ -12585,6 +12585,51 @@ seen_api = 0
 seen_controller = 0
 rendered = []
 
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate key")
+        value[key] = item
+    return value
+
+def exact_inline_template_identity(document, template_index, live_template, container_name, repository, allowed_pairs):
+    prefix = "  template: "
+    line = document[template_index]
+    if not line.startswith(prefix):
+        raise SystemExit(1)
+    raw = line[len(prefix):]
+    try:
+        template = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise SystemExit(1)
+    canonical = json.dumps(template, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    if raw != canonical or not isinstance(template, dict) or set(template) != {"metadata", "spec"}:
+        raise SystemExit(1)
+    if template != live_template:
+        raise SystemExit(1)
+    metadata = template.get("metadata")
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    spec = template.get("spec")
+    containers = spec.get("containers") if isinstance(spec, dict) else None
+    source_value = annotations.get("fugue.pro/source-commit") if isinstance(annotations, dict) else None
+    matches = [
+        item for item in containers or []
+        if isinstance(item, dict) and item.get("name") == container_name
+    ]
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", source_value or "") is None
+        or not isinstance(containers, list) or len(matches) != 1
+    ):
+        raise SystemExit(1)
+    image_value = matches[0].get("image")
+    if re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", image_value or "") is None:
+        raise SystemExit(1)
+    pair = (source_value, image_value)
+    if allowed_pairs is not None and pair not in allowed_pairs:
+        raise SystemExit(1)
+    return pair
+
 for document in documents:
     kind = next((line[6:] for line in document if line.startswith("kind: ")), "")
     spec_index = next((index for index, line in enumerate(document) if line == "spec:"), -1)
@@ -12616,26 +12661,50 @@ for document in documents:
         seen_public_objects.add(name)
 
     if api_template is not None and kind == "Deployment" and name == "fugue-fugue-api":
-        source_matches = [
-            re.fullmatch(r'\s+fugue\.pro/source-commit:\s*["\']?([0-9a-f]{40})["\']?', line)
-            for line in document
-        ]
-        source_values = [match.group(1) for match in source_matches if match]
-        image_matches = [
-            re.fullmatch(r'\s+-?\s*image:\s*["\']?(ghcr\.io/yym68686/fugue-api@sha256:[0-9a-f]{64})["\']?', line)
-            for line in document
-        ]
-        image_values = [match.group(1) for match in image_matches if match]
         template_matches = [index for index, line in enumerate(document) if line.startswith("  template:")]
-        if len(template_matches) != 1 or len(source_values) != 1 or len(image_values) != 1 or seen_api:
+        if len(template_matches) != 1 or seen_api:
             raise SystemExit(1)
+        template_index = template_matches[0]
+        if document[template_index] == "  template:":
+            source_matches = [
+                re.fullmatch(r'\s+fugue\.pro/source-commit:\s*["\']?([0-9a-f]{40})["\']?', line)
+                for line in document
+            ]
+            source_values = [match.group(1) for match in source_matches if match]
+            image_matches = [
+                re.fullmatch(r'\s+-?\s*image:\s*["\']?(ghcr\.io/yym68686/fugue-api@sha256:[0-9a-f]{64})["\']?', line)
+                for line in document
+            ]
+            image_values = [match.group(1) for match in image_matches if match]
+            if len(source_values) != 1 or len(image_values) != 1:
+                raise SystemExit(1)
+        else:
+            live_api_containers = [
+                item for item in api_template["spec"]["containers"]
+                if isinstance(item, dict) and item.get("name") == "api"
+            ]
+            if len(live_api_containers) != 1:
+                raise SystemExit(1)
+            live_api_pair = (
+                api_template["metadata"]["annotations"].get("fugue.pro/source-commit"),
+                live_api_containers[0].get("image"),
+            )
+            source_value, image_value = exact_inline_template_identity(
+                document,
+                template_index,
+                api_template,
+                "api",
+                "ghcr.io/yym68686/fugue-api",
+                {live_api_pair},
+            )
+            source_values = [source_value]
+            image_values = [image_value]
         template = json.loads(json.dumps(api_template, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         template["metadata"]["annotations"]["fugue.pro/source-commit"] = source_values[0]
         api_containers = [item for item in template["spec"]["containers"] if item.get("name") == "api"]
         if len(api_containers) != 1:
             raise SystemExit(1)
         api_containers[0]["image"] = image_values[0]
-        template_index = template_matches[0]
         template_end = next(
             (
                 index
@@ -12650,20 +12719,6 @@ for document in documents:
         seen_api += 1
 
     if controller_template is not None and kind == "Deployment" and name == "fugue-fugue-controller":
-        source_matches = [
-            re.fullmatch(r'\s+fugue\.pro/source-commit:\s*["\']?([0-9a-f]{40})["\']?', line)
-            for line in document
-        ]
-        source_values = [match.group(1) for match in source_matches if match]
-        image_matches = [
-            re.fullmatch(r'\s+-?\s*image:\s*["\']?(ghcr\.io/yym68686/fugue-controller@sha256:[0-9a-f]{64})["\']?', line)
-            for line in document
-        ]
-        image_values = [match.group(1) for match in image_matches if match]
-        container_names = [
-            line for line in document
-            if re.fullmatch(r'\s+-?\s*name:\s*["\']?controller["\']?', line)
-        ]
         template_matches = [index for index, line in enumerate(document) if line.startswith("  template:")]
         allowed = {
             (
@@ -12675,18 +12730,46 @@ for document in documents:
                 "ghcr.io/yym68686/fugue-controller@sha256:444bca23386cc0f19012fcbaba20d71db1b9863ee80d50d1bde6d87376e190df",
             ),
         }
-        if (
-            len(template_matches) != 1 or len(source_values) != 1 or len(image_values) != 1
-            or len(container_names) != 1 or seen_controller or (source_values[0], image_values[0]) not in allowed
-        ):
+        if len(template_matches) != 1 or seen_controller:
             raise SystemExit(1)
+        template_index = template_matches[0]
+        if document[template_index] == "  template:":
+            source_matches = [
+                re.fullmatch(r'\s+fugue\.pro/source-commit:\s*["\']?([0-9a-f]{40})["\']?', line)
+                for line in document
+            ]
+            source_values = [match.group(1) for match in source_matches if match]
+            image_matches = [
+                re.fullmatch(r'\s+-?\s*image:\s*["\']?(ghcr\.io/yym68686/fugue-controller@sha256:[0-9a-f]{64})["\']?', line)
+                for line in document
+            ]
+            image_values = [match.group(1) for match in image_matches if match]
+            container_names = [
+                line for line in document
+                if re.fullmatch(r'\s+-?\s*name:\s*["\']?controller["\']?', line)
+            ]
+            if (
+                len(source_values) != 1 or len(image_values) != 1 or len(container_names) != 1
+                or (source_values[0], image_values[0]) not in allowed
+            ):
+                raise SystemExit(1)
+        else:
+            source_value, image_value = exact_inline_template_identity(
+                document,
+                template_index,
+                controller_template,
+                "controller",
+                "ghcr.io/yym68686/fugue-controller",
+                allowed,
+            )
+            source_values = [source_value]
+            image_values = [image_value]
         template = json.loads(json.dumps(controller_template, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         template["metadata"]["annotations"]["fugue.pro/source-commit"] = source_values[0]
         controller_containers = [item for item in template["spec"]["containers"] if item.get("name") == "controller"]
         if len(controller_containers) != 1:
             raise SystemExit(1)
         controller_containers[0]["image"] = image_values[0]
-        template_index = template_matches[0]
         template_end = next(
             (
                 index
