@@ -1142,8 +1142,60 @@ jobs:
           plan_dir="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR}"
           [[ ! -e "${plan_dir}" && ! -L "${plan_dir}" ]]
           ./scripts/apply_controller_declarative.sh "${FORWARD_MANIFEST}" "${LKG_MANIFEST}"
+          fresh_helm_dir="$(mktemp -d "${RUNNER_TEMP}/fugue-controller-fresh-helm-status.XXXXXX")"
+          chmod 0700 "${fresh_helm_dir}"
+          cleanup_fresh_helm_status() {
+            rm -rf -- "${fresh_helm_dir}"
+          }
+          trap cleanup_fresh_helm_status EXIT
+          fresh_helm_status="${fresh_helm_dir}/status.json"
+          timeout --signal=TERM --kill-after=1s 19s \
+            helm status "${FUGUE_CONTROLLER_HELM_RELEASE}" \
+              --namespace "${FUGUE_CONTROLLER_NAMESPACE}" --output json >"${fresh_helm_status}"
+          chmod 0600 "${fresh_helm_status}"
+          fresh_helm_revision="$(python3 - "${fresh_helm_status}" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          raw = Path(sys.argv[1]).read_bytes()
+          if not raw or len(raw) > 4 * 1024 * 1024:
+              raise SystemExit("controller-fresh-helm-status-size-invalid")
+
+          def strict_object(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise ValueError("duplicate JSON key")
+                  value[key] = item
+              return value
+
+          def reject_constant(value):
+              raise ValueError("non-finite JSON number: " + value)
+
+          try:
+              status = json.loads(
+                  raw.decode("utf-8"),
+                  object_pairs_hook=strict_object,
+                  parse_constant=reject_constant,
+              )
+          except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+              raise SystemExit("controller-fresh-helm-status-json-invalid")
+          revision = status.get("version") if type(status) is dict else None
+          info = status.get("info") if type(status) is dict else None
+          if type(info) is not dict or info.get("status") != "deployed":
+              raise SystemExit("controller-fresh-helm-status-not-deployed")
+          if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+              raise SystemExit("controller-fresh-helm-revision-invalid")
+          print(revision)
+          PY
+          )"
+          [[ "${fresh_helm_revision}" =~ ^[1-9][0-9]*$ ]]
+          rm -rf -- "${fresh_helm_dir}"
+          trap - EXIT
           PLAN_DIR="${plan_dir}" CURRENT_CONFIG_SHA="${GITHUB_SHA}" \
             CURRENT_RUN_ID="${GITHUB_RUN_ID}" CURRENT_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
+            FRESH_HELM_REVISION="${fresh_helm_revision}" \
             python3 - <<'PY'
           import hashlib
           import json
@@ -1199,7 +1251,7 @@ jobs:
               raise SystemExit("controller-observed-plan-current-config-invalid")
           if plan.get("runId") != int(os.environ["CURRENT_RUN_ID"]) or plan.get("runAttempt") != int(os.environ["CURRENT_RUN_ATTEMPT"]):
               raise SystemExit("controller-observed-plan-run-identity-invalid")
-          if (plan.get("helm") or {}).get("revision") != 824:
+          if (plan.get("helm") or {}).get("revision") != int(os.environ["FRESH_HELM_REVISION"]):
               raise SystemExit("controller-observed-plan-helm-revision-invalid")
           expected_artifact = {
               "configDigest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",

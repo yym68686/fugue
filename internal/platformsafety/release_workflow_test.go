@@ -5600,6 +5600,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"controller-observed-plan-copied-input-drift",
 			"controller-observed-plan-current-config-invalid",
 			"controller-observed-plan-run-identity-invalid",
+			"timeout --signal=TERM --kill-after=1s 19s",
+			`helm status "${FUGUE_CONTROLLER_HELM_RELEASE}"`,
+			"controller-fresh-helm-status-json-invalid",
+			"controller-fresh-helm-status-not-deployed",
+			"controller-fresh-helm-revision-invalid",
+			`FRESH_HELM_REVISION="${fresh_helm_revision}"`,
+			`(plan.get("helm") or {}).get("revision") != int(os.environ["FRESH_HELM_REVISION"])`,
 			"controller-observed-plan-artifact-invalid",
 			"controller-observed-plan-receipt-invalid",
 			`"productionWriteAttempted": False`,
@@ -5608,6 +5615,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			if !strings.Contains(prepare.Run, required) {
 				t.Fatalf("Controller prepare proof is missing %q", required)
 			}
+		}
+		if strings.Contains(prepare.Run, `(plan.get("helm") or {}).get("revision") != 824`) {
+			t.Fatal("Controller durable plan verification must not pin a historical Helm revision literal")
+		}
+		if got, want := fmt.Sprintf("%x", sha256.Sum256([]byte(prepare.Run))), "22267e1fbc499ddec80fea9629fec795ac6adf0ad104fb80ffc0bf533dcdcc2e"; got != want {
+			t.Fatalf("Controller durable plan run fingerprint drifted: got sha256:%s want sha256:%s", got, want)
 		}
 		uploadPlan := workflowStepByName(t, deploy, "Upload durable Controller observed-state plan")
 		if uploadPlan.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
@@ -5658,7 +5671,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			`declarative)`,
 			`spec.get("replicas") != 2`,
 			`controller-forward-pods-not-new`,
-			`controller-leader-renewal-stale`,
+			`LEADER_CONVERGENCE_TIMEOUT_SECONDS`,
+			`controller-leader-witness-timeout`,
+			`controller-active-loop-split-brain`,
 			`"${INITIAL_UID}"`,
 			`"${INITIAL_API_TEMPLATE_JSON}"`,
 			`forward-failed; restoring exact Git LKG`,
@@ -5689,7 +5704,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",
 			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
 			"fieldManager":                "fugue-controller-declarative",
-			"intentGeneration":            float64(4),
+			"intentGeneration":            float64(8),
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",
