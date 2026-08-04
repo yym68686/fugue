@@ -21812,6 +21812,182 @@ PY
   CONTROL_PLANE_RELEASE_DOMAIN_ARGV_FD_READY=true
 }
 
+control_plane_m16_observed_recovery_tool_receipt() {
+  local action="${1:-}"
+  local binary="${2:-}"
+  local receipt="${3:-}"
+  (( $# == 3 )) || return 2
+  [[ "${action}" =~ ^(create|verify)$ ]] || return 2
+  [[ "${GITHUB_ACTIONS:-}" == "true" && "${GITHUB_EVENT_NAME:-}" == "workflow_dispatch" &&
+    "${GITHUB_REF:-}" == "refs/heads/main" && "${GITHUB_RUN_ATTEMPT:-}" == "1" &&
+    "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ && "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ "${binary}" == /* && "${receipt}" == /* && "${binary}" != "${receipt}" ]] || return 1
+  [[ -f "${binary}" && ! -L "${binary}" && "$(stat -c '%a' -- "${binary}" 2>/dev/null || stat -f '%Lp' -- "${binary}" 2>/dev/null)" == "700" ]] || return 1
+  if [[ "${action}" == "create" ]]; then
+    [[ ! -e "${receipt}" && ! -L "${receipt}" ]] || return 1
+  else
+    [[ -f "${receipt}" && ! -L "${receipt}" && "$(stat -c '%a' -- "${receipt}" 2>/dev/null || stat -f '%Lp' -- "${receipt}" 2>/dev/null)" == "600" ]] || return 1
+  fi
+  ACTION="${action}" BINARY="${binary}" RECEIPT="${receipt}" EXPECTED_SHA="${GITHUB_SHA}" \
+    RUN_ID="${GITHUB_RUN_ID}" RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" python3 - <<'PY' || return
+import datetime,hashlib,json,os,pathlib,re,stat,struct
+
+action=os.environ["ACTION"]
+binary=pathlib.Path(os.environ["BINARY"])
+receipt=pathlib.Path(os.environ["RECEIPT"])
+expected_sha=os.environ["EXPECTED_SHA"]
+run_id=os.environ["RUN_ID"]
+run_attempt=os.environ["RUN_ATTEMPT"]
+if action not in {"create","verify"} or re.fullmatch(r"[0-9a-f]{40}",expected_sha) is None or re.fullmatch(r"[1-9][0-9]*",run_id) is None or run_attempt!="1": raise SystemExit(1)
+artifact_name="fugue-controller-m16-observed-recovery-tool-"+run_id+"-1"
+if binary.parent!=receipt.parent or binary.parent.name!=artifact_name or binary.name!="fugue-control-plane-hotfix-adoption" or receipt.name!="receipt.json": raise SystemExit(1)
+
+def canonical(value): return json.dumps(value,ensure_ascii=True,sort_keys=True,separators=(",",":")).encode()
+def strict_object(raw):
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result: raise ValueError("duplicate key")
+            result[key]=value
+        return result
+    def reject_constant(_): raise ValueError("non-finite value")
+    try: value=json.loads(raw.decode("utf-8"),object_pairs_hook=unique,parse_constant=reject_constant)
+    except (UnicodeDecodeError,ValueError): raise SystemExit(1)
+    if not isinstance(value,dict) or raw!=canonical(value)+b"\n": raise SystemExit(1)
+    return value
+
+def uvarint(raw,offset):
+    value=0
+    for index in range(10):
+        if offset+index>=len(raw): raise SystemExit(1)
+        byte=raw[offset+index]
+        value|=(byte&0x7f)<<(7*index)
+        if byte<0x80: return value,offset+index+1
+    raise SystemExit(1)
+
+def inspect_tool(path):
+    info=path.stat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o700: raise SystemExit(1)
+    raw=path.read_bytes()
+    if len(raw)<1048576 or len(raw)>33554432: raise SystemExit(1)
+    if raw[:16]!=b"\x7fELF\x02\x01\x01\x00"+b"\x00"*8: raise SystemExit(1)
+    elf_type,machine,elf_version=struct.unpack_from("<HHI",raw,16)
+    if (elf_type,machine,elf_version)!=(2,62,1): raise SystemExit(1)
+    magic=b"\xff Go buildinf:"
+    positions=[]; cursor=0
+    while True:
+        cursor=raw.find(magic,cursor)
+        if cursor<0: break
+        positions.append(cursor); cursor+=1
+    if len(positions)!=1 or positions[0]%16!=0: raise SystemExit(1)
+    offset=positions[0]
+    header=raw[offset:offset+32]
+    if len(header)!=32 or header[14]!=8 or header[15]!=2 or header[16:]!=b"\x00"*16: raise SystemExit(1)
+    version_size,cursor=uvarint(raw,offset+32)
+    version=raw[cursor:cursor+version_size]; cursor+=version_size
+    module_size,cursor=uvarint(raw,cursor)
+    module=raw[cursor:cursor+module_size]
+    if len(version)!=version_size or len(module)!=module_size or version!=b"go1.25.7": raise SystemExit(1)
+    start=bytes.fromhex("3077af0c9274080241e1c107e6d618e6")
+    end=bytes.fromhex("f932433186182072008242104116d8f2")
+    if len(module)<33 or module[:16]!=start or module[-16:]!=end or module[-17]!=10: raise SystemExit(1)
+    framed=module[16:-16]
+    try: lines=framed.decode("utf-8").splitlines()
+    except UnicodeDecodeError: raise SystemExit(1)
+    if not framed.endswith(b"\n") or b"\r" in framed: raise SystemExit(1)
+    paths=[]; settings={}
+    for line in lines:
+        if line.startswith("path\t"):
+            paths.append(line[5:])
+        elif line.startswith("build\t"):
+            key,separator,value=line[6:].partition("=")
+            if separator!="=" or not key or key in settings: raise SystemExit(1)
+            settings[key]=value
+        elif line.startswith(("mod\t","dep\t","=>\t")):
+            continue
+        else:
+            raise SystemExit(1)
+    if paths!=["fugue/cmd/fugue-control-plane-hotfix-adoption"]: raise SystemExit(1)
+    expected_settings={
+        "-buildmode":"exe","-compiler":"gc","-trimpath":"true","CGO_ENABLED":"0",
+        "GOARCH":"amd64","GOOS":"linux","GOAMD64":"v1","vcs":"git",
+        "vcs.revision":expected_sha,"vcs.modified":"false",
+    }
+    if set(settings)!=set(expected_settings)|{"vcs.time"}: raise SystemExit(1)
+    if any(settings.get(key)!=value for key,value in expected_settings.items()): raise SystemExit(1)
+    try:
+        stamp=datetime.datetime.fromisoformat(settings["vcs.time"].replace("Z","+00:00"))
+    except ValueError:
+        raise SystemExit(1)
+    if stamp.tzinfo is None: raise SystemExit(1)
+    return raw,{
+        "goVersion":"go1.25.7",
+        "moduleInfoSha256":"sha256:"+hashlib.sha256(framed).hexdigest(),
+        "path":paths[0],
+        "settings":settings,
+    }
+
+raw,build_info=inspect_tool(binary)
+expected={
+    "apiVersion":"release-domain.fugue.dev/v1",
+    "artifactName":artifact_name,
+    "binary":{"mode":"0700","name":binary.name,"sha256":"sha256:"+hashlib.sha256(raw).hexdigest(),"sizeBytes":len(raw)},
+    "elf":{"class":"ELF64","data":"little-endian","machine":"x86-64","machineId":62,"type":"ET_EXEC"},
+    "expectedSha":expected_sha,
+    "goBuildInfo":build_info,
+    "kind":"ControlPlaneControllerM16ObservedRecoveryToolReceipt",
+    "workflowRunAttempt":1,
+    "workflowRunId":run_id,
+}
+if action=="create":
+    with receipt.open("xb") as stream: stream.write(canonical(expected)+b"\n")
+else:
+    receipt_info=receipt.stat()
+    if not stat.S_ISREG(receipt_info.st_mode) or receipt_info.st_uid!=os.getuid() or receipt_info.st_nlink!=1 or stat.S_IMODE(receipt_info.st_mode)!=0o600 or receipt_info.st_size>65536: raise SystemExit(1)
+    if strict_object(receipt.read_bytes())!=expected: raise SystemExit(1)
+PY
+  if [[ "${action}" == "create" ]]; then
+    chmod 600 "${receipt}" || return
+  fi
+}
+
+control_plane_m16_observed_recovery_write_tool_receipt() {
+  (( $# == 2 )) || return 2
+  control_plane_m16_observed_recovery_tool_receipt create "$1" "$2"
+}
+
+control_plane_m16_observed_recovery_verify_tool() {
+  (( $# == 0 )) || return 2
+  [[ -n "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL:-}" && -n "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT:-}" ]] || return 1
+  control_plane_m16_observed_recovery_tool_receipt verify \
+    "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}" "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT}"
+}
+
+control_plane_m16_observed_recovery_materialize_tool() {
+  local download_directory="${1:-}"
+  local output_directory="${2:-}"
+  local inventory=""
+  (( $# == 2 )) || return 2
+  [[ "${download_directory}" == /* && -d "${download_directory}" && ! -L "${download_directory}" &&
+    "${output_directory}" == /* && ! -e "${output_directory}" && ! -L "${output_directory}" ]] || return 1
+  [[ "$(basename "${download_directory}")" == "fugue-controller-m16-observed-recovery-tool-download-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" &&
+    "$(basename "${output_directory}")" == "fugue-controller-m16-observed-recovery-tool-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]] || return 1
+  inventory="$(find "${download_directory}" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)" || return
+  [[ "${inventory}" == $'fugue-control-plane-hotfix-adoption\nreceipt.json' ]] || return 1
+  [[ -f "${download_directory}/fugue-control-plane-hotfix-adoption" && ! -L "${download_directory}/fugue-control-plane-hotfix-adoption" &&
+    -f "${download_directory}/receipt.json" && ! -L "${download_directory}/receipt.json" ]] || return 1
+  [[ "$(stat -c '%a' "${download_directory}/fugue-control-plane-hotfix-adoption" 2>/dev/null || stat -f '%Lp' "${download_directory}/fugue-control-plane-hotfix-adoption" 2>/dev/null)" == "644" &&
+    "$(stat -c '%a' "${download_directory}/receipt.json" 2>/dev/null || stat -f '%Lp' "${download_directory}/receipt.json" 2>/dev/null)" == "644" ]] || return 1
+  install -d -m 0700 "${output_directory}" || return
+  install -m 0700 "${download_directory}/fugue-control-plane-hotfix-adoption" \
+    "${output_directory}/fugue-control-plane-hotfix-adoption" || return
+  install -m 0600 "${download_directory}/receipt.json" "${output_directory}/receipt.json" || return
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${output_directory}/fugue-control-plane-hotfix-adoption"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${output_directory}/receipt.json"
+  export FUGUE_CONTROL_PLANE_HOTFIX_TOOL FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT
+  control_plane_m16_observed_recovery_verify_tool || return
+}
+
 control_plane_m16_observed_recovery_build_plan() {
   local directory="$1"
   local head_sha="$2"
@@ -21859,11 +22035,13 @@ value={"planVersion":4,"expectedSha":os.environ["EXPECTED_SHA"],"runId":os.envir
 (root/"input.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
 PY
   chmod 600 "${directory}/input.json" || return
+  control_plane_m16_observed_recovery_verify_tool || return
   FUGUE_CONTROL_PLANE_HOTFIX_BUILD_PLAN=true FUGUE_CONTROL_PLANE_HOTFIX_BUILD_DIR="${directory}" \
-    go run ./cmd/fugue-control-plane-hotfix-adoption >"${directory}/plan.json" || return
+    "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}" >"${directory}/plan.json" || return
   chmod 600 "${directory}/plan.json" || return
+  control_plane_m16_observed_recovery_verify_tool || return
   FUGUE_CONTROL_PLANE_HOTFIX_VALIDATE_ONLY=true FUGUE_CONTROL_PLANE_HOTFIX_VALIDATION_DIR="${directory}" \
-    go run ./cmd/fugue-control-plane-hotfix-adoption <"${directory}/plan.json" || return
+    "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}" <"${directory}/plan.json" || return
   CONTROL_PLANE_M16_OBSERVED_RECOVERY_PLAN_FILE="${directory}/plan.json"
   CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE="${directory}/wal.json"
   control_plane_m16_observed_recovery_write_wal prepared "" "${CONTROL_PLANE_M16_OBSERVED_RECOVERY_WAL_FILE}" || return
@@ -22014,17 +22192,18 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "8d80f0393c227b5998d423bc8cf26c51d3159e1a" &&
-    "$(git rev-parse --verify HEAD^^)" == "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619" &&
-    "$(git rev-parse --verify HEAD^^^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
-    "$(git rev-parse --verify HEAD^^^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
-    "$(git rev-parse --verify HEAD^^^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
-    "$(git rev-parse --verify HEAD^^^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 10 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b" &&
+    "$(git rev-parse --verify HEAD^^)" == "8d80f0393c227b5998d423bc8cf26c51d3159e1a" &&
+    "$(git rev-parse --verify HEAD^^^)" == "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
+    "$(git rev-parse --verify HEAD^^^^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
+    "$(git rev-parse --verify HEAD^^^^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 11 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1
@@ -22066,6 +22245,7 @@ PY
   [[ "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "${PREVIOUS_REVISION}" &&
     "${CONTROL_PLANE_HOTFIX_BASE_REVISION}" == "${observed_helm_revision}" ]] || return 1
   control_plane_m16_observed_recovery_assert_base_revision || return
+  control_plane_m16_observed_recovery_verify_tool || return
   work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-controller-m16-observed-recovery.XXXXXX")" || return
   chmod 700 "${work_dir}" || return
   CONTROL_PLANE_HOTFIX_WORK_DIR="${work_dir}"

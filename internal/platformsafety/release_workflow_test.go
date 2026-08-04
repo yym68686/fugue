@@ -2293,6 +2293,41 @@ func TestControlPlaneMetadataBaselineResolverMockMatrix(t *testing.T) {
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
 	}
+	parentCommand := exec.Command("git", "show", "c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b:.github/workflows/deploy-control-plane.yml")
+	parentCommand.Dir = filepath.Join("..", "..")
+	parentData, err := parentCommand.Output()
+	if err != nil {
+		t.Fatalf("read exact parent control-plane workflow: %v", err)
+	}
+	var parentWorkflow releaseWorkflow
+	if err := yaml.Unmarshal(parentData, &parentWorkflow); err != nil {
+		t.Fatalf("parse exact parent control-plane workflow: %v", err)
+	}
+	var clearNodePositions func(*yaml.Node)
+	clearNodePositions = func(node *yaml.Node) {
+		node.Line = 0
+		node.Column = 0
+		for _, child := range node.Content {
+			clearNodePositions(child)
+		}
+	}
+	unrelatedJobs := make(map[string]releaseWorkflowJob, len(workflow.Jobs))
+	for name, job := range workflow.Jobs {
+		if name != "prepare-controller-m16-observed-recovery-tool" && name != "recover-controller-m16-observed-state" {
+			clearNodePositions(&job.RunsOn)
+			unrelatedJobs[name] = job
+		}
+	}
+	parentUnrelatedJobs := make(map[string]releaseWorkflowJob, len(parentWorkflow.Jobs))
+	for name, job := range parentWorkflow.Jobs {
+		if name != "recover-controller-m16-observed-state" {
+			clearNodePositions(&job.RunsOn)
+			parentUnrelatedJobs[name] = job
+		}
+	}
+	if !reflect.DeepEqual(unrelatedJobs, parentUnrelatedJobs) {
+		t.Fatal("Controller M16 helper bridge changed an unrelated ordinary/historical/API/M16-forward workflow job")
+	}
 	resolver := workflowStepByName(t, workflow.Jobs["release-baseline"], "Resolve release-domain baseline").Run
 
 	root := t.TempDir()
@@ -2852,7 +2887,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "7b15baf325468bd747c3ced6bfe9ef3e27c3a82e6625a1784bef6aea5d21f07e")
+	assertWorkflowSourceDigest(t, data, "9320fbfebb0814076c2ce78e77d5aa82f61c99d96991911c559cde7fa39dd4fe")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2893,57 +2928,60 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	workflowRootNode := workflowDocumentMapping(t, data)
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
-		"release-input-guard/Guard exact main commit authorization":                                          "05e3ec860ae45383c379fe7a2020bec0accc379c55680395e48995b7431cc1cd",
-		"recover-api-hotfix-fence/Verify exact recovery implementation identity":                             "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
-		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":                      "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
-		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                                    "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
-		"recover-controller-m16-observed-state/Verify exact Controller M16 observed recovery identity":       "38535116676b132d86989cf410a879eed68caec050ee683a670da590b7d9c38c",
-		"recover-controller-m16-observed-state/Run exact independent Controller M16 observed-state recovery": "bbeb2a0a09394cb50025836bce38d2671f46f9d4b5f10add3b114555b8ddf8ad",
-		"settle-controller-m16-observed-recovery-lane/Settle Controller M16 observed recovery lane":          "2858a2cbd55823ceedbd596df4d728b336c313e37ca97be3b8f65bae4a2f3073",
-		"release-baseline/Resolve release-domain baseline":                                                   "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
-		"release-baseline/Verify Stage1 handoff before release planning":                                     "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
-		"release-baseline/Resolve live image metadata":                                                       "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
-		"release-baseline/Compute live-to-target release changed files":                                      "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
-		"release-baseline/Verify exact API hotfix runtime closure":                                           "491a04c7454cf3b908b796d7b7238b88f08ae45612c0994783151fdb450ee105",
-		"release-baseline/Verify exact Controller M16 runtime closure":                                       "26331f47864d8f07f11be63dc1175b4af2320ca2b6e76d58d60a85879e7dc0bd",
-		"release-gate/Verify exact source CI receipt":                                                        "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
-		"release-gate/Verify exact API hotfix product receipt":                                               "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
-		"release-gate/Verify exact M16 Controller build-only product receipt":                                "d67426ed8b1b03d144db9c3aa0955adf30ab3c06062e914ae98fbfb466802c35",
-		"build/Compute image metadata":                                                                       "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
-		"build/Compute image build plan":                                                                     "2ee47f93ec82ca4fe331e3efe2e5308ae5fffc3cf094db49fa046d135d0ab315",
-		"build/Verify exact historical incident image plan":                                                  "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
-		"build/Verify exact Controller M16 image plan and receipt":                                           "363879040eed8b52eff53740ec6aeda71199fa6e8dda684387767c2f823e442a",
-		"build/Verify exact API hotfix image plan":                                                           "d5b258401587abc13c630536f8ec36cbdae46203b3308ace9bfd1ed5c40f9a97",
-		"build/Materialize exact canonical build receipt":                                                    "2d6ecd17bcd49b56c15cf1ab4e3a2569b88db8b4e63b6499ccc63f87cedd5889",
-		"build/Publish verified control-plane image provenance":                                              "e47cb84a90a8d24b2e18ec0b1b1ce5bef3445b58d6948c9cfca1e9cf19454dce",
-		"deploy/Record deploy job budget origin":                                                             "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
-		"deploy/Prepare exact current tooling for historical runtime evidence":                               "15cd94ec3a12647dc78e51695e2ce52ee7ed2b8a29ee2cf63e9df945e6d7c33a",
-		"deploy/Build private release-domain tools":                                                          "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
-		"deploy/Restore exact historical runtime checkout":                                                   "72a75a948848c5b0bf2042e66c5849835fedcd7e311c91910cd73287d77c9142",
-		"deploy/Reverify Stage1 handoff at deploy prewrite":                                                  "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
-		"deploy/Write genesis public release evidence":                                                       "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
-		"deploy/Guard stateful component files":                                                              "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
-		"deploy/Synchronize additive ManagedApp CRD schema":                                                  "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",
-		"deploy/Prepare authoritative DNS DiG runtime":                                                       "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
-		"deploy/Verify local deploy prerequisites":                                                           "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
-		"deploy/Explain runner and fail closed target":                                                       "1731c0653bfe39738df9b79b1deafd74e1454c815ed2aa816454b9b83713f0d0",
-		"deploy/Resolve live image metadata":                                                                 "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
-		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                                 "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
-		"deploy/Roll out exact API hotfix with hybrid compensation":                                          "88e24f910736b2cd3468b5c98320fafb4e7dd1de422e209123d7a679901f3b43",
-		"deploy/Roll out exact Controller M16 with hybrid compensation":                                      "a18981d516350e59a17b02670c87057586dde7aed07ffa7400c2ee31a1f8e059",
-		"deploy/Remove stale release recovery proof":                                                         "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
-		"continue-release-convergence/Dispatch exact release convergence successor":                          "510c424625aa4b352c3fdacfbca149f8e784760da4971977cbe5f487fddcdfb9",
-		"record-release-baseline/Advance dedicated forward-only release baseline branch":                     "007dfc7144f11bc1cc0a7b62994c4efee969679de1a185913489ec5d42b592e7",
-		"rearm-release-lane-on-success/Disable successful release lane with exact readback":                  "0ddb180847bef9e95cf999a5b30707aa4f8b04c10112f208dce8ebfad6249132",
-		"freeze-release-lane-on-failure/Record release lane freeze evidence":                                 "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
-		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":                         "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
-		"freeze-release-lane-on-failure/Require release lane freeze evidence":                                "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
-		"historical-controller-build-only/Bind exact historical Controller build-only plan":                  "39ba749973f0f699062fbf7347a2d5335b66fa55a917a711279914796bae8933",
-		"historical-controller-build-only/Build and verify exact historical Controller artifact":             "945d58db0d33901ea33a593d552079e806c6408b4b8070340a4d67b87bb23dd5",
-		"historical-controller-build-only/Guard exact historical Controller build-only authorization":        "7f8edfc7d0b94f41c525a7568d8b68367a10e1ae97b335759db68b3598bb2b85",
-		"historical-controller-build-only/Initialize exact historical Controller receipt directory":          "433f13dfa97a749a480ada6c1d4dca23ddb615d4e12fa37d9ff868ea8dd5e9d9",
-		"historical-controller-build-only/Require exact historical Controller build-only success":            "4c29c0165ec22321ed267ff97dd249bf5c35999e013d01d362b543520d4fa2ca",
-		"historical-controller-build-only/Seal verified or quarantined historical Controller receipt":        "8ae7ea1c81494ebe8e0e62cdea24770f54b938b94aaf5e3c59115e5a22afcd51",
+		"release-input-guard/Guard exact main commit authorization":                                                   "05e3ec860ae45383c379fe7a2020bec0accc379c55680395e48995b7431cc1cd",
+		"recover-api-hotfix-fence/Verify exact recovery implementation identity":                                      "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
+		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":                               "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
+		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                                             "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
+		"prepare-controller-m16-observed-recovery-tool/Verify exact Controller M16 observed recovery helper identity": "0762d51af4f824a8b998c38e2e02b41b424e5ecc840723fbd4c1b8178ad52d73",
+		"prepare-controller-m16-observed-recovery-tool/Build and bind exact Controller M16 observed recovery helper":  "695f99ba7877a7318fe7c45ae7928442ec525aa977ff93eb0898312aff17c004",
+		"recover-controller-m16-observed-state/Verify exact Controller M16 observed recovery identity":                "edd582c2a378f4c8d1fdfce719403464073c65b9096f1d244a6ae5063dce1f04",
+		"recover-controller-m16-observed-state/Verify and materialize exact Controller M16 observed recovery helper":  "f7469dcc2f1c70a296a78776c007e0ab9eef597fcc0907d3e67a248b670c02a0",
+		"recover-controller-m16-observed-state/Run exact independent Controller M16 observed-state recovery":          "bbeb2a0a09394cb50025836bce38d2671f46f9d4b5f10add3b114555b8ddf8ad",
+		"settle-controller-m16-observed-recovery-lane/Settle Controller M16 observed recovery lane":                   "2858a2cbd55823ceedbd596df4d728b336c313e37ca97be3b8f65bae4a2f3073",
+		"release-baseline/Resolve release-domain baseline":                                                            "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
+		"release-baseline/Verify Stage1 handoff before release planning":                                              "309ac2db472e741bdd25a4c5d380f4074d386807f057aec279631a7fececa211",
+		"release-baseline/Resolve live image metadata":                                                                "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"release-baseline/Compute live-to-target release changed files":                                               "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
+		"release-baseline/Verify exact API hotfix runtime closure":                                                    "491a04c7454cf3b908b796d7b7238b88f08ae45612c0994783151fdb450ee105",
+		"release-baseline/Verify exact Controller M16 runtime closure":                                                "26331f47864d8f07f11be63dc1175b4af2320ca2b6e76d58d60a85879e7dc0bd",
+		"release-gate/Verify exact source CI receipt":                                                                 "006942ca3f4ccc4d4fdf708219b6acc88ee4a652e70fb1d288899d65a5bba7fd",
+		"release-gate/Verify exact API hotfix product receipt":                                                        "73b0194c0de1043bd869b78e96be40400920ec10d388294907f690e6001f41b2",
+		"release-gate/Verify exact M16 Controller build-only product receipt":                                         "d67426ed8b1b03d144db9c3aa0955adf30ab3c06062e914ae98fbfb466802c35",
+		"build/Compute image metadata":                                                                                "95dbd02ae09313f4d3e01ac44f7b3bdd99da8fb6302ca85e9efa87cbbd6e189c",
+		"build/Compute image build plan":                                                                              "2ee47f93ec82ca4fe331e3efe2e5308ae5fffc3cf094db49fa046d135d0ab315",
+		"build/Verify exact historical incident image plan":                                                           "ea9c8f3100c63075f5e0d7376f6580ba25ba2e32d9ed318d66e2c4634081a8f1",
+		"build/Verify exact Controller M16 image plan and receipt":                                                    "363879040eed8b52eff53740ec6aeda71199fa6e8dda684387767c2f823e442a",
+		"build/Verify exact API hotfix image plan":                                                                    "d5b258401587abc13c630536f8ec36cbdae46203b3308ace9bfd1ed5c40f9a97",
+		"build/Materialize exact canonical build receipt":                                                             "2d6ecd17bcd49b56c15cf1ab4e3a2569b88db8b4e63b6499ccc63f87cedd5889",
+		"build/Publish verified control-plane image provenance":                                                       "e47cb84a90a8d24b2e18ec0b1b1ce5bef3445b58d6948c9cfca1e9cf19454dce",
+		"deploy/Record deploy job budget origin":                                                                      "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
+		"deploy/Prepare exact current tooling for historical runtime evidence":                                        "15cd94ec3a12647dc78e51695e2ce52ee7ed2b8a29ee2cf63e9df945e6d7c33a",
+		"deploy/Build private release-domain tools":                                                                   "1927cf23030b57763f05b16fe227da645e993df07218783a9dc7a882f9700300",
+		"deploy/Restore exact historical runtime checkout":                                                            "72a75a948848c5b0bf2042e66c5849835fedcd7e311c91910cd73287d77c9142",
+		"deploy/Reverify Stage1 handoff at deploy prewrite":                                                           "a95f6099c3affdc2e5176133f3d9a324f8273cdc6adf55ef4d60ed8ed957fbae",
+		"deploy/Write genesis public release evidence":                                                                "f9cda719ba304a529408a14275a87be590e9fa0422dbfbf2bfecf18c758b401d",
+		"deploy/Guard stateful component files":                                                                       "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
+		"deploy/Synchronize additive ManagedApp CRD schema":                                                           "a89dc070599c8f3d24b2da7e237e97730c83881a2324adbd81505e8f832fce5f",
+		"deploy/Prepare authoritative DNS DiG runtime":                                                                "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
+		"deploy/Verify local deploy prerequisites":                                                                    "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
+		"deploy/Explain runner and fail closed target":                                                                "1731c0653bfe39738df9b79b1deafd74e1454c815ed2aa816454b9b83713f0d0",
+		"deploy/Resolve live image metadata":                                                                          "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"deploy/Prove explicitly authorized stale pre-Helm release recovery":                                          "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
+		"deploy/Roll out exact API hotfix with hybrid compensation":                                                   "88e24f910736b2cd3468b5c98320fafb4e7dd1de422e209123d7a679901f3b43",
+		"deploy/Roll out exact Controller M16 with hybrid compensation":                                               "a18981d516350e59a17b02670c87057586dde7aed07ffa7400c2ee31a1f8e059",
+		"deploy/Remove stale release recovery proof":                                                                  "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
+		"continue-release-convergence/Dispatch exact release convergence successor":                                   "510c424625aa4b352c3fdacfbca149f8e784760da4971977cbe5f487fddcdfb9",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch":                              "007dfc7144f11bc1cc0a7b62994c4efee969679de1a185913489ec5d42b592e7",
+		"rearm-release-lane-on-success/Disable successful release lane with exact readback":                           "0ddb180847bef9e95cf999a5b30707aa4f8b04c10112f208dce8ebfad6249132",
+		"freeze-release-lane-on-failure/Record release lane freeze evidence":                                          "a06aef257a74d0b2029c79bbc175d57f998698edf04bfeb66f11f012f55c0ac1",
+		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":                                  "1c3e22987871632615f8c74f86e1da5f6675b440a3dbba8c2848056cd045d99a",
+		"freeze-release-lane-on-failure/Require release lane freeze evidence":                                         "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
+		"historical-controller-build-only/Bind exact historical Controller build-only plan":                           "39ba749973f0f699062fbf7347a2d5335b66fa55a917a711279914796bae8933",
+		"historical-controller-build-only/Build and verify exact historical Controller artifact":                      "945d58db0d33901ea33a593d552079e806c6408b4b8070340a4d67b87bb23dd5",
+		"historical-controller-build-only/Guard exact historical Controller build-only authorization":                 "7f8edfc7d0b94f41c525a7568d8b68367a10e1ae97b335759db68b3598bb2b85",
+		"historical-controller-build-only/Initialize exact historical Controller receipt directory":                   "433f13dfa97a749a480ada6c1d4dca23ddb615d4e12fa37d9ff868ea8dd5e9d9",
+		"historical-controller-build-only/Require exact historical Controller build-only success":                     "4c29c0165ec22321ed267ff97dd249bf5c35999e013d01d362b543520d4fa2ca",
+		"historical-controller-build-only/Seal verified or quarantined historical Controller receipt":                 "8ae7ea1c81494ebe8e0e62cdea24770f54b938b94aaf5e3c59115e5a22afcd51",
 	})
 	workflowJobsNode := workflowMappingValue(t, workflowRootNode, "jobs")
 	assertWorkflowJobNodeContracts(t, workflowJobsNode, map[string]workflowJobNodeContract{
@@ -2964,11 +3002,23 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				{"name", "id", "if", "uses", "with"},
 			},
 		},
+		"prepare-controller-m16-observed-recovery-tool": {
+			Keys: []string{"needs", "if", "runs-on", "timeout-minutes", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "uses", "with"},
+				{"name", "env", "run"},
+				{"name", "uses", "with"},
+				{"name", "run"},
+				{"name", "uses", "with"},
+			},
+		},
 		"recover-controller-m16-observed-state": {
 			Keys: []string{"needs", "if", "timeout-minutes", "runs-on", "environment", "permissions", "steps"},
 			StepKeys: [][]string{
 				{"name", "uses", "with"},
 				{"name", "env", "run"},
+				{"name", "uses", "with"},
+				{"name", "run"},
 				{"name", "id", "env", "run"},
 				{"name", "if", "uses", "with"},
 			},
@@ -3389,12 +3439,62 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 	}
 
+	observedTool, ok := workflow.Jobs["prepare-controller-m16-observed-recovery-tool"]
+	if !ok || !containsWorkflowNeed(observedTool.Needs, "release-input-guard") || len(observedTool.Needs) != 1 {
+		t.Fatalf("Controller M16 observed recovery helper dependencies drifted: %+v", observedTool)
+	}
+	const observedToolCondition = "${{ needs.release-input-guard.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}"
+	var observedToolRunner string
+	if observedTool.If != observedToolCondition || observedTool.TimeoutMinutes != 10 || observedTool.Environment != "" ||
+		!reflect.DeepEqual(observedTool.Permissions, map[string]string{"contents": "read"}) ||
+		observedTool.RunsOn.Decode(&observedToolRunner) != nil || observedToolRunner != "ubuntu-latest" {
+		t.Fatalf("Controller M16 observed recovery helper boundary drifted: %+v runner=%q", observedTool, observedToolRunner)
+	}
+	observedToolCheckout := workflowStepByName(t, observedTool, "Checkout exact Controller M16 observed recovery helper source")
+	if observedToolCheckout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+		!reflect.DeepEqual(observedToolCheckout.With, map[string]string{"ref": "${{ inputs.expected_sha }}", "fetch-depth": "0"}) {
+		t.Fatalf("Controller M16 observed recovery helper checkout drifted: %+v", observedToolCheckout)
+	}
+	observedToolIdentity := workflowStepByName(t, observedTool, "Verify exact Controller M16 observed recovery helper identity")
+	for _, required := range []string{"c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b", "rev-list --count", "== 11", "git status --porcelain=v1", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
+		if !strings.Contains(observedToolIdentity.Run, required) {
+			t.Fatalf("Controller M16 observed recovery helper identity must contain %q", required)
+		}
+	}
+	observedToolSetup := workflowStepByName(t, observedTool, "Setup exact Go for Controller M16 observed recovery helper")
+	if observedToolSetup.Uses != "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16" ||
+		!reflect.DeepEqual(observedToolSetup.With, map[string]string{"go-version-file": "go.mod", "cache": "false"}) {
+		t.Fatalf("Controller M16 observed recovery helper setup-go drifted: %+v", observedToolSetup)
+	}
+	observedToolBuild := workflowStepByName(t, observedTool, "Build and bind exact Controller M16 observed recovery helper")
+	for _, required := range []string{
+		"CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64", "GOFLAGS=-mod=readonly", "GOTOOLCHAIN=local",
+		"go mod verify", "go build -trimpath -buildvcs=true -ldflags=-buildid=", "./cmd/fugue-control-plane-hotfix-adoption",
+		"control_plane_m16_observed_recovery_write_tool_receipt", "control_plane_m16_observed_recovery_verify_tool",
+		"fugue-controller-m16-observed-recovery-tool-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}", "elapsedMs=",
+	} {
+		if !strings.Contains(observedToolBuild.Run, required) {
+			t.Fatalf("Controller M16 observed recovery helper build must contain %q", required)
+		}
+	}
+	if strings.Count(observedToolBuild.Run, "go build ") != 1 || strings.Contains(observedToolBuild.Run, "./cmd/...") ||
+		strings.Contains(observedToolBuild.Run, "docker") || strings.Contains(observedToolBuild.Run, "registry") {
+		t.Fatalf("Controller M16 observed recovery helper build gained a non-fixed build surface: %s", observedToolBuild.Run)
+	}
+	observedToolUpload := workflowStepByName(t, observedTool, "Upload exact Controller M16 observed recovery helper")
+	if observedToolUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		observedToolUpload.With["name"] != "fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}" ||
+		observedToolUpload.With["if-no-files-found"] != "error" || observedToolUpload.With["include-hidden-files"] != "false" || observedToolUpload.With["overwrite"] != "false" {
+		t.Fatalf("Controller M16 observed recovery helper upload drifted: %+v", observedToolUpload)
+	}
+
 	observedRecovery, ok := workflow.Jobs["recover-controller-m16-observed-state"]
-	if !ok || !containsWorkflowNeed(observedRecovery.Needs, "release-input-guard") || !containsWorkflowNeed(observedRecovery.Needs, "release-gate") || len(observedRecovery.Needs) != 2 {
+	if !ok || !containsWorkflowNeed(observedRecovery.Needs, "release-input-guard") || !containsWorkflowNeed(observedRecovery.Needs, "release-gate") ||
+		!containsWorkflowNeed(observedRecovery.Needs, "prepare-controller-m16-observed-recovery-tool") || len(observedRecovery.Needs) != 3 {
 		t.Fatalf("Controller M16 observed recovery dependencies drifted: %+v", observedRecovery)
 	}
-	const observedRecoveryCondition = "${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}"
-	if observedRecovery.If != observedRecoveryCondition || observedRecovery.Environment != "production" || observedRecovery.TimeoutMinutes != 20 || !reflect.DeepEqual(observedRecovery.Permissions, map[string]string{"contents": "read"}) {
+	const observedRecoveryCondition = "${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && needs.prepare-controller-m16-observed-recovery-tool.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}"
+	if observedRecovery.If != observedRecoveryCondition || observedRecovery.Environment != "production" || observedRecovery.TimeoutMinutes != 20 || !reflect.DeepEqual(observedRecovery.Permissions, map[string]string{"actions": "read", "contents": "read"}) {
 		t.Fatalf("Controller M16 observed recovery job boundary drifted: %+v", observedRecovery)
 	}
 	var observedRunner []string
@@ -3402,18 +3502,37 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("Controller M16 observed recovery runner drifted: %v err=%v", observedRunner, err)
 	}
 	observedIdentity := workflowStepByName(t, observedRecovery, "Verify exact Controller M16 observed recovery identity")
-	for _, required := range []string{"8d80f0393c227b5998d423bc8cf26c51d3159e1a", "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619", "fc604d4d4ee91aa538017bc5094adb0bc0073652", "7ae3825d00990f603a8e62ce045842a98f1fb93d", "32e03a1ceaff860176e20751077579ea5ff2cd60", "4c0130d31fe66c4db7637a8c10807b372076006d", "d88811c191b40fe5e2a7ce187938f7df0809fa08", "168699dff1ef57958b01973d46db3cc92babec30", "d412416cbca7094ee19d996f312468f871988fdb", "fbfa707084d429176783354745043b5c12b3b488", "internal/releasedomain/control_plane_hotfix_adoption.go", "scripts/test_control_plane_hotfix_adoption.sh", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
+	for _, required := range []string{"c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b", "8d80f0393c227b5998d423bc8cf26c51d3159e1a", "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619", "fc604d4d4ee91aa538017bc5094adb0bc0073652", "7ae3825d00990f603a8e62ce045842a98f1fb93d", "32e03a1ceaff860176e20751077579ea5ff2cd60", "4c0130d31fe66c4db7637a8c10807b372076006d", "d88811c191b40fe5e2a7ce187938f7df0809fa08", "168699dff1ef57958b01973d46db3cc92babec30", "d412416cbca7094ee19d996f312468f871988fdb", "fbfa707084d429176783354745043b5c12b3b488", "internal/releasedomain/control_plane_hotfix_adoption.go", "scripts/test_control_plane_hotfix_adoption.sh", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
 		if !strings.Contains(observedIdentity.Run, required) {
 			t.Fatalf("Controller M16 observed recovery identity must contain %q", required)
 		}
 	}
+	observedDownload := workflowStepByName(t, observedRecovery, "Download exact Controller M16 observed recovery helper")
+	if observedDownload.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" ||
+		observedDownload.With["name"] != "fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}" ||
+		observedDownload.With["run-id"] != "${{ github.run_id }}" || observedDownload.With["repository"] != "${{ github.repository }}" || observedDownload.With["github-token"] != "${{ github.token }}" {
+		t.Fatalf("Controller M16 observed recovery helper download drifted: %+v", observedDownload)
+	}
+	observedMaterialize := workflowStepByName(t, observedRecovery, "Verify and materialize exact Controller M16 observed recovery helper")
+	for _, required := range []string{"control_plane_m16_observed_recovery_materialize_tool", "control_plane_m16_observed_recovery_verify_tool", "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"} {
+		if !strings.Contains(observedMaterialize.Run, required) {
+			t.Fatalf("Controller M16 observed recovery helper materialization must contain %q", required)
+		}
+	}
 	observedRun := workflowStepByName(t, observedRecovery, "Run exact independent Controller M16 observed-state recovery")
-	if observedRun.ID != "controller_m16_observed_recovery" || observedRun.Env["FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1"] != "true" || observedRun.Env["FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM"] != "${{ inputs.controller_m16_observed_recovery_v1 }}" || observedRun.Env["FUGUE_API_KEY"] != "${{ secrets.FUGUE_API_KEY || '' }}" || !strings.Contains(observedRun.Run, "./scripts/upgrade_fugue_control_plane.sh") {
+	if observedRun.ID != "controller_m16_observed_recovery" || observedRun.Env["FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1"] != "true" || observedRun.Env["FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM"] != "${{ inputs.controller_m16_observed_recovery_v1 }}" || observedRun.Env["FUGUE_API_KEY"] != "${{ secrets.FUGUE_API_KEY || '' }}" ||
+		observedRun.Env["FUGUE_CONTROL_PLANE_HOTFIX_TOOL"] != "${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}/fugue-control-plane-hotfix-adoption" ||
+		observedRun.Env["FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT"] != "${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json" || !strings.Contains(observedRun.Run, "./scripts/upgrade_fugue_control_plane.sh") {
 		t.Fatalf("Controller M16 observed recovery execution drifted: %+v", observedRun)
 	}
 	for _, forbidden := range []string{"build_control_plane_images", "artifact_reuse", "helm rollback", "workflow_dispatch"} {
 		if strings.Contains(observedRun.Run, forbidden) {
 			t.Fatalf("Controller M16 observed recovery execution gained forbidden capability %q", forbidden)
+		}
+	}
+	for _, step := range observedRecovery.Steps {
+		if strings.Contains(step.Uses, "actions/setup-go@") || strings.Contains(step.Run, "go build") || strings.Contains(step.Run, "go run") || strings.Contains(step.Run, "go env") {
+			t.Fatalf("production observed recovery runner gained a Go installation or command: %+v", step)
 		}
 	}
 	observedUpload := workflowStepByName(t, observedRecovery, "Upload sanitized Controller M16 observed recovery evidence")
@@ -3750,7 +3869,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 					t.Fatalf("step %s/%s uses an unapproved checkout action: %q", jobName, step.Name, step.Uses)
 				}
 				want := "${{ inputs.target_sha }}"
-				if jobName == "recover-api-hotfix-fence" || jobName == "recover-controller-m16-observed-state" {
+				if jobName == "recover-api-hotfix-fence" || jobName == "prepare-controller-m16-observed-recovery-tool" || jobName == "recover-controller-m16-observed-state" {
 					want = "${{ inputs.expected_sha }}"
 				}
 				if jobName == "deploy" && step.Name == "Checkout" {
@@ -3770,7 +3889,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			}
 		}
 	}
-	if checkoutCount != 8 || currentToolingCheckoutCount != 1 {
+	if checkoutCount != 9 || currentToolingCheckoutCount != 1 {
 		t.Fatalf("control-plane workflow checkout closure drifted: total=%d current-tooling=%d", checkoutCount, currentToolingCheckoutCount)
 	}
 

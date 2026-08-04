@@ -392,11 +392,123 @@ jobs:
           include-hidden-files: false
           overwrite: false
 
+  prepare-controller-m16-observed-recovery-tool:
+    needs:
+      - release-input-guard
+    if: ${{ needs.release-input-guard.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact Controller M16 observed recovery helper source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.expected_sha }}
+          fetch-depth: 0
+
+      - name: Verify exact Controller M16 observed recovery helper identity
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          AUTHORIZATION: ${{ inputs.controller_m16_observed_recovery_v1 }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch && "${GITHUB_REF}" == refs/heads/main && "${GITHUB_RUN_ATTEMPT}" == 1 ]]
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
+          [[ "${AUTHORIZATION}" == CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717 ]]
+          [[ "$(git rev-parse --verify HEAD)" == "${EXPECTED_SHA}" ]]
+          [[ "$(git rev-parse --verify HEAD^)" == c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b ]]
+          [[ "$(git rev-parse --verify HEAD^^)" == 8d80f0393c227b5998d423bc8cf26c51d3159e1a ]]
+          [[ "$(git rev-parse --verify HEAD^^^)" == bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^)" == fc604d4d4ee91aa538017bc5094adb0bc0073652 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^)" == 7ae3825d00990f603a8e62ce045842a98f1fb93d ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^)" == 32e03a1ceaff860176e20751077579ea5ff2cd60 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^)" == 4c0130d31fe66c4db7637a8c10807b372076006d ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^)" == d88811c191b40fe5e2a7ce187938f7df0809fa08 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^^)" == 168699dff1ef57958b01973d46db3cc92babec30 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^^^)" == d412416cbca7094ee19d996f312468f871988fdb ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^^^^)" == fbfa707084d429176783354745043b5c12b3b488 ]]
+          [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 11 ]]
+          [[ -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]]
+          [[ "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
+          [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Setup exact Go for Controller M16 observed recovery helper
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build and bind exact Controller M16 observed recovery helper
+        run: |
+          set -euo pipefail
+          [[ "$(go env GOVERSION)" == go1.25.7 ]]
+          artifact_name="fugue-controller-m16-observed-recovery-tool-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_dir="${RUNNER_TEMP}/${artifact_name}"
+          binary="${artifact_dir}/fugue-control-plane-hotfix-adoption"
+          receipt="${artifact_dir}/receipt.json"
+          [[ ! -e "${artifact_dir}" && ! -L "${artifact_dir}" ]]
+          install -d -m 0700 "${artifact_dir}"
+          module_files_digest="$(sha256sum go.mod go.sum | sha256sum | awk '{print $1}')"
+          env \
+            GOENV=off \
+            GOFLAGS=-mod=readonly \
+            GONOPROXY=none \
+            GONOSUMDB=none \
+            GOPRIVATE= \
+            GOPROXY=https://proxy.golang.org \
+            GOSUMDB=sum.golang.org \
+            GOTOOLCHAIN=local \
+            GOWORK=off \
+            go mod verify
+          started_millis="$(python3 -c 'import time; print(time.monotonic_ns()//1000000)')"
+          env \
+            CGO_ENABLED=0 \
+            GOENV=off \
+            GOFLAGS=-mod=readonly \
+            GOOS=linux \
+            GOARCH=amd64 \
+            GONOPROXY=none \
+            GONOSUMDB=none \
+            GOPRIVATE= \
+            GOPROXY=https://proxy.golang.org \
+            GOSUMDB=sum.golang.org \
+            GOTOOLCHAIN=local \
+            GOWORK=off \
+            go build -trimpath -buildvcs=true -ldflags=-buildid= -o "${binary}" ./cmd/fugue-control-plane-hotfix-adoption
+          completed_millis="$(python3 -c 'import time; print(time.monotonic_ns()//1000000)')"
+          [[ "$(sha256sum go.mod go.sum | sha256sum | awk '{print $1}')" == "${module_files_digest}" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          chmod 0700 "${binary}"
+          export FUGUE_UPGRADE_LIB_ONLY=true
+          # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+          source ./scripts/upgrade_fugue_control_plane.sh
+          control_plane_m16_observed_recovery_write_tool_receipt "${binary}" "${receipt}"
+          FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${binary}"
+          FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${receipt}"
+          export FUGUE_CONTROL_PLANE_HOTFIX_TOOL FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT
+          control_plane_m16_observed_recovery_verify_tool
+          [[ "$(find "${artifact_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)" == $'fugue-control-plane-hotfix-adoption\nreceipt.json' ]]
+          printf 'Controller M16 observed recovery helper compile elapsedMs=%s\n' "$((completed_millis - started_millis))"
+
+      - name: Upload exact Controller M16 observed recovery helper
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
+          overwrite: false
+
   recover-controller-m16-observed-state:
     needs:
       - release-input-guard
       - release-gate
-    if: ${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}
+      - prepare-controller-m16-observed-recovery-tool
+    if: ${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && needs.prepare-controller-m16-observed-recovery-tool.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}
     timeout-minutes: 20
     runs-on:
       - self-hosted
@@ -406,6 +518,7 @@ jobs:
       - control-plane
     environment: production
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Checkout exact Controller M16 observed recovery implementation
@@ -425,21 +538,44 @@ jobs:
           [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" && "${TARGET_SHA}" == "${EXPECTED_SHA}" ]]
           [[ "${AUTHORIZATION}" == CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717 ]]
           [[ "$(git rev-parse --verify HEAD)" == "${EXPECTED_SHA}" ]]
-          [[ "$(git rev-parse --verify HEAD^)" == 8d80f0393c227b5998d423bc8cf26c51d3159e1a ]]
-          [[ "$(git rev-parse --verify HEAD^^)" == bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619 ]]
-          [[ "$(git rev-parse --verify HEAD^^^)" == fc604d4d4ee91aa538017bc5094adb0bc0073652 ]]
-          [[ "$(git rev-parse --verify HEAD^^^^)" == 7ae3825d00990f603a8e62ce045842a98f1fb93d ]]
-          [[ "$(git rev-parse --verify HEAD^^^^^)" == 32e03a1ceaff860176e20751077579ea5ff2cd60 ]]
-          [[ "$(git rev-parse --verify HEAD^^^^^^)" == 4c0130d31fe66c4db7637a8c10807b372076006d ]]
-          [[ "$(git rev-parse --verify HEAD^^^^^^^)" == d88811c191b40fe5e2a7ce187938f7df0809fa08 ]]
-          [[ "$(git rev-parse --verify HEAD^^^^^^^^)" == 168699dff1ef57958b01973d46db3cc92babec30 ]]
-          [[ "$(git rev-parse --verify HEAD^^^^^^^^^)" == d412416cbca7094ee19d996f312468f871988fdb ]]
-          [[ "$(git rev-parse --verify HEAD^^^^^^^^^^)" == fbfa707084d429176783354745043b5c12b3b488 ]]
-          [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 10 ]]
+          [[ "$(git rev-parse --verify HEAD^)" == c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b ]]
+          [[ "$(git rev-parse --verify HEAD^^)" == 8d80f0393c227b5998d423bc8cf26c51d3159e1a ]]
+          [[ "$(git rev-parse --verify HEAD^^^)" == bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^)" == fc604d4d4ee91aa538017bc5094adb0bc0073652 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^)" == 7ae3825d00990f603a8e62ce045842a98f1fb93d ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^)" == 32e03a1ceaff860176e20751077579ea5ff2cd60 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^)" == 4c0130d31fe66c4db7637a8c10807b372076006d ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^)" == d88811c191b40fe5e2a7ce187938f7df0809fa08 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^^)" == 168699dff1ef57958b01973d46db3cc92babec30 ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^^^)" == d412416cbca7094ee19d996f312468f871988fdb ]]
+          [[ "$(git rev-parse --verify HEAD^^^^^^^^^^^)" == fbfa707084d429176783354745043b5c12b3b488 ]]
+          [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 11 ]]
           [[ -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]]
           [[ "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]]
           [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" ]]
           [[ -z "$(git status --short)" ]]
+
+      - name: Download exact Controller M16 observed recovery helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-download-${{ github.run_id }}-${{ github.run_attempt }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+
+      - name: Verify and materialize exact Controller M16 observed recovery helper
+        run: |
+          set -euo pipefail
+          download_directory="${RUNNER_TEMP}/fugue-controller-m16-observed-recovery-tool-download-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          output_directory="${RUNNER_TEMP}/fugue-controller-m16-observed-recovery-tool-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export FUGUE_UPGRADE_LIB_ONLY=true
+          # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+          source ./scripts/upgrade_fugue_control_plane.sh
+          control_plane_m16_observed_recovery_materialize_tool "${download_directory}" "${output_directory}"
+          [[ "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}" == "${output_directory}/fugue-control-plane-hotfix-adoption" ]]
+          [[ "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT}" == "${output_directory}/receipt.json" ]]
+          control_plane_m16_observed_recovery_verify_tool
 
       - name: Run exact independent Controller M16 observed-state recovery
         id: controller_m16_observed_recovery
@@ -447,6 +583,8 @@ jobs:
           FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1: 'true'
           FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM: ${{ inputs.controller_m16_observed_recovery_v1 }}
           FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_EVIDENCE_DIR: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          FUGUE_CONTROL_PLANE_HOTFIX_TOOL: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}/fugue-control-plane-hotfix-adoption
+          FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT: ${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY || '' }}
         run: |
           set -euo pipefail

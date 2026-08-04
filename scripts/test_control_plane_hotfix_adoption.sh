@@ -735,6 +735,194 @@ PYTEST
   [[ "${short_circuit_status}" != 0 && ! -e "${short_circuit_root}/input.json" ]]
   ! grep -Fq 'chmod:' <<<"${short_circuit_error}"
 )
+grep -Fq 'control_plane_m16_observed_recovery_verify_tool || return' <<<"${observed_plan_source}"
+[[ "$(grep -c '^    "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}"' <<<"${observed_plan_source}")" == 2 ]]
+! grep -Fq 'go run ./cmd/fugue-control-plane-hotfix-adoption' <<<"${observed_plan_source}"
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  tool_source="${TMP}/observed-recovery-tool-source"
+  artifact_name="fugue-controller-m16-observed-recovery-tool-30870000000-1"
+  download_name="fugue-controller-m16-observed-recovery-tool-download-30870000000-1"
+  artifact="${TMP}/observed-recovery-tool-hosted/${artifact_name}"
+  download="${TMP}/observed-recovery-tool-production/${download_name}"
+  materialized="${TMP}/observed-recovery-tool-production/${artifact_name}"
+  invalid_build="${TMP}/observed-recovery-tool-invalid/${artifact_name}"
+  git clone --quiet --no-hardlinks "${ROOT}" "${tool_source}"
+  git -C "${tool_source}" checkout --quiet --detach "${HEAD_SHA}"
+  [[ -d "${tool_source}/.git" && -z "$(git -C "${tool_source}" status --porcelain=v1 --untracked-files=all)" ]]
+  mkdir -p "$(dirname "${artifact}")" "$(dirname "${download}")" "$(dirname "${invalid_build}")"
+  install -d -m 0700 "${artifact}"
+  tool_binary="${artifact}/fugue-control-plane-hotfix-adoption"
+  tool_receipt="${artifact}/receipt.json"
+  compile_started="$(python3 -c 'import time; print(time.monotonic_ns()//1000000)')"
+  (
+    cd "${tool_source}"
+    [[ "$(go env GOVERSION)" == go1.25.7 ]]
+    env \
+      CGO_ENABLED=0 \
+      GOENV=off \
+      GOFLAGS=-mod=readonly \
+      GOOS=linux \
+      GOARCH=amd64 \
+      GONOPROXY=none \
+      GONOSUMDB=none \
+      GOPRIVATE= \
+      GOPROXY=https://proxy.golang.org \
+      GOSUMDB=sum.golang.org \
+      GOTOOLCHAIN=go1.25.7 \
+      GOWORK=off \
+      go build -trimpath -buildvcs=true -ldflags=-buildid= -o "${tool_binary}" ./cmd/fugue-control-plane-hotfix-adoption
+  )
+  compile_completed="$(python3 -c 'import time; print(time.monotonic_ns()//1000000)')"
+  chmod 0700 "${tool_binary}"
+  export GITHUB_ACTIONS=true
+  export GITHUB_EVENT_NAME=workflow_dispatch
+  export GITHUB_REF=refs/heads/main
+  export GITHUB_RUN_ID=30870000000
+  export GITHUB_RUN_ATTEMPT=1
+  export GITHUB_SHA="${HEAD_SHA}"
+  control_plane_m16_observed_recovery_write_tool_receipt "${tool_binary}" "${tool_receipt}"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${tool_binary}"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${tool_receipt}"
+  export FUGUE_CONTROL_PLANE_HOTFIX_TOOL FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT
+  control_plane_m16_observed_recovery_verify_tool
+  TOOL_RECEIPT="${tool_receipt}" HEAD_SHA="${HEAD_SHA}" python3 - <<'PY'
+import json,os,pathlib,stat
+path=pathlib.Path(os.environ["TOOL_RECEIPT"]); value=json.loads(path.read_text(encoding="utf-8"))
+assert path.read_bytes()==json.dumps(value,ensure_ascii=True,sort_keys=True,separators=(",",":")).encode()+b"\n"
+assert value["expectedSha"]==os.environ["HEAD_SHA"]
+assert value["workflowRunId"]=="30870000000" and value["workflowRunAttempt"]==1
+assert value["artifactName"]=="fugue-controller-m16-observed-recovery-tool-30870000000-1"
+assert value["binary"]["name"]=="fugue-control-plane-hotfix-adoption" and value["binary"]["mode"]=="0700"
+assert value["elf"]=={"class":"ELF64","data":"little-endian","machine":"x86-64","machineId":62,"type":"ET_EXEC"}
+settings=value["goBuildInfo"]["settings"]
+assert value["goBuildInfo"]["goVersion"]=="go1.25.7"
+assert value["goBuildInfo"]["path"]=="fugue/cmd/fugue-control-plane-hotfix-adoption"
+assert settings["vcs.revision"]==os.environ["HEAD_SHA"] and settings["vcs.modified"]=="false"
+assert stat.S_IMODE(path.stat().st_mode)==0o600
+PY
+
+  install -d -m 0700 "${download}"
+  install -m 0644 "${tool_binary}" "${download}/fugue-control-plane-hotfix-adoption"
+  install -m 0644 "${tool_receipt}" "${download}/receipt.json"
+  control_plane_m16_observed_recovery_materialize_tool "${download}" "${materialized}"
+  [[ "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}" == "${materialized}/fugue-control-plane-hotfix-adoption" ]]
+  [[ "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT}" == "${materialized}/receipt.json" ]]
+  control_plane_m16_observed_recovery_verify_tool
+  (
+    PATH=/usr/bin:/bin
+    export PATH
+    ! command -v go >/dev/null 2>&1
+    control_plane_m16_observed_recovery_verify_tool
+  )
+
+  saved_sha="${GITHUB_SHA}"
+  GITHUB_SHA="$(printf 'f%.0s' {1..40})"
+  ! control_plane_m16_observed_recovery_verify_tool
+  GITHUB_SHA="${saved_sha}"
+  GITHUB_RUN_ID=30870000001
+  ! control_plane_m16_observed_recovery_verify_tool
+  GITHUB_RUN_ID=30870000000
+  GITHUB_RUN_ATTEMPT=2
+  ! control_plane_m16_observed_recovery_verify_tool
+  GITHUB_RUN_ATTEMPT=1
+  saved_tool="${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}"
+  saved_receipt="${FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT}"
+  unset FUGUE_CONTROL_PLANE_HOTFIX_TOOL
+  ! control_plane_m16_observed_recovery_verify_tool
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL=relative-tool
+  ! control_plane_m16_observed_recovery_verify_tool
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${saved_tool}"
+  unset FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT
+  ! control_plane_m16_observed_recovery_verify_tool
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${saved_receipt}"
+  chmod 0600 "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}"
+  ! control_plane_m16_observed_recovery_verify_tool
+  chmod 0700 "${FUGUE_CONTROL_PLANE_HOTFIX_TOOL}"
+  control_plane_m16_observed_recovery_verify_tool
+
+  tamper_root="${TMP}/observed-recovery-tool-tamper/${artifact_name}"
+  mkdir -p "$(dirname "${tamper_root}")"
+  install -d -m 0700 "${tamper_root}"
+  install -m 0700 "${tool_binary}" "${tamper_root}/fugue-control-plane-hotfix-adoption"
+  install -m 0600 "${tool_receipt}" "${tamper_root}/receipt.json"
+  printf X >>"${tamper_root}/fugue-control-plane-hotfix-adoption"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${tamper_root}/fugue-control-plane-hotfix-adoption"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${tamper_root}/receipt.json"
+  ! control_plane_m16_observed_recovery_verify_tool
+
+  receipt_tamper_root="${TMP}/observed-recovery-tool-receipt-tamper/${artifact_name}"
+  mkdir -p "$(dirname "${receipt_tamper_root}")"
+  install -d -m 0700 "${receipt_tamper_root}"
+  install -m 0700 "${tool_binary}" "${receipt_tamper_root}/fugue-control-plane-hotfix-adoption"
+  install -m 0600 "${tool_receipt}" "${receipt_tamper_root}/receipt.json"
+  RECEIPT="${receipt_tamper_root}/receipt.json" python3 - <<'PY'
+import json,os,pathlib
+path=pathlib.Path(os.environ["RECEIPT"]); value=json.loads(path.read_text()); value["binary"]["sizeBytes"]+=1
+path.write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
+PY
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${receipt_tamper_root}/fugue-control-plane-hotfix-adoption"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${receipt_tamper_root}/receipt.json"
+  ! control_plane_m16_observed_recovery_verify_tool
+
+  elf_root="${TMP}/observed-recovery-tool-elf-tamper/${artifact_name}"
+  mkdir -p "$(dirname "${elf_root}")"
+  install -d -m 0700 "${elf_root}"
+  printf '#!/bin/sh\nexit 0\n' >"${elf_root}/fugue-control-plane-hotfix-adoption"
+  chmod 0700 "${elf_root}/fugue-control-plane-hotfix-adoption"
+  install -m 0600 "${tool_receipt}" "${elf_root}/receipt.json"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${elf_root}/fugue-control-plane-hotfix-adoption"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${elf_root}/receipt.json"
+  ! control_plane_m16_observed_recovery_verify_tool
+
+  symlink_root="${TMP}/observed-recovery-tool-symlink/${artifact_name}"
+  mkdir -p "$(dirname "${symlink_root}")"
+  install -d -m 0700 "${symlink_root}"
+  ln -s "${tool_binary}" "${symlink_root}/fugue-control-plane-hotfix-adoption"
+  install -m 0600 "${tool_receipt}" "${symlink_root}/receipt.json"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL="${symlink_root}/fugue-control-plane-hotfix-adoption"
+  FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT="${symlink_root}/receipt.json"
+  ! control_plane_m16_observed_recovery_verify_tool
+
+  install -d -m 0700 "${invalid_build}"
+  (
+    cd "${tool_source}"
+    env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=go1.25.7 \
+      go build -trimpath -buildvcs=false -ldflags=-buildid= \
+      -o "${invalid_build}/fugue-control-plane-hotfix-adoption" ./cmd/fugue-control-plane-hotfix-adoption
+  )
+  chmod 0700 "${invalid_build}/fugue-control-plane-hotfix-adoption"
+  ! control_plane_m16_observed_recovery_write_tool_receipt \
+    "${invalid_build}/fugue-control-plane-hotfix-adoption" "${invalid_build}/receipt.json"
+
+  missing_download="${TMP}/observed-recovery-tool-download-missing/${download_name}"
+  missing_output="${TMP}/observed-recovery-tool-output-missing/${artifact_name}"
+  mkdir -p "$(dirname "${missing_download}")" "$(dirname "${missing_output}")"
+  install -d -m 0700 "${missing_download}"
+  install -m 0644 "${tool_receipt}" "${missing_download}/receipt.json"
+  ! control_plane_m16_observed_recovery_materialize_tool "${missing_download}" "${missing_output}"
+  wrong_mode_download="${TMP}/observed-recovery-tool-download-wrong-mode/${download_name}"
+  wrong_mode_output="${TMP}/observed-recovery-tool-output-wrong-mode/${artifact_name}"
+  mkdir -p "$(dirname "${wrong_mode_download}")" "$(dirname "${wrong_mode_output}")"
+  install -d -m 0700 "${wrong_mode_download}"
+  install -m 0600 "${tool_binary}" "${wrong_mode_download}/fugue-control-plane-hotfix-adoption"
+  install -m 0644 "${tool_receipt}" "${wrong_mode_download}/receipt.json"
+  ! control_plane_m16_observed_recovery_materialize_tool "${wrong_mode_download}" "${wrong_mode_output}"
+  symlink_download="${TMP}/observed-recovery-tool-download-symlink/${download_name}"
+  symlink_output="${TMP}/observed-recovery-tool-output-symlink/${artifact_name}"
+  mkdir -p "$(dirname "${symlink_download}")" "$(dirname "${symlink_output}")"
+  install -d -m 0700 "${symlink_download}"
+  ln -s "${tool_binary}" "${symlink_download}/fugue-control-plane-hotfix-adoption"
+  install -m 0644 "${tool_receipt}" "${symlink_download}/receipt.json"
+  ! control_plane_m16_observed_recovery_materialize_tool "${symlink_download}" "${symlink_output}"
+
+  printf '[test_control_plane_hotfix_adoption] controlled helper compile elapsedMs=%s\n' \
+    "$((compile_completed - compile_started))"
+)
 observed_seal_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_sealed_argv()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
 [[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_seal_source}")" == 1 ]]
 [[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_seal_source}")" == 2 ]]

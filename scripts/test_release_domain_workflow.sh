@@ -234,16 +234,44 @@ for fragment in [
   fail_contract("input guard is missing #{fragment.inspect}") unless guard_step.fetch("run").include?(fragment)
 end
 
+observed_tool = jobs.fetch("prepare-controller-m16-observed-recovery-tool")
+assert_equal(needs(observed_tool), ["release-input-guard"], "Controller M16 observed recovery helper dependencies")
+assert_equal(
+  observed_tool.fetch("if"),
+  "${{ needs.release-input-guard.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}",
+  "Controller M16 observed recovery helper condition",
+)
+assert_equal(observed_tool.fetch("runs-on"), "ubuntu-latest", "Controller M16 observed recovery helper runner")
+assert_equal(observed_tool.fetch("permissions"), {"contents" => "read"}, "Controller M16 observed recovery helper permissions")
+observed_tool_setup = step(observed_tool, "Setup exact Go for Controller M16 observed recovery helper")
+assert_equal(observed_tool_setup.fetch("uses"), "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16", "Controller M16 observed recovery helper setup-go pin")
+assert_equal(observed_tool_setup.fetch("with"), {"go-version-file" => "go.mod", "cache" => false}, "Controller M16 observed recovery helper setup-go cache policy")
+observed_tool_build = step(observed_tool, "Build and bind exact Controller M16 observed recovery helper")
+for fragment in [
+  "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64", "GOFLAGS=-mod=readonly", "GOTOOLCHAIN=local",
+  "go build -trimpath -buildvcs=true -ldflags=-buildid=", "./cmd/fugue-control-plane-hotfix-adoption",
+  "control_plane_m16_observed_recovery_write_tool_receipt", "control_plane_m16_observed_recovery_verify_tool",
+]
+  fail_contract("Controller M16 observed recovery helper build is missing #{fragment.inspect}") unless observed_tool_build.fetch("run").include?(fragment)
+end
+fail_contract("Controller M16 observed recovery helper build is not single-target") unless observed_tool_build.fetch("run").scan("go build ").length == 1
+fail_contract("Controller M16 observed recovery helper build gained a generic command target") if observed_tool_build.fetch("run").include?("./cmd/...")
+observed_tool_upload = step(observed_tool, "Upload exact Controller M16 observed recovery helper")
+assert_equal(observed_tool_upload.fetch("uses"), "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "Controller M16 observed recovery helper upload pin")
+assert_equal(observed_tool_upload.fetch("with").fetch("name"), "fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}", "Controller M16 observed recovery helper artifact identity")
+
 observed_recovery = jobs.fetch("recover-controller-m16-observed-state")
-assert_equal(needs(observed_recovery), ["release-input-guard", "release-gate"], "Controller M16 observed recovery dependencies")
+assert_equal(needs(observed_recovery), ["release-input-guard", "release-gate", "prepare-controller-m16-observed-recovery-tool"], "Controller M16 observed recovery dependencies")
 assert_equal(
   observed_recovery.fetch("if"),
-  "${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}",
+  "${{ needs.release-input-guard.result == 'success' && needs.release-gate.result == 'success' && needs.prepare-controller-m16-observed-recovery-tool.result == 'success' && inputs.controller_m16_observed_recovery_v1 == 'CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717' }}",
   "Controller M16 observed recovery condition",
 )
 assert_equal(observed_recovery.fetch("environment"), "production", "Controller M16 observed recovery environment")
+assert_equal(observed_recovery.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "Controller M16 observed recovery permissions")
 observed_identity = step(observed_recovery, "Verify exact Controller M16 observed recovery identity")
 for fragment in [
+  "c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b",
   "8d80f0393c227b5998d423bc8cf26c51d3159e1a",
   "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619",
   "fc604d4d4ee91aa538017bc5094adb0bc0073652",
@@ -260,10 +288,20 @@ for fragment in [
 ]
   fail_contract("Controller M16 observed recovery identity is missing #{fragment.inspect}") unless observed_identity.fetch("run").include?(fragment)
 end
+observed_download = step(observed_recovery, "Download exact Controller M16 observed recovery helper")
+assert_equal(observed_download.fetch("uses"), "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "Controller M16 observed recovery helper download pin")
+assert_equal(observed_download.fetch("with").fetch("name"), "fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}", "Controller M16 observed recovery helper download identity")
+assert_equal(observed_download.fetch("with").fetch("run-id"), "${{ github.run_id }}", "Controller M16 observed recovery helper run binding")
+observed_materialize = step(observed_recovery, "Verify and materialize exact Controller M16 observed recovery helper")
+for fragment in ["control_plane_m16_observed_recovery_materialize_tool", "control_plane_m16_observed_recovery_verify_tool"]
+  fail_contract("Controller M16 observed recovery helper materialization is missing #{fragment.inspect}") unless observed_materialize.fetch("run").include?(fragment)
+end
 observed_run = step(observed_recovery, "Run exact independent Controller M16 observed-state recovery")
 assert_equal(observed_run.fetch("id"), "controller_m16_observed_recovery", "Controller M16 observed recovery step ID")
 assert_equal(observed_run.fetch("env").fetch("FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1"), "true", "Controller M16 observed recovery mode")
 assert_equal(observed_run.fetch("env").fetch("FUGUE_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_CONFIRM"), "${{ inputs.controller_m16_observed_recovery_v1 }}", "Controller M16 observed recovery authorization")
+assert_equal(observed_run.fetch("env").fetch("FUGUE_CONTROL_PLANE_HOTFIX_TOOL"), "${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}/fugue-control-plane-hotfix-adoption", "Controller M16 observed recovery helper path")
+assert_equal(observed_run.fetch("env").fetch("FUGUE_CONTROL_PLANE_HOTFIX_TOOL_RECEIPT"), "${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json", "Controller M16 observed recovery helper receipt path")
 assert_equal(observed_run.fetch("env").fetch("FUGUE_API_KEY"), "${{ secrets.FUGUE_API_KEY || '' }}", "Controller M16 observed recovery read-only operation witness credential")
 for forbidden in ["build_control_plane_images", "artifact_reuse", "helm rollback", "edge"]
   fail_contract("Controller M16 observed recovery workflow contains out-of-scope capability #{forbidden.inspect}") if observed_run.fetch("run").include?(forbidden)
@@ -1081,7 +1119,8 @@ assert_equal(freeze["permissions"], {"actions" => "write", "contents" => "read"}
 allowed_permissions = {
   "release-input-guard" => {"actions" => "read", "contents" => "read"},
   "recover-api-hotfix-fence" => {"contents" => "read"},
-  "recover-controller-m16-observed-state" => {"contents" => "read"},
+  "prepare-controller-m16-observed-recovery-tool" => {"contents" => "read"},
+  "recover-controller-m16-observed-state" => {"actions" => "read", "contents" => "read"},
   "historical-controller-build-only" => {"actions" => "read", "contents" => "read", "packages" => "write"},
   "settle-api-hotfix-recovery-lane" => {"actions" => "write", "contents" => "read"},
   "settle-controller-m16-observed-recovery-lane" => {"actions" => "write", "contents" => "read"},
@@ -1116,6 +1155,7 @@ allowed_uploads = [
   ["recover-api-hotfix-fence", "${{ runner.temp }}/fugue-api-hotfix-recovery-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_OPERATIONAL_REPORT_FILE }}"],
   ["deploy", "${{ env.FUGUE_RELEASE_DOMAIN_IMAGE_ACTIVATION_REPORT_DIR }}"],
+  ["prepare-controller-m16-observed-recovery-tool", "${{ runner.temp }}/fugue-controller-m16-observed-recovery-tool-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["recover-controller-m16-observed-state", "${{ runner.temp }}/fugue-controller-m16-observed-recovery-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["historical-controller-build-only", "${{ runner.temp }}/fugue-historical-controller-build-only-${{ github.run_id }}-${{ github.run_attempt }}"],
   ["deploy", "${{ runner.temp }}/fugue-api-hotfix-v2-${{ github.run_id }}-${{ github.run_attempt }}"],
