@@ -341,7 +341,7 @@ fixed = {
     "service": "fugue-fugue-telemetry-agent",
 }
 expected_keys = set(fixed) | {
-    "desiredSourceSha", "expectedPreviousImageDigest", "expectedPreviousSourceSha",
+    "desiredSourceSha", "expectedPreviousImageDigest", "expectedPreviousSourceSha", "intentGeneration",
 }
 if type(value) is not dict or set(value) != expected_keys:
     raise SystemExit("telemetry-production-release-intent-schema-invalid")
@@ -353,12 +353,15 @@ digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
 desired = value["desiredSourceSha"]
 previous = value["expectedPreviousSourceSha"]
 previous_digest = value["expectedPreviousImageDigest"]
+generation = value["intentGeneration"]
 if type(desired) is not str or sha_pattern.fullmatch(desired) is None:
     raise SystemExit("telemetry-production-release-intent-desired-source-invalid")
 if type(previous) is not str or sha_pattern.fullmatch(previous) is None or previous == desired:
     raise SystemExit("telemetry-production-release-intent-previous-source-invalid")
 if type(previous_digest) is not str or digest_pattern.fullmatch(previous_digest) is None:
     raise SystemExit("telemetry-production-release-intent-previous-image-digest-invalid")
+if type(generation) is not int or generation < 1:
+    raise SystemExit("telemetry-production-release-intent-generation-invalid")
 canonical = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
 if raw != canonical:
     raise SystemExit("telemetry-production-release-intent-canonical-bytes-invalid")

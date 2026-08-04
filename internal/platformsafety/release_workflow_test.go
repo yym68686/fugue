@@ -5386,6 +5386,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",
 			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
 			"fieldManager":                "fugue-telemetry-declarative",
+			"intentGeneration":            float64(1),
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",
@@ -5463,12 +5464,15 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	})
 
 	t.Run("Telemetry component planner rejects a non-singleton release", func(t *testing.T) {
+		inheritedPlannerOutput := filepath.Join(t.TempDir(), "inherited-github-output")
 		run := func(changed string) string {
 			t.Helper()
 			command := exec.Command("bash", "../../scripts/compute_control_plane_image_build_plan.sh")
 			command.Env = append(os.Environ(),
+				"GITHUB_OUTPUT="+inheritedPlannerOutput,
 				"FUGUE_RELEASE_CHANGED_FILES_SET=true",
 				"FUGUE_RELEASE_CHANGED_FILES="+changed,
+				"GITHUB_OUTPUT=/dev/stdout",
 			)
 			output, err := command.CombinedOutput()
 			if err != nil {
@@ -5477,6 +5481,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			return string(output)
 		}
 		singleton := run("cmd/fugue-telemetry-agent/main.go")
+		if _, err := os.Stat(inheritedPlannerOutput); !os.IsNotExist(err) {
+			t.Fatalf("planner fixture leaked outputs into inherited GITHUB_OUTPUT: %v", err)
+		}
 		for _, exact := range []string{"build_telemetry_agent=true\n", "target_count=1\n", "targets=telemetry_agent\n"} {
 			if !strings.Contains(singleton, exact) {
 				t.Fatalf("singleton Telemetry plan missing %q:\n%s", exact, singleton)
@@ -5571,6 +5578,52 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("non-lowercase previous digest did not fail closed: err=%v output=%s", err, digestInvalidOutput)
 		}
 
+		for _, test := range []struct {
+			name   string
+			value  any
+			extra  bool
+			wanted string
+		}{
+			{name: "boolean", value: true, wanted: "telemetry-production-release-intent-generation-invalid"},
+			{name: "string", value: "1", wanted: "telemetry-production-release-intent-generation-invalid"},
+			{name: "zero", value: float64(0), wanted: "telemetry-production-release-intent-generation-invalid"},
+			{name: "extra", value: float64(1), extra: true, wanted: "telemetry-production-release-intent-schema-invalid"},
+		} {
+			t.Run("intent generation "+test.name, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, productionIntentPath)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				var value map[string]any
+				if err := json.Unmarshal(validIntentBytes, &value); err != nil {
+					t.Fatal(err)
+				}
+				value["intentGeneration"] = test.value
+				if test.extra {
+					value["unexpected"] = true
+				}
+				raw, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command("bash", "../../scripts/compute_control_plane_image_build_plan.sh")
+				command.Env = append(os.Environ(),
+					"FUGUE_RELEASE_REPO_ROOT="+root,
+					"FUGUE_RELEASE_CHANGED_FILES_SET=true",
+					"FUGUE_RELEASE_CHANGED_FILES="+productionIntentPath,
+					"GITHUB_OUTPUT=/dev/stdout",
+				)
+				output, err := command.CombinedOutput()
+				if err == nil || !strings.Contains(string(output), test.wanted) {
+					t.Fatalf("invalid generation did not fail closed: err=%v output=%s", err, output)
+				}
+			})
+		}
+
 		repoRoot, err := filepath.Abs("../..")
 		if err != nil {
 			t.Fatal(err)
@@ -5589,6 +5642,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"expectedPreviousSourceSha":   "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
 			"fieldManager":                "fugue-telemetry-declarative",
+			"intentGeneration":            2,
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",
@@ -5613,6 +5667,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"FUGUE_RELEASE_REPO_ROOT="+successorRoot,
 			"FUGUE_RELEASE_CHANGED_FILES_SET=true",
 			"FUGUE_RELEASE_CHANGED_FILES="+productionIntentPath,
+			"GITHUB_OUTPUT=/dev/stdout",
 		)
 		successorOutput, err := successorCommand.CombinedOutput()
 		if err != nil || !strings.Contains(string(successorOutput), "target_count=1\n") ||
