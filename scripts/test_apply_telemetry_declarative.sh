@@ -168,7 +168,26 @@ PY
     fi
     exit 0
   fi
-  cat "${FIXTURE_ROOT}/live.json"
+  show_managed_fields=false
+  for argument in "$@"; do
+    if [[ "${argument}" == "--show-managed-fields=true" ]]; then
+      show_managed_fields=true
+    fi
+  done
+  printf 'deployment-read:%s\n' "${show_managed_fields}" >>"${FIXTURE_ROOT}/live-reads.log"
+  if [[ "${show_managed_fields}" == true ]]; then
+    cat "${FIXTURE_ROOT}/live.json"
+  else
+    python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+value = json.loads(Path(sys.argv[1]).read_text())
+value.get("metadata", {}).pop("managedFields", None)
+print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+  fi
   exit 0
 fi
 if [[ "${1:-}" == "get" && "${2:-}" == --raw=* ]]; then
@@ -443,6 +462,7 @@ PY
 
 reset_fixture() {
   : >"${FIXTURE_ROOT}/commands.log"
+  : >"${FIXTURE_ROOT}/live-reads.log"
   : >"${FIXTURE_ROOT}/renderer.log"
   printf '%s\n' initial >"${FIXTURE_ROOT}/state"
   printf '%s\n' 824 >"${FIXTURE_ROOT}/helm-revision"
@@ -537,6 +557,58 @@ run_apply() {
     FUGUE_TELEMETRY_LKG_OCI_REVISION="${TEST_LKG_OCI_REVISION:-${LKG_OCI_REVISION}}" \
     bash "${SCRIPT}" "${FIXTURE_ROOT}/forward.json" "${FIXTURE_ROOT}/lkg.json"
 }
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+default_live="$(env PATH="${FIXTURE_ROOT}/bin:${PATH}" FIXTURE_ROOT="${FIXTURE_ROOT}" \
+  kubectl get deployment fugue-fugue-telemetry-agent --namespace fugue-system --output json)"
+shown_live="$(env PATH="${FIXTURE_ROOT}/bin:${PATH}" FIXTURE_ROOT="${FIXTURE_ROOT}" \
+  kubectl get deployment fugue-fugue-telemetry-agent --namespace fugue-system \
+    --show-managed-fields=true --output json)"
+DEFAULT_LIVE="${default_live}" SHOWN_LIVE="${shown_live}" python3 - <<'PY'
+import json
+import os
+
+default = json.loads(os.environ["DEFAULT_LIVE"])
+shown = json.loads(os.environ["SHOWN_LIVE"])
+if default.get("metadata", {}).get("managedFields"):
+    raise SystemExit("default kubectl output unexpectedly exposed managedFields")
+managers = {
+    item.get("manager")
+    for item in shown.get("metadata", {}).get("managedFields") or []
+    if isinstance(item, dict)
+}
+if "fugue-telemetry-declarative" not in managers:
+    raise SystemExit("explicit managedFields output omitted declarative manager")
+PY
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+run_apply >"${FIXTURE_ROOT}/declarative-resume.log"
+[[ "$(cat "${FIXTURE_ROOT}/commands.log")" == $'dry-run:forward.json\ndry-run:lkg.json\napply:forward' ]]
+[[ "$(grep -c '^deployment-read:true$' "${FIXTURE_ROOT}/live-reads.log")" -eq 3 ]]
+! grep -Fq '^deployment-read:false$' "${FIXTURE_ROOT}/live-reads.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value.get("metadata", {}).pop("managedFields", None)
+path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+if run_apply >"${FIXTURE_ROOT}/declarative-missing-manager.log" 2>&1; then
+  printf 'declarative live missing field manager was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'live-lkg-not-proven' "${FIXTURE_ROOT}/declarative-missing-manager.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 reset_fixture
 run_apply >"${FIXTURE_ROOT}/success.log"

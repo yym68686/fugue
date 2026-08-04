@@ -529,7 +529,8 @@ assert_live_continuity() {
   local expected="$1"
   local label="$2"
   local output="${WORK_DIR}/${label}-continuity-live.json"
-  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${output}" ||
+  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+    --show-managed-fields=true --output json >"${output}" ||
     fail "${label}-deleted-telemetry-deployment"
   local observed
   observed="$(live_continuity_fingerprint "${output}")" || fail "${label}-live-continuity-invalid"
@@ -562,7 +563,8 @@ bootstrap_helm_ownership() {
     run_helm_stage helm || stage1_rc=$?
     stage1_observed="$(capture_helm_desired stage1-observed)" ||
       fail 'helm-stage1-commit-unknown-reconcile-unavailable'
-    kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${WORK_DIR}/stage1-live.json" ||
+    kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+      --show-managed-fields=true --output json >"${WORK_DIR}/stage1-live.json" ||
       fail 'helm-stage1-commit-unknown-live-unavailable'
     if compare_helm_manifest_bytes "${stage1_manifest}" "${WORK_DIR}/stage1-observed-helm-manifest.yaml" &&
       validate_live "${WORK_DIR}/stage1-live.json" "${LKG_DIGEST}" handoff "${LKG_OCI_REVISION}" >/dev/null; then
@@ -583,7 +585,8 @@ bootstrap_helm_ownership() {
   run_helm_stage declarative || stage2_rc=$?
   stage2_capture="$(capture_helm_desired stage2-observed)" ||
     fail 'helm-stage2-commit-unknown-reconcile-unavailable'
-  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${WORK_DIR}/stage2-live.json" ||
+  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+    --show-managed-fields=true --output json >"${WORK_DIR}/stage2-live.json" ||
     fail 'helm-stage2-commit-unknown-live-unavailable'
   if compare_helm_manifest_bytes "${stage2_manifest}" "${WORK_DIR}/stage2-observed-helm-manifest.yaml" &&
     [[ "${stage2_capture##*$'\t'}" == false ]] &&
@@ -800,13 +803,15 @@ verify_rollout() {
   local oci_revision="$3"
   local live_file="${WORK_DIR}/${label}-live.json"
   kubectl rollout status "deployment/${DEPLOYMENT}" --namespace "${NAMESPACE}" --timeout=120s || return 1
-  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${live_file}" || return 1
+  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+    --show-managed-fields=true --output json >"${live_file}" || return 1
   validate_live "${live_file}" "${digest}" declarative "${oci_revision}" >/dev/null || return 1
   health_check || return 1
 }
 
 initial_helm="$(capture_helm_desired initial)" || fail 'initial-helm-desired-invalid'
-kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${WORK_DIR}/initial-live.json"
+kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+  --show-managed-fields=true --output json >"${WORK_DIR}/initial-live.json"
 
 validate_rendered_manifest "${FORWARD_MANIFEST}" forward "${FORWARD_DIGEST}" "${SOURCE_SHA}" "${OCI_REVISION}" ||
   fail 'forward-manifest-invalid'
@@ -847,7 +852,8 @@ if [[ "${initial_helm##*$'\t'}" == true ]]; then
   bootstrap_helm_ownership "${initial_owner_mode}" "${baseline_fingerprint}"
   initial_helm="$(capture_helm_desired post-bootstrap)" || fail 'post-bootstrap-helm-desired-invalid'
   [[ "${initial_helm##*$'\t'}" == false ]] || fail 'post-bootstrap-double-writer'
-  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${WORK_DIR}/initial-live.json"
+  kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+    --show-managed-fields=true --output json >"${WORK_DIR}/initial-live.json"
   initial_resource_version="$(validate_live "${WORK_DIR}/initial-live.json" "${LKG_DIGEST}" handoff "${LKG_OCI_REVISION}")" ||
     fail 'post-bootstrap-live-invalid'
   expected_initial_owner=handoff
@@ -860,7 +866,8 @@ readonly INITIAL_RESOURCE_VERSION="${initial_resource_version}"
 final_helm="$(capture_helm_desired prewrite)" || fail 'prewrite-helm-desired-invalid'
 readonly FINAL_HELM="${final_helm}"
 [[ "${FINAL_HELM}" == "${INITIAL_HELM}" ]] || fail 'helm-desired-changed-before-apply'
-kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" --output json >"${WORK_DIR}/prewrite-live.json"
+kubectl get deployment "${DEPLOYMENT}" --namespace "${NAMESPACE}" \
+  --show-managed-fields=true --output json >"${WORK_DIR}/prewrite-live.json"
 prewrite_resource_version="$(validate_live "${WORK_DIR}/prewrite-live.json" "${LKG_DIGEST}" "${expected_initial_owner}" "${LKG_OCI_REVISION}")" ||
   fail 'prewrite-live-recapture-invalid'
 readonly PREWRITE_RESOURCE_VERSION="${prewrite_resource_version}"
