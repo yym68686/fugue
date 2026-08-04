@@ -1013,7 +1013,7 @@ if HEALTH_FAIL=true run_apply >"${FIXTURE_ROOT}/rollback.log" 2>&1; then
   exit 1
 fi
 grep -Fq 'forward-rollout-failed-lkg-restored' "${FIXTURE_ROOT}/rollback.log"
-[[ "$(tail -n 2 "${FIXTURE_ROOT}/commands.log")" == $'apply:forward\napply:lkg' ]]
+[[ "$(tail -n 3 "${FIXTURE_ROOT}/commands.log")" == $'apply:forward\napply:lkg\nlease:release' ]]
 cmp -s "${FIXTURE_ROOT}/live.json" "${FIXTURE_ROOT}/lkg-live.json"
 python3 - "${FIXTURE_ROOT}/live.json" "${LKG_OCI_REVISION}" <<'PY'
 import json
@@ -1350,6 +1350,74 @@ HELM_STAGE2_FAIL_MODE=committed run_apply >"${FIXTURE_ROOT}/stage2-committed.log
 grep -Fxq 'apply:forward' "${FIXTURE_ROOT}/commands.log"
 
 )
+
+run_transient_empty_process_identity_case() (
+  set -euo pipefail
+
+  local identity_root="${FIXTURE_PARENT}/transient-empty-process-identity"
+  local real_ps=""
+  local ps_count_file="${identity_root}/ps-count"
+  local ps_log_file="${identity_root}/ps.log"
+  local target_log_file="${identity_root}/target.log"
+
+  mkdir -m 0700 "${identity_root}"
+  printf '0\n' >"${ps_count_file}"
+  : >"${ps_log_file}"
+  : >"${target_log_file}"
+  chmod 0600 "${ps_count_file}" "${ps_log_file}" "${target_log_file}"
+  real_ps="$(command -v ps)"
+  [[ -x "${real_ps}" ]]
+
+  env \
+    IDENTITY_ROOT="${identity_root}" \
+    REAL_PS="${real_ps}" \
+    REPO_ROOT="${REPO_ROOT}" \
+    FUGUE_UPGRADE_LIB_ONLY=true \
+    bash <<'SH'
+set -euo pipefail
+
+# shellcheck source=scripts/upgrade_fugue_control_plane.sh
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+ps() {
+    local count=0
+    local output=""
+    local sample=""
+
+    if (( $# == 4 )) && [[ "$1" == -o && "$3" == -p && "$4" =~ ^[1-9][0-9]*$ ]] &&
+      { [[ "$2" == stat= ]] || [[ "$2" == pgid= ]]; }; then
+      count="$(( $(<"${IDENTITY_ROOT}/ps-count") + 1 ))"
+      printf '%s\n' "${count}" >"${IDENTITY_ROOT}/ps-count"
+      sample="${2%=}"
+      if (( count <= 2 )); then
+        printf 'empty:%s\n' "${sample}" >>"${IDENTITY_ROOT}/ps.log"
+        return 0
+      fi
+      output="$("${REAL_PS}" "$@")"
+      printf '%s\n' "${output}"
+      [[ -n "$(printf '%s' "${output}" | tr -d '[:space:]')" ]]
+      printf 'valid:%s\n' "${sample}" >>"${IDENTITY_ROOT}/ps.log"
+      if (( count == 4 )); then
+        : >"${IDENTITY_ROOT}/pgid-proven"
+        chmod 0600 "${IDENTITY_ROOT}/pgid-proven"
+      fi
+      return 0
+    fi
+    "${REAL_PS}" "$@"
+}
+
+run_after_process_group_proof() {
+  [[ -f "${IDENTITY_ROOT}/pgid-proven" ]] || return 97
+  printf 'ran\n' >>"${IDENTITY_ROOT}/target.log"
+}
+
+run_with_wall_timeout 5 run_after_process_group_proof
+SH
+  [[ "$(sed -n '1,4p' "${ps_log_file}")" == $'empty:stat\nempty:pgid\nvalid:stat\nvalid:pgid' ]]
+  [[ "$(<"${target_log_file}")" == ran ]]
+)
+
+run_transient_empty_process_identity_case
 
 case_pids=()
 case_names=()

@@ -846,7 +846,13 @@ prepare_release_command_in_dedicated_group() {
     if [[ -n "${process_state}" && -n "${actual_pgid}" ]]; then
       break
     fi
-    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+    if [[ "${process_state}" == Z* ]]; then
+      abort_prepared_release_command "${started_pid}" "" "${prepared_gate_dir}"
+      return 126
+    fi
+    if [[ -z "${process_state}" || -z "${actual_pgid}" ]] &&
+      { ! kill -0 "${started_pid}" >/dev/null 2>&1 ||
+        ! control_plane_release_job_is_registered "${started_pid}"; }; then
       abort_prepared_release_command "${started_pid}" "" "${prepared_gate_dir}"
       return 126
     fi
