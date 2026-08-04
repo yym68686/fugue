@@ -5360,6 +5360,14 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			`elif expected_owner == "declarative"`,
 			`if source_commit is None and ownership in {None, "helm"}`,
 			`if source_commit != expected_oci`,
+			`FUGUE_UPGRADE_LIB_ONLY=true source "${UPGRADE_HELPER}"`,
+			`public_data_plane_checksum_records_from_daemonset_snapshot`,
+			`prepare_helm_post_renderer`,
+			`"${HELM_POST_RENDERER_ARGS[@]}"`,
+			`TelemetryHelmHandoffSealReceipt`,
+			`"publicDataPlaneDigest": "sha256:" + os.environ["HANDOFF_PUBLIC_CHECKSUMS_DIGEST"]`,
+			`helm-handoff-sealed-input-drift-before-stage1`,
+			`helm-handoff-sealed-input-drift-before-stage2`,
 		} {
 			if !strings.Contains(string(applySource), required) {
 				t.Fatalf("Telemetry legacy/handoff provenance compatibility is missing %q", required)
@@ -5386,7 +5394,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",
 			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
 			"fieldManager":                "fugue-telemetry-declarative",
-			"intentGeneration":            float64(1),
+			"intentGeneration":            float64(2),
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",
@@ -5642,7 +5650,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"expectedPreviousImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"expectedPreviousSourceSha":   "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
 			"fieldManager":                "fugue-telemetry-declarative",
-			"intentGeneration":            2,
+			"intentGeneration":            3,
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",

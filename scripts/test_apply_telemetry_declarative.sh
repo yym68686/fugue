@@ -11,6 +11,8 @@ readonly SOURCE_SHA="1111111111111111111111111111111111111111"
 readonly LKG_SOURCE_SHA="2222222222222222222222222222222222222222"
 readonly LKG_OCI_REVISION="3333333333333333333333333333333333333333"
 readonly REPOSITORY="ghcr.io/example/fugue-telemetry-agent"
+readonly CONTROLLER_SOURCE_SHA="d1e7ed9cdedbaa09db9bd78b4e433b94c7357510"
+readonly CONTROLLER_IMAGE="ghcr.io/yym68686/fugue-controller@sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d"
 
 FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/fugue-telemetry-declarative-test.XXXXXX")"
 cleanup() {
@@ -25,14 +27,35 @@ cat >"${FIXTURE_ROOT}/bin/helm" <<'SH'
 set -euo pipefail
 case "${1:-} ${2:-}" in
   "status fugue")
-    printf '{"info":{"status":"deployed"},"version":%s}\n' "$(cat "${FIXTURE_ROOT}/helm-revision")"
+    count="$(( $(cat "${FIXTURE_ROOT}/helm-status-count") + 1 ))"
+    printf '%s\n' "${count}" >"${FIXTURE_ROOT}/helm-status-count"
+    revision="$(cat "${FIXTURE_ROOT}/helm-revision")"
+    if [[ "${HELM_REVISION_DRIFT:-false}" == true && "${count}" -eq 2 ]]; then
+      revision="$((revision + 1))"
+    fi
+    printf '{"info":{"status":"deployed"},"version":%s}\n' "${revision}"
     ;;
   "get manifest")
-    cat "${FIXTURE_ROOT}/helm-manifest.yaml"
+    revision=''
+    while (($#)); do
+      case "$1" in
+        --revision)
+          revision="$2"
+          shift 2
+          ;;
+        *) shift ;;
+      esac
+    done
+    if [[ "${revision}" == 822 ]]; then
+      cat "${FIXTURE_ROOT}/legacy-base-manifest.yaml"
+    else
+      cat "${FIXTURE_ROOT}/helm-manifest.yaml"
+    fi
     ;;
   "upgrade fugue")
     ownership=''
     dry_run=false
+    post_renderer=''
     while (($#)); do
       case "$1" in
         --set-string)
@@ -43,12 +66,25 @@ case "${1:-} ${2:-}" in
           dry_run=true
           shift
           ;;
+        --post-renderer)
+          post_renderer="$2"
+          shift 2
+          ;;
         *) shift ;;
       esac
     done
     [[ "${ownership}" == helm || "${ownership}" == declarative ]]
+    rendered="${FIXTURE_ROOT}/rendered-${ownership}.yaml"
+    if [[ -n "${post_renderer}" ]]; then
+      [[ -x "${post_renderer}" ]]
+      printf 'renderer-use:%s:%s:%s:%s\n' "${ownership}" "${dry_run}" \
+        "$(sha256sum "${post_renderer}" | awk '{print $1}')" "${post_renderer}" >>"${FIXTURE_ROOT}/renderer.log"
+      "${post_renderer}" <"${FIXTURE_ROOT}/stage-${ownership}-manifest.yaml" >"${rendered}"
+    else
+      cp "${FIXTURE_ROOT}/stage-${ownership}-manifest.yaml" "${rendered}"
+    fi
     if [[ "${dry_run}" == true ]]; then
-      python3 - "${FIXTURE_ROOT}/stage-${ownership}-manifest.yaml" <<'PY'
+      python3 - "${rendered}" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -61,7 +97,7 @@ PY
       if [[ "${HELM_STAGE1_FAIL_MODE:-}" == old ]]; then
         exit 41
       fi
-      cp "${FIXTURE_ROOT}/stage-helm-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
+      cp "${rendered}" "${FIXTURE_ROOT}/helm-manifest.yaml"
       python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
 import json
 from pathlib import Path
@@ -80,7 +116,7 @@ PY
       if [[ "${HELM_STAGE2_FAIL_MODE:-}" == old ]]; then
         exit 43
       fi
-      cp "${FIXTURE_ROOT}/stage-declarative-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
+      cp "${rendered}" "${FIXTURE_ROOT}/helm-manifest.yaml"
       printf '%s\n' 824 >"${FIXTURE_ROOT}/helm-revision"
       [[ "${HELM_STAGE2_FAIL_MODE:-}" != committed ]] || exit 44
     fi
@@ -95,7 +131,43 @@ SH
 cat >"${FIXTURE_ROOT}/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" == "get" && "${2:-}" == "daemonsets" ]]; then
+  count="$(( $(cat "${FIXTURE_ROOT}/daemonset-read-count") + 1 ))"
+  printf '%s\n' "${count}" >"${FIXTURE_ROOT}/daemonset-read-count"
+  if [[ "${EDGE_CHECKSUM_DRIFT:-false}" == true && "${count}" -ge 2 ]]; then
+    python3 - "${FIXTURE_ROOT}/daemonsets.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+value = json.loads(Path(sys.argv[1]).read_text())
+annotations = value["items"][0]["spec"]["template"]["metadata"]["annotations"]
+key = next(iter(annotations))
+annotations[key] = "f" * 64
+print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+  else
+    cat "${FIXTURE_ROOT}/daemonsets.json"
+  fi
+  exit 0
+fi
 if [[ "${1:-}" == "get" && "${2:-}" == "deployment" ]]; then
+  if [[ "${3:-}" == "fugue-fugue-controller" ]]; then
+    count="$(( $(cat "${FIXTURE_ROOT}/controller-read-count") + 1 ))"
+    printf '%s\n' "${count}" >"${FIXTURE_ROOT}/controller-read-count"
+    if [[ "${CONTROLLER_TEMPLATE_DRIFT:-false}" == true && "${count}" -ge 2 ]]; then
+      python3 - "${FIXTURE_ROOT}/controller.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+value = json.loads(Path(sys.argv[1]).read_text())
+value["spec"]["template"]["metadata"].setdefault("annotations", {})["synthetic.test/drift"] = "true"
+print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+    else
+      cat "${FIXTURE_ROOT}/controller.json"
+    fi
+    exit 0
+  fi
   cat "${FIXTURE_ROOT}/live.json"
   exit 0
 fi
@@ -226,10 +298,158 @@ os.chmod(path, 0o600)
 PY
 }
 
+write_handoff_support_fixtures() {
+  FIXTURE_ROOT="${FIXTURE_ROOT}" python3 - "${CONTROLLER_SOURCE_SHA}" "${CONTROLLER_IMAGE}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(os.environ["FIXTURE_ROOT"])
+controller_source, controller_image = sys.argv[1:]
+controller_template = {
+    "metadata": {
+        "annotations": {
+            "fugue.pro/source-commit": controller_source,
+            "kubectl.kubernetes.io/restartedAt": "2026-01-01T00:00:00Z",
+        },
+        "labels": {"app.kubernetes.io/component": "controller"},
+    },
+    "spec": {
+        "containers": [
+            {
+                "env": [{"name": "SYNTHETIC_STABLE", "value": "true"}],
+                "image": controller_image,
+                "name": "controller",
+            }
+        ],
+        "serviceAccountName": "synthetic-controller",
+    },
+}
+controller = {
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {"name": "fugue-fugue-controller", "namespace": "fugue-system"},
+    "spec": {"template": controller_template},
+}
+(root / "controller.json").write_text(
+    json.dumps(controller, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+    encoding="ascii",
+)
+
+items = []
+preserved = []
+drifted = []
+for index in range(9):
+    name = f"synthetic-public-edge-{index + 1}"
+    mode = "node-local-blue-green-front" if index % 3 == 0 else "node-local-blue-green-worker"
+    key = "checksum/edge-blue-green-front" if mode.endswith("front") else "checksum/edge-blue-green-worker"
+    checksum = f"{index + 1:064x}"
+    items.append(
+        {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {
+                "labels": {
+                    "app.kubernetes.io/instance": "fugue",
+                    "fugue.io/rollout-mode": mode,
+                    "fugue.io/rollout-subsystem": "public-data-plane",
+                },
+                "name": name,
+                "namespace": "fugue-system",
+            },
+            "spec": {"template": {"metadata": {"annotations": {key: checksum}}}},
+        }
+    )
+    preserved.append(
+        "\n".join(
+            [
+                "---",
+                "apiVersion: apps/v1",
+                "kind: DaemonSet",
+                "metadata:",
+                f"  name: {name}",
+                "spec:",
+                "  template:",
+                "    metadata:",
+                "      annotations:",
+                f"        {key}: {checksum}",
+            ]
+        )
+    )
+    drifted.append(
+        "\n".join(
+            [
+                "---",
+                "apiVersion: apps/v1",
+                "kind: DaemonSet",
+                "metadata:",
+                f"  name: {name}",
+                "spec:",
+                "  template:",
+                "    metadata:",
+                "      annotations:",
+                f"        {key}: {'e' * 64}",
+                "        synthetic.test/unreleased-template: true",
+            ]
+        )
+    )
+(root / "daemonsets.json").write_text(
+    json.dumps({"apiVersion": "v1", "items": items, "kind": "List"}, separators=(",", ":"), sort_keys=True),
+    encoding="ascii",
+)
+
+template_json = json.dumps(controller_template, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+preserved.append(
+    "\n".join(
+        [
+            "---",
+            "apiVersion: apps/v1",
+            "kind: Deployment",
+            "metadata:",
+            "  name: fugue-fugue-controller",
+            "spec:",
+            "  replicas: 2",
+            f"  template: {template_json}",
+        ]
+    )
+)
+drifted.append(
+    "\n".join(
+        [
+            "---",
+            "apiVersion: apps/v1",
+            "kind: Deployment",
+            "metadata:",
+            "  name: fugue-fugue-controller",
+            "spec:",
+            "  replicas: 2",
+            "  template:",
+            "    metadata:",
+            "      annotations:",
+            f"        fugue.pro/source-commit: {controller_source}",
+            "        synthetic.test/unreleased-template: true",
+            "    spec:",
+            "      containers:",
+            "        - name: controller",
+            f"          image: {controller_image}",
+        ]
+    )
+)
+for name, documents in (("preserved-other.yaml", preserved), ("drifted-other.yaml", drifted)):
+    (root / name).write_text("\n".join(documents) + "\n", encoding="ascii")
+PY
+}
+
 reset_fixture() {
   : >"${FIXTURE_ROOT}/commands.log"
+  : >"${FIXTURE_ROOT}/renderer.log"
   printf '%s\n' initial >"${FIXTURE_ROOT}/state"
   printf '%s\n' 824 >"${FIXTURE_ROOT}/helm-revision"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/helm-status-count"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/daemonset-read-count"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/controller-read-count"
+  write_handoff_support_fixtures
   cat >"${FIXTURE_ROOT}/helm-manifest.yaml" <<'YAML'
 ---
 # Source: fugue/templates/telemetry-agent-service.yaml
@@ -238,14 +458,10 @@ kind: Service
 metadata:
   name: fugue-fugue-telemetry-agent
 YAML
-  cp "${FIXTURE_ROOT}/helm-manifest.yaml" "${FIXTURE_ROOT}/stage-declarative-manifest.yaml"
-  cat >"${FIXTURE_ROOT}/stage-helm-manifest.yaml" <<'YAML'
----
-# Source: fugue/templates/telemetry-agent-service.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: fugue-fugue-telemetry-agent
+  {
+    cat "${FIXTURE_ROOT}/helm-manifest.yaml"
+    cat "${FIXTURE_ROOT}/drifted-other.yaml"
+    cat <<'YAML'
 ---
 # Source: fugue/templates/telemetry-agent-deployment.yaml
 apiVersion: apps/v1
@@ -258,6 +474,44 @@ metadata:
   labels:
     app.kubernetes.io/component: telemetry-agent
 YAML
+  } >"${FIXTURE_ROOT}/stage-helm-manifest.yaml"
+  {
+    cat "${FIXTURE_ROOT}/helm-manifest.yaml"
+    cat "${FIXTURE_ROOT}/drifted-other.yaml"
+  } >"${FIXTURE_ROOT}/stage-declarative-manifest.yaml"
+  {
+    cat "${FIXTURE_ROOT}/helm-manifest.yaml"
+    cat "${FIXTURE_ROOT}/preserved-other.yaml"
+    cat <<'YAML'
+---
+# Source: fugue/templates/telemetry-agent-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-telemetry-agent
+  labels:
+    app.kubernetes.io/component: telemetry-agent
+YAML
+  } >"${FIXTURE_ROOT}/legacy-base-manifest.yaml"
+  python3 - "${FIXTURE_ROOT}/legacy-base-manifest.yaml" "${FIXTURE_ROOT}/stage-helm-preserved-manifest.yaml" <<'PY'
+from pathlib import Path
+import sys
+
+source, destination = map(Path, sys.argv[1:])
+needle = "metadata:\n  name: fugue-fugue-telemetry-agent\n  labels:\n"
+replacement = (
+    "metadata:\n"
+    "  name: fugue-fugue-telemetry-agent\n"
+    "  annotations:\n"
+    "    helm.sh/resource-policy: keep\n"
+    "    fugue.pro/telemetry-ownership: helm\n"
+    "  labels:\n"
+)
+value = source.read_text()
+if value.count(needle) != 1:
+    raise SystemExit("telemetry fixture identity invalid")
+destination.write_text(value.replace(needle, replacement, 1))
+PY
   write_manifest "${FIXTURE_ROOT}/forward.json" "${REPOSITORY}@${FORWARD_DIGEST}" "${SOURCE_SHA}" "${SOURCE_SHA}" declarative false false
   write_manifest "${FIXTURE_ROOT}/lkg.json" "${REPOSITORY}@${LKG_DIGEST}" "${LKG_SOURCE_SHA}" "${LKG_OCI_REVISION}" declarative false false
   write_manifest "${FIXTURE_ROOT}/forward-live.json" "${REPOSITORY}@${FORWARD_DIGEST}" "${SOURCE_SHA}" "${SOURCE_SHA}" declarative true false
@@ -289,7 +543,7 @@ run_apply >"${FIXTURE_ROOT}/success.log"
 [[ "$(cat "${FIXTURE_ROOT}/commands.log")" == $'dry-run:forward.json\ndry-run:lkg.json\napply:forward' ]]
 
 reset_fixture
-cp "${FIXTURE_ROOT}/stage-helm-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
+cp "${FIXTURE_ROOT}/stage-helm-preserved-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
 cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
 if run_apply >"${FIXTURE_ROOT}/double-writer.log" 2>&1; then
   printf 'double writer was not rejected\n' >&2
@@ -355,21 +609,7 @@ PY
 
 prepare_legacy_bootstrap() {
   reset_fixture
-  python3 - "${FIXTURE_ROOT}/stage-helm-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml" <<'PY'
-from pathlib import Path
-import sys
-
-source, destination = map(Path, sys.argv[1:])
-block = (
-    "  annotations:\n"
-    "    helm.sh/resource-policy: keep\n"
-    "    fugue.pro/telemetry-ownership: helm\n"
-)
-value = source.read_text()
-if value.count(block) != 1:
-    raise SystemExit("fixture annotation block invalid")
-destination.write_text(value.replace(block, "", 1))
-PY
+  cp "${FIXTURE_ROOT}/legacy-base-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
   printf '%s\n' 822 >"${FIXTURE_ROOT}/helm-revision"
   write_manifest "${FIXTURE_ROOT}/live.json" "${REPOSITORY}@${LKG_DIGEST}" "" "${LKG_OCI_REVISION}" legacy true false
   python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
@@ -384,10 +624,81 @@ PY
 }
 
 prepare_legacy_bootstrap
+[[ "$(grep -c 'synthetic.test/unreleased-template: true' "${FIXTURE_ROOT}/stage-helm-manifest.yaml")" -eq 10 ]]
 run_apply >"${FIXTURE_ROOT}/bootstrap.log"
 [[ "$(grep -c '^helm-stage:helm$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
 [[ "$(grep -c '^helm-stage:declarative$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
 grep -Fxq 'apply:forward' "${FIXTURE_ROOT}/commands.log"
+python3 - "${FIXTURE_ROOT}/bootstrap.log" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+prefix = "telemetry-declarative:handoff-seal="
+lines = [line for line in Path(sys.argv[1]).read_text().splitlines() if line.startswith(prefix)]
+if len(lines) != 1:
+    raise SystemExit("handoff seal receipt cardinality invalid")
+raw = lines[0][len(prefix):]
+value = json.loads(raw)
+if raw != json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True):
+    raise SystemExit("handoff seal receipt is not canonical")
+if value.get("kind") != "TelemetryHelmHandoffSealReceipt" or value.get("status") != "sealed-before-write":
+    raise SystemExit("handoff seal receipt identity invalid")
+if value.get("helmBaseRevision") != 822 or len(value.get("publicDataPlane") or []) != 9:
+    raise SystemExit("handoff seal receipt inventory invalid")
+for key in ("controllerTemplateDigest", "helmBaseManifestDigest", "publicDataPlaneDigest", "rendererDigest"):
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value.get(key, "")) is None:
+        raise SystemExit(f"handoff seal receipt {key} invalid")
+PY
+python3 - "${FIXTURE_ROOT}/renderer.log" <<'PY'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+if len(lines) != 4:
+    raise SystemExit("sealed renderer was not reused exactly four times")
+records = [line.split(":", 4) for line in lines]
+expected = [
+    ["renderer-use", "helm", "true"],
+    ["renderer-use", "declarative", "true"],
+    ["renderer-use", "helm", "false"],
+    ["renderer-use", "declarative", "false"],
+]
+if [record[:3] for record in records] != expected:
+    raise SystemExit("sealed renderer use order invalid")
+if len({record[3] for record in records}) != 1 or len({record[4] for record in records}) != 1:
+    raise SystemExit("renderer digest or path changed between Helm stages")
+PY
+grep -Fq 'FUGUE_UPGRADE_LIB_ONLY=true source "${UPGRADE_HELPER}"' "${SCRIPT}"
+! grep -Fq 'CONFIG_B64 =' "${SCRIPT}"
+
+prepare_legacy_bootstrap
+if EDGE_CHECKSUM_DRIFT=true run_apply >"${FIXTURE_ROOT}/edge-drift.log" 2>&1; then
+  printf 'Edge checksum drift was not rejected before Helm write\n' >&2
+  exit 1
+fi
+grep -Fq 'helm-handoff-sealed-input-drift-before-stage1' "${FIXTURE_ROOT}/edge-drift.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
+
+prepare_legacy_bootstrap
+if CONTROLLER_TEMPLATE_DRIFT=true run_apply >"${FIXTURE_ROOT}/controller-drift.log" 2>&1; then
+  printf 'Controller template drift was not rejected before Helm write\n' >&2
+  exit 1
+fi
+grep -Fq 'helm-handoff-sealed-input-drift-before-stage1' "${FIXTURE_ROOT}/controller-drift.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
+
+prepare_legacy_bootstrap
+if HELM_REVISION_DRIFT=true run_apply >"${FIXTURE_ROOT}/helm-revision-drift.log" 2>&1; then
+  printf 'Helm revision drift was not rejected before Helm write\n' >&2
+  exit 1
+fi
+grep -Fq 'helm-handoff-sealed-input-drift-before-stage1' "${FIXTURE_ROOT}/helm-revision-drift.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 prepare_legacy_bootstrap
 python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
@@ -437,7 +748,7 @@ grep -Fq 'lkg-manifest-invalid' "${FIXTURE_ROOT}/legacy-wrong-registry-source.lo
 ! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 reset_fixture
-cp "${FIXTURE_ROOT}/stage-helm-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
+cp "${FIXTURE_ROOT}/stage-helm-preserved-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
 python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
 import json
 from pathlib import Path

@@ -18,6 +18,7 @@ readonly LKG_SOURCE_SHA="${FUGUE_TELEMETRY_LKG_SOURCE_SHA:-}"
 readonly OCI_REVISION="${FUGUE_TELEMETRY_OCI_REVISION:-}"
 readonly LKG_OCI_REVISION="${FUGUE_TELEMETRY_LKG_OCI_REVISION:-}"
 readonly FIELD_MANAGER="fugue-telemetry-declarative"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 fail() {
   printf 'telemetry-declarative:%s\n' "$1" >&2
@@ -27,6 +28,29 @@ fail() {
 for command in helm kubectl python3 awk sha256sum; do
   command -v "${command}" >/dev/null 2>&1 || fail "missing-command:${command}"
 done
+
+readonly UPGRADE_HELPER="${SCRIPT_DIR}/upgrade_fugue_control_plane.sh"
+[[ -f "${UPGRADE_HELPER}" && ! -L "${UPGRADE_HELPER}" ]] || fail 'upgrade-helper-invalid'
+FUGUE_UPGRADE_LIB_ONLY=true source "${UPGRADE_HELPER}"
+
+# The shared upgrade helper defines its own production-facing fail function.
+# Restore this entrypoint's typed error prefix after importing the helper.
+fail() {
+  printf 'telemetry-declarative:%s\n' "$1" >&2
+  exit 1
+}
+
+KUBECTL=kubectl
+FUGUE_RELEASE_NAME="${HELM_RELEASE}"
+FUGUE_NAMESPACE="${NAMESPACE}"
+HANDOFF_RENDERER_PREPARED=false
+HANDOFF_BASE_REVISION=""
+HANDOFF_BASE_MANIFEST_DIGEST=""
+HANDOFF_PUBLIC_CHECKSUMS_JSON='{}'
+HANDOFF_PUBLIC_CHECKSUMS_DIGEST=""
+HANDOFF_CONTROLLER_TEMPLATE_JSON='{}'
+HANDOFF_CONTROLLER_TEMPLATE_DIGEST=""
+HANDOFF_RENDERER_DIGEST=""
 
 [[ -n "${NAMESPACE}" && -n "${HELM_RELEASE}" && -n "${HELM_CHART}" && -n "${DEPLOYMENT}" && -n "${SERVICE}" ]] ||
   fail 'resource-identity-missing'
@@ -130,6 +154,139 @@ capture_helm_desired() {
     contains=true
   fi
   printf '%s\t%s\t%s\n' "${revision}" "$(sha256sum "${manifest_file}" | awk '{print $1}')" "${contains}"
+}
+
+canonical_public_data_plane_checksums() {
+  local snapshot="$1"
+  local raw=""
+  raw="$(public_data_plane_checksum_records_from_daemonset_snapshot "$(<"${snapshot}")")" || return 1
+  CHECKSUMS="${raw}" python3 - <<'PY'
+import json
+import os
+
+value = json.loads(os.environ["CHECKSUMS"])
+if type(value) is not dict or len(value) != 9:
+    raise SystemExit("telemetry-handoff-public-data-plane-inventory-invalid")
+for name, record in value.items():
+    if type(name) is not str or type(record) is not dict or set(record) != {"key", "value"}:
+        raise SystemExit("telemetry-handoff-public-data-plane-record-invalid")
+print(json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+canonical_controller_template() {
+  local deployment_json="$1"
+  python3 - "${deployment_json}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+raw = Path(sys.argv[1]).read_bytes()
+if not raw or len(raw) > 2 * 1024 * 1024:
+    raise SystemExit("telemetry-handoff-controller-size-invalid")
+value = json.loads(raw)
+template = (value.get("spec") or {}).get("template") if type(value) is dict else None
+if type(template) is not dict or set(template) != {"metadata", "spec"}:
+    raise SystemExit("telemetry-handoff-controller-template-invalid")
+print(json.dumps(template, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+prepare_handoff_renderer() {
+  local revision="$1"
+  local base_manifest="$2"
+  local daemonsets_file="${WORK_DIR}/handoff-daemonsets.json"
+  local controller_file="${WORK_DIR}/handoff-controller.json"
+
+  [[ "${revision}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ -f "${base_manifest}" && ! -L "${base_manifest}" ]] || return 1
+  HANDOFF_BASE_REVISION="${revision}"
+  HANDOFF_BASE_MANIFEST_DIGEST="$(sha256sum "${base_manifest}" | awk '{print $1}')"
+  [[ "${HANDOFF_BASE_MANIFEST_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  kubectl get daemonsets --namespace "${NAMESPACE}" --output json >"${daemonsets_file}" || return 1
+  HANDOFF_PUBLIC_CHECKSUMS_JSON="$(canonical_public_data_plane_checksums "${daemonsets_file}")" || return 1
+  HANDOFF_PUBLIC_CHECKSUMS_DIGEST="$(printf '%s' "${HANDOFF_PUBLIC_CHECKSUMS_JSON}" | sha256sum | awk '{print $1}')"
+  [[ "${HANDOFF_PUBLIC_CHECKSUMS_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  kubectl get deployment fugue-fugue-controller --namespace "${NAMESPACE}" --output json >"${controller_file}" || return 1
+  HANDOFF_CONTROLLER_TEMPLATE_JSON="$(canonical_controller_template "${controller_file}")" || return 1
+  HANDOFF_CONTROLLER_TEMPLATE_DIGEST="$(printf '%s' "${HANDOFF_CONTROLLER_TEMPLATE_JSON}" | sha256sum | awk '{print $1}')"
+  [[ "${HANDOFF_CONTROLLER_TEMPLATE_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  PREVIOUS_REVISION="${HANDOFF_BASE_REVISION}"
+  PUBLIC_DATA_PLANE_PRESERVED=true
+  PUBLIC_DATA_PLANE_CHECKSUMS_JSON="${HANDOFF_PUBLIC_CHECKSUMS_JSON}"
+  CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON=""
+  CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="${HANDOFF_CONTROLLER_TEMPLATE_JSON}"
+  CONTROL_PLANE_HOTFIX_OBSERVED_RECOVERY_MODE=false
+  TMPDIR="${WORK_DIR}" prepare_helm_post_renderer || return 1
+  [[ "${#HELM_POST_RENDERER_ARGS[@]}" -eq 2 && "${HELM_POST_RENDERER_ARGS[0]}" == --post-renderer ]] || return 1
+  [[ "${HELM_POST_RENDERER_ARGS[1]}" == "${HELM_POST_RENDERER_FILE}" ]] || return 1
+  [[ -f "${HELM_POST_RENDERER_FILE}" && ! -L "${HELM_POST_RENDERER_FILE}" && -x "${HELM_POST_RENDERER_FILE}" ]] || return 1
+  HANDOFF_RENDERER_DIGEST="$(sha256sum "${HELM_POST_RENDERER_FILE}" | awk '{print $1}')"
+  [[ "${HANDOFF_RENDERER_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  HANDOFF_RENDERER_PREPARED=true
+}
+
+verify_handoff_renderer_inputs() {
+  local expected_current_revision="$1"
+  local label="$2"
+  local status_file="${WORK_DIR}/${label}-helm-status.json"
+  local base_manifest="${WORK_DIR}/${label}-base-manifest.yaml"
+  local daemonsets_file="${WORK_DIR}/${label}-daemonsets.json"
+  local controller_file="${WORK_DIR}/${label}-controller.json"
+  local observed=""
+
+  [[ "${HANDOFF_RENDERER_PREPARED}" == true ]] || return 1
+  observed="$(helm_revision "${status_file}")" || return 1
+  [[ "${observed}" == "${expected_current_revision}" ]] || return 1
+  helm get manifest "${HELM_RELEASE}" --namespace "${NAMESPACE}" \
+    --revision "${HANDOFF_BASE_REVISION}" >"${base_manifest}" || return 1
+  [[ "$(sha256sum "${base_manifest}" | awk '{print $1}')" == "${HANDOFF_BASE_MANIFEST_DIGEST}" ]] || return 1
+
+  kubectl get daemonsets --namespace "${NAMESPACE}" --output json >"${daemonsets_file}" || return 1
+  observed="$(canonical_public_data_plane_checksums "${daemonsets_file}")" || return 1
+  [[ "${observed}" == "${HANDOFF_PUBLIC_CHECKSUMS_JSON}" ]] || return 1
+
+  kubectl get deployment fugue-fugue-controller --namespace "${NAMESPACE}" --output json >"${controller_file}" || return 1
+  observed="$(canonical_controller_template "${controller_file}")" || return 1
+  [[ "${observed}" == "${HANDOFF_CONTROLLER_TEMPLATE_JSON}" ]] || return 1
+
+  [[ -f "${HELM_POST_RENDERER_FILE}" && ! -L "${HELM_POST_RENDERER_FILE}" && -x "${HELM_POST_RENDERER_FILE}" ]] || return 1
+  [[ "$(sha256sum "${HELM_POST_RENDERER_FILE}" | awk '{print $1}')" == "${HANDOFF_RENDERER_DIGEST}" ]] || return 1
+}
+
+emit_handoff_seal_receipt() {
+  HANDOFF_BASE_REVISION="${HANDOFF_BASE_REVISION}" \
+    HANDOFF_BASE_MANIFEST_DIGEST="${HANDOFF_BASE_MANIFEST_DIGEST}" \
+    HANDOFF_PUBLIC_CHECKSUMS_JSON="${HANDOFF_PUBLIC_CHECKSUMS_JSON}" \
+    HANDOFF_PUBLIC_CHECKSUMS_DIGEST="${HANDOFF_PUBLIC_CHECKSUMS_DIGEST}" \
+    HANDOFF_CONTROLLER_TEMPLATE_DIGEST="${HANDOFF_CONTROLLER_TEMPLATE_DIGEST}" \
+    HANDOFF_RENDERER_DIGEST="${HANDOFF_RENDERER_DIGEST}" python3 - <<'PY'
+import json
+import os
+
+records = json.loads(os.environ["HANDOFF_PUBLIC_CHECKSUMS_JSON"])
+receipt = {
+    "apiVersion": "release.fugue.dev/v1",
+    "controllerTemplateDigest": "sha256:" + os.environ["HANDOFF_CONTROLLER_TEMPLATE_DIGEST"],
+    "helmBaseManifestDigest": "sha256:" + os.environ["HANDOFF_BASE_MANIFEST_DIGEST"],
+    "helmBaseRevision": int(os.environ["HANDOFF_BASE_REVISION"]),
+    "kind": "TelemetryHelmHandoffSealReceipt",
+    "publicDataPlane": [
+        {"checksumKey": record["key"], "checksumValue": record["value"], "name": name}
+        for name, record in sorted(records.items())
+    ],
+    "publicDataPlaneDigest": "sha256:" + os.environ["HANDOFF_PUBLIC_CHECKSUMS_DIGEST"],
+    "rendererDigest": "sha256:" + os.environ["HANDOFF_RENDERER_DIGEST"],
+    "status": "sealed-before-write",
+}
+print(
+    "telemetry-declarative:handoff-seal="
+    + json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+)
+PY
 }
 
 validate_live() {
@@ -250,6 +407,7 @@ render_helm_stage() {
     --namespace "${NAMESPACE}" \
     --reuse-values \
     --set-string "observability.agent.ownership=${ownership}" \
+    "${HELM_POST_RENDERER_ARGS[@]}" \
     --dry-run=server \
     --hide-notes \
     --output json >"${release_json}"
@@ -360,6 +518,7 @@ run_helm_stage() {
     --namespace "${NAMESPACE}" \
     --reuse-values \
     --set-string "observability.agent.ownership=${ownership}" \
+    "${HELM_POST_RENDERER_ARGS[@]}" \
     --atomic \
     --cleanup-on-fail \
     --wait \
@@ -395,7 +554,10 @@ bootstrap_helm_ownership() {
     "${current_manifest}" "${stage1_manifest}" "${stage2_manifest}" "${current_owner}" ||
     fail 'helm-handoff-render-proof-failed'
 
+  local stage2_expected_revision="${HANDOFF_BASE_REVISION}"
   if [[ "${current_owner}" == legacy ]]; then
+    verify_handoff_renderer_inputs "${HANDOFF_BASE_REVISION}" stage1-prewrite ||
+      fail 'helm-handoff-sealed-input-drift-before-stage1'
     stage1_rc=0
     run_helm_stage helm || stage1_rc=$?
     stage1_observed="$(capture_helm_desired stage1-observed)" ||
@@ -405,6 +567,7 @@ bootstrap_helm_ownership() {
     if compare_helm_manifest_bytes "${stage1_manifest}" "${WORK_DIR}/stage1-observed-helm-manifest.yaml" &&
       validate_live "${WORK_DIR}/stage1-live.json" "${LKG_DIGEST}" handoff "${LKG_OCI_REVISION}" >/dev/null; then
       assert_live_continuity "${baseline_fingerprint}" stage1
+      stage2_expected_revision="${stage1_observed%%$'\t'*}"
     elif compare_helm_manifest_bytes "${current_manifest}" "${WORK_DIR}/stage1-observed-helm-manifest.yaml" &&
       validate_live "${WORK_DIR}/stage1-live.json" "${LKG_DIGEST}" legacy "${LKG_OCI_REVISION}" >/dev/null; then
       assert_live_continuity "${baseline_fingerprint}" stage1-safe-old-owner
@@ -414,6 +577,8 @@ bootstrap_helm_ownership() {
     fi
   fi
 
+  verify_handoff_renderer_inputs "${stage2_expected_revision}" stage2-prewrite ||
+    fail 'helm-handoff-sealed-input-drift-before-stage2'
   stage2_rc=0
   run_helm_stage declarative || stage2_rc=$?
   stage2_capture="$(capture_helm_desired stage2-observed)" ||
@@ -673,6 +838,12 @@ baseline_fingerprint="$(live_continuity_fingerprint "${WORK_DIR}/initial-live.js
   fail 'live-continuity-baseline-invalid'
 
 if [[ "${initial_helm##*$'\t'}" == true ]]; then
+  if [[ "${initial_owner_mode}" != declarative ]]; then
+    initial_helm_revision="${initial_helm%%$'\t'*}"
+    prepare_handoff_renderer "${initial_helm_revision}" "${WORK_DIR}/initial-helm-manifest.yaml" ||
+      fail 'helm-handoff-renderer-preparation-failed'
+    emit_handoff_seal_receipt || fail 'helm-handoff-seal-receipt-invalid'
+  fi
   bootstrap_helm_ownership "${initial_owner_mode}" "${baseline_fingerprint}"
   initial_helm="$(capture_helm_desired post-bootstrap)" || fail 'post-bootstrap-helm-desired-invalid'
   [[ "${initial_helm##*$'\t'}" == false ]] || fail 'post-bootstrap-double-writer'
