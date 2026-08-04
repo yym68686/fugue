@@ -1327,6 +1327,80 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 			t.Fatalf("controller deployment missing app observability endpoint %q:\n%s", want, controllerDoc)
 		}
 	}
+
+	t.Run("ownership handoff is keep then omit", func(t *testing.T) {
+		if _, err := exec.LookPath("helm"); err != nil {
+			t.Skip("helm not installed")
+		}
+		chartDir, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("getwd: %v", err)
+		}
+		render := func(ownership string) string {
+			args := []string{
+				"template", "fugue", chartDir,
+				"--set", "observability.enabled=true",
+				"--set", "observability.agent.enabled=true",
+				"--set-string", "configSecret.existingSecretName=fugue-config-existing",
+				"--set-string", "platformComponentIdentity.existingSecretName=fugue-platform-identity-existing",
+			}
+			if ownership != "" {
+				args = append(args, "--set-string", "observability.agent.ownership="+ownership)
+			}
+			cmd := exec.Command("helm", args...)
+			cmd.Dir = chartDir
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("helm template ownership=%q failed: %v\n%s", ownership, err, output)
+			}
+			return string(output)
+		}
+
+		helmOwned := render("")
+		deployment := manifestDocumentForKindAndName(helmOwned, "Deployment", "fugue-fugue-telemetry-agent")
+		if deployment == "" ||
+			!strings.Contains(deployment, "helm.sh/resource-policy: keep") ||
+			!strings.Contains(deployment, "fugue.pro/telemetry-ownership: helm") {
+			t.Fatalf("Helm-owned Telemetry must be retained before handoff:\n%s", deployment)
+		}
+
+		declarative := render("declarative")
+		if got := manifestDocumentForKindAndName(declarative, "Deployment", "fugue-fugue-telemetry-agent"); got != "" {
+			t.Fatalf("declarative ownership left a second Deployment writer:\n%s", got)
+		}
+		if got := manifestDocumentForKindAndName(declarative, "Service", "fugue-fugue-telemetry-agent"); got == "" {
+			t.Fatal("Telemetry Service must remain Helm-owned during Deployment handoff")
+		}
+
+		withoutTelemetryDeployment := func(manifest string) string {
+			kept := make([]string, 0)
+			for _, document := range strings.Split(manifest, "\n---") {
+				document = strings.TrimSpace(document)
+				if document == "" {
+					continue
+				}
+				if manifestDocumentForKindAndName(document, "Deployment", "fugue-fugue-telemetry-agent") != "" {
+					continue
+				}
+				kept = append(kept, document)
+			}
+			return strings.Join(kept, "\n---\n")
+		}
+		if withoutTelemetryDeployment(helmOwned) != withoutTelemetryDeployment(declarative) {
+			t.Fatal("ownership handoff changed a Helm object other than the Telemetry Deployment")
+		}
+
+		cmd := exec.Command(
+			"helm", "template", "fugue", chartDir,
+			"--set", "observability.agent.enabled=true",
+			"--set-string", "observability.agent.ownership=shared",
+		)
+		cmd.Dir = chartDir
+		if output, err := cmd.CombinedOutput(); err == nil ||
+			!strings.Contains(string(output), "observability.agent.ownership must be helm or declarative") {
+			t.Fatalf("invalid ownership did not fail closed: err=%v\n%s", err, output)
+		}
+	})
 }
 
 func TestControllerReceivesInternalObservabilityQueryEnv(t *testing.T) {

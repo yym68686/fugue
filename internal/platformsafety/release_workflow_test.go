@@ -5166,6 +5166,184 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := requireFreezeEvidence.If, "${{ always() && steps.freeze_evidence_upload.outcome != 'success' }}"; got != want {
 		t.Fatalf("release-lane evidence failure condition drifted: got %q want %q", got, want)
 	}
+
+	t.Run("Telemetry declarative CI is singleton and shares the global mutation mutex", func(t *testing.T) {
+		ciSource, err := os.ReadFile("../../.github/workflows/ci.yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ci releaseWorkflow
+		if err := yaml.Unmarshal(ciSource, &ci); err != nil {
+			t.Fatalf("parse CI workflow: %v", err)
+		}
+		prepush, ok := ci.Jobs["prepush"]
+		if !ok || prepush.Outputs["telemetry_release"] != "${{ steps.component_plan.outputs.telemetry_release }}" {
+			t.Fatalf("Telemetry release output is not bound to prepush: %+v", prepush.Outputs)
+		}
+		componentPlan := workflowStepByName(t, prepush, "Require an exact singleton Telemetry component plan")
+		for _, required := range []string{
+			"./scripts/compute_control_plane_image_build_plan.sh",
+			"grep -Fxq 'build_telemetry_agent=true'",
+			"grep -Fxq 'targets=telemetry_agent'",
+			"grep -Fxq 'target_count=1'",
+			"for component in api controller drain_agent image_cache edge app_ssh",
+			"telemetry_release=true",
+		} {
+			if !strings.Contains(componentPlan.Run, required) {
+				t.Fatalf("strict Telemetry component planner is missing %q", required)
+			}
+		}
+
+		build, ok := ci.Jobs["telemetry-build"]
+		if !ok || build.If != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.telemetry_release == 'true' }}" {
+			t.Fatalf("Telemetry build is reachable outside the successful push planner: %+v", build)
+		}
+		if !reflect.DeepEqual([]string(build.Needs), []string{"prepush"}) || build.Permissions["packages"] != "write" {
+			t.Fatalf("Telemetry build dependency or permissions drifted: needs=%v permissions=%v", build.Needs, build.Permissions)
+		}
+		publish := workflowStepByName(t, build, "Build and fresh-verify immutable Telemetry image")
+		if publish.Run != "./scripts/build_control_plane_images.sh" || publish.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"] != "telemetry_agent" {
+			t.Fatalf("Telemetry build does not use the canonical singleton builder: %+v", publish)
+		}
+		upload := workflowStepByName(t, build, "Upload canonical Telemetry build receipt")
+		if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" || upload.With["if-no-files-found"] != "error" {
+			t.Fatalf("Telemetry canonical receipt upload is not pinned/fail-closed: %+v", upload)
+		}
+
+		deploy, ok := ci.Jobs["telemetry-deploy"]
+		if !ok {
+			t.Fatal("Telemetry deploy job is absent")
+		}
+		var runner []string
+		if err := deploy.RunsOn.Decode(&runner); err != nil {
+			t.Fatalf("decode Telemetry self-hosted runner: %v", err)
+		}
+		if !reflect.DeepEqual(runner, []string{"self-hosted", "linux", "x64", "fugue", "control-plane"}) || deploy.Environment != "production" {
+			t.Fatalf("Telemetry deploy lane drifted: runner=%v environment=%q", runner, deploy.Environment)
+		}
+		if deploy.If != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.telemetry-build.result == 'success' && needs.prepush.outputs.telemetry_release == 'true' }}" {
+			t.Fatalf("Telemetry deployment is reachable outside successful push/build gates: %q", deploy.If)
+		}
+		if strings.Count(string(ciSource), "group: fugue-production-cluster-mutation-v1") != 1 ||
+			strings.Contains(string(ciSource), "fugue-telemetry-declarative-production") {
+			t.Fatal("Telemetry bootstrap must share the existing repo-wide production mutation mutex")
+		}
+		download := workflowStepByName(t, deploy, "Download canonical Telemetry build receipt")
+		if download.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" {
+			t.Fatalf("Telemetry receipt download is not pinned: %+v", download)
+		}
+		readback := workflowStepByName(t, deploy, "Fresh registry GET and canonical receipt readback")
+		if !strings.Contains(readback.Run, "timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh") ||
+			readback.Env["FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE"] != "true" {
+			t.Fatalf("Telemetry deploy does not use bounded fresh registry receipt verification: %+v", readback)
+		}
+		render := workflowStepByName(t, deploy, "Render digest-pinned forward and exact Git LKG manifests")
+		for _, required := range []string{
+			"owner is None:",
+			"owner = \"legacy\"",
+			"./scripts/verify_registry_image.py",
+			"--metadata-only",
+			"git archive \"${lkg_source_sha}\" deploy/kustomize/telemetry",
+			"telemetry-lkg-oci-revision-invalid",
+			"fugue.pro~1source-commit",
+			"lkg_oci_revision=${lkg_oci_revision}",
+			"kubectl kustomize \"${root}/forward\"",
+			"kubectl kustomize \"${root}/lkg\"",
+		} {
+			if !strings.Contains(render.Run, required) {
+				t.Fatalf("Telemetry desired/LKG render is missing %q", required)
+			}
+		}
+		apply := workflowStepByName(t, deploy, "Apply Telemetry with single-writer proof and exact Git LKG rollback")
+		if !strings.Contains(apply.Run, "./scripts/apply_telemetry_declarative.sh") ||
+			apply.Env["FUGUE_TELEMETRY_HELM_CHART"] != "${{ github.workspace }}/deploy/helm/fugue" {
+			t.Fatalf("Telemetry apply step is not bound to the exact chart and declarative driver: %+v", apply)
+		}
+		for _, step := range deploy.Steps {
+			if step.Name == "Setup Go" || strings.Contains(step.Uses, "setup-buildx") || strings.Contains(step.Uses, "login-action") {
+				t.Fatalf("self-hosted Telemetry deploy must not build or log into the registry: %+v", step)
+			}
+		}
+	})
+
+	t.Run("Telemetry Kustomize template owns only the Deployment", func(t *testing.T) {
+		if _, err := exec.LookPath("kubectl"); err != nil {
+			t.Skip("kubectl is not installed")
+		}
+		command := exec.Command("kubectl", "kustomize", "../../deploy/kustomize/telemetry")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("render Telemetry Kustomize template: %v\n%s", err, output)
+		}
+		var documents []map[string]any
+		decoder := yaml.NewDecoder(strings.NewReader(string(output)))
+		for {
+			var document map[string]any
+			err := decoder.Decode(&document)
+			if err != nil {
+				if strings.Contains(err.Error(), "EOF") {
+					break
+				}
+				t.Fatalf("decode Telemetry Kustomize output: %v", err)
+			}
+			if len(document) != 0 {
+				documents = append(documents, document)
+			}
+		}
+		if len(documents) != 1 || documents[0]["apiVersion"] != "apps/v1" || documents[0]["kind"] != "Deployment" {
+			t.Fatalf("Telemetry Kustomize inventory must contain one Deployment: %+v", documents)
+		}
+		metadata, _ := documents[0]["metadata"].(map[string]any)
+		if metadata["name"] != "fugue-fugue-telemetry-agent" || metadata["namespace"] != "fugue-system" {
+			t.Fatalf("Telemetry Kustomize resource identity drifted: %+v", metadata)
+		}
+		for _, required := range []string{
+			"fugue.pro/telemetry-ownership: declarative",
+			"app.kubernetes.io/managed-by: fugue-telemetry-declarative",
+			"image: ghcr.io/yym68686/fugue-telemetry-agent:git-source",
+			"fugue.pro/source-commit: git-source",
+			"path: /healthz",
+			"path: /readyz",
+		} {
+			if !strings.Contains(string(output), required) {
+				t.Fatalf("Telemetry Kustomize template missing %q:\n%s", required, output)
+			}
+		}
+		for _, forbidden := range []string{"fugue-api", "fugue-controller", "fugue-edge", "image-cache", "ManagedApp"} {
+			if strings.Contains(string(output), forbidden) {
+				t.Fatalf("Telemetry Kustomize template leaked another component %q", forbidden)
+			}
+		}
+	})
+
+	t.Run("Telemetry component planner rejects a non-singleton release", func(t *testing.T) {
+		run := func(changed string) string {
+			t.Helper()
+			command := exec.Command("bash", "../../scripts/compute_control_plane_image_build_plan.sh")
+			command.Env = append(os.Environ(),
+				"FUGUE_RELEASE_CHANGED_FILES_SET=true",
+				"FUGUE_RELEASE_CHANGED_FILES="+changed,
+			)
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("run strict component planner: %v\n%s", err, output)
+			}
+			return string(output)
+		}
+		singleton := run("cmd/fugue-telemetry-agent/main.go")
+		for _, exact := range []string{"build_telemetry_agent=true\n", "target_count=1\n", "targets=telemetry_agent\n"} {
+			if !strings.Contains(singleton, exact) {
+				t.Fatalf("singleton Telemetry plan missing %q:\n%s", exact, singleton)
+			}
+		}
+		mixed := run("cmd/fugue-api/main.go\ncmd/fugue-telemetry-agent/main.go")
+		if !strings.Contains(mixed, "build_telemetry_agent=true\n") ||
+			!strings.Contains(mixed, "target_count=2\n") ||
+			!strings.Contains(mixed, "targets=api telemetry_agent\n") ||
+			strings.Contains(mixed, "target_count=1\n") || strings.Contains(mixed, "targets=telemetry_agent\n") {
+			t.Fatalf("mixed API/Telemetry plan could masquerade as an exact singleton:\n%s", mixed)
+		}
+	})
 }
 
 func TestHistoricalControllerBuildOnlyScriptMock(t *testing.T) {

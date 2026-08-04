@@ -327,6 +327,13 @@ def main() -> int:
             "python3", "-m", "unittest",
             "scripts.test_control_plane_build_reuse", "scripts.test_verify_registry_image",
         ]
+    if any(name in {
+        "scripts/apply_telemetry_declarative.sh",
+        "scripts/test_apply_telemetry_declarative.sh",
+    } for name in paths):
+        tasks["telemetry-declarative-tests"] = [
+            "bash", "./scripts/test_apply_telemetry_declarative.sh",
+        ]
 
     local_checks = {
         "diff-check": lambda remaining: diff_check(base, paths, remaining),

@@ -9,6 +9,7 @@ test:
 	python3 ./scripts/test_prepush.py
 	python3 ./scripts/test_control_plane_build_reuse.py
 	python3 ./scripts/test_verify_registry_image.py
+	bash ./scripts/test_apply_telemetry_declarative.sh
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_control_plane_observability_assets.sh
@@ -21,6 +22,7 @@ test-scripts:
 	python3 ./scripts/test_prepush.py
 	python3 ./scripts/test_control_plane_build_reuse.py
 	python3 ./scripts/test_verify_registry_image.py
+	bash ./scripts/test_apply_telemetry_declarative.sh
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_control_plane_observability_assets.sh
 	bash ./scripts/test_prepare_authoritative_dns_dig.sh

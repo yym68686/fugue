@@ -30,7 +30,7 @@ class CanonicalReceiptTest(unittest.TestCase):
         ):
             self.assertIsNone(classifier.search(path), path)
 
-    def run_main_with_fake(self, fake_run):
+    def run_main_with_fake(self, fake_run, paths=None):
         receipts = []
 
         def capture_receipt(receipt):
@@ -40,7 +40,7 @@ class CanonicalReceiptTest(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, {"PREPUSH_TIMEOUT_SECONDS": "5"}),
             mock.patch.object(prepush, "resolve_base", return_value="HEAD"),
-            mock.patch.object(prepush, "changed_files", return_value=["cmd/fugue-api/main.go"]),
+            mock.patch.object(prepush, "changed_files", return_value=paths or ["cmd/fugue-api/main.go"]),
             mock.patch.object(prepush, "diff_check", return_value=(0, "")),
             mock.patch.object(prepush, "gofmt_check", return_value=(0, "")),
             mock.patch.object(prepush, "shell_syntax_check", return_value=(0, "")),
@@ -77,6 +77,27 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertLess(intervals["affected-tests"][0], intervals["compile-all"][1])
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
+
+    def test_telemetry_declarative_shell_change_selects_focused_contract(self) -> None:
+        commands = []
+
+        def fake_run(command, _timeout):
+            commands.append(command)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["scripts/apply_telemetry_declarative.sh"],
+        )
+        self.assertEqual(result, 0)
+        self.assertIn(
+            ["bash", "./scripts/test_apply_telemetry_declarative.sh"],
+            commands,
+        )
+        self.assertEqual(
+            receipt["checks"]["telemetry-declarative-tests"]["status"],
+            "pass",
+        )
 
     def test_test_only_package_selects_exact_current_tests(self) -> None:
         diff = b"\n".join(

@@ -1,4 +1,8 @@
-{{- if .Values.observability.agent.enabled }}
+{{- $ownership := default "helm" .Values.observability.agent.ownership -}}
+{{- if not (has $ownership (list "helm" "declarative")) -}}
+{{- fail "observability.agent.ownership must be helm or declarative" -}}
+{{- end -}}
+{{- if and .Values.observability.agent.enabled (eq $ownership "helm") }}
 {{- $agentNodeSelector := .Values.observability.agent.nodeSelector -}}
 {{- $agentTolerations := default .Values.tolerations .Values.observability.agent.tolerations -}}
 {{- $agentAffinity := default .Values.affinity .Values.observability.agent.affinity -}}
@@ -6,6 +10,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ printf "%s-telemetry-agent" (include "fugue.fullname" .) }}
+  annotations:
+    helm.sh/resource-policy: keep
+    fugue.pro/telemetry-ownership: helm
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "telemetry-agent") | nindent 4 }}
 spec:

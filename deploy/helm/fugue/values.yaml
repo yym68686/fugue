@@ -145,6 +145,7 @@ observability:
     extraEnv: []
   agent:
     enabled: false
+    ownership: helm
     replicaCount: 1
     image:
       repository: fugue-telemetry-agent
