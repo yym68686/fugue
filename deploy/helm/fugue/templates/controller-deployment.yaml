@@ -1,3 +1,8 @@
+{{- $ownership := default "helm" .Values.controller.ownership -}}
+{{- if not (has $ownership (list "helm" "declarative")) -}}
+{{- fail "controller.ownership must be helm or declarative" -}}
+{{- end -}}
+{{- if eq $ownership "helm" }}
 {{- $controllerNodeSelector := .Values.controller.nodeSelector -}}
 {{- $controllerTolerations := default .Values.tolerations .Values.controller.tolerations -}}
 {{- $controllerAffinity := default .Values.affinity .Values.controller.affinity -}}
@@ -6,6 +11,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "fugue.controllerDeploymentName" . }}
+  annotations:
+    helm.sh/resource-policy: keep
+    fugue.pro/controller-ownership: helm
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
 spec:
@@ -334,3 +342,4 @@ spec:
         {{- with $controllerTolerations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+{{- end }}

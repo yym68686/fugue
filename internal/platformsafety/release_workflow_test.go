@@ -5204,8 +5204,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if !ok || prepush.Outputs["telemetry_release"] != "${{ steps.component_plan.outputs.telemetry_release }}" {
 			t.Fatalf("Telemetry release output is not bound to prepush: %+v", prepush.Outputs)
 		}
-		componentPlan := workflowStepByName(t, prepush, "Require an exact singleton Telemetry component plan")
-		if !strings.Contains(string(ciSource), `deploy/environments/production/telemetry/release\.json$`) {
+		componentPlan := workflowStepByName(t, prepush, "Require an exact singleton declarative component plan")
+		if !strings.Contains(string(ciSource), `deploy/environments/production/(telemetry|controller)/release\.json$`) {
 			t.Fatal("production Telemetry release intent must invoke the release-preflight fixture")
 		}
 		for _, required := range []string{
@@ -5298,7 +5298,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if deploy.If != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.telemetry-build.result == 'success' && needs.prepush.outputs.telemetry_release == 'true' }}" {
 			t.Fatalf("Telemetry deployment is reachable outside successful push/build gates: %q", deploy.If)
 		}
-		if strings.Count(string(ciSource), "group: fugue-production-cluster-mutation-v1") != 1 ||
+		if strings.Count(string(ciSource), "group: fugue-production-cluster-mutation-v1") != 2 ||
 			strings.Contains(string(ciSource), "fugue-telemetry-declarative-production") {
 			t.Fatal("Telemetry bootstrap must share the existing repo-wide production mutation mutex")
 		}
@@ -5441,6 +5441,224 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		for _, step := range deploy.Steps {
 			if step.Name == "Setup Go" || strings.Contains(step.Uses, "setup-buildx") || strings.Contains(step.Uses, "login-action") {
 				t.Fatalf("self-hosted Telemetry deploy must not build or log into the registry: %+v", step)
+			}
+		}
+	})
+
+	t.Run("Controller declarative CI is singleton and uses exact live LKG compensation", func(t *testing.T) {
+		ciSource, err := os.ReadFile("../../.github/workflows/ci.yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ci releaseWorkflow
+		if err := yaml.Unmarshal(ciSource, &ci); err != nil {
+			t.Fatalf("parse CI workflow: %v", err)
+		}
+		prepush := ci.Jobs["prepush"]
+		if prepush.Outputs["controller_release"] != "${{ steps.component_plan.outputs.controller_release }}" {
+			t.Fatalf("Controller release output is not bound to prepush: %+v", prepush.Outputs)
+		}
+		componentPlan := workflowStepByName(t, prepush, "Require an exact singleton declarative component plan")
+		for _, required := range []string{
+			"grep -Fxq 'build_controller=true'",
+			"grep -Fxq 'targets=controller'",
+			"grep -Fxq 'target_count=1'",
+			"for component in api drain_agent telemetry_agent image_cache edge app_ssh",
+			"controller_release=true",
+		} {
+			if !strings.Contains(componentPlan.Run, required) {
+				t.Fatalf("strict Controller planner is missing %q", required)
+			}
+		}
+
+		build, ok := ci.Jobs["controller-build"]
+		if !ok || build.If != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.controller_release == 'true' }}" {
+			t.Fatalf("Controller build is reachable outside the successful push planner: %+v", build)
+		}
+		if !reflect.DeepEqual([]string(build.Needs), []string{"prepush"}) ||
+			build.Permissions["packages"] != "write" || build.Permissions["contents"] != "read" {
+			t.Fatalf("Controller build dependency or permissions drifted: needs=%v permissions=%v", build.Needs, build.Permissions)
+		}
+		sourceCheckout := workflowStepByName(t, build, "Checkout detached exact Controller source")
+		if sourceCheckout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+			sourceCheckout.With["ref"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			sourceCheckout.With["path"] != ".fugue-controller-source" ||
+			sourceCheckout.With["fetch-depth"] != "1" || sourceCheckout.With["persist-credentials"] != "false" {
+			t.Fatalf("Controller desired source checkout is not detached/exact/bounded: %+v", sourceCheckout)
+		}
+		publish := workflowStepByName(t, build, "Build and fresh-verify immutable Controller image")
+		if publish.Run != "./scripts/build_control_plane_images.sh" ||
+			publish.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"] != "controller" ||
+			publish.Env["FUGUE_IMAGE_TAG"] != "${{ github.sha }}" ||
+			publish.Env["FUGUE_IMAGE_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			publish.Env["FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT"] != "${{ github.workspace }}/.fugue-controller-source" ||
+			publish.Env["FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT"] != "true" {
+			t.Fatalf("Controller build does not use the singleton immutable builder: %+v", publish)
+		}
+		materialize := workflowStepByName(t, build, "Materialize canonical build receipt")
+		for _, required := range []string{
+			"controller-build-receipt-source-identity-invalid",
+			`artifact.get("source_tag") != config_sha`,
+			`artifact.get("oci_revision") != desired_source_sha`,
+			`"component": "controller"`,
+			"ComponentBuildReceiptBinding",
+		} {
+			if !strings.Contains(materialize.Run, required) {
+				t.Fatalf("Controller build receipt binding is missing %q", required)
+			}
+		}
+
+		deploy, ok := ci.Jobs["controller-deploy"]
+		if !ok {
+			t.Fatal("Controller deploy job is absent")
+		}
+		var runner []string
+		if err := deploy.RunsOn.Decode(&runner); err != nil {
+			t.Fatalf("decode Controller self-hosted runner: %v", err)
+		}
+		if !reflect.DeepEqual(runner, []string{"self-hosted", "linux", "x64", "fugue", "control-plane"}) ||
+			deploy.Environment != "production" ||
+			strings.Count(string(ciSource), "group: fugue-production-cluster-mutation-v1") != 2 {
+			t.Fatalf("Controller deploy lane or mutex drifted: runner=%v environment=%q", runner, deploy.Environment)
+		}
+		if deploy.If != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.controller-build.result == 'success' && needs.prepush.outputs.controller_release == 'true' }}" {
+			t.Fatalf("Controller deploy is reachable outside successful push/build gates: %q", deploy.If)
+		}
+		render := workflowStepByName(t, deploy, "Render digest-pinned forward and exact live LKG manifests")
+		for _, required := range []string{
+			`python3 - "${root}/live.json" "${EXPECTED_PREVIOUS_SOURCE_SHA}"`,
+			`[[ "${lkg_digest}" == "${EXPECTED_PREVIOUS_IMAGE_DIGEST}" ]]`,
+			"controller-live-image-predecessor-digest-mismatch",
+			"controller-live-registry-source-predecessor-mismatch",
+			`cp deploy/kustomize/controller/deployment.json deploy/kustomize/controller/kustomization.yaml "${root}/forward/base/"`,
+			`cp deploy/kustomize/controller/deployment.json deploy/kustomize/controller/kustomization.yaml "${root}/lkg/base/"`,
+			`FORWARD_OCI_REVISION="${DESIRED_SOURCE_SHA}"`,
+			"fugue.pro~1controller-manifest-revision",
+			"fugue.pro~1source-commit",
+		} {
+			if !strings.Contains(render.Run, required) {
+				t.Fatalf("Controller desired/LKG render is missing %q", required)
+			}
+		}
+		if strings.Contains(render.Run, `git archive "${lkg_source_sha}" deploy/kustomize/controller`) {
+			t.Fatal("first Controller migration must not claim a nonexistent historical declarative overlay")
+		}
+		apply := workflowStepByName(t, deploy, "Apply Controller with single-writer proof and exact live LKG rollback")
+		if apply.Env["FUGUE_CONTROLLER_API_DEPLOYMENT"] != "fugue-fugue-api" ||
+			apply.Env["FUGUE_CONTROLLER_LEADER_LEASE"] != "fugue-fugue-controller" ||
+			apply.Env["FUGUE_CONTROLLER_SOURCE_SHA"] != "${{ github.sha }}" ||
+			apply.Env["FUGUE_CONTROLLER_OCI_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			!strings.Contains(apply.Run, "./scripts/apply_controller_declarative.sh") {
+			t.Fatalf("Controller apply is not bound to the exact declarative driver: %+v", apply)
+		}
+		for _, step := range deploy.Steps {
+			if step.Name == "Setup Go" || strings.Contains(step.Uses, "setup-buildx") || strings.Contains(step.Uses, "login-action") {
+				t.Fatalf("self-hosted Controller deploy must not build or log into registry: %+v", step)
+			}
+		}
+
+		applySource, err := os.ReadFile("../../scripts/apply_controller_declarative.sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range []string{
+			`prepare_helm_post_renderer`,
+			`CONTROL_PLANE_HOTFIX_LIVE_API_TEMPLATE_JSON="${HANDOFF_API_TEMPLATE_JSON}"`,
+			`CONTROL_PLANE_HOTFIX_LIVE_CONTROLLER_TEMPLATE_JSON="${HANDOFF_CONTROLLER_TEMPLATE_JSON}"`,
+			`select_handoff_renderer helm`,
+			`declarative)`,
+			`spec.get("replicas") != 2`,
+			`controller-forward-pods-not-new`,
+			`controller-leader-renewal-stale`,
+			`"${INITIAL_UID}"`,
+			`"${INITIAL_API_TEMPLATE_JSON}"`,
+			`forward-failed; restoring exact Git LKG`,
+		} {
+			if !strings.Contains(string(applySource), required) {
+				t.Fatalf("Controller declarative safety contract is missing %q", required)
+			}
+		}
+
+		intentBytes, err := os.ReadFile("../../deploy/environments/production/controller/release.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var productionIntent map[string]any
+		if err := json.Unmarshal(intentBytes, &productionIntent); err != nil {
+			t.Fatalf("parse production Controller release intent: %v", err)
+		}
+		canonicalIntent, err := json.Marshal(productionIntent)
+		if err != nil || string(intentBytes) != string(canonicalIntent)+"\n" {
+			t.Fatalf("production Controller release intent is not canonical: err=%v bytes=%s", err, intentBytes)
+		}
+		expectedIntent := map[string]any{
+			"apiVersion":                  "release.fugue.dev/v1",
+			"component":                   "controller",
+			"deployment":                  "fugue-fugue-controller",
+			"desiredSourceSha":            "58fc2e560064214e3f329765c9ec7839ee513c27",
+			"environment":                 "production",
+			"expectedPreviousImageDigest": "sha256:e636b35fe8718e1f20895c0a290924a0d48a6cb7d1072d741612df18483fa13d",
+			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
+			"fieldManager":                "fugue-controller-declarative",
+			"intentGeneration":            float64(1),
+			"kind":                        "ProductionComponentRelease",
+			"namespace":                   "fugue-system",
+			"ownership":                   "declarative",
+			"replicas":                    float64(2),
+			"repository":                  "ghcr.io/yym68686/fugue-controller",
+			"rollback":                    "previous-live-lkg",
+		}
+		if !reflect.DeepEqual(productionIntent, expectedIntent) {
+			t.Fatalf("production Controller release intent drifted: got=%v want=%v", productionIntent, expectedIntent)
+		}
+	})
+
+	t.Run("Controller Kustomize template owns only the Deployment", func(t *testing.T) {
+		if _, err := exec.LookPath("kubectl"); err != nil {
+			t.Skip("kubectl is not installed")
+		}
+		command := exec.Command("kubectl", "kustomize", "../../deploy/kustomize/controller")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("render Controller Kustomize template: %v\n%s", err, output)
+		}
+		var documents []map[string]any
+		decoder := yaml.NewDecoder(strings.NewReader(string(output)))
+		for {
+			var document map[string]any
+			err := decoder.Decode(&document)
+			if err != nil {
+				if strings.Contains(err.Error(), "EOF") {
+					break
+				}
+				t.Fatalf("decode Controller Kustomize output: %v", err)
+			}
+			if len(document) != 0 {
+				documents = append(documents, document)
+			}
+		}
+		if len(documents) != 1 || documents[0]["apiVersion"] != "apps/v1" || documents[0]["kind"] != "Deployment" {
+			t.Fatalf("Controller Kustomize inventory must contain one Deployment: %+v", documents)
+		}
+		metadata, _ := documents[0]["metadata"].(map[string]any)
+		if metadata["name"] != "fugue-fugue-controller" || metadata["namespace"] != "fugue-system" {
+			t.Fatalf("Controller Kustomize identity drifted: %+v", metadata)
+		}
+		for _, required := range []string{
+			"fugue.pro/controller-ownership: declarative",
+			"app.kubernetes.io/managed-by: fugue-controller-declarative",
+			"image: ghcr.io/yym68686/fugue-controller:git-source",
+			"fugue.pro/source-commit: git-source",
+			"name: metrics",
+			"replicas: 2",
+		} {
+			if !strings.Contains(string(output), required) {
+				t.Fatalf("Controller Kustomize template missing %q:\n%s", required, output)
+			}
+		}
+		for _, forbidden := range []string{"kind: Service", "kind: DaemonSet", "kind: StatefulSet"} {
+			if strings.Contains(string(output), forbidden) {
+				t.Fatalf("Controller Kustomize template leaked another resource kind %q", forbidden)
 			}
 		}
 	})

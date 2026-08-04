@@ -335,6 +335,13 @@ def main() -> int:
         non_go_tasks["telemetry-declarative-tests"] = [
             "bash", "./scripts/test_apply_telemetry_declarative.sh",
         ]
+    if any(name in {
+        "scripts/apply_controller_declarative.sh",
+        "scripts/test_apply_controller_declarative.sh",
+    } for name in paths):
+        non_go_tasks["controller-declarative-tests"] = [
+            "bash", "./scripts/test_apply_controller_declarative.sh",
+        ]
 
     local_checks = {
         "diff-check": lambda remaining: diff_check(base, paths, remaining),

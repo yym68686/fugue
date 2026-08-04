@@ -1443,6 +1443,73 @@ func TestControllerReceivesInternalObservabilityQueryEnv(t *testing.T) {
 	}
 }
 
+func TestControllerOwnershipHandoffIsKeepThenOmit(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	render := func(ownership string) string {
+		args := []string{
+			"template", "fugue", chartDir,
+			"--set-string", "configSecret.existingSecretName=fugue-config-existing",
+			"--set-string", "platformComponentIdentity.existingSecretName=fugue-platform-identity-existing",
+		}
+		if ownership != "" {
+			args = append(args, "--set-string", "controller.ownership="+ownership)
+		}
+		cmd := exec.Command("helm", args...)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template ownership=%q failed: %v\n%s", ownership, err, output)
+		}
+		return string(output)
+	}
+
+	helmOwned := render("")
+	deployment := manifestDocumentForKindAndName(helmOwned, "Deployment", "fugue-fugue-controller")
+	if deployment == "" ||
+		!strings.Contains(deployment, "helm.sh/resource-policy: keep") ||
+		!strings.Contains(deployment, "fugue.pro/controller-ownership: helm") {
+		t.Fatalf("Helm-owned Controller must be retained before handoff:\n%s", deployment)
+	}
+
+	declarative := render("declarative")
+	if got := manifestDocumentForKindAndName(declarative, "Deployment", "fugue-fugue-controller"); got != "" {
+		t.Fatalf("declarative ownership left a second Controller writer:\n%s", got)
+	}
+	withoutControllerDeployment := func(manifest string) string {
+		kept := make([]string, 0)
+		for _, document := range strings.Split(manifest, "\n---") {
+			document = strings.TrimSpace(document)
+			if document == "" {
+				continue
+			}
+			if manifestDocumentForKindAndName(document, "Deployment", "fugue-fugue-controller") != "" {
+				continue
+			}
+			kept = append(kept, document)
+		}
+		return strings.Join(kept, "\n---\n")
+	}
+	if withoutControllerDeployment(helmOwned) != withoutControllerDeployment(declarative) {
+		t.Fatal("ownership handoff changed a Helm object other than the Controller Deployment")
+	}
+
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set-string", "controller.ownership=shared",
+	)
+	cmd.Dir = chartDir
+	if output, err := cmd.CombinedOutput(); err == nil ||
+		!strings.Contains(string(output), "controller.ownership must be helm or declarative") {
+		t.Fatalf("invalid Controller ownership did not fail closed: err=%v\n%s", err, output)
+	}
+}
+
 func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

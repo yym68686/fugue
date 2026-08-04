@@ -140,6 +140,27 @@ class CanonicalReceiptTest(unittest.TestCase):
             "pass",
         )
 
+    def test_controller_declarative_shell_change_selects_focused_contract(self) -> None:
+        commands = []
+
+        def fake_run(command, _timeout):
+            commands.append(command)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["scripts/apply_controller_declarative.sh"],
+        )
+        self.assertEqual(result, 0)
+        self.assertIn(
+            ["bash", "./scripts/test_apply_controller_declarative.sh"],
+            commands,
+        )
+        self.assertEqual(
+            receipt["checks"]["controller-declarative-tests"]["status"],
+            "pass",
+        )
+
     def test_test_only_package_selects_exact_current_tests(self) -> None:
         diff = b"\n".join(
             (
@@ -239,6 +260,21 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["status"], "fail")
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["telemetry-declarative-tests"]["status"], "fail")
+
+    def test_non_go_controller_failure_still_fails_closed(self) -> None:
+        def fake_run(command, _timeout):
+            if command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
+                return 8, "controller failed"
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["scripts/apply_controller_declarative.sh"],
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(receipt["status"], "fail")
+        self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["controller-declarative-tests"]["status"], "fail")
 
     def test_default_deadline_and_receipt_schema_are_unchanged(self) -> None:
         self.assertEqual(prepush.DEFAULT_TIMEOUT_SECONDS, 55.0)

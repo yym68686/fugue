@@ -257,6 +257,7 @@ api:
   extraEnv: []
 
 controller:
+  ownership: helm
   replicaCount: 2
   image:
     repository: fugue-controller
