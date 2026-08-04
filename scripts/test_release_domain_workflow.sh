@@ -271,6 +271,7 @@ assert_equal(observed_recovery.fetch("environment"), "production", "Controller M
 assert_equal(observed_recovery.fetch("permissions"), {"actions" => "read", "contents" => "read"}, "Controller M16 observed recovery permissions")
 observed_identity = step(observed_recovery, "Verify exact Controller M16 observed recovery identity")
 for fragment in [
+  "e84daba6ff977a75773675e98ad786d054db46e6",
   "c06e841e9bc556f62eb8d4dbe970b1bd8a1dc50b",
   "8d80f0393c227b5998d423bc8cf26c51d3159e1a",
   "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619",
