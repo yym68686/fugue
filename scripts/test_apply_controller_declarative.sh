@@ -324,6 +324,16 @@ if [[ "${1:-}" == "get" && "${2:-}" == "lease" ]]; then
   state="$(cat "${FIXTURE_ROOT}/state")"
   prefix=controller-old
   [[ "${state}" != forward ]] || prefix=controller-new
+  count="$(( $(cat "${FIXTURE_ROOT}/leader-lease-read-count") + 1 ))"
+  printf '%s\n' "${count}" >"${FIXTURE_ROOT}/leader-lease-read-count"
+  if [[ "${state}" == forward ]]; then
+    count="$(( $(cat "${FIXTURE_ROOT}/forward-leader-read-count") + 1 ))"
+    printf '%s\n' "${count}" >"${FIXTURE_ROOT}/forward-leader-read-count"
+    if [[ "${LEADER_PERMANENT_STALE:-false}" == true ||
+      ( "${LEADER_STALE_ONCE:-false}" == true && "${count}" -eq 1 ) ]]; then
+      prefix=controller-old
+    fi
+  fi
   printf '{"apiVersion":"coordination.k8s.io/v1","kind":"Lease","spec":{"holderIdentity":"%s-a","renewTime":"%s"}}\n' \
     "${prefix}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   exit 0
@@ -338,7 +348,11 @@ if [[ "${1:-}" == "get" && "${2:-}" == --raw=* ]]; then
       printf '%s\n' 'fugue_controller_leader_election_enabled 1.000000' 'fugue_controller_active_loop_running 1.000000'
       ;;
     *controller-*-b:9090/proxy/metrics)
-      printf '%s\n' 'fugue_controller_leader_election_enabled 1.000000' 'fugue_controller_active_loop_running 0.000000'
+      if [[ "${LEADER_SPLIT_BRAIN:-false}" == true && "$(cat "${FIXTURE_ROOT}/state")" == forward ]]; then
+        printf '%s\n' 'fugue_controller_leader_election_enabled 1.000000' 'fugue_controller_active_loop_running 1.000000'
+      else
+        printf '%s\n' 'fugue_controller_leader_election_enabled 1.000000' 'fugue_controller_active_loop_running 0.000000'
+      fi
       ;;
     *) exit 92 ;;
   esac
@@ -678,6 +692,8 @@ reset_fixture() {
   printf '%s\n' 0 >"${FIXTURE_ROOT}/helm-status-count"
   printf '%s\n' 0 >"${FIXTURE_ROOT}/daemonset-read-count"
   printf '%s\n' 0 >"${FIXTURE_ROOT}/controller-read-count"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/leader-lease-read-count"
+  printf '%s\n' 0 >"${FIXTURE_ROOT}/forward-leader-read-count"
   cat >"${FIXTURE_ROOT}/coordination-lease.json" <<'JSON'
 {"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"annotations":{},"name":"fugue-fugue-control-plane-db-backup","namespace":"fugue-system","resourceVersion":"401","uid":"coordination-lease-uid-1"},"spec":{"holderIdentity":"","leaseDurationSeconds":120,"leaseTransitions":0}}
 JSON
@@ -1025,6 +1041,34 @@ observed = value["spec"]["template"]["metadata"]["annotations"].get("fugue.pro/s
 if observed != sys.argv[2]:
     raise SystemExit("rollback did not restore exact LKG Pod provenance")
 PY
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+LEADER_STALE_ONCE=true run_apply >"${FIXTURE_ROOT}/leader-stale-once.log"
+grep -Fq 'controller-declarative:success' "${FIXTURE_ROOT}/leader-stale-once.log"
+[[ "$(<"${FIXTURE_ROOT}/forward-leader-read-count")" -eq 2 ]]
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+if LEADER_PERMANENT_STALE=true FUGUE_CONTROLLER_LEADER_CONVERGENCE_TIMEOUT_SECONDS=1 \
+  run_apply >"${FIXTURE_ROOT}/leader-permanent-stale.log" 2>&1; then
+  printf 'permanently stale Controller leader witness was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'controller-leader-witness-timeout' "${FIXTURE_ROOT}/leader-permanent-stale.log"
+grep -Fq 'forward-rollout-failed-lkg-restored' "${FIXTURE_ROOT}/leader-permanent-stale.log"
+[[ "$(<"${FIXTURE_ROOT}/forward-leader-read-count")" -ge 1 ]]
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+if LEADER_SPLIT_BRAIN=true run_apply >"${FIXTURE_ROOT}/leader-split-brain.log" 2>&1; then
+  printf 'split-brain Controller active loop witness was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'controller-active-loop-split-brain' "${FIXTURE_ROOT}/leader-split-brain.log"
+! grep -Fq 'controller-leader-witness-timeout' "${FIXTURE_ROOT}/leader-split-brain.log"
+grep -Fq 'forward-rollout-failed-lkg-restored' "${FIXTURE_ROOT}/leader-split-brain.log"
+[[ "$(<"${FIXTURE_ROOT}/forward-leader-read-count")" -eq 1 ]]
 )
 
 prepare_legacy_bootstrap() {

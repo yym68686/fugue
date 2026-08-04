@@ -23,6 +23,7 @@ readonly SOURCE_SHA="${FUGUE_CONTROLLER_SOURCE_SHA:-}"
 readonly LKG_SOURCE_SHA="${FUGUE_CONTROLLER_LKG_SOURCE_SHA:-}"
 readonly OCI_REVISION="${FUGUE_CONTROLLER_OCI_REVISION:-}"
 readonly LKG_OCI_REVISION="${FUGUE_CONTROLLER_LKG_OCI_REVISION:-}"
+readonly LEADER_CONVERGENCE_TIMEOUT_SECONDS="${FUGUE_CONTROLLER_LEADER_CONVERGENCE_TIMEOUT_SECONDS:-30}"
 readonly FIELD_MANAGER="fugue-controller-declarative"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -82,6 +83,8 @@ HANDOFF_STAGE2_RENDERER_DIGEST=""
 [[ "${LKG_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail 'lkg-source-sha-invalid'
 [[ "${OCI_REVISION}" =~ ^[0-9a-f]{40}$ ]] || fail 'oci-revision-invalid'
 [[ "${LKG_OCI_REVISION}" =~ ^[0-9a-f]{40}$ ]] || fail 'lkg-oci-revision-invalid'
+[[ "${LEADER_CONVERGENCE_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ &&
+  "${LEADER_CONVERGENCE_TIMEOUT_SECONDS}" -le 30 ]] || fail 'leader-convergence-timeout-invalid'
 [[ "${EXECUTION_MODE}" == prepare || "${EXECUTION_MODE}" == execute ]] || fail 'execution-mode-invalid'
 [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] ||
   fail 'actions-run-identity-invalid'
@@ -1187,7 +1190,13 @@ PY
 health_check() {
   local digest="$1"
   local label="$2"
-  local health pods lease metrics pod active=0
+  local health pods lease pod_names metrics pod active=0
+  local leader_status=0
+  local leader_ready=false
+  local deadline=$((SECONDS + LEADER_CONVERGENCE_TIMEOUT_SECONDS))
+  local leader_metric_count=0
+  local active_metric_count=0
+  local inactive_metric_count=0
   health="$(kubectl get --raw="/api/v1/namespaces/${NAMESPACE}/services/http:fugue-fugue:http/proxy/healthz")" || return 1
   HEALTH="${health}" python3 - <<'PY' || return 1
 import json
@@ -1200,19 +1209,17 @@ PY
 
   pods="${WORK_DIR}/${label}-pods.json"
   lease="${WORK_DIR}/${label}-leader-lease.json"
+  pod_names="${WORK_DIR}/${label}-pod-names"
   kubectl get pods --namespace "${NAMESPACE}" \
     --selector 'app.kubernetes.io/component=controller,app.kubernetes.io/instance=fugue,app.kubernetes.io/name=fugue' \
     --output json >"${pods}" || return 1
-  kubectl get lease "${LEADER_LEASE}" --namespace "${NAMESPACE}" --output json >"${lease}" || return 1
-  PODS="${pods}" LEASE="${lease}" REPOSITORY="${IMAGE_REPOSITORY}" DIGEST="${digest}" \
-    INITIAL_PODS="${INITIAL_POD_NAMES}" LABEL="${label}" python3 - <<'PY' || return 1
-import datetime
+  PODS="${pods}" REPOSITORY="${IMAGE_REPOSITORY}" DIGEST="${digest}" \
+    INITIAL_PODS="${INITIAL_POD_NAMES}" LABEL="${label}" python3 - <<'PY' >"${pod_names}" || return 1
 import json
 import os
 from pathlib import Path
 
 pods = json.loads(Path(os.environ["PODS"]).read_text())
-lease = json.loads(Path(os.environ["LEASE"]).read_text())
 items = pods.get("items") if type(pods) is dict else None
 if type(items) is not list or len(items) != 2:
     raise SystemExit("controller-pod-inventory-invalid")
@@ -1239,35 +1246,72 @@ if os.environ["LABEL"] == "forward":
     initial = set(filter(None, os.environ["INITIAL_PODS"].splitlines()))
     if initial.intersection(names):
         raise SystemExit("controller-forward-pods-not-new")
-holder = (lease.get("spec") or {}).get("holderIdentity")
-renew = (lease.get("spec") or {}).get("renewTime")
-if holder not in names or not isinstance(renew, str):
-    raise SystemExit("controller-leader-witness-invalid")
-renewed = datetime.datetime.fromisoformat(renew.replace("Z", "+00:00"))
-now = datetime.datetime.now(datetime.timezone.utc)
-if renewed > now + datetime.timedelta(seconds=5) or now - renewed > datetime.timedelta(seconds=45):
-    raise SystemExit("controller-leader-renewal-stale")
 print("\n".join(sorted(names)))
 PY
-  while IFS= read -r pod; do
-    [[ -n "${pod}" ]] || continue
-    metrics="$(kubectl get --raw="/api/v1/namespaces/${NAMESPACE}/pods/${pod}:9090/proxy/metrics")" || return 1
-    grep -Eq '^fugue_controller_leader_election_enabled 1(\.0+)?$' <<<"${metrics}" || return 1
-    if grep -Eq '^fugue_controller_active_loop_running 1(\.0+)?$' <<<"${metrics}"; then
-      active=$((active + 1))
-    elif ! grep -Eq '^fugue_controller_active_loop_running 0(\.0+)?$' <<<"${metrics}"; then
+
+  while true; do
+    kubectl get lease "${LEADER_LEASE}" --namespace "${NAMESPACE}" --output json >"${lease}" || return 1
+    leader_status=0
+    if POD_NAMES="${pod_names}" LEASE="${lease}" python3 - <<'PY'
+import datetime
+import json
+import os
+from pathlib import Path
+
+names = set(filter(None, Path(os.environ["POD_NAMES"]).read_text().splitlines()))
+lease = json.loads(Path(os.environ["LEASE"]).read_text())
+holder = (lease.get("spec") or {}).get("holderIdentity")
+renew = (lease.get("spec") or {}).get("renewTime")
+if holder not in names:
+    raise SystemExit(75)
+if not isinstance(renew, str):
+    raise SystemExit("controller-leader-witness-invalid")
+try:
+    renewed = datetime.datetime.fromisoformat(renew.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit("controller-leader-witness-invalid")
+now = datetime.datetime.now(datetime.timezone.utc)
+if renewed > now + datetime.timedelta(seconds=5) or now - renewed > datetime.timedelta(seconds=45):
+    raise SystemExit(75)
+PY
+    then
+      leader_ready=true
+    else
+      leader_status=$?
+      if (( leader_status == 75 )); then
+        leader_ready=false
+      else
+        return 1
+      fi
+    fi
+
+    active=0
+    while IFS= read -r pod; do
+      [[ -n "${pod}" ]] || continue
+      metrics="$(kubectl get --raw="/api/v1/namespaces/${NAMESPACE}/pods/${pod}:9090/proxy/metrics")" || return 1
+      leader_metric_count="$(grep -Ec '^fugue_controller_leader_election_enabled 1(\.0+)?$' <<<"${metrics}" || true)"
+      active_metric_count="$(grep -Ec '^fugue_controller_active_loop_running 1(\.0+)?$' <<<"${metrics}" || true)"
+      inactive_metric_count="$(grep -Ec '^fugue_controller_active_loop_running 0(\.0+)?$' <<<"${metrics}" || true)"
+      if (( leader_metric_count != 1 || active_metric_count + inactive_metric_count != 1 )); then
+        printf 'controller-metrics-witness-invalid\n' >&2
+        return 1
+      fi
+      active=$((active + active_metric_count))
+      if (( active > 1 )); then
+        printf 'controller-active-loop-split-brain\n' >&2
+        return 1
+      fi
+    done <"${pod_names}"
+
+    if [[ "${leader_ready}" == true ]] && (( active == 1 )); then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      printf 'controller-leader-witness-timeout\n' >&2
       return 1
     fi
-  done < <(python3 - "${pods}" <<'PY'
-import json
-from pathlib import Path
-import sys
-value = json.loads(Path(sys.argv[1]).read_text())
-for item in sorted(value["items"], key=lambda entry: entry["metadata"]["name"]):
-    print(item["metadata"]["name"])
-PY
-)
-  [[ "${active}" -eq 1 ]]
+    sleep 1
+  done
 }
 
 verify_rollout() {
