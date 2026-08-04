@@ -5413,12 +5413,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"apiVersion":                  "release.fugue.dev/v1",
 			"component":                   "telemetry_agent",
 			"deployment":                  "fugue-fugue-telemetry-agent",
-			"desiredSourceSha":            "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
+			"desiredSourceSha":            "10b7061f91d653d13a3c3f95abfd4b996f17ddab",
 			"environment":                 "production",
-			"expectedPreviousImageDigest": "sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",
-			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
+			"expectedPreviousImageDigest": "sha256:0fbad52617b06960e98d1f52839fa512b7041784ec158825235b023aee02e8f9",
+			"expectedPreviousSourceSha":   "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
 			"fieldManager":                "fugue-telemetry-declarative",
-			"intentGeneration":            float64(3),
+			"intentGeneration":            float64(4),
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",
@@ -5665,16 +5665,21 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if output, err := clone.CombinedOutput(); err != nil {
 			t.Fatalf("clone successor planner fixture: %v output=%s", err, output)
 		}
+		successorDesiredOutput, err := exec.Command("git", "-C", successorRoot, "rev-parse", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatalf("read successor desired source: %v output=%s", err, successorDesiredOutput)
+		}
+		successorDesiredSHA := strings.TrimSpace(string(successorDesiredOutput))
 		successorIntent := map[string]any{
 			"apiVersion":                  "release.fugue.dev/v1",
 			"component":                   "telemetry_agent",
 			"deployment":                  "fugue-fugue-telemetry-agent",
-			"desiredSourceSha":            "10b7061f91d653d13a3c3f95abfd4b996f17ddab",
+			"desiredSourceSha":            successorDesiredSHA,
 			"environment":                 "production",
 			"expectedPreviousImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			"expectedPreviousSourceSha":   "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
+			"expectedPreviousSourceSha":   "10b7061f91d653d13a3c3f95abfd4b996f17ddab",
 			"fieldManager":                "fugue-telemetry-declarative",
-			"intentGeneration":            4,
+			"intentGeneration":            5,
 			"kind":                        "ProductionComponentRelease",
 			"namespace":                   "fugue-system",
 			"ownership":                   "declarative",
