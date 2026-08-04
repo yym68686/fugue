@@ -628,6 +628,113 @@ grep -Fq '(root/"target-candidate.yaml").write_bytes(target)' <<<"${observed_raw
 grep -Fq 'control_plane_m16_observed_recovery_normalize_target_terminal_lf \' <<<"${observed_raw_target_source}"
 ! grep -Fq '(root/"target.yaml").write_bytes(target)' <<<"${observed_raw_target_source}"
 ! grep -Fq 'rstrip' <<<"${observed_raw_target_source}"
+observed_plan_source="$(sed -n '/^control_plane_m16_observed_recovery_build_plan()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
+grep -Fq "python3 - <<'PY' || return" <<<"${observed_plan_source}"
+grep -Fq 'all_values=load_object(root/"second/helm-values-822.json",require_canonical=True)' <<<"${observed_plan_source}"
+grep -Fq 'all_values_digest!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81"' <<<"${observed_plan_source}"
+grep -Fq 'user_values_digest!="sha256:ef119aa09ab2ae0077c477fbb101b3912a82e44646805492d8641047b7d1d20c"' <<<"${observed_plan_source}"
+grep -Fq 'values_digest=all_values_digest' <<<"${observed_plan_source}"
+[[ "$(grep -c 'ValuesDigest":values_digest' <<<"${observed_plan_source}")" == 5 ]]
+! grep -Fq 'userValuesDigest' <<<"${observed_plan_source}"
+
+SOURCE="${ROOT}/scripts/upgrade_fugue_control_plane.sh" TEST_ROOT="${TMP}/observed-recovery-plan-values" python3 - <<'PYTEST'
+import hashlib,json,os,pathlib,shutil,subprocess,sys
+
+source=pathlib.Path(os.environ["SOURCE"]).read_text(encoding="utf-8")
+function_start=source.index("control_plane_m16_observed_recovery_build_plan() {")
+function_end=source.index("\n}\n\ncontrol_plane_m16_observed_recovery_verify_target()",function_start)
+function=source[function_start:function_end]
+marker=" python3 - <<'PY' || return\n"
+body_start=function.index(marker)+len(marker)
+body_end=function.index("\nPY\n",body_start)
+body=function[body_start:body_end]+"\n"
+
+fixed_all="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81"
+fixed_user="sha256:ef119aa09ab2ae0077c477fbb101b3912a82e44646805492d8641047b7d1d20c"
+assert body.count(fixed_all)==1 and body.count(fixed_user)==1
+def canonical(value):
+    return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
+def digest(value):
+    return "sha256:"+hashlib.sha256(canonical(value)).hexdigest()
+
+user_values={"api":{"replicas":2},"controller":{"replicas":2},"fixture":"user-values"}
+all_values={"api":{"replicas":2},"controller":{"replicas":2},"defaults":{"enabled":True},"fixture":"all-values"}
+body=body.replace(fixed_all,digest(all_values),1).replace(fixed_user,digest(user_values),1)
+test_root=pathlib.Path(os.environ["TEST_ROOT"])
+test_root.mkdir(mode=0o700)
+runner=test_root/"plan-input.py"
+runner.write_text(body,encoding="utf-8")
+
+def write_json(path,value,canonical_file=False):
+    raw=canonical(value) if canonical_file else json.dumps(value,indent=2,ensure_ascii=True).encode()
+    path.write_bytes(raw+b"\n")
+
+def prepare(name):
+    root=test_root/name
+    if root.exists(): shutil.rmtree(root)
+    (root/"second").mkdir(parents=True,mode=0o700)
+    write_json(root/"second/snapshot.json",{"helmRecordDigest":"sha256:"+"a"*64,"kubernetes":{},"lease":{}},True)
+    write_json(root/"second/helm-values-822.json",all_values,True)
+    write_json(root/"render-one.json",{"config":user_values,"manifest":"fixture"})
+    (root/"render-one.raw").write_bytes(b"raw\n")
+    (root/"target.yaml").write_bytes(b"target\n")
+    (root/"renderer-digest").write_text("sha256:"+"b"*64+"\n",encoding="ascii")
+    return root
+
+def run(name,mutate=None,success=False):
+    root=prepare(name)
+    if mutate is not None: mutate(root)
+    env=dict(os.environ,DIRECTORY=str(root),SNAPSHOT=str(root/"second/snapshot.json"),ENVELOPE=str(root/"render-one.json"),EXPECTED_SHA="1"*40,RUN_ID="30800000000",CHART_DIGEST="sha256:"+"c"*64)
+    result=subprocess.run([sys.executable,str(runner)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    if success:
+        assert result.returncode==0,(name,result.stderr.decode(errors="replace"))
+        value=json.loads((root/"input.json").read_text(encoding="utf-8"))
+        expected=digest(all_values)
+        assert value["baseValuesDigest"]==expected
+        assert value["targetValuesDigest"]==expected
+        assert value["hybridValuesDigest"]==expected
+        assert value["archivedValuesDigest"]==expected
+        assert value["observedValuesDigest"]==expected
+        assert "userValuesDigest" not in value
+    else:
+        assert result.returncode!=0,name
+        assert not (root/"input.json").exists(),name
+
+run("valid",success=True)
+run("missing-all",lambda root:(root/"second/helm-values-822.json").unlink())
+run("missing-user",lambda root:write_json(root/"render-one.json",{"manifest":"fixture"}))
+run("wrong-user-shape",lambda root:write_json(root/"render-one.json",{"config":[],"manifest":"fixture"}))
+run("swapped",lambda root:(write_json(root/"second/helm-values-822.json",user_values,True),write_json(root/"render-one.json",{"config":all_values,"manifest":"fixture"})))
+run("all-drift",lambda root:write_json(root/"second/helm-values-822.json",{**all_values,"extra":True},True))
+run("user-drift",lambda root:write_json(root/"render-one.json",{"config":{**user_values,"extra":True},"manifest":"fixture"}))
+run("noncanonical-all",lambda root:write_json(root/"second/helm-values-822.json",all_values,False))
+run("trailing-all",lambda root:(root/"second/helm-values-822.json").write_bytes(canonical(all_values)+b"\n{}\n"))
+run("duplicate-all",lambda root:(root/"second/helm-values-822.json").write_text('{"fixture":"all-values","fixture":"all-values"}\n',encoding="utf-8"))
+run("duplicate-user",lambda root:(root/"render-one.json").write_text('{"config":{},"config":{},"manifest":"fixture"}\n',encoding="utf-8"))
+PYTEST
+
+(
+  cd "${ROOT}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  short_circuit_root="${TMP}/observed-recovery-plan-short-circuit"
+  mkdir -m 700 -p "${short_circuit_root}/second"
+  printf '%s\n' manifest >"${short_circuit_root}/second/helm-manifest-822.yaml"
+  printf '%s\n' manifest >"${short_circuit_root}/second/helm-manifest-820.yaml"
+  printf '%s\n' '{}' >"${short_circuit_root}/second/snapshot.json"
+  printf '%s\n' '{}' >"${short_circuit_root}/second/helm-values-822.json"
+  printf '%s\n' '{"config":{}}' >"${short_circuit_root}/render-one.json"
+  printf '%s\n' raw >"${short_circuit_root}/render-one.raw"
+  printf '%s\n' target >"${short_circuit_root}/target.yaml"
+  printf 'sha256:%064d\n' 0 >"${short_circuit_root}/renderer-digest"
+  set +e
+  short_circuit_error="$(GITHUB_RUN_ID=30800000000 control_plane_m16_observed_recovery_build_plan "${short_circuit_root}" "$(git rev-parse HEAD)" 2>&1)"
+  short_circuit_status=$?
+  set -e
+  [[ "${short_circuit_status}" != 0 && ! -e "${short_circuit_root}/input.json" ]]
+  ! grep -Fq 'chmod:' <<<"${short_circuit_error}"
+)
 observed_seal_source="$(sed -n '/^control_plane_m16_observed_recovery_prepare_sealed_argv()/,/^}/p' "${ROOT}/scripts/upgrade_fugue_control_plane.sh")"
 [[ "$(grep -c '^  control_plane_hotfix_prepare_post_renderer || return$' <<<"${observed_seal_source}")" == 1 ]]
 [[ "$(grep -c '^  control_plane_m16_observed_recovery_assert_renderer || return$' <<<"${observed_seal_source}")" == 2 ]]

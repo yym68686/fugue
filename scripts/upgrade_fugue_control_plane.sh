@@ -21820,13 +21820,40 @@ control_plane_m16_observed_recovery_build_plan() {
   cp "${directory}/second/helm-manifest-820.yaml" "${directory}/hybrid.yaml" || return
   chmod 600 "${directory}/base.yaml" "${directory}/hybrid.yaml" || return
   chart_digest="sha256:$(git ls-tree -r HEAD -- deploy/helm/fugue | control_plane_release_sha256_stream)" || return
-  SNAPSHOT="${directory}/second/snapshot.json" ENVELOPE="${directory}/render-one.json" DIRECTORY="${directory}" EXPECTED_SHA="${head_sha}" RUN_ID="${GITHUB_RUN_ID}" CHART_DIGEST="${chart_digest}" python3 - <<'PY'
+  SNAPSHOT="${directory}/second/snapshot.json" ENVELOPE="${directory}/render-one.json" DIRECTORY="${directory}" EXPECTED_SHA="${head_sha}" RUN_ID="${GITHUB_RUN_ID}" CHART_DIGEST="${chart_digest}" python3 - <<'PY' || return
 import hashlib,json,os,pathlib,secrets
-root=pathlib.Path(os.environ["DIRECTORY"]); snapshot=json.load(open(os.environ["SNAPSHOT"],encoding="utf-8")); envelope=json.load(open(os.environ["ENVELOPE"],encoding="utf-8"))
-def digest(value): return "sha256:"+hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+root=pathlib.Path(os.environ["DIRECTORY"])
+def reject_duplicates(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value: raise ValueError("duplicate JSON key")
+        value[key]=item
+    return value
+def reject_constant(_): raise ValueError("non-finite JSON value")
+def canonical(value): return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
+def load_object(path,require_canonical=False):
+    path=pathlib.Path(path)
+    if not path.is_file() or path.is_symlink(): raise SystemExit(1)
+    try:
+        raw=path.read_bytes()
+        value=json.loads(raw.decode("utf-8"),object_pairs_hook=reject_duplicates,parse_constant=reject_constant)
+    except (OSError,UnicodeDecodeError,ValueError):
+        raise SystemExit(1)
+    if not isinstance(value,dict): raise SystemExit(1)
+    if require_canonical and raw!=canonical(value)+b"\n": raise SystemExit(1)
+    return value
+snapshot=load_object(os.environ["SNAPSHOT"])
+envelope=load_object(os.environ["ENVELOPE"])
+all_values=load_object(root/"second/helm-values-822.json",require_canonical=True)
+def digest(value): return "sha256:"+hashlib.sha256(canonical(value)).hexdigest()
 def file_digest(name): return "sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest()
-values_digest=digest(envelope.get("config"))
-if values_digest!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81": raise SystemExit(1)
+all_values_digest=digest(all_values)
+user_values=envelope.get("config")
+if not isinstance(user_values,dict): raise SystemExit(1)
+user_values_digest=digest(user_values)
+if all_values_digest!="sha256:6fdd9f635542f805e2b79678053c073402c663a789a00f05863460ad68acad81": raise SystemExit(1)
+if user_values_digest!="sha256:ef119aa09ab2ae0077c477fbb101b3912a82e44646805492d8641047b7d1d20c": raise SystemExit(1)
+values_digest=all_values_digest
 renderer=(root/"renderer-digest").read_text(encoding="ascii").strip()
 value={"planVersion":4,"expectedSha":os.environ["EXPECTED_SHA"],"runId":os.environ["RUN_ID"],"runAttempt":1,"namespace":"fugue-system","releaseName":"fugue","releaseFullname":"fugue-fugue","helmRevision":822,"helmStatus":"deployed","helmRecordDigest":snapshot["helmRecordDigest"],"baseValuesDigest":values_digest,"targetValuesDigest":values_digest,"hybridValuesDigest":values_digest,"rawTargetManifestDigest":file_digest("render-one.raw"),"targetPostRenderDigest":file_digest("target.yaml"),"nonApiEdgeRestorePlanDigest":renderer,"chartTreeDigest":os.environ["CHART_DIGEST"],"fence":secrets.token_hex(24),"nonce":secrets.token_hex(24),"confirm":"CONFIRM_CONTROL_PLANE_CONTROLLER_M16_OBSERVED_RECOVERY_V1_30836591717","kubernetes":snapshot["kubernetes"],"lease":snapshot["lease"],"originRunId":"30836591717","originRunAttempt":1,"originSourceSha":"fbfa707084d429176783354745043b5c12b3b488","archivedRevision":820,"archivedManifestDigest":"sha256:c329cecdb34afa206284c5b7fcb943b2548fdb66aee45f084a590139181589e9","observedManifestDigest":"sha256:c4f4985576b469fe8fba4bea5133b9dfc79002405a166392f75e291d2b560bab","archivedValuesDigest":values_digest,"observedValuesDigest":values_digest,"recoveryBasis":"independent-observed-state","recoveryConfigMapName":"fugue-fugue-controller-m16-observed-recovery-30836591717"}
 (root/"input.json").write_text(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
@@ -21987,16 +22014,17 @@ run_control_plane_controller_m16_observed_recovery_v1() {
   cd "${REPO_ROOT}" || return
   head_sha="$(git rev-parse --verify HEAD)" || return
   [[ "${head_sha}" == "${GITHUB_SHA:-}" && "${GITHUB_RUN_ATTEMPT:-}" == "1" && "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "$(git rev-parse --verify HEAD^)" == "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619" &&
-    "$(git rev-parse --verify HEAD^^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
-    "$(git rev-parse --verify HEAD^^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
-    "$(git rev-parse --verify HEAD^^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
-    "$(git rev-parse --verify HEAD^^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
-    "$(git rev-parse --verify HEAD^^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
-    "$(git rev-parse --verify HEAD^^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
-    "$(git rev-parse --verify HEAD^^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
-    "$(git rev-parse --verify HEAD^^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
-  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 9 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
+  [[ "$(git rev-parse --verify HEAD^)" == "8d80f0393c227b5998d423bc8cf26c51d3159e1a" &&
+    "$(git rev-parse --verify HEAD^^)" == "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619" &&
+    "$(git rev-parse --verify HEAD^^^)" == "fc604d4d4ee91aa538017bc5094adb0bc0073652" &&
+    "$(git rev-parse --verify HEAD^^^^)" == "7ae3825d00990f603a8e62ce045842a98f1fb93d" &&
+    "$(git rev-parse --verify HEAD^^^^^)" == "32e03a1ceaff860176e20751077579ea5ff2cd60" &&
+    "$(git rev-parse --verify HEAD^^^^^^)" == "4c0130d31fe66c4db7637a8c10807b372076006d" &&
+    "$(git rev-parse --verify HEAD^^^^^^^)" == "d88811c191b40fe5e2a7ce187938f7df0809fa08" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^)" == "168699dff1ef57958b01973d46db3cc92babec30" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^^)" == "d412416cbca7094ee19d996f312468f871988fdb" &&
+    "$(git rev-parse --verify HEAD^^^^^^^^^^)" == "fbfa707084d429176783354745043b5c12b3b488" ]] || return 1
+  [[ "$(git rev-list --count fbfa707084d429176783354745043b5c12b3b488..HEAD)" == 10 && -z "$(git rev-list --merges fbfa707084d429176783354745043b5c12b3b488..HEAD)" ]] || return 1
   changed_files="$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD)" || return
   [[ "${changed_files}" == $'.github/workflows/deploy-control-plane.yml\ninternal/platformsafety/release_workflow_test.go\ninternal/releasedomain/control_plane_hotfix_adoption.go\ninternal/releasedomain/control_plane_hotfix_adoption_test.go\nscripts/test_control_plane_hotfix_adoption.sh\nscripts/test_release_domain_workflow.sh\nscripts/upgrade_fugue_control_plane.sh' ]] || return 1
   [[ -z "$(git diff --name-only fbfa707084d429176783354745043b5c12b3b488 HEAD -- deploy/helm/fugue go.mod go.sum scripts/lib)" && -z "$(git status --short)" ]] || return 1

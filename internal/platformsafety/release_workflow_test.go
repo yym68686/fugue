@@ -2852,7 +2852,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "5f9d53cfb7f613f36af964d6875ed45ce98d9bd836858a49df4d7ccb89bd9e39")
+	assertWorkflowSourceDigest(t, data, "7b15baf325468bd747c3ced6bfe9ef3e27c3a82e6625a1784bef6aea5d21f07e")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -2897,7 +2897,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"recover-api-hotfix-fence/Verify exact recovery implementation identity":                             "1069e7f8a00ace7af32621534978d3b30a874c4781a8c5eebb3a0461b936e0bc",
 		"recover-api-hotfix-fence/Verify LKG and clear exact API hotfix recovery fence":                      "ed63c75339fda958c6bdbb31acd75925fb24c6f7643d32fa5275ec5578a8ad1f",
 		"settle-api-hotfix-recovery-lane/Settle API hotfix recovery lane":                                    "9454221c3aa7e8e3dbc860dcfa2b463d187e13767f07630b6c07dd16b192c447",
-		"recover-controller-m16-observed-state/Verify exact Controller M16 observed recovery identity":       "a3d3c37aa59b6859e2fe9ddb8d9d3436124c56647869b94a5b5cd0a3c7806b39",
+		"recover-controller-m16-observed-state/Verify exact Controller M16 observed recovery identity":       "38535116676b132d86989cf410a879eed68caec050ee683a670da590b7d9c38c",
 		"recover-controller-m16-observed-state/Run exact independent Controller M16 observed-state recovery": "bbeb2a0a09394cb50025836bce38d2671f46f9d4b5f10add3b114555b8ddf8ad",
 		"settle-controller-m16-observed-recovery-lane/Settle Controller M16 observed recovery lane":          "2858a2cbd55823ceedbd596df4d728b336c313e37ca97be3b8f65bae4a2f3073",
 		"release-baseline/Resolve release-domain baseline":                                                   "5ebc563799cb49f189178bbc29bcaee2bc01a2605139e1c12e35106f00fbf927",
@@ -3402,7 +3402,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatalf("Controller M16 observed recovery runner drifted: %v err=%v", observedRunner, err)
 	}
 	observedIdentity := workflowStepByName(t, observedRecovery, "Verify exact Controller M16 observed recovery identity")
-	for _, required := range []string{"bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619", "fc604d4d4ee91aa538017bc5094adb0bc0073652", "7ae3825d00990f603a8e62ce045842a98f1fb93d", "32e03a1ceaff860176e20751077579ea5ff2cd60", "4c0130d31fe66c4db7637a8c10807b372076006d", "d88811c191b40fe5e2a7ce187938f7df0809fa08", "168699dff1ef57958b01973d46db3cc92babec30", "d412416cbca7094ee19d996f312468f871988fdb", "fbfa707084d429176783354745043b5c12b3b488", "internal/releasedomain/control_plane_hotfix_adoption.go", "scripts/test_control_plane_hotfix_adoption.sh", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
+	for _, required := range []string{"8d80f0393c227b5998d423bc8cf26c51d3159e1a", "bc7cb9c9baeb3dd324bc0916155d5a9b4ce0e619", "fc604d4d4ee91aa538017bc5094adb0bc0073652", "7ae3825d00990f603a8e62ce045842a98f1fb93d", "32e03a1ceaff860176e20751077579ea5ff2cd60", "4c0130d31fe66c4db7637a8c10807b372076006d", "d88811c191b40fe5e2a7ce187938f7df0809fa08", "168699dff1ef57958b01973d46db3cc92babec30", "d412416cbca7094ee19d996f312468f871988fdb", "fbfa707084d429176783354745043b5c12b3b488", "internal/releasedomain/control_plane_hotfix_adoption.go", "scripts/test_control_plane_hotfix_adoption.sh", "deploy/helm/fugue go.mod go.sum scripts/lib"} {
 		if !strings.Contains(observedIdentity.Run, required) {
 			t.Fatalf("Controller M16 observed recovery identity must contain %q", required)
 		}
