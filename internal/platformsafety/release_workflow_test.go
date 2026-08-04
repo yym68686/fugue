@@ -2870,6 +2870,30 @@ exit 0
 func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	t.Parallel()
 
+	t.Run("Build CLI workflow fetches history required by repository tests", func(t *testing.T) {
+		data, err := os.ReadFile("../../.github/workflows/build-cli.yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var workflow releaseWorkflow
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			t.Fatalf("parse build-cli workflow: %v", err)
+		}
+		job, ok := workflow.Jobs["package"]
+		if !ok {
+			t.Fatal("build-cli package job is absent")
+		}
+		checkout := workflowStepByName(t, job, "Checkout")
+		if checkout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+			checkout.With["fetch-depth"] != "0" {
+			t.Fatalf("build-cli full repository tests require complete Git history: %+v", checkout)
+		}
+		runTests := workflowStepByName(t, job, "Run tests")
+		if runTests.Run != "go test ./..." {
+			t.Fatalf("build-cli repository test command drifted: %q", runTests.Run)
+		}
+	})
+
 	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
 	data, err := os.ReadFile(path)
 	if err != nil {
