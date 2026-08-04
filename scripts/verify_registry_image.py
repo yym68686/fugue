@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 from email.message import Message
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -46,18 +48,30 @@ class RegistryTransportError(VerificationError):
     pass
 
 
-def parse_image_ref(image_ref):
-    if "://" in image_ref or "@" not in image_ref:
+def parse_image_ref(image_ref, allow_tag=False):
+    if "://" in image_ref:
         raise VerificationError("image must be registry/repository@sha256:digest")
-    name, digest = image_ref.rsplit("@", 1)
-    if DIGEST_RE.fullmatch(digest) is None:
-        raise VerificationError("image digest must be a complete lowercase sha256 digest")
+    is_tag = False
+    if "@" in image_ref:
+        name, reference = image_ref.rsplit("@", 1)
+        if DIGEST_RE.fullmatch(reference) is None:
+            raise VerificationError("image digest must be a complete lowercase sha256 digest")
+    elif allow_tag:
+        separator = image_ref.rfind(":")
+        if separator <= image_ref.rfind("/"):
+            raise VerificationError("tag preflight image must be registry/repository:40-character-source-tag")
+        name, reference = image_ref[:separator], image_ref[separator + 1 :]
+        if GIT_REVISION_RE.fullmatch(reference) is None:
+            raise VerificationError("tag preflight source tag must be a complete lowercase 40-character Git revision")
+        is_tag = True
+    else:
+        raise VerificationError("image must be registry/repository@sha256:digest")
     if "/" not in name or any(ch.isspace() for ch in name):
         raise VerificationError("image must include a registry and repository path")
     registry, repository = name.split("/", 1)
     if not registry or not repository or "@" in repository or "|" in repository:
         raise VerificationError("invalid registry image repository")
-    return registry, repository, digest
+    return registry, repository, reference, is_tag
 
 
 def parse_platform(value):
@@ -109,6 +123,16 @@ class RegistryClient:
         self.curl = shutil.which("curl")
         if not self.curl:
             raise VerificationError("curl is required for registry verification")
+        username = os.environ.get("FUGUE_REGISTRY_USERNAME", "")
+        password = os.environ.get("FUGUE_REGISTRY_PASSWORD", "")
+        if bool(username) != bool(password):
+            raise VerificationError("registry username and password must be provided together")
+        if any(ch in username for ch in "\r\n") or any(ch in password for ch in "\r\n"):
+            raise VerificationError("registry credentials contain invalid control characters")
+        self.basic_authorization = ""
+        if username:
+            credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            self.basic_authorization = f"Basic {credentials}"
 
     def _remaining(self):
         remaining = self.deadline - time.monotonic()
@@ -276,7 +300,10 @@ class RegistryClient:
         token_url = urllib.parse.urlunsplit(
             (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment)
         )
-        status, _, body = self._open("GET", token_url, {"Accept": "application/json"}, 1024 * 1024)
+        headers = {"Accept": "application/json"}
+        if self.basic_authorization:
+            headers["Authorization"] = self.basic_authorization
+        status, _, body = self._open("GET", token_url, headers, 1024 * 1024)
         if status != 200:
             raise VerificationError(f"registry bearer token request returned HTTP {status}")
         try:
@@ -328,6 +355,23 @@ class RegistryClient:
         if isinstance(document_media_type, str) and document_media_type:
             media_type = document_media_type
         return document, media_type, len(body)
+
+    def resolve_tag(self, tag, allow_missing):
+        path = f"/v2/{urllib.parse.quote(self.repository, safe='/')}/manifests/{tag}"
+        status, headers, body = self.request("GET", path, MANIFEST_ACCEPT, MAX_MANIFEST_BYTES)
+        if status == 404 and allow_missing:
+            return None
+        if status != 200:
+            raise VerificationError(f"registry source tag {tag} returned HTTP {status}")
+        actual = content_digest(body)
+        declared = headers.get("Docker-Content-Digest", "").strip()
+        if DIGEST_RE.fullmatch(declared) is None:
+            raise VerificationError("registry source tag response has no canonical content digest")
+        if declared != actual:
+            raise VerificationError(
+                f"registry source tag body digest mismatch: expected {declared}, got {actual}"
+            )
+        return declared
 
     def blob(self, digest, expected_size, read_body):
         path = f"/v2/{urllib.parse.quote(self.repository, safe='/')}/blobs/{digest}"
@@ -515,7 +559,7 @@ def verify_image(client, top_digest, platform, expected_revision=None, metadata_
 
 def main():
     parser = argparse.ArgumentParser(description="Verify an immutable OCI registry image and all pull-critical blobs.")
-    parser.add_argument("--image", required=True, help="Immutable registry/repository@sha256:digest reference")
+    parser.add_argument("--image", required=True, help="Immutable digest ref, or an exact source tag for preflight")
     parser.add_argument("--platform", default="linux/amd64", help="Required image platform")
     parser.add_argument(
         "--expected-revision",
@@ -546,6 +590,11 @@ def main():
         action="store_true",
         help="GET the top/platform manifests and config without probing OCI layer blobs",
     )
+    parser.add_argument(
+        "--allow-missing-tag",
+        action="store_true",
+        help="Resolve one exact Git-SHA source tag; emit exists=false only for authenticated HTTP 404",
+    )
     parser.add_argument("--insecure", action="store_true", help="Allow HTTP and unverified TLS for local tests only")
     args = parser.parse_args()
 
@@ -560,7 +609,12 @@ def main():
             raise VerificationError("retry delay must be between zero and 10 seconds")
         if args.expected_revision is not None and GIT_REVISION_RE.fullmatch(args.expected_revision) is None:
             raise VerificationError("expected revision must be a complete lowercase 40-character Git revision")
-        registry, repository, digest = parse_image_ref(args.image)
+        registry, repository, reference, is_tag = parse_image_ref(args.image, args.allow_missing_tag)
+        if args.allow_missing_tag:
+            if not is_tag:
+                raise VerificationError("allow-missing-tag requires an exact source tag reference")
+            if args.expected_revision is None:
+                raise VerificationError("source tag preflight requires an expected OCI revision")
         platform = parse_platform(args.platform)
         client = RegistryClient(
             registry,
@@ -571,8 +625,19 @@ def main():
             args.retry_delay_seconds,
             args.insecure,
         )
+        if is_tag:
+            if not client.basic_authorization:
+                raise VerificationError("authenticated source tag preflight requires registry credentials")
+            digest = client.resolve_tag(reference, allow_missing=True)
+            if not client.token:
+                raise VerificationError("source tag preflight did not complete bearer authentication")
+            if digest is None:
+                print(json.dumps({"exists": False, "image": args.image}, separators=(",", ":"), sort_keys=True))
+                return 0
+        else:
+            digest = reference
         result = verify_image(client, digest, platform, args.expected_revision, args.metadata_only)
-        result["image"] = args.image
+        result["image"] = f"{registry}/{repository}@{digest}"
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     except VerificationError as exc:
         print(f"[verify_registry_image] ERROR: {exc}", file=sys.stderr)

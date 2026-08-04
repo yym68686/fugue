@@ -276,11 +276,11 @@ run_apply() {
     FUGUE_TELEMETRY_SERVICE=fugue-fugue-telemetry-agent \
     FUGUE_TELEMETRY_IMAGE_REPOSITORY="${REPOSITORY}" \
     FUGUE_TELEMETRY_IMAGE_DIGEST="${FORWARD_DIGEST}" \
-    FUGUE_TELEMETRY_LKG_IMAGE_DIGEST="${LKG_DIGEST}" \
+    FUGUE_TELEMETRY_LKG_IMAGE_DIGEST="${TEST_LKG_DIGEST:-${LKG_DIGEST}}" \
     FUGUE_TELEMETRY_SOURCE_SHA="${SOURCE_SHA}" \
     FUGUE_TELEMETRY_LKG_SOURCE_SHA="${LKG_SOURCE_SHA}" \
     FUGUE_TELEMETRY_OCI_REVISION="${SOURCE_SHA}" \
-    FUGUE_TELEMETRY_LKG_OCI_REVISION="${LKG_OCI_REVISION}" \
+    FUGUE_TELEMETRY_LKG_OCI_REVISION="${TEST_LKG_OCI_REVISION:-${LKG_OCI_REVISION}}" \
     bash "${SCRIPT}" "${FIXTURE_ROOT}/forward.json" "${FIXTURE_ROOT}/lkg.json"
 }
 
@@ -342,6 +342,16 @@ fi
 grep -Fq 'forward-rollout-failed-lkg-restored' "${FIXTURE_ROOT}/rollback.log"
 [[ "$(tail -n 2 "${FIXTURE_ROOT}/commands.log")" == $'apply:forward\napply:lkg' ]]
 cmp -s "${FIXTURE_ROOT}/live.json" "${FIXTURE_ROOT}/lkg-live.json"
+python3 - "${FIXTURE_ROOT}/live.json" "${LKG_OCI_REVISION}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+value = json.loads(Path(sys.argv[1]).read_text())
+observed = value["spec"]["template"]["metadata"]["annotations"].get("fugue.pro/source-commit")
+if observed != sys.argv[2]:
+    raise SystemExit("rollback did not restore exact LKG Pod provenance")
+PY
 
 prepare_legacy_bootstrap() {
   reset_fixture
@@ -378,6 +388,90 @@ run_apply >"${FIXTURE_ROOT}/bootstrap.log"
 [[ "$(grep -c '^helm-stage:helm$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
 [[ "$(grep -c '^helm-stage:declarative$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
 grep -Fxq 'apply:forward' "${FIXTURE_ROOT}/commands.log"
+
+prepare_legacy_bootstrap
+python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["spec"]["template"].setdefault("metadata", {}).setdefault("annotations", {})["fugue.pro/source-commit"] = "4" * 40
+path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+if run_apply >"${FIXTURE_ROOT}/legacy-wrong-source.log" 2>&1; then
+  printf 'legacy live wrong non-empty source was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'initial-transition-proof-failed' "${FIXTURE_ROOT}/legacy-wrong-source.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
+
+prepare_legacy_bootstrap
+python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["spec"]["template"]["spec"]["containers"][0]["image"] = "ghcr.io/example/fugue-telemetry-agent@sha256:" + "9" * 64
+path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+if run_apply >"${FIXTURE_ROOT}/legacy-wrong-digest.log" 2>&1; then
+  printf 'legacy live wrong digest was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'initial-transition-proof-failed' "${FIXTURE_ROOT}/legacy-wrong-digest.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
+
+prepare_legacy_bootstrap
+if TEST_LKG_OCI_REVISION=5555555555555555555555555555555555555555 run_apply >"${FIXTURE_ROOT}/legacy-wrong-registry-source.log" 2>&1; then
+  printf 'legacy wrong registry source evidence was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'lkg-manifest-invalid' "${FIXTURE_ROOT}/legacy-wrong-registry-source.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
+
+reset_fixture
+cp "${FIXTURE_ROOT}/stage-helm-manifest.yaml" "${FIXTURE_ROOT}/helm-manifest.yaml"
+python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["spec"]["template"]["metadata"].pop("annotations", None)
+path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+run_apply >"${FIXTURE_ROOT}/handoff-empty-resume.log"
+[[ "$(grep -c '^helm-stage:helm$' "${FIXTURE_ROOT}/commands.log")" -eq 0 ]]
+[[ "$(grep -c '^helm-stage:declarative$' "${FIXTURE_ROOT}/commands.log")" -eq 1 ]]
+grep -Fxq 'apply:forward' "${FIXTURE_ROOT}/commands.log"
+
+reset_fixture
+cp "${FIXTURE_ROOT}/lkg-live.json" "${FIXTURE_ROOT}/live.json"
+python3 - "${FIXTURE_ROOT}/live.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["spec"]["template"]["metadata"].pop("annotations", None)
+path.write_text(json.dumps(value, separators=(",", ":"), sort_keys=True))
+PY
+if run_apply >"${FIXTURE_ROOT}/declarative-empty-source.log" 2>&1; then
+  printf 'declarative live empty source was not rejected\n' >&2
+  exit 1
+fi
+grep -Fq 'initial-transition-proof-failed' "${FIXTURE_ROOT}/declarative-empty-source.log"
+! grep -Fq '^helm-stage:' "${FIXTURE_ROOT}/commands.log"
+! grep -Fq '^apply:' "${FIXTURE_ROOT}/commands.log"
 
 prepare_legacy_bootstrap
 python3 - "${FIXTURE_ROOT}/stage-helm-manifest.yaml" <<'PY'

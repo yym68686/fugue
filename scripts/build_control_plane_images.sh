@@ -32,6 +32,21 @@ require_git_revision() {
   fi
 }
 
+resolve_image_revision() {
+  local value="${FUGUE_IMAGE_REVISION:-${FUGUE_IMAGE_TAG:-}}"
+  local trimmed
+  trimmed="$(trim_field "${value}")"
+  if [[ ! "${trimmed}" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'FUGUE_IMAGE_REVISION must be a complete lowercase 40-character Git revision\n' >&2
+    return 1
+  fi
+  if [[ "${trimmed}" != "${value}" ]]; then
+    printf 'FUGUE_IMAGE_REVISION must not contain surrounding whitespace\n' >&2
+    return 1
+  fi
+  printf '%s' "${trimmed}"
+}
+
 image_repository_var() {
   case "$1" in
     api) printf 'FUGUE_API_IMAGE_REPOSITORY' ;;
@@ -452,6 +467,63 @@ fi
 
 require_env FUGUE_IMAGE_TAG
 require_git_revision
+IMAGE_REVISION="$(resolve_image_revision)" || exit 1
+
+build_source_root="${REPO_ROOT}"
+explicit_build_source_root="$(trim_field "${FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT:-}")"
+if [[ -n "${explicit_build_source_root}" ]]; then
+  [[ "${explicit_build_source_root}" == "${FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT}" &&
+    "${explicit_build_source_root}" == /* &&
+    "${explicit_build_source_root}" != */ &&
+    -d "${explicit_build_source_root}" &&
+    ! -L "${explicit_build_source_root}" &&
+    -d "${explicit_build_source_root}/.git" &&
+    ! -L "${explicit_build_source_root}/.git" ]] || {
+    printf 'explicit build source root must be an absolute canonical non-symlink Git worktree\n' >&2
+    exit 1
+  }
+  canonical_build_source_root="$(cd "${explicit_build_source_root}" && pwd -P)" || {
+    printf 'explicit build source root is not accessible\n' >&2
+    exit 1
+  }
+  [[ "${canonical_build_source_root}" == "${explicit_build_source_root}" ]] || {
+    printf 'explicit build source root contains a symlink or non-canonical path\n' >&2
+    exit 1
+  }
+  [[ "$(git -C "${canonical_build_source_root}" rev-parse --show-toplevel)" == "${canonical_build_source_root}" ]] || {
+    printf 'explicit build source root must be the exact Git worktree root\n' >&2
+    exit 1
+  }
+  [[ "$(git -C "${canonical_build_source_root}" rev-parse --verify 'HEAD^{commit}')" == "${IMAGE_REVISION}" ]] || {
+    printf 'explicit build source root HEAD does not match the image revision\n' >&2
+    exit 1
+  }
+  source_head_tree="$(git -C "${canonical_build_source_root}" rev-parse --verify 'HEAD^{tree}')" || exit 1
+  source_tag_tree="$(git -C "${canonical_build_source_root}" rev-parse --verify "${IMAGE_REVISION}^{tree}")" || exit 1
+  [[ "${source_head_tree}" =~ ^[0-9a-f]{40}$ && "${source_head_tree}" == "${source_tag_tree}" ]] || {
+    printf 'explicit build source root tree does not match the image revision\n' >&2
+    exit 1
+  }
+  if git -C "${canonical_build_source_root}" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    printf 'explicit build source root must be detached at the desired revision\n' >&2
+    exit 1
+  fi
+  [[ -z "$(git -C "${canonical_build_source_root}" status --porcelain=v1 --untracked-files=all)" ]] || {
+    printf 'explicit build source root must be clean\n' >&2
+    exit 1
+  }
+  if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+    canonical_workspace="$(cd "${GITHUB_WORKSPACE}" && pwd -P)" || exit 1
+    case "${canonical_build_source_root}" in
+      "${canonical_workspace}"/*) ;;
+      *)
+        printf 'explicit build source root must remain inside GITHUB_WORKSPACE\n' >&2
+        exit 1
+        ;;
+    esac
+  fi
+  build_source_root="${canonical_build_source_root}"
+fi
 
 metadata_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 metadata_dir="$(mktemp -d "${metadata_root%/}/fugue-build-metadata.XXXXXX")"
@@ -489,6 +561,18 @@ digests=()
 historical_incident_reuse=false
 canonical_receipt_reuse=false
 canonical_receipt_file="$(trim_field "${FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE:-}")"
+immutable_tag_preflight="$(trim_field "${FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT:-false}")"
+[[ "${immutable_tag_preflight}" == true || "${immutable_tag_preflight}" == false ]] || {
+  printf 'FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT must be true or false\n' >&2
+  exit 1
+}
+tag_preflight_reused=()
+tag_preflight_files=()
+registry_verifier="${FUGUE_REGISTRY_IMAGE_VERIFIER:-${REPO_ROOT}/scripts/verify_registry_image.py}"
+[[ -f "${registry_verifier}" && ! -L "${registry_verifier}" ]] || {
+  printf 'registry image verifier must be a regular non-symlink file\n' >&2
+  exit 1
+}
 seen_targets=' '
 for target in ${targets}; do
   repo_var="$(image_repository_var "${target}")" || {
@@ -506,7 +590,29 @@ for target in ${targets}; do
   names+=("${target}")
   repositories+=("${!repo_var}")
   dockerfiles+=("$(image_dockerfile "${target}")")
+  tag_preflight_reused+=(false)
+  tag_preflight_files+=("")
 done
+
+if [[ -n "${explicit_build_source_root}" ]]; then
+  for dockerfile in "${dockerfiles[@]}"; do
+    [[ -f "${build_source_root}/${dockerfile}" && ! -L "${build_source_root}/${dockerfile}" ]] || {
+      printf 'explicit build source root is missing a regular Dockerfile: %s\n' "${dockerfile}" >&2
+      exit 1
+    }
+  done
+fi
+
+if [[ "${immutable_tag_preflight}" == true ]]; then
+  [[ -z "${canonical_receipt_file}" && -z "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN:-}" ]] || {
+    printf 'immutable tag preflight cannot overlap another artifact reuse mode\n' >&2
+    exit 1
+  }
+  [[ "${#names[@]}" -eq 1 ]] || {
+    printf 'immutable tag preflight requires exactly one component target\n' >&2
+    exit 1
+  }
+fi
 
 if [[ -n "${canonical_receipt_file}" ]]; then
 	[[ -f "${canonical_receipt_file}" && ! -L "${canonical_receipt_file}" ]] || {
@@ -518,7 +624,7 @@ if [[ -n "${canonical_receipt_file}" ]]; then
 	for index in "${!names[@]}"; do
 		receipt_arguments+=("${names[${index}]}" "${repositories[${index}]}")
 	done
-	python3 - "${canonical_receipt_file}" "${FUGUE_IMAGE_TAG}" "${receipt_digests_file}" "${receipt_arguments[@]}" <<'PY'
+	python3 - "${canonical_receipt_file}" "${FUGUE_IMAGE_TAG}" "${IMAGE_REVISION}" "${receipt_digests_file}" "${receipt_arguments[@]}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -526,7 +632,7 @@ import re
 import stat
 import sys
 
-receipt_path, revision, digest_path, *arguments = sys.argv[1:]
+receipt_path, source_tag, revision, digest_path, *arguments = sys.argv[1:]
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 ARTIFACT_KEYS = {
@@ -535,7 +641,7 @@ ARTIFACT_KEYS = {
     "verification",
 }
 
-if SHA_RE.fullmatch(revision) is None or not arguments or len(arguments) % 2:
+if SHA_RE.fullmatch(source_tag) is None or SHA_RE.fullmatch(revision) is None or not arguments or len(arguments) % 2:
     raise SystemExit("build-receipt-revision-or-targets-invalid")
 path = Path(receipt_path)
 info = path.lstat()
@@ -583,7 +689,7 @@ for artifact in artifacts:
     repository = expected[component]
     if artifact["repository"] != repository:
         raise SystemExit(f"build-receipt-repository-mismatch:{component}")
-    if artifact["source_tag"] != revision or artifact["oci_revision"] != revision:
+    if artifact["source_tag"] != source_tag or artifact["oci_revision"] != revision:
         raise SystemExit(f"build-receipt-stale:{component}")
     for field in ("top_digest", "config_digest", "platform_manifest_digest"):
         if DIGEST_RE.fullmatch(artifact[field]) is None:
@@ -610,6 +716,105 @@ PY
 	}
 	canonical_receipt_reuse=true
 	printf 'reusing exact canonical build receipt; rebuild and push are disabled\n'
+fi
+
+if [[ "${immutable_tag_preflight}" == true ]]; then
+  index=0
+  repository="${repositories[0]}"
+  tag_reference="${repository}:${FUGUE_IMAGE_TAG}"
+  tag_verification_file="${metadata_dir}/immutable-tag-preflight.json"
+  if ! python3 "${registry_verifier}" \
+    --image "${tag_reference}" \
+    --platform linux/amd64 \
+    --expected-revision "${IMAGE_REVISION}" \
+    --allow-missing-tag \
+    --timeout-seconds 18 \
+    --request-timeout-seconds 5 \
+    --max-attempts 2 \
+    --retry-delay-seconds 0.1 \
+    >"${tag_verification_file}"; then
+    printf 'immutable-tag-preflight-failed:%s\n' "${names[0]}" >&2
+    exit 1
+  fi
+  tag_resolution="$(python3 - "${tag_verification_file}" "${tag_reference}" "${repository}" "${IMAGE_REVISION}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path, tag_reference, repository, revision = sys.argv[1:]
+raw = Path(path).read_bytes()
+if not raw or len(raw) > 1024 * 1024:
+    raise SystemExit("immutable-tag-preflight-output-size-invalid")
+
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate key {key}")
+        value[key] = item
+    return value
+
+try:
+    value = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
+    )
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    raise SystemExit(f"immutable-tag-preflight-output-json-invalid:{exc}") from exc
+canonical = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
+if raw != canonical:
+    raise SystemExit("immutable-tag-preflight-output-noncanonical")
+if value == {"exists": False, "image": tag_reference}:
+    print("missing")
+    raise SystemExit(0)
+
+expected_fields = {
+    "blob_count", "config_digest", "image", "index_digest", "layer_get_probe_count",
+    "manifest_digest", "oci_revision", "platform", "request_count", "total_layer_bytes",
+    "verification",
+}
+digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+if type(value) is not dict or set(value) != expected_fields:
+    raise SystemExit("immutable-tag-preflight-output-shape-invalid")
+if value["oci_revision"] != revision or value["platform"] != "linux/amd64":
+    raise SystemExit("immutable-tag-preflight-output-identity-mismatch")
+if value["verification"] != "registry_manifest_config_and_layer_get":
+    raise SystemExit("immutable-tag-preflight-output-verification-mismatch")
+for field in ("blob_count", "layer_get_probe_count", "request_count", "total_layer_bytes"):
+    item = value[field]
+    if type(item) is not int or item < 0:
+        raise SystemExit(f"immutable-tag-preflight-output-{field}-invalid")
+if value["blob_count"] < 2 or value["layer_get_probe_count"] < 1:
+    raise SystemExit("immutable-tag-preflight-output-layer-verification-missing")
+for field in ("config_digest", "manifest_digest"):
+    if type(value[field]) is not str or digest_pattern.fullmatch(value[field]) is None:
+        raise SystemExit(f"immutable-tag-preflight-output-{field}-invalid")
+index_digest = value["index_digest"]
+if type(index_digest) is not str or (index_digest and digest_pattern.fullmatch(index_digest) is None):
+    raise SystemExit("immutable-tag-preflight-output-index-digest-invalid")
+top_digest = index_digest or value["manifest_digest"]
+if value["image"] != f"{repository}@{top_digest}":
+    raise SystemExit("immutable-tag-preflight-output-repository-or-digest-mismatch")
+print(top_digest)
+PY
+  )" || {
+    printf 'immutable-tag-preflight-shape-invalid:%s\n' "${names[0]}" >&2
+    exit 1
+  }
+  if [[ "${tag_resolution}" == missing ]]; then
+    printf 'immutable source tag is absent; one build and push is authorized: %s\n' "${tag_reference}"
+  elif [[ "${tag_resolution}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    tag_preflight_reused[0]=true
+    tag_preflight_files[0]="${tag_verification_file}"
+    digests[0]="${tag_resolution}"
+    printf 'reusing fresh-verified immutable source tag; build and push are disabled: %s@%s\n' \
+      "${repository}" "${tag_resolution}"
+  else
+    printf 'immutable-tag-preflight-resolution-invalid:%s\n' "${names[0]}" >&2
+    exit 1
+  fi
 fi
 
 if [[ "${canonical_receipt_reuse}" == true && -n "${FUGUE_CONTROL_PLANE_HISTORICAL_INCIDENT_BUILD_PLAN:-}" ]]; then
@@ -689,6 +894,9 @@ PY
   printf 'reusing exact historical incident artifacts; rebuild and push are disabled\n'
 elif [[ "${canonical_receipt_reuse}" != true ]]; then
   for index in "${!names[@]}"; do
+    if [[ "${tag_preflight_reused[${index}]}" == true ]]; then
+      continue
+    fi
     target="${names[${index}]}"
     repository="${repositories[${index}]}"
     dockerfile="${dockerfiles[${index}]}"
@@ -697,13 +905,13 @@ elif [[ "${canonical_receipt_reuse}" != true ]]; then
     metadata_file="${metadata_dir}/${target}.json"
     printf 'building %s -> %s\n' "${target}" "${tag}"
     (
-      cd "${REPO_ROOT}"
+      cd "${build_source_root}"
       exec docker buildx build \
         --platform linux/amd64 \
         --file "${dockerfile}" \
         --tag "${tag}" \
         --metadata-file "${metadata_file}" \
-        --label "org.opencontainers.image.revision=${FUGUE_IMAGE_TAG}" \
+        --label "org.opencontainers.image.revision=${IMAGE_REVISION}" \
         --cache-from "type=gha,scope=${cache_scope}" \
         --cache-to "type=gha,scope=${cache_scope},mode=max,ignore-error=true" \
         --push \
@@ -728,7 +936,11 @@ if [[ "${rc}" -ne 0 ]]; then
 fi
 
 if [[ "${historical_incident_reuse}" != true && "${canonical_receipt_reuse}" != true ]]; then
-  for target in "${names[@]}"; do
+  for index in "${!names[@]}"; do
+    if [[ "${tag_preflight_reused[${index}]}" == true ]]; then
+      continue
+    fi
+    target="${names[${index}]}"
     metadata_file="${metadata_dir}/${target}.json"
     if ! digest="$(image_digest_from_metadata "${metadata_file}")"; then
       printf 'image digest metadata verification failed: %s\n' "${target}" >&2
@@ -744,15 +956,15 @@ if [[ "${rc}" -ne 0 ]]; then
 fi
 
 verification_files=()
-registry_verifier="${FUGUE_REGISTRY_IMAGE_VERIFIER:-${REPO_ROOT}/scripts/verify_registry_image.py}"
-[[ -f "${registry_verifier}" && ! -L "${registry_verifier}" ]] || {
-	printf 'registry image verifier must be a regular non-symlink file\n' >&2
-	exit 1
-}
 for index in "${!names[@]}"; do
   target="${names[${index}]}"
   repository="${repositories[${index}]}"
   digest="${digests[${index}]}"
+  if [[ "${tag_preflight_reused[${index}]}" == true ]]; then
+    verification_files+=("${tag_preflight_files[${index}]}")
+    printf 'verified immutable source tag %s -> %s@%s\n' "${target}" "${repository}" "${digest}"
+    continue
+  fi
   verification_file="${metadata_dir}/${target}.verified.json"
   verification_files+=("${verification_file}")
   printf 'verifying %s -> %s@%s\n' "${target}" "${repository}" "${digest}"
@@ -760,7 +972,7 @@ for index in "${!names[@]}"; do
     python3 "${registry_verifier}" \
       --image "${repository}@${digest}" \
       --platform linux/amd64 \
-      --expected-revision "${FUGUE_IMAGE_TAG}" \
+      --expected-revision "${IMAGE_REVISION}" \
       --metadata-only \
       --timeout-seconds 18 \
       --request-timeout-seconds 5 \
@@ -772,13 +984,13 @@ for index in "${!names[@]}"; do
     python3 "${registry_verifier}" \
       --image "${repository}@${digest}" \
       --platform linux/amd64 \
-      --expected-revision "${FUGUE_IMAGE_TAG}" \
+      --expected-revision "${IMAGE_REVISION}" \
       >"${verification_file}" &
     pids+=("$!")
   elif ! python3 "${registry_verifier}" \
     --image "${repository}@${digest}" \
     --platform linux/amd64 \
-    --expected-revision "${FUGUE_IMAGE_TAG}" \
+    --expected-revision "${IMAGE_REVISION}" \
     >"${verification_file}"; then
     printf 'registry image verification failed: %s\n' "${target}" >&2
     exit 1
@@ -812,6 +1024,7 @@ done
 python3 - \
   "${canonical_receipt_reuse}" \
   "${FUGUE_IMAGE_TAG}" \
+  "${IMAGE_REVISION}" \
   "${verified_artifacts_file}" \
   "${verified_artifacts_digest_file}" \
   "${artifact_args[@]}" <<'PY'
@@ -861,11 +1074,13 @@ def load_verification(path):
     )
 
 
-reuse_mode, revision, artifacts_path, digest_path, *arguments = sys.argv[1:]
+reuse_mode, source_tag, revision, artifacts_path, digest_path, *arguments = sys.argv[1:]
 if reuse_mode not in {"true", "false"}:
     raise SystemExit("canonical receipt reuse mode must be true or false")
+if re.fullmatch(r"[0-9a-f]{40}", source_tag) is None:
+    raise SystemExit("image source tag must be a complete lowercase 40-character Git revision")
 if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-    raise SystemExit("image revision must be a complete lowercase 40-character Git revision")
+    raise SystemExit("image OCI revision must be a complete lowercase 40-character Git revision")
 if not arguments or len(arguments) % 4 != 0:
     raise SystemExit("verified artifact inputs must be non-empty component/repository/digest/file groups")
 
@@ -925,7 +1140,7 @@ for offset in range(0, len(arguments), 4):
             "oci_revision": revision,
             "platform_manifest_digest": manifest_digest,
             "repository": repository,
-            "source_tag": revision,
+            "source_tag": source_tag,
             "top_digest": top_digest,
             "verification": VERIFICATION,
         }

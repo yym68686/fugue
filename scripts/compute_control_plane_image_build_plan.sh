@@ -284,6 +284,118 @@ release_file_path_is_canonical() {
   done
 }
 
+verify_telemetry_production_release_intent() {
+  local relative_path='deploy/environments/production/telemetry/release.json'
+  local intent_path="${REPO_ROOT}/${relative_path}"
+  local config_head
+  local identity=()
+  local identity_output
+  local desired_source_sha
+  local previous_source_sha
+
+  [[ -f "${intent_path}" && ! -L "${intent_path}" ]] || {
+    printf 'Telemetry production release intent must be a regular non-symlink file: %s\n' \
+      "${relative_path}" >&2
+    exit 1
+  }
+  identity_output="$(python3 - "${intent_path}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+raw = path.read_bytes()
+if not raw or len(raw) > 16 * 1024:
+    raise SystemExit("telemetry-production-release-intent-size-invalid")
+
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate key {key}")
+        value[key] = item
+    return value
+
+try:
+    value = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
+    )
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    raise SystemExit(f"telemetry-production-release-intent-json-invalid: {exc}") from exc
+
+fixed = {
+    "apiVersion": "release.fugue.dev/v1",
+    "component": "telemetry_agent",
+    "deployment": "fugue-fugue-telemetry-agent",
+    "environment": "production",
+    "fieldManager": "fugue-telemetry-declarative",
+    "kind": "ProductionComponentRelease",
+    "namespace": "fugue-system",
+    "ownership": "declarative",
+    "replicas": 1,
+    "repository": "ghcr.io/yym68686/fugue-telemetry-agent",
+    "rollback": "previous-git-lkg",
+    "service": "fugue-fugue-telemetry-agent",
+}
+expected_keys = set(fixed) | {
+    "desiredSourceSha", "expectedPreviousImageDigest", "expectedPreviousSourceSha",
+}
+if type(value) is not dict or set(value) != expected_keys:
+    raise SystemExit("telemetry-production-release-intent-schema-invalid")
+for key, expected in fixed.items():
+    if value[key] != expected or type(value[key]) is not type(expected):
+        raise SystemExit(f"telemetry-production-release-intent-identity-invalid:{key}")
+sha_pattern = re.compile(r"[0-9a-f]{40}")
+digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+desired = value["desiredSourceSha"]
+previous = value["expectedPreviousSourceSha"]
+previous_digest = value["expectedPreviousImageDigest"]
+if type(desired) is not str or sha_pattern.fullmatch(desired) is None:
+    raise SystemExit("telemetry-production-release-intent-desired-source-invalid")
+if type(previous) is not str or sha_pattern.fullmatch(previous) is None or previous == desired:
+    raise SystemExit("telemetry-production-release-intent-previous-source-invalid")
+if type(previous_digest) is not str or digest_pattern.fullmatch(previous_digest) is None:
+    raise SystemExit("telemetry-production-release-intent-previous-image-digest-invalid")
+canonical = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
+if raw != canonical:
+    raise SystemExit("telemetry-production-release-intent-canonical-bytes-invalid")
+print(desired)
+print(previous)
+PY
+  )" || exit 1
+  desired_source_sha="${identity_output%%$'\n'*}"
+  previous_source_sha="${identity_output#*$'\n'}"
+  [[ "${identity_output}" == *$'\n'* && "${previous_source_sha}" != *$'\n'* ]] || {
+    printf 'telemetry-production-release-intent-source-identity-invalid\n' >&2
+    exit 1
+  }
+  identity=("${desired_source_sha}" "${previous_source_sha}")
+  [[ "${#identity[@]}" -eq 2 ]] || {
+    printf 'telemetry-production-release-intent-source-identity-invalid\n' >&2
+    exit 1
+  }
+  config_head="$(git -C "${REPO_ROOT}" rev-parse --verify 'HEAD^{commit}')" || {
+    printf 'telemetry-production-release-intent-config-head-invalid\n' >&2
+    exit 1
+  }
+  if ! git -C "${REPO_ROOT}" cat-file -e "${identity[0]}^{commit}" 2>/dev/null ||
+    ! git -C "${REPO_ROOT}" cat-file -e "${identity[1]}^{commit}" 2>/dev/null; then
+    printf 'telemetry-production-release-intent-source-commit-missing\n' >&2
+    exit 1
+  fi
+  if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${identity[1]}" "${identity[0]}"; then
+    printf 'telemetry-production-release-intent-previous-not-ancestor\n' >&2
+    exit 1
+  fi
+  if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${identity[0]}" "${config_head}"; then
+    printf 'telemetry-production-release-intent-desired-not-config-ancestor\n' >&2
+    exit 1
+  fi
+}
+
 go_fixture_package_dir() {
   local file="$1"
   local package_dir=""
@@ -567,6 +679,19 @@ elif [[ ! -s "${changed_file}" ]]; then
     mark_all_images "unknown-change-set"
   fi
 else
+  TELEMETRY_PRODUCTION_RELEASE_INTENT_CHANGED=false
+  if grep_membership exact 'deploy/environments/production/telemetry/release.json' \
+    "${changed_file}" 'Telemetry production release intent'; then
+    verify_telemetry_production_release_intent
+    TELEMETRY_PRODUCTION_RELEASE_INTENT_CHANGED=true
+  fi
+  changed_path_count="$(sed '/^[[:space:]]*$/d' "${changed_file}" | sort -u | wc -l | tr -d '[:space:]')"
+  if [[ "${TELEMETRY_PRODUCTION_RELEASE_INTENT_CHANGED}" == true && "${changed_path_count}" == 1 ]]; then
+    mark_image telemetry_agent 'deploy/environments/production/telemetry/release.json'
+    emit_plan
+    exit 0
+  fi
+
   for image in api controller drain_agent telemetry_agent image_cache edge; do
     deps_file="${tmp_dir}/deps-${image}"
     : >"${deps_file}"
@@ -605,6 +730,10 @@ else
     fixture_package_dir=""
     [[ -n "${file}" ]] || continue
     case "${file}" in
+      deploy/environments/production/telemetry/release.json)
+        mark_image telemetry_agent "${file}"
+        continue
+        ;;
       go.mod|go.sum)
         mark_all_go_images "${file}"
         continue

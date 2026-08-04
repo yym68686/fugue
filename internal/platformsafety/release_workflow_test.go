@@ -5181,6 +5181,9 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			t.Fatalf("Telemetry release output is not bound to prepush: %+v", prepush.Outputs)
 		}
 		componentPlan := workflowStepByName(t, prepush, "Require an exact singleton Telemetry component plan")
+		if !strings.Contains(string(ciSource), `deploy/environments/production/telemetry/release\.json$`) {
+			t.Fatal("production Telemetry release intent must invoke the release-preflight fixture")
+		}
 		for _, required := range []string{
 			"./scripts/compute_control_plane_image_build_plan.sh",
 			"grep -Fxq 'build_telemetry_agent=true'",
@@ -5201,9 +5204,56 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if !reflect.DeepEqual([]string(build.Needs), []string{"prepush"}) || build.Permissions["packages"] != "write" {
 			t.Fatalf("Telemetry build dependency or permissions drifted: needs=%v permissions=%v", build.Needs, build.Permissions)
 		}
+		if build.Outputs["desired_source_sha"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			build.Outputs["expected_previous_image_digest"] != "${{ steps.intent.outputs.expected_previous_image_digest }}" ||
+			build.Outputs["expected_previous_source_sha"] != "${{ steps.intent.outputs.expected_previous_source_sha }}" {
+			t.Fatalf("Telemetry build source outputs are not bound to the canonical intent: %+v", build.Outputs)
+		}
+		intent := workflowStepByName(t, build, "Verify canonical Telemetry production release intent")
+		for _, required := range []string{
+			"FUGUE_RELEASE_CHANGED_FILES='deploy/environments/production/telemetry/release.json'",
+			"./scripts/compute_control_plane_image_build_plan.sh",
+			"grep -Fxq 'targets=telemetry_agent'",
+			"grep -Fxq 'target_count=1'",
+			"desired_source_sha=",
+			"expected_previous_image_digest=",
+			"expected_previous_source_sha=",
+		} {
+			if !strings.Contains(intent.Run, required) {
+				t.Fatalf("Telemetry canonical production intent step is missing %q", required)
+			}
+		}
+		sourceCheckout := workflowStepByName(t, build, "Checkout detached exact Telemetry source")
+		if sourceCheckout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+			sourceCheckout.With["ref"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			sourceCheckout.With["path"] != ".fugue-telemetry-source" ||
+			sourceCheckout.With["fetch-depth"] != "1" || sourceCheckout.With["persist-credentials"] != "false" {
+			t.Fatalf("Telemetry desired source checkout is not detached/exact/bounded: %+v", sourceCheckout)
+		}
 		publish := workflowStepByName(t, build, "Build and fresh-verify immutable Telemetry image")
-		if publish.Run != "./scripts/build_control_plane_images.sh" || publish.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"] != "telemetry_agent" {
+		if publish.Run != "./scripts/build_control_plane_images.sh" ||
+			publish.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"] != "telemetry_agent" ||
+			publish.Env["FUGUE_IMAGE_TAG"] != "${{ github.sha }}" ||
+			publish.Env["FUGUE_IMAGE_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" ||
+			publish.Env["FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT"] != "${{ github.workspace }}/.fugue-telemetry-source" ||
+			publish.Env["FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT"] != "true" ||
+			publish.Env["FUGUE_REGISTRY_USERNAME"] != "${{ github.actor }}" ||
+			publish.Env["FUGUE_REGISTRY_PASSWORD"] != "${{ secrets.GITHUB_TOKEN }}" {
 			t.Fatalf("Telemetry build does not use the canonical singleton builder: %+v", publish)
+		}
+		materialize := workflowStepByName(t, build, "Materialize canonical build receipt")
+		for _, required := range []string{
+			"telemetry-build-receipt-source-identity-invalid",
+			`artifact.get("source_tag") != config_sha`,
+			`artifact.get("oci_revision") != desired_source_sha`,
+			"ComponentBuildReceiptBinding",
+			`"configSha": config_sha`,
+			`"desiredSourceSha": desired_source_sha`,
+			`"artifactReceiptDigest": digest`,
+		} {
+			if !strings.Contains(materialize.Run, required) {
+				t.Fatalf("Telemetry outer build receipt binding is missing %q", required)
+			}
 		}
 		upload := workflowStepByName(t, build, "Upload canonical Telemetry build receipt")
 		if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" || upload.With["if-no-files-found"] != "error" {
@@ -5228,13 +5278,45 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			strings.Contains(string(ciSource), "fugue-telemetry-declarative-production") {
 			t.Fatal("Telemetry bootstrap must share the existing repo-wide production mutation mutex")
 		}
+		deployIntent := workflowStepByName(t, deploy, "Verify exact production Telemetry release intent")
+		if deployIntent.Env["BUILT_DESIRED_SOURCE_SHA"] != "${{ needs.telemetry-build.outputs.desired_source_sha }}" ||
+			deployIntent.Env["BUILT_EXPECTED_PREVIOUS_IMAGE_DIGEST"] != "${{ needs.telemetry-build.outputs.expected_previous_image_digest }}" ||
+			deployIntent.Env["BUILT_EXPECTED_PREVIOUS_SOURCE_SHA"] != "${{ needs.telemetry-build.outputs.expected_previous_source_sha }}" ||
+			deployIntent.Env["BUILT_IMAGE_REPOSITORY"] != "${{ needs.telemetry-build.outputs.image_repository }}" {
+			t.Fatalf("Telemetry deploy intent is not bound to build outputs: %+v", deployIntent.Env)
+		}
+		for _, required := range []string{
+			`(desired, os.environ["BUILT_DESIRED_SOURCE_SHA"], "desired-source")`,
+			`(previous_digest, os.environ["BUILT_EXPECTED_PREVIOUS_IMAGE_DIGEST"], "previous-image-digest")`,
+			`(previous, os.environ["BUILT_EXPECTED_PREVIOUS_SOURCE_SHA"], "previous-source")`,
+			`(repository, os.environ["BUILT_IMAGE_REPOSITORY"], "repository")`,
+			"telemetry-production-intent-build-{label}-mismatch",
+		} {
+			if !strings.Contains(deployIntent.Run, required) {
+				t.Fatalf("Telemetry deploy intent verification is missing %q", required)
+			}
+		}
 		download := workflowStepByName(t, deploy, "Download canonical Telemetry build receipt")
 		if download.Uses != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" {
 			t.Fatalf("Telemetry receipt download is not pinned: %+v", download)
 		}
+		binding := workflowStepByName(t, deploy, "Verify canonical config and source receipt binding")
+		for _, required := range []string{
+			"telemetry-build-binding-noncanonical",
+			"telemetry-build-binding-identity-or-digest-mismatch",
+			`"configSha": os.environ["CONFIG_SHA"]`,
+			`"desiredSourceSha": os.environ["DESIRED_SOURCE_SHA"]`,
+			`"artifactReceiptDigest": os.environ["RECEIPT_DIGEST"]`,
+		} {
+			if !strings.Contains(binding.Run, required) {
+				t.Fatalf("Telemetry deploy build receipt binding is missing %q", required)
+			}
+		}
 		readback := workflowStepByName(t, deploy, "Fresh registry GET and canonical receipt readback")
 		if !strings.Contains(readback.Run, "timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh") ||
-			readback.Env["FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE"] != "true" {
+			readback.Env["FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE"] != "true" ||
+			readback.Env["FUGUE_IMAGE_TAG"] != "${{ github.sha }}" ||
+			readback.Env["FUGUE_IMAGE_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" {
 			t.Fatalf("Telemetry deploy does not use bounded fresh registry receipt verification: %+v", readback)
 		}
 		render := workflowStepByName(t, deploy, "Render digest-pinned forward and exact Git LKG manifests")
@@ -5245,6 +5327,13 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 			"--metadata-only",
 			"git archive \"${lkg_source_sha}\" deploy/kustomize/telemetry",
 			"telemetry-lkg-oci-revision-invalid",
+			`[[ "${lkg_digest}" == "${EXPECTED_PREVIOUS_IMAGE_DIGEST}" ]]`,
+			"telemetry-live-image-predecessor-digest-mismatch",
+			"legacy|helm)",
+			"telemetry-live-pre-ssa-pod-source-predecessor-mismatch",
+			"telemetry-live-pod-source-predecessor-mismatch",
+			"telemetry-live-registry-source-predecessor-mismatch",
+			`FORWARD_OCI_REVISION="${DESIRED_SOURCE_SHA}"`,
 			"fugue.pro~1source-commit",
 			"lkg_oci_revision=${lkg_oci_revision}",
 			"kubectl kustomize \"${root}/forward\"",
@@ -5256,8 +5345,65 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		}
 		apply := workflowStepByName(t, deploy, "Apply Telemetry with single-writer proof and exact Git LKG rollback")
 		if !strings.Contains(apply.Run, "./scripts/apply_telemetry_declarative.sh") ||
-			apply.Env["FUGUE_TELEMETRY_HELM_CHART"] != "${{ github.workspace }}/deploy/helm/fugue" {
+			apply.Env["FUGUE_TELEMETRY_HELM_CHART"] != "${{ github.workspace }}/deploy/helm/fugue" ||
+			apply.Env["FUGUE_TELEMETRY_SOURCE_SHA"] != "${{ github.sha }}" ||
+			apply.Env["FUGUE_TELEMETRY_OCI_REVISION"] != "${{ steps.intent.outputs.desired_source_sha }}" {
 			t.Fatalf("Telemetry apply step is not bound to the exact chart and declarative driver: %+v", apply)
+		}
+		applySource, err := os.ReadFile("../../scripts/apply_telemetry_declarative.sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range []string{
+			`expected_owner in {"legacy", "handoff"}`,
+			`pod_source_commit is not None and pod_source_commit != expected_oci_revision`,
+			`elif expected_owner == "declarative"`,
+			`if source_commit is None and ownership in {None, "helm"}`,
+			`if source_commit != expected_oci`,
+		} {
+			if !strings.Contains(string(applySource), required) {
+				t.Fatalf("Telemetry legacy/handoff provenance compatibility is missing %q", required)
+			}
+		}
+		intentBytes, err := os.ReadFile("../../deploy/environments/production/telemetry/release.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var productionIntent map[string]any
+		if err := json.Unmarshal(intentBytes, &productionIntent); err != nil {
+			t.Fatalf("parse production Telemetry release intent: %v", err)
+		}
+		canonicalIntent, err := json.Marshal(productionIntent)
+		if err != nil || string(intentBytes) != string(canonicalIntent)+"\n" {
+			t.Fatalf("production Telemetry release intent is not canonical: err=%v bytes=%s", err, intentBytes)
+		}
+		expectedIntent := map[string]any{
+			"apiVersion":                  "release.fugue.dev/v1",
+			"component":                   "telemetry_agent",
+			"deployment":                  "fugue-fugue-telemetry-agent",
+			"desiredSourceSha":            "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
+			"environment":                 "production",
+			"expectedPreviousImageDigest": "sha256:3c79d82c3e094e3bf404df39e8c2a052d734dc7b54cac5e32c208e8a970a0eeb",
+			"expectedPreviousSourceSha":   "d1e7ed9cdedbaa09db9bd78b4e433b94c7357510",
+			"fieldManager":                "fugue-telemetry-declarative",
+			"kind":                        "ProductionComponentRelease",
+			"namespace":                   "fugue-system",
+			"ownership":                   "declarative",
+			"replicas":                    float64(1),
+			"repository":                  "ghcr.io/yym68686/fugue-telemetry-agent",
+			"rollback":                    "previous-git-lkg",
+			"service":                     "fugue-fugue-telemetry-agent",
+		}
+		if !reflect.DeepEqual(productionIntent, expectedIntent) {
+			t.Fatalf("production Telemetry release intent drifted: got=%v want=%v", productionIntent, expectedIntent)
+		}
+		for _, sourceRevision := range []string{
+			productionIntent["desiredSourceSha"].(string),
+			productionIntent["expectedPreviousSourceSha"].(string),
+		} {
+			if strings.Contains(string(ciSource), sourceRevision) {
+				t.Fatalf("Telemetry workflow hardcodes release source %s instead of consuming the manifest", sourceRevision)
+			}
 		}
 		for _, step := range deploy.Steps {
 			if step.Name == "Setup Go" || strings.Contains(step.Uses, "setup-buildx") || strings.Contains(step.Uses, "login-action") {
@@ -5336,12 +5482,142 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 				t.Fatalf("singleton Telemetry plan missing %q:\n%s", exact, singleton)
 			}
 		}
+		const productionIntentPath = "deploy/environments/production/telemetry/release.json"
+		productionIntentPlan := run(productionIntentPath)
+		for _, exact := range []string{
+			"build_api=false\n",
+			"build_controller=false\n",
+			"build_drain_agent=false\n",
+			"build_telemetry_agent=true\n",
+			"build_image_cache=false\n",
+			"build_edge=false\n",
+			"build_app_ssh=false\n",
+			"target_count=1\n",
+			"targets=telemetry_agent\n",
+		} {
+			if !strings.Contains(productionIntentPlan, exact) {
+				t.Fatalf("production Telemetry intent plan missing %q:\n%s", exact, productionIntentPlan)
+			}
+		}
+		nearMiss := run(productionIntentPath + ".bak")
+		if !strings.Contains(nearMiss, "build_telemetry_agent=false\n") ||
+			!strings.Contains(nearMiss, "target_count=0\n") ||
+			!strings.Contains(nearMiss, "targets=\n") {
+			t.Fatalf("near-miss production Telemetry intent path selected a component:\n%s", nearMiss)
+		}
 		mixed := run("cmd/fugue-api/main.go\ncmd/fugue-telemetry-agent/main.go")
 		if !strings.Contains(mixed, "build_telemetry_agent=true\n") ||
 			!strings.Contains(mixed, "target_count=2\n") ||
 			!strings.Contains(mixed, "targets=api telemetry_agent\n") ||
 			strings.Contains(mixed, "target_count=1\n") || strings.Contains(mixed, "targets=telemetry_agent\n") {
 			t.Fatalf("mixed API/Telemetry plan could masquerade as an exact singleton:\n%s", mixed)
+		}
+		mixedIntent := run("cmd/fugue-api/main.go\n" + productionIntentPath)
+		if !strings.Contains(mixedIntent, "target_count=2\n") ||
+			!strings.Contains(mixedIntent, "targets=api telemetry_agent\n") {
+			t.Fatalf("production Telemetry intent plus API change did not fail singleton planning:\n%s", mixedIntent)
+		}
+
+		invalidRoot := t.TempDir()
+		invalidPath := filepath.Join(invalidRoot, productionIntentPath)
+		if err := os.MkdirAll(filepath.Dir(invalidPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(invalidPath, []byte(`{"component":"telemetry_agent"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		invalidCommand := exec.Command("bash", "../../scripts/compute_control_plane_image_build_plan.sh")
+		invalidCommand.Env = append(os.Environ(),
+			"FUGUE_RELEASE_REPO_ROOT="+invalidRoot,
+			"FUGUE_RELEASE_CHANGED_FILES_SET=true",
+			"FUGUE_RELEASE_CHANGED_FILES="+productionIntentPath,
+		)
+		invalidOutput, err := invalidCommand.CombinedOutput()
+		if err == nil || !strings.Contains(string(invalidOutput), "telemetry-production-release-intent-schema-invalid") {
+			t.Fatalf("invalid production Telemetry intent did not fail closed: err=%v output=%s", err, invalidOutput)
+		}
+
+		digestInvalidRoot := t.TempDir()
+		digestInvalidPath := filepath.Join(digestInvalidRoot, productionIntentPath)
+		if err := os.MkdirAll(filepath.Dir(digestInvalidPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		validIntentBytes, err := os.ReadFile(filepath.Join("../..", productionIntentPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var digestInvalidIntent map[string]any
+		if err := json.Unmarshal(validIntentBytes, &digestInvalidIntent); err != nil {
+			t.Fatal(err)
+		}
+		digestInvalidIntent["expectedPreviousImageDigest"] = strings.ToUpper(
+			digestInvalidIntent["expectedPreviousImageDigest"].(string),
+		)
+		digestInvalidBytes, err := json.Marshal(digestInvalidIntent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(digestInvalidPath, append(digestInvalidBytes, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		digestInvalidCommand := exec.Command("bash", "../../scripts/compute_control_plane_image_build_plan.sh")
+		digestInvalidCommand.Env = append(os.Environ(),
+			"FUGUE_RELEASE_REPO_ROOT="+digestInvalidRoot,
+			"FUGUE_RELEASE_CHANGED_FILES_SET=true",
+			"FUGUE_RELEASE_CHANGED_FILES="+productionIntentPath,
+		)
+		digestInvalidOutput, err := digestInvalidCommand.CombinedOutput()
+		if err == nil || !strings.Contains(string(digestInvalidOutput), "telemetry-production-release-intent-previous-image-digest-invalid") {
+			t.Fatalf("non-lowercase previous digest did not fail closed: err=%v output=%s", err, digestInvalidOutput)
+		}
+
+		repoRoot, err := filepath.Abs("../..")
+		if err != nil {
+			t.Fatal(err)
+		}
+		successorRoot := filepath.Join(t.TempDir(), "repo")
+		clone := exec.Command("git", "clone", "--quiet", "--shared", repoRoot, successorRoot)
+		if output, err := clone.CombinedOutput(); err != nil {
+			t.Fatalf("clone successor planner fixture: %v output=%s", err, output)
+		}
+		successorIntent := map[string]any{
+			"apiVersion":                  "release.fugue.dev/v1",
+			"component":                   "telemetry_agent",
+			"deployment":                  "fugue-fugue-telemetry-agent",
+			"desiredSourceSha":            "10b7061f91d653d13a3c3f95abfd4b996f17ddab",
+			"environment":                 "production",
+			"expectedPreviousImageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"expectedPreviousSourceSha":   "d14bd56a5c6f99ca2bdfb2e6b3fe0c0a06ccc2d3",
+			"fieldManager":                "fugue-telemetry-declarative",
+			"kind":                        "ProductionComponentRelease",
+			"namespace":                   "fugue-system",
+			"ownership":                   "declarative",
+			"replicas":                    1,
+			"repository":                  "ghcr.io/yym68686/fugue-telemetry-agent",
+			"rollback":                    "previous-git-lkg",
+			"service":                     "fugue-fugue-telemetry-agent",
+		}
+		successorBytes, err := json.Marshal(successorIntent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		successorPath := filepath.Join(successorRoot, productionIntentPath)
+		if err := os.MkdirAll(filepath.Dir(successorPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(successorPath, append(successorBytes, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		successorCommand := exec.Command("bash", "../../scripts/compute_control_plane_image_build_plan.sh")
+		successorCommand.Env = append(os.Environ(),
+			"FUGUE_RELEASE_REPO_ROOT="+successorRoot,
+			"FUGUE_RELEASE_CHANGED_FILES_SET=true",
+			"FUGUE_RELEASE_CHANGED_FILES="+productionIntentPath,
+		)
+		successorOutput, err := successorCommand.CombinedOutput()
+		if err != nil || !strings.Contains(string(successorOutput), "target_count=1\n") ||
+			!strings.Contains(string(successorOutput), "targets=telemetry_agent\n") {
+			t.Fatalf("manifest-only Telemetry successor requires workflow changes: err=%v output=%s", err, successorOutput)
 		}
 	})
 }

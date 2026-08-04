@@ -140,7 +140,6 @@ validate_live() {
   python3 - "${path}" "${NAMESPACE}" "${DEPLOYMENT}" "${IMAGE_REPOSITORY}" "${expected_digest}" "${expected_owner}" "${expected_oci_revision}" "${FIELD_MANAGER}" <<'PY'
 import json
 from pathlib import Path
-import re
 import sys
 
 path, namespace, name, repository, digest, expected_owner, expected_oci_revision, manager = sys.argv[1:]
@@ -164,11 +163,12 @@ if containers[0].get("image") != f"{repository}@{digest}":
     raise SystemExit("live-deployment-image-invalid")
 pod_annotations = spec.get("template", {}).get("metadata", {}).get("annotations") or {}
 pod_source_commit = pod_annotations.get("fugue.pro/source-commit")
-if expected_owner == "declarative":
+if expected_owner in {"legacy", "handoff"}:
+    if pod_source_commit is not None and pod_source_commit != expected_oci_revision:
+        raise SystemExit("live-deployment-pre-ssa-pod-source-commit-invalid")
+elif expected_owner == "declarative":
     if pod_source_commit != expected_oci_revision:
         raise SystemExit("live-deployment-pod-source-commit-invalid")
-elif pod_source_commit is not None and re.fullmatch(r"[0-9a-f]{40}", pod_source_commit) is None:
-    raise SystemExit("live-deployment-existing-pod-source-commit-invalid")
 annotations = metadata.get("annotations") or {}
 labels = metadata.get("labels") or {}
 owner = annotations.get("fugue.pro/telemetry-ownership")
@@ -509,7 +509,6 @@ validate_transition_proof() {
 import copy
 import json
 from pathlib import Path
-import re
 import sys
 
 live_path, forward_path, lkg_path, repository, forward_digest, lkg_digest, forward_oci, lkg_oci, label = sys.argv[1:]
@@ -581,7 +580,15 @@ def normalized_lkg_live_spec(value, expected_oci, live_document):
         raise SystemExit(f"{label}-transition-template-annotations-invalid")
     source_commit = annotations.get("fugue.pro/source-commit")
     if live_document:
-        if source_commit is not None and re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        metadata = value.get("metadata")
+        if type(metadata) is not dict:
+            raise SystemExit(f"{label}-transition-live-metadata-invalid")
+        ownership = (metadata.get("annotations") or {}).get("fugue.pro/telemetry-ownership")
+        if ownership not in {None, "helm", "declarative"}:
+            raise SystemExit(f"{label}-transition-live-owner-invalid")
+        if source_commit is None and ownership in {None, "helm"}:
+            source_commit = expected_oci
+        if source_commit != expected_oci:
             raise SystemExit(f"{label}-transition-live-source-commit-invalid")
     elif source_commit != expected_oci:
         raise SystemExit(f"{label}-transition-lkg-source-commit-invalid")

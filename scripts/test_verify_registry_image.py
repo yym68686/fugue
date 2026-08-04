@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
@@ -26,6 +27,7 @@ def digest(data):
 class RegistryFixture:
     def __init__(self):
         self.revision = FIXTURE_REVISION
+        self.source_tag = "b" * 40
         config_body = encoded(
             {
                 "architecture": "amd64",
@@ -85,6 +87,9 @@ class RegistryFixture:
         self.ignore_layer_range = False
         self.invalid_layer_content_range = False
         self.transient_layer_get_failures = 0
+        self.tag_status = 200
+        self.tag_digest_header = self.index_digest
+        self.require_basic_token_auth = False
         self.lock = threading.Lock()
 
     def record(self, method, path):
@@ -138,6 +143,9 @@ def fixture_handler(fixture):
             fixture.record("GET", self.path)
             parsed = urllib.parse.urlsplit(self.path)
             if parsed.path == "/token":
+                if fixture.require_basic_token_auth and self.headers.get("Authorization") != "Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=":
+                    self.send_bytes(403)
+                    return
                 with fixture.lock:
                     fixture.token_requests += 1
                 self.send_bytes(200, b'{"token":"fixture-token"}', "application/json")
@@ -148,6 +156,14 @@ def fixture_handler(fixture):
             blob_prefix = "/v2/acme/image/blobs/"
             if parsed.path.startswith(manifest_prefix):
                 requested_digest = parsed.path[len(manifest_prefix) :]
+                if requested_digest == fixture.source_tag:
+                    if fixture.tag_status != 200:
+                        self.send_bytes(fixture.tag_status)
+                        return
+                    body = fixture.manifests[fixture.index_digest]
+                    document = json.loads(body)
+                    self.send_bytes(200, body, document["mediaType"], fixture.tag_digest_header)
+                    return
                 body = fixture.manifests.get(requested_digest)
                 if body is None:
                     self.send_bytes(404, b'{"errors":[{"code":"MANIFEST_UNKNOWN"}]}', "application/json")
@@ -207,7 +223,15 @@ def fixture_handler(fixture):
     return Handler
 
 
-def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_revision=None, extra_args=None):
+def run_verifier(
+    fixture,
+    image_digest=None,
+    platform="linux/amd64",
+    expected_revision=None,
+    extra_args=None,
+    source_tag=False,
+    authenticated=True,
+):
     server = ThreadingHTTPServer(("127.0.0.1", 0), fixture_handler(fixture))
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -215,26 +239,47 @@ def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_re
     try:
         host, port = server.server_address
         selected_digest = image_digest or fixture.index_digest
+        image = (
+            f"{host}:{port}/acme/image:{fixture.source_tag}"
+            if source_tag
+            else f"{host}:{port}/acme/image@{selected_digest}"
+        )
         command = [
             "python3",
             str(VERIFIER),
             "--image",
-            f"{host}:{port}/acme/image@{selected_digest}",
+            image,
             "--platform",
             platform,
             "--timeout-seconds",
             "5",
             "--insecure",
         ]
+        if source_tag:
+            command.append("--allow-missing-tag")
+            if expected_revision is None:
+                expected_revision = fixture.revision
         if expected_revision is not None:
             command.extend(("--expected-revision", expected_revision))
         command.extend(extra_args or [])
+        environment = os.environ.copy()
+        if source_tag and authenticated:
+            environment.update(
+                {
+                    "FUGUE_REGISTRY_USERNAME": "fixture-user",
+                    "FUGUE_REGISTRY_PASSWORD": "fixture-password",
+                }
+            )
+        else:
+            environment.pop("FUGUE_REGISTRY_USERNAME", None)
+            environment.pop("FUGUE_REGISTRY_PASSWORD", None)
         return subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
             timeout=10,
+            env=environment,
         )
     finally:
         server.shutdown()
@@ -243,6 +288,54 @@ def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_re
 
 
 class RegistryImageVerificationTests(unittest.TestCase):
+    def test_authenticated_source_tag_200_resolves_and_fully_verifies(self):
+        fixture = RegistryFixture()
+        fixture.require_basic_token_auth = True
+        result = run_verifier(fixture, source_tag=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["image"].endswith(f"/acme/image@{fixture.index_digest}"))
+        self.assertEqual(payload["oci_revision"], fixture.revision)
+        self.assertEqual(payload["platform"], "linux/amd64")
+        self.assertEqual(payload["config_digest"], fixture.config_digest)
+        self.assertEqual(payload["manifest_digest"], fixture.manifest_digest)
+        self.assertEqual(payload["verification"], "registry_manifest_config_and_layer_get")
+        self.assertEqual(fixture.token_requests, 1)
+        self.assertIn(("GET", f"/v2/acme/image/manifests/{fixture.source_tag}"), fixture.requests)
+        self.assertIn(("GET", f"/v2/acme/image/manifests/{fixture.index_digest}"), fixture.requests)
+
+    def test_authenticated_source_tag_404_is_the_only_missing_result(self):
+        fixture = RegistryFixture()
+        fixture.require_basic_token_auth = True
+        fixture.tag_status = 404
+        result = run_verifier(fixture, source_tag=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["exists"], False)
+        self.assertTrue(payload["image"].endswith(f"/acme/image:{fixture.source_tag}"))
+        self.assertNotIn(("GET", f"/v2/acme/image/blobs/{fixture.config_digest}"), fixture.requests)
+
+    def test_source_tag_preflight_requires_credentials_before_network(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, source_tag=True, authenticated=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires registry credentials", result.stderr)
+        self.assertEqual(fixture.requests, [])
+
+    def test_source_tag_http_and_digest_uncertainty_fail_closed(self):
+        for status in (401, 403, 429, 500):
+            with self.subTest(status=status):
+                fixture = RegistryFixture()
+                fixture.tag_status = status
+                result = run_verifier(fixture, source_tag=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('"exists":false', result.stdout)
+        fixture = RegistryFixture()
+        fixture.tag_digest_header = "sha256:" + "f" * 64
+        result = run_verifier(fixture, source_tag=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source tag body digest mismatch", result.stderr)
+
     def test_bearer_registry_index_manifest_config_and_layers_pass(self):
         fixture = RegistryFixture()
         result = run_verifier(fixture)
