@@ -304,18 +304,19 @@ def main() -> int:
     test_commands = affected_test_commands(base, paths)
     checks: dict[str, dict[str, object]] = {}
 
-    tasks: dict[str, list[str] | None] = {
-        "compile-all": ["go", "build", "./..."],
+    compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
+    go_dependent_tasks: dict[str, list[str] | None] = {
         "openapi-generated": [
             "go", "run", "./cmd/fugue-openapi-gen", "-spec", "openapi/openapi.yaml",
             "-routes-out", "internal/api/routes_gen.go", "-spec-out", "internal/apispec/spec_gen.go", "-check",
         ],
     }
+    non_go_tasks: dict[str, list[str] | None] = {}
     if packages:
-        tasks["affected-tests"] = None
-        tasks["affected-vet"] = ["go", "vet", *packages]
+        go_dependent_tasks["affected-tests"] = None
+        go_dependent_tasks["affected-vet"] = ["go", "vet", *packages]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
-        tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
+        non_go_tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
     if any(name in {
         ".github/workflows/deploy-control-plane.yml",
         "scripts/build_control_plane_images.sh",
@@ -323,7 +324,7 @@ def main() -> int:
         "scripts/test_verify_registry_image.py",
         "scripts/verify_registry_image.py",
     } for name in paths):
-        tasks["control-plane-build-reuse-tests"] = [
+        non_go_tasks["control-plane-build-reuse-tests"] = [
             "python3", "-m", "unittest",
             "scripts.test_control_plane_build_reuse", "scripts.test_verify_registry_image",
         ]
@@ -331,7 +332,7 @@ def main() -> int:
         "scripts/apply_telemetry_declarative.sh",
         "scripts/test_apply_telemetry_declarative.sh",
     } for name in paths):
-        tasks["telemetry-declarative-tests"] = [
+        non_go_tasks["telemetry-declarative-tests"] = [
             "bash", "./scripts/test_apply_telemetry_declarative.sh",
         ]
 
@@ -350,30 +351,55 @@ def main() -> int:
         if status != 0:
             failures.append((name, output[-12000:]))
 
-    for name, check in local_checks.items():
+    def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
         before = time.monotonic()
-        remaining = deadline - before
-        if remaining <= 0:
-            record(name, before, 124, "pre-push deadline exceeded")
-            break
-        status, output = check(remaining)
-        record(name, before, status, output)
+        if name == "affected-tests":
+            status, output = run_test_commands(test_commands, deadline)
+        elif command is None:
+            status, output = 124, f"pre-push task {name} has no command"
+        else:
+            status, output = run(command, deadline - before)
+        return status, output, before
 
-    if not failures:
-        def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
+    phase_one_workers = 1 + len(non_go_tasks)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=phase_one_workers) as phase_one:
+        compile_name, compile_command = compile_task
+        compile_future = phase_one.submit(execute, compile_name, compile_command)
+        non_go_futures = {
+            phase_one.submit(execute, name, command): name
+            for name, command in non_go_tasks.items()
+        }
+
+        for name, check in local_checks.items():
             before = time.monotonic()
-            if name == "affected-tests":
-                status, output = run_test_commands(test_commands, deadline)
-            elif command is None:
-                status, output = 124, f"pre-push task {name} has no command"
-            else:
-                status, output = run(command, deadline - before)
-            return status, output, before
+            remaining = deadline - before
+            if remaining <= 0:
+                record(name, before, 124, "pre-push deadline exceeded")
+                break
+            status, output = check(remaining)
+            record(name, before, status, output)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = {executor.submit(execute, name, command): name for name, command in tasks.items()}
-            for future in concurrent.futures.as_completed(futures):
-                name = futures[future]
+        compile_status, compile_output, compile_before = compile_future.result()
+        record(compile_name, compile_before, compile_status, compile_output)
+
+        if not failures:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(go_dependent_tasks)
+            ) as go_phase:
+                go_futures = {
+                    go_phase.submit(execute, name, command): name
+                    for name, command in go_dependent_tasks.items()
+                }
+                all_futures = {**non_go_futures, **go_futures}
+                for future in concurrent.futures.as_completed(all_futures):
+                    name = all_futures[future]
+                    status, output, before = future.result()
+                    record(name, before, status, output)
+        else:
+            for name in go_dependent_tasks:
+                checks[name] = {"durationMs": 0, "status": "skipped"}
+            for future in concurrent.futures.as_completed(non_go_futures):
+                name = non_go_futures[future]
                 status, output, before = future.result()
                 record(name, before, status, output)
 

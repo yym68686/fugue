@@ -53,16 +53,16 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(len(receipts), 1)
         return result, receipts[0]
 
-    def test_compile_and_affected_tests_overlap(self) -> None:
+    def test_cold_compile_and_non_go_tests_overlap(self) -> None:
         barrier = threading.Barrier(2)
         intervals = {}
 
         def fake_run(command, _timeout):
             key = None
-            if command == ["go", "build", "./..."]:
+            if command == ["go", "build", "-p", "4", "./..."]:
                 key = "compile-all"
-            elif command[:2] == ["go", "test"]:
-                key = "affected-tests"
+            elif command == ["python3", "-m", "unittest", "scripts.test_prepush"]:
+                key = "prepush-receipt-tests"
             if key is None:
                 return 0, ""
             started = time.monotonic()
@@ -71,12 +71,53 @@ class CanonicalReceiptTest(unittest.TestCase):
             intervals[key] = (started, ended)
             return 0, ""
 
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["scripts/prepush.py"],
+        )
+        self.assertEqual(result, 0)
+        self.assertLess(intervals["compile-all"][0], intervals["prepush-receipt-tests"][1])
+        self.assertLess(intervals["prepush-receipt-tests"][0], intervals["compile-all"][1])
+        self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["prepush-receipt-tests"]["status"], "pass")
+
+    def test_go_dependent_tasks_start_only_after_compile_success(self) -> None:
+        compile_finished = threading.Event()
+        dependent_observations = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                time.sleep(0.01)
+                compile_finished.set()
+                return 0, ""
+            if command and command[0] == "go":
+                dependent_observations.append(compile_finished.is_set())
+            return 0, ""
+
         result, receipt = self.run_main_with_fake(fake_run)
         self.assertEqual(result, 0)
-        self.assertLess(intervals["compile-all"][0], intervals["affected-tests"][1])
-        self.assertLess(intervals["affected-tests"][0], intervals["compile-all"][1])
-        self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
-        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
+        self.assertEqual(len(dependent_observations), 3)
+        self.assertTrue(all(dependent_observations))
+        for name in ("affected-tests", "affected-vet", "openapi-generated"):
+            self.assertEqual(receipt["checks"][name]["status"], "pass")
+
+    def test_compile_failure_does_not_start_go_dependent_tasks(self) -> None:
+        dependent_commands = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                return 9, "compile failed"
+            if command and command[0] == "go":
+                dependent_commands.append(command)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(fake_run)
+        self.assertEqual(result, 1)
+        self.assertEqual(dependent_commands, [])
+        self.assertEqual(receipt["status"], "fail")
+        self.assertEqual(receipt["checks"]["compile-all"]["status"], "fail")
+        for name in ("affected-tests", "affected-vet", "openapi-generated"):
+            self.assertEqual(receipt["checks"][name], {"durationMs": 0, "status": "skipped"})
 
     def test_telemetry_declarative_shell_change_selects_focused_contract(self) -> None:
         commands = []
@@ -175,7 +216,7 @@ class CanonicalReceiptTest(unittest.TestCase):
 
     def test_parallel_task_failure_still_fails_closed(self) -> None:
         def fake_run(command, _timeout):
-            if command == ["go", "build", "./..."]:
+            if command == ["go", "build", "-p", "4", "./..."]:
                 return 9, "compile failed"
             return 0, ""
 
@@ -183,6 +224,34 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(receipt["status"], "fail")
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "fail")
+
+    def test_non_go_telemetry_failure_still_fails_closed(self) -> None:
+        def fake_run(command, _timeout):
+            if command == ["bash", "./scripts/test_apply_telemetry_declarative.sh"]:
+                return 8, "telemetry failed"
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["scripts/apply_telemetry_declarative.sh"],
+        )
+        self.assertEqual(result, 1)
+        self.assertEqual(receipt["status"], "fail")
+        self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["telemetry-declarative-tests"]["status"], "fail")
+
+    def test_default_deadline_and_receipt_schema_are_unchanged(self) -> None:
+        self.assertEqual(prepush.DEFAULT_TIMEOUT_SECONDS, 55.0)
+
+        result, receipt = self.run_main_with_fake(lambda _command, _timeout: (0, ""))
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            set(receipt),
+            {
+                "apiVersion", "baseCommit", "changedFilesDigest", "checks",
+                "elapsedMs", "kind", "sourceCommit", "status",
+            },
+        )
 
     def test_command_environment_preserves_default_and_explicit_go_cache(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
