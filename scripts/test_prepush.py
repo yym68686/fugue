@@ -211,32 +211,65 @@ class CanonicalReceiptTest(unittest.TestCase):
         )
 
     def test_controller_declarative_shell_change_selects_focused_contract(self) -> None:
-        commands = []
-        controller_timeouts = []
+        for path in (
+            "scripts/apply_controller_declarative.sh",
+            "deploy/environments/production/controller/release.json",
+        ):
+            with self.subTest(path=path):
+                commands = []
+                controller_timeouts = []
 
-        def fake_run(command, timeout):
-            commands.append(command)
-            if command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
-                controller_timeouts.append(timeout)
+                def fake_run(command, timeout):
+                    commands.append(command)
+                    if command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
+                        controller_timeouts.append(timeout)
+                    return 0, ""
+
+                result, receipt = self.run_main_with_fake(fake_run, paths=[path])
+                self.assertEqual(result, 0)
+                self.assertIn(
+                    ["bash", "./scripts/test_apply_controller_declarative.sh"],
+                    commands,
+                )
+                self.assertEqual(
+                    receipt["checks"]["controller-declarative-tests"]["status"],
+                    "pass",
+                )
+                self.assertEqual(
+                    controller_timeouts,
+                    [prepush.CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS],
+                )
+
+    def test_controller_declarative_runs_after_compile_and_affected_tests(self) -> None:
+        intervals = {}
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                name = "compile-all"
+            elif command[:2] == ["go", "test"]:
+                name = "affected-tests"
+            elif command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
+                name = "controller-declarative-tests"
+            else:
+                return 0, ""
+            started = time.monotonic()
+            if name != "controller-declarative-tests":
+                time.sleep(0.02)
+            intervals[name] = (started, time.monotonic())
             return 0, ""
 
         result, receipt = self.run_main_with_fake(
             fake_run,
-            paths=["scripts/apply_controller_declarative.sh"],
+            paths=[
+                "deploy/environments/production/controller/release.json",
+                "internal/example/example.go",
+            ],
         )
         self.assertEqual(result, 0)
-        self.assertIn(
-            ["bash", "./scripts/test_apply_controller_declarative.sh"],
-            commands,
-        )
-        self.assertEqual(
-            receipt["checks"]["controller-declarative-tests"]["status"],
-            "pass",
-        )
-        self.assertEqual(
-            controller_timeouts,
-            [prepush.CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS],
-        )
+        controller_started = intervals["controller-declarative-tests"][0]
+        self.assertLessEqual(intervals["compile-all"][1], controller_started)
+        self.assertLessEqual(intervals["affected-tests"][1], controller_started)
+        self.assertEqual(receipt["checks"]["controller-declarative-tests"]["status"], "pass")
 
     def test_test_only_package_selects_exact_current_tests(self) -> None:
         diff = b"\n".join(
@@ -313,15 +346,27 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertIn("$ go test ./internal/b\nb failed", output)
 
     def test_parallel_task_failure_still_fails_closed(self) -> None:
+        controller_commands = []
+
         def fake_run(command, _timeout):
             if command == ["go", "build", "-p", "4", "./..."]:
                 return 9, "compile failed"
+            if command == ["bash", "./scripts/test_apply_controller_declarative.sh"]:
+                controller_commands.append(command)
             return 0, ""
 
-        result, receipt = self.run_main_with_fake(fake_run)
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["deploy/environments/production/controller/release.json"],
+        )
         self.assertEqual(result, 1)
         self.assertEqual(receipt["status"], "fail")
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "fail")
+        self.assertEqual(
+            receipt["checks"]["controller-declarative-tests"],
+            {"durationMs": 0, "status": "skipped"},
+        )
+        self.assertEqual(controller_commands, [])
 
     def test_non_go_telemetry_failure_still_fails_closed(self) -> None:
         def fake_run(command, _timeout):

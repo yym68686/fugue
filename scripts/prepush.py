@@ -362,10 +362,12 @@ def main() -> int:
     if any(name in {
         "scripts/apply_controller_declarative.sh",
         "scripts/test_apply_controller_declarative.sh",
+        "deploy/environments/production/controller/release.json",
     } for name in paths):
         non_go_tasks["controller-declarative-tests"] = [
             "bash", "./scripts/test_apply_controller_declarative.sh",
         ]
+    controller_task = non_go_tasks.pop("controller-declarative-tests", None)
 
     local_checks = {
         "diff-check": lambda remaining: diff_check(base, paths, remaining),
@@ -439,6 +441,13 @@ def main() -> int:
                 name = phase_one_futures[future]
                 status, output, before = future.result()
                 record(name, before, status, output)
+
+    if controller_task is not None:
+        if failures:
+            checks["controller-declarative-tests"] = {"durationMs": 0, "status": "skipped"}
+        else:
+            status, output, before = execute("controller-declarative-tests", controller_task)
+            record("controller-declarative-tests", before, status, output)
 
     for name in ("affected-tests", "affected-vet", "helm-lint-render"):
         if name not in checks:
