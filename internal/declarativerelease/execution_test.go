@@ -46,9 +46,9 @@ func (fake *fakeCluster) Observe(context.Context, PlanRelease, TargetIdentity, [
 	return value, nil
 }
 
-func (fake *fakeCluster) ObserveCAS(context.Context, PlanRelease, []byte) (Observation, error) {
+func (fake *fakeCluster) ObserveCAS(ctx context.Context, release PlanRelease, manifest []byte) (Observation, error) {
 	if len(fake.cas) == 0 {
-		return Observation{}, errors.New("no CAS observation")
+		return fake.Observe(ctx, release, TargetIdentity{}, manifest)
 	}
 	value := fake.cas[0]
 	fake.cas = fake.cas[1:]
@@ -670,7 +670,7 @@ func TestExecuteUsesCASOnlyObservationToCompensateAnUnhealthyObject(t *testing.T
 	fake.observations = []Observation{lkg}
 	fake.health = []Observation{{}, lkg}
 	fake.healthErrors = []error{errors.New("failed workload has no healthy pod"), nil}
-	fake.cas = []Observation{forward}
+	fake.cas = []Observation{casOnlyObservation(lkg), forward}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "compensated" || result.LKGApplyCount != 1 || fake.applies != 2 || fake.deleteCreated != 1 || len(fake.cas) != 0 {
 		t.Fatalf("failed workload was not UID/RV-bound for compensation: %+v applies=%d", result, fake.applies)
@@ -705,6 +705,22 @@ func TestExecuteClassifiesPrewriteObservationFailureAsNoWrite(t *testing.T) {
 	if result.Status != "failed-no-write" || result.Reason != "prewrite-cas-drift" ||
 		result.ForwardApplyCount != 0 || result.LKGApplyCount != 0 || fake.applies != 0 {
 		t.Fatalf("prewrite observation failure retained a false recovery fence: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestExecuteRecapturesOnlyResourceCASBeforeFirstWrite(t *testing.T) {
+	plan, receipt, rendered, lkg, forward := executionFixture(t)
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.cas = []Observation{casOnlyObservation(lkg)}
+	fake.observationErrors = []error{errors.New("full observation must not be repeated")}
+	fake.health = []Observation{forward}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || fake.applies != 1 || len(fake.observationErrors) != 1 {
+		t.Fatalf("execute repeated full prewrite observation: result=%+v applies=%d observationErrors=%d", result, fake.applies, len(fake.observationErrors))
 	}
 }
 

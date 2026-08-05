@@ -519,10 +519,6 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	observationManifest := forwardManifest
-	currentTarget := prepared.LKG
-	if prepared.AlreadyConverged {
-		currentTarget = prepared.Forward
-	}
 	var current Observation
 	if prepared.DegradedPredecessor {
 		if prepared.Prewrite.ImageRef == "" {
@@ -545,8 +541,8 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			}
 		}
 	} else {
-		current, err = cluster.Observe(ctx, release, currentTarget, observationManifest)
-		if err == nil && !current.SameCAS(prepared.Prewrite) {
+		current, err = cluster.ObserveCAS(ctx, release, observationManifest)
+		if err == nil && !current.SameResourceCAS(prepared.Prewrite) {
 			err = errors.New("prewrite CAS changed")
 		}
 	}
@@ -974,11 +970,23 @@ func (observation Observation) Matches(target TargetIdentity, release PlanReleas
 }
 
 func (observation Observation) SameCAS(other Observation) bool {
+	if !observation.SameResourceCAS(other) ||
+		observation.TemplateDigest != other.TemplateDigest || observation.ImageRef != other.ImageRef ||
+		observation.ConfigSHA != other.ConfigSHA || observation.ManifestSHA != other.ManifestSHA ||
+		observation.OCIRevision != other.OCIRevision {
+		return false
+	}
+	return true
+}
+
+// SameResourceCAS compares only Kubernetes object identity, desired bytes, and
+// managed-field ownership. Prepare has already verified image provenance and
+// workload health; execute uses this bounded recapture to avoid repeating
+// network and Pod-health observations before the first mutation.
+func (observation Observation) SameResourceCAS(other Observation) bool {
 	if observation.Present != other.Present || observation.Primary != other.Primary ||
 		observation.UID != other.UID || observation.ResourceVersion != other.ResourceVersion ||
-		observation.Generation != other.Generation || observation.TemplateDigest != other.TemplateDigest ||
-		observation.ImageRef != other.ImageRef || observation.ConfigSHA != other.ConfigSHA ||
-		observation.ManifestSHA != other.ManifestSHA || observation.OCIRevision != other.OCIRevision ||
+		observation.Generation != other.Generation ||
 		len(observation.Resources) != len(other.Resources) {
 		return false
 	}
