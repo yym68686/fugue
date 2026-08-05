@@ -59,6 +59,13 @@
               "fugue.io/role.edge": "true",
               "fugue.io/schedulable": "true"
             },
+            "tolerations": [
+              {
+                "effect": "NoSchedule",
+                "key": "fugue.io/tenant",
+                "operator": "Exists"
+              }
+            ],
             "securityContext": {
               "runAsNonRoot": true,
               "runAsUser": 65532,

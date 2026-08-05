@@ -17,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -119,7 +118,7 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 		return errors.New("edge group transition is not fully bound")
 	}
 	transition := *release.Transition.EdgeGroupAB
-	config, err := clientcmd.BuildConfigFromFlags("", "")
+	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return fmt.Errorf("load Kubernetes client config: %w", err)
 	}

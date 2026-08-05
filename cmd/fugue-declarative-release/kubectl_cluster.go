@@ -21,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	metadataclient "k8s.io/client-go/metadata"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const maxKubernetesOutputBytes = 4 << 20
@@ -218,7 +217,7 @@ func (cluster *kubectlCluster) Delete(ctx context.Context, _ declarativerelease.
 	for _, resource := range observation.Resources {
 		observed[resource.Identity] = resource
 	}
-	config, err := clientcmd.BuildConfigFromFlags("", "")
+	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return fmt.Errorf("load Kubernetes client config: %w", err)
 	}
@@ -292,7 +291,7 @@ func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativer
 	if err != nil {
 		return err
 	}
-	config, err := clientcmd.BuildConfigFromFlags("", "")
+	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return fmt.Errorf("load Kubernetes client config: %w", err)
 	}
@@ -426,7 +425,7 @@ func (cluster *kubectlCluster) applyJob(ctx context.Context, release declarative
 		if uid == "" || rv == "" {
 			return errors.New("Job replacement has a partial delete precondition")
 		}
-		config, err := clientcmd.BuildConfigFromFlags("", "")
+		config, err := loadComponentLeaseClientConfig()
 		if err != nil {
 			return fmt.Errorf("load Kubernetes client config: %w", err)
 		}

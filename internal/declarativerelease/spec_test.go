@@ -287,3 +287,26 @@ func TestBindIntentsAllowsOneConsecutiveAttemptAgainstTheSameLKG(t *testing.T) {
 		t.Fatal("attempt with a changed LKG was accepted")
 	}
 }
+
+func TestBindIntentsAllowsAbsentLKGRetryWithoutOwnershipAdoption(t *testing.T) {
+	registry := testRegistry()
+	registry.Components[0].MigrationState = "adopting"
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 1, ExpectedPreviousPresent: false, Rollback: "previous-git-lkg"}
+	current := previous
+	current.Generation = 2
+	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": testSHA1})
+	if err != nil {
+		t.Fatalf("absent-LKG retry was rejected: %v", err)
+	}
+	if len(bound.Releases) != 1 || !bound.Releases[0].RetrySameLKG || bound.Releases[0].OwnershipAdoption != nil || bound.Releases[0].ExpectedPreviousPresent {
+		t.Fatalf("absent-LKG retry gained ownership adoption: %+v", bound.Releases)
+	}
+	current.ExpectedPreviousConfigSHA = testSHA1
+	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": testSHA1}); err == nil {
+		t.Fatal("absent-LKG retry with a predecessor identity was accepted")
+	}
+}

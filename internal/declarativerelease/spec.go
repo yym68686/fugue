@@ -579,7 +579,7 @@ func (intent Intent) Validate() error {
 			return errors.New("production intent predecessor identity is invalid")
 		}
 	} else if intent.ExpectedPreviousConfigSHA != "" || intent.ExpectedPreviousManifestSHA != "" ||
-		intent.ExpectedPreviousOCIRevision != "" || intent.ExpectedPreviousImageDigest != "" || intent.Generation != 1 {
+		intent.ExpectedPreviousOCIRevision != "" || intent.ExpectedPreviousImageDigest != "" {
 		return errors.New("absent production predecessor must be the first empty identity")
 	}
 	if intent.Rollback != "previous-git-lkg" {

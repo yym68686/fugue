@@ -98,7 +98,13 @@ type inventoryReceiverDeploymentSpec struct {
 			AutomountServiceAccountToken bool              `json:"automountServiceAccountToken"`
 			ServiceAccountName           string            `json:"serviceAccountName"`
 			NodeSelector                 map[string]string `json:"nodeSelector"`
-			Containers                   []struct {
+			Tolerations                  []struct {
+				Effect   string `json:"effect"`
+				Key      string `json:"key"`
+				Operator string `json:"operator"`
+				Value    string `json:"value,omitempty"`
+			} `json:"tolerations"`
+			Containers []struct {
 				Name  string `json:"name"`
 				Image string `json:"image"`
 				Env   []struct {
@@ -136,7 +142,7 @@ func TestInventoryReceiverCandidateSelectsOneControlArtifactAndPhysicallyIsolate
 	if err := decodeStrictInventoryReceiverJSON(receiptRaw, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Schema != "edge-control-inventory-receiver-candidate/v1" || receipt.BaseCommit != "64614a9623c4844c0133f56a81e4ec49e94e1198" ||
+	if receipt.Schema != "edge-control-inventory-receiver-candidate/v1" || receipt.BaseCommit != "c51f6381d862326518bfd84ff167a72db320e597" ||
 		!receipt.ProductionMutationAllowed || receipt.AuthorityCutoverAllowedWithoutWorker ||
 		receipt.Artifact.Role != "fugue-artifact://edge-control" || receipt.Artifact.Repository != "ghcr.io/yym68686/fugue-edge-control" ||
 		receipt.Artifact.Dockerfile != "Dockerfile.edge-control" || receipt.Artifact.BuildPackage != "./cmd/fugue-edge-control" ||
@@ -223,7 +229,10 @@ func validateInventoryReceiverResourceSet(t *testing.T, raw []byte, groupID, cou
 			deployment.Template.Spec.NodeSelector["fugue.io/location-country-code"] != country ||
 			deployment.Template.Metadata.Labels["fugue.io/edge-group-id"] != groupID ||
 			deployment.Template.Metadata.Annotations["fugue.pro/edge-control-authority"] != "group-scoped" ||
-			deployment.Template.Metadata.Annotations["fugue.pro/edge-control-publication"] != "group-cas" || len(deployment.Template.Spec.Containers) != 1 {
+			deployment.Template.Metadata.Annotations["fugue.pro/edge-control-publication"] != "group-cas" || len(deployment.Template.Spec.Containers) != 1 ||
+			len(deployment.Template.Spec.Tolerations) != 1 || deployment.Template.Spec.Tolerations[0].Key != "fugue.io/tenant" ||
+			deployment.Template.Spec.Tolerations[0].Operator != "Exists" || deployment.Template.Spec.Tolerations[0].Effect != "NoSchedule" ||
+			deployment.Template.Spec.Tolerations[0].Value != "" {
 			t.Fatalf("%s deployment is not a group-local authority: %+v", groupID, deployment)
 		}
 		container := deployment.Template.Spec.Containers[0]

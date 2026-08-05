@@ -1,6 +1,6 @@
 {
   "schema": "edge-control-inventory-receiver-candidate/v1",
-  "base_commit": "64614a9623c4844c0133f56a81e4ec49e94e1198",
+  "base_commit": "c51f6381d862326518bfd84ff167a72db320e597",
   "production_mutation_allowed": true,
   "authority_cutover_allowed_without_worker_candidate": false,
   "artifact": {
