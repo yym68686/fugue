@@ -98,6 +98,44 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 	return observation, nil
 }
 
+func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) (declarativerelease.Observation, error) {
+	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+	workloadRaw, err := cluster.getResource(ctx, primary)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	if len(bytes.TrimSpace(workloadRaw)) == 0 {
+		return declarativerelease.Observation{}, errors.New("owned degraded predecessor is absent")
+	}
+	observation, err := parseDegradedObservation(workloadRaw, release)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	observation.Resources = resources
+	if err := observation.ValidateDegradedPredecessor(release); err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
+		"--image", observation.ImageRef, "--platform", "linux/amd64", "--expected-revision", observation.OCIRevision,
+		"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
+		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	if err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("verify degraded predecessor registry identity: %w", err)
+	}
+	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	if verification.Image != observation.ImageRef || verification.OCIRevision != observation.OCIRevision {
+		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
+	}
+	return observation, nil
+}
+
 func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarativerelease.TargetIdentity) error {
 	if !target.Present || target.ImageRef == "" || target.OCIRevision == "" {
 		return errors.New("registry target identity is incomplete")
@@ -876,6 +914,50 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	observation.ImageID = imageID
 	observation.HealthDigest = healthDigest
 	return observation, nil
+}
+
+func parseDegradedObservation(workloadRaw []byte, release declarativerelease.PlanRelease) (declarativerelease.Observation, error) {
+	workload, err := decodeJSONObject(workloadRaw)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	metadata := mapField(workload, "metadata")
+	spec := mapField(workload, "spec")
+	template := mapField(spec, "template")
+	templateMetadata := mapField(template, "metadata")
+	templateAnnotations := mapStringField(templateMetadata, "annotations")
+	templateSpec := mapField(template, "spec")
+	containers, ok := templateSpec["containers"].([]any)
+	if !ok {
+		return declarativerelease.Observation{}, errors.New("workload containers are invalid")
+	}
+	image := ""
+	for _, rawContainer := range containers {
+		container, ok := rawContainer.(map[string]any)
+		if !ok {
+			return declarativerelease.Observation{}, errors.New("workload container is invalid")
+		}
+		if stringValue(container["name"]) == release.Workload.Container {
+			if image != "" {
+				return declarativerelease.Observation{}, errors.New("workload container is ambiguous")
+			}
+			image = stringValue(container["image"])
+		}
+	}
+	workloadAnnotations := mapStringField(metadata, "annotations")
+	return declarativerelease.Observation{
+		Present: true,
+		Primary: declarativerelease.ResourceIdentity{
+			APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
+			Namespace: release.Workload.Namespace, Name: release.Workload.Name,
+		},
+		UID: stringValue(metadata["uid"]), ResourceVersion: stringValue(metadata["resourceVersion"]),
+		Generation: int64Value(metadata["generation"]), ImageRef: image,
+		ConfigSHA:      workloadAnnotations["fugue.pro/production-config-sha"],
+		ManifestSHA:    templateAnnotations["fugue.pro/source-commit"],
+		OCIRevision:    templateAnnotations["fugue.pro/oci-revision"],
+		TemplateDigest: digestJSON(template), FieldManagers: managedFieldManagers(metadata),
+	}, nil
 }
 
 func parseSucceededJobPod(raw []byte, release declarativerelease.PlanRelease, manifestSHA string) (string, string, error) {

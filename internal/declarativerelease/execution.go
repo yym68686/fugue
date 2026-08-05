@@ -98,6 +98,7 @@ type ExecutionResult struct {
 type Cluster interface {
 	Observe(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error)
 	ObserveCAS(context.Context, PlanRelease, []byte) (Observation, error)
+	ObserveDegraded(context.Context, PlanRelease, []byte) (Observation, error)
 	VerifyTarget(context.Context, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
 	Apply(context.Context, PlanRelease, TargetIdentity, []byte) error
@@ -255,7 +256,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			return ExecutionPlan{}, fmt.Errorf("validate converged prewrite state: %w", err)
 		}
 	} else if degradedPredecessor {
-		if err := prewrite.ValidateDegradedPredecessor(); err != nil {
+		if err := prewrite.ValidateDegradedPredecessor(release); err != nil {
 			return ExecutionPlan{}, fmt.Errorf("validate degraded LKG prewrite state: %w", err)
 		}
 	} else if release.ExpectedPreviousPresent {
@@ -315,17 +316,48 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if err != nil {
 		return Observation{}, err
 	}
-	if err := first.ValidateDegradedPredecessor(); err != nil {
+	if err := first.ValidateDegradedPredecessor(release); err != nil {
 		return Observation{}, err
 	}
 	if err := cluster.Converged(ctx, release, witness); err != nil {
-		return Observation{}, fmt.Errorf("degraded predecessor manifest drift: %w", err)
+		return prepareOwnedDegradedPredecessor(ctx, cluster, release, forwardManifest, err)
 	}
 	second, err := cluster.ObserveCAS(ctx, release, forwardManifest)
 	if err != nil {
 		return Observation{}, err
 	}
-	if err := second.ValidateDegradedPredecessor(); err != nil {
+	if err := second.ValidateDegradedPredecessor(release); err != nil {
+		return Observation{}, err
+	}
+	if !second.SameSpecIdentity(first) {
+		return Observation{}, errors.New("degraded predecessor identity changed during validation")
+	}
+	return second, nil
+}
+
+func prepareOwnedDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, forwardManifest []byte, lkgDrift error) (Observation, error) {
+	witness, err := RetryPredecessorConvergenceManifest(forwardManifest, release)
+	if err != nil {
+		return Observation{}, err
+	}
+	first, err := cluster.ObserveDegraded(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, fmt.Errorf("observe owned degraded predecessor: %w", err)
+	}
+	if err := first.ValidateDegradedPredecessor(release); err != nil {
+		return Observation{}, err
+	}
+	if first.ImageRef == "" {
+		return Observation{}, errors.New("owned degraded predecessor identity is absent")
+	}
+	if err := cluster.Converged(ctx, release, witness); err != nil {
+		return Observation{}, fmt.Errorf("degraded predecessor manifest drift: LKG=%v retry=%w", lkgDrift, err)
+	}
+	second, err := cluster.ObserveDegraded(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	if err := second.ValidateDegradedPredecessor(release); err != nil {
 		return Observation{}, err
 	}
 	if !second.SameSpecIdentity(first) {
@@ -353,13 +385,21 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	var current Observation
 	if prepared.DegradedPredecessor {
-		current, err = cluster.ObserveCAS(ctx, release, observationManifest)
+		if prepared.Prewrite.ImageRef == "" {
+			current, err = cluster.ObserveCAS(ctx, release, observationManifest)
+		} else {
+			current, err = cluster.ObserveDegraded(ctx, release, observationManifest)
+		}
 		if err == nil && !current.SameSpecIdentity(prepared.Prewrite) {
 			err = errors.New("degraded predecessor identity changed")
 		}
 		if err == nil {
 			var witness []byte
-			witness, err = PredecessorConvergenceManifest(lkgManifest)
+			if prepared.Prewrite.ImageRef == "" {
+				witness, err = PredecessorConvergenceManifest(lkgManifest)
+			} else {
+				witness, err = RetryPredecessorConvergenceManifest(forwardManifest, release)
+			}
 			if err == nil {
 				err = cluster.Converged(ctx, release, witness)
 			}
@@ -410,7 +450,11 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		var observeErr error
 		unchanged := false
 		if prepared.DegradedPredecessor {
-			observed, observeErr = cluster.ObserveCAS(ctx, release, observationManifest)
+			if prepared.Prewrite.ImageRef == "" {
+				observed, observeErr = cluster.ObserveCAS(ctx, release, observationManifest)
+			} else {
+				observed, observeErr = cluster.ObserveDegraded(ctx, release, observationManifest)
+			}
 			unchanged = observeErr == nil && observed.SameSpecIdentity(prepared.Prewrite)
 		} else {
 			observed, observeErr = cluster.Observe(ctx, release, prepared.LKG, observationManifest)
@@ -576,7 +620,7 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 		if !release.RetrySameLKG || !release.ExpectedPreviousPresent || plan.AlreadyConverged {
 			return errors.New("degraded predecessor execution is not authorized")
 		}
-		if err := plan.Prewrite.ValidateDegradedPredecessor(); err != nil {
+		if err := plan.Prewrite.ValidateDegradedPredecessor(release); err != nil {
 			return err
 		}
 	} else if err := plan.Prewrite.ValidateMustBeStable(); err != nil {
@@ -592,15 +636,34 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	return nil
 }
 
-func (observation Observation) ValidateDegradedPredecessor() error {
+func (observation Observation) ValidateDegradedPredecessor(release PlanRelease) error {
 	if !observation.Present || observation.UID == "" || !resourceVersionPattern.MatchString(observation.ResourceVersion) || observation.Generation < 1 {
 		return errors.New("degraded predecessor CAS is invalid")
 	}
 	if observation.ObservedGeneration != 0 || observation.Desired != 0 || observation.Updated != 0 || observation.Ready != 0 ||
-		observation.Available != 0 || observation.Unavailable != 0 || observation.ImageRef != "" || observation.ImageID != "" ||
-		observation.ConfigSHA != "" || observation.ManifestSHA != "" || observation.OCIRevision != "" || observation.TemplateDigest != "" ||
-		observation.HealthDigest != "" || len(observation.FieldManagers) != 0 {
+		observation.Available != 0 || observation.Unavailable != 0 || observation.ImageID != "" || observation.HealthDigest != "" {
 		return errors.New("degraded predecessor observation carries unverified health state")
+	}
+	owned := observation.ImageRef != "" || observation.ConfigSHA != "" || observation.ManifestSHA != "" ||
+		observation.OCIRevision != "" || observation.TemplateDigest != "" || len(observation.FieldManagers) != 0
+	if owned {
+		separator := strings.LastIndex(observation.ImageRef, "@")
+		if separator < 1 || !digestPattern.MatchString(observation.ImageRef[separator+1:]) ||
+			!shaPattern.MatchString(observation.ConfigSHA) || observation.ManifestSHA != observation.ConfigSHA ||
+			observation.OCIRevision != observation.ConfigSHA || !digestPattern.MatchString(observation.TemplateDigest) ||
+			!sort.StringsAreSorted(observation.FieldManagers) {
+			return errors.New("owned degraded predecessor identity is invalid")
+		}
+		ownedByComponent := false
+		for _, manager := range observation.FieldManagers {
+			if manager == release.Workload.FieldManager {
+				ownedByComponent = true
+				break
+			}
+		}
+		if !ownedByComponent {
+			return errors.New("owned degraded predecessor field manager is invalid")
+		}
 	}
 	return observation.validateResourceCAS()
 }
@@ -703,7 +766,10 @@ func (observation Observation) SameCAS(other Observation) bool {
 // immediate server-side-apply CAS precondition.
 func (observation Observation) SameSpecIdentity(other Observation) bool {
 	if observation.Present != other.Present || observation.Primary != other.Primary || observation.UID != other.UID ||
-		observation.Generation != other.Generation || len(observation.Resources) != len(other.Resources) {
+		observation.Generation != other.Generation || observation.ImageRef != other.ImageRef ||
+		observation.ConfigSHA != other.ConfigSHA || observation.ManifestSHA != other.ManifestSHA ||
+		observation.OCIRevision != other.OCIRevision || observation.TemplateDigest != other.TemplateDigest ||
+		!equalStrings(observation.FieldManagers, other.FieldManagers) || len(observation.Resources) != len(other.Resources) {
 		return false
 	}
 	for index := range observation.Resources {

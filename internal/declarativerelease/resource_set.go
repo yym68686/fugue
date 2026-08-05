@@ -239,6 +239,101 @@ func PredecessorConvergenceManifest(manifest []byte) ([]byte, error) {
 	return CanonicalJSON(set)
 }
 
+// RetryPredecessorConvergenceManifest binds an unhealthy prior declarative
+// attempt to the current reviewed resource shape while excluding only the
+// immutable image and release identity injected by the renderer. The caller
+// separately verifies that the live object is owned by this component's field
+// manager and that its immutable image carries the same OCI revision as its
+// source annotations.
+func RetryPredecessorConvergenceManifest(manifest []byte, release PlanRelease) ([]byte, error) {
+	set, err := DecodeResourceSet(bytes.NewReader(manifest))
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range set.Items {
+		metadata, metadataErr := objectField(item, "metadata")
+		if metadataErr != nil {
+			return nil, metadataErr
+		}
+		if annotations, ok := metadata["annotations"].(map[string]any); ok {
+			delete(annotations, "fugue.pro/production-config-sha")
+			delete(annotations, "fugue.pro/release-plan-digest")
+			delete(annotations, "fugue.pro/artifact-receipt-digest")
+		}
+	}
+	targets := release.ArtifactTargets
+	if len(targets) == 0 {
+		targets = []ArtifactTarget{{
+			APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
+			Namespace: release.Workload.Namespace, Name: release.Workload.Name,
+			Container: release.Workload.Container, ContainerType: "container",
+		}}
+	}
+	cleanedWorkloads := make(map[string]struct{})
+	for _, target := range targets {
+		item, targetErr := resourceSetTarget(&set, target)
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		workloadKey := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name
+		if _, exists := cleanedWorkloads[workloadKey]; !exists {
+			spec, specErr := objectField(item, "spec")
+			if specErr != nil {
+				return nil, specErr
+			}
+			template, templateErr := objectField(spec, "template")
+			if templateErr != nil {
+				return nil, templateErr
+			}
+			templateMetadata, metadataErr := objectField(template, "metadata")
+			if metadataErr != nil {
+				return nil, metadataErr
+			}
+			if annotations, ok := templateMetadata["annotations"].(map[string]any); ok {
+				delete(annotations, "fugue.pro/source-commit")
+				delete(annotations, "fugue.pro/oci-revision")
+				delete(annotations, "fugue.pro/production-config-sha")
+			}
+			cleanedWorkloads[workloadKey] = struct{}{}
+		}
+		spec, specErr := objectField(item, "spec")
+		if specErr != nil {
+			return nil, specErr
+		}
+		template, templateErr := objectField(spec, "template")
+		if templateErr != nil {
+			return nil, templateErr
+		}
+		podSpec, podSpecErr := objectField(template, "spec")
+		if podSpecErr != nil {
+			return nil, podSpecErr
+		}
+		field := "containers"
+		if target.ContainerType == "init-container" {
+			field = "initContainers"
+		}
+		containers, ok := podSpec[field].([]any)
+		if !ok {
+			return nil, fmt.Errorf("artifact target %s are invalid", field)
+		}
+		matches := 0
+		for _, raw := range containers {
+			container, ok := raw.(map[string]any)
+			if !ok {
+				return nil, errors.New("artifact target container is not an object")
+			}
+			if stringField(container, "name") == target.Container {
+				delete(container, "image")
+				matches++
+			}
+		}
+		if matches != 1 {
+			return nil, fmt.Errorf("workload manifest must contain exactly one %q %s", target.Container, target.ContainerType)
+		}
+	}
+	return CanonicalJSON(set)
+}
+
 func desiredSubset(desired, live any, path string) bool {
 	switch typed := desired.(type) {
 	case map[string]any:

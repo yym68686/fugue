@@ -3,6 +3,7 @@ package declarativerelease
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -87,6 +88,53 @@ func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *test
 	} {
 		if !bytes.Contains(witness, retained) {
 			t.Fatalf("operational predecessor field %q was dropped: %s", retained, witness)
+		}
+	}
+}
+
+func TestRetryPredecessorConvergenceManifestDropsOnlyRenderedTargetIdentity(t *testing.T) {
+	release := PlanRelease{
+		Workload: Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "telemetry", Container: "telemetry-agent", FieldManager: "fugue-telemetry-declarative"},
+	}
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/artifact-receipt-digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/release-plan-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","stable.example/key":"keep"},"labels":{"app.kubernetes.io/managed-by":"fugue-telemetry-declarative"},"name":"telemetry","namespace":"fugue-system"},"spec":{"replicas":1,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"1111111111111111111111111111111111111111","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/source-commit":"1111111111111111111111111111111111111111"}},"spec":{"containers":[{"env":[{"name":"LIMIT","value":"16"}],"image":"ghcr.io/example/telemetry@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"telemetry-agent"}]}}}}],"kind":"ComponentResourceSet"}`)
+	witnessRaw, err := RetryPredecessorConvergenceManifest(manifest, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"fugue.pro/artifact-receipt-digest", "fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/oci-revision", "fugue.pro/source-commit", "ghcr.io/example/telemetry@"} {
+		if bytes.Contains(witnessRaw, []byte(removed)) {
+			t.Fatalf("rendered identity %q remains in retry witness: %s", removed, witnessRaw)
+		}
+	}
+	for _, retained := range []string{"app.kubernetes.io/managed-by", "fugue-telemetry-declarative", "stable.example/key", `"name":"LIMIT"`, `"value":"16"`, `"replicas":1`} {
+		if !bytes.Contains(witnessRaw, []byte(retained)) {
+			t.Fatalf("operational field %q was dropped: %s", retained, witnessRaw)
+		}
+	}
+	witness, err := DecodeResourceSet(bytes.NewReader(witnessRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := deepCopyMap(witness.Items[0])
+	container := live["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["image"] = "ghcr.io/example/telemetry@sha256:" + strings.Repeat("9", 64)
+	live["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"] = map[string]any{"fugue.pro/source-commit": strings.Repeat("9", 40)}
+	if !ResourceDesiredSubset(witness.Items[0], live) {
+		t.Fatal("exact operational predecessor with different rendered identity was rejected")
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"manager": func(value map[string]any) {
+			value["metadata"].(map[string]any)["labels"].(map[string]any)["app.kubernetes.io/managed-by"] = "other"
+		},
+		"env": func(value map[string]any) {
+			value["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["env"].([]any)[0].(map[string]any)["value"] = "64"
+		},
+		"replicas": func(value map[string]any) { value["spec"].(map[string]any)["replicas"] = 2 },
+	} {
+		drifted := deepCopyMap(live)
+		mutate(drifted)
+		if ResourceDesiredSubset(witness.Items[0], drifted) {
+			t.Fatalf("%s drift was accepted", name)
 		}
 	}
 }

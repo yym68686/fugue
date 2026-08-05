@@ -13,6 +13,7 @@ type fakeCluster struct {
 	observations      []Observation
 	observationErrors []error
 	cas               []Observation
+	degraded          []Observation
 	verifiedTargets   []TargetIdentity
 	verifyErrors      []error
 	dryRuns           int
@@ -23,6 +24,7 @@ type fakeCluster struct {
 	healthErrors      []error
 	healthTargets     []TargetIdentity
 	converged         [][]byte
+	convergedErrors   []error
 }
 
 func (fake *fakeCluster) Observe(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error) {
@@ -47,6 +49,15 @@ func (fake *fakeCluster) ObserveCAS(context.Context, PlanRelease, []byte) (Obser
 	}
 	value := fake.cas[0]
 	fake.cas = fake.cas[1:]
+	return value, nil
+}
+
+func (fake *fakeCluster) ObserveDegraded(context.Context, PlanRelease, []byte) (Observation, error) {
+	if len(fake.degraded) == 0 {
+		return Observation{}, errors.New("no degraded observation")
+	}
+	value := fake.degraded[0]
+	fake.degraded = fake.degraded[1:]
 	return value, nil
 }
 
@@ -102,6 +113,11 @@ func (fake *fakeCluster) WaitHealthy(_ context.Context, _ PlanRelease, target Ta
 
 func (fake *fakeCluster) Converged(_ context.Context, _ PlanRelease, manifest []byte) error {
 	fake.converged = append(fake.converged, append([]byte(nil), manifest...))
+	if len(fake.convergedErrors) > 0 {
+		err := fake.convergedErrors[0]
+		fake.convergedErrors = fake.convergedErrors[1:]
+		return err
+	}
 	return nil
 }
 
@@ -248,6 +264,70 @@ func TestPrepareAndExecuteRecoverAnExactDegradedSameLKGPredecessor(t *testing.T)
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 || fake.applies != 1 {
 		t.Fatalf("degraded predecessor did not execute with a fresh CAS: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestPrepareAndExecuteRecoverAnOwnedDegradedPriorAttempt(t *testing.T) {
+	plan, receipt, rendered, lkg, forward := retryExecutionFixture(t)
+	legacyCAS := casOnlyObservation(lkg)
+	prior := casOnlyObservation(lkg)
+	prior.ImageRef = "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("9", 64)
+	prior.ConfigSHA = strings.Repeat("9", 40)
+	prior.ManifestSHA = prior.ConfigSHA
+	prior.OCIRevision = prior.ConfigSHA
+	prior.TemplateDigest = "sha256:" + strings.Repeat("8", 64)
+	prior.FieldManagers = []string{plan.Releases[0].Workload.FieldManager}
+	fake := &fakeCluster{
+		cas:             []Observation{legacyCAS},
+		degraded:        []Observation{prior, prior},
+		convergedErrors: []error{errors.New("live is not the declared LKG"), nil},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || !prepared.DegradedPredecessor || prepared.Prewrite.ImageRef != prior.ImageRef || fake.dryRuns != 2 {
+		t.Fatalf("prepare owned degraded predecessor: plan=%+v dryRuns=%d err=%v", prepared, fake.dryRuns, err)
+	}
+	current := prior
+	current.ResourceVersion = "11"
+	current.Resources = append([]ResourceObservation(nil), prior.Resources...)
+	current.Resources[0].ResourceVersion = "11"
+	fake.degraded = []Observation{current}
+	fake.convergedErrors = []error{nil}
+	fake.health = []Observation{forward}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 || fake.applies != 1 {
+		t.Fatalf("owned degraded predecessor did not execute: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestPrepareOwnedDegradedPriorAttemptRejectsOwnershipAndSpecDrift(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := retryExecutionFixture(t)
+	legacyCAS := casOnlyObservation(lkg)
+	prior := casOnlyObservation(lkg)
+	prior.ImageRef = "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("9", 64)
+	prior.ConfigSHA = strings.Repeat("9", 40)
+	prior.ManifestSHA = prior.ConfigSHA
+	prior.OCIRevision = prior.ConfigSHA
+	prior.TemplateDigest = "sha256:" + strings.Repeat("8", 64)
+	fake := &fakeCluster{
+		cas:             []Observation{legacyCAS},
+		degraded:        []Observation{prior},
+		convergedErrors: []error{errors.New("live is not the declared LKG")},
+	}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "field manager") {
+		t.Fatalf("unowned degraded predecessor was accepted: %v", err)
+	}
+
+	prior.FieldManagers = []string{plan.Releases[0].Workload.FieldManager}
+	drift := prior
+	drift.Resources = append([]ResourceObservation(nil), prior.Resources...)
+	drift.Resources[0].ObjectDigest = "sha256:" + strings.Repeat("7", 64)
+	fake = &fakeCluster{
+		cas:             []Observation{legacyCAS},
+		degraded:        []Observation{prior, drift},
+		convergedErrors: []error{errors.New("live is not the declared LKG"), nil},
+	}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("changing owned predecessor was accepted: %v", err)
 	}
 }
 

@@ -74,6 +74,41 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	}
 }
 
+func TestParseDegradedObservationKeepsOwnedIdentityWithoutPodHealth(t *testing.T) {
+	revision := strings.Repeat("9", 40)
+	release := declarativerelease.PlanRelease{
+		ComponentID: "telemetry",
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "telemetry",
+			Container: "telemetry-agent", FieldManager: "fugue-telemetry-declarative", Replicas: 1,
+		},
+	}
+	workload := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"name": "telemetry", "namespace": "fugue-system", "uid": "telemetry-uid", "resourceVersion": "42", "generation": 7,
+			"annotations":   map[string]any{"fugue.pro/production-config-sha": revision},
+			"managedFields": []any{map[string]any{"manager": "fugue-telemetry-declarative"}},
+		},
+		"spec": map[string]any{
+			"replicas": 1,
+			"template": map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": revision, "fugue.pro/oci-revision": revision}},
+				"spec":     map[string]any{"containers": []any{map[string]any{"name": "telemetry-agent", "image": "ghcr.io/example/telemetry@sha256:" + strings.Repeat("a", 64)}}},
+			},
+		},
+		"status": map[string]any{"observedGeneration": 7, "updatedReplicas": 1, "readyReplicas": 0, "availableReplicas": 0, "unavailableReplicas": 1},
+	}
+	observation, err := parseDegradedObservation(mustJSON(t, workload), release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.ConfigSHA != revision || observation.ManifestSHA != revision || observation.OCIRevision != revision ||
+		observation.Ready != 0 || observation.HealthDigest != "" || len(observation.FieldManagers) != 1 {
+		t.Fatalf("unexpected degraded observation: %+v", observation)
+	}
+}
+
 func TestParseObservationAllowsOnlyStableHistoricalLKGRestarts(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ComponentID: "telemetry",
