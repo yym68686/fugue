@@ -21,7 +21,7 @@ func TestRenderManifestsChangesOnlyReleaseIdentityAndSelectedImage(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"existing":"keep"},"labels":{"app":"api"},"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"api"}},"strategy":{"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"old"},"labels":{"app":"api"}},"spec":{"containers":[{"env":[{"name":"KEEP","value":"yes"}],"image":"ghcr.io/example/fugue-api:old","name":"api"},{"image":"example/sidecar@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","name":"sidecar"}]}}}}],"kind":"ComponentResourceSet"}`)
+	base := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"existing":"keep"},"labels":{"app":"api","app.kubernetes.io/managed-by":"Helm"},"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"api"}},"strategy":{"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"old"},"labels":{"app":"api"}},"spec":{"containers":[{"env":[{"name":"KEEP","value":"yes"}],"image":"ghcr.io/example/fugue-api:old","name":"api"},{"image":"example/sidecar@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","name":"sidecar"}]}}}}],"kind":"ComponentResourceSet"}`)
 	rendered, err := RenderManifests(plan, "api", receipt, bytes.NewReader(base), bytes.NewReader(base))
 	if err != nil {
 		t.Fatalf("render manifests: %v", err)
@@ -49,6 +49,12 @@ func TestRenderManifestsChangesOnlyReleaseIdentityAndSelectedImage(t *testing.T)
 	}
 	if forwardContainers[0].(map[string]any)["env"].([]any)[0].(map[string]any)["value"] != "yes" {
 		t.Fatal("unrelated workload configuration changed")
+	}
+	for label, set := range map[string]ResourceSet{"forward": forward, "lkg": lkg} {
+		labels := set.Items[0]["metadata"].(map[string]any)["labels"].(map[string]any)
+		if labels["app.kubernetes.io/managed-by"] != "Helm" {
+			t.Fatalf("%s renderer rewrote declared ownership label: %#v", label, labels)
+		}
 	}
 }
 

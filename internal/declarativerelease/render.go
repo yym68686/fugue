@@ -206,8 +206,6 @@ func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, m
 		annotations["fugue.pro/production-config-sha"] = configSHA
 		annotations["fugue.pro/release-plan-digest"] = planDigest
 		annotations["fugue.pro/artifact-receipt-digest"] = receiptDigest
-		labels := ensureStringMap(metadata, "labels")
-		labels["app.kubernetes.io/managed-by"] = release.Workload.FieldManager
 	}
 	targets := release.ArtifactTargets
 	if len(targets) == 0 {
@@ -225,7 +223,7 @@ func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, m
 		}
 		workloadKey := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name
 		if _, exists := patchedWorkloads[workloadKey]; !exists {
-			if err := patchWorkloadIdentity(item, release.Workload.FieldManager, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest); err != nil {
+			if err := patchWorkloadIdentity(item, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest); err != nil {
 				return err
 			}
 			patchedWorkloads[workloadKey] = struct{}{}
@@ -248,7 +246,7 @@ func validateManifestIdentity(value map[string]any, workload Workload) error {
 	return nil
 }
 
-func patchWorkloadIdentity(value map[string]any, fieldManager, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string) error {
+func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string) error {
 	metadata, err := objectField(value, "metadata")
 	if err != nil {
 		return err
@@ -257,9 +255,6 @@ func patchWorkloadIdentity(value map[string]any, fieldManager, configSHA, manife
 	annotations["fugue.pro/production-config-sha"] = configSHA
 	annotations["fugue.pro/release-plan-digest"] = planDigest
 	annotations["fugue.pro/artifact-receipt-digest"] = receiptDigest
-	labels := ensureStringMap(metadata, "labels")
-	labels["app.kubernetes.io/managed-by"] = fieldManager
-
 	spec, err := objectField(value, "spec")
 	if err != nil {
 		return err

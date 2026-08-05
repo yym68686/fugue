@@ -37,7 +37,7 @@ func TestDeclarativeAPIManifestOwnsTrustedRouteIntentTLS(t *testing.T) {
 	}
 	servicePort := apiTLSNamedObject(t, apiTLSArray(t, serviceSpec, "ports"), "name", "https-route-intent")
 	if port, ok := integerField(servicePort["port"]); !ok || port != 8443 ||
-		stringField(servicePort, "targetPort") != "route-intent-tls" || stringField(servicePort, "protocol") != "TCP" {
+		stringField(servicePort, "targetPort") != "route-intent" || stringField(servicePort, "protocol") != "TCP" {
 		t.Fatalf("route-intent TLS service port drifted: %#v", servicePort)
 	}
 
@@ -61,7 +61,7 @@ func TestDeclarativeAPIManifestOwnsTrustedRouteIntentTLS(t *testing.T) {
 			t.Fatalf("route-intent TLS env %s drifted: %#v", name, entry)
 		}
 	}
-	containerPort := apiTLSNamedObject(t, apiTLSArray(t, api, "ports"), "name", "route-intent-tls")
+	containerPort := apiTLSNamedObject(t, apiTLSArray(t, api, "ports"), "name", "route-intent")
 	if port, ok := integerField(containerPort["containerPort"]); !ok || port != 8443 || stringField(containerPort, "protocol") != "TCP" {
 		t.Fatalf("route-intent TLS container port drifted: %#v", containerPort)
 	}
@@ -88,6 +88,31 @@ func TestDeclarativeAPIManifestOwnsTrustedRouteIntentTLS(t *testing.T) {
 	sort.Strings(keys)
 	if want := []string{"ca.crt", "tls.crt", "tls.key"}; !reflect.DeepEqual(keys, want) {
 		t.Fatalf("route-intent TLS Secret keyset drifted: got=%v want=%v", keys, want)
+	}
+}
+
+func TestDeclarativeAPILKGPreservesLegacyOwnershipUntilFirstHandoff(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/releases/api/lkg.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := DecodeResourceSet(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := ResourceSetItem(mustCanonical(set), ResourceIdentity{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := apiTLSObject(t, deployment, "metadata")
+	annotations := ensureReadStringMap(metadata, "annotations")
+	if _, exists := annotations["fugue.pro/api-ownership"]; exists {
+		t.Fatal("legacy API LKG prematurely claims declarative ownership")
+	}
+	if annotations["meta.helm.sh/release-name"] != "fugue" || annotations["meta.helm.sh/release-namespace"] != "fugue-system" {
+		t.Fatalf("legacy Helm ownership witness drifted: %#v", annotations)
 	}
 }
 
