@@ -89,14 +89,24 @@ func (group EdgeGroup) validate() error {
 		return errors.New("edge worker transition is not bound to the registry group")
 	}
 	readyPath := "/v1/authority/groups/" + group.GroupID + "/readyz"
-	readyBound := false
+	controlProcessReady := false
+	legacyControlPublicationReady := false
 	for _, probe := range group.Control.Health {
+		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/readyz" {
+			controlProcessReady = true
+		}
 		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath {
-			readyBound = true
+			legacyControlPublicationReady = true
 		}
 	}
-	if !readyBound {
-		return errors.New("edge control health is not bound to the registry group")
+	publicationReady := false
+	for _, probe := range group.Worker.Health {
+		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath {
+			publicationReady = true
+		}
+	}
+	if !legacyControlPublicationReady && (!controlProcessReady || !publicationReady) {
+		return errors.New("edge control process and worker publication health must be group-bound")
 	}
 	if group.Worker.BootstrapLKGPath == "" || !group.Worker.HeterogeneousBootstrapLKG || !strings.Contains(group.Worker.BootstrapLKGPath, group.ID) {
 		return errors.New("edge worker semantic LKG is not group-scoped")
@@ -180,6 +190,9 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			continue
 		}
 		delete(before, group.ID)
+		if edgeGroupUsesStagedHealth(prior) && !edgeGroupUsesStagedHealth(group) {
+			return fmt.Errorf("edge group %q cannot regress staged publication health", group.ID)
+		}
 		for _, pair := range []struct {
 			id             string
 			previous, next Component
@@ -210,4 +223,17 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 		return errors.New("edge group registry cannot remove an existing group")
 	}
 	return nil
+}
+
+func edgeGroupUsesStagedHealth(group EdgeGroup) bool {
+	readyPath := "/v1/authority/groups/" + group.GroupID + "/readyz"
+	controlReady := false
+	publicationReady := false
+	for _, probe := range group.Control.Health {
+		controlReady = controlReady || (probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/readyz")
+	}
+	for _, probe := range group.Worker.Health {
+		publicationReady = publicationReady || (probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath)
+	}
+	return controlReady && publicationReady
 }

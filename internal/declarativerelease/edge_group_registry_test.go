@@ -219,6 +219,28 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	}
 }
 
+func TestEdgeGroupPublicationHealthMigratesForwardOnly(t *testing.T) {
+	legacy := edgeGroupFixture("alpha", "edge-group-metro-alpha")
+	legacy.Control.MigrationState = "pending"
+	legacy.Worker.MigrationState = "pending"
+	legacy.Control.Health[1].Path = "/v1/authority/groups/" + legacy.GroupID + "/readyz"
+	legacy.Worker.Health = append(legacy.Worker.Health[:1], legacy.Worker.Health[2:]...)
+	if err := legacy.validate(); err != nil {
+		t.Fatalf("read legacy group health: %v", err)
+	}
+	staged := edgeGroupFixture("alpha", "edge-group-metro-alpha")
+	staged.Control.MigrationState = "pending"
+	staged.Worker.MigrationState = "pending"
+	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{legacy}}
+	current := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{staged}}
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, Plan{}, []string{"deploy/releases/edge-groups.json"}); err != nil {
+		t.Fatalf("legacy to staged health migration: %v", err)
+	}
+	if err := ValidateEdgeGroupRegistryUpdate(&current, previous, Plan{}, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "cannot regress") {
+		t.Fatalf("staged health regressed to legacy: %v", err)
+	}
+}
+
 func TestPendingSharedEdgeManifestTemplateIsConfigurationOnly(t *testing.T) {
 	base := Registry{APIVersion: RegistryAPIVersion, Kind: RegistryKind, Components: []Component{
 		edgeGroupFixture("gamma", "edge-group-metro-gamma").Control,
@@ -250,7 +272,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		SourceRoots: []string{"Dockerfile.edge-control", "cmd/fugue-edge-control", "internal/edgecontrol"},
 		Artifact:    Artifact{Repository: "ghcr.io/example/fugue-edge-control", Dockerfile: "Dockerfile.edge-control", Context: ".", BuildPackage: "./cmd/fugue-edge-control"},
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", FieldManager: "fugue-edge-control-" + id + "-declarative", Replicas: 1, RolloutMode: "recreate"},
-		Health:      []HealthProbe{{Type: "deployment", Name: controlName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/v1/authority/groups/" + groupID + "/readyz"}},
+		Health:      []HealthProbe{{Type: "deployment", Name: controlName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/readyz"}},
 		Concurrency: "fugue-production-edge-control-" + id, MigrationState: "independent",
 	}
 	worker := Component{
@@ -272,7 +294,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		},
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: frontName, Container: "edge-front", FieldManager: "fugue-edge-worker-" + id + "-declarative", RolloutMode: "on-delete"},
 		Transition:  &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: groupID, FrontName: frontName, WorkerAName: workerAName, WorkerBName: workerBName, WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
-		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
+		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/v1/authority/groups/" + groupID + "/readyz"}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
 		Concurrency: "fugue-production-edge-worker-" + id, MigrationState: "independent",
 	}
 	return EdgeGroup{ID: id, GroupID: groupID, Control: control, Worker: worker}
