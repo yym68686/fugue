@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,11 @@ import (
 )
 
 const maxKubernetesOutputBytes = 4 << 20
+
+var (
+	adoptionConflictCountPattern = regexp.MustCompile(`Apply failed with ([1-9][0-9]*) conflicts?`)
+	adoptionConflictPattern      = regexp.MustCompile(`conflict with "([^"]+)" using [^:]+: (\.[^[:space:]]+)`)
+)
 
 type kubectlCluster struct {
 	kubectl  string
@@ -219,7 +225,7 @@ func (cluster *kubectlCluster) DryRunOwnershipAdoption(ctx context.Context, rele
 	if err != nil {
 		return err
 	}
-	return cluster.applyOwnershipAdoptionSet(ctx, release, manifest, true)
+	return cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, true)
 }
 
 func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkg declarativerelease.TargetIdentity, lkgManifest []byte) (declarativerelease.Observation, error) {
@@ -227,7 +233,7 @@ func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release decla
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, manifest, false)
+	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
 	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
 		if applyErr != nil {
 			return declarativerelease.Observation{}, fmt.Errorf("apply ownership adoption: %v; verify ownership adoption: %w", applyErr, err)
@@ -241,7 +247,7 @@ func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release decla
 	return observation, nil
 }
 
-func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, dryRun bool) error {
+func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, manifest []byte, dryRun bool) error {
 	identities, err := declarativerelease.ResourceSetIdentities(manifest)
 	if err != nil {
 		return err
@@ -249,6 +255,10 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 	arguments, err := adoptionApplyArguments(release, dryRun)
 	if err != nil {
 		return err
+	}
+	scopes := make(map[declarativerelease.ResourceIdentity]declarativerelease.OwnershipAdoptionResourcePlan, len(adoption.Resources))
+	for _, scope := range adoption.Resources {
+		scopes[scope.Identity] = scope
 	}
 	for _, identity := range identities {
 		item, err := declarativerelease.ResourceSetItem(manifest, identity)
@@ -259,11 +269,60 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 		if err != nil {
 			return err
 		}
-		if _, err := cluster.kubectlRun(ctx, encoded, arguments...); err != nil {
-			return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
+		if _, applyErr := cluster.kubectlRun(ctx, encoded, arguments...); applyErr != nil {
+			scope, exists := scopes[identity]
+			if !exists {
+				return fmt.Errorf("adopt %s/%s has no reviewed scope", identity.Kind, identity.Name)
+			}
+			if err := validateAdoptionConflicts(applyErr, adoption.LegacyFieldManager, scope.Fields); err != nil {
+				return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
+			}
+			forceArguments, err := adoptionForceApplyArguments(release, dryRun)
+			if err != nil {
+				return err
+			}
+			if _, forceErr := cluster.kubectlRun(ctx, encoded, forceArguments...); forceErr != nil {
+				return fmt.Errorf("adopt %s/%s reviewed force-conflicts: %w", identity.Kind, identity.Name, forceErr)
+			}
 		}
 	}
 	return nil
+}
+
+func validateAdoptionConflicts(applyErr error, manager string, fields []string) error {
+	if applyErr == nil || manager == "" || len(fields) == 0 {
+		return errors.New("ownership adoption conflict evidence is incomplete")
+	}
+	raw := applyErr.Error()
+	countMatch := adoptionConflictCountPattern.FindStringSubmatch(raw)
+	matches := adoptionConflictPattern.FindAllStringSubmatch(raw, -1)
+	if len(countMatch) != 2 || len(matches) == 0 {
+		return errors.New("ownership adoption failure is not a typed SSA conflict")
+	}
+	count, err := strconv.Atoi(countMatch[1])
+	if err != nil || count != len(matches) {
+		return errors.New("ownership adoption conflict count is inconsistent")
+	}
+	for _, match := range matches {
+		if match[1] != manager || !adoptionFieldAllowed(match[2], fields) {
+			return fmt.Errorf("ownership adoption conflict %s:%s is outside the reviewed allowlist", match[1], match[2])
+		}
+	}
+	return nil
+}
+
+func adoptionFieldAllowed(field string, pointers []string) bool {
+	for _, pointer := range pointers {
+		parts := strings.Split(strings.TrimPrefix(pointer, "/"), "/")
+		for index, part := range parts {
+			parts[index] = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+		}
+		prefix := "." + strings.Join(parts, ".")
+		if field == prefix || strings.HasPrefix(field, prefix+".") || strings.HasPrefix(field, prefix+"[") {
+			return true
+		}
+	}
+	return false
 }
 
 func (cluster *kubectlCluster) verifyOwnershipAdoption(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
@@ -644,15 +703,24 @@ func adoptionApplyArguments(release declarativerelease.PlanRelease, dryRun bool)
 	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil {
 		return nil, errors.New("ownership adoption is not explicitly authorized")
 	}
-	// The adoption manifest already contains only the reviewed LKG fields. Use
-	// ordinary SSA unless a future group presents a separately reviewed,
-	// reproducible conflict set; this migration's production dry-run proved the
-	// legacy Helm manager can co-own identical values without force.
 	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager}
 	if dryRun {
 		arguments = append(arguments, "--dry-run=server")
 	}
 	return append(arguments, "--filename", "-", "--output", "json"), nil
+}
+
+func adoptionForceApplyArguments(release declarativerelease.PlanRelease, dryRun bool) ([]string, error) {
+	arguments, err := adoptionApplyArguments(release, dryRun)
+	if err != nil {
+		return nil, err
+	}
+	for index, argument := range arguments {
+		if argument == "--filename" {
+			return append(append(append([]string(nil), arguments[:index]...), "--force-conflicts"), arguments[index:]...), nil
+		}
+	}
+	return nil, errors.New("ownership adoption apply arguments are invalid")
 }
 
 func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {

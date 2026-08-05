@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -364,6 +365,27 @@ func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 	}
 	if args := strings.Join(adoption, " "); strings.Contains(args, "--force-conflicts") || !strings.Contains(args, "--dry-run=server") {
 		t.Fatalf("explicit adoption args are incomplete: %s", args)
+	}
+	force, err := adoptionForceApplyArguments(release, true)
+	if err != nil || !strings.Contains(strings.Join(force, " "), "--force-conflicts") {
+		t.Fatalf("reviewed adoption conflict did not produce force arguments: %v %v", force, err)
+	}
+}
+
+func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
+	allowed := errors.New(`command failed: exit status 1: error: Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.containers[name="edge-front"].image`)
+	if err := validateAdoptionConflicts(allowed, "kubectl-patch", []string{"/spec/template"}); err != nil {
+		t.Fatalf("reviewed conflict was rejected: %v", err)
+	}
+	if err := validateAdoptionConflicts(allowed, "helm", []string{"/spec/template"}); err == nil {
+		t.Fatal("unreviewed field manager was accepted")
+	}
+	if err := validateAdoptionConflicts(allowed, "kubectl-patch", []string{"/metadata/annotations"}); err == nil {
+		t.Fatal("out-of-scope conflict field was accepted")
+	}
+	inconsistent := errors.New(`error: Apply failed with 2 conflicts: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.containers[name="edge-front"].image`)
+	if err := validateAdoptionConflicts(inconsistent, "kubectl-patch", []string{"/spec/template"}); err == nil {
+		t.Fatal("inconsistent conflict count was accepted")
 	}
 }
 
