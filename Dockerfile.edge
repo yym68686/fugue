@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # This is the exact Caddy manifest digest already attested by the existing
 # public Edge production transaction. The final Edge artifact carries the
 # binary so worker, front, identity-init, and Caddy share one release digest.
-FROM docker.io/library/caddy:2.10.2-alpine@sha256:e088ffae92d9f4803cceccfc33f961fe5545ba0efed0c2ec1899ef37951af8e5 AS caddy
+FROM docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d AS caddy
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
