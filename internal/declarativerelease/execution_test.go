@@ -325,6 +325,36 @@ func TestPrepareBindsExplicitOwnershipAdoptionToLKGAndLiveCAS(t *testing.T) {
 	}
 }
 
+func TestBindOwnershipAdoptionRecognizesAnExactExistingDeclarativeManager(t *testing.T) {
+	plan := boundAPIPlan(t)
+	release := plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm",
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+			Fields:   []string{"/spec/template"},
+		}},
+	}
+	lkg := TargetIdentity{
+		Present: true, ImageRef: release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest,
+		ConfigSHA: release.ExpectedPreviousConfigSHA, ManifestSHA: release.ExpectedPreviousManifestSHA,
+		OCIRevision: release.ExpectedPreviousOCIRevision, ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	prewrite := stableObservation("uid", "10", lkg.ImageRef, lkg.ConfigSHA)
+	prewrite.FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	prewrite.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	adoption, err := bindOwnershipAdoption(release, lkg, prewrite)
+	if err != nil || adoption == nil || !adoption.AlreadyConverged {
+		t.Fatalf("exact existing declarative ownership was not resumable: adoption=%+v err=%v", adoption, err)
+	}
+	prewrite.Resources[0].FieldManagers = []string{"helm"}
+	if _, err := bindOwnershipAdoption(release, lkg, prewrite); err == nil {
+		t.Fatal("partially adopted ownership was accepted")
+	}
+}
+
 func TestExecuteAdoptsReviewedLKGFieldsBeforeOrdinaryForwardApply(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.PlanDigest = ""

@@ -241,6 +241,9 @@ func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release decla
 		}
 		return declarativerelease.Observation{}, err
 	}
+	if err := cluster.Converged(ctx, release, lkgManifest); err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("verify adopted bootstrap LKG convergence: %w", err)
+	}
 	observation, observeErr := cluster.observeExpected(ctx, release, lkg.OCIRevision, lkgManifest, true)
 	if observeErr != nil {
 		return declarativerelease.Observation{}, observeErr
@@ -363,7 +366,7 @@ func (cluster *kubectlCluster) verifyOwnershipAdoption(ctx context.Context, rele
 			return err
 		}
 		metadata := mapField(value, "metadata")
-		if stringValue(metadata["uid"]) != scope.UID || int64Value(metadata["generation"]) != scope.Generation ||
+		if stringValue(metadata["uid"]) != scope.UID || int64Value(metadata["generation"]) < scope.Generation ||
 			!managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scope.Fields) {
 			return fmt.Errorf("adopted %s/%s ownership is incomplete", scope.Identity.Kind, scope.Identity.Name)
 		}
