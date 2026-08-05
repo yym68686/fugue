@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -39,7 +40,7 @@ type componentLeaseCoordinator struct {
 }
 
 func newComponentLeaseCoordinator() (*componentLeaseCoordinator, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", "")
+	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("load Kubernetes client config for component lease: %w", err)
 	}
@@ -48,6 +49,18 @@ func newComponentLeaseCoordinator() (*componentLeaseCoordinator, error) {
 		return nil, fmt.Errorf("create Kubernetes client for component lease: %w", err)
 	}
 	return &componentLeaseCoordinator{client: client, now: time.Now}, nil
+}
+
+func loadComponentLeaseClientConfig() (*rest.Config, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	if config == nil || strings.TrimSpace(config.Host) == "" {
+		return nil, errors.New("Kubernetes client config is empty")
+	}
+	return config, nil
 }
 
 func componentLeaseHolder(release declarativerelease.PlanRelease, configSHA string) (string, error) {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,48 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
+
+func TestComponentLeaseLoadsDefaultKubeconfigAndFailsClosed(t *testing.T) {
+	directory := t.TempDir()
+	valid := filepath.Join(directory, "config")
+	content := []byte("apiVersion: v1\nkind: Config\nclusters:\n- name: production\n  cluster:\n    server: https://127.0.0.1:6443\n    insecure-skip-tls-verify: true\ncontexts:\n- name: production\n  context:\n    cluster: production\n    user: release\ncurrent-context: production\nusers:\n- name: release\n  user:\n    token: test-only-token\n")
+	if err := os.WriteFile(valid, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", valid)
+	config, err := loadComponentLeaseClientConfig()
+	if err != nil || config.Host != "https://127.0.0.1:6443" {
+		t.Fatalf("default kubeconfig loading rules did not select the explicit runner config: host=%q err=%v", config.Host, err)
+	}
+	t.Setenv("KUBECONFIG", filepath.Join(directory, "missing"))
+	if _, err := loadComponentLeaseClientConfig(); err == nil {
+		t.Fatal("missing explicit kubeconfig was accepted")
+	}
+	invalid := filepath.Join(directory, "invalid")
+	if err := os.WriteFile(invalid, []byte("not: [valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", invalid)
+	if _, err := loadComponentLeaseClientConfig(); err == nil {
+		t.Fatal("invalid explicit kubeconfig was accepted")
+	}
+}
+
+func TestComponentLeaseNamesRemainComponentScoped(t *testing.T) {
+	want := map[string]string{
+		"api": "fugue-production-api", "controller": "fugue-production-controller",
+		"edge-control-de": "fugue-production-edge-control-de", "telemetry": "fugue-production-telemetry",
+	}
+	seen := map[string]bool{}
+	for component, leaseName := range want {
+		release := declarativerelease.PlanRelease{ComponentID: component, Concurrency: leaseName, Workload: declarativerelease.Workload{Namespace: "fugue-system"}}
+		lease := newComponentLease(release, "holder", time.Unix(1, 0))
+		if lease.GetName() != leaseName || lease.GetLabels()["fugue.pro/component"] != component || seen[lease.GetName()] {
+			t.Fatalf("component lease identity collided or drifted: component=%s lease=%s labels=%v", component, lease.GetName(), lease.GetLabels())
+		}
+		seen[lease.GetName()] = true
+	}
+}
 
 func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *testing.T) {
 	now := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
