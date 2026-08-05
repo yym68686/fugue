@@ -760,7 +760,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	verificationImage, err := observedVerificationImage(partial.ImageRef, partial.ImageID, expectedOCI, allowHistoricalRestarts)
+	verificationImage, err := observedVerificationImage(partial.ImageRef, partial.ImageID, partial.ManifestSHA, allowHistoricalRestarts)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -777,8 +777,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if verification.Image != verificationImage || (!allowHistoricalRestarts && verification.OCIRevision != expectedOCI) ||
-		(allowHistoricalRestarts && verification.OCIRevision != "" && verification.OCIRevision != expectedOCI) {
+	if !observedRegistryIdentityMatches(verification, verificationImage, expectedOCI, allowHistoricalRestarts) {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
 	}
 	partial.OCIRevision = expectedOCI
@@ -790,11 +789,11 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	return partial, nil
 }
 
-func observedVerificationImage(imageRef, imageID, expectedOCI string, allowHistorical bool) (string, error) {
+func observedVerificationImage(imageRef, imageID, expectedSource string, allowHistorical bool) (string, error) {
 	if strings.Contains(imageRef, "@sha256:") {
 		return imageRef, nil
 	}
-	if !allowHistorical || legacySourceTag(imageRef) != expectedOCI {
+	if !allowHistorical || legacySourceTag(imageRef) != expectedSource {
 		return "", errors.New("legacy workload image is not exact adoption bootstrap source")
 	}
 	separator := strings.LastIndex(imageRef, ":")
@@ -802,6 +801,11 @@ func observedVerificationImage(imageRef, imageID, expectedOCI string, allowHisto
 		return "", errors.New("legacy workload image cannot be bound to immutable pod identity")
 	}
 	return imageRef[:separator] + "@" + imageID, nil
+}
+
+func observedRegistryIdentityMatches(verification declarativerelease.RegistryVerification, image, expectedOCI string, allowHistorical bool) bool {
+	return verification.Image == image && ((!allowHistorical && verification.OCIRevision == expectedOCI) ||
+		(allowHistorical && (verification.OCIRevision == "" || verification.OCIRevision == expectedOCI)))
 }
 
 func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []byte, release declarativerelease.PlanRelease, workloadRaw []byte) ([]declarativerelease.ResourceObservation, error) {

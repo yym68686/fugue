@@ -234,6 +234,15 @@ func TestObservedVerificationImageBindsLegacySourceTagToPodDigestOnlyDuringAdopt
 	if got, err := observedVerificationImage(immutable, digest, source, false); err != nil || got != immutable {
 		t.Fatalf("ordinary immutable observation changed: got=%q err=%v", got, err)
 	}
+	oci := strings.Repeat("2", 40)
+	verification := declarativerelease.RegistryVerification{Image: immutable, OCIRevision: oci}
+	if !observedRegistryIdentityMatches(verification, immutable, oci, true) {
+		t.Fatal("adoption conflated deployment source with exact OCI revision")
+	}
+	verification.OCIRevision = source
+	if observedRegistryIdentityMatches(verification, immutable, oci, true) {
+		t.Fatal("adoption accepted a registry revision copied from the deployment tag")
+	}
 }
 
 func TestParseObservationRecoversExactLegacyOnDeleteUpdatedStatusOnlyDuringAdoption(t *testing.T) {
