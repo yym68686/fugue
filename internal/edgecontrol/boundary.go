@@ -1,5 +1,5 @@
-// Package edgecontrol defines the independently deployable Edge control-plane
-// boundary. The initial boundary intentionally owns no production authority.
+// Package edgecontrol defines the independently deployable, group-scoped Edge
+// control-plane boundary.
 package edgecontrol
 
 import (
@@ -11,8 +11,8 @@ import (
 
 const BoundarySchemaV1 = "edge-control-boundary/v1"
 
-// BoundaryStatus is deliberately explicit about capabilities that have not
-// moved out of the legacy Core API yet.
+// BoundaryStatus explicitly distinguishes the inert and shadow modes from the
+// group-authority runtime.
 type BoundaryStatus struct {
 	Schema                 string `json:"schema"`
 	Status                 string `json:"status"`
@@ -26,32 +26,55 @@ type BoundaryStatus struct {
 	BundleSignerCapability bool   `json:"bundle_signer_capability"`
 }
 
-// Boundary serves health and status only. It has no outbound client, store,
-// signer, or Kubernetes capability by construction.
+// Boundary serves the process identity view; concrete runtime handlers own
+// stores, signers, inventory, publication, and recovery endpoints.
 type Boundary struct {
-	enabled bool
+	enabled   bool
+	mode      string
+	authority bool
 }
 
 func NewBoundary(enabled bool) *Boundary {
-	return &Boundary{enabled: enabled}
+	return &Boundary{enabled: enabled, mode: "boundary-only"}
+}
+
+func NewShadowBoundary(enabled bool) *Boundary {
+	return &Boundary{enabled: enabled, mode: "shadow-only"}
+}
+
+func NewAuthorityBoundary(enabled bool) *Boundary {
+	return &Boundary{enabled: enabled, mode: "group-authority", authority: true}
 }
 
 func (b *Boundary) Status(status string) BoundaryStatus {
+	mode := "boundary-only"
+	if b != nil && (b.mode == "shadow-only" || b.mode == "group-authority") {
+		mode = b.mode
+	}
+	authority := "none"
+	publication := false
+	signer := false
+	if b != nil && b.authority {
+		authority = "edge-control"
+		publication = true
+		signer = true
+	}
 	return BoundaryStatus{
 		Schema:                 BoundarySchemaV1,
 		Status:                 status,
-		Mode:                   "boundary-only",
-		Authority:              "none",
+		Mode:                   mode,
+		Authority:              authority,
 		Enabled:                b != nil && b.enabled,
-		PublicationEnabled:     false,
+		PublicationEnabled:     publication,
 		DataPlaneDependency:    false,
 		DatabaseCapability:     false,
 		KubernetesCapability:   false,
-		BundleSignerCapability: false,
+		BundleSignerCapability: signer,
 	}
 }
 
 func (b *Boundary) Handler() http.Handler {
+	boundaryStatus := b.Status("ok")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, b.Status("ok"))
@@ -64,9 +87,9 @@ func (b *Boundary) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_boundary_info Static identity of the non-authoritative Edge control boundary.")
+		_, _ = fmt.Fprintln(w, "# HELP fugue_edge_control_boundary_info Static identity of the Edge control boundary.")
 		_, _ = fmt.Fprintln(w, "# TYPE fugue_edge_control_boundary_info gauge")
-		_, _ = fmt.Fprintln(w, "fugue_edge_control_boundary_info{authority=\"none\",mode=\"boundary-only\"} 1")
+		_, _ = fmt.Fprintf(w, "fugue_edge_control_boundary_info{authority=%q,mode=%q} 1\n", boundaryStatus.Authority, boundaryStatus.Mode)
 	})
 	return mux
 }

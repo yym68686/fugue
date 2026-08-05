@@ -56,3 +56,18 @@ func TestBoundaryMetricsAreStaticAndNonAuthoritative(t *testing.T) {
 		t.Fatalf("unexpected metrics response: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestShadowBoundaryRemainsNonAuthoritative(t *testing.T) {
+	t.Parallel()
+
+	boundary := NewShadowBoundary(true)
+	status := boundary.Status("ready")
+	if status.Mode != "shadow-only" || status.Authority != "none" || status.PublicationEnabled || status.DataPlaneDependency || status.DatabaseCapability || status.KubernetesCapability || status.BundleSignerCapability {
+		t.Fatalf("shadow runtime boundary gained authority: %+v", status)
+	}
+	recorder := httptest.NewRecorder()
+	boundary.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `authority="none",mode="shadow-only"`) {
+		t.Fatalf("unexpected shadow metrics: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}

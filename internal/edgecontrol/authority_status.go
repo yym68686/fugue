@@ -1,0 +1,317 @@
+package edgecontrol
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	AuthorityStatusPathV1       = "/v1/authority/status"
+	AuthorityStatusSchemaV1     = "edge-control-group-authority-status/v1"
+	AuthorityGroupReadyPrefixV1 = "/v1/authority/groups/"
+
+	GroupAuthorityHealthReady       = "ready"
+	GroupAuthorityHealthServingLKG  = "serving_lkg"
+	GroupAuthorityHealthUnavailable = "unavailable"
+
+	GroupAuthorityLKGCurrent   = "current"
+	GroupAuthorityLKGPreserved = "preserved"
+	GroupAuthorityLKGMissing   = "missing"
+)
+
+type AuthorityStatusStore interface {
+	ReadGroupInventory(context.Context, string) (GroupInventorySnapshot, error)
+	ReadGroupInventoryProducerState(context.Context, string) (GroupInventoryProducerState, bool, error)
+	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
+}
+
+type AuthorityGroupStatus struct {
+	GroupID                     string     `json:"edge_group_id"`
+	Status                      string     `json:"status"`
+	Ready                       bool       `json:"ready"`
+	InventorySequence           uint64     `json:"inventory_sequence,omitempty"`
+	InventoryGeneration         string     `json:"inventory_generation,omitempty"`
+	InventoryProducerGeneration uint64     `json:"inventory_producer_generation,omitempty"`
+	InventoryProducerNodes      int        `json:"inventory_producer_nodes,omitempty"`
+	InventoryHeartbeatAt        *time.Time `json:"inventory_heartbeat_at,omitempty"`
+	PublicationSequence         uint64     `json:"publication_sequence,omitempty"`
+	PublicationDecision         string     `json:"publication_decision,omitempty"`
+	BundleGeneration            string     `json:"bundle_generation,omitempty"`
+	PublishedBundleDigest       string     `json:"published_bundle_digest,omitempty"`
+	RecoveryEpoch               uint64     `json:"recovery_epoch"`
+	BundleValidUntil            *time.Time `json:"bundle_valid_until,omitempty"`
+	LKGState                    string     `json:"lkg_state"`
+	FailureCode                 string     `json:"failure_code,omitempty"`
+}
+
+type AuthorityStatusSnapshot struct {
+	Schema                    string                 `json:"schema"`
+	Status                    string                 `json:"status"`
+	Ready                     bool                   `json:"ready"`
+	ServingReady              bool                   `json:"serving_ready"`
+	ReadyGroups               int                    `json:"ready_groups"`
+	UnavailableGroups         int                    `json:"unavailable_groups"`
+	Mode                      string                 `json:"mode"`
+	Authority                 string                 `json:"authority"`
+	PublicationEnabled        bool                   `json:"publication_enabled"`
+	CrossGroupTransaction     bool                   `json:"cross_group_transaction"`
+	Groups                    []AuthorityGroupStatus `json:"groups"`
+	ProcessStartedAt          *time.Time             `json:"process_started_at,omitempty"`
+	LastReconciledAt          *time.Time             `json:"last_reconciled_at,omitempty"`
+	LastRouteIntentGeneration string                 `json:"last_route_intent_generation,omitempty"`
+	LastPublished             int                    `json:"last_published,omitempty"`
+	LastFailed                int                    `json:"last_failed,omitempty"`
+	RuntimeFailureCode        string                 `json:"runtime_failure_code,omitempty"`
+	CanonicalDigest           string                 `json:"canonical_digest"`
+}
+
+type AuthorityRuntimeState struct {
+	mu          sync.RWMutex
+	now         func() time.Time
+	startedAt   time.Time
+	lastAt      time.Time
+	last        AuthorityRuntimeObservation
+	hasObserved bool
+}
+
+func NewAuthorityRuntimeState(now func() time.Time) *AuthorityRuntimeState {
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	return &AuthorityRuntimeState{now: now, startedAt: now().UTC()}
+}
+
+func (state *AuthorityRuntimeState) Observe(observation AuthorityRuntimeObservation) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.lastAt = state.now().UTC()
+	state.last = observation
+	state.hasObserved = true
+}
+
+func (state *AuthorityRuntimeState) snapshot() (time.Time, time.Time, AuthorityRuntimeObservation, bool) {
+	if state == nil {
+		return time.Time{}, time.Time{}, AuthorityRuntimeObservation{}, false
+	}
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return state.startedAt, state.lastAt, state.last, state.hasObserved
+}
+
+type authorityStatusHandler struct {
+	store  AuthorityStatusStore
+	groups []string
+	state  *AuthorityRuntimeState
+	now    func() time.Time
+}
+
+func NewAuthorityStatusHandler(store AuthorityStatusStore, groupIDs []string, state *AuthorityRuntimeState, now func() time.Time) (http.Handler, error) {
+	if store == nil {
+		return nil, errors.New("edge-control authority status store is nil")
+	}
+	groups, err := normalizeGroupIDs(groupIDs)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		return nil, errors.New("edge-control authority runtime state is nil")
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	return &authorityStatusHandler{store: store, groups: groups, state: state, now: func() time.Time { return now().UTC() }}, nil
+}
+
+func (handler *authorityStatusHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet || request.URL.RawQuery != "" {
+		http.NotFound(w, request)
+		return
+	}
+	if request.URL.Path == ShadowReadyPathV1 {
+		writeJSON(w, http.StatusOK, handler.processReadySnapshot())
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, AuthorityGroupReadyPrefixV1) {
+		parts := strings.Split(strings.TrimPrefix(request.URL.Path, AuthorityGroupReadyPrefixV1), "/")
+		if len(parts) != 2 || parts[1] != "readyz" || parts[0] != normalizeGroupID(parts[0]) || !edgeGroupIDPattern.MatchString(parts[0]) {
+			http.NotFound(w, request)
+			return
+		}
+		groupID := parts[0]
+		allowed := false
+		for _, configured := range handler.groups {
+			if configured == groupID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			http.NotFound(w, request)
+			return
+		}
+		group := handler.snapshotGroup(request.Context(), groupID, handler.now())
+		status := http.StatusOK
+		if !group.Ready {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, group)
+		return
+	}
+	if request.URL.Path != AuthorityStatusPathV1 {
+		http.NotFound(w, request)
+		return
+	}
+	writeJSON(w, http.StatusOK, handler.snapshot(request.Context()))
+}
+
+func (handler *authorityStatusHandler) snapshot(ctx context.Context) AuthorityStatusSnapshot {
+	now := handler.now()
+	out := AuthorityStatusSnapshot{
+		Schema: AuthorityStatusSchemaV1, Status: "unavailable", Ready: true, Mode: "group-authority",
+		Authority: "edge-control", PublicationEnabled: true, CrossGroupTransaction: false,
+		Groups: make([]AuthorityGroupStatus, 0, len(handler.groups)),
+	}
+	readyGroups := 0
+	degradedGroups := 0
+	for _, groupID := range handler.groups {
+		group := handler.snapshotGroup(ctx, groupID, now)
+		if group.Ready {
+			readyGroups++
+			if group.Status == GroupAuthorityHealthServingLKG {
+				degradedGroups++
+			}
+		}
+		out.Groups = append(out.Groups, group)
+	}
+	if readyGroups > 0 {
+		out.ServingReady = true
+		out.Status = "healthy"
+		if readyGroups != len(handler.groups) || degradedGroups > 0 {
+			out.Status = "degraded"
+		}
+	}
+	out.ReadyGroups = readyGroups
+	out.UnavailableGroups = len(handler.groups) - readyGroups
+	startedAt, lastAt, observation, observed := handler.state.snapshot()
+	out.ProcessStartedAt = &startedAt
+	if observed {
+		out.LastReconciledAt = &lastAt
+		out.LastRouteIntentGeneration = observation.RouteIntentGeneration
+		out.LastPublished = observation.Published
+		out.LastFailed = observation.Failed
+		out.RuntimeFailureCode = observation.FailureCode
+		if observation.FailureCode != "" && out.Status == "healthy" {
+			out.Status = "degraded"
+		}
+	}
+	digestMaterial := out
+	digestMaterial.CanonicalDigest = ""
+	out.CanonicalDigest = digestJSON(digestMaterial)
+	return out
+}
+
+func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupID string, now time.Time) AuthorityGroupStatus {
+	group := AuthorityGroupStatus{GroupID: groupID, Status: GroupAuthorityHealthUnavailable, LKGState: GroupAuthorityLKGMissing}
+	inventory, inventoryErr := handler.store.ReadGroupInventory(ctx, groupID)
+	if inventoryErr == nil {
+		group.InventorySequence = inventory.Sequence
+		group.InventoryGeneration = inventory.Generation
+	}
+	producer, producerExists, producerErr := handler.store.ReadGroupInventoryProducerState(ctx, groupID)
+	if producerErr == nil && producerExists {
+		group.InventoryProducerGeneration = producer.Generation
+		nodes := make(map[string]struct{}, len(producer.Observations))
+		var latest time.Time
+		for _, observation := range producer.Observations {
+			if observation.ObservedAt.After(latest) {
+				latest = observation.ObservedAt
+			}
+			if !observation.ObservedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) && now.Sub(observation.ObservedAt) <= GroupInventoryHeartbeatMaxAge {
+				nodes[observation.NodeID] = struct{}{}
+			}
+		}
+		group.InventoryProducerNodes = len(nodes)
+		if !latest.IsZero() {
+			group.InventoryHeartbeatAt = &latest
+		}
+	}
+	authority, authorityErr := handler.store.ReadGroupAuthority(ctx, groupID)
+	if authorityErr == nil && authority.LedgerExists {
+		group.PublicationSequence = authority.LedgerHead.Sequence
+		group.PublicationDecision = authority.LedgerHead.Status
+		group.FailureCode = authority.LedgerHead.FailureCode
+	}
+	if authorityErr == nil && authority.PublishedExists && validateGroupPublishedBundle(groupID, authority.Published) == nil && authority.Published.Bundle.ValidUntil.After(now) {
+		validUntil := authority.Published.Bundle.ValidUntil
+		group.Ready = true
+		group.BundleGeneration = authority.Published.Bundle.Generation
+		group.PublishedBundleDigest = authority.Published.Digest
+		group.RecoveryEpoch = authority.Published.RecoveryEpoch
+		group.BundleValidUntil = &validUntil
+		group.Status = GroupAuthorityHealthReady
+		group.LKGState = GroupAuthorityLKGCurrent
+		if !authority.LedgerExists || authority.LedgerHead.Status != GroupAuthorityStatusPublished || authority.LedgerHead.BundleGeneration != authority.Published.Bundle.Generation {
+			group.Status = GroupAuthorityHealthServingLKG
+			group.LKGState = GroupAuthorityLKGPreserved
+		}
+	}
+	if inventoryErr != nil && !errors.Is(inventoryErr, ErrGroupInventoryNotFound) && group.FailureCode == "" {
+		group.FailureCode = GroupShadowFailureInventoryRead
+	}
+	if producerErr != nil && group.FailureCode == "" {
+		group.FailureCode = GroupShadowFailureInventoryRead
+	}
+	if inventoryErr != nil && group.Ready {
+		group.Status = GroupAuthorityHealthServingLKG
+		group.LKGState = GroupAuthorityLKGPreserved
+	}
+	if authorityErr != nil && group.FailureCode == "" {
+		group.FailureCode = GroupAuthorityFailurePublicationCAS
+	}
+	return group
+}
+
+func (handler *authorityStatusHandler) processReadySnapshot() AuthorityStatusSnapshot {
+	startedAt, lastAt, observation, observed := handler.state.snapshot()
+	out := AuthorityStatusSnapshot{
+		Schema: AuthorityStatusSchemaV1, Status: "ready", Ready: true, Mode: "group-authority", Authority: "edge-control",
+		PublicationEnabled: true, CrossGroupTransaction: false, ProcessStartedAt: &startedAt,
+	}
+	if observed {
+		out.LastReconciledAt = &lastAt
+		out.LastRouteIntentGeneration = observation.RouteIntentGeneration
+		out.LastPublished = observation.Published
+		out.LastFailed = observation.Failed
+		out.RuntimeFailureCode = observation.FailureCode
+	}
+	digestMaterial := out
+	digestMaterial.CanonicalDigest = ""
+	out.CanonicalDigest = digestJSON(digestMaterial)
+	return out
+}
+
+func authorityGroupReadyPath(groupID string) string {
+	return AuthorityGroupReadyPrefixV1 + normalizeGroupID(groupID) + "/readyz"
+}
+
+func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery http.Handler) (http.Handler, error) {
+	if boundary == nil || heartbeat == nil || status == nil || bundles == nil || recovery == nil {
+		return nil, errors.New("edge-control authority HTTP handler dependency is nil")
+	}
+	mux := http.NewServeMux()
+	mux.Handle("POST "+GroupAuthorityInventoryHeartbeatPathV1, heartbeat)
+	mux.Handle("GET "+ShadowReadyPathV1, status)
+	mux.Handle("GET "+AuthorityStatusPathV1, status)
+	mux.Handle("GET "+AuthorityGroupReadyPrefixV1, status)
+	mux.Handle("GET "+GroupBundleReadPathV1, bundles)
+	mux.Handle("POST "+GroupRecoveryPathV1, recovery)
+	mux.Handle("/", boundary)
+	return mux, nil
+}
