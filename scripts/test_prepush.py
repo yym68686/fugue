@@ -249,6 +249,48 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertIn("$ go test ./internal/a\na failed", output)
         self.assertIn("$ go test ./internal/b\nb failed", output)
 
+    def test_dedicated_declarative_packages_are_not_run_twice(self) -> None:
+        commands = [
+            ["go", "test", "./cmd/fugue-declarative-release"],
+            ["go", "test", "./internal/api", "-run", "^(TestOne)$"],
+            ["go", "test", "./internal/declarativerelease"],
+            ["go", "test", "./internal/cli"],
+        ]
+        self.assertEqual(
+            prepush.without_dedicated_declarative_tests(commands),
+            [
+                ["go", "test", "./internal/api", "-run", "^(TestOne)$"],
+                ["go", "test", "./internal/cli"],
+            ],
+        )
+
+    def test_affected_go_tests_have_a_global_two_process_limit(self) -> None:
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def fake_run(_command, _timeout):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return 0, ""
+
+        commands = [
+            ["go", "test", "./internal/a"],
+            ["go", "test", "./internal/b"],
+            ["go", "test", "./internal/c"],
+        ]
+        with mock.patch.object(prepush, "run", side_effect=fake_run):
+            status, output = prepush.run_test_commands(
+                commands, time.monotonic() + 2
+            )
+        self.assertEqual((status, output), (0, ""))
+        self.assertEqual(peak, 2)
+
     def test_default_deadline_and_receipt_schema_are_unchanged(self) -> None:
         self.assertEqual(prepush.DEFAULT_TIMEOUT_SECONDS, 55.0)
         self.assertEqual(prepush.DEFAULT_MAX_ELAPSED_SECONDS, 60.0)

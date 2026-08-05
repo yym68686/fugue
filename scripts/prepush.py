@@ -12,12 +12,18 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
 DEFAULT_MAX_ELAPSED_SECONDS = 60.0
+GO_TASK_CONCURRENCY = 2
+DECLARATIVE_TEST_PACKAGES = {
+    "./cmd/fugue-declarative-release",
+    "./internal/declarativerelease",
+}
 TEST_HUNK_RE = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ func "
     r"(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\("
@@ -159,19 +165,40 @@ def affected_test_commands(base: str, paths: list[str]) -> list[list[str]]:
     return commands
 
 
-def run_test_commands(commands: list[list[str]], deadline: float) -> tuple[int, str]:
+def without_dedicated_declarative_tests(commands: list[list[str]]) -> list[list[str]]:
+    return [
+        command
+        for command in commands
+        if not (
+            len(command) >= 3
+            and command[:2] == ["go", "test"]
+            and command[2] in DECLARATIVE_TEST_PACKAGES
+        )
+    ]
+
+
+def run_test_commands(
+    commands: list[list[str]],
+    deadline: float,
+    go_slots: threading.BoundedSemaphore | None = None,
+) -> tuple[int, str]:
     if not commands:
         return 0, ""
     results: list[tuple[int, str] | None] = [None] * len(commands)
 
+    slots = go_slots or threading.BoundedSemaphore(GO_TASK_CONCURRENCY)
+
     def execute(index: int, command: list[str]) -> tuple[int, int, str]:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return index, 124, "pre-push deadline exceeded"
-        status, output = run(command, remaining)
+        with slots:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return index, 124, "pre-push deadline exceeded"
+            status, output = run(command, remaining)
         return index, status, output
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(commands)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(commands), GO_TASK_CONCURRENCY)
+    ) as executor:
         futures = [executor.submit(execute, index, command) for index, command in enumerate(commands)]
         for future in concurrent.futures.as_completed(futures):
             index, status, output = future.result()
@@ -316,7 +343,25 @@ def main() -> int:
     paths = changed_files(base)
     packages = affected_packages(paths)
     test_commands = affected_test_commands(base, paths)
+    declarative_release_changed = any(
+        name == ".github/workflows/ci.yml"
+        or name.startswith(".github/actions/deploy-declarative-component/")
+        or name == "deploy/releases/components.json"
+        or name.startswith("deploy/releases/")
+        or name.startswith("cmd/fugue-declarative-release/")
+        or name.startswith("internal/declarativerelease/")
+        or name in {
+            "scripts/prepush.py",
+            "scripts/test_prepush.py",
+            "scripts/test_verify_registry_image.py",
+            "scripts/verify_registry_image.py",
+        }
+        for name in paths
+    )
+    if declarative_release_changed:
+        test_commands = without_dedicated_declarative_tests(test_commands)
     checks: dict[str, dict[str, object]] = {}
+    go_slots = threading.BoundedSemaphore(GO_TASK_CONCURRENCY)
 
     compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
     go_dependent_tasks: dict[str, list[str] | None] = {
@@ -335,16 +380,7 @@ def main() -> int:
             "python3", "-m", "unittest", "scripts.test_verify_registry_image",
         ]
 
-    if any(
-        name == ".github/workflows/ci.yml"
-        or name.startswith(".github/actions/deploy-declarative-component/")
-        or name == "deploy/releases/components.json"
-        or name.startswith("deploy/releases/")
-        or name.startswith("cmd/fugue-declarative-release/")
-        or name.startswith("internal/declarativerelease/")
-        or name in {"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py"}
-        for name in paths
-    ):
+    if declarative_release_changed:
         non_go_tasks["declarative-release-tests"] = [
             "go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release",
         ]
@@ -367,13 +403,21 @@ def main() -> int:
     def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
         before = time.monotonic()
         if name == "affected-tests":
-            status, output = run_test_commands(test_commands, deadline)
+            status, output = run_test_commands(test_commands, deadline, go_slots)
         elif name == "helm-lint-render":
             status, output = helm_check(deadline - before)
         elif command is None:
             status, output = 124, f"pre-push task {name} has no command"
         else:
-            status, output = run(command, task_timeout_seconds(name, deadline - before))
+            if command and command[0] == "go":
+                with go_slots:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        status, output = 124, "pre-push deadline exceeded"
+                    else:
+                        status, output = run(command, task_timeout_seconds(name, remaining))
+            else:
+                status, output = run(command, task_timeout_seconds(name, deadline - before))
         return status, output, before
 
     phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
