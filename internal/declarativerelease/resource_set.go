@@ -370,6 +370,23 @@ func BootstrapPredecessorConvergenceManifest(manifest []byte, release PlanReleas
 	if err != nil {
 		return nil, err
 	}
+	for _, item := range set.Items {
+		spec, ok := item["spec"].(map[string]any)
+		if !ok {
+			continue
+		}
+		template, ok := spec["template"].(map[string]any)
+		if !ok {
+			continue
+		}
+		metadata, ok := template["metadata"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if annotations, ok := metadata["annotations"].(map[string]any); ok {
+			delete(annotations, "fugue.pro/source-commit")
+		}
+	}
 	targets := release.ArtifactTargets
 	if len(targets) == 0 {
 		targets = []ArtifactTarget{{
