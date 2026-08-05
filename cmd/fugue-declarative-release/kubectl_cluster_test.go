@@ -206,6 +206,25 @@ func TestParseObservationAllowsOnlyStableHistoricalLKGRestarts(t *testing.T) {
 	}
 }
 
+func TestObservedVerificationImageBindsLegacySourceTagToPodDigestOnlyDuringAdoption(t *testing.T) {
+	source := strings.Repeat("1", 40)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	legacy := "ghcr.io/example/fugue-edge:" + source
+	immutable := "ghcr.io/example/fugue-edge@" + digest
+	if got, err := observedVerificationImage(legacy, digest, source, true); err != nil || got != immutable {
+		t.Fatalf("bind exact legacy source to immutable pod identity: got=%q err=%v", got, err)
+	}
+	if _, err := observedVerificationImage(legacy, digest, source, false); err == nil {
+		t.Fatal("independent observation accepted a legacy source tag")
+	}
+	if _, err := observedVerificationImage(legacy, digest, strings.Repeat("2", 40), true); err == nil {
+		t.Fatal("adoption accepted a legacy tag for another source")
+	}
+	if got, err := observedVerificationImage(immutable, digest, source, false); err != nil || got != immutable {
+		t.Fatalf("ordinary immutable observation changed: got=%q err=%v", got, err)
+	}
+}
+
 func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousPresent:     true,

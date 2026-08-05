@@ -747,7 +747,11 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	arguments := []string{"python3", cluster.verifier, "--image", partial.ImageRef, "--platform", "linux/amd64"}
+	verificationImage, err := observedVerificationImage(partial.ImageRef, partial.ImageID, expectedOCI, allowHistoricalRestarts)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	arguments := []string{"python3", cluster.verifier, "--image", verificationImage, "--platform", "linux/amd64"}
 	if !allowHistoricalRestarts {
 		arguments = append(arguments, "--expected-revision", expectedOCI)
 	}
@@ -760,7 +764,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if verification.Image != partial.ImageRef || (!allowHistoricalRestarts && verification.OCIRevision != expectedOCI) ||
+	if verification.Image != verificationImage || (!allowHistoricalRestarts && verification.OCIRevision != expectedOCI) ||
 		(allowHistoricalRestarts && verification.OCIRevision != "" && verification.OCIRevision != expectedOCI) {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
 	}
@@ -771,6 +775,20 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	partial.Resources = resources
 	return partial, nil
+}
+
+func observedVerificationImage(imageRef, imageID, expectedOCI string, allowHistorical bool) (string, error) {
+	if strings.Contains(imageRef, "@sha256:") {
+		return imageRef, nil
+	}
+	if !allowHistorical || legacySourceTag(imageRef) != expectedOCI {
+		return "", errors.New("legacy workload image is not exact adoption bootstrap source")
+	}
+	separator := strings.LastIndex(imageRef, ":")
+	if separator <= strings.LastIndex(imageRef, "/") || separator < 1 || !strings.HasPrefix(imageID, "sha256:") {
+		return "", errors.New("legacy workload image cannot be bound to immutable pod identity")
+	}
+	return imageRef[:separator] + "@" + imageID, nil
 }
 
 func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []byte, release declarativerelease.PlanRelease, workloadRaw []byte) ([]declarativerelease.ResourceObservation, error) {
