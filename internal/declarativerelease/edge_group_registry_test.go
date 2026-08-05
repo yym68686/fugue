@@ -223,7 +223,7 @@ func TestEdgeGroupPublicationHealthMigratesForwardOnly(t *testing.T) {
 	legacy := edgeGroupFixture("alpha", "edge-group-metro-alpha")
 	legacy.Control.MigrationState = "pending"
 	legacy.Worker.MigrationState = "pending"
-	legacy.Control.Health[1].Path = "/v1/authority/groups/" + legacy.GroupID + "/readyz"
+	legacy.Control.Health = append(legacy.Control.Health, HealthProbe{Type: "service-http", Name: legacy.Control.Workload.Name, Port: "http", Path: "/v1/authority/groups/" + legacy.GroupID + "/readyz"})
 	legacy.Worker.Health = append(legacy.Worker.Health[:1], legacy.Worker.Health[2:]...)
 	if err := legacy.validate(); err != nil {
 		t.Fatalf("read legacy group health: %v", err)
@@ -238,6 +238,14 @@ func TestEdgeGroupPublicationHealthMigratesForwardOnly(t *testing.T) {
 	}
 	if err := ValidateEdgeGroupRegistryUpdate(&current, previous, Plan{}, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "cannot regress") {
 		t.Fatalf("staged health regressed to legacy: %v", err)
+	}
+	if len(staged.Control.Health) != 1 || staged.Control.Health[0].Type != "deployment" || staged.Control.Health[0].Name != staged.Control.Workload.Name {
+		t.Fatalf("control readiness must be the workload readiness probe: %+v", staged.Control.Health)
+	}
+	for _, probe := range staged.Control.Health {
+		if probe.Type == "service-http" {
+			t.Fatalf("control atom must not bypass the group NetworkPolicy: %+v", probe)
+		}
 	}
 }
 
@@ -276,7 +284,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "state-permissions", ContainerType: "init-container"},
 		},
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", FieldManager: "fugue-edge-control-" + id + "-declarative", Replicas: 1, RolloutMode: "recreate"},
-		Health:      []HealthProbe{{Type: "deployment", Name: controlName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/readyz"}},
+		Health:      []HealthProbe{{Type: "deployment", Name: controlName}},
 		Concurrency: "fugue-production-edge-control-" + id, MigrationState: "independent",
 	}
 	worker := Component{

@@ -92,6 +92,9 @@ func (group EdgeGroup) validate() error {
 	controlProcessReady := false
 	legacyControlPublicationReady := false
 	for _, probe := range group.Control.Health {
+		if probe.Type == "deployment" && probe.Name == group.Control.Workload.Name {
+			controlProcessReady = true
+		}
 		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/readyz" {
 			controlProcessReady = true
 		}
@@ -230,6 +233,7 @@ func edgeGroupUsesStagedHealth(group EdgeGroup) bool {
 	controlReady := false
 	publicationReady := false
 	for _, probe := range group.Control.Health {
+		controlReady = controlReady || (probe.Type == "deployment" && probe.Name == group.Control.Workload.Name)
 		controlReady = controlReady || (probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/readyz")
 	}
 	for _, probe := range group.Worker.Health {
