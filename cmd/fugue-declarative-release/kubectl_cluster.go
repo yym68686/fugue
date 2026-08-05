@@ -962,18 +962,9 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s is not declared: %w", kind, name, err)
 	}
-	container := ""
-	for _, artifactTarget := range release.ArtifactTargets {
-		if artifactTarget.APIVersion == apiVersion && artifactTarget.Kind == kind && artifactTarget.Namespace == release.Workload.Namespace &&
-			artifactTarget.Name == name && artifactTarget.ContainerType == "container" {
-			if container != "" {
-				return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s has multiple primary artifact containers", kind, name)
-			}
-			container = artifactTarget.Container
-		}
-	}
-	if container == "" {
-		return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s has no declared artifact container", kind, name)
+	container, err := healthWorkloadContainer(release, apiVersion, kind, name)
+	if err != nil {
+		return declarativerelease.Observation{}, err
 	}
 	workload, err := workloadFromDeclaredResource(desired, identity, container, release.Workload.FieldManager)
 	if err != nil {
@@ -999,6 +990,34 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 		return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s has not converged to the immutable target", kind, name)
 	}
 	return auxiliary, nil
+}
+
+func healthWorkloadContainer(release declarativerelease.PlanRelease, apiVersion, kind, name string) (string, error) {
+	if release.Transition != nil && release.Transition.EdgeGroupAB != nil && kind == "DaemonSet" &&
+		(name == release.Transition.EdgeGroupAB.WorkerAName || name == release.Transition.EdgeGroupAB.WorkerBName) {
+		container := release.Transition.EdgeGroupAB.WorkerContainer
+		for _, artifactTarget := range release.ArtifactTargets {
+			if artifactTarget.APIVersion == apiVersion && artifactTarget.Kind == kind && artifactTarget.Namespace == release.Workload.Namespace &&
+				artifactTarget.Name == name && artifactTarget.ContainerType == "container" && artifactTarget.Container == container {
+				return container, nil
+			}
+		}
+		return "", fmt.Errorf("health workload %s/%s has no transition-bound worker container", kind, name)
+	}
+	container := ""
+	for _, artifactTarget := range release.ArtifactTargets {
+		if artifactTarget.APIVersion == apiVersion && artifactTarget.Kind == kind && artifactTarget.Namespace == release.Workload.Namespace &&
+			artifactTarget.Name == name && artifactTarget.ContainerType == "container" {
+			if container != "" {
+				return "", fmt.Errorf("health workload %s/%s has multiple primary artifact containers", kind, name)
+			}
+			container = artifactTarget.Container
+		}
+	}
+	if container == "" {
+		return "", fmt.Errorf("health workload %s/%s has no declared artifact container", kind, name)
+	}
+	return container, nil
 }
 
 func targetIdentityFromDeclaredWorkload(desired map[string]any, workload declarativerelease.Workload) (declarativerelease.TargetIdentity, error) {

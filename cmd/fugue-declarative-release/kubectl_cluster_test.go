@@ -556,6 +556,31 @@ func TestPodHTTPUsesBoundReadyPodIPAndNamedPort(t *testing.T) {
 	}
 }
 
+func TestHealthWorkloadContainerUsesTransitionBoundEdgeWorker(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		Workload: declarativerelease.Workload{Namespace: "fugue-system"},
+		Transition: &declarativerelease.Transition{EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{
+			WorkerAName: "edge-gamma-worker-a", WorkerBName: "edge-gamma-worker-b", WorkerContainer: "edge",
+		}},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a", ContainerType: "container", Container: "edge"},
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a", ContainerType: "container", Container: "caddy"},
+		},
+	}
+	container, err := healthWorkloadContainer(release, "apps/v1", "DaemonSet", "edge-gamma-worker-a")
+	if err != nil || container != "edge" {
+		t.Fatalf("select transition-bound worker: container=%q err=%v", container, err)
+	}
+	release.Transition.EdgeGroupAB.WorkerContainer = "missing"
+	if _, err := healthWorkloadContainer(release, "apps/v1", "DaemonSet", "edge-gamma-worker-a"); err == nil {
+		t.Fatal("missing transition-bound worker container was accepted")
+	}
+	release.Transition = nil
+	if _, err := healthWorkloadContainer(release, "apps/v1", "DaemonSet", "edge-gamma-worker-a"); err == nil {
+		t.Fatal("unbound multi-container health workload was accepted")
+	}
+}
+
 func TestBootstrapAuxiliaryIdentityAndEveryArtifactImageAreExact(t *testing.T) {
 	source := strings.Repeat("a", 40)
 	edgeDigest := strings.Repeat("b", 64)
