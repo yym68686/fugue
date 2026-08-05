@@ -17,6 +17,9 @@ type fakeCluster struct {
 	verifiedTargets   []TargetIdentity
 	verifyErrors      []error
 	dryRuns           int
+	dryRunAdoptions   int
+	adoptions         []Observation
+	adoptionErrors    []error
 	applies           int
 	applyErrors       []error
 	deleteCreated     int
@@ -74,6 +77,25 @@ func (fake *fakeCluster) VerifyTarget(_ context.Context, target TargetIdentity) 
 func (fake *fakeCluster) DryRunApply(context.Context, PlanRelease, []byte) error {
 	fake.dryRuns++
 	return nil
+}
+
+func (fake *fakeCluster) DryRunOwnershipAdoption(context.Context, PlanRelease, OwnershipAdoptionPlan, []byte) error {
+	fake.dryRunAdoptions++
+	return nil
+}
+
+func (fake *fakeCluster) AdoptOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error) {
+	var observation Observation
+	if len(fake.adoptions) > 0 {
+		observation = fake.adoptions[0]
+		fake.adoptions = fake.adoptions[1:]
+	}
+	if len(fake.adoptionErrors) == 0 {
+		return observation, nil
+	}
+	err := fake.adoptionErrors[0]
+	fake.adoptionErrors = fake.adoptionErrors[1:]
+	return observation, err
 }
 
 func (fake *fakeCluster) Apply(context.Context, PlanRelease, TargetIdentity, []byte) error {
@@ -235,6 +257,9 @@ func TestPrepareBindsExplicitOwnershipAdoptionToLKGAndLiveCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if fake.dryRunAdoptions != 1 || fake.dryRuns != 0 {
+		t.Fatalf("adoption prepare used the ordinary force scope: adoption=%d ordinary=%d", fake.dryRunAdoptions, fake.dryRuns)
+	}
 	adoption := prepared.OwnershipAdoption
 	if adoption == nil || adoption.Component != "api" || adoption.UID != lkg.UID ||
 		adoption.ResourceVersion != lkg.ResourceVersion || adoption.Generation != lkg.Generation ||
@@ -252,6 +277,47 @@ func TestPrepareBindsExplicitOwnershipAdoptionToLKGAndLiveCAS(t *testing.T) {
 	prepared.PlanDigest = digestOf(tampered)
 	if err := prepared.Validate(plan, rendered.Forward, rendered.LKG); err == nil || !strings.Contains(err.Error(), "ownership adoption identity") {
 		t.Fatalf("ownership adoption CAS drift was accepted: %v", err)
+	}
+}
+
+func TestExecuteAdoptsReviewedLKGFieldsBeforeOrdinaryForwardApply(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm",
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+			Fields:   []string{"/spec/template"},
+		}},
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, forward := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{"helm"}
+	lkg.Resources[0].FieldManagers = []string{"helm"}
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted := lkg
+	adopted.ResourceVersion = "11"
+	adopted.FieldManagers = []string{"fugue-api-declarative", "helm"}
+	adopted.Resources = append([]ResourceObservation(nil), lkg.Resources...)
+	adopted.Resources[0].ResourceVersion = "11"
+	adopted.Resources[0].FieldManagers = []string{"fugue-api-declarative", "helm"}
+	fake.observations = []Observation{lkg}
+	fake.adoptions = []Observation{adopted}
+	fake.health = []Observation{forward}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || fake.dryRuns != 1 || fake.applies != 1 {
+		t.Fatalf("adoption did not converge through ordinary apply: result=%+v dryRuns=%d applies=%d", result, fake.dryRuns, fake.applies)
 	}
 }
 

@@ -124,6 +124,8 @@ type Cluster interface {
 	ObserveDegraded(context.Context, PlanRelease, []byte) (Observation, error)
 	VerifyTarget(context.Context, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
+	DryRunOwnershipAdoption(context.Context, PlanRelease, OwnershipAdoptionPlan, []byte) error
+	AdoptOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error)
 	Apply(context.Context, PlanRelease, TargetIdentity, []byte) error
 	Delete(context.Context, PlanRelease, []byte, Observation) error
 	DeleteCreated(context.Context, PlanRelease, []byte, Observation, Observation) error
@@ -301,20 +303,26 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	forwardDryRun, err := BindManifestCAS(rendered.Forward, prewrite)
-	if err != nil {
-		return ExecutionPlan{}, err
-	}
-	if err := cluster.DryRunApply(ctx, release, forwardDryRun); err != nil {
-		return ExecutionPlan{}, fmt.Errorf("server-side dry-run forward: %w", err)
-	}
-	if release.ExpectedPreviousPresent {
-		lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, prewrite)
+	if adoption != nil {
+		if err := cluster.DryRunOwnershipAdoption(ctx, release, *adoption, rendered.LKG); err != nil {
+			return ExecutionPlan{}, fmt.Errorf("server-side dry-run ownership adoption: %w", err)
+		}
+	} else {
+		forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, prewrite)
 		if bindErr != nil {
 			return ExecutionPlan{}, bindErr
 		}
-		if err := cluster.DryRunApply(ctx, release, lkgDryRun); err != nil {
-			return ExecutionPlan{}, fmt.Errorf("server-side dry-run LKG: %w", err)
+		if err := cluster.DryRunApply(ctx, release, forwardDryRun); err != nil {
+			return ExecutionPlan{}, fmt.Errorf("server-side dry-run forward: %w", err)
+		}
+		if release.ExpectedPreviousPresent {
+			lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, prewrite)
+			if bindErr != nil {
+				return ExecutionPlan{}, bindErr
+			}
+			if err := cluster.DryRunApply(ctx, release, lkgDryRun); err != nil {
+				return ExecutionPlan{}, fmt.Errorf("server-side dry-run LKG: %w", err)
+			}
 		}
 	}
 	plan := ExecutionPlan{
@@ -500,6 +508,16 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		result.Reason = "prewrite-cas-drift"
 		return sealResult(result)
 	}
+	if prepared.OwnershipAdoption != nil {
+		adopted, adoptionErr := cluster.AdoptOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.LKG, lkgManifest)
+		if adoptionErr != nil || !ownershipAdoptionConverged(prepared.Prewrite, adopted, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
+			result.Status = "recovery-required"
+			result.Reason = "ownership-adoption-unknown"
+			result.Final = adopted
+			return sealResult(result)
+		}
+		current = adopted
+	}
 	if prepared.AlreadyConverged {
 		forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
 		convergedErr := cluster.Converged(ctx, release, forwardManifest)
@@ -516,6 +534,14 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	if err != nil {
 		result.Reason = "forward-cas-manifest-invalid"
 		return sealResult(result)
+	}
+	if prepared.OwnershipAdoption != nil {
+		if err := cluster.DryRunApply(ctx, release, forwardCAS); err != nil {
+			result.Status = "recovery-required"
+			result.Reason = "post-adoption-forward-dry-run-rejected"
+			result.Final = current
+			return sealResult(result)
+		}
 	}
 	result.ForwardApplyCount = 1
 	applyErr := cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
@@ -596,6 +622,36 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	result.Reason = "lkg-unproven"
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func ownershipAdoptionConverged(before, after Observation, manager string, plan OwnershipAdoptionPlan) bool {
+	if before.Present != after.Present || before.Primary != after.Primary || before.UID != after.UID || before.Generation != after.Generation ||
+		before.TemplateDigest != after.TemplateDigest || before.ImageRef != after.ImageRef || before.ConfigSHA != after.ConfigSHA ||
+		before.ManifestSHA != after.ManifestSHA || before.OCIRevision != after.OCIRevision || !receiptContainsString(after.FieldManagers, manager) ||
+		len(before.Resources) != len(after.Resources) {
+		return false
+	}
+	beforeResources := make(map[ResourceIdentity]ResourceObservation, len(before.Resources))
+	afterResources := make(map[ResourceIdentity]ResourceObservation, len(after.Resources))
+	for _, resource := range before.Resources {
+		beforeResources[resource.Identity] = resource
+	}
+	for _, resource := range after.Resources {
+		afterResources[resource.Identity] = resource
+	}
+	for identity, prior := range beforeResources {
+		current, exists := afterResources[identity]
+		if !exists || prior.Present != current.Present || prior.UID != current.UID || prior.Generation != current.Generation ||
+			prior.ObjectDigest != current.ObjectDigest || prior.RetainOnRollback != current.RetainOnRollback {
+			return false
+		}
+	}
+	for _, scope := range plan.Resources {
+		if !receiptContainsString(afterResources[scope.Identity].FieldManagers, manager) {
+			return false
+		}
+	}
+	return true
 }
 
 // ReconcileExecution is the read-only terminal path used when the executor

@@ -280,7 +280,7 @@
                     "name": "FUGUE_EDGE_TOKEN",
                     "valueFrom": {
                       "secretKeyRef": {
-                        "key": "token",
+                        "key": "FUGUE_EDGE_TOKEN",
                         "name": "@@API_SECRET@@"
                       }
                     }
@@ -306,8 +306,8 @@
                     "value": "http://@@CONTROL_NAME@@.fugue-system.svc:8092/v1/authority/group-inventory-heartbeats"
                   },
                   {
-                    "name": "FUGUE_EDGE_INVENTORY_IDENTITY_TOKEN_FILE",
-                    "value": "/var/run/secrets/fugue-edge/inventory-identity/token"
+                    "name": "FUGUE_EDGE_INVENTORY_IDENTITY_KEYRING_FILE",
+                    "value": "/var/run/secrets/fugue-edge/inventory-identity/keyring.json"
                   },
                   {
                     "name": "FUGUE_EDGE_INVENTORY_ACTIVATION_STATE_FILE",
@@ -656,8 +656,8 @@
                   "defaultMode": 384,
                   "items": [
                     {
-                      "key": "token",
-                      "path": "token"
+                      "key": "keyring.json",
+                      "path": "keyring.json"
                     }
                   ],
                   "secretName": "@@INVENTORY_IDENTITY_A_SECRET@@"
@@ -753,7 +753,7 @@
                     "name": "FUGUE_EDGE_TOKEN",
                     "valueFrom": {
                       "secretKeyRef": {
-                        "key": "token",
+                        "key": "FUGUE_EDGE_TOKEN",
                         "name": "@@API_SECRET@@"
                       }
                     }
@@ -779,8 +779,8 @@
                     "value": "http://@@CONTROL_NAME@@.fugue-system.svc:8092/v1/authority/group-inventory-heartbeats"
                   },
                   {
-                    "name": "FUGUE_EDGE_INVENTORY_IDENTITY_TOKEN_FILE",
-                    "value": "/var/run/secrets/fugue-edge/inventory-identity/token"
+                    "name": "FUGUE_EDGE_INVENTORY_IDENTITY_KEYRING_FILE",
+                    "value": "/var/run/secrets/fugue-edge/inventory-identity/keyring.json"
                   },
                   {
                     "name": "FUGUE_EDGE_INVENTORY_ACTIVATION_STATE_FILE",
@@ -1129,8 +1129,8 @@
                   "defaultMode": 384,
                   "items": [
                     {
-                      "key": "token",
-                      "path": "token"
+                      "key": "keyring.json",
+                      "path": "keyring.json"
                     }
                   ],
                   "secretName": "@@INVENTORY_IDENTITY_B_SECRET@@"

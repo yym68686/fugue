@@ -26,6 +26,7 @@ const (
 	edgeActivationInitialize    = "initialize"
 	edgeActivationPromote       = "promote"
 	edgeActivationRollback      = "rollback"
+	edgeGroupAuthoritySource    = "edge-control-group-authority/v1"
 )
 
 type edgeActivationRequest struct {
@@ -67,15 +68,33 @@ type edgeActivationReceipt struct {
 }
 
 type edgeGroupPod struct {
-	Name             string
-	UID              string
-	ResourceVersion  string
-	NodeName         string
-	SourceCommit     string
-	ImageRef         string
-	ImageID          string
-	BundleGeneration string
-	Ready            bool
+	Name                         string
+	UID                          string
+	ResourceVersion              string
+	NodeName                     string
+	SourceCommit                 string
+	ImageRef                     string
+	ImageID                      string
+	BundleGeneration             string
+	RouteBundleSource            string
+	PublicationSequence          uint64
+	ServingGeneration            string
+	InventoryProducerActive      bool
+	InventoryHeartbeatGeneration uint64
+	InventoryHeartbeatAt         time.Time
+	InventoryHeartbeatError      string
+	Ready                        bool
+}
+
+type edgeWorkerHealth struct {
+	BundleGeneration             string
+	RouteBundleSource            string
+	PublicationSequence          uint64
+	ServingGeneration            string
+	InventoryProducerActive      bool
+	InventoryHeartbeatGeneration uint64
+	InventoryHeartbeatAt         time.Time
+	InventoryHeartbeatError      string
 }
 
 type edgeFrontHealth struct {
@@ -103,6 +122,7 @@ type edgeGroupTransitionRuntime interface {
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
 	ActivationCAS(context.Context, edgeGroupPod, edgeActivationRequest) (edgeActivationReceipt, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
+	WaitActiveWorkerAuthority(context.Context, string, declarativerelease.TargetIdentity) error
 }
 
 type kubectlEdgeGroupRuntime struct {
@@ -229,6 +249,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		if _, err := runtime.Roll(ctx, activeName, target); err != nil {
 			return fmt.Errorf("roll previous active edge slot %s: %w", activeSlot, err)
 		}
+		activeSlot = inactiveSlot
 	}
 	if !edgePodsMatchTarget(frontPods, target) {
 		frontPods, err = runtime.Roll(ctx, transition.FrontName, target)
@@ -237,12 +258,18 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		}
 	}
 
+	if err := runtime.WaitActiveWorkerAuthority(ctx, edgeWorkerName(transition, activeSlot), target); err != nil {
+		return fmt.Errorf("verify active edge worker authority: %w", err)
+	}
 	final, err := runtime.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("capture final edge group state: %w", err)
 	}
 	if !edgePodsMatchTarget(final.Front, target) || !edgePodsMatchTarget(final.WorkerA, target) || !edgePodsMatchTarget(final.WorkerB, target) {
 		return errors.New("edge group did not converge all artifact workloads")
+	}
+	if err := validateEdgeGroupAuthority(final, transition); err != nil {
+		return err
 	}
 	if final.ActiveSlot != inactiveSlot && !edgePodsMatchTarget(activeWorkers, target) {
 		return errors.New("edge group activation did not converge to the promoted slot")
@@ -272,6 +299,10 @@ func (runtime *kubectlEdgeGroupRuntime) ActivationCAS(ctx context.Context, pod e
 
 func (runtime *kubectlEdgeGroupRuntime) WaitFront(ctx context.Context, slot, source, digest string) (map[string]edgeFrontHealth, error) {
 	return runtime.cluster.waitFrontActivation(ctx, runtime.release, runtime.transition, slot, source, digest)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) WaitActiveWorkerAuthority(ctx context.Context, name string, target declarativerelease.TargetIdentity) error {
+	return runtime.cluster.waitActiveEdgeWorkerAuthority(ctx, runtime.release, runtime.transition, name, target)
 }
 
 func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition) (edgeGroupState, error) {
@@ -324,24 +355,39 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPods(ctx context.Context, releas
 	if err != nil {
 		return nil, err
 	}
-	pods, err := parseEdgeGroupPods(podsRaw, container, expectedNodes, groupID)
+	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil
+	legacySource := ""
+	if allowLegacy {
+		legacySource, err = workloadLegacySource(workloadRaw, container)
+		if err != nil {
+			return nil, err
+		}
+	}
+	pods, err := parseEdgeGroupPods(podsRaw, container, expectedNodes, groupID, allowLegacy, legacySource)
 	if err != nil {
 		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
 	}
 	if includeWorkerHealth {
 		for node, pod := range pods {
-			bundle, healthErr := cluster.readEdgeWorkerHealth(ctx, release.Workload.Namespace, pod.Name, groupID)
+			health, healthErr := cluster.readEdgeWorkerHealth(ctx, release.Workload.Namespace, pod.Name, groupID)
 			if healthErr != nil {
 				return nil, healthErr
 			}
-			pod.BundleGeneration = bundle
+			pod.BundleGeneration = health.BundleGeneration
+			pod.RouteBundleSource = health.RouteBundleSource
+			pod.PublicationSequence = health.PublicationSequence
+			pod.ServingGeneration = health.ServingGeneration
+			pod.InventoryProducerActive = health.InventoryProducerActive
+			pod.InventoryHeartbeatGeneration = health.InventoryHeartbeatGeneration
+			pod.InventoryHeartbeatAt = health.InventoryHeartbeatAt
+			pod.InventoryHeartbeatError = health.InventoryHeartbeatError
 			pods[node] = pod
 		}
 	}
 	return pods, nil
 }
 
-func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID string) (map[string]edgeGroupPod, error) {
+func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID string, allowLegacy bool, legacySource string) (map[string]edgeGroupPod, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil {
 		return nil, err
@@ -361,13 +407,17 @@ func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID
 			continue
 		}
 		labels := mapStringField(metadata, "labels")
-		if labels["fugue.io/edge-group-id"] != groupID {
+		podGroupID := labels["fugue.io/edge-group-id"]
+		if podGroupID != groupID && !(allowLegacy && podGroupID == "") {
 			return nil, errors.New("pod edge group identity mismatch")
 		}
 		spec := mapField(item, "spec")
 		node := stringValue(spec["nodeName"])
 		pod := edgeGroupPod{Name: stringValue(metadata["name"]), UID: stringValue(metadata["uid"]), ResourceVersion: stringValue(metadata["resourceVersion"]), NodeName: node,
 			SourceCommit: mapStringField(metadata, "annotations")["fugue.pro/source-commit"]}
+		if pod.SourceCommit == "" && allowLegacy {
+			pod.SourceCommit = legacySource
+		}
 		containers, _ := spec["containers"].([]any)
 		for _, rawContainer := range containers {
 			entry, _ := rawContainer.(map[string]any)
@@ -405,16 +455,114 @@ func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID
 	return pods, nil
 }
 
-func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, namespace, pod, groupID string) (string, error) {
-	body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:health/proxy/healthz", namespace, pod))
+func workloadLegacySource(raw []byte, containerName string) (string, error) {
+	workload, err := decodeJSONObject(raw)
 	if err != nil {
 		return "", err
 	}
+	spec := mapField(mapField(mapField(workload, "spec"), "template"), "spec")
+	for _, rawContainer := range anySlice(spec["containers"]) {
+		container, _ := rawContainer.(map[string]any)
+		if stringValue(container["name"]) != containerName {
+			continue
+		}
+		source := legacySourceTag(stringValue(container["image"]))
+		if source == "" {
+			return "", errors.New("legacy edge workload source tag is invalid")
+		}
+		return source, nil
+	}
+	return "", errors.New("legacy edge workload container is absent")
+}
+
+func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, namespace, pod, groupID string) (edgeWorkerHealth, error) {
+	body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:health/proxy/healthz", namespace, pod))
+	if err != nil {
+		return edgeWorkerHealth{}, err
+	}
 	value, err := decodeJSONObject(body)
 	if err != nil || value["healthy"] != true || stringValue(value["edge_group_id"]) != groupID || strings.TrimSpace(stringValue(value["bundle_version"])) == "" {
-		return "", errors.New("edge worker health is not group-bound and healthy")
+		return edgeWorkerHealth{}, errors.New("edge worker health is not group-bound and healthy")
 	}
-	return stringValue(value["bundle_version"]), nil
+	health := edgeWorkerHealth{
+		BundleGeneration:        strings.TrimSpace(stringValue(value["bundle_version"])),
+		RouteBundleSource:       strings.TrimSpace(stringValue(value["route_bundle_source"])),
+		ServingGeneration:       strings.TrimSpace(stringValue(value["serving_generation"])),
+		InventoryProducerActive: value["inventory_producer_active"] == true,
+		InventoryHeartbeatError: strings.TrimSpace(stringValue(value["inventory_heartbeat_error"])),
+	}
+	if raw, exists := value["publication_sequence"]; exists {
+		health.PublicationSequence, err = uint64Value(raw)
+		if err != nil {
+			return edgeWorkerHealth{}, errors.New("edge worker publication sequence is invalid")
+		}
+	}
+	if raw, exists := value["inventory_heartbeat_generation"]; exists {
+		health.InventoryHeartbeatGeneration, err = uint64Value(raw)
+		if err != nil {
+			return edgeWorkerHealth{}, errors.New("edge worker inventory generation is invalid")
+		}
+	}
+	if raw := strings.TrimSpace(stringValue(value["inventory_heartbeat_at"])); raw != "" {
+		health.InventoryHeartbeatAt, err = time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return edgeWorkerHealth{}, errors.New("edge worker inventory timestamp is invalid")
+		}
+	}
+	return health, nil
+}
+
+func edgePodHasGroupAuthority(pod edgeGroupPod) bool {
+	return pod.RouteBundleSource == edgeGroupAuthoritySource && pod.PublicationSequence > 0 && pod.ServingGeneration != ""
+}
+
+func edgePodHasActiveInventory(pod edgeGroupPod) bool {
+	return edgePodHasGroupAuthority(pod) && pod.InventoryProducerActive && pod.InventoryHeartbeatGeneration > 0 &&
+		!pod.InventoryHeartbeatAt.IsZero() && pod.InventoryHeartbeatError == ""
+}
+
+func validateEdgeGroupAuthority(state edgeGroupState, transition declarativerelease.EdgeGroupABTransition) error {
+	for slot, pods := range map[string]map[string]edgeGroupPod{"a": state.WorkerA, "b": state.WorkerB} {
+		for node, pod := range pods {
+			if !edgePodHasGroupAuthority(pod) {
+				return fmt.Errorf("edge group slot %s node %s has no verified group authority publication", slot, node)
+			}
+			if slot == state.ActiveSlot && !edgePodHasActiveInventory(pod) {
+				return fmt.Errorf("edge group active slot %s node %s has no verified inventory heartbeat", slot, node)
+			}
+		}
+	}
+	if state.ActiveSlot != "a" && state.ActiveSlot != "b" {
+		return errors.New("edge group authority active slot is invalid")
+	}
+	if transition.GroupID == "" {
+		return errors.New("edge group authority transition is unbound")
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) waitActiveEdgeWorkerAuthority(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity) error {
+	deadline := time.Now().Add(cluster.timeout)
+	for {
+		pods, err := cluster.readEdgeDaemonSetPods(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
+		if err == nil {
+			converged := len(pods) == transition.ExpectedNodes
+			for _, pod := range pods {
+				converged = converged && edgePodMatchesTarget(pod, target) && edgePodHasActiveInventory(pod)
+			}
+			if converged {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("DaemonSet/%s did not publish active group authority and inventory evidence", name)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, namespace, pod string) (edgeFrontHealth, error) {
@@ -485,7 +633,7 @@ func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release de
 		pods, err := cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
 		if err == nil {
 			pod, exists := pods[node]
-			if exists && pod.UID != priorUID && edgePodMatchesTarget(pod, target) {
+			if exists && pod.UID != priorUID && edgePodMatchesTarget(pod, target) && (!includeHealth || edgePodHasGroupAuthority(pod)) {
 				return pod, nil
 			}
 		}

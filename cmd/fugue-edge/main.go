@@ -18,7 +18,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	service := edge.NewService(cfg, logger)
+	service := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfigFromEnv(), logger)
 	if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatalf("edge exited: %v", err)
 	}

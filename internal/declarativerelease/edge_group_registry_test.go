@@ -265,6 +265,13 @@ func TestEdgeGroupPublicationHealthMigratesForwardOnly(t *testing.T) {
 			t.Fatalf("control atom must not bypass the group NetworkPolicy: %+v", probe)
 		}
 	}
+	foundAuthority := false
+	for _, probe := range staged.Worker.Health {
+		foundAuthority = foundAuthority || (probe.Type == "edge-group-authority" && probe.Name == staged.GroupID)
+	}
+	if !foundAuthority {
+		t.Fatalf("worker atom must verify group authority through worker runtime evidence: %+v", staged.Worker.Health)
+	}
 }
 
 func TestPendingSharedEdgeManifestTemplateIsConfigurationOnly(t *testing.T) {
@@ -326,7 +333,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		},
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: frontName, Container: "edge-front", FieldManager: "fugue-edge-worker-" + id + "-declarative", RolloutMode: "on-delete"},
 		Transition:  &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: groupID, FrontName: frontName, WorkerAName: workerAName, WorkerBName: workerBName, WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
-		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/v1/authority/groups/" + groupID + "/readyz"}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
+		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "edge-group-authority", Name: groupID}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
 		Concurrency: "fugue-production-edge-worker-" + id, MigrationState: "independent",
 		AdoptionReceiptPath: "deploy/releases/edge-worker-" + id + "/adoption-receipt.json",
 	}

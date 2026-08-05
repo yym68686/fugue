@@ -174,6 +174,104 @@ func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarat
 	return cluster.applyResourceSet(ctx, release, manifest, true)
 }
 
+func (cluster *kubectlCluster) DryRunOwnershipAdoption(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkgManifest []byte) error {
+	manifest, err := declarativerelease.BuildOwnershipAdoptionManifest(lkgManifest, adoption)
+	if err != nil {
+		return err
+	}
+	return cluster.applyOwnershipAdoptionSet(ctx, release, manifest, true)
+}
+
+func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkg declarativerelease.TargetIdentity, lkgManifest []byte) (declarativerelease.Observation, error) {
+	manifest, err := declarativerelease.BuildOwnershipAdoptionManifest(lkgManifest, adoption)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, manifest, false)
+	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
+		if applyErr != nil {
+			return declarativerelease.Observation{}, fmt.Errorf("apply ownership adoption: %v; verify ownership adoption: %w", applyErr, err)
+		}
+		return declarativerelease.Observation{}, err
+	}
+	observation, observeErr := cluster.observeExpected(ctx, release, lkg.OCIRevision, lkgManifest, true)
+	if observeErr != nil {
+		return declarativerelease.Observation{}, observeErr
+	}
+	return observation, nil
+}
+
+func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, dryRun bool) error {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil {
+		return err
+	}
+	arguments, err := adoptionApplyArguments(release, dryRun)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		item, err := declarativerelease.ResourceSetItem(manifest, identity)
+		if err != nil {
+			return err
+		}
+		encoded, err := declarativerelease.CanonicalJSON(item)
+		if err != nil {
+			return err
+		}
+		if _, err := cluster.kubectlRun(ctx, encoded, arguments...); err != nil {
+			return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
+		}
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) verifyOwnershipAdoption(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
+	for _, scope := range adoption.Resources {
+		raw, err := cluster.getResource(ctx, scope.Identity)
+		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+			return fmt.Errorf("read adopted %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, err)
+		}
+		value, err := decodeJSONObject(raw)
+		if err != nil {
+			return err
+		}
+		metadata := mapField(value, "metadata")
+		if stringValue(metadata["uid"]) != scope.UID || int64Value(metadata["generation"]) != scope.Generation ||
+			!managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scope.Fields) {
+			return fmt.Errorf("adopted %s/%s ownership is incomplete", scope.Identity.Kind, scope.Identity.Name)
+		}
+	}
+	return nil
+}
+
+func managedFieldsOwnPointers(metadata map[string]any, manager string, pointers []string) bool {
+	for _, rawEntry := range anySlice(metadata["managedFields"]) {
+		entry, _ := rawEntry.(map[string]any)
+		if stringValue(entry["manager"]) != manager || stringValue(entry["operation"]) != "Apply" || stringValue(entry["subresource"]) != "" {
+			continue
+		}
+		fields := mapField(entry, "fieldsV1")
+		all := true
+		for _, pointer := range pointers {
+			current := fields
+			for _, token := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+				token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
+				next, ok := current["f:"+token].(map[string]any)
+				if !ok {
+					all = false
+					break
+				}
+				current = next
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
 func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) error {
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
@@ -506,7 +604,11 @@ func adoptionApplyArguments(release declarativerelease.PlanRelease, dryRun bool)
 	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil {
 		return nil, errors.New("ownership adoption is not explicitly authorized")
 	}
-	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager, "--force-conflicts"}
+	// The adoption manifest already contains only the reviewed LKG fields. Use
+	// ordinary SSA unless a future group presents a separately reviewed,
+	// reproducible conflict set; this migration's production dry-run proved the
+	// legacy Helm manager can co-own identical values without force.
+	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager}
 	if dryRun {
 		arguments = append(arguments, "--dry-run=server")
 	}
@@ -744,6 +846,29 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 				return "", errors.New("leader lease is stale or invalid")
 			}
 			evidence = append(evidence, probe.Type+":"+holder+":"+renew.UTC().Format(time.RFC3339Nano))
+		case "edge-group-authority":
+			if release.Transition == nil || release.Transition.EdgeGroupAB == nil || probe.Name != release.Transition.EdgeGroupAB.GroupID {
+				return "", errors.New("edge group authority probe is not transition-bound")
+			}
+			transition := *release.Transition.EdgeGroupAB
+			state, err := cluster.readEdgeGroupState(ctx, release, transition)
+			if err != nil {
+				return "", err
+			}
+			if err := validateEdgeGroupAuthority(state, transition); err != nil {
+				return "", err
+			}
+			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot}
+			for _, slot := range []struct {
+				name string
+				pods map[string]edgeGroupPod
+			}{{"a", state.WorkerA}, {"b", state.WorkerB}} {
+				for _, node := range sortedEdgeNodes(slot.pods) {
+					pod := slot.pods[node]
+					items = append(items, strings.Join([]string{slot.name, node, pod.RouteBundleSource, strconv.FormatUint(pod.PublicationSequence, 10), pod.ServingGeneration, strconv.FormatBool(pod.InventoryProducerActive), strconv.FormatUint(pod.InventoryHeartbeatGeneration, 10)}, ":"))
+				}
+			}
+			evidence = append(evidence, probe.Type+":"+digestBytesLocal([]byte(strings.Join(items, "\n"))))
 		default:
 			return "", fmt.Errorf("unsupported health probe %q", probe.Type)
 		}

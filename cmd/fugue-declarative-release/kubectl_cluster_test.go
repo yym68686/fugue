@@ -198,6 +198,24 @@ func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
 	}
 }
 
+func TestManagedFieldsOwnershipRequiresEveryReviewedPointer(t *testing.T) {
+	metadata := map[string]any{"managedFields": []any{map[string]any{
+		"manager": "edge-worker-declarative", "operation": "Apply", "fieldsV1": map[string]any{
+			"f:metadata": map[string]any{"f:labels": map[string]any{"f:fugue.io/edge-group-id": map[string]any{}}},
+			"f:spec":     map[string]any{"f:selector": map[string]any{}, "f:template": map[string]any{}},
+		},
+	}}}
+	if !managedFieldsOwnPointers(metadata, "edge-worker-declarative", []string{"/metadata/labels", "/spec/selector", "/spec/template"}) {
+		t.Fatal("reviewed ownership pointers were not recognized")
+	}
+	if managedFieldsOwnPointers(metadata, "edge-worker-declarative", []string{"/spec/updateStrategy"}) {
+		t.Fatal("an unowned pointer was accepted")
+	}
+	if managedFieldsOwnPointers(metadata, "helm", []string{"/spec/template"}) {
+		t.Fatal("the legacy manager was accepted as the declarative owner")
+	}
+}
+
 func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 	release := declarativerelease.PlanRelease{IntentGeneration: 1, Workload: declarativerelease.Workload{FieldManager: "fugue-api-declarative"}}
 	first := strings.Join(applyArguments(release, true), " ")
@@ -225,7 +243,7 @@ func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if args := strings.Join(adoption, " "); !strings.Contains(args, "--force-conflicts") || !strings.Contains(args, "--dry-run=server") {
+	if args := strings.Join(adoption, " "); strings.Contains(args, "--force-conflicts") || !strings.Contains(args, "--dry-run=server") {
 		t.Fatalf("explicit adoption args are incomplete: %s", args)
 	}
 }

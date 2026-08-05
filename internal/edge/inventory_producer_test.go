@@ -1,0 +1,287 @@
+package edge
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"fugue/internal/config"
+	"fugue/internal/edgecontrol"
+	"fugue/internal/edgegroupfront"
+	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
+)
+
+func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-us"
+	nodeID := "edge-node-us-1"
+	sourceCommit := strings.Repeat("a", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotB, sourceCommit)
+	keyringFile, activeKey := writeInventoryProducerKeyringFixture(t, groupID)
+	identityKeyring := platformcontrol.DerivePlatformComponentIdentityKeyring(activeKey, "inventory-platform-current", "", "", nil)
+
+	var requests atomic.Int32
+	client := &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == edgecontrol.AuthorityGroupReadyPrefixV1+groupID+"/readyz":
+			if request.URL.RawQuery != "" || request.Header.Get("Authorization") != "" {
+				t.Fatalf("cursor request leaked credential or query: %s headers=%v", request.URL.String(), request.Header)
+			}
+			return inventoryJSONResponse(http.StatusServiceUnavailable, edgecontrol.AuthorityGroupStatus{
+				GroupID: groupID, InventorySequence: 9, InventoryProducerGeneration: 7,
+			}), nil
+		case request.Method == http.MethodPost && request.URL.Path == edgecontrol.GroupAuthorityInventoryHeartbeatPathV1:
+			if request.URL.RawQuery != "" || !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") || request.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("heartbeat transport is not fixed bearer auth: url=%s headers=%v", request.URL.String(), request.Header)
+			}
+			claims, err := platformcontrol.ParsePlatformComponentIdentity(identityKeyring, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "), now)
+			if err != nil || claims.NodeID != nodeID || claims.ScopeKey != groupID || claims.Component != model.PlatformConsumerComponentEdgeWorker {
+				t.Fatalf("heartbeat bearer is not freshly group/node bound: claims=%+v err=%v", claims, err)
+			}
+			var heartbeat edgecontrol.GroupInventoryHeartbeat
+			decoder := json.NewDecoder(request.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&heartbeat); err != nil {
+				t.Fatal(err)
+			}
+			if heartbeat.GroupID != groupID || heartbeat.ProducerNodeID != nodeID || heartbeat.ProducerGeneration != 8 ||
+				heartbeat.ExpectedSequence != 9 || heartbeat.Inventory.Sequence != 10 || heartbeat.Inventory.ActiveEpoch.FenceSequence != 1 ||
+				heartbeat.Inventory.ActiveEpoch.ReleaseEpoch != sourceCommit || len(heartbeat.Inventory.Instances) != 1 ||
+				heartbeat.Inventory.Instances[0].EdgeID != nodeID || heartbeat.Inventory.Instances[0].InstanceUID != "pod-uid-us-b" {
+				t.Fatalf("heartbeat is not group/node/cursor bound: %+v", heartbeat)
+			}
+			return inventoryJSONResponse(http.StatusCreated, edgecontrol.GroupInventoryHeartbeatReceipt{
+				Schema: edgecontrol.GroupInventoryHeartbeatReceiptSchemaV1, GroupID: groupID, Sequence: 10,
+				Generation: "inventory-server-generation", InventoryDigest: "sha256:" + strings.Repeat("c", 64),
+				Authority: "edge-control", Publication: true, ProducerNodeID: nodeID, ProducerGeneration: 8,
+			}), nil
+		default:
+			t.Fatalf("unexpected inventory producer request: %s %s", request.Method, request.URL.String())
+			return nil, nil
+		}
+	})}
+
+	edgeConfig := config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-us-b", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second,
+	}
+	producer := InventoryProducerConfig{
+		URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}
+	service := NewServiceWithEdgeSources(edgeConfig, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
+	service.InventoryProducerHTTPClient = client
+	service.mu.Lock()
+	service.snapshot.Healthy = true
+	service.snapshot.Status = "healthy"
+	service.mu.Unlock()
+	if err := service.InventoryHeartbeatOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status := service.Status()
+	if !status.InventoryProducerActive || status.InventoryHeartbeatGeneration != 8 || status.InventoryHeartbeatAt == nil || status.InventoryHeartbeatError != "" || requests.Load() != 2 {
+		t.Fatalf("inventory producer status is not complete: %+v requests=%d", status, requests.Load())
+	}
+}
+
+func TestInventoryProducerInteroperatesWithGroupAuthorityVerifierAndDurableLedger(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-de"
+	nodeID := "edge-node-de-1"
+	sourceCommit := strings.Repeat("c", 40)
+	activeKey := "inventory-platform-identity-key-0123456789abcdef"
+	activeKeyID := "inventory-platform-current"
+
+	keyringDir := t.TempDir()
+	if err := os.Chmod(keyringDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyringRaw, err := json.Marshal(map[string]any{
+		"schema": edgecontrol.InventoryPlatformIdentityKeyringSchemaV1, "generation": 1, "edge_group_id": groupID,
+		"active_key_id": activeKeyID, "active_key": activeKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyringDir, groupID+".json"), keyringRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := edgecontrol.OpenPersistentGroupStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeatHandler, err := edgecontrol.NewGroupInventoryHeartbeatHandler(edgecontrol.GroupInventoryHeartbeatHandlerConfig{
+		Store: store, GroupIDs: []string{groupID}, KeyringDir: keyringDir, Authority: "edge-control", PublicationEnabled: true,
+		Path: edgecontrol.GroupAuthorityInventoryHeartbeatPathV1, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusHandler, err := edgecontrol.NewAuthorityStatusHandler(store, []string{groupID}, edgecontrol.NewAuthorityRuntimeState(func() time.Time { return now }), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keyringFile := filepath.Join(t.TempDir(), "keyring.json")
+	if err := os.WriteFile(keyringFile, keyringRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
+	service := NewServiceWithEdgeSources(config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-de-a", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second,
+	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
+		URL:                 "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}, log.New(io.Discard, "", 0))
+	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		if request.Method == http.MethodGet {
+			statusHandler.ServeHTTP(recorder, request)
+		} else {
+			heartbeatHandler.ServeHTTP(recorder, request)
+		}
+		return recorder.Result(), nil
+	})}
+	service.mu.Lock()
+	service.snapshot.Healthy = true
+	service.snapshot.Status = "healthy"
+	service.mu.Unlock()
+	if err := service.InventoryHeartbeatOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	producer, exists, err := store.ReadGroupInventoryProducerState(context.Background(), groupID)
+	if err != nil || !exists || producer.Generation != 1 || len(producer.Observations) != 1 || producer.Observations[0].NodeID != nodeID {
+		t.Fatalf("durable producer ledger=%+v exists=%t err=%v", producer, exists, err)
+	}
+}
+
+func TestInventoryProducerInactiveSlotDoesNotWriteAndCrossGroupIdentityFailsClosed(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-de"
+	nodeID := "edge-node-de-1"
+	sourceCommit := strings.Repeat("d", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
+	keyringFile, _ := writeInventoryProducerKeyringFixture(t, "edge-group-country-us")
+	producer := InventoryProducerConfig{
+		URL:                 "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}
+	edgeConfig := config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotB, EdgeInstanceUID: "pod-uid-de-b", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second,
+	}
+	service := NewServiceWithEdgeSources(edgeConfig, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
+	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		t.Fatalf("inactive slot unexpectedly contacted inventory authority: %s", request.URL.String())
+		return nil, nil
+	})}
+	if err := service.InventoryHeartbeatOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if service.Status().InventoryProducerActive {
+		t.Fatal("inactive slot claimed inventory producer authority")
+	}
+
+	edgeConfig.EdgeSlot = model.EdgeSlotA
+	active := NewServiceWithEdgeSources(edgeConfig, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
+	active.InventoryProducerHTTPClient = service.InventoryProducerHTTPClient
+	if err := active.InventoryHeartbeatOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "keyring is invalid") {
+		t.Fatalf("cross-group projected identity was not rejected locally: %v", err)
+	}
+}
+
+func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-us"
+	nodeID := "edge-node-us-1"
+	sourceCommit := strings.Repeat("e", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
+	keyringFile, secret := writeInventoryProducerKeyringFixture(t, groupID)
+	producer := InventoryProducerConfig{
+		URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}
+	service := NewServiceWithEdgeSources(config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-us-a", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second,
+	}, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
+	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			return inventoryJSONResponse(http.StatusServiceUnavailable, edgecontrol.AuthorityGroupStatus{GroupID: groupID}), nil
+		}
+		return nil, &url.Error{Op: "Post", URL: request.URL.String(), Err: errors.New("connection refused")}
+	})}
+	err := service.InventoryHeartbeatOnce(context.Background())
+	if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(service.Status().InventoryHeartbeatError, secret) {
+		t.Fatalf("transport error exposed projected identity: err=%v status=%+v", err, service.Status())
+	}
+}
+
+type inventoryRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn inventoryRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func inventoryJSONResponse(status int, value any) *http.Response {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(append(raw, '\n'))),
+	}
+}
+
+func writeInventoryActivationFixture(t *testing.T, now time.Time, groupID, slot, sourceCommit string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "activation.json")
+	_, err := edgegroupfront.ApplyActivationCAS(path, edgegroupfront.ActivationCASRequest{
+		GroupID: groupID, ExpectedGeneration: 0, ExpectedSlot: slot, TargetSlot: slot,
+		BundleGeneration: "bundle-generation-1", WorkerSourceCommit: sourceCommit,
+		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Operation: edgegroupfront.ActivationOperationInit,
+		Reason: "inventory producer test activation",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeInventoryProducerKeyringFixture(t *testing.T, groupID string) (string, string) {
+	t.Helper()
+	activeKey := "inventory-platform-identity-key-0123456789abcdef"
+	raw, err := json.Marshal(map[string]any{
+		"schema": edgecontrol.InventoryPlatformIdentityKeyringSchemaV1, "generation": 1, "edge_group_id": groupID,
+		"active_key_id": "inventory-platform-current", "active_key": activeKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, activeKey
+}

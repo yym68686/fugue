@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/declarativerelease"
 )
@@ -72,27 +73,53 @@ func (fake *fakeEdgeGroupRuntime) WaitFront(_ context.Context, slot, source, dig
 	return value, nil
 }
 
+func (fake *fakeEdgeGroupRuntime) WaitActiveWorkerAuthority(_ context.Context, name string, _ declarativerelease.TargetIdentity) error {
+	fake.calls = append(fake.calls, "wait-worker-authority:"+name)
+	return nil
+}
+
 func TestParseEdgeGroupPodsRequiresOneReadyGroupBoundPodPerNode(t *testing.T) {
 	pods := map[string]any{"items": []any{
 		edgeGroupPodFixture("worker-1", "uid-1", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64)),
 		edgeGroupPodFixture("worker-2", "uid-2", "node-2", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64)),
 	}}
 	raw, _ := json.Marshal(pods)
-	got, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us")
+	got, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us", false, "")
 	if err != nil || len(got) != 2 || got["node-1"].Name != "worker-1" || !got["node-2"].Ready {
 		t.Fatalf("parse edge group pods: got=%+v err=%v", got, err)
 	}
 
 	pods["items"].([]any)[1].(map[string]any)["metadata"].(map[string]any)["labels"].(map[string]any)["fugue.io/edge-group-id"] = "edge-group-country-de"
 	raw, _ = json.Marshal(pods)
-	if _, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us"); err == nil || !strings.Contains(err.Error(), "group identity") {
+	if _, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us", false, ""); err == nil || !strings.Contains(err.Error(), "group identity") {
 		t.Fatalf("cross-group pod was accepted: %v", err)
 	}
 
 	pods["items"] = []any{edgeGroupPodFixture("worker-1", "uid-1", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))}
 	raw, _ = json.Marshal(pods)
-	if _, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us"); err == nil || !strings.Contains(err.Error(), "want 2") {
+	if _, err := parseEdgeGroupPods(raw, "edge", 2, "edge-group-country-us", false, ""); err == nil || !strings.Contains(err.Error(), "want 2") {
 		t.Fatalf("partial group cohort was accepted: %v", err)
+	}
+}
+
+func TestAdoptingEdgeGroupAloneMayReadLegacyPodIdentity(t *testing.T) {
+	pod := edgeGroupPodFixture("worker-legacy", "uid-legacy", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	metadata := pod["metadata"].(map[string]any)
+	delete(metadata["labels"].(map[string]any), "fugue.io/edge-group-id")
+	delete(metadata["annotations"].(map[string]any), "fugue.pro/source-commit")
+	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
+	legacySource := strings.Repeat("2", 40)
+	got, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, legacySource)
+	if err != nil || got["node-1"].SourceCommit != legacySource {
+		t.Fatalf("explicit adoption did not recover the reviewed legacy identity: got=%+v err=%v", got, err)
+	}
+	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", false, ""); err == nil {
+		t.Fatal("independent edge group accepted legacy pod identity")
+	}
+	metadata["labels"].(map[string]any)["fugue.io/edge-group-id"] = "edge-group-country-de"
+	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
+	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, legacySource); err == nil {
+		t.Fatal("adoption accepted an explicit cross-group identity")
 	}
 }
 
@@ -141,7 +168,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply", "roll:" + transition.WorkerBName, "cas:initialize:a", "roll:" + transition.FrontName, "wait-front:a", "select-cas", "cas:promote:b", "wait-front:b", "roll:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply", "roll:" + transition.WorkerBName, "cas:initialize:a", "roll:" + transition.FrontName, "wait-front:a", "select-cas", "cas:promote:b", "wait-front:b", "roll:" + transition.WorkerAName, "wait-worker-authority:" + transition.WorkerBName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
@@ -171,12 +198,34 @@ func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, lkg); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply", "roll:" + transition.WorkerAName, "select-cas", "cas:rollback:a", "wait-front:a", "roll:" + transition.WorkerBName, "roll:" + transition.FrontName, "snapshot"}
+	want := []string{"snapshot", "apply", "roll:" + transition.WorkerAName, "select-cas", "cas:rollback:a", "wait-front:a", "roll:" + transition.WorkerBName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge compensation order=%v want=%v", runtime.calls, want)
 	}
 	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].RollbackOfGeneration != 4 {
 		t.Fatalf("edge compensation CAS is not generation-bound: %+v", runtime.requests)
+	}
+}
+
+func TestEdgeGroupAuthorityRequiresPublicationOnBothSlotsAndInventoryOnActive(t *testing.T) {
+	transition := edgeTransitionFixture()
+	target := edgeTargetFixture("2", "b")
+	state := edgeStateFixture("a", target, edgeFrontHealth{ActiveSlot: "a"})
+	if err := validateEdgeGroupAuthority(state, transition); err != nil {
+		t.Fatalf("valid authority evidence: %v", err)
+	}
+	pod := state.WorkerB["node-1"]
+	pod.RouteBundleSource = ""
+	state.WorkerB["node-1"] = pod
+	if err := validateEdgeGroupAuthority(state, transition); err == nil || !strings.Contains(err.Error(), "publication") {
+		t.Fatalf("missing inactive publication was accepted: %v", err)
+	}
+	state = edgeStateFixture("a", target, edgeFrontHealth{ActiveSlot: "a"})
+	pod = state.WorkerA["node-1"]
+	pod.InventoryProducerActive = false
+	state.WorkerA["node-1"] = pod
+	if err := validateEdgeGroupAuthority(state, transition); err == nil || !strings.Contains(err.Error(), "inventory") {
+		t.Fatalf("missing active inventory was accepted: %v", err)
 	}
 }
 
@@ -208,7 +257,9 @@ func edgeTargetFixture(sourceDigit, digestDigit string) declarativerelease.Targe
 
 func edgeStateFixture(active string, target declarativerelease.TargetIdentity, health edgeFrontHealth) edgeGroupState {
 	pod := func(name string) map[string]edgeGroupPod {
-		return map[string]edgeGroupPod{"node-1": {Name: name + "-pod", UID: name + "-uid", ResourceVersion: "42", NodeName: "node-1", SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef, ImageID: target.ImageRef, BundleGeneration: "bundle-" + active, Ready: true}}
+		return map[string]edgeGroupPod{"node-1": {Name: name + "-pod", UID: name + "-uid", ResourceVersion: "42", NodeName: "node-1", SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef, ImageID: target.ImageRef, BundleGeneration: "bundle-" + active,
+			RouteBundleSource: edgeGroupAuthoritySource, PublicationSequence: 1, ServingGeneration: "generation-one",
+			InventoryProducerActive: true, InventoryHeartbeatGeneration: 1, InventoryHeartbeatAt: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC), Ready: true}}
 	}
 	return edgeGroupState{Front: pod("front"), FrontHealth: map[string]edgeFrontHealth{"node-1": health}, WorkerA: pod("worker-a"), WorkerB: pod("worker-b"), ActiveSlot: active}
 }

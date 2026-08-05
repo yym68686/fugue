@@ -551,12 +551,13 @@ func (workload Workload) validate(componentID string) error {
 
 func (probe HealthProbe) validate() error {
 	allowed := map[string]bool{
-		"deployment":   true,
-		"daemonset":    true,
-		"job":          true,
-		"service-http": true,
-		"pod-http":     true,
-		"leader-lease": true,
+		"deployment":           true,
+		"daemonset":            true,
+		"job":                  true,
+		"service-http":         true,
+		"pod-http":             true,
+		"leader-lease":         true,
+		"edge-group-authority": true,
 	}
 	if !allowed[probe.Type] || !componentIDPattern.MatchString(probe.Name) {
 		return errors.New("unsupported health probe")
@@ -567,6 +568,9 @@ func (probe HealthProbe) validate() error {
 	if (probe.Type == "service-http" || probe.Type == "pod-http") &&
 		(probe.Port == "" || !strings.HasPrefix(probe.Path, "/")) {
 		return errors.New("HTTP health probe requires port and absolute path")
+	}
+	if probe.Type == "edge-group-authority" && (probe.Port != "" || probe.Path != "" || probe.Expected != "") {
+		return errors.New("edge group authority probe does not accept HTTP fields")
 	}
 	return nil
 }

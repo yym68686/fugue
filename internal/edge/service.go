@@ -36,7 +36,7 @@ import (
 	"fugue/internal/weightedselector"
 )
 
-const cacheFileVersion = 1
+const cacheFileVersion = 2
 
 const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
 const edgeClientRemoteAddrHeader = "X-Fugue-Edge-Client-Remote-Addr"
@@ -57,30 +57,35 @@ const (
 )
 
 type Service struct {
-	Config                   config.EdgeConfig
-	HTTPClient               *http.Client
-	Logger                   *log.Logger
-	caddyWarmup              func(context.Context, string, string) error
-	cacheWarmupClientFactory func(string, string) *http.Client
-	proxyBase                http.RoundTripper
-	proxyTransportMu         sync.Mutex
-	proxyTransportPrototype  *http.Transport
-	proxyTransports          map[string]*http.Transport
-	proxyTransportActiveKeys map[string]struct{}
-	proxyTransportBundleSet  bool
-	bodyBuffer               *edgeRequestBodyBufferManager
-	requestBodyPolicyMu      sync.Mutex
-	requestBodyPolicyGuards  map[string]*edgeRequestBodyPolicyGuard
-	caddyWarmupMu            sync.Mutex
-	caddyWarmupCancel        context.CancelFunc
-	caddyWarmupDone          <-chan struct{}
-	caddyWarmupIdentity      string
-	caddyWarmupSequence      uint64
+	Config                      config.EdgeConfig
+	RouteBundleSource           RouteBundleSourceConfig
+	InventoryProducer           InventoryProducerConfig
+	HTTPClient                  *http.Client
+	RouteBundleHTTPClient       *http.Client
+	InventoryProducerHTTPClient *http.Client
+	Logger                      *log.Logger
+	caddyWarmup                 func(context.Context, string, string) error
+	cacheWarmupClientFactory    func(string, string) *http.Client
+	proxyBase                   http.RoundTripper
+	proxyTransportMu            sync.Mutex
+	proxyTransportPrototype     *http.Transport
+	proxyTransports             map[string]*http.Transport
+	proxyTransportActiveKeys    map[string]struct{}
+	proxyTransportBundleSet     bool
+	bodyBuffer                  *edgeRequestBodyBufferManager
+	requestBodyPolicyMu         sync.Mutex
+	requestBodyPolicyGuards     map[string]*edgeRequestBodyPolicyGuard
+	caddyWarmupMu               sync.Mutex
+	caddyWarmupCancel           context.CancelFunc
+	caddyWarmupDone             <-chan struct{}
+	caddyWarmupIdentity         string
+	caddyWarmupSequence         uint64
 
 	mu                    sync.Mutex
 	snapshot              Status
 	bundle                *model.EdgeRouteBundle
 	etag                  string
+	routePublication      routePublicationMetadata
 	metrics               telemetry
 	performanceBaseline   telemetry
 	cacheRevalidating     map[string]struct{}
@@ -92,32 +97,39 @@ type Service struct {
 }
 
 type Status struct {
-	Status                 string     `json:"status"`
-	Healthy                bool       `json:"healthy"`
-	EdgeID                 string     `json:"edge_id,omitempty"`
-	EdgeGroupID            string     `json:"edge_group_id,omitempty"`
-	BundleVersion          string     `json:"bundle_version,omitempty"`
-	ServingGeneration      string     `json:"serving_generation,omitempty"`
-	LKGGeneration          string     `json:"lkg_generation,omitempty"`
-	LastGoodGeneration     string     `json:"last_good_generation,omitempty"`
-	CacheCorruptGeneration string     `json:"cache_corrupt_generation,omitempty"`
-	BundleValidUntil       *time.Time `json:"bundle_valid_until,omitempty"`
-	RouteCount             int        `json:"route_count"`
-	TLSAllowlistCount      int        `json:"tls_allowlist_count"`
-	LastSyncAt             *time.Time `json:"last_sync_at,omitempty"`
-	LastSuccessAt          *time.Time `json:"last_success_at,omitempty"`
-	LastError              string     `json:"last_error,omitempty"`
-	DegradedReason         string     `json:"degraded_reason,omitempty"`
-	StaleCache             bool       `json:"stale_cache"`
-	MaxStaleExceeded       bool       `json:"max_stale_exceeded,omitempty"`
-	FailureClass           string     `json:"failure_class,omitempty"`
-	CachePath              string     `json:"cache_path,omitempty"`
-	CaddyEnabled           bool       `json:"caddy_enabled,omitempty"`
-	CaddyListenAddr        string     `json:"caddy_listen_addr,omitempty"`
-	CaddyTLSMode           string     `json:"caddy_tls_mode,omitempty"`
-	CaddyAppliedVersion    string     `json:"caddy_applied_version,omitempty"`
-	CaddyLastApplyAt       *time.Time `json:"caddy_last_apply_at,omitempty"`
-	CaddyLastError         string     `json:"caddy_last_error,omitempty"`
+	Status                       string     `json:"status"`
+	Healthy                      bool       `json:"healthy"`
+	EdgeID                       string     `json:"edge_id,omitempty"`
+	EdgeGroupID                  string     `json:"edge_group_id,omitempty"`
+	BundleVersion                string     `json:"bundle_version,omitempty"`
+	RouteBundleSource            string     `json:"route_bundle_source,omitempty"`
+	PublicationSequence          uint64     `json:"publication_sequence,omitempty"`
+	RecoveryEpoch                uint64     `json:"recovery_epoch,omitempty"`
+	ServingGeneration            string     `json:"serving_generation,omitempty"`
+	LKGGeneration                string     `json:"lkg_generation,omitempty"`
+	LastGoodGeneration           string     `json:"last_good_generation,omitempty"`
+	CacheCorruptGeneration       string     `json:"cache_corrupt_generation,omitempty"`
+	BundleValidUntil             *time.Time `json:"bundle_valid_until,omitempty"`
+	RouteCount                   int        `json:"route_count"`
+	TLSAllowlistCount            int        `json:"tls_allowlist_count"`
+	LastSyncAt                   *time.Time `json:"last_sync_at,omitempty"`
+	LastSuccessAt                *time.Time `json:"last_success_at,omitempty"`
+	LastError                    string     `json:"last_error,omitempty"`
+	DegradedReason               string     `json:"degraded_reason,omitempty"`
+	StaleCache                   bool       `json:"stale_cache"`
+	MaxStaleExceeded             bool       `json:"max_stale_exceeded,omitempty"`
+	FailureClass                 string     `json:"failure_class,omitempty"`
+	CachePath                    string     `json:"cache_path,omitempty"`
+	CaddyEnabled                 bool       `json:"caddy_enabled,omitempty"`
+	CaddyListenAddr              string     `json:"caddy_listen_addr,omitempty"`
+	CaddyTLSMode                 string     `json:"caddy_tls_mode,omitempty"`
+	CaddyAppliedVersion          string     `json:"caddy_applied_version,omitempty"`
+	CaddyLastApplyAt             *time.Time `json:"caddy_last_apply_at,omitempty"`
+	CaddyLastError               string     `json:"caddy_last_error,omitempty"`
+	InventoryProducerActive      bool       `json:"inventory_producer_active,omitempty"`
+	InventoryHeartbeatAt         *time.Time `json:"inventory_heartbeat_at,omitempty"`
+	InventoryHeartbeatGeneration uint64     `json:"inventory_heartbeat_generation,omitempty"`
+	InventoryHeartbeatError      string     `json:"inventory_heartbeat_error,omitempty"`
 }
 
 type edgeDesiredStateEnvelope struct {
@@ -139,10 +151,13 @@ type edgeDesiredState struct {
 }
 
 type cacheFile struct {
-	Version  int                   `json:"version"`
-	ETag     string                `json:"etag,omitempty"`
-	CachedAt time.Time             `json:"cached_at"`
-	Bundle   model.EdgeRouteBundle `json:"bundle"`
+	Version             int                   `json:"version"`
+	ETag                string                `json:"etag,omitempty"`
+	CachedAt            time.Time             `json:"cached_at"`
+	RouteBundleSource   string                `json:"route_bundle_source,omitempty"`
+	PublicationSequence uint64                `json:"publication_sequence,omitempty"`
+	RecoveryEpoch       uint64                `json:"recovery_epoch,omitempty"`
+	Bundle              model.EdgeRouteBundle `json:"bundle"`
 }
 
 type telemetry struct {
@@ -410,6 +425,14 @@ func (e statusError) Error() string {
 }
 
 func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
+	return NewServiceWithEdgeSources(cfg, RouteBundleSourceConfig{}, InventoryProducerConfig{}, logger)
+}
+
+func NewServiceWithRouteBundleSource(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, logger *log.Logger) *Service {
+	return NewServiceWithEdgeSources(cfg, routeBundleSource, InventoryProducerConfig{}, logger)
+}
+
+func NewServiceWithEdgeSources(cfg config.EdgeConfig, routeBundleSource RouteBundleSourceConfig, inventoryProducer InventoryProducerConfig, logger *log.Logger) *Service {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -418,19 +441,23 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		timeout = 10 * time.Second
 	}
 	service := &Service{
-		Config: cfg,
+		Config:            cfg,
+		RouteBundleSource: routeBundleSource,
+		InventoryProducer: inventoryProducer,
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
-		Logger:                   logger,
-		caddyWarmup:              warmupCaddyTLS,
-		cacheWarmupClientFactory: newEdgeCacheWarmupClient,
-		proxyBase:                newDefaultEdgeProxyTransport(),
-		proxyTransports:          map[string]*http.Transport{},
-		proxyTransportActiveKeys: map[string]struct{}{},
-		bodyBuffer:               newEdgeRequestBodyBufferManager(cfg),
-		requestBodyPolicyGuards:  map[string]*edgeRequestBodyPolicyGuard{},
-		walActionLast:            map[string]time.Time{},
+		RouteBundleHTTPClient:       newEdgeRouteBundleHTTPClient(timeout),
+		InventoryProducerHTTPClient: newInventoryProducerHTTPClient(timeout),
+		Logger:                      logger,
+		caddyWarmup:                 warmupCaddyTLS,
+		cacheWarmupClientFactory:    newEdgeCacheWarmupClient,
+		proxyBase:                   newDefaultEdgeProxyTransport(),
+		proxyTransports:             map[string]*http.Transport{},
+		proxyTransportActiveKeys:    map[string]struct{}{},
+		bodyBuffer:                  newEdgeRequestBodyBufferManager(cfg),
+		requestBodyPolicyGuards:     map[string]*edgeRequestBodyPolicyGuard{},
+		walActionLast:               map[string]time.Time{},
 		snapshot: Status{
 			Status:      "unhealthy",
 			EdgeID:      strings.TrimSpace(cfg.EdgeID),
@@ -450,6 +477,12 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.HTTPClient == nil {
 		s.HTTPClient = &http.Client{Timeout: s.Config.HTTPTimeout}
+	}
+	if s.RouteBundleHTTPClient == nil {
+		s.RouteBundleHTTPClient = newEdgeRouteBundleHTTPClient(s.Config.HTTPTimeout)
+	}
+	if s.InventoryProducerHTTPClient == nil {
+		s.InventoryProducerHTTPClient = newInventoryProducerHTTPClient(s.Config.HTTPTimeout)
 	}
 	if s.proxyBase == nil {
 		s.proxyBase = newDefaultEdgeProxyTransport()
@@ -502,6 +535,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.Logger.Printf("fugue-edge shadow started; api=%s edge_id=%s edge_group_id=%s cache=%s listen=%s interval=%s caddy_enabled=%t caddy_listen=%s caddy_tls_mode=%s proxy_listen=%s", safeBaseURL(s.Config.APIURL), s.Config.EdgeID, s.Config.EdgeGroupID, s.Config.CachePath, s.Config.ListenAddr, s.syncInterval(), s.Config.CaddyEnabled, s.Config.CaddyListenAddr, s.normalizedCaddyTLSMode(), s.Config.CaddyProxyListenAddr)
 	_ = s.SyncOnce(ctx)
 	s.startHeartbeatLoop(ctx)
+	s.startInventoryProducerLoop(ctx)
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -557,7 +591,11 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		return err
 	}
 
-	resp, err := s.HTTPClient.Do(req)
+	routeClient := s.HTTPClient
+	if s.edgeControlRouteSourceEnabled() {
+		routeClient = s.RouteBundleHTTPClient
+	}
+	resp, err := routeClient.Do(req)
 	if err != nil {
 		err = fmt.Errorf("fetch edge route bundle: %s", s.redact(err.Error()))
 		s.recordSyncError(err)
@@ -569,6 +607,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 	switch resp.StatusCode {
 	case http.StatusOK:
 		var bundle model.EdgeRouteBundle
+		var previousBundle *model.EdgeRouteBundle
 		if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
 			err = fmt.Errorf("decode edge route bundle: %w", err)
 			s.recordSyncError(err)
@@ -582,6 +621,24 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			s.recordSyncError(err)
 			return err
 		}
+		publication := routePublicationMetadata{}
+		if s.edgeControlRouteSourceEnabled() {
+			publication, err = routePublicationFromResponse(resp.Header, bundle, s.Config.EdgeGroupID)
+			if err != nil {
+				s.recordSyncError(err)
+				return err
+			}
+			currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
+			previousBundle = currentBundle
+			if err = validateRoutePublicationAdvance(currentPublication, publication); err != nil {
+				s.recordSyncError(err)
+				return err
+			}
+			if err = validateNonCatastrophicGroupBundle(currentBundle, bundle, publication.RecoveryEpoch > currentPublication.RecoveryEpoch); err != nil {
+				s.recordSyncError(err)
+				return err
+			}
+		}
 		etag := strings.TrimSpace(resp.Header.Get("ETag"))
 		if etag == "" {
 			etag = quoteETag(bundle.Version)
@@ -594,15 +651,23 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		if err := s.writeCache(cacheFile{
-			Version:  cacheFileVersion,
-			ETag:     etag,
-			CachedAt: now,
-			Bundle:   bundle,
+			Version:             cacheFileVersion,
+			ETag:                etag,
+			CachedAt:            now,
+			RouteBundleSource:   publication.Source,
+			PublicationSequence: publication.PublicationSequence,
+			RecoveryEpoch:       publication.RecoveryEpoch,
+			Bundle:              bundle,
 		}); err != nil {
+			if previousBundle != nil && s.Config.CaddyEnabled {
+				if _, restoreErr := s.applyCaddyConfigOnly(ctx, *previousBundle); restoreErr != nil {
+					err = errors.Join(err, fmt.Errorf("restore edge route LKG after cache failure: %w", restoreErr))
+				}
+			}
 			s.recordSyncError(err)
 			return err
 		}
-		s.recordSyncSuccess(bundle, etag, now, false)
+		s.recordSyncSuccessWithPublication(bundle, etag, now, false, publication)
 		s.scheduleCurrentCaddyWarmup(bundle, configSignature)
 		result = "success"
 		return nil
@@ -611,6 +676,20 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			err := fmt.Errorf("edge routes returned 304 without a cached bundle")
 			s.recordSyncError(err)
 			return err
+		}
+		if s.edgeControlRouteSourceEnabled() {
+			currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
+			if currentBundle == nil {
+				err := fmt.Errorf("edge-control routes returned 304 without a cached publication")
+				s.recordSyncError(err)
+				return err
+			}
+			observedPublication, publicationErr := routePublicationFromResponse(resp.Header, *currentBundle, s.Config.EdgeGroupID)
+			if publicationErr != nil || observedPublication != currentPublication {
+				err := fmt.Errorf("edge-control routes returned 304 with mismatched publication metadata")
+				s.recordSyncError(err)
+				return err
+			}
 		}
 		s.recordNotModified(now)
 		if err := s.applyCurrentCaddyConfig(ctx); err != nil {
@@ -692,6 +771,15 @@ func (s *Service) LoadCache() error {
 	}
 	if err := s.verifyCachedBundle(cached.Bundle, time.Now().UTC()); err != nil {
 		err = fmt.Errorf("verify edge route cache: %w", err)
+		s.recordCacheLoad("error")
+		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
+			s.recordCacheCorruptGeneration(edgeCacheGeneration(cached.Bundle))
+			return nil
+		}
+		return err
+	}
+	if err := s.validateCachedRouteSource(cached); err != nil {
+		err = fmt.Errorf("verify edge route cache source: %w", err)
 		s.recordCacheLoad("error")
 		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
 			s.recordCacheCorruptGeneration(edgeCacheGeneration(cached.Bundle))
@@ -2666,13 +2754,31 @@ func (s *Service) startProxyServer() (func(context.Context) error, error) {
 }
 
 func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
-	base, err := url.Parse(strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/"))
-	if err != nil || base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("invalid FUGUE_API_URL")
+	routeSource := s.edgeRouteSourceConfig()
+	baseURL := strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/")
+	token := strings.TrimSpace(s.Config.EdgeToken)
+	if s.edgeControlRouteSourceEnabled() {
+		if err := validateEdgeControlRouteSourceConfig(routeSource); err != nil {
+			return nil, err
+		}
+		baseURL = routeSource.url
+		var err error
+		token, err = loadEdgeRouteReaderToken(routeSource.tokenFile)
+		if err != nil {
+			return nil, err
+		}
 	}
-	base.Path = strings.TrimRight(base.Path, "/") + "/v1/edge/routes"
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("invalid edge route bundle URL")
+	}
+	if !s.edgeControlRouteSourceEnabled() {
+		base.Path = strings.TrimRight(base.Path, "/") + edgeControlBundlePath
+	}
 	query := base.Query()
-	query.Set("token", strings.TrimSpace(s.Config.EdgeToken))
+	if !s.edgeControlRouteSourceEnabled() {
+		query.Set("token", token)
+	}
 	if edgeID := strings.TrimSpace(s.Config.EdgeID); edgeID != "" {
 		query.Set("edge_id", edgeID)
 	}
@@ -2684,6 +2790,9 @@ func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build edge routes request: %w", err)
+	}
+	if s.edgeControlRouteSourceEnabled() {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if etag := s.currentETag(); etag != "" {
 		req.Header.Set("If-None-Match", etag)
@@ -3422,6 +3531,15 @@ func (s *Service) validateConfig() error {
 	if strings.TrimSpace(s.Config.EdgeToken) == "" {
 		return fmt.Errorf("FUGUE_EDGE_TOKEN is required")
 	}
+	if err := validateEdgeControlRouteSourceConfig(s.edgeRouteSourceConfig()); err != nil {
+		return err
+	}
+	if err := validateInventoryProducerConfig(s.InventoryProducer, s.Config); err != nil {
+		return err
+	}
+	if s.edgeControlRouteSourceEnabled() && strings.TrimSpace(s.Config.EdgeGroupID) == "" {
+		return fmt.Errorf("edge-control route source requires a projected edge group identity")
+	}
 	staticTLSCertFile := strings.TrimSpace(s.Config.CaddyStaticTLSCertFile)
 	staticTLSKeyFile := strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile)
 	if (staticTLSCertFile == "") != (staticTLSKeyFile == "") {
@@ -3534,6 +3652,11 @@ func (s *Service) LoadPreviousCache() error {
 			s.recordCacheLoad("error")
 			continue
 		}
+		if err := s.validateCachedRouteSource(cached); err != nil {
+			lastErr = fmt.Errorf("verify previous edge route cache source %s: %w", candidate.Path, err)
+			s.recordCacheLoad("error")
+			continue
+		}
 		s.recordCacheLoaded(cached)
 		s.recordCacheLoad("success")
 		s.recordEdgeServeLKGWAL("load_previous_cache", nil)
@@ -3554,7 +3677,7 @@ func (s *Service) preservePreviousCache(path string) {
 		if err := json.Unmarshal(data, &cached); err != nil || cached.Bundle.Version == "" {
 			return false
 		}
-		return s.verifyCachedBundle(cached.Bundle, time.Now().UTC()) == nil
+		return s.verifyCachedBundle(cached.Bundle, time.Now().UTC()) == nil && s.validateCachedRouteSource(cached) == nil
 	})
 	if err != nil && !os.IsNotExist(err) && s.Logger != nil {
 		s.Logger.Printf("preserve previous edge route cache failed: %v", err)
@@ -3573,6 +3696,20 @@ func (s *Service) verifyBundle(bundle model.EdgeRouteBundle, now time.Time) erro
 		s.Config.BundleSigningPreviousKeyID,
 		s.Config.BundleRevokedKeyIDs,
 	)
+	if s.edgeControlRouteSourceEnabled() {
+		var err error
+		keyring, err = loadEdgeRouteVerifierKeyring(s.RouteBundleSource.VerifierKeyringFile, s.Config.EdgeGroupID)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			zeroString(&keyring.PrimaryKey)
+			zeroString(&keyring.PreviousKey)
+		}()
+		if strings.TrimSpace(bundle.EdgeGroupID) != strings.TrimSpace(s.Config.EdgeGroupID) || bundle.Issuer != "fugue-edge-control" {
+			return fmt.Errorf("edge-control route bundle group or issuer is invalid")
+		}
+	}
 	if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(bundle, keyring, now); err != nil {
 		return err
 	}
@@ -3615,6 +3752,7 @@ func (s *Service) recordCacheLoaded(cached cacheFile) {
 	bundle := cached.Bundle
 	s.mu.Lock()
 	s.bundle = &bundle
+	s.routePublication = routePublicationFromCache(cached)
 	s.etag = strings.TrimSpace(cached.ETag)
 	if s.etag == "" {
 		s.etag = quoteETag(bundle.Version)
@@ -3635,8 +3773,13 @@ func (s *Service) recordCacheCorruptGeneration(generation string) {
 }
 
 func (s *Service) recordSyncSuccess(bundle model.EdgeRouteBundle, etag string, now time.Time, stale bool) {
+	s.recordSyncSuccessWithPublication(bundle, etag, now, stale, routePublicationMetadata{})
+}
+
+func (s *Service) recordSyncSuccessWithPublication(bundle model.EdgeRouteBundle, etag string, now time.Time, stale bool, publication routePublicationMetadata) {
 	s.mu.Lock()
 	s.bundle = &bundle
+	s.routePublication = publication
 	s.etag = strings.TrimSpace(etag)
 	s.snapshot = s.statusForBundleLocked(bundle, now, &now, stale)
 	s.mu.Unlock()
@@ -4131,22 +4274,25 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 	}
 	generation := edgeCacheGeneration(bundle)
 	out := Status{
-		Status:             status,
-		Healthy:            healthy,
-		EdgeID:             strings.TrimSpace(s.Config.EdgeID),
-		EdgeGroupID:        strings.TrimSpace(s.Config.EdgeGroupID),
-		BundleVersion:      bundle.Version,
-		ServingGeneration:  generation,
-		LKGGeneration:      generation,
-		LastGoodGeneration: generation,
-		RouteCount:         len(bundle.Routes),
-		TLSAllowlistCount:  len(bundle.TLSAllowlist),
-		LastSyncAt:         &syncAt,
-		LastSuccessAt:      successAt,
-		DegradedReason:     degradedReason,
-		StaleCache:         stale,
-		MaxStaleExceeded:   maxStaleExceeded,
-		CachePath:          strings.TrimSpace(s.Config.CachePath),
+		Status:              status,
+		Healthy:             healthy,
+		EdgeID:              strings.TrimSpace(s.Config.EdgeID),
+		EdgeGroupID:         strings.TrimSpace(s.Config.EdgeGroupID),
+		BundleVersion:       bundle.Version,
+		RouteBundleSource:   s.routePublication.Source,
+		PublicationSequence: s.routePublication.PublicationSequence,
+		RecoveryEpoch:       s.routePublication.RecoveryEpoch,
+		ServingGeneration:   generation,
+		LKGGeneration:       generation,
+		LastGoodGeneration:  generation,
+		RouteCount:          len(bundle.Routes),
+		TLSAllowlistCount:   len(bundle.TLSAllowlist),
+		LastSyncAt:          &syncAt,
+		LastSuccessAt:       successAt,
+		DegradedReason:      degradedReason,
+		StaleCache:          stale,
+		MaxStaleExceeded:    maxStaleExceeded,
+		CachePath:           strings.TrimSpace(s.Config.CachePath),
 	}
 	if !validUntil.IsZero() {
 		out.BundleValidUntil = &validUntil
@@ -4403,10 +4549,10 @@ func (s *Service) syncInterval() time.Duration {
 
 func (s *Service) redact(value string) string {
 	token := strings.TrimSpace(s.Config.EdgeToken)
-	if token == "" {
-		return value
+	if token != "" {
+		value = strings.ReplaceAll(value, token, "[redacted]")
 	}
-	return strings.ReplaceAll(value, token, "[redacted]")
+	return value
 }
 
 func safeBaseURL(raw string) string {

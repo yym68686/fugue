@@ -10,18 +10,26 @@ COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-edge ./cmd/fugue-edge && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-edge-front ./cmd/fugue-edge-front && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-edge-front-cas ./cmd/fugue-edge-front-cas && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-ssh-front ./cmd/fugue-ssh-front && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-dns ./cmd/fugue-dns && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-mesh-recovery ./cmd/fugue-mesh-recovery && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-mesh-agent ./cmd/fugue-mesh-agent
+
+# This is the exact Caddy manifest digest already attested by the existing
+# public Edge production transaction. The final Edge artifact carries the
+# binary so worker, front, identity-init, and Caddy share one release digest.
+FROM docker.io/library/caddy:2.10.2-alpine@sha256:e088ffae92d9f4803cceccfc33f961fe5545ba0efed0c2ec1899ef37951af8e5 AS caddy
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=build /out/fugue-edge /usr/local/bin/fugue-edge
 COPY --from=build /out/fugue-edge-front /usr/local/bin/fugue-edge-front
+COPY --from=build /out/fugue-edge-front-cas /usr/local/bin/fugue-edge-front-cas
 COPY --from=build /out/fugue-ssh-front /usr/local/bin/fugue-ssh-front
 COPY --from=build /out/fugue-dns /usr/local/bin/fugue-dns
 COPY --from=build /out/fugue-mesh-recovery /usr/local/bin/fugue-mesh-recovery
 COPY --from=build /out/fugue-mesh-agent /usr/local/bin/fugue-mesh-agent
+COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 ENTRYPOINT ["/usr/local/bin/fugue-edge"]

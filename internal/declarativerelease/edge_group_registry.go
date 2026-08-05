@@ -112,6 +112,9 @@ func (group EdgeGroup) validate() error {
 		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath {
 			publicationReady = true
 		}
+		if probe.Type == "edge-group-authority" && probe.Name == group.GroupID {
+			publicationReady = true
+		}
 	}
 	if !legacyControlPublicationReady && (!controlProcessReady || !publicationReady) {
 		return errors.New("edge control process and worker publication health must be group-bound")
@@ -282,6 +285,7 @@ func edgeGroupUsesStagedHealth(group EdgeGroup) bool {
 	}
 	for _, probe := range group.Worker.Health {
 		publicationReady = publicationReady || (probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath)
+		publicationReady = publicationReady || (probe.Type == "edge-group-authority" && probe.Name == group.GroupID)
 	}
 	return controlReady && publicationReady
 }
