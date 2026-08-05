@@ -187,9 +187,22 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	}
 	prewrite, lkgObserveErr := cluster.Observe(ctx, release, lkg, rendered.Forward)
 	alreadyConverged := false
-	if lkgObserveErr == nil && prewrite.Matches(lkg, release, true) {
+	lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
+	lkgHealthVerified := false
+	if release.ExpectedPreviousPresent && lkgObserveErr != nil {
+		var healthyLKG Observation
+		healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+		if err == nil && healthyLKG.Matches(lkg, release, true) {
+			prewrite, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
+			lkgMatched = err == nil && prewrite.Matches(lkg, release, true)
+			lkgHealthVerified = lkgMatched
+		}
+	}
+	if lkgMatched {
 		if release.ExpectedPreviousPresent {
-			_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+			if !lkgHealthVerified {
+				_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+			}
 			if err == nil {
 				var predecessorWitness []byte
 				predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)

@@ -391,9 +391,10 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	var lastErr error
 	tracker := healthSoakTracker{required: soak}
 	allowHistoricalRestarts := allowsHistoricalRestarts(release, target)
+	allowLegacyManager := release.IntentGeneration == 1 || allowHistoricalRestarts
 	for {
 		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowHistoricalRestarts)
-		if err == nil && observation.Matches(target, release, release.IntentGeneration == 1) {
+		if err == nil && observation.Matches(target, release, allowLegacyManager) {
 			probeDigest, probeErr := cluster.verifyProbes(ctx, release, target, manifest, observation)
 			if probeErr == nil {
 				observation.HealthDigest = digestJoin(observation.HealthDigest, probeDigest)

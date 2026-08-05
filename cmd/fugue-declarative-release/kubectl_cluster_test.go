@@ -97,6 +97,28 @@ func TestParseObservationAllowsOnlyStableHistoricalLKGRestarts(t *testing.T) {
 	}
 }
 
+func TestHistoricalLKGAllowsLegacyManagerAfterTheFirstIntent(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		ExpectedPreviousPresent:     true,
+		ExpectedPreviousConfigSHA:   strings.Repeat("1", 40),
+		ExpectedPreviousManifestSHA: strings.Repeat("2", 40),
+		ExpectedPreviousOCIRevision: strings.Repeat("3", 40),
+		IntentGeneration:            6,
+	}
+	lkg := declarativerelease.TargetIdentity{
+		Present: true, ConfigSHA: release.ExpectedPreviousConfigSHA,
+		ManifestSHA: release.ExpectedPreviousManifestSHA, OCIRevision: release.ExpectedPreviousOCIRevision,
+	}
+	if !allowsHistoricalRestarts(release, lkg) {
+		t.Fatal("declared historical LKG lost its restart and legacy-manager allowance")
+	}
+	forward := lkg
+	forward.ConfigSHA = strings.Repeat("4", 40)
+	if allowsHistoricalRestarts(release, forward) {
+		t.Fatal("forward target inherited the historical LKG allowance")
+	}
+}
+
 func TestApplyArgumentsForceOnlyFirstOwnershipHandoff(t *testing.T) {
 	release := declarativerelease.PlanRelease{IntentGeneration: 1, Workload: declarativerelease.Workload{FieldManager: "fugue-api-declarative"}}
 	first := strings.Join(applyArguments(release, true), " ")

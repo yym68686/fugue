@@ -10,18 +10,27 @@ import (
 )
 
 type fakeCluster struct {
-	observations  []Observation
-	cas           []Observation
-	dryRuns       int
-	applies       int
-	applyErrors   []error
-	deleteCreated int
-	health        []Observation
-	healthErrors  []error
-	converged     [][]byte
+	observations      []Observation
+	observationErrors []error
+	cas               []Observation
+	dryRuns           int
+	applies           int
+	applyErrors       []error
+	deleteCreated     int
+	health            []Observation
+	healthErrors      []error
+	healthTargets     []TargetIdentity
+	converged         [][]byte
 }
 
 func (fake *fakeCluster) Observe(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error) {
+	if len(fake.observationErrors) > 0 {
+		err := fake.observationErrors[0]
+		fake.observationErrors = fake.observationErrors[1:]
+		if err != nil {
+			return Observation{}, err
+		}
+	}
 	if len(fake.observations) == 0 {
 		return Observation{}, errors.New("no observation")
 	}
@@ -64,7 +73,8 @@ func (fake *fakeCluster) DeleteCreated(context.Context, PlanRelease, []byte, Obs
 	return nil
 }
 
-func (fake *fakeCluster) WaitHealthy(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error) {
+func (fake *fakeCluster) WaitHealthy(_ context.Context, _ PlanRelease, target TargetIdentity, _ []byte) (Observation, error) {
+	fake.healthTargets = append(fake.healthTargets, target)
 	var value Observation
 	if len(fake.health) > 0 {
 		value = fake.health[0]
@@ -161,6 +171,22 @@ func TestPrepareComparesPodHealthUsingTheSameObservationSemantics(t *testing.T) 
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{probeAugmented}}
 	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err != nil {
 		t.Fatalf("probe-augmented health witness was compared with the pod-only witness: %v", err)
+	}
+}
+
+func TestPrepareRecoversTheDeclaredLKGAfterATransientUnreadyObservation(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	fake := &fakeCluster{
+		observationErrors: []error{errors.New("ready workload pod count mismatch")},
+		observations:      []Observation{lkg, lkg},
+		health:            []Observation{lkg},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || prepared.AlreadyConverged || fake.dryRuns != 2 {
+		t.Fatalf("transiently unready LKG did not recover: plan=%+v dryRuns=%d err=%v", prepared, fake.dryRuns, err)
+	}
+	if len(fake.healthTargets) != 1 || fake.healthTargets[0].OCIRevision != plan.Releases[0].ExpectedPreviousOCIRevision {
+		t.Fatalf("prepare waited on the forward target before the declared LKG: %+v", fake.healthTargets)
 	}
 }
 
