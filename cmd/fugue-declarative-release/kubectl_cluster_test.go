@@ -178,7 +178,7 @@ func TestHistoricalLKGAllowsLegacyManagerAfterTheFirstIntent(t *testing.T) {
 	}
 }
 
-func TestApplyArgumentsForceOnlyFirstOwnershipHandoff(t *testing.T) {
+func TestApplyArgumentsForceOnlyVerifiedOwnershipHandoff(t *testing.T) {
 	release := declarativerelease.PlanRelease{IntentGeneration: 1, Workload: declarativerelease.Workload{FieldManager: "fugue-api-declarative"}}
 	first := strings.Join(applyArguments(release, true), " ")
 	if !strings.Contains(first, "--force-conflicts") || !strings.Contains(first, "--dry-run=server") {
@@ -188,6 +188,11 @@ func TestApplyArgumentsForceOnlyFirstOwnershipHandoff(t *testing.T) {
 	next := strings.Join(applyArguments(release, false), " ")
 	if strings.Contains(next, "--force-conflicts") || strings.Contains(next, "--dry-run") {
 		t.Fatalf("ordinary component apply retained handoff privileges: %s", next)
+	}
+	release.RetrySameLKG = true
+	retry := strings.Join(applyArguments(release, true), " ")
+	if !strings.Contains(retry, "--force-conflicts") || !strings.Contains(retry, "--dry-run=server") {
+		t.Fatalf("exact same-LKG retry lost handoff privileges: %s", retry)
 	}
 }
 

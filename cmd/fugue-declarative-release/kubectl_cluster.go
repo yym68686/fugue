@@ -429,7 +429,7 @@ func (cluster *kubectlCluster) applyJob(ctx context.Context, release declarative
 
 func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []string {
 	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager}
-	if release.IntentGeneration == 1 {
+	if release.IntentGeneration == 1 || release.RetrySameLKG {
 		arguments = append(arguments, "--force-conflicts")
 	}
 	if dryRun {
