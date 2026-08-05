@@ -70,8 +70,16 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if !lkgResourceIdentitiesSubset(forward, lkg) {
 			return RenderedManifests{}, errors.New("LKG resource identities are not a subset of forward")
 		}
-		if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
-			return RenderedManifests{}, err
+		bootstrap := release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
+			release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != ""
+		if bootstrap {
+			if err := validateBootstrapLKGIdentity(lkg, *release); err != nil {
+				return RenderedManifests{}, err
+			}
+		} else {
+			if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
+				return RenderedManifests{}, err
+			}
 		}
 		if err := validateImmutableResourceSetImages(lkg); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG images: %w", err)
@@ -92,6 +100,83 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		ForwardDigest: fmt.Sprintf("sha256:%x", forwardDigest),
 		LKGDigest:     fmt.Sprintf("sha256:%x", lkgDigest),
 	}, nil
+}
+
+// validateBootstrapLKGIdentity permits a first ownership handoff from a
+// heterogeneous legacy resource set. Each reviewed LKG container must already
+// be immutable; the primary workload remains bound to the intent's exact
+// source and digest while auxiliary front/slot/sidecar images retain their own
+// reviewed LKG identities.
+func validateBootstrapLKGIdentity(lkg ResourceSet, release PlanRelease) error {
+	primary, err := lkg.Primary(release.Workload)
+	if err != nil {
+		return err
+	}
+	image, err := workloadContainerImage(primary, release.Workload.Container, "container")
+	if err != nil {
+		return err
+	}
+	if image != release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest {
+		return errors.New("bootstrap LKG primary image does not match the declared predecessor")
+	}
+	spec, err := objectField(primary, "spec")
+	if err != nil {
+		return err
+	}
+	template, err := objectField(spec, "template")
+	if err != nil {
+		return err
+	}
+	metadata, err := objectField(template, "metadata")
+	if err != nil {
+		return err
+	}
+	annotations := ensureReadStringMap(metadata, "annotations")
+	if annotations["fugue.pro/source-commit"] != release.ExpectedPreviousManifestSHA ||
+		annotations["fugue.pro/oci-revision"] != release.ExpectedPreviousOCIRevision {
+		return errors.New("bootstrap LKG primary source identity does not match the declared predecessor")
+	}
+	return nil
+}
+
+func workloadContainerImage(workload map[string]any, name, containerType string) (string, error) {
+	spec, err := objectField(workload, "spec")
+	if err != nil {
+		return "", err
+	}
+	template, err := objectField(spec, "template")
+	if err != nil {
+		return "", err
+	}
+	templateSpec, err := objectField(template, "spec")
+	if err != nil {
+		return "", err
+	}
+	field := "containers"
+	if containerType == "init-container" {
+		field = "initContainers"
+	}
+	containers, ok := templateSpec[field].([]any)
+	if !ok {
+		return "", fmt.Errorf("bootstrap LKG %s are invalid", field)
+	}
+	image := ""
+	for _, raw := range containers {
+		container, ok := raw.(map[string]any)
+		if !ok {
+			return "", errors.New("bootstrap LKG container is invalid")
+		}
+		if stringField(container, "name") == name {
+			if image != "" {
+				return "", errors.New("bootstrap LKG container is ambiguous")
+			}
+			image = stringField(container, "image")
+		}
+	}
+	if image == "" {
+		return "", errors.New("bootstrap LKG container is absent")
+	}
+	return image, nil
 }
 
 func validateImmutableResourceSetImages(set ResourceSet) error {

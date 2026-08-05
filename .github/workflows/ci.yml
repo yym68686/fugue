@@ -19,6 +19,10 @@ jobs:
       release_count: ${{ steps.release.outputs.release_count }}
       release_matrix: ${{ steps.release.outputs.release_matrix }}
       release_components: ${{ steps.release.outputs.release_components }}
+      edge_control_count: ${{ steps.release.outputs.edge_control_count }}
+      edge_control_matrix: ${{ steps.release.outputs.edge_control_matrix }}
+      edge_worker_count: ${{ steps.release.outputs.edge_worker_count }}
+      edge_worker_matrix: ${{ steps.release.outputs.edge_worker_matrix }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -177,61 +181,41 @@ jobs:
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: controller, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-  deploy_edge_control_de:
+  deploy_edge_control:
     needs: [prepush, component-build, deploy_api]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-control-de') }}
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && needs.prepush.outputs.edge_control_count != '0' }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepush.outputs.edge_control_matrix) }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-edge-control-de, cancel-in-progress: false}
+    concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
-        with: {component: edge-control-de, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+        with: {component: '${{ matrix.component }}', registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-  deploy_edge_control_us:
-    needs: [prepush, component-build, deploy_api, deploy_edge_control_de]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control_de.result == 'success' || needs.deploy_edge_control_de.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-control-us') }}
-    timeout-minutes: 15
-    runs-on: [self-hosted, linux, x64, fugue, control-plane]
-    environment: production
-    concurrency: {group: fugue-production-edge-control-us, cancel-in-progress: false}
-    permissions: {actions: read, contents: read, packages: read}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with: {ref: '${{ github.sha }}', fetch-depth: 0}
-      - uses: ./.github/actions/deploy-declarative-component
-        with: {component: edge-control-us, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
-
-  deploy_edge_worker_de:
-    needs: [prepush, component-build, deploy_api, deploy_edge_control_de]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control_de.result == 'success' || needs.deploy_edge_control_de.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-worker-de') }}
+  deploy_edge_worker:
+    needs: [prepush, component-build, deploy_api, deploy_edge_control]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control.result == 'success' || needs.deploy_edge_control.result == 'skipped') && needs.prepush.outputs.edge_worker_count != '0' }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepush.outputs.edge_worker_matrix) }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-edge-worker-de, cancel-in-progress: false}
+    concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
-        with: {component: edge-worker-de, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
-
-  deploy_edge_worker_us:
-    needs: [prepush, component-build, deploy_api, deploy_edge_control_us, deploy_edge_worker_de]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control_us.result == 'success' || needs.deploy_edge_control_us.result == 'skipped') && (needs.deploy_edge_worker_de.result == 'success' || needs.deploy_edge_worker_de.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-worker-us') }}
-    timeout-minutes: 30
-    runs-on: [self-hosted, linux, x64, fugue, control-plane]
-    environment: production
-    concurrency: {group: fugue-production-edge-worker-us, cancel-in-progress: false}
-    permissions: {actions: read, contents: read, packages: read}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with: {ref: '${{ github.sha }}', fetch-depth: 0}
-      - uses: ./.github/actions/deploy-declarative-component
-        with: {component: edge-worker-us, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+        with: {component: '${{ matrix.component }}', registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_image_cache:
     needs: [prepush, component-build, deploy_controller]

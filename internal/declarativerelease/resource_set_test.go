@@ -3,6 +3,7 @@ package declarativerelease
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -203,5 +204,20 @@ func TestPredecessorConvergenceAcceptsLegacyTelemetryWithoutRendererAnnotations(
 		if ResourceDesiredSubset(witness, drifted) {
 			t.Fatalf("%s drift was accepted by predecessor convergence", name)
 		}
+	}
+}
+
+func TestReferencedRequiredSecretsReturnsNamesOnlyAndSkipsOptionalRefs(t *testing.T) {
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-worker","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"edge"}},"template":{"metadata":{"labels":{"app":"edge"}},"spec":{"containers":[{"env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"key":"token","name":"edge-api"}}},{"name":"OPTIONAL","valueFrom":{"secretKeyRef":{"key":"value","name":"optional-config","optional":true}}}],"envFrom":[{"secretRef":{"name":"edge-env"}}],"image":"ghcr.io/example/edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"edge"}],"imagePullSecrets":[{"name":"registry-auth"}],"volumes":[{"name":"reader","secret":{"secretName":"edge-reader"}}]}},"updateStrategy":{"type":"OnDelete"}}}],"kind":"ComponentResourceSet"}`)
+	names, err := ReferencedRequiredSecrets(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"edge-api", "edge-env", "edge-reader", "registry-auth"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("required Secret names=%v want=%v", names, want)
+	}
+	if bytes.Contains([]byte(strings.Join(names, "\n")), []byte("token")) {
+		t.Fatal("Secret key/value material escaped the name-only inventory")
 	}
 }

@@ -65,20 +65,43 @@ type TargetIdentity struct {
 }
 
 type ExecutionPlan struct {
-	APIVersion          string         `json:"apiVersion"`
-	Kind                string         `json:"kind"`
-	Component           string         `json:"component"`
-	ConfigSHA           string         `json:"configSha"`
-	ReleasePlanDigest   string         `json:"releasePlanDigest"`
-	IntentDigest        string         `json:"intentDigest"`
-	ArtifactDigest      string         `json:"artifactDigest"`
-	Forward             TargetIdentity `json:"forward"`
-	LKG                 TargetIdentity `json:"lkg"`
-	Prewrite            Observation    `json:"prewrite"`
-	AlreadyConverged    bool           `json:"alreadyConverged"`
-	DegradedPredecessor bool           `json:"degradedPredecessor,omitempty"`
-	PreparedAt          string         `json:"preparedAt"`
-	PlanDigest          string         `json:"planDigest"`
+	APIVersion          string                 `json:"apiVersion"`
+	Kind                string                 `json:"kind"`
+	Component           string                 `json:"component"`
+	ConfigSHA           string                 `json:"configSha"`
+	ReleasePlanDigest   string                 `json:"releasePlanDigest"`
+	IntentDigest        string                 `json:"intentDigest"`
+	ArtifactDigest      string                 `json:"artifactDigest"`
+	Forward             TargetIdentity         `json:"forward"`
+	LKG                 TargetIdentity         `json:"lkg"`
+	Prewrite            Observation            `json:"prewrite"`
+	AlreadyConverged    bool                   `json:"alreadyConverged"`
+	DegradedPredecessor bool                   `json:"degradedPredecessor,omitempty"`
+	OwnershipAdoption   *OwnershipAdoptionPlan `json:"ownershipAdoption,omitempty"`
+	PreparedAt          string                 `json:"preparedAt"`
+	PlanDigest          string                 `json:"planDigest"`
+}
+
+type OwnershipAdoptionPlan struct {
+	Component          string                          `json:"component"`
+	BootstrapLKGDigest string                          `json:"bootstrapLkgDigest"`
+	UID                string                          `json:"uid"`
+	ResourceVersion    string                          `json:"resourceVersion"`
+	Generation         int64                           `json:"generation"`
+	LegacyFieldManager string                          `json:"legacyFieldManager"`
+	Resources          []OwnershipAdoptionResourcePlan `json:"resources"`
+	ImageRef           string                          `json:"imageRef"`
+	ConfigSHA          string                          `json:"configSha"`
+	ManifestSHA        string                          `json:"manifestSha"`
+	OCIRevision        string                          `json:"ociRevision"`
+}
+
+type OwnershipAdoptionResourcePlan struct {
+	Identity        ResourceIdentity `json:"identity"`
+	Fields          []string         `json:"fields"`
+	UID             string           `json:"uid"`
+	ResourceVersion string           `json:"resourceVersion"`
+	Generation      int64            `json:"generation"`
 }
 
 type ExecutionResult struct {
@@ -224,7 +247,12 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				}
 				if err == nil {
 					var predecessorWitness []byte
-					predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)
+					if release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
+						release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" {
+						predecessorWitness, err = BootstrapPredecessorConvergenceManifest(rendered.LKG, release)
+					} else {
+						predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)
+					}
 					if err == nil {
 						err = cluster.Converged(ctx, release, predecessorWitness)
 					}
@@ -269,6 +297,10 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if !alreadyConverged && !degradedPredecessor && !prewrite.Matches(lkg, release, true) {
 		return ExecutionPlan{}, errors.New("live workload matches neither declared LKG nor immutable target")
 	}
+	adoption, err := bindOwnershipAdoption(release, lkg, prewrite)
+	if err != nil {
+		return ExecutionPlan{}, err
+	}
 	forwardDryRun, err := BindManifestCAS(rendered.Forward, prewrite)
 	if err != nil {
 		return ExecutionPlan{}, err
@@ -291,7 +323,8 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		ReleasePlanDigest: releasePlan.PlanDigest, IntentDigest: release.IntentDigest,
 		ArtifactDigest: artifact.ReceiptDigest, Forward: forward, LKG: lkg,
 		Prewrite: prewrite, AlreadyConverged: alreadyConverged, DegradedPredecessor: degradedPredecessor,
-		PreparedAt: now.UTC().Format(time.RFC3339Nano),
+		OwnershipAdoption: adoption,
+		PreparedAt:        now.UTC().Format(time.RFC3339Nano),
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
@@ -299,6 +332,59 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	}
 	plan.PlanDigest = digestOf(unsigned)
 	return plan, nil
+}
+
+func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Observation) (*OwnershipAdoptionPlan, error) {
+	if release.MigrationState != "adopting" || !release.ExpectedPreviousPresent {
+		if release.OwnershipAdoption != nil {
+			return nil, errors.New("ownership adoption is present outside an adopting predecessor")
+		}
+		return nil, nil
+	}
+	if release.OwnershipAdoption == nil || !lkg.Present || !prewrite.Matches(lkg, release, true) {
+		return nil, errors.New("ownership adoption is not bound to the exact bootstrap LKG")
+	}
+	legacyManager := false
+	declarativeManager := false
+	for _, manager := range prewrite.FieldManagers {
+		legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
+		declarativeManager = declarativeManager || manager == release.Workload.FieldManager
+	}
+	if !legacyManager || declarativeManager {
+		return nil, errors.New("ownership adoption live field manager identity is invalid")
+	}
+	resources := make(map[ResourceIdentity]ResourceObservation, len(prewrite.Resources))
+	for _, resource := range prewrite.Resources {
+		resources[resource.Identity] = resource
+	}
+	boundResources := make([]OwnershipAdoptionResourcePlan, 0, len(release.OwnershipAdoption.Resources))
+	for _, scope := range release.OwnershipAdoption.Resources {
+		resource, exists := resources[scope.Identity]
+		if !exists || !resource.Present || resource.UID == "" || !resourceVersionPattern.MatchString(resource.ResourceVersion) {
+			return nil, fmt.Errorf("ownership adoption resource %s/%s is not CAS-bound", scope.Identity.Kind, scope.Identity.Name)
+		}
+		legacyManager := false
+		declarativeManager := false
+		for _, manager := range resource.FieldManagers {
+			legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
+			declarativeManager = declarativeManager || manager == release.Workload.FieldManager
+		}
+		if !legacyManager || declarativeManager {
+			return nil, fmt.Errorf("ownership adoption resource %s/%s field manager identity is invalid", scope.Identity.Kind, scope.Identity.Name)
+		}
+		boundResources = append(boundResources, OwnershipAdoptionResourcePlan{
+			Identity: scope.Identity, Fields: append([]string(nil), scope.Fields...),
+			UID: resource.UID, ResourceVersion: resource.ResourceVersion, Generation: resource.Generation,
+		})
+	}
+	result := &OwnershipAdoptionPlan{
+		Component: release.ComponentID, BootstrapLKGDigest: lkg.ManifestDigest,
+		UID: prewrite.UID, ResourceVersion: prewrite.ResourceVersion, Generation: prewrite.Generation,
+		LegacyFieldManager: release.OwnershipAdoption.LegacyFieldManager,
+		Resources:          boundResources,
+		ImageRef:           lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA, OCIRevision: lkg.OCIRevision,
+	}
+	return result, nil
 }
 
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
@@ -616,6 +702,9 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	} else if plan.LKG.ImageRef != "" || plan.LKG.ConfigSHA != "" || plan.LKG.ManifestSHA != "" || plan.LKG.OCIRevision != "" {
 		return errors.New("absent execution LKG carries runtime identity")
 	}
+	if err := plan.validateOwnershipAdoption(release); err != nil {
+		return err
+	}
 	if plan.DegradedPredecessor {
 		if !release.RetrySameLKG || !release.ExpectedPreviousPresent || plan.AlreadyConverged {
 			return errors.New("degraded predecessor execution is not authorized")
@@ -632,6 +721,46 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 		}
 	} else if !plan.DegradedPredecessor && !plan.Prewrite.Matches(plan.LKG, release, true) {
 		return errors.New("execution plan prewrite is not bound to the LKG")
+	}
+	return nil
+}
+
+func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
+	required := release.MigrationState == "adopting" && release.ExpectedPreviousPresent
+	if !required {
+		if plan.OwnershipAdoption != nil || release.OwnershipAdoption != nil {
+			return errors.New("execution retained ownership adoption outside an adopting predecessor")
+		}
+		return nil
+	}
+	adoption := plan.OwnershipAdoption
+	if adoption == nil || release.OwnershipAdoption == nil || adoption.Component != release.ComponentID ||
+		adoption.BootstrapLKGDigest != plan.LKG.ManifestDigest || adoption.UID != plan.Prewrite.UID ||
+		adoption.ResourceVersion != plan.Prewrite.ResourceVersion || adoption.Generation != plan.Prewrite.Generation ||
+		adoption.LegacyFieldManager != release.OwnershipAdoption.LegacyFieldManager ||
+		adoption.ImageRef != plan.LKG.ImageRef || adoption.ConfigSHA != plan.LKG.ConfigSHA ||
+		adoption.ManifestSHA != plan.LKG.ManifestSHA || adoption.OCIRevision != plan.LKG.OCIRevision {
+		return errors.New("execution ownership adoption identity is invalid")
+	}
+	resources := make(map[ResourceIdentity]ResourceObservation, len(plan.Prewrite.Resources))
+	for _, resource := range plan.Prewrite.Resources {
+		resources[resource.Identity] = resource
+	}
+	scopes := make([]OwnershipAdoptionScope, 0, len(adoption.Resources))
+	for _, resource := range adoption.Resources {
+		prewrite, exists := resources[resource.Identity]
+		if !exists || resource.UID != prewrite.UID || resource.ResourceVersion != prewrite.ResourceVersion || resource.Generation != prewrite.Generation {
+			return errors.New("execution ownership adoption resource CAS is invalid")
+		}
+		scopes = append(scopes, OwnershipAdoptionScope{Identity: resource.Identity, Fields: resource.Fields})
+	}
+	want, err := CanonicalJSON(release.OwnershipAdoption.Resources)
+	if err != nil {
+		return err
+	}
+	got, err := CanonicalJSON(scopes)
+	if err != nil || !bytes.Equal(got, want) {
+		return errors.New("execution ownership adoption scope is invalid")
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	metadataclient "k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -29,6 +30,7 @@ type kubectlCluster struct {
 	kubectl  string
 	verifier string
 	timeout  time.Duration
+	metadata metadataclient.Interface
 }
 
 type healthSoakTracker struct {
@@ -59,7 +61,15 @@ func newKubectlCluster() (*kubectlCluster, error) {
 	if info, err := os.Stat(verifier); err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("registry verifier is unavailable")
 	}
-	return &kubectlCluster{kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second}, nil
+	config, err := loadComponentLeaseClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load Kubernetes metadata client config: %w", err)
+	}
+	metadata, err := metadataclient.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes metadata client: %w", err)
+	}
+	return &kubectlCluster{kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second, metadata: metadata}, nil
 }
 
 func (cluster *kubectlCluster) Observe(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
@@ -67,7 +77,8 @@ func (cluster *kubectlCluster) Observe(ctx context.Context, release declarativer
 }
 
 func allowsHistoricalRestarts(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) bool {
-	return release.ExpectedPreviousPresent && target.Present &&
+	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
+		release.ExpectedPreviousPresent && target.Present &&
 		target.ConfigSHA == release.ExpectedPreviousConfigSHA &&
 		target.ManifestSHA == release.ExpectedPreviousManifestSHA &&
 		target.OCIRevision == release.ExpectedPreviousOCIRevision
@@ -158,14 +169,44 @@ func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarat
 }
 
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
+		return err
+	}
 	return cluster.applyResourceSet(ctx, release, manifest, true)
 }
 
 func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) error {
+	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
+		return err
+	}
 	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
 		return cluster.applyEdgeGroupAB(ctx, release, target, manifest)
 	}
 	return cluster.applyResourceSet(ctx, release, manifest, false)
+}
+
+func (cluster *kubectlCluster) requireReferencedSecrets(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	if cluster == nil || cluster.metadata == nil {
+		return errors.New("Kubernetes metadata client is unavailable")
+	}
+	names, err := declarativerelease.ReferencedRequiredSecrets(manifest)
+	if err != nil {
+		return err
+	}
+	secrets := cluster.metadata.Resource(schema.GroupVersionResource{Version: "v1", Resource: "secrets"}).Namespace(release.Workload.Namespace)
+	for _, name := range names {
+		value, getErr := secrets.Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			if apierrors.IsNotFound(getErr) {
+				return fmt.Errorf("required Secret %q is absent", name)
+			}
+			return fmt.Errorf("read required Secret metadata %q: %w", name, getErr)
+		}
+		if value.GetName() != name || value.GetNamespace() != release.Workload.Namespace || value.GetUID() == "" || value.GetResourceVersion() == "" {
+			return fmt.Errorf("required Secret metadata %q is invalid", name)
+		}
+	}
+	return nil
 }
 
 func (cluster *kubectlCluster) Delete(ctx context.Context, _ declarativerelease.PlanRelease, manifest []byte, observation declarativerelease.Observation) error {
@@ -429,13 +470,21 @@ func (cluster *kubectlCluster) applyJob(ctx context.Context, release declarative
 
 func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []string {
 	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager}
-	if release.IntentGeneration == 1 || release.RetrySameLKG {
-		arguments = append(arguments, "--force-conflicts")
-	}
 	if dryRun {
 		arguments = append(arguments, "--dry-run=server")
 	}
 	return append(arguments, "--filename", "-", "--output", "json")
+}
+
+func adoptionApplyArguments(release declarativerelease.PlanRelease, dryRun bool) ([]string, error) {
+	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil {
+		return nil, errors.New("ownership adoption is not explicitly authorized")
+	}
+	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager, "--force-conflicts"}
+	if dryRun {
+		arguments = append(arguments, "--dry-run=server")
+	}
+	return append(arguments, "--filename", "-", "--output", "json"), nil
 }
 
 func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
@@ -450,7 +499,7 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	var lastErr error
 	tracker := healthSoakTracker{required: soak}
 	allowHistoricalRestarts := allowsHistoricalRestarts(release, target)
-	allowLegacyManager := release.IntentGeneration == 1 || allowHistoricalRestarts
+	allowLegacyManager := allowHistoricalRestarts
 	for {
 		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowHistoricalRestarts)
 		if err == nil && observation.Matches(target, release, allowLegacyManager) {
@@ -534,6 +583,9 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	partial, err := parseObservation(workloadRaw, podsRaw, release, allowHistoricalRestarts)
 	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
 	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
@@ -703,14 +755,187 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 	}
 	auxiliaryRelease := release
 	auxiliaryRelease.Workload = workload
-	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, target.OCIRevision, manifest, false)
+	expected := target
+	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
+		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" &&
+		target.ConfigSHA == release.ExpectedPreviousConfigSHA && target.OCIRevision == release.ExpectedPreviousOCIRevision
+	if allowLegacy {
+		expected, err = targetIdentityFromDeclaredWorkload(desired, workload)
+		if err != nil {
+			return declarativerelease.Observation{}, err
+		}
+	}
+	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, expected.OCIRevision, manifest, allowLegacy)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("observe health workload %s/%s: %w", kind, name, err)
 	}
-	if !auxiliary.Matches(target, auxiliaryRelease, release.IntentGeneration == 1) {
+	if !auxiliary.Matches(expected, auxiliaryRelease, allowLegacy) {
 		return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s has not converged to the immutable target", kind, name)
 	}
 	return auxiliary, nil
+}
+
+func targetIdentityFromDeclaredWorkload(desired map[string]any, workload declarativerelease.Workload) (declarativerelease.TargetIdentity, error) {
+	spec := mapField(desired, "spec")
+	template := mapField(spec, "template")
+	templateMetadata := mapField(template, "metadata")
+	templateAnnotations := mapStringField(templateMetadata, "annotations")
+	templateSpec := mapField(template, "spec")
+	containers, ok := templateSpec["containers"].([]any)
+	if !ok {
+		return declarativerelease.TargetIdentity{}, errors.New("declared workload containers are invalid")
+	}
+	image := ""
+	for _, raw := range containers {
+		container, ok := raw.(map[string]any)
+		if !ok {
+			return declarativerelease.TargetIdentity{}, errors.New("declared workload container is invalid")
+		}
+		if stringValue(container["name"]) == workload.Container {
+			if image != "" {
+				return declarativerelease.TargetIdentity{}, errors.New("declared workload primary container is ambiguous")
+			}
+			image = stringValue(container["image"])
+		}
+	}
+	if image == "" || !strings.Contains(image, "@sha256:") {
+		return declarativerelease.TargetIdentity{}, errors.New("declared workload primary image is not immutable")
+	}
+	manifestSHA := templateAnnotations["fugue.pro/source-commit"]
+	ociRevision := templateAnnotations["fugue.pro/oci-revision"]
+	metadata := mapField(desired, "metadata")
+	annotations := mapStringField(metadata, "annotations")
+	configSHA := annotations["fugue.pro/production-config-sha"]
+	if configSHA == "" {
+		configSHA = annotations["fugue.pro/"+strings.TrimSuffix(workload.FieldManager, "-declarative")+"-manifest-revision"]
+	}
+	if configSHA == "" {
+		configSHA = manifestSHA
+	}
+	if len(configSHA) != 40 || len(manifestSHA) != 40 || len(ociRevision) != 40 {
+		return declarativerelease.TargetIdentity{}, errors.New("declared workload source identity is invalid")
+	}
+	return declarativerelease.TargetIdentity{Present: true, ImageRef: image, ConfigSHA: configSHA, ManifestSHA: manifestSHA, OCIRevision: ociRevision}, nil
+}
+
+func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease) error {
+	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+	desired, err := declarativerelease.ResourceSetItem(manifest, identity)
+	if err != nil {
+		return err
+	}
+	expected := make(map[string]string)
+	for _, target := range release.ArtifactTargets {
+		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
+			continue
+		}
+		workload, found, imageErr := declaredContainerImageOptional(desired, target.Container, target.ContainerType)
+		if imageErr != nil {
+			return imageErr
+		}
+		if !found {
+			continue
+		}
+		expected[target.ContainerType+"\x00"+target.Container] = workload
+	}
+	if len(expected) == 0 {
+		image, imageErr := declaredContainerImage(desired, release.Workload.Container, "container")
+		if imageErr != nil {
+			return imageErr
+		}
+		expected["container\x00"+release.Workload.Container] = image
+	}
+	list, err := decodeJSONObject(podsRaw)
+	if err != nil {
+		return err
+	}
+	items, ok := list["items"].([]any)
+	if !ok || len(items) == 0 {
+		return errors.New("artifact workload has no Pods")
+	}
+	for _, raw := range items {
+		pod, ok := raw.(map[string]any)
+		if !ok {
+			return errors.New("artifact workload Pod is invalid")
+		}
+		status := mapField(pod, "status")
+		for key, image := range expected {
+			parts := strings.SplitN(key, "\x00", 2)
+			field := "containerStatuses"
+			if parts[0] == "init-container" {
+				field = "initContainerStatuses"
+			}
+			statuses, ok := status[field].([]any)
+			if !ok {
+				return fmt.Errorf("Pod %s are absent", field)
+			}
+			wantDigest := image[strings.LastIndex(image, "@")+1:]
+			matched := false
+			for _, rawStatus := range statuses {
+				containerStatus, ok := rawStatus.(map[string]any)
+				if !ok || stringValue(containerStatus["name"]) != parts[1] {
+					continue
+				}
+				imageID := stringValue(containerStatus["imageID"])
+				if imageID != wantDigest && !strings.HasSuffix(imageID, "@"+wantDigest) {
+					return fmt.Errorf("Pod container %s imageID does not match declared immutable image", parts[1])
+				}
+				matched = true
+			}
+			if !matched {
+				return fmt.Errorf("Pod container %s status is absent", parts[1])
+			}
+		}
+	}
+	return nil
+}
+
+func declaredContainerImage(desired map[string]any, name, containerType string) (string, error) {
+	image, found, err := declaredContainerImageOptional(desired, name, containerType)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", errors.New("declared workload container is absent")
+	}
+	return image, nil
+}
+
+func declaredContainerImageOptional(desired map[string]any, name, containerType string) (string, bool, error) {
+	spec := mapField(desired, "spec")
+	template := mapField(spec, "template")
+	templateSpec := mapField(template, "spec")
+	field := "containers"
+	if containerType == "init-container" {
+		field = "initContainers"
+	}
+	containers, ok := templateSpec[field].([]any)
+	if !ok {
+		if containerType == "init-container" {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("declared workload %s are invalid", field)
+	}
+	image := ""
+	for _, raw := range containers {
+		container, ok := raw.(map[string]any)
+		if !ok {
+			return "", false, errors.New("declared workload container is invalid")
+		}
+		if stringValue(container["name"]) == name {
+			if image != "" {
+				return "", false, errors.New("declared workload container is ambiguous")
+			}
+			image = stringValue(container["image"])
+		}
+	}
+	if image == "" {
+		return "", false, nil
+	}
+	if !strings.Contains(image, "@sha256:") {
+		return "", false, errors.New("declared workload image is not immutable")
+	}
+	return image, true, nil
 }
 
 func workloadFromDeclaredResource(desired map[string]any, identity declarativerelease.ResourceIdentity, container, fieldManager string) (declarativerelease.Workload, error) {
@@ -850,19 +1075,19 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 			image = stringValue(container["image"])
 		}
 	}
-	if image == "" || !strings.Contains(image, "@sha256:") {
+	if image == "" || (!strings.Contains(image, "@sha256:") && !allowHistoricalRestarts) {
 		return declarativerelease.Observation{}, errors.New("workload image is not immutable")
 	}
 	manifestSHA := templateAnnotations["fugue.pro/source-commit"]
-	if manifestSHA == "" {
+	if manifestSHA == "" && allowHistoricalRestarts {
 		manifestSHA = legacySourceTag(image)
 	}
 	workloadAnnotations := mapStringField(metadata, "annotations")
 	configSHA := workloadAnnotations["fugue.pro/production-config-sha"]
-	if configSHA == "" {
+	if configSHA == "" && allowHistoricalRestarts {
 		configSHA = workloadAnnotations["fugue.pro/"+release.ComponentID+"-manifest-revision"]
 	}
-	if configSHA == "" {
+	if configSHA == "" && allowHistoricalRestarts {
 		configSHA = manifestSHA
 	}
 	observation := declarativerelease.Observation{

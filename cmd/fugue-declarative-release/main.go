@@ -61,17 +61,9 @@ func runPlan(args []string, output io.Writer) error {
 			return fmt.Errorf("Git commit %s is unavailable: %w", revision, err)
 		}
 	}
-	registryFile, err := os.Open(registryPath)
+	registry, err := loadProductionRegistry(registryPath)
 	if err != nil {
-		return fmt.Errorf("open registry: %w", err)
-	}
-	registry, decodeErr := declarativerelease.DecodeRegistry(registryFile)
-	closeErr := registryFile.Close()
-	if decodeErr != nil {
-		return decodeErr
-	}
-	if closeErr != nil {
-		return closeErr
+		return err
 	}
 	registry, err = expandComponentDependencyRoots(registry)
 	if err != nil {
@@ -84,6 +76,19 @@ func runPlan(args []string, output io.Writer) error {
 	plan, err := declarativerelease.BuildPlan(registry, baseSHA, headSHA, changed)
 	if err != nil {
 		return err
+	}
+	if registry.EdgeGroupRegistryPath != "" && containsPath(changed, registry.EdgeGroupRegistryPath) {
+		currentEdge, edgeErr := loadEdgeGroupRegistryFile(registry.EdgeGroupRegistryPath)
+		if edgeErr != nil {
+			return edgeErr
+		}
+		previousEdge, edgeErr := loadGitEdgeGroupRegistry(baseSHA, registryPath)
+		if edgeErr != nil {
+			return edgeErr
+		}
+		if edgeErr := declarativerelease.ValidateEdgeGroupRegistryUpdate(previousEdge, currentEdge, plan, changed); edgeErr != nil {
+			return edgeErr
+		}
 	}
 	if len(plan.Releases) > 0 {
 		parentRaw, parentErr := exec.Command("git", "rev-parse", headSHA+"^").Output()
@@ -119,6 +124,85 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
+}
+
+func loadEdgeGroupRegistryFile(path string) (declarativerelease.EdgeGroupRegistry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return declarativerelease.EdgeGroupRegistry{}, fmt.Errorf("open edge group registry: %w", err)
+	}
+	registry, decodeErr := declarativerelease.DecodeEdgeGroupRegistry(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return declarativerelease.EdgeGroupRegistry{}, decodeErr
+	}
+	if closeErr != nil {
+		return declarativerelease.EdgeGroupRegistry{}, closeErr
+	}
+	return registry, nil
+}
+
+func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativerelease.EdgeGroupRegistry, error) {
+	raw, err := exec.Command("git", "show", revision+":"+registryPath).Output()
+	if err != nil {
+		return nil, fmt.Errorf("read previous production registry: %w", err)
+	}
+	base, err := declarativerelease.DecodeRegistry(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("decode previous production registry: %w", err)
+	}
+	if base.EdgeGroupRegistryPath == "" {
+		return nil, nil
+	}
+	raw, err = exec.Command("git", "show", revision+":"+base.EdgeGroupRegistryPath).Output()
+	if err != nil {
+		return nil, fmt.Errorf("read previous edge group registry: %w", err)
+	}
+	edge, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("decode previous edge group registry: %w", err)
+	}
+	return &edge, nil
+}
+
+func loadProductionRegistry(registryPath string) (declarativerelease.Registry, error) {
+	registryFile, err := os.Open(registryPath)
+	if err != nil {
+		return declarativerelease.Registry{}, fmt.Errorf("open registry: %w", err)
+	}
+	registry, decodeErr := declarativerelease.DecodeRegistry(registryFile)
+	closeErr := registryFile.Close()
+	if decodeErr != nil {
+		return declarativerelease.Registry{}, decodeErr
+	}
+	if closeErr != nil {
+		return declarativerelease.Registry{}, closeErr
+	}
+	if registry.EdgeGroupRegistryPath == "" {
+		return registry, nil
+	}
+	edgeFile, err := os.Open(registry.EdgeGroupRegistryPath)
+	if err != nil {
+		return declarativerelease.Registry{}, fmt.Errorf("open edge group registry: %w", err)
+	}
+	edgeRegistry, decodeEdgeErr := declarativerelease.DecodeEdgeGroupRegistry(edgeFile)
+	closeEdgeErr := edgeFile.Close()
+	if decodeEdgeErr != nil {
+		return declarativerelease.Registry{}, decodeEdgeErr
+	}
+	if closeEdgeErr != nil {
+		return declarativerelease.Registry{}, closeEdgeErr
+	}
+	return declarativerelease.MergeEdgeGroupRegistry(registry, edgeRegistry)
 }
 
 func expandComponentDependencyRoots(registry declarativerelease.Registry) (declarativerelease.Registry, error) {
@@ -222,13 +306,16 @@ func runEmitGitHubOutput(args []string) error {
 		return err
 	}
 	type matrixEntry struct {
-		Component string `json:"component"`
-		BuildLane string `json:"build_lane"`
+		Component   string `json:"component"`
+		BuildLane   string `json:"build_lane,omitempty"`
+		Concurrency string `json:"concurrency,omitempty"`
 	}
 	type matrix struct {
 		Include []matrixEntry `json:"include"`
 	}
 	value := matrix{Include: make([]matrixEntry, 0, len(plan.Releases))}
+	edgeControl := matrix{Include: make([]matrixEntry, 0, 1)}
+	edgeWorker := matrix{Include: make([]matrixEntry, 0, 1)}
 	components := make([]string, 0, len(plan.Releases))
 	for _, release := range plan.Releases {
 		repositoryDigest := sha256.Sum256([]byte(release.Artifact.Repository))
@@ -236,6 +323,13 @@ func runEmitGitHubOutput(args []string) error {
 			Component: release.ComponentID,
 			BuildLane: fmt.Sprintf("%x", repositoryDigest[:8]),
 		})
+		entry := matrixEntry{Component: release.ComponentID, Concurrency: release.Concurrency}
+		switch {
+		case strings.HasPrefix(release.ComponentID, "edge-control-"):
+			edgeControl.Include = append(edgeControl.Include, entry)
+		case strings.HasPrefix(release.ComponentID, "edge-worker-"):
+			edgeWorker.Include = append(edgeWorker.Include, entry)
+		}
 		components = append(components, release.ComponentID)
 	}
 	encoded, err := declarativerelease.CanonicalJSON(value)
@@ -243,6 +337,14 @@ func runEmitGitHubOutput(args []string) error {
 		return err
 	}
 	componentJSON, err := declarativerelease.CanonicalJSON(components)
+	if err != nil {
+		return err
+	}
+	edgeControlJSON, err := declarativerelease.CanonicalJSON(edgeControl)
+	if err != nil {
+		return err
+	}
+	edgeWorkerJSON, err := declarativerelease.CanonicalJSON(edgeWorker)
 	if err != nil {
 		return err
 	}
@@ -254,7 +356,11 @@ func runEmitGitHubOutput(args []string) error {
 	if err != nil {
 		return err
 	}
-	_, writeErr := fmt.Fprintf(file, "release_count=%d\nrelease_matrix=%s\nrelease_components=%s\n", len(plan.Releases), encoded, componentJSON)
+	_, writeErr := fmt.Fprintf(
+		file,
+		"release_count=%d\nrelease_matrix=%s\nrelease_components=%s\nedge_control_count=%d\nedge_control_matrix=%s\nedge_worker_count=%d\nedge_worker_matrix=%s\n",
+		len(plan.Releases), encoded, componentJSON, len(edgeControl.Include), edgeControlJSON, len(edgeWorker.Include), edgeWorkerJSON,
+	)
 	closeErr := file.Close()
 	if writeErr != nil {
 		return writeErr
@@ -339,9 +445,9 @@ func loadLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
 	if !release.ExpectedPreviousPresent {
 		return nil, nil
 	}
-	if release.IntentGeneration == 1 || release.RetrySameLKG {
+	if release.MigrationState == "adopting" {
 		if release.BootstrapLKGPath == "" {
-			return nil, errors.New("first declarative release with a predecessor requires bootstrapLkgPath")
+			return nil, errors.New("adopting declarative release with a predecessor requires bootstrapLkgPath")
 		}
 		content, err := os.ReadFile(release.BootstrapLKGPath)
 		if err != nil {

@@ -95,8 +95,12 @@ func (plan Plan) ValidateBound() error {
 			release.ExpectedPreviousImageDigest != "" {
 			return fmt.Errorf("bound release %d absent predecessor is invalid", index)
 		}
-		if release.RetrySameLKG && (release.IntentGeneration < 2 || (release.ExpectedPreviousPresent && release.BootstrapLKGPath == "")) {
+		if release.RetrySameLKG && release.IntentGeneration < 2 {
 			return fmt.Errorf("bound release %d same-LKG attempt is invalid", index)
+		}
+		if release.MigrationState == "adopting" && release.ExpectedPreviousPresent &&
+			(release.OwnershipAdoption == nil || release.BootstrapLKGPath == "") {
+			return fmt.Errorf("bound release %d adoption identity is incomplete", index)
 		}
 		if _, exists := seen[release.ComponentID]; exists {
 			return fmt.Errorf("bound plan repeats component %q", release.ComponentID)

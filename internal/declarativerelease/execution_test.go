@@ -209,6 +209,52 @@ func TestExecuteVerifiesForwardAndReconcilesCommitUnknown(t *testing.T) {
 	}
 }
 
+func TestPrepareBindsExplicitOwnershipAdoptionToLKGAndLiveCAS(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm",
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+			Fields:   []string{"/spec/template/metadata/annotations/fugue.pro~1source-commit", "/spec/template/spec/containers/name=api/image"},
+		}},
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{"helm"}
+	lkg.Resources[0].FieldManagers = []string{"helm"}
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoption := prepared.OwnershipAdoption
+	if adoption == nil || adoption.Component != "api" || adoption.UID != lkg.UID ||
+		adoption.ResourceVersion != lkg.ResourceVersion || adoption.Generation != lkg.Generation ||
+		adoption.LegacyFieldManager != "helm" || adoption.BootstrapLKGDigest != prepared.LKG.ManifestDigest ||
+		adoption.ImageRef != prepared.LKG.ImageRef || adoption.ConfigSHA != prepared.LKG.ConfigSHA ||
+		len(adoption.Resources) != 1 || len(adoption.Resources[0].Fields) != 2 {
+		t.Fatalf("ownership adoption was not exactly bound: %+v", adoption)
+	}
+	prepared.OwnershipAdoption.ResourceVersion = "999"
+	prepared.PlanDigest = ""
+	tampered, err := CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.PlanDigest = digestOf(tampered)
+	if err := prepared.Validate(plan, rendered.Forward, rendered.LKG); err == nil || !strings.Contains(err.Error(), "ownership adoption identity") {
+		t.Fatalf("ownership adoption CAS drift was accepted: %v", err)
+	}
+}
+
 func TestPrepareRejectsAnLKGRestartDuringPrewriteValidation(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	changed := lkg

@@ -7,7 +7,125 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 )
+
+// ReferencedRequiredSecrets returns only Secret names required by Pod specs.
+// Callers can use the Kubernetes metadata API to prove presence without ever
+// requesting or materializing Secret data.
+func ReferencedRequiredSecrets(manifest []byte) ([]string, error) {
+	set, err := DecodeResourceSet(bytes.NewReader(manifest))
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]struct{})
+	add := func(value any, optional bool) error {
+		if optional {
+			return nil
+		}
+		name, _ := value.(string)
+		name = strings.TrimSpace(name)
+		if !componentIDPattern.MatchString(name) {
+			return errors.New("required Secret name is invalid")
+		}
+		names[name] = struct{}{}
+		return nil
+	}
+	for _, item := range set.Items {
+		identity, identityErr := resourceIdentity(item)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		if identity.Kind != "Deployment" && identity.Kind != "DaemonSet" && identity.Kind != "Job" {
+			continue
+		}
+		spec, specErr := objectField(item, "spec")
+		if specErr != nil {
+			return nil, specErr
+		}
+		template, specErr := objectField(spec, "template")
+		if specErr != nil {
+			return nil, specErr
+		}
+		podSpec, specErr := objectField(template, "spec")
+		if specErr != nil {
+			return nil, specErr
+		}
+		if pullSecrets, ok := podSpec["imagePullSecrets"].([]any); ok {
+			for _, raw := range pullSecrets {
+				secret, ok := raw.(map[string]any)
+				if !ok {
+					return nil, errors.New("imagePullSecrets entry is invalid")
+				}
+				if err := add(secret["name"], false); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if volumes, ok := podSpec["volumes"].([]any); ok {
+			for _, raw := range volumes {
+				volume, ok := raw.(map[string]any)
+				if !ok {
+					return nil, errors.New("Pod volume is invalid")
+				}
+				secret, ok := volume["secret"].(map[string]any)
+				if !ok {
+					continue
+				}
+				optional, _ := secret["optional"].(bool)
+				if err := add(secret["secretName"], optional); err != nil {
+					return nil, err
+				}
+			}
+		}
+		for _, field := range []string{"initContainers", "containers"} {
+			containers, _ := podSpec[field].([]any)
+			for _, raw := range containers {
+				container, ok := raw.(map[string]any)
+				if !ok {
+					return nil, errors.New("Pod container is invalid")
+				}
+				env, _ := container["env"].([]any)
+				for _, rawEnv := range env {
+					variable, ok := rawEnv.(map[string]any)
+					if !ok {
+						return nil, errors.New("container environment is invalid")
+					}
+					valueFrom, _ := variable["valueFrom"].(map[string]any)
+					secret, ok := valueFrom["secretKeyRef"].(map[string]any)
+					if !ok {
+						continue
+					}
+					optional, _ := secret["optional"].(bool)
+					if err := add(secret["name"], optional); err != nil {
+						return nil, err
+					}
+				}
+				envFrom, _ := container["envFrom"].([]any)
+				for _, rawEnvFrom := range envFrom {
+					source, ok := rawEnvFrom.(map[string]any)
+					if !ok {
+						return nil, errors.New("container envFrom is invalid")
+					}
+					secret, ok := source["secretRef"].(map[string]any)
+					if !ok {
+						continue
+					}
+					optional, _ := secret["optional"].(bool)
+					if err := add(secret["name"], optional); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 const (
 	ResourceSetAPIVersion = "release.fugue.dev/v2"
@@ -234,6 +352,76 @@ func PredecessorConvergenceManifest(manifest []byte) ([]byte, error) {
 					}
 				}
 			}
+		}
+	}
+	return CanonicalJSON(set)
+}
+
+// BootstrapPredecessorConvergenceManifest compares every reviewed legacy
+// operational field while leaving container identity to the registry and Pod
+// imageID checks. This is required when a safe immutable bootstrap LKG records
+// digests but the legacy workload spec still contains the corresponding tag.
+func BootstrapPredecessorConvergenceManifest(manifest []byte, release PlanRelease) ([]byte, error) {
+	witness, err := PredecessorConvergenceManifest(manifest)
+	if err != nil {
+		return nil, err
+	}
+	set, err := DecodeResourceSet(bytes.NewReader(witness))
+	if err != nil {
+		return nil, err
+	}
+	targets := release.ArtifactTargets
+	if len(targets) == 0 {
+		targets = []ArtifactTarget{{
+			APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
+			Namespace: release.Workload.Namespace, Name: release.Workload.Name,
+			Container: release.Workload.Container, ContainerType: "container",
+		}}
+	}
+	for _, target := range targets {
+		item, targetErr := resourceSetTarget(&set, target)
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		spec, targetErr := objectField(item, "spec")
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		template, targetErr := objectField(spec, "template")
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		templateSpec, targetErr := objectField(template, "spec")
+		if targetErr != nil {
+			return nil, targetErr
+		}
+		field := "containers"
+		if target.ContainerType == "init-container" {
+			field = "initContainers"
+		}
+		containers, ok := templateSpec[field].([]any)
+		if !ok {
+			return nil, errors.New("bootstrap predecessor container list is invalid")
+		}
+		matches := 0
+		for _, raw := range containers {
+			container, ok := raw.(map[string]any)
+			if !ok {
+				return nil, errors.New("bootstrap predecessor container is invalid")
+			}
+			if stringField(container, "name") == target.Container {
+				delete(container, "image")
+				matches++
+			}
+		}
+		if matches == 0 {
+			// A bootstrap LKG may predate a forward-only init container. The
+			// forward manifest is still required to contain every artifact
+			// target by RenderManifests.
+			continue
+		}
+		if matches != 1 {
+			return nil, errors.New("bootstrap predecessor container is ambiguous")
 		}
 	}
 	return CanonicalJSON(set)

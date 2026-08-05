@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -156,13 +157,21 @@ func TestParseObservationAllowsOnlyStableHistoricalLKGRestarts(t *testing.T) {
 	}
 }
 
-func TestHistoricalLKGAllowsLegacyManagerAfterTheFirstIntent(t *testing.T) {
+func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousPresent:     true,
 		ExpectedPreviousConfigSHA:   strings.Repeat("1", 40),
 		ExpectedPreviousManifestSHA: strings.Repeat("2", 40),
 		ExpectedPreviousOCIRevision: strings.Repeat("3", 40),
 		IntentGeneration:            6,
+		MigrationState:              "adopting",
+		OwnershipAdoption: &declarativerelease.OwnershipAdoption{
+			LegacyFieldManager: "helm",
+			Resources: []declarativerelease.OwnershipAdoptionScope{{
+				Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+				Fields:   []string{"/spec/template"},
+			}},
+		},
 	}
 	lkg := declarativerelease.TargetIdentity{
 		Present: true, ConfigSHA: release.ExpectedPreviousConfigSHA,
@@ -176,23 +185,42 @@ func TestHistoricalLKGAllowsLegacyManagerAfterTheFirstIntent(t *testing.T) {
 	if allowsHistoricalRestarts(release, forward) {
 		t.Fatal("forward target inherited the historical LKG allowance")
 	}
+	release.MigrationState = "independent"
+	release.OwnershipAdoption = nil
+	if allowsHistoricalRestarts(release, lkg) {
+		t.Fatal("independent release retained historical restart or legacy-manager allowance")
+	}
 }
 
-func TestApplyArgumentsForceOnlyVerifiedOwnershipHandoff(t *testing.T) {
+func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 	release := declarativerelease.PlanRelease{IntentGeneration: 1, Workload: declarativerelease.Workload{FieldManager: "fugue-api-declarative"}}
 	first := strings.Join(applyArguments(release, true), " ")
-	if !strings.Contains(first, "--force-conflicts") || !strings.Contains(first, "--dry-run=server") {
-		t.Fatalf("first ownership handoff args are incomplete: %s", first)
+	if strings.Contains(first, "--force-conflicts") || !strings.Contains(first, "--dry-run=server") {
+		t.Fatalf("ordinary first-generation apply gained ownership handoff privileges: %s", first)
 	}
 	release.IntentGeneration = 2
+	release.RetrySameLKG = true
 	next := strings.Join(applyArguments(release, false), " ")
 	if strings.Contains(next, "--force-conflicts") || strings.Contains(next, "--dry-run") {
-		t.Fatalf("ordinary component apply retained handoff privileges: %s", next)
+		t.Fatalf("same-LKG retry gained ownership handoff privileges: %s", next)
 	}
-	release.RetrySameLKG = true
-	retry := strings.Join(applyArguments(release, true), " ")
-	if !strings.Contains(retry, "--force-conflicts") || !strings.Contains(retry, "--dry-run=server") {
-		t.Fatalf("exact same-LKG retry lost handoff privileges: %s", retry)
+	if _, err := adoptionApplyArguments(release, true); err == nil {
+		t.Fatal("unbound release obtained ownership adoption arguments")
+	}
+	release.MigrationState = "adopting"
+	release.OwnershipAdoption = &declarativerelease.OwnershipAdoption{
+		LegacyFieldManager: "helm",
+		Resources: []declarativerelease.OwnershipAdoptionScope{{
+			Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+			Fields:   []string{"/spec/template/spec/containers/name=api/image"},
+		}},
+	}
+	adoption, err := adoptionApplyArguments(release, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := strings.Join(adoption, " "); !strings.Contains(args, "--force-conflicts") || !strings.Contains(args, "--dry-run=server") {
+		t.Fatalf("explicit adoption args are incomplete: %s", args)
 	}
 }
 
@@ -315,6 +343,56 @@ func TestHealthSoakTrackerRequiresOneContinuousWindow(t *testing.T) {
 	}
 	if tracker.observe(start.Add(200*time.Second), true) || !tracker.observe(start.Add(380*time.Second), true) {
 		t.Fatal("health soak did not reset and complete after a new continuous window")
+	}
+}
+
+func TestBootstrapAuxiliaryIdentityAndEveryArtifactImageAreExact(t *testing.T) {
+	source := strings.Repeat("a", 40)
+	edgeDigest := strings.Repeat("b", 64)
+	caddyDigest := strings.Repeat("c", 64)
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "edge-gamma-worker-a", "namespace": "fugue-system"},
+		"spec": map[string]any{
+			"selector":       map[string]any{"matchLabels": map[string]any{"app": "worker"}},
+			"updateStrategy": map[string]any{"type": "OnDelete"},
+			"template": map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": source, "fugue.pro/oci-revision": source}},
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{"name": "edge", "image": "ghcr.io/example/fugue-edge@sha256:" + edgeDigest},
+						map[string]any{"name": "caddy", "image": "docker.io/library/caddy@sha256:" + caddyDigest},
+					},
+				},
+			},
+		},
+	}
+	workload, err := workloadFromDeclaredResource(desired, declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a"}, "edge", "fugue-edge-worker-gamma-declarative")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := targetIdentityFromDeclaredWorkload(desired, workload)
+	if err != nil || target.ImageRef != "ghcr.io/example/fugue-edge@sha256:"+edgeDigest || target.ConfigSHA != source || target.ManifestSHA != source || target.OCIRevision != source {
+		t.Fatalf("bootstrap auxiliary target=%+v err=%v", target, err)
+	}
+	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired}})
+	pods := mustJSON(t, map[string]any{"items": []any{map[string]any{"status": map[string]any{"containerStatuses": []any{
+		map[string]any{"name": "edge", "imageID": "ghcr.io/example/fugue-edge@sha256:" + edgeDigest},
+		map[string]any{"name": "caddy", "imageID": "docker.io/library/caddy@sha256:" + caddyDigest},
+	}}}}})
+	release := declarativerelease.PlanRelease{
+		Workload: workload,
+		ArtifactTargets: []declarativerelease.ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a", Container: "caddy", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a", Container: "edge", ContainerType: "container"},
+		},
+	}
+	if err := verifyDeclaredArtifactImageIDs(pods, manifest, release); err != nil {
+		t.Fatal(err)
+	}
+	tampered := bytes.Replace(pods, []byte(caddyDigest), []byte(strings.Repeat("d", 64)), 1)
+	if err := verifyDeclaredArtifactImageIDs(tampered, manifest, release); err == nil {
+		t.Fatal("cross-container LKG image drift was accepted")
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 	"fugue/internal/declarativerelease"
 )
 
-func TestLoadLKGManifestUsesBootstrapOnlyForAnExplicitSameLKGAttempt(t *testing.T) {
+func TestLoadLKGManifestUsesBootstrapOnlyForExplicitAdoption(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()
 	if err != nil {
@@ -31,14 +31,15 @@ func TestLoadLKGManifestUsesBootstrapOnlyForAnExplicitSameLKGAttempt(t *testing.
 		IntentGeneration: 3, ExpectedPreviousPresent: true, RetrySameLKG: true,
 		BootstrapLKGPath:          "deploy/releases/telemetry/lkg.json",
 		ExpectedPreviousConfigSHA: strings.Repeat("1", 40), ManifestPath: "deploy/releases/telemetry/resources.json",
+		MigrationState: "adopting",
 	}
 	got, err := loadLKGManifest(release)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("load retry LKG: got=%s err=%v", got, err)
 	}
-	release.RetrySameLKG = false
+	release.MigrationState = "independent"
 	if _, err := loadLKGManifest(release); err == nil || !strings.Contains(err.Error(), "previous component manifest") {
-		t.Fatalf("normal successor fell back to bootstrap LKG: %v", err)
+		t.Fatalf("independent same-LKG retry fell back to bootstrap LKG: %v", err)
 	}
 }
 
@@ -304,7 +305,7 @@ func TestEmitGitHubOutputUsesCanonicalSingleComponentMatrix(t *testing.T) {
 	}
 	apiLane := sha256.Sum256([]byte("ghcr.io/example/fugue-api"))
 	want := fmt.Sprintf(
-		"release_count=1\nrelease_matrix={\"include\":[{\"build_lane\":\"%x\",\"component\":\"api\"}]}\nrelease_components=[\"api\"]\n",
+		"release_count=1\nrelease_matrix={\"include\":[{\"build_lane\":\"%x\",\"component\":\"api\"}]}\nrelease_components=[\"api\"]\nedge_control_count=0\nedge_control_matrix={\"include\":[]}\nedge_worker_count=0\nedge_worker_matrix={\"include\":[]}\n",
 		apiLane[:8],
 	)
 	if string(content) != want {

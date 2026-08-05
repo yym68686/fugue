@@ -42,27 +42,47 @@ var (
 // releasable production components. Components are ordered by ID so that the
 // registry has one canonical representation.
 type Registry struct {
-	APIVersion string      `json:"apiVersion"`
-	Kind       string      `json:"kind"`
-	Components []Component `json:"components"`
+	APIVersion            string      `json:"apiVersion"`
+	Kind                  string      `json:"kind"`
+	EdgeGroupRegistryPath string      `json:"edgeGroupRegistryPath,omitempty"`
+	Components            []Component `json:"components"`
 }
 
 // Component contains only static release mechanics. Runtime version choices
 // belong to Intent and immutable build receipts.
 type Component struct {
-	ID               string           `json:"id"`
-	Family           string           `json:"family"`
-	IntentPath       string           `json:"intentPath"`
-	ManifestPath     string           `json:"manifestPath"`
-	BootstrapLKGPath string           `json:"bootstrapLkgPath,omitempty"`
-	SourceRoots      []string         `json:"sourceRoots"`
-	Artifact         Artifact         `json:"artifact"`
-	ArtifactTargets  []ArtifactTarget `json:"artifactTargets,omitempty"`
-	Workload         Workload         `json:"workload"`
-	Transition       *Transition      `json:"transition,omitempty"`
-	Health           []HealthProbe    `json:"health"`
-	Concurrency      string           `json:"concurrency"`
-	MigrationState   string           `json:"migrationState"`
+	ID                        string             `json:"id"`
+	Family                    string             `json:"family"`
+	IntentPath                string             `json:"intentPath"`
+	ManifestPath              string             `json:"manifestPath"`
+	BootstrapLKGPath          string             `json:"bootstrapLkgPath,omitempty"`
+	HeterogeneousBootstrapLKG bool               `json:"heterogeneousBootstrapLkg,omitempty"`
+	SourceRoots               []string           `json:"sourceRoots"`
+	Artifact                  Artifact           `json:"artifact"`
+	ArtifactTargets           []ArtifactTarget   `json:"artifactTargets,omitempty"`
+	Workload                  Workload           `json:"workload"`
+	Transition                *Transition        `json:"transition,omitempty"`
+	Health                    []HealthProbe      `json:"health"`
+	Concurrency               string             `json:"concurrency"`
+	MigrationState            string             `json:"migrationState"`
+	OwnershipAdoption         *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
+}
+
+// OwnershipAdoption is the reviewed, one-time compatibility boundary for a
+// workload that is still owned by a legacy Kubernetes field manager. It is
+// copied into the immutable release plan; independent components must not
+// carry it.
+type OwnershipAdoption struct {
+	LegacyFieldManager string                   `json:"legacyFieldManager"`
+	Resources          []OwnershipAdoptionScope `json:"resources"`
+}
+
+// OwnershipAdoptionScope limits force-conflicts to named resources and
+// explicit JSON-pointer subtrees. The adoption adapter materializes a
+// separate minimal SSA document from this allowlist.
+type OwnershipAdoptionScope struct {
+	Identity ResourceIdentity `json:"identity"`
+	Fields   []string         `json:"fields"`
 }
 
 // ArtifactTarget identifies every container in the component resource set
@@ -157,25 +177,28 @@ type Plan struct {
 }
 
 type PlanRelease struct {
-	ComponentID                 string           `json:"component"`
-	ChangedPaths                []string         `json:"changedPaths"`
-	IntentPath                  string           `json:"intentPath"`
-	IntentDigest                string           `json:"intentDigest"`
-	IntentGeneration            int              `json:"intentGeneration"`
-	ExpectedPreviousPresent     bool             `json:"expectedPreviousPresent"`
-	ExpectedPreviousConfigSHA   string           `json:"expectedPreviousConfigSha"`
-	ExpectedPreviousManifestSHA string           `json:"expectedPreviousManifestSha"`
-	ExpectedPreviousOCIRevision string           `json:"expectedPreviousOciRevision"`
-	ExpectedPreviousImageDigest string           `json:"expectedPreviousImageDigest"`
-	ManifestPath                string           `json:"manifestPath"`
-	BootstrapLKGPath            string           `json:"bootstrapLkgPath,omitempty"`
-	RetrySameLKG                bool             `json:"retrySameLkg,omitempty"`
-	Artifact                    Artifact         `json:"artifact"`
-	ArtifactTargets             []ArtifactTarget `json:"artifactTargets,omitempty"`
-	Workload                    Workload         `json:"workload"`
-	Transition                  *Transition      `json:"transition,omitempty"`
-	Health                      []HealthProbe    `json:"health"`
-	Concurrency                 string           `json:"concurrency"`
+	ComponentID                 string             `json:"component"`
+	ChangedPaths                []string           `json:"changedPaths"`
+	IntentPath                  string             `json:"intentPath"`
+	IntentDigest                string             `json:"intentDigest"`
+	IntentGeneration            int                `json:"intentGeneration"`
+	ExpectedPreviousPresent     bool               `json:"expectedPreviousPresent"`
+	ExpectedPreviousConfigSHA   string             `json:"expectedPreviousConfigSha"`
+	ExpectedPreviousManifestSHA string             `json:"expectedPreviousManifestSha"`
+	ExpectedPreviousOCIRevision string             `json:"expectedPreviousOciRevision"`
+	ExpectedPreviousImageDigest string             `json:"expectedPreviousImageDigest"`
+	ManifestPath                string             `json:"manifestPath"`
+	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
+	HeterogeneousBootstrapLKG   bool               `json:"heterogeneousBootstrapLkg,omitempty"`
+	RetrySameLKG                bool               `json:"retrySameLkg,omitempty"`
+	Artifact                    Artifact           `json:"artifact"`
+	ArtifactTargets             []ArtifactTarget   `json:"artifactTargets,omitempty"`
+	Workload                    Workload           `json:"workload"`
+	Transition                  *Transition        `json:"transition,omitempty"`
+	Health                      []HealthProbe      `json:"health"`
+	Concurrency                 string             `json:"concurrency"`
+	MigrationState              string             `json:"migrationState"`
+	OwnershipAdoption           *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
 }
 
 // DecodeRegistry accepts exactly one strict JSON document.
@@ -241,6 +264,11 @@ func (registry Registry) Validate() error {
 	if len(registry.Components) == 0 {
 		return errors.New("production component registry is empty")
 	}
+	if registry.EdgeGroupRegistryPath != "" {
+		if normalized, err := normalizeRepositoryPath(registry.EdgeGroupRegistryPath); err != nil || normalized != registry.EdgeGroupRegistryPath {
+			return errors.New("edge group registry path is invalid")
+		}
+	}
 	seenIDs := make(map[string]struct{}, len(registry.Components))
 	seenIntents := make(map[string]string, len(registry.Components))
 	seenWorkloads := make(map[string]string, len(registry.Components))
@@ -286,6 +314,9 @@ func (component Component) Validate() error {
 			return fmt.Errorf("component %q bootstrapLkgPath is invalid", component.ID)
 		}
 	}
+	if component.HeterogeneousBootstrapLKG && (component.BootstrapLKGPath == "" || component.Transition == nil || component.Transition.Type != "edge-group-ab") {
+		return fmt.Errorf("component %q heterogeneous bootstrap LKG requires an edge-group transition", component.ID)
+	}
 	if component.Artifact.Context != "." {
 		if _, err := normalizeRepositoryPath(component.Artifact.Context); err != nil {
 			return fmt.Errorf("component %q context: %w", component.ID, err)
@@ -312,8 +343,16 @@ func (component Component) Validate() error {
 	if component.Concurrency != "fugue-production-"+component.ID {
 		return fmt.Errorf("component %q concurrency must be component-scoped", component.ID)
 	}
-	if component.MigrationState != "pending" && component.MigrationState != "independent" {
-		return fmt.Errorf("component %q migrationState must be pending or independent", component.ID)
+	if component.MigrationState != "pending" && component.MigrationState != "adopting" && component.MigrationState != "independent" {
+		return fmt.Errorf("component %q migrationState must be pending, adopting, or independent", component.ID)
+	}
+	if component.MigrationState == "independent" && component.OwnershipAdoption != nil {
+		return fmt.Errorf("component %q independent lane retains ownership adoption", component.ID)
+	}
+	if component.OwnershipAdoption != nil {
+		if err := component.OwnershipAdoption.validate(component); err != nil {
+			return err
+		}
 	}
 	if err := component.Workload.validate(component.ID); err != nil {
 		return err
@@ -331,6 +370,34 @@ func (component Component) Validate() error {
 		if err := probe.validate(); err != nil {
 			return fmt.Errorf("component %q health probe %d: %w", component.ID, index, err)
 		}
+	}
+	return nil
+}
+
+func (adoption OwnershipAdoption) validate(component Component) error {
+	if !fieldManagerPattern.MatchString(adoption.LegacyFieldManager) || adoption.LegacyFieldManager == component.Workload.FieldManager {
+		return fmt.Errorf("component %q ownership adoption legacy manager is invalid", component.ID)
+	}
+	if len(adoption.Resources) == 0 || len(adoption.Resources) > 16 {
+		return fmt.Errorf("component %q ownership adoption resource count is invalid", component.ID)
+	}
+	previous := ""
+	for index, scope := range adoption.Resources {
+		key := scope.Identity.key()
+		if !componentIDPattern.MatchString(scope.Identity.Namespace) || !componentIDPattern.MatchString(scope.Identity.Name) ||
+			scope.Identity.APIVersion == "" || scope.Identity.Kind == "" || (previous != "" && previous >= key) {
+			return fmt.Errorf("component %q ownership adoption resource %d is invalid or unordered", component.ID, index)
+		}
+		if len(scope.Fields) == 0 || len(scope.Fields) > 128 {
+			return fmt.Errorf("component %q ownership adoption resource %d field count is invalid", component.ID, index)
+		}
+		for fieldIndex, field := range scope.Fields {
+			if !strings.HasPrefix(field, "/") || strings.Contains(field, "//") ||
+				(fieldIndex > 0 && scope.Fields[fieldIndex-1] >= field) {
+				return fmt.Errorf("component %q ownership adoption fields must be strict ordered JSON pointers", component.ID)
+			}
+		}
+		previous = key
 	}
 	return nil
 }
@@ -588,7 +655,7 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 		return Plan{}, errors.New("runtime commit contains multiple production intents; split it into independent production atoms")
 	}
 	selected := candidates[selectedIndex]
-	if selected.component.MigrationState != "independent" {
+	if selected.component.MigrationState != "adopting" && selected.component.MigrationState != "independent" {
 		return Plan{}, fmt.Errorf("component %q is not migrated to the declarative release entrypoint", selected.component.ID)
 	}
 	selectedPathSet := make(map[string]struct{}, len(selected.selectedPaths))
@@ -682,8 +749,12 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.ExpectedPreviousManifestSHA = intent.ExpectedPreviousManifestSHA
 		release.ExpectedPreviousOCIRevision = intent.ExpectedPreviousOCIRevision
 		release.ExpectedPreviousImageDigest = intent.ExpectedPreviousImageDigest
+		if component.MigrationState == "adopting" && intent.ExpectedPreviousPresent && component.OwnershipAdoption == nil {
+			return Plan{}, fmt.Errorf("component %q adopting predecessor has no explicit ownership adoption", component.ID)
+		}
 		release.ManifestPath = component.ManifestPath
 		release.BootstrapLKGPath = component.BootstrapLKGPath
+		release.HeterogeneousBootstrapLKG = component.HeterogeneousBootstrapLKG
 		release.RetrySameLKG = retrySameLKG
 		release.Artifact = component.Artifact
 		release.ArtifactTargets = append([]ArtifactTarget(nil), component.ArtifactTargets...)
@@ -698,6 +769,15 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.Workload = component.Workload
 		release.Health = append([]HealthProbe(nil), component.Health...)
 		release.Concurrency = component.Concurrency
+		release.MigrationState = component.MigrationState
+		if component.OwnershipAdoption != nil {
+			copyAdoption := *component.OwnershipAdoption
+			copyAdoption.Resources = append([]OwnershipAdoptionScope(nil), component.OwnershipAdoption.Resources...)
+			for index := range copyAdoption.Resources {
+				copyAdoption.Resources[index].Fields = append([]string(nil), component.OwnershipAdoption.Resources[index].Fields...)
+			}
+			release.OwnershipAdoption = &copyAdoption
+		}
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
