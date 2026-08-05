@@ -62,7 +62,7 @@ func TestRetainOnRollbackIsRestrictedToPVC(t *testing.T) {
 }
 
 func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *testing.T) {
-	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/artifact-receipt-digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/release-plan-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","stable.example/key":"keep"},"labels":{"app.kubernetes.io/managed-by":"new-owner","stable.example/key":"keep"},"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"1111111111111111111111111111111111111111"}},"spec":{"containers":[{"image":"ghcr.io/example/fugue-api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/artifact-receipt-digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/release-plan-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","stable.example/key":"keep"},"labels":{"app.kubernetes.io/managed-by":"new-owner","stable.example/key":"keep"},"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"1111111111111111111111111111111111111111","fugue.pro/production-config-sha":"1111111111111111111111111111111111111111","fugue.pro/source-commit":"1111111111111111111111111111111111111111"}},"spec":{"containers":[{"image":"ghcr.io/example/fugue-api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
 	witness, err := PredecessorConvergenceManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +79,7 @@ func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *test
 	}
 	for _, retained := range [][]byte{
 		[]byte(`stable.example/key`),
+		[]byte(`fugue.pro/oci-revision`),
 		[]byte(`fugue.pro/source-commit`),
 		[]byte(`"replicas":2`),
 		[]byte(`ghcr.io/example/fugue-api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`),

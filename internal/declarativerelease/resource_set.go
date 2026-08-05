@@ -225,6 +225,15 @@ func PredecessorConvergenceManifest(manifest []byte) ([]byte, error) {
 			delete(annotations, "fugue.pro/release-plan-digest")
 			delete(annotations, "fugue.pro/artifact-receipt-digest")
 		}
+		if spec, ok := item["spec"].(map[string]any); ok {
+			if template, ok := spec["template"].(map[string]any); ok {
+				if templateMetadata, ok := template["metadata"].(map[string]any); ok {
+					if templateAnnotations, ok := templateMetadata["annotations"].(map[string]any); ok {
+						delete(templateAnnotations, "fugue.pro/production-config-sha")
+					}
+				}
+			}
+		}
 	}
 	return CanonicalJSON(set)
 }
