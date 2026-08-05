@@ -14,6 +14,16 @@ import (
 	"fugue/internal/model"
 )
 
+func mustReadQueuedEvent(t *testing.T, pipeline *Pipeline) Event {
+	t.Helper()
+	queued := <-pipeline.queue
+	var event Event
+	if err := json.Unmarshal(queued.payload, &event); err != nil {
+		t.Fatalf("decode queued event: %v", err)
+	}
+	return event
+}
+
 func TestPipelineInjectsIdentityAndDropsMetricSecrets(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,
@@ -41,7 +51,7 @@ func TestPipelineInjectsIdentityAndDropsMetricSecrets(t *testing.T) {
 	}) {
 		t.Fatal("expected event to be queued")
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if event.Message != "authorization=[REDACTED]" {
 		t.Fatalf("message was not redacted: %q", event.Message)
 	}
@@ -95,7 +105,7 @@ func TestPipelineIdentityDoesNotOverrideEventResourceAttributes(t *testing.T) {
 		t.Fatal("expected event to be queued")
 	}
 
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	for key, want := range map[string]string{
 		"tenant_id":  "tenant_app",
 		"project_id": "project_app",
@@ -113,19 +123,68 @@ func TestPipelineQueueAndMemoryLimitDropsWithoutBlocking(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,
 		QueueSize:        1,
-		MemoryLimitBytes: 120,
+		MemoryLimitBytes: 512,
 	}, nil)
 	ok := pipeline.Ingest(context.Background(), Event{Kind: EventKindLog, Source: "unit", Message: strings.Repeat("a", 20)})
 	if !ok {
 		t.Fatal("expected first event to be queued")
 	}
-	ok = pipeline.Ingest(context.Background(), Event{Kind: EventKindLog, Source: "unit", Message: strings.Repeat("b", 200)})
+	ok = pipeline.Ingest(context.Background(), Event{Kind: EventKindLog, Source: "unit", Message: strings.Repeat("b", 1000)})
 	if ok {
 		t.Fatal("expected oversized event to be dropped")
 	}
 	snap := pipeline.Snapshot()
 	if snap.Dropped == 0 || snap.QueueDepth != 1 {
 		t.Fatalf("unexpected snapshot: %+v", snap)
+	}
+}
+
+func TestPipelineQueueBudgetUsesOwnedBytesAndReservesCriticalEvidence(t *testing.T) {
+	pipeline := NewPipeline(Config{Enabled: true, QueueSize: 100, MemoryLimitBytes: 4096}, nil)
+	ordinary := Event{Kind: EventKindLog, Source: "unit", Message: strings.Repeat("ordinary", 64)}
+	accepted := 0
+	for pipeline.Ingest(context.Background(), ordinary) {
+		accepted++
+	}
+	if accepted == 0 {
+		t.Fatal("ordinary queue budget rejected every event")
+	}
+	ordinaryLimit := int64(4096 - 4096/telemetryCriticalQueueReserveDivisor)
+	if got := pipeline.Snapshot().QueuedBytes; got > ordinaryLimit {
+		t.Fatalf("ordinary events consumed the critical reserve: queued=%d limit=%d", got, ordinaryLimit)
+	}
+	critical := Event{Kind: EventKindLog, Source: "unit", Attributes: map[string]string{
+		"event_type": "edge_route_decision", "decision_id": "decision_123", "bundle_version": "bundle_123", "route_generation": "42",
+	}}
+	if !pipeline.Ingest(context.Background(), critical) {
+		t.Fatal("critical evidence could not consume its reserved bounded capacity")
+	}
+	snapshot := pipeline.Snapshot()
+	if snapshot.QueuedBytes > 4096 {
+		t.Fatalf("exact serialized queue bytes exceeded the global budget: %+v", snapshot)
+	}
+	var retained int64
+	queuedCount := len(pipeline.queue)
+	for range queuedCount {
+		queued := <-pipeline.queue
+		retained += int64(len(queued.payload))
+		pipeline.queue <- queued
+	}
+	if retained != snapshot.QueuedBytes {
+		t.Fatalf("queue accounting is not byte-exact: retained=%d snapshot=%d", retained, snapshot.QueuedBytes)
+	}
+
+	slotPipeline := NewPipeline(Config{Enabled: true, QueueSize: 10, MemoryLimitBytes: 1 << 20}, nil)
+	for index := 0; index < 9; index++ {
+		if !slotPipeline.Ingest(context.Background(), Event{Kind: EventKindLog, Source: "ordinary"}) {
+			t.Fatalf("ordinary slot %d was rejected before the reserved capacity", index)
+		}
+	}
+	if slotPipeline.Ingest(context.Background(), Event{Kind: EventKindLog, Source: "ordinary"}) {
+		t.Fatal("ordinary event consumed the reserved queue slot")
+	}
+	if !slotPipeline.Ingest(context.Background(), critical) {
+		t.Fatal("critical evidence could not consume the reserved queue slot")
 	}
 }
 
@@ -377,9 +436,9 @@ func TestPipelinePriorityDecisionEvidenceConvergesAcrossReplayAndOutOfOrder(t *t
 	if !pipeline.Ingest(context.Background(), request) || !pipeline.Ingest(context.Background(), request) || !pipeline.Ingest(context.Background(), decision) {
 		t.Fatal("out-of-order request, replay, and later decision must all enter the persistence queue")
 	}
-	first := <-pipeline.queue
-	second := <-pipeline.queue
-	third := <-pipeline.queue
+	first := mustReadQueuedEvent(t, pipeline)
+	second := mustReadQueuedEvent(t, pipeline)
+	third := mustReadQueuedEvent(t, pipeline)
 	if first.Attributes["platform_error_class"] != model.PlatformErrorClassInvariant || second.Attributes["platform_error_class"] != model.PlatformErrorClassInvariant || third.Attributes["event_type"] != "edge_route_decision" {
 		t.Fatalf("priority evidence order or N-1 projection drifted: first=%+v second=%+v third=%+v", first.Attributes, second.Attributes, third.Attributes)
 	}
@@ -444,7 +503,7 @@ func TestOTLPHTTPReceiverAcceptsJSONWithoutStoringPayload(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if strings.Contains(event.Message, "should-not-be-stored") {
 		t.Fatalf("raw OTLP payload leaked into event: %+v", event)
 	}
@@ -494,7 +553,7 @@ func TestOTLPHTTPReceiverParsesJSONSpans(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	for key, want := range map[string]string{
 		"event_type":     "request_span",
 		"service":        "checkout-api",
@@ -558,7 +617,7 @@ func TestOTLPHTTPReceiverParsesStructuredJSONRequestSummary(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if event.Kind != EventKindLog {
 		t.Fatalf("expected log event, got %+v", event)
 	}
@@ -838,7 +897,7 @@ func TestOTLPHTTPReceiverParsesStructuredJSONMetrics(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if event.Kind != EventKindMetric {
 		t.Fatalf("expected metric event, got %+v", event)
 	}
@@ -897,7 +956,7 @@ func TestPrometheusScrapeCreatesMetricEvent(t *testing.T) {
 	pipeline.ctx = context.Background()
 	pipeline.scrapePrometheusOnce(server.URL)
 
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if event.Kind != EventKindMetric || event.Attributes["sample_count"] != "2" {
 		t.Fatalf("unexpected scrape event: %+v", event)
 	}

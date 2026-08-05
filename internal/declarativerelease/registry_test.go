@@ -56,6 +56,12 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		}
 	}
 	for _, componentID := range []string{"edge-worker-de", "edge-worker-us"} {
+		component := byID[componentID]
+		if !containsString(component.SourceRoots, "internal/observability/config.go") || containsString(component.SourceRoots, "internal/observability") {
+			t.Fatalf("%s does not isolate its exact observability config dependency: %v", componentID, component.SourceRoots)
+		}
+	}
+	for _, componentID := range []string{"edge-worker-de", "edge-worker-us"} {
 		caddyTargets := 0
 		for _, target := range byID[componentID].ArtifactTargets {
 			if target.Container == "caddy" && target.ContainerType == "container" {
@@ -124,4 +130,13 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 			t.Fatalf("%s intent is not canonical JSON", component.ID)
 		}
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

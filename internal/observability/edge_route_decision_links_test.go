@@ -51,7 +51,7 @@ func TestPipelineMissingDecisionLinkCheckEmitsTypedAlert(t *testing.T) {
 	if !strings.Contains(query, "edge_route_decisions FINAL") {
 		t.Fatalf("link check did not query persistent decision material: %s", query)
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if event.Attributes["event_type"] != "edge_route_decision_material_missing" || event.Attributes["correlation_key"] == "" || event.Attributes["platform_error_class"] != "decision_missing" {
 		t.Fatalf("unexpected missing-link event: %+v", event)
 	}

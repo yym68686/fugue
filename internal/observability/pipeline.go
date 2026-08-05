@@ -38,6 +38,16 @@ type Event struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
+// queuedEvent owns the exact compact bytes retained by the in-memory queue.
+// Keeping the map-rich Event outside the queue makes MemoryLimitBytes a real
+// retained-payload bound instead of an estimate of Go heap usage.
+type queuedEvent struct {
+	payload  []byte
+	critical bool
+}
+
+const telemetryCriticalQueueReserveDivisor int64 = 10
+
 type PipelineSnapshot struct {
 	Enabled                       bool   `json:"enabled"`
 	Running                       bool   `json:"running"`
@@ -111,7 +121,7 @@ type telemetryTenantMeterSnapshot struct {
 type Pipeline struct {
 	cfg        Config
 	logger     *log.Logger
-	queue      chan Event
+	queue      chan queuedEvent
 	exporter   Exporter
 	httpClient *http.Client
 
@@ -129,6 +139,7 @@ type Pipeline struct {
 
 	queueDepth                    atomic.Int64
 	queuedBytes                   atomic.Int64
+	ordinaryQueuedSlots           atomic.Int64
 	received                      atomic.Uint64
 	exported                      atomic.Uint64
 	dropped                       atomic.Uint64
@@ -169,7 +180,7 @@ func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
 	return &Pipeline{
 		cfg:                cfg,
 		logger:             logger,
-		queue:              make(chan Event, cfg.QueueSize),
+		queue:              make(chan queuedEvent, cfg.QueueSize),
 		exporter:           NewConfiguredExporter(cfg, httpClient),
 		httpClient:         httpClient,
 		tenantQuotaBuckets: map[string]telemetryQuotaBucket{},
@@ -312,11 +323,44 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		p.recordTenantMeter(event, "quota_dropped")
 		return false
 	}
-	size := eventSize(event)
+	payload, err := json.Marshal(event)
+	if err != nil {
+		p.dropped.Add(1)
+		p.recordTenantMeter(event, "dropped")
+		p.recordError(fmt.Errorf("encode telemetry queue event: %w", err))
+		if criticalDecisionEvidence {
+			p.edgeRouteDecisionDrops.Add(1)
+		}
+		return false
+	}
+	queued := queuedEvent{payload: payload, critical: criticalDecisionEvidence}
+	size := int64(len(payload))
+	ordinarySlotReserved := false
+	if !criticalDecisionEvidence {
+		ordinaryLimit := int64(cap(p.queue))
+		if ordinaryLimit >= telemetryCriticalQueueReserveDivisor {
+			ordinaryLimit -= ordinaryLimit / telemetryCriticalQueueReserveDivisor
+		}
+		if p.ordinaryQueuedSlots.Add(1) > ordinaryLimit {
+			p.ordinaryQueuedSlots.Add(-1)
+			p.dropped.Add(1)
+			p.recordTenantMeter(event, "dropped")
+			p.recordError(errors.New("telemetry queue reserved capacity dropped event"))
+			return false
+		}
+		ordinarySlotReserved = true
+	}
 	if p.cfg.MemoryLimitBytes > 0 {
 		nextSize := p.queuedBytes.Add(size)
-		if nextSize > p.cfg.MemoryLimitBytes {
+		admissionLimit := p.cfg.MemoryLimitBytes
+		if !criticalDecisionEvidence {
+			admissionLimit -= p.cfg.MemoryLimitBytes / telemetryCriticalQueueReserveDivisor
+		}
+		if nextSize > admissionLimit {
 			p.queuedBytes.Add(-size)
+			if ordinarySlotReserved {
+				p.ordinaryQueuedSlots.Add(-1)
+			}
 			p.dropped.Add(1)
 			p.recordTenantMeter(event, "dropped")
 			p.recordError(errors.New("telemetry memory limiter dropped event"))
@@ -328,7 +372,7 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 	}
 
 	select {
-	case p.queue <- event:
+	case p.queue <- queued:
 		p.received.Add(1)
 		p.queueDepth.Add(1)
 		p.recordTenantMeter(event, "received")
@@ -336,6 +380,9 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 	case <-ctx.Done():
 		if p.cfg.MemoryLimitBytes > 0 {
 			p.queuedBytes.Add(-size)
+		}
+		if ordinarySlotReserved {
+			p.ordinaryQueuedSlots.Add(-1)
 		}
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
@@ -347,6 +394,9 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 	default:
 		if p.cfg.MemoryLimitBytes > 0 {
 			p.queuedBytes.Add(-size)
+		}
+		if ordinarySlotReserved {
+			p.ordinaryQueuedSlots.Add(-1)
 		}
 		p.dropped.Add(1)
 		p.recordTenantMeter(event, "dropped")
@@ -718,9 +768,18 @@ func (p *Pipeline) runBatchExporter() {
 		case <-p.ctx.Done():
 			flush()
 			return
-		case event := <-p.queue:
+		case queued := <-p.queue:
 			p.queueDepth.Add(-1)
-			p.queuedBytes.Add(-eventSize(event))
+			p.queuedBytes.Add(-int64(len(queued.payload)))
+			if !queued.critical {
+				p.ordinaryQueuedSlots.Add(-1)
+			}
+			var event Event
+			if err := json.Unmarshal(queued.payload, &event); err != nil {
+				p.dropped.Add(1)
+				p.recordError(fmt.Errorf("decode telemetry queue event: %w", err))
+				continue
+			}
 			batch = append(batch, event)
 			if len(batch) >= p.cfg.BatchSize {
 				flush()
@@ -1052,14 +1111,6 @@ func (p *Pipeline) lastErrorString() string {
 		return text
 	}
 	return ""
-}
-
-func eventSize(event Event) int64 {
-	size := len(event.Source) + len(event.Message) + 64
-	for key, value := range event.Attributes {
-		size += len(key) + len(value) + 8
-	}
-	return int64(size)
 }
 
 func otlpPathKind(path string) EventKind {

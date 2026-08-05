@@ -3,6 +3,7 @@ package observability
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,8 +19,7 @@ import (
 )
 
 const (
-	kubernetesLogDedupWindow                  = 5 * time.Minute
-	kubernetesPriorityLogCollectorConcurrency = 8
+	kubernetesLogDedupWindow = 5 * time.Minute
 
 	kubernetesLabelName               = "app.kubernetes.io/name"
 	kubernetesLabelComponent          = "app.kubernetes.io/component"
@@ -31,8 +31,6 @@ const (
 	kubernetesLabelBackingServiceType = "fugue.pro/backing-service-type"
 	kubernetesLabelRolloutSubsystem   = "fugue.io/rollout-subsystem"
 	kubernetesPublicDataPlane         = "public-data-plane"
-	kubernetesPublicDataPlaneSelector = kubernetesLabelRolloutSubsystem + "=" + kubernetesPublicDataPlane
-	kubernetesAPISelector             = kubernetesLabelComponent + "=api"
 )
 
 type kubernetesLogCollector struct {
@@ -76,9 +74,12 @@ func newKubernetesLogCollector(p *Pipeline) (*kubernetesLogCollector, error) {
 }
 
 func newKubernetesLogCollectorWithClient(p *Pipeline, client kubernetes.Interface) *kubernetesLogCollector {
-	maxEntries := p.cfg.KubernetesLogMaxLinesPerCycle * 20
-	if maxEntries < 10000 {
-		maxEntries = 10000
+	maxEntries := p.cfg.KubernetesLogMaxLinesPerCycle * 2
+	if maxEntries < 2048 {
+		maxEntries = 2048
+	}
+	if maxEntries > 40000 {
+		maxEntries = 40000
 	}
 	return &kubernetesLogCollector{
 		pipeline: p,
@@ -88,14 +89,7 @@ func newKubernetesLogCollectorWithClient(p *Pipeline, client kubernetes.Interfac
 }
 
 func (c *kubernetesLogCollector) run() {
-	var priority sync.WaitGroup
-	priority.Add(1)
-	go func() {
-		defer priority.Done()
-		c.runCollectionLoop(c.collectPriorityOnce)
-	}()
 	c.runCollectionLoop(c.collectOnce)
-	priority.Wait()
 }
 
 func (c *kubernetesLogCollector) runCollectionLoop(collect func(context.Context)) {
@@ -118,65 +112,25 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 		return
 	}
 	linesPerContainer := c.kubernetesLogLinesPerContainer(len(targets))
+	priorityTargets := 0
 	for _, target := range targets {
 		if ctx.Err() != nil {
 			return
 		}
-		c.collectContainerLogs(ctx, target.pod, target.container, linesPerContainer)
-	}
-	c.pipeline.kubernetesLogPods.Store(int64(podCount))
-}
-
-func (c *kubernetesLogCollector) collectPriorityOnce(ctx context.Context) {
-	targets := []kubernetesLogTarget{}
-	for _, selector := range []string{kubernetesPublicDataPlaneSelector, kubernetesAPISelector} {
-		selected, _, ok := c.kubernetesLogTargets(ctx, selector, false)
-		if !ok {
-			return
+		priority := kubernetesLogPriorityTarget(target)
+		if priority {
+			priorityTargets++
 		}
-		targets = append(targets, selected...)
-	}
-	priorityTargets := make([]kubernetesLogTarget, 0, len(targets))
-	for _, target := range targets {
-		if kubernetesLogPriorityTarget(target) {
-			priorityTargets = append(priorityTargets, target)
-		}
-	}
-	c.pipeline.kubernetesPriorityTargets.Store(int64(len(priorityTargets)))
-	if len(priorityTargets) == 0 {
-		return
-	}
-
-	linesPerContainer := c.kubernetesLogLinesPerContainer(len(priorityTargets))
-	jobs := make(chan kubernetesLogTarget)
-	var workers sync.WaitGroup
-	workerCount := len(priorityTargets)
-	if workerCount > kubernetesPriorityLogCollectorConcurrency {
-		workerCount = kubernetesPriorityLogCollectorConcurrency
-	}
-	workers.Add(workerCount)
-	for i := 0; i < workerCount; i++ {
-		go func() {
-			defer workers.Done()
-			for target := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
-				c.collectPriorityContainerLogs(ctx, target.pod, target.container, linesPerContainer)
+		result := c.collectContainerLogs(ctx, target.pod, target.container, linesPerContainer)
+		if priority {
+			tailLines := kubernetesLogTailLinesForRequest(c.pipeline.cfg, linesPerContainer)
+			if tailLines > 0 && result.scanned >= int(tailLines) {
+				c.pipeline.kubernetesPriorityTruncations.Add(1)
 			}
-		}()
-	}
-	for _, target := range priorityTargets {
-		select {
-		case <-ctx.Done():
-			close(jobs)
-			workers.Wait()
-			return
-		case jobs <- target:
 		}
 	}
-	close(jobs)
-	workers.Wait()
+	c.pipeline.kubernetesPriorityTargets.Store(int64(priorityTargets))
+	c.pipeline.kubernetesLogPods.Store(int64(podCount))
 }
 
 func (c *kubernetesLogCollector) kubernetesLogTargets(ctx context.Context, labelSelector string, enforcePodLimit bool) ([]kubernetesLogTarget, int, bool) {
@@ -243,33 +197,12 @@ func (c *kubernetesLogCollector) kubernetesLogLinesPerContainer(targetCount int)
 	return fairShare
 }
 
-func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod corev1.Pod, container string, maxLines int) int {
-	return c.collectContainerLogsMode(ctx, pod, container, maxLines, false).ingested
-}
-
-func (c *kubernetesLogCollector) collectPriorityContainerLogs(ctx context.Context, pod corev1.Pod, container string, maxLines int) int {
-	result := c.collectContainerLogsMode(ctx, pod, container, maxLines, true)
-	if result.ingested > 0 {
-		c.pipeline.kubernetesPriorityLines.Add(uint64(result.ingested))
-	}
-	if tailLines := kubernetesLogTailLinesForRequest(c.pipeline.cfg, maxLines); tailLines > 0 && result.scanned >= int(tailLines) {
-		c.pipeline.kubernetesPriorityTruncations.Add(1)
-	}
-	return result.ingested
-}
-
-func (c *kubernetesLogCollector) collectContainerLogsMode(ctx context.Context, pod corev1.Pod, container string, maxLines int, priorityOnly bool) kubernetesLogIngestResult {
+func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod corev1.Pod, container string, maxLines int) kubernetesLogIngestResult {
 	if maxLines <= 0 {
 		return kubernetesLogIngestResult{}
 	}
 	cfg := c.pipeline.cfg
 	sinceSeconds := int64((cfg.KubernetesLogPollInterval * 2).Seconds())
-	if priorityOnly {
-		// Keep a wider bounded overlap for the small priority target set. The
-		// deduper removes repeats, while the overlap prevents a transient slow
-		// Kubernetes log read from reopening a blind interval.
-		sinceSeconds = int64((cfg.KubernetesLogPollInterval * 4).Seconds())
-	}
 	if sinceSeconds < 5 {
 		sinceSeconds = 5
 	}
@@ -297,7 +230,7 @@ func (c *kubernetesLogCollector) collectContainerLogsMode(ctx context.Context, p
 	}
 	defer stream.Close()
 
-	return c.ingestLogStreamMode(logCtx, stream, pod, container, maxLines, priorityOnly)
+	return c.ingestLogStreamResult(logCtx, stream, pod, container, maxLines)
 }
 
 func kubernetesLogTailLinesForRequest(cfg Config, maxLines int) int64 {
@@ -315,19 +248,15 @@ func kubernetesLogTailLinesForRequest(cfg Config, maxLines int) int64 {
 }
 
 func (c *kubernetesLogCollector) ingestLogStream(ctx context.Context, stream io.Reader, pod corev1.Pod, container string, maxLines int) int {
-	return c.ingestLogStreamMode(ctx, stream, pod, container, maxLines, false).ingested
+	return c.ingestLogStreamResult(ctx, stream, pod, container, maxLines).ingested
 }
 
-func (c *kubernetesLogCollector) ingestLogStreamMode(ctx context.Context, stream io.Reader, pod corev1.Pod, container string, maxLines int, priorityOnly bool) kubernetesLogIngestResult {
+func (c *kubernetesLogCollector) ingestLogStreamResult(ctx context.Context, stream io.Reader, pod corev1.Pod, container string, maxLines int) kubernetesLogIngestResult {
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 0, 64*1024), int(c.pipeline.cfg.MaxPayloadBytes))
-	type logRecord struct {
-		timestamp time.Time
-		message   string
-	}
-	priorityRecords := []logRecord{}
-	records := make([]logRecord, 0, maxLines)
-	dropped := 0
+	attrs := kubernetesLogAttributes(pod, container)
+	source := "kubernetes://" + pod.Namespace + "/" + pod.Name + "/" + container
+	ingested := 0
 	scanned := 0
 	for scanner.Scan() {
 		select {
@@ -335,39 +264,21 @@ func (c *kubernetesLogCollector) ingestLogStreamMode(ctx context.Context, stream
 			return kubernetesLogIngestResult{scanned: scanned}
 		default:
 		}
+		if scanned >= maxLines {
+			break
+		}
 		scanned++
 		timestamp, message := splitKubernetesLogLine(scanner.Text())
-		record := logRecord{timestamp: timestamp, message: message}
-		if kubernetesLogPriorityMessage(message) {
-			priorityRecords = append(priorityRecords, record)
-		}
-		if priorityOnly {
-			continue
-		}
-		if len(records) < maxLines {
-			records = append(records, record)
-		} else if maxLines > 0 {
-			records[dropped%maxLines] = record
-			dropped++
-		}
-	}
-	if !priorityOnly && dropped > 0 && len(records) > 1 {
-		rotate := dropped % len(records)
-		records = append(append([]logRecord{}, records[rotate:]...), records[:rotate]...)
-	}
-	if len(priorityRecords) > 0 {
-		records = append(priorityRecords, records...)
-	}
-	attrs := kubernetesLogAttributes(pod, container)
-	source := "kubernetes://" + pod.Namespace + "/" + pod.Name + "/" + container
-	ingested := 0
-	for _, record := range records {
-		key := kubernetesLogDedupKey(pod.Namespace, pod.Name, container, record.timestamp, record.message)
+		priority := kubernetesLogPriorityMessage(message)
+		key := kubernetesLogDedupKey(pod.Namespace, pod.Name, container, timestamp, message)
 		if c.deduper.Seen(key, time.Now().UTC()) {
 			continue
 		}
-		if c.pipeline.IngestLogLineWithAttributes(ctx, source, record.message, attrs, record.timestamp) {
+		if c.pipeline.IngestLogLineWithAttributes(ctx, source, message, attrs, timestamp) {
 			c.pipeline.kubernetesLogLines.Add(1)
+			if priority {
+				c.pipeline.kubernetesPriorityLines.Add(1)
+			}
 			ingested++
 		}
 	}
@@ -542,28 +453,37 @@ func splitKubernetesLogLine(line string) (time.Time, string) {
 	return timestamp.UTC(), message
 }
 
-func kubernetesLogDedupKey(namespace, pod, container string, timestamp time.Time, message string) string {
-	ts := ""
-	if !timestamp.IsZero() {
-		ts = timestamp.UTC().Format(time.RFC3339Nano)
+func kubernetesLogDedupKey(namespace, pod, container string, timestamp time.Time, message string) [sha256.Size]byte {
+	digest := sha256.New()
+	for _, value := range []string{namespace, pod, container, timestamp.UTC().Format(time.RFC3339Nano), message} {
+		_, _ = io.WriteString(digest, value)
+		_, _ = digest.Write([]byte{0})
 	}
-	return namespace + "\x00" + pod + "\x00" + container + "\x00" + ts + "\x00" + message
+	var key [sha256.Size]byte
+	copy(key[:], digest.Sum(nil))
+	return key
 }
 
 type logLineDeduper struct {
 	mu      sync.Mutex
 	maxSize int
-	seen    map[string]time.Time
+	seen    map[[sha256.Size]byte]time.Time
+	order   []logLineDedupEntry
+}
+
+type logLineDedupEntry struct {
+	key    [sha256.Size]byte
+	seenAt time.Time
 }
 
 func newLogLineDeduper(maxSize int) *logLineDeduper {
 	if maxSize < 1 {
 		maxSize = 1
 	}
-	return &logLineDeduper{maxSize: maxSize, seen: map[string]time.Time{}}
+	return &logLineDeduper{maxSize: maxSize, seen: map[[sha256.Size]byte]time.Time{}, order: make([]logLineDedupEntry, 0, maxSize)}
 }
 
-func (d *logLineDeduper) Seen(key string, now time.Time) bool {
+func (d *logLineDeduper) Seen(key [sha256.Size]byte, now time.Time) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, ok := d.seen[key]; ok {
@@ -572,10 +492,15 @@ func (d *logLineDeduper) Seen(key string, now time.Time) bool {
 	if len(d.seen) >= d.maxSize {
 		d.pruneLocked(now.Add(-kubernetesLogDedupWindow))
 	}
-	if len(d.seen) >= d.maxSize {
-		d.seen = map[string]time.Time{}
+	for len(d.seen) >= d.maxSize && len(d.order) > 0 {
+		oldest := d.order[0]
+		d.order = d.order[1:]
+		if seenAt, ok := d.seen[oldest.key]; ok && seenAt.Equal(oldest.seenAt) {
+			delete(d.seen, oldest.key)
+		}
 	}
 	d.seen[key] = now
+	d.order = append(d.order, logLineDedupEntry{key: key, seenAt: now})
 	return false
 }
 
@@ -586,9 +511,15 @@ func (d *logLineDeduper) Prune(cutoff time.Time) {
 }
 
 func (d *logLineDeduper) pruneLocked(cutoff time.Time) {
-	for key, seenAt := range d.seen {
-		if seenAt.Before(cutoff) {
-			delete(d.seen, key)
+	retained := d.order[:0]
+	for _, entry := range d.order {
+		if entry.seenAt.Before(cutoff) {
+			if seenAt, ok := d.seen[entry.key]; ok && seenAt.Equal(entry.seenAt) {
+				delete(d.seen, entry.key)
+			}
+			continue
 		}
+		retained = append(retained, entry)
 	}
+	d.order = retained
 }

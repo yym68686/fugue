@@ -41,7 +41,7 @@ func TestKubernetesLogCollectorInjectsIdentityAndDeduplicates(t *testing.T) {
 	if got := collector.ingestLogStream(context.Background(), strings.NewReader(line), pod, "app", 10); got != 0 {
 		t.Fatalf("expected duplicate line to be skipped, got %d", got)
 	}
-	event := <-pipeline.queue
+	event := mustReadQueuedEvent(t, pipeline)
 	if event.Timestamp.IsZero() || event.Timestamp.Format(time.RFC3339) != "2026-06-06T01:02:03Z" {
 		t.Fatalf("expected Kubernetes timestamp to be preserved, got %s", event.Timestamp)
 	}
@@ -63,6 +63,24 @@ func TestKubernetesLogCollectorInjectsIdentityAndDeduplicates(t *testing.T) {
 	}
 	if pipeline.Snapshot().KubernetesLogLines != 1 {
 		t.Fatalf("expected Kubernetes line counter to increase: %+v", pipeline.Snapshot())
+	}
+}
+
+func TestKubernetesLogDeduperStoresFixedHashesWithinTheConfiguredBound(t *testing.T) {
+	collector := newKubernetesLogCollectorWithClient(NewPipeline(Config{KubernetesLogMaxLinesPerCycle: 100000}, nil), nil)
+	if collector.deduper.maxSize != 40000 {
+		t.Fatalf("deduper did not enforce its absolute entry bound: %d", collector.deduper.maxSize)
+	}
+	deduper := newLogLineDeduper(2)
+	now := time.Now().UTC()
+	for index, message := range []string{"one", "two", "three"} {
+		key := kubernetesLogDedupKey("ns", "pod", "container", now.Add(time.Duration(index)*time.Second), message)
+		if deduper.Seen(key, now) {
+			t.Fatalf("fresh fixed hash was treated as duplicate: %x", key)
+		}
+	}
+	if len(deduper.seen) > 2 {
+		t.Fatalf("deduper exceeded its fixed entry bound: %d", len(deduper.seen))
 	}
 }
 
@@ -116,7 +134,7 @@ func TestKubernetesContainerHasLogsIncludesTerminatedContainers(t *testing.T) {
 	}
 }
 
-func TestKubernetesLogCollectorKeepsNewestLinesWhenCapped(t *testing.T) {
+func TestKubernetesLogCollectorStreamsTheBoundedTailWithoutRetainingACycle(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:                       true,
 		QueueSize:                     4,
@@ -134,8 +152,6 @@ func TestKubernetesLogCollectorKeepsNewestLinesWhenCapped(t *testing.T) {
 		},
 	}
 	lines := strings.Join([]string{
-		"2026-06-06T01:02:01Z old-one",
-		"2026-06-06T01:02:02Z old-two",
 		"2026-06-06T01:02:03Z keep-one",
 		"2026-06-06T01:02:04Z keep-two",
 	}, "\n") + "\n"
@@ -143,8 +159,8 @@ func TestKubernetesLogCollectorKeepsNewestLinesWhenCapped(t *testing.T) {
 	if got := collector.ingestLogStream(context.Background(), strings.NewReader(lines), pod, "app", 2); got != 2 {
 		t.Fatalf("expected two ingested lines, got %d", got)
 	}
-	first := <-pipeline.queue
-	second := <-pipeline.queue
+	first := mustReadQueuedEvent(t, pipeline)
+	second := mustReadQueuedEvent(t, pipeline)
 	if first.Message != "keep-one" || second.Message != "keep-two" {
 		t.Fatalf("expected newest capped lines to be ingested in order, got %q then %q", first.Message, second.Message)
 	}
@@ -166,13 +182,13 @@ func TestKubernetesLogTailLinesForRequestUsesFairShareCap(t *testing.T) {
 	}
 }
 
-func TestKubernetesLogCollectorRetainsPriorityRequestFactsWhenCapped(t *testing.T) {
+func TestKubernetesLogCollectorClassifiesPriorityFactsInTheSinglePass(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:                       true,
 		QueueSize:                     4,
 		MemoryLimitBytes:              4096,
 		KubernetesLogsEnabled:         true,
-		KubernetesLogMaxLinesPerCycle: 1,
+		KubernetesLogMaxLinesPerCycle: 3,
 		MaxPayloadBytes:               2048,
 	}, nil)
 	pipeline.ctx = context.Background()
@@ -189,20 +205,24 @@ func TestKubernetesLogCollectorRetainsPriorityRequestFactsWhenCapped(t *testing.
 		"2026-06-06T01:02:03Z noisy-two",
 	}, "\n") + "\n"
 
-	if got := collector.ingestLogStream(context.Background(), strings.NewReader(lines), pod, "edge", 1); got != 2 {
-		t.Fatalf("expected priority request fact plus newest capped line, got %d", got)
+	if got := collector.ingestLogStream(context.Background(), strings.NewReader(lines), pod, "edge", 3); got != 3 {
+		t.Fatalf("expected all three single-pass records, got %d", got)
 	}
-	first := <-pipeline.queue
-	second := <-pipeline.queue
+	first := mustReadQueuedEvent(t, pipeline)
+	second := mustReadQueuedEvent(t, pipeline)
+	third := mustReadQueuedEvent(t, pipeline)
 	if first.Attributes["event_type"] != "request_fact" || first.Attributes["trace_id"] != "trace_123" {
 		t.Fatalf("expected priority request_fact first, got %+v", first)
 	}
-	if second.Message != "noisy-two" {
-		t.Fatalf("expected newest non-priority line second, got %q", second.Message)
+	if second.Message != "noisy-one" || third.Message != "noisy-two" {
+		t.Fatalf("single-pass log order drifted: second=%q third=%q", second.Message, third.Message)
+	}
+	if pipeline.Snapshot().KubernetesPriorityLines != 1 {
+		t.Fatalf("priority classification counter drifted: %+v", pipeline.Snapshot())
 	}
 }
 
-func TestKubernetesLogCollectorPriorityPassOnlyIngestsStructuredDataPlaneFacts(t *testing.T) {
+func TestKubernetesLogCollectorSinglePassPreservesStructuredPriorityFacts(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,
 		QueueSize:        8,
@@ -220,18 +240,22 @@ func TestKubernetesLogCollectorPriorityPassOnlyIngestsStructuredDataPlaneFacts(t
 		`2026-06-06T01:02:04Z 2026/06/06 01:02:04 {"event_type":"edge_route_decision","decision_id":"decision_123","bundle_version":"bundle_123","route_generation":"route_123"}`,
 	}, "\n") + "\n"
 
-	result := collector.ingestLogStreamMode(context.Background(), strings.NewReader(lines), pod, "edge", 10, true)
-	if result.scanned != 5 || result.ingested != 3 {
-		t.Fatalf("expected five scanned lines and three priority facts, got %+v", result)
+	result := collector.ingestLogStreamResult(context.Background(), strings.NewReader(lines), pod, "edge", 10)
+	if result.scanned != 5 || result.ingested != 5 {
+		t.Fatalf("expected one pass to ingest five scanned lines, got %+v", result)
 	}
-	first := <-pipeline.queue
-	second := <-pipeline.queue
-	third := <-pipeline.queue
-	if first.Attributes["trace_id"] != "trace_webhook" || second.Attributes["trace_id"] != "trace_status" {
-		t.Fatalf("unexpected priority facts: first=%+v second=%+v", first, second)
+	events := make([]Event, 0, 5)
+	for range 5 {
+		events = append(events, mustReadQueuedEvent(t, pipeline))
 	}
-	if third.Attributes["event_type"] != "edge_route_decision" || third.Attributes["decision_id"] != "decision_123" {
-		t.Fatalf("route decision material was not prioritized: %+v", third)
+	if events[1].Attributes["trace_id"] != "trace_webhook" || events[3].Attributes["trace_id"] != "trace_status" {
+		t.Fatalf("unexpected priority facts: %+v", events)
+	}
+	if events[4].Attributes["event_type"] != "edge_route_decision" || events[4].Attributes["decision_id"] != "decision_123" {
+		t.Fatalf("route decision material was not classified: %+v", events[4])
+	}
+	if pipeline.Snapshot().KubernetesPriorityLines != 3 {
+		t.Fatalf("expected three priority facts from one pass: %+v", pipeline.Snapshot())
 	}
 }
 
@@ -247,9 +271,6 @@ func TestEventFromLogLineParsesExactGoLoggerPrefixForDecisionMaterial(t *testing
 }
 
 func TestKubernetesLogPriorityTargetUsesExplicitDataPlaneMetadata(t *testing.T) {
-	if kubernetesPublicDataPlaneSelector != "fugue.io/rollout-subsystem=public-data-plane" {
-		t.Fatalf("unexpected priority Kubernetes label selector %q", kubernetesPublicDataPlaneSelector)
-	}
 	priority := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{kubernetesLabelRolloutSubsystem: kubernetesPublicDataPlane}}}
 	if !kubernetesLogPriorityTarget(kubernetesLogTarget{pod: priority, container: "edge"}) {
 		t.Fatal("expected public data-plane pod to use the priority collector")

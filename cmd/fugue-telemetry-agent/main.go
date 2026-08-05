@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -17,11 +18,17 @@ import (
 )
 
 const (
-	telemetryAgentMemoryLimitBytes int64 = 64 << 20
-	telemetryAgentBatchSize              = 64
+	telemetryAgentGoMemoryLimitBytes     int64 = 160 << 20
+	telemetryAgentMemoryLimitBytes       int64 = 16 << 20
+	telemetryAgentQueueSize                    = 4096
+	telemetryAgentBatchSize                    = 32
+	telemetryAgentKubernetesLogTailLines int64 = 200
+	telemetryAgentKubernetesLogMaxPods         = 100
+	telemetryAgentKubernetesLogMaxLines        = 2000
 )
 
 func main() {
+	debug.SetMemoryLimit(telemetryAgentGoMemoryLimitBytes)
 	cfg := config.TelemetryAgentFromEnv()
 	observabilityConfig := boundTelemetryAgentMemory(cfg.Observability)
 	logger := log.Default()
@@ -76,8 +83,20 @@ func boundTelemetryAgentMemory(cfg observability.Config) observability.Config {
 	if cfg.MemoryLimitBytes > telemetryAgentMemoryLimitBytes {
 		cfg.MemoryLimitBytes = telemetryAgentMemoryLimitBytes
 	}
+	if cfg.QueueSize > telemetryAgentQueueSize {
+		cfg.QueueSize = telemetryAgentQueueSize
+	}
 	if cfg.BatchSize > telemetryAgentBatchSize {
 		cfg.BatchSize = telemetryAgentBatchSize
+	}
+	if cfg.KubernetesLogTailLines > telemetryAgentKubernetesLogTailLines {
+		cfg.KubernetesLogTailLines = telemetryAgentKubernetesLogTailLines
+	}
+	if cfg.KubernetesLogMaxPods > telemetryAgentKubernetesLogMaxPods {
+		cfg.KubernetesLogMaxPods = telemetryAgentKubernetesLogMaxPods
+	}
+	if cfg.KubernetesLogMaxLinesPerCycle > telemetryAgentKubernetesLogMaxLines {
+		cfg.KubernetesLogMaxLinesPerCycle = telemetryAgentKubernetesLogMaxLines
 	}
 	return cfg
 }
