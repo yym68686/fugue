@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,11 +10,12 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestComponentLeaseLoadsDefaultKubeconfigAndFailsClosed(t *testing.T) {
@@ -58,12 +60,44 @@ func TestComponentLeaseNamesRemainComponentScoped(t *testing.T) {
 	}
 }
 
+func TestComponentLeaseMicroTimeRoundTripsThroughKubernetesCodec(t *testing.T) {
+	release := testLeaseRelease()
+	now := time.Date(2026, 8, 5, 9, 38, 12, 422221054, time.UTC)
+	lease := newComponentLease(release, "holder", now)
+	scheme := runtime.NewScheme()
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	codecs := serializer.NewCodecFactory(scheme)
+	encoded, err := runtime.Encode(codecs.LegacyCodec(coordinationv1.SchemeGroupVersion), lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"acquireTime":"2026-08-05T09:38:12.422221Z"`, `"renewTime":"2026-08-05T09:38:12.422221Z"`} {
+		if !bytes.Contains(encoded, []byte(field)) {
+			t.Fatalf("Kubernetes Lease codec did not emit canonical MicroTime %s: %s", field, encoded)
+		}
+	}
+	decodedObject, _, err := codecs.UniversalDeserializer().Decode(encoded, nil, nil)
+	if err != nil {
+		t.Fatalf("Kubernetes Lease codec rejected its Create payload: %v", err)
+	}
+	decoded, ok := decodedObject.(*coordinationv1.Lease)
+	if !ok || decoded.Spec.AcquireTime == nil || decoded.Spec.RenewTime == nil {
+		t.Fatalf("decoded Lease times are missing: %T %+v", decodedObject, decodedObject)
+	}
+	want := now.Truncate(time.Microsecond)
+	if !decoded.Spec.AcquireTime.Time.Equal(want) || !decoded.Spec.RenewTime.Time.Equal(want) {
+		t.Fatalf("decoded Lease MicroTime drifted: acquire=%v renew=%v want=%v", decoded.Spec.AcquireTime, decoded.Spec.RenewTime, want)
+	}
+}
+
 func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *testing.T) {
 	now := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
 	release := testLeaseRelease()
 	active := testLeaseObject(release, "github:other/repo:1:1:"+strings.Repeat("a", 40)+":controller", now.Add(-time.Minute))
-	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), active)
-	coordinator := &componentLeaseCoordinator{client: client, now: func() time.Time { return now }}
+	client := kubernetesfake.NewSimpleClientset(active)
+	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), now: func() time.Time { return now }}
 	t.Setenv("GITHUB_REPOSITORY", "example/fugue")
 	t.Setenv("GITHUB_RUN_ID", "42")
 	t.Setenv("GITHUB_RUN_ATTEMPT", "1")
@@ -72,8 +106,8 @@ func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *t
 	}
 
 	expired := testLeaseObject(release, "github:other/repo:1:1:"+strings.Repeat("a", 40)+":controller", now.Add(-20*time.Minute))
-	client = dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), expired)
-	coordinator.client = client
+	client = kubernetesfake.NewSimpleClientset(expired)
+	coordinator.client = client.CoordinationV1()
 	held, err := coordinator.acquire(context.Background(), release, strings.Repeat("b", 40))
 	if err != nil {
 		t.Fatalf("reclaim expired lease: %v", err)
@@ -84,7 +118,7 @@ func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *t
 	if err := coordinator.release(context.Background(), held); err != nil {
 		t.Fatalf("release exact lease: %v", err)
 	}
-	readback, err := client.Resource(componentLeaseGVR).Namespace(release.Workload.Namespace).Get(context.Background(), release.Concurrency, metav1.GetOptions{})
+	readback, err := client.CoordinationV1().Leases(release.Workload.Namespace).Get(context.Background(), release.Concurrency, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +152,7 @@ func testLeaseRelease() declarativerelease.PlanRelease {
 	return declarativerelease.PlanRelease{ComponentID: "controller", Concurrency: "fugue-production-controller", Workload: declarativerelease.Workload{Namespace: "fugue-system"}}
 }
 
-func testLeaseObject(release declarativerelease.PlanRelease, holder string, renew time.Time) *unstructured.Unstructured {
+func testLeaseObject(release declarativerelease.PlanRelease, holder string, renew time.Time) *coordinationv1.Lease {
 	value := newComponentLease(release, holder, renew)
 	value.SetUID(types.UID("lease-uid"))
 	value.SetResourceVersion("50")
