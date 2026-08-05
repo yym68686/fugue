@@ -135,7 +135,7 @@ func (c *CLI) loadConsoleView(client *Client, projectRef string, includeAdmin bo
 	}
 	if includeAdmin {
 		view.Tables = append(view.Tables, c.loadConsoleAdminTables(client)...)
-		view.Actions = append(view.Actions, "control plane release path: GitHub Actions deploy-control-plane.yml")
+		view.Actions = append(view.Actions, "control plane release path: GitHub Actions ci.yml declarative component lanes")
 	}
 	return view, nil
 }
@@ -240,7 +240,7 @@ func (c *CLI) loadConsoleAdminTables(client *Client) []cliconsole.Table {
 		tables = append(tables, cliconsole.Table{Title: string(cliconsole.PageAdmin), Headers: []string{"DNS", "STATUS", "HEALTHY"}, Rows: rows})
 	}
 	if controlPlane, err := client.GetControlPlaneStatus(); err == nil {
-		rows := []cliconsole.Row{{Cells: []string{"status", controlPlane.Status}}, {Cells: []string{"version", controlPlane.Version}}, {Cells: []string{"release_path", "GitHub Actions deploy-control-plane.yml"}}}
+		rows := []cliconsole.Row{{Cells: []string{"status", controlPlane.Status}}, {Cells: []string{"version", controlPlane.Version}}, {Cells: []string{"release_path", "GitHub Actions ci.yml declarative component lanes"}}}
 		tables = append(tables, cliconsole.Table{Title: string(cliconsole.PageAdmin), Headers: []string{"FIELD", "VALUE"}, Rows: rows})
 	}
 	return tables

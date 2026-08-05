@@ -61,7 +61,7 @@ func TestAdminClusterTopOnceAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run admin cluster top: %v stderr=%s", err, stderr)
 	}
-	for _, want := range []string{"┌ Admin cluster top", "nodes=1 ready=1", "control_plane=ready", "gcp1", "node policy", "deploy-control-plane"} {
+	for _, want := range []string{"┌ Admin cluster top", "nodes=1 ready=1", "control_plane=ready", "gcp1", "node policy", "deploy_workflow=ci.yml"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout)
 		}
@@ -139,7 +139,7 @@ func newAdminClusterTopServer(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
 			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","tenant_id":"tenant_123","name":"shared","type":"managed-shared","access_mode":"public","status":"active","cluster_node_name":"gcp1","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
-			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeefcafebabefeed1234567890abcdef1234","live_version":"deadbeefcafebabefeed1234567890abcdef1234","status":"ready","observed_at":"2026-04-14T00:00:00Z","components":[{"component":"api","deployment_name":"fugue-api","image":"ghcr.io/acme/fugue-api:deadbeefcafebabefeed1234567890abcdef1234","image_repository":"ghcr.io/acme/fugue-api","image_tag":"deadbeefcafebabefeed1234567890abcdef1234","status":"ready","desired_replicas":2,"ready_replicas":2,"updated_replicas":2,"available_replicas":2}],"deploy_workflow":{"repository":"acme/fugue","workflow":"deploy-control-plane.yml","status":"completed","conclusion":"success","run_number":42,"head_sha":"deadbeefcafebabefeed1234567890abcdef1234","head_branch":"main","observed_at":"2026-04-14T00:00:00Z"}}}`))
+			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeefcafebabefeed1234567890abcdef1234","live_version":"deadbeefcafebabefeed1234567890abcdef1234","status":"ready","observed_at":"2026-04-14T00:00:00Z","components":[{"component":"api","deployment_name":"fugue-api","image":"ghcr.io/acme/fugue-api:deadbeefcafebabefeed1234567890abcdef1234","image_repository":"ghcr.io/acme/fugue-api","image_tag":"deadbeefcafebabefeed1234567890abcdef1234","status":"ready","desired_replicas":2,"ready_replicas":2,"updated_replicas":2,"available_replicas":2}],"deploy_workflow":{"repository":"acme/fugue","workflow":"ci.yml","status":"completed","conclusion":"success","run_number":42,"head_sha":"deadbeefcafebabefeed1234567890abcdef1234","head_branch":"main","observed_at":"2026-04-14T00:00:00Z"}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/node-policies/status":
 			_, _ = w.Write([]byte(`{"summary":{"total":1,"reconciled":1,"drifted":0,"ready":1,"disk_pressure":0,"blocked_by_health":0},"node_policies":[{"node_name":"gcp1","runtime_id":"runtime_managed_shared","ready":true,"disk_pressure":false,"node_schedulable":true,"reconciled":true,"block_rollout":false,"policy":{"effective_app_runtime":true,"effective_builds":true,"effective_shared_pool":true,"effective_control_plane_role":"member"}}]}`))
 		default:

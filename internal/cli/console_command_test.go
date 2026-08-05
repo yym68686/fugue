@@ -29,7 +29,7 @@ func TestConsolePlainPreviewLoadsReadOnlyPages(t *testing.T) {
 		"Admin",
 		"web",
 		"runtime log line",
-		"GitHub Actions deploy-control-plane.yml",
+		"GitHub Actions ci.yml declarative component lanes",
 		"cancel operation action is not enabled",
 		"mouse=optional",
 	} {
@@ -119,7 +119,7 @@ func newConsolePreviewServer(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/dns/nodes":
 			_, _ = w.Write([]byte(`{"nodes":[{"id":"dns-us","edge_group_id":"default","zone":"example.com","status":"ready","healthy":true,"record_count":1,"udp_listen":true,"tcp_listen":true,"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
-			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeef","live_version":"deadbeef","status":"ready","observed_at":"2026-04-14T00:00:00Z","components":[],"deploy_workflow":{"repository":"acme/fugue","workflow":"deploy-control-plane.yml","status":"completed","conclusion":"success","run_number":42,"head_sha":"deadbeef","head_branch":"main","observed_at":"2026-04-14T00:00:00Z"}}}`))
+			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeef","live_version":"deadbeef","status":"ready","observed_at":"2026-04-14T00:00:00Z","components":[],"deploy_workflow":{"repository":"acme/fugue","workflow":"ci.yml","status":"completed","conclusion":"success","run_number":42,"head_sha":"deadbeef","head_branch":"main","observed_at":"2026-04-14T00:00:00Z"}}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}

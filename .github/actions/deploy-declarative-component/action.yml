@@ -1,0 +1,91 @@
+name: Deploy one declarative Fugue component
+description: Prepare, persist, execute, verify, and receipt one immutable component atom.
+inputs:
+  component:
+    description: Exact component id from the bound production release plan.
+    required: true
+  registry-token:
+    description: Read-only GHCR token used for live provenance verification.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      with:
+        go-version-file: go.mod
+    - name: Download the immutable release plan
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: fugue-production-release-plan-${{ github.sha }}
+        path: ${{ runner.temp }}/fugue-release-plan
+    - name: Download the exact component artifact receipt
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: fugue-${{ inputs.component }}-artifact-${{ github.sha }}
+        path: ${{ runner.temp }}/fugue-component-artifact
+    - name: Prepare the durable server-side apply plan
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+        FUGUE_REGISTRY_PASSWORD: ${{ inputs.registry-token }}
+        PLAN: ${{ runner.temp }}/fugue-release-plan/fugue-production-release-plan.json
+        RECEIPT: ${{ runner.temp }}/fugue-component-artifact/fugue-${{ inputs.component }}-artifact-receipt.json
+        EXECUTION: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
+        RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
+      run: |
+        set -euo pipefail
+        go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
+        "${RELEASE_TOOL}" prepare "${PLAN}" "${COMPONENT}" "${RECEIPT}" "${EXECUTION}"
+    - name: Upload the durable prewrite plan before mutation
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
+        if-no-files-found: error
+        include-hidden-files: false
+        retention-days: 30
+    - name: Execute one declarative component atom
+      id: execute
+      continue-on-error: true
+      shell: bash
+      env:
+        EXECUTION: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
+        FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+        FUGUE_REGISTRY_PASSWORD: ${{ inputs.registry-token }}
+        RESULT: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-result.json
+        RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
+      run: |
+        set -euo pipefail
+        "${RELEASE_TOOL}" execute "${EXECUTION}" >"${RESULT}"
+    - name: Reconcile terminal state read-only after executor failure
+      if: steps.execute.outcome == 'failure'
+      shell: bash
+      env:
+        EXECUTION: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
+        FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+        FUGUE_REGISTRY_PASSWORD: ${{ inputs.registry-token }}
+        RESULT: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-result.json
+        RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
+      run: |
+        set -uo pipefail
+        set +e
+        "${RELEASE_TOOL}" reconcile "${EXECUTION}" "${RESULT}" >"${RESULT}.reconcile"
+        rc=$?
+        set -e
+        if [[ -s "${RESULT}.reconcile" ]]; then
+          mv "${RESULT}.reconcile" "${RESULT}"
+        else
+          rm -f "${RESULT}.reconcile"
+        fi
+        exit "${rc}"
+    - name: Upload terminal component receipt
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fugue-${{ inputs.component }}-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-result.json
+        if-no-files-found: warn
+        include-hidden-files: false
+        retention-days: 30

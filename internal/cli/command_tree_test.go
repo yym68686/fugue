@@ -5381,7 +5381,7 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 					],
 					"deploy_workflow":{
 						"repository":"acme/fugue",
-						"workflow":"deploy-control-plane.yml",
+						"workflow":"ci.yml",
 						"status":"completed",
 						"conclusion":"success",
 						"run_number":42,
@@ -5427,7 +5427,7 @@ func TestRunAdminClusterStatusShowsDeployWorkflow(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"deploy_workflow_repository=acme/fugue",
-		"deploy_workflow=deploy-control-plane.yml",
+		"deploy_workflow=ci.yml",
 		"deploy_workflow_status=completed",
 		"deploy_workflow_run_number=42",
 		"deploy_workflow_head_sha=deadbeef",

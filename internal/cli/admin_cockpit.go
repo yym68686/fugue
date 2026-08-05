@@ -74,7 +74,7 @@ func (c *CLI) newAdminCockpitCommand() *cobra.Command {
 }
 
 func (c *CLI) loadAdminCockpit(client *Client) adminCockpitPayload {
-	payload := adminCockpitPayload{ReleasePath: "GitHub Actions deploy-control-plane.yml"}
+	payload := adminCockpitPayload{ReleasePath: "GitHub Actions ci.yml declarative component lanes"}
 	if tenants, err := client.ListTenants(); err == nil {
 		payload.Tenants = tenants
 	} else {

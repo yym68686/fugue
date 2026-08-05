@@ -844,7 +844,7 @@ fugue admin cluster net websocket my-app --path /ws
 		Long: strings.TrimSpace(`
 Show a read-only admin cockpit that joins tenants, project gallery, runtime capacity, cluster nodes, node policy drift, edge health, DNS health, control-plane rollout state, and optional Web admin user snapshots.
 
-This command is intentionally diagnostic. It documents the formal release path as GitHub Actions deploy-control-plane.yml and does not treat SSH hotfixes or manual Kubernetes patches as the normal control-plane update path.
+This command is intentionally diagnostic. It documents the formal release path as the declarative component lanes in GitHub Actions ci.yml and does not treat SSH hotfixes or manual Kubernetes patches as the normal control-plane update path.
 
 User emails are redacted in text output by default. Use --redacted=false only for a local, intentional investigation.
 `),
@@ -859,7 +859,7 @@ fugue admin cockpit --json
 		Long: strings.TrimSpace(`
 Show control-plane deployment health, image versions, and component readiness.
 
-When the API is configured with FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY, this view also includes the latest deploy-control-plane GitHub Actions workflow run so you can correlate control-plane rollouts with the current cluster state.
+When the API is configured with FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY, this view also includes the latest ci declarative component lanes GitHub Actions workflow run so you can correlate control-plane rollouts with the current cluster state.
 
 Non-core control-plane pods are reported as warnings when they are Pending, not ready, or otherwise unhealthy, so issues like workspace provisioner or postgres joiner stalls are visible without changing the core ready summary.
 `),

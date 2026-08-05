@@ -5,168 +5,88 @@ on:
   pull_request:
   schedule:
     - cron: '23 18 * * *'
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   prepush:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
-      telemetry_release: ${{ steps.component_plan.outputs.telemetry_release }}
-      controller_release: ${{ steps.component_plan.outputs.controller_release }}
+      release_count: ${{ steps.release.outputs.release_count }}
+      release_matrix: ${{ steps.release.outputs.release_matrix }}
+      release_components: ${{ steps.release.outputs.release_components }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - name: Setup Helm
+      - name: Setup Helm for bounded prepush
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
-      - name: Classify release-related changes
-        id: changes
-        env:
-          PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
-        run: |
-          set -euo pipefail
-          base="${PREPUSH_BASE_REF}"
-          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == '0000000000000000000000000000000000000000' ]]; then
-            base="$(git rev-parse HEAD^)"
-          fi
-          changed="$(git diff --name-only "${base}...HEAD" --)"
-          if grep -Eq '^((\.github/(actions/operational-domain-guarded-deploy|workflows/(ci|deploy-control-plane))|cmd/fugue-release-domain-evidence|deploy/helm/fugue|internal/releasedomain|scripts/(build_control_plane_images|lib/control_plane_release_domain_production|upgrade_fugue_control_plane))(/|\.|$)|deploy/environments/production/(telemetry|controller)/release\.json$|scripts/(apply_controller_declarative|test_apply_controller_declarative|compute_control_plane_image_build_plan)(/|\.|$)|scripts/(prepush|test_prepush)\.py$|Makefile$)' <<<"${changed}"; then
-            echo 'release=true' >>"${GITHUB_OUTPUT}"
-          else
-            echo 'release=false' >>"${GITHUB_OUTPUT}"
-          fi
-      - name: Run bounded pre-push gate
+      - name: Run the repository prepush contract
         env:
           PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           PREPUSH_RECEIPT: ${{ runner.temp }}/fugue-prepush-receipt.json
         run: make prepush
-      - name: Require an exact singleton declarative component plan
-        id: component_plan
+      - name: Materialize the exact declarative component plan
+        id: release
         env:
-          PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          PLAN: ${{ runner.temp }}/fugue-production-release-plan.json
+          CHANGED: ${{ runner.temp }}/fugue-production-changed-paths.txt
+          RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
         run: |
           set -euo pipefail
-          base="${PREPUSH_BASE_REF}"
-          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == '0000000000000000000000000000000000000000' ]]; then
+          base="${BASE_SHA}"
+          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          changed="$(git diff --no-renames --name-only "${base}...HEAD" --)"
-          plan="$(mktemp "${RUNNER_TEMP}/fugue-declarative-component-plan.XXXXXX")"
-          trap 'rm -f "${plan}"' EXIT
-          FUGUE_RELEASE_CHANGED_FILES_SET=true \
-            FUGUE_RELEASE_CHANGED_FILES="${changed}" \
-            GITHUB_OUTPUT="${plan}" \
-            ./scripts/compute_control_plane_image_build_plan.sh
-          if grep -Fxq 'build_telemetry_agent=true' "${plan}"; then
-            grep -Fxq 'targets=telemetry_agent' "${plan}"
-            grep -Fxq 'target_count=1' "${plan}"
-            for component in api controller drain_agent image_cache edge app_ssh; do
-              grep -Fxq "build_${component}=false" "${plan}"
-            done
-            echo 'telemetry_release=true' >>"${GITHUB_OUTPUT}"
-          else
-            echo 'telemetry_release=false' >>"${GITHUB_OUTPUT}"
-          fi
-          if grep -Fxq 'build_controller=true' "${plan}"; then
-            grep -Fxq 'targets=controller' "${plan}"
-            grep -Fxq 'target_count=1' "${plan}"
-            for component in api drain_agent telemetry_agent image_cache edge app_ssh; do
-              grep -Fxq "build_${component}=false" "${plan}"
-            done
-            echo 'controller_release=true' >>"${GITHUB_OUTPUT}"
-          else
-            echo 'controller_release=false' >>"${GITHUB_OUTPUT}"
-          fi
-      - name: Verify release preflight fixture
-        if: steps.changes.outputs.release == 'true'
-        env:
-          RECEIPT: ${{ runner.temp }}/fugue-release-preflight-receipt.json
-        run: make release-preflight SNAPSHOT="${GITHUB_WORKSPACE}/cmd/fugue-release-domain-evidence/testdata/release-preflight" RECEIPT="${RECEIPT}"
+          git diff --no-renames --name-only "${base}...HEAD" -- >"${CHANGED}"
+          go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
+          "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
+          "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
+      - name: Upload the immutable release plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-production-release-plan-${{ github.sha }}
+          path: ${{ runner.temp }}/fugue-production-release-plan.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
 
-  telemetry-build:
+  component-build:
     needs: prepush
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.telemetry_release == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.release_count != '0' }}
+    concurrency:
+      group: fugue-build-${{ matrix.build_lane }}-${{ github.sha }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepush.outputs.release_matrix) }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       packages: write
-    outputs:
-      image_repository: ${{ steps.meta.outputs.image_repository }}
-      image_digest: ${{ steps.publish.outputs.telemetry_agent_image_digest }}
-      receipt_digest: ${{ steps.publish.outputs.verified_image_artifacts_digest }}
-      desired_source_sha: ${{ steps.intent.outputs.desired_source_sha }}
-      expected_previous_image_digest: ${{ steps.intent.outputs.expected_previous_image_digest }}
-      expected_previous_source_sha: ${{ steps.intent.outputs.expected_previous_source_sha }}
     steps:
-      - name: Checkout exact configuration push
+      - name: Checkout exact release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Verify canonical Telemetry production release intent
-        id: intent
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          plan="$(mktemp "${RUNNER_TEMP}/fugue-telemetry-production-intent.XXXXXX")"
-          trap 'rm -f "${plan}"' EXIT
-          FUGUE_RELEASE_CHANGED_FILES_SET=true \
-            FUGUE_RELEASE_CHANGED_FILES='deploy/environments/production/telemetry/release.json' \
-            GITHUB_OUTPUT="${plan}" \
-            ./scripts/compute_control_plane_image_build_plan.sh
-          grep -Fxq 'build_telemetry_agent=true' "${plan}"
-          grep -Fxq 'targets=telemetry_agent' "${plan}"
-          grep -Fxq 'target_count=1' "${plan}"
-          for component in api controller drain_agent image_cache edge app_ssh; do
-            grep -Fxq "build_${component}=false" "${plan}"
-          done
-          python3 - "${GITHUB_OUTPUT}" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
-
-          value = json.loads(Path("deploy/environments/production/telemetry/release.json").read_bytes())
-          desired = value.get("desiredSourceSha")
-          previous_digest = value.get("expectedPreviousImageDigest")
-          previous = value.get("expectedPreviousSourceSha")
-          if re.fullmatch(r"[0-9a-f]{40}", desired or "") is None:
-              raise SystemExit("telemetry-production-desired-source-invalid")
-          if re.fullmatch(r"[0-9a-f]{40}", previous or "") is None or previous == desired:
-              raise SystemExit("telemetry-production-previous-source-invalid")
-          if re.fullmatch(r"sha256:[0-9a-f]{64}", previous_digest or "") is None:
-              raise SystemExit("telemetry-production-previous-image-digest-invalid")
-          with Path(sys.argv[1]).open("a", encoding="ascii") as output:
-              output.write(f"desired_source_sha={desired}\n")
-              output.write(f"expected_previous_image_digest={previous_digest}\n")
-              output.write(f"expected_previous_source_sha={previous}\n")
-          PY
-      - name: Compute immutable Telemetry image identity
-        id: meta
-        env:
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          [[ "${DESIRED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          [[ "${owner}" =~ ^[a-z0-9][a-z0-9-]*$ ]]
-          echo "image_repository=ghcr.io/${owner}/fugue-telemetry-agent" >>"${GITHUB_OUTPUT}"
-      - name: Checkout detached exact Telemetry source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          ref: ${{ steps.intent.outputs.desired_source_sha }}
-          fetch-depth: 1
-          path: .fugue-telemetry-source
-          persist-credentials: false
-          clean: true
+          go-version-file: go.mod
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Login to GHCR
@@ -175,1154 +95,165 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and fresh-verify immutable Telemetry image
-        id: publish
+      - name: Download the immutable release plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fugue-production-release-plan-${{ github.sha }}
+          path: ${{ runner.temp }}/fugue-release-plan
+      - name: Build and verify exactly one immutable component image
         env:
-          FUGUE_CONTROL_PLANE_IMAGE_TARGETS: telemetry_agent
-          FUGUE_IMAGE_TAG: ${{ github.sha }}
-          FUGUE_IMAGE_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
-          FUGUE_CONTROL_PLANE_BUILD_SOURCE_ROOT: ${{ github.workspace }}/.fugue-telemetry-source
-          FUGUE_CONTROL_PLANE_IMMUTABLE_TAG_PREFLIGHT: "true"
+          COMPONENT: ${{ matrix.component }}
           FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
           FUGUE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/build_control_plane_images.sh
-      - name: Materialize canonical build receipt
-        env:
-          RECEIPT_JSON: ${{ steps.publish.outputs.verified_image_artifacts_json }}
-          RECEIPT_DIGEST: ${{ steps.publish.outputs.verified_image_artifacts_digest }}
-          CONFIG_SHA: ${{ github.sha }}
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
+          PLAN: ${{ runner.temp }}/fugue-release-plan/fugue-production-release-plan.json
+          RECEIPT: ${{ runner.temp }}/fugue-${{ matrix.component }}-artifact-receipt.json
+          RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
         run: |
           set -euo pipefail
-          install -d -m 0700 "${RUNNER_TEMP}/fugue-telemetry-build"
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import re
-
-          raw = os.environ["RECEIPT_JSON"].encode("ascii")
-          digest = os.environ["RECEIPT_DIGEST"]
-          config_sha = os.environ["CONFIG_SHA"]
-          desired_source_sha = os.environ["DESIRED_SOURCE_SHA"]
-          if re.fullmatch(r"[0-9a-f]{40}", config_sha) is None:
-              raise SystemExit("telemetry-build-config-sha-invalid")
-          if re.fullmatch(r"[0-9a-f]{40}", desired_source_sha) is None:
-              raise SystemExit("telemetry-build-desired-source-sha-invalid")
-          value = json.loads(raw)
-          canonical = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("ascii")
-          if raw != canonical or type(value) is not list or len(value) != 1:
-              raise SystemExit("telemetry-build-receipt-canonical-shape-invalid")
-          artifact = value[0]
-          if type(artifact) is not dict or artifact.get("component") != "telemetry_agent":
-              raise SystemExit("telemetry-build-receipt-component-invalid")
-          if artifact.get("source_tag") != config_sha or artifact.get("oci_revision") != desired_source_sha:
-              raise SystemExit("telemetry-build-receipt-source-identity-invalid")
-          actual = "sha256:" + hashlib.sha256(canonical).hexdigest()
-          if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or digest != actual:
-              raise SystemExit("telemetry-build-receipt-digest-invalid")
-          path = Path(os.environ["RUNNER_TEMP"]) / "fugue-telemetry-build" / "receipt.json"
-          path.write_bytes(canonical)
-          os.chmod(path, 0o600)
-          binding = {
-              "apiVersion": "release.fugue.dev/v1",
-              "artifactReceiptDigest": digest,
-              "component": "telemetry_agent",
-              "configSha": config_sha,
-              "desiredSourceSha": desired_source_sha,
-              "kind": "ComponentBuildReceiptBinding",
-          }
-          binding_bytes = json.dumps(
-              binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          binding_path = path.with_name("binding.json")
-          binding_path.write_bytes(binding_bytes)
-          os.chmod(binding_path, 0o600)
-          PY
-      - name: Upload canonical Telemetry build receipt
+          go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
+          "${RELEASE_TOOL}" build "${PLAN}" "${COMPONENT}" "${RECEIPT}"
+      - name: Upload the canonical component artifact receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fugue-telemetry-build-${{ github.sha }}
-          path: ${{ runner.temp }}/fugue-telemetry-build
+          name: fugue-${{ matrix.component }}-artifact-${{ github.sha }}
+          path: ${{ runner.temp }}/fugue-${{ matrix.component }}-artifact-receipt.json
           if-no-files-found: error
           include-hidden-files: false
           retention-days: 7
 
-  telemetry-deploy:
-    needs:
-      - prepush
-      - telemetry-build
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.telemetry-build.result == 'success' && needs.prepush.outputs.telemetry_release == 'true' }}
-    timeout-minutes: 10
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
-      - fugue
-      - control-plane
+  deploy_schema:
+    needs: [prepush, component-build]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'schema') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency:
-      group: fugue-production-cluster-mutation-v1
-      cancel-in-progress: false
-    permissions:
-      actions: read
-      contents: read
+    concurrency: {group: fugue-production-schema, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Checkout exact push and Git LKG history
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Verify exact production Telemetry release intent
-        id: intent
-        env:
-          BUILT_DESIRED_SOURCE_SHA: ${{ needs.telemetry-build.outputs.desired_source_sha }}
-          BUILT_EXPECTED_PREVIOUS_IMAGE_DIGEST: ${{ needs.telemetry-build.outputs.expected_previous_image_digest }}
-          BUILT_EXPECTED_PREVIOUS_SOURCE_SHA: ${{ needs.telemetry-build.outputs.expected_previous_source_sha }}
-          BUILT_IMAGE_REPOSITORY: ${{ needs.telemetry-build.outputs.image_repository }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          plan="$(mktemp "${RUNNER_TEMP}/fugue-telemetry-production-intent.XXXXXX")"
-          trap 'rm -f "${plan}"' EXIT
-          FUGUE_RELEASE_CHANGED_FILES_SET=true \
-            FUGUE_RELEASE_CHANGED_FILES='deploy/environments/production/telemetry/release.json' \
-            GITHUB_OUTPUT="${plan}" \
-            ./scripts/compute_control_plane_image_build_plan.sh
-          grep -Fxq 'targets=telemetry_agent' "${plan}"
-          grep -Fxq 'target_count=1' "${plan}"
-          python3 - "${GITHUB_OUTPUT}" <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import re
-          import sys
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: schema, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          value = json.loads(Path("deploy/environments/production/telemetry/release.json").read_bytes())
-          desired = value.get("desiredSourceSha")
-          previous_digest = value.get("expectedPreviousImageDigest")
-          previous = value.get("expectedPreviousSourceSha")
-          repository = value.get("repository")
-          for observed, expected, label in (
-              (desired, os.environ["BUILT_DESIRED_SOURCE_SHA"], "desired-source"),
-              (previous_digest, os.environ["BUILT_EXPECTED_PREVIOUS_IMAGE_DIGEST"], "previous-image-digest"),
-              (previous, os.environ["BUILT_EXPECTED_PREVIOUS_SOURCE_SHA"], "previous-source"),
-              (repository, os.environ["BUILT_IMAGE_REPOSITORY"], "repository"),
-          ):
-              if observed != expected:
-                  raise SystemExit(f"telemetry-production-intent-build-{label}-mismatch")
-          if re.fullmatch(r"[0-9a-f]{40}", desired or "") is None:
-              raise SystemExit("telemetry-production-desired-source-invalid")
-          if re.fullmatch(r"[0-9a-f]{40}", previous or "") is None:
-              raise SystemExit("telemetry-production-previous-source-invalid")
-          if re.fullmatch(r"sha256:[0-9a-f]{64}", previous_digest or "") is None:
-              raise SystemExit("telemetry-production-previous-image-digest-invalid")
-          with Path(sys.argv[1]).open("a", encoding="ascii") as output:
-              output.write(f"desired_source_sha={desired}\n")
-              output.write(f"expected_previous_image_digest={previous_digest}\n")
-              output.write(f"expected_previous_source_sha={previous}\n")
-          PY
-      - name: Download canonical Telemetry build receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: fugue-telemetry-build-${{ github.sha }}
-          path: ${{ runner.temp }}/fugue-telemetry-build
-      - name: Verify canonical config and source receipt binding
-        env:
-          CONFIG_SHA: ${{ github.sha }}
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-          RECEIPT_DIGEST: ${{ needs.telemetry-build.outputs.receipt_digest }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "fugue-telemetry-build"
-          receipt = root / "receipt.json"
-          binding_path = root / "binding.json"
-          receipt_bytes = receipt.read_bytes()
-          binding_bytes = binding_path.read_bytes()
-          if not receipt_bytes or len(receipt_bytes) > 128 * 1024:
-              raise SystemExit("telemetry-build-receipt-size-invalid")
-          if not binding_bytes or len(binding_bytes) > 16 * 1024:
-              raise SystemExit("telemetry-build-binding-size-invalid")
-          binding = json.loads(binding_bytes)
-          canonical_binding = json.dumps(
-              binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          if binding_bytes != canonical_binding:
-              raise SystemExit("telemetry-build-binding-noncanonical")
-          receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
-          expected = {
-              "apiVersion": "release.fugue.dev/v1",
-              "artifactReceiptDigest": os.environ["RECEIPT_DIGEST"],
-              "component": "telemetry_agent",
-              "configSha": os.environ["CONFIG_SHA"],
-              "desiredSourceSha": os.environ["DESIRED_SOURCE_SHA"],
-              "kind": "ComponentBuildReceiptBinding",
-          }
-          if binding != expected or receipt_digest != expected["artifactReceiptDigest"]:
-              raise SystemExit("telemetry-build-binding-identity-or-digest-mismatch")
-          PY
-      - name: Fresh registry GET and canonical receipt readback
-        id: receipt
-        env:
-          FUGUE_CONTROL_PLANE_IMAGE_TARGETS: telemetry_agent
-          FUGUE_IMAGE_TAG: ${{ github.sha }}
-          FUGUE_IMAGE_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY: ${{ needs.telemetry-build.outputs.image_repository }}
-          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-telemetry-build/receipt.json
-          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE: "true"
-        run: timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh
-      - name: Verify receipt outputs are exact
-        env:
-          EXPECTED_REPOSITORY: ${{ needs.telemetry-build.outputs.image_repository }}
-          EXPECTED_DIGEST: ${{ needs.telemetry-build.outputs.image_digest }}
-          EXPECTED_RECEIPT_DIGEST: ${{ needs.telemetry-build.outputs.receipt_digest }}
-          OBSERVED_DIGEST: ${{ steps.receipt.outputs.telemetry_agent_image_digest }}
-          OBSERVED_RECEIPT_DIGEST: ${{ steps.receipt.outputs.verified_image_artifacts_digest }}
-        run: |
-          set -euo pipefail
-          [[ "${EXPECTED_REPOSITORY}" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+$ ]]
-          [[ "${EXPECTED_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ && "${OBSERVED_DIGEST}" == "${EXPECTED_DIGEST}" ]]
-          [[ "${EXPECTED_RECEIPT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${OBSERVED_RECEIPT_DIGEST}" == "${EXPECTED_RECEIPT_DIGEST}" ]]
-      - name: Render digest-pinned forward and exact Git LKG manifests
-        id: manifests
-        env:
-          IMAGE_REPOSITORY: ${{ needs.telemetry-build.outputs.image_repository }}
-          FORWARD_DIGEST: ${{ needs.telemetry-build.outputs.image_digest }}
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-          EXPECTED_PREVIOUS_IMAGE_DIGEST: ${{ steps.intent.outputs.expected_previous_image_digest }}
-          EXPECTED_PREVIOUS_SOURCE_SHA: ${{ steps.intent.outputs.expected_previous_source_sha }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          [[ "${IMAGE_REPOSITORY}" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+$ ]]
-          [[ "${FORWARD_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${DESIRED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${EXPECTED_PREVIOUS_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${EXPECTED_PREVIOUS_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${DESIRED_SOURCE_SHA}" != "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]]
-          root="${RUNNER_TEMP}/fugue-telemetry-manifests"
-          install -d -m 0700 "${root}"
-          kubectl get deployment fugue-fugue-telemetry-agent --namespace fugue-system --output json >"${root}/live.json"
-          readarray -t live_identity < <(python3 - "${root}/live.json" "$(git rev-parse HEAD^)" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
-
-          value = json.loads(Path(sys.argv[1]).read_text())
-          metadata = value.get("metadata") or {}
-          annotations = metadata.get("annotations") or {}
-          owner = annotations.get("fugue.pro/telemetry-ownership")
-          if owner is None:
-              owner = "legacy"
-              manifest_revision = sys.argv[2]
-          elif owner == "helm":
-              manifest_revision = sys.argv[2]
-          elif owner == "declarative":
-              manifest_revision = annotations.get("fugue.pro/telemetry-manifest-revision", "")
-          else:
-              raise SystemExit("telemetry-live-owner-invalid")
-          containers = value.get("spec", {}).get("template", {}).get("spec", {}).get("containers")
-          if type(containers) is not list or len(containers) != 1 or containers[0].get("name") != "telemetry-agent":
-              raise SystemExit("telemetry-live-container-invalid")
-          pod_annotations = value.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations") or {}
-          pod_source_commit = pod_annotations.get("fugue.pro/source-commit", "")
-          image = containers[0].get("image", "")
-          if re.fullmatch(r"[a-z0-9.-]+/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", image) is None:
-              raise SystemExit("telemetry-live-image-not-immutable")
-          repository, digest = image.rsplit("@", 1)
-          if re.fullmatch(r"[0-9a-f]{40}", manifest_revision) is None:
-              raise SystemExit("telemetry-lkg-manifest-revision-invalid")
-          if pod_source_commit and re.fullmatch(r"[0-9a-f]{40}", pod_source_commit) is None:
-              raise SystemExit("telemetry-lkg-pod-source-commit-invalid")
-          print(owner)
-          print(repository)
-          print(digest)
-          print(manifest_revision)
-          print(pod_source_commit)
-          PY
-          )
-          [[ "${#live_identity[@]}" -eq 5 ]]
-          live_owner="${live_identity[0]}"
-          [[ "${live_identity[1]}" == "${IMAGE_REPOSITORY}" ]]
-          lkg_digest="${live_identity[2]}"
-          lkg_source_sha="${live_identity[3]}"
-          live_pod_source_commit="${live_identity[4]}"
-          [[ "${lkg_digest}" == "${EXPECTED_PREVIOUS_IMAGE_DIGEST}" ]] || {
-            printf 'telemetry-live-image-predecessor-digest-mismatch\n' >&2
-            exit 1
-          }
-          git cat-file -e "${lkg_source_sha}^{commit}"
-          git cat-file -e "${lkg_source_sha}:deploy/kustomize/telemetry/kustomization.yaml"
-          python3 ./scripts/verify_registry_image.py \
-            --image "${IMAGE_REPOSITORY}@${lkg_digest}" \
-            --platform linux/amd64 \
-            --metadata-only \
-            --timeout-seconds 18 \
-            --request-timeout-seconds 5 \
-            --max-attempts 2 \
-            --retry-delay-seconds 0.1 >"${root}/lkg-registry.json"
-          lkg_oci_revision="$(python3 - "${root}/lkg-registry.json" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
-
-          value = json.loads(Path(sys.argv[1]).read_text())
-          revision = value.get("oci_revision") if type(value) is dict else None
-          if re.fullmatch(r"[0-9a-f]{40}", revision or "") is None:
-              raise SystemExit("telemetry-lkg-oci-revision-invalid")
-          print(revision)
-          PY
-          )"
-          [[ "${lkg_oci_revision}" =~ ^[0-9a-f]{40}$ ]]
-          case "${live_owner}" in
-            legacy|helm)
-              [[ -z "${live_pod_source_commit}" || "${live_pod_source_commit}" == "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]] || {
-                printf 'telemetry-live-pre-ssa-pod-source-predecessor-mismatch\n' >&2
-                exit 1
-              }
-              ;;
-            declarative)
-              [[ "${live_pod_source_commit}" == "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]] || {
-                printf 'telemetry-live-pod-source-predecessor-mismatch\n' >&2
-                exit 1
-              }
-              ;;
-            *)
-              printf 'telemetry-live-owner-predecessor-validation-invalid\n' >&2
-              exit 1
-              ;;
-          esac
-          [[ "${lkg_oci_revision}" == "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]] || {
-            printf 'telemetry-live-registry-source-predecessor-mismatch\n' >&2
-            exit 1
-          }
-          git cat-file -e "${lkg_oci_revision}^{commit}"
-          install -d -m 0700 "${root}/forward/base" "${root}/lkg/base"
-          cp deploy/kustomize/telemetry/deployment.json deploy/kustomize/telemetry/kustomization.yaml "${root}/forward/base/"
-          git archive "${lkg_source_sha}" deploy/kustomize/telemetry | tar -x -C "${root}/lkg"
-          mv "${root}/lkg/deploy/kustomize/telemetry/"* "${root}/lkg/base/"
-          rm -rf "${root}/lkg/deploy"
-          ROOT="${root}" IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" FORWARD_DIGEST="${FORWARD_DIGEST}" \
-            LKG_DIGEST="${lkg_digest}" SOURCE_SHA="${GITHUB_SHA}" LKG_SOURCE_SHA="${lkg_source_sha}" \
-            FORWARD_OCI_REVISION="${DESIRED_SOURCE_SHA}" LKG_OCI_REVISION="${lkg_oci_revision}" python3 - <<'PY'
-          import os
-          from pathlib import Path
-          import re
-
-          root = Path(os.environ["ROOT"])
-          repository = os.environ["IMAGE_REPOSITORY"]
-          values = {
-              "forward": (os.environ["FORWARD_DIGEST"], os.environ["SOURCE_SHA"], os.environ["FORWARD_OCI_REVISION"]),
-              "lkg": (os.environ["LKG_DIGEST"], os.environ["LKG_SOURCE_SHA"], os.environ["LKG_OCI_REVISION"]),
-          }
-          if re.fullmatch(r"[a-z0-9.-]+/[a-z0-9._/-]+", repository) is None:
-              raise SystemExit("telemetry-kustomize-repository-invalid")
-          for name, (digest, revision, oci_revision) in values.items():
-              if (re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None or
-                      re.fullmatch(r"[0-9a-f]{40}", revision) is None or
-                      re.fullmatch(r"[0-9a-f]{40}", oci_revision) is None):
-                  raise SystemExit("telemetry-kustomize-pin-invalid")
-              content = (
-                  "apiVersion: kustomize.config.k8s.io/v1beta1\n"
-                  "kind: Kustomization\n"
-                  "resources:\n  - base\n"
-                  "images:\n"
-                  f"  - name: {repository}\n    newName: {repository}\n    digest: {digest}\n"
-                  "patches:\n"
-                  "  - target:\n"
-                  "      group: apps\n"
-                  "      version: v1\n"
-                  "      kind: Deployment\n"
-                  "      name: fugue-fugue-telemetry-agent\n"
-                  "    patch: |-\n"
-                  "      - op: add\n"
-                  "        path: /metadata/annotations/fugue.pro~1telemetry-manifest-revision\n"
-                  f"        value: {revision}\n"
-                  "      - op: replace\n"
-                  "        path: /spec/template/metadata/annotations/fugue.pro~1source-commit\n"
-                  f"        value: {oci_revision}\n"
-              )
-              path = root / name / "kustomization.yaml"
-              path.write_text(content, encoding="ascii")
-              path.chmod(0o600)
-          PY
-          kubectl kustomize "${root}/forward" --output "${root}/forward.json"
-          kubectl kustomize "${root}/lkg" --output "${root}/lkg.json"
-          chmod 0600 "${root}/forward.json" "${root}/lkg.json"
-          {
-            echo "forward_manifest=${root}/forward.json"
-            echo "lkg_manifest=${root}/lkg.json"
-            echo "lkg_digest=${lkg_digest}"
-            echo "lkg_source_sha=${lkg_source_sha}"
-            echo "lkg_oci_revision=${lkg_oci_revision}"
-          } >>"${GITHUB_OUTPUT}"
-      - name: Apply Telemetry with single-writer proof and exact Git LKG rollback
-        env:
-          FUGUE_TELEMETRY_NAMESPACE: fugue-system
-          FUGUE_TELEMETRY_HELM_RELEASE: fugue
-          FUGUE_TELEMETRY_HELM_CHART: ${{ github.workspace }}/deploy/helm/fugue
-          FUGUE_TELEMETRY_DEPLOYMENT: fugue-fugue-telemetry-agent
-          FUGUE_TELEMETRY_SERVICE: fugue-fugue-telemetry-agent
-          FUGUE_TELEMETRY_IMAGE_REPOSITORY: ${{ needs.telemetry-build.outputs.image_repository }}
-          FUGUE_TELEMETRY_IMAGE_DIGEST: ${{ needs.telemetry-build.outputs.image_digest }}
-          FUGUE_TELEMETRY_LKG_IMAGE_DIGEST: ${{ steps.manifests.outputs.lkg_digest }}
-          FUGUE_TELEMETRY_SOURCE_SHA: ${{ github.sha }}
-          FUGUE_TELEMETRY_LKG_SOURCE_SHA: ${{ steps.manifests.outputs.lkg_source_sha }}
-          FUGUE_TELEMETRY_OCI_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_TELEMETRY_LKG_OCI_REVISION: ${{ steps.manifests.outputs.lkg_oci_revision }}
-        run: ./scripts/apply_telemetry_declarative.sh "${{ steps.manifests.outputs.forward_manifest }}" "${{ steps.manifests.outputs.lkg_manifest }}"
-
-  controller-build:
-    needs: prepush
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.controller_release == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    outputs:
-      image_repository: ${{ steps.meta.outputs.image_repository }}
-      image_digest: ${{ steps.publish.outputs.controller_image_digest }}
-      receipt_digest: ${{ steps.publish.outputs.verified_image_artifacts_digest }}
-      desired_source_sha: ${{ steps.intent.outputs.desired_source_sha }}
-      expected_previous_image_digest: ${{ steps.intent.outputs.expected_previous_image_digest }}
-      expected_previous_source_sha: ${{ steps.intent.outputs.expected_previous_source_sha }}
-    steps:
-      - name: Checkout exact configuration push
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Verify canonical Controller production release intent
-        id: intent
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          plan="$(mktemp "${RUNNER_TEMP}/fugue-controller-production-intent.XXXXXX")"
-          trap 'rm -f "${plan}"' EXIT
-          FUGUE_RELEASE_CHANGED_FILES_SET=true \
-            FUGUE_RELEASE_CHANGED_FILES='deploy/environments/production/controller/release.json' \
-            GITHUB_OUTPUT="${plan}" \
-            ./scripts/compute_control_plane_image_build_plan.sh
-          grep -Fxq 'build_controller=true' "${plan}"
-          grep -Fxq 'targets=controller' "${plan}"
-          grep -Fxq 'target_count=1' "${plan}"
-          for component in api drain_agent telemetry_agent image_cache edge app_ssh; do
-            grep -Fxq "build_${component}=false" "${plan}"
-          done
-          python3 - "${GITHUB_OUTPUT}" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
-
-          value = json.loads(Path("deploy/environments/production/controller/release.json").read_bytes())
-          desired = value.get("desiredSourceSha")
-          previous_digest = value.get("expectedPreviousImageDigest")
-          previous = value.get("expectedPreviousSourceSha")
-          if re.fullmatch(r"[0-9a-f]{40}", desired or "") is None:
-              raise SystemExit("controller-production-desired-source-invalid")
-          if re.fullmatch(r"[0-9a-f]{40}", previous or "") is None or previous == desired:
-              raise SystemExit("controller-production-previous-source-invalid")
-          if re.fullmatch(r"sha256:[0-9a-f]{64}", previous_digest or "") is None:
-              raise SystemExit("controller-production-previous-image-digest-invalid")
-          with Path(sys.argv[1]).open("a", encoding="ascii") as output:
-              output.write(f"desired_source_sha={desired}\n")
-              output.write(f"expected_previous_image_digest={previous_digest}\n")
-              output.write(f"expected_previous_source_sha={previous}\n")
-          PY
-      - name: Compute immutable Controller image identity
-        id: meta
-        env:
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          [[ "${DESIRED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          [[ "${owner}" =~ ^[a-z0-9][a-z0-9-]*$ ]]
-          echo "image_repository=ghcr.io/${owner}/fugue-controller" >>"${GITHUB_OUTPUT}"
-      - name: Download exact historical Controller build receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: fugue-controller-build-5966e295d9f9bf4a65c690108084c2018f945a75
-          path: ${{ runner.temp }}/fugue-controller-build-source
-          github-token: ${{ github.token }}
-          run-id: '30900532415'
-      - name: Verify exact historical Controller receipt binding
-        env:
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-          IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          [[ "${GITHUB_SHA}" != 5966e295d9f9bf4a65c690108084c2018f945a75 ]]
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import stat
-
-          root = Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build-source"
-          receipt_path = root / "receipt.json"
-          binding_path = root / "binding.json"
-          if {path.name for path in root.iterdir()} != {"binding.json", "receipt.json"}:
-              raise SystemExit("controller-historical-artifact-file-set-invalid")
-          for path, maximum in ((receipt_path, 128 * 1024), (binding_path, 16 * 1024)):
-              info = path.lstat()
-              if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                  raise SystemExit("controller-historical-artifact-file-invalid")
-              if info.st_size < 1 or info.st_size > maximum:
-                  raise SystemExit("controller-historical-artifact-size-invalid")
-          receipt_raw = receipt_path.read_bytes()
-          receipt = json.loads(receipt_raw)
-          canonical_receipt = json.dumps(
-              receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          if receipt_raw != canonical_receipt or type(receipt) is not list or len(receipt) != 1:
-              raise SystemExit("controller-historical-receipt-canonical-shape-invalid")
-          expected_artifact = {
-              "component": "controller",
-              "config_digest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
-              "immutable_ref": "ghcr.io/yym68686/fugue-controller@sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
-              "oci_revision": "58fc2e560064214e3f329765c9ec7839ee513c27",
-              "platform_manifest_digest": "sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
-              "repository": "ghcr.io/yym68686/fugue-controller",
-              "source_tag": "5966e295d9f9bf4a65c690108084c2018f945a75",
-              "top_digest": "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
-              "verification": "registry_manifest_config_and_layer_get",
-          }
-          if receipt[0] != expected_artifact:
-              raise SystemExit("controller-historical-receipt-artifact-invalid")
-          receipt_digest = "sha256:" + hashlib.sha256(receipt_raw).hexdigest()
-          if receipt_digest != "sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e":
-              raise SystemExit("controller-historical-receipt-digest-invalid")
-          binding_raw = binding_path.read_bytes()
-          binding = json.loads(binding_raw)
-          canonical_binding = json.dumps(
-              binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          expected_binding = {
-              "apiVersion": "release.fugue.dev/v1",
-              "artifactReceiptDigest": receipt_digest,
-              "component": "controller",
-              "configSha": "5966e295d9f9bf4a65c690108084c2018f945a75",
-              "desiredSourceSha": "58fc2e560064214e3f329765c9ec7839ee513c27",
-              "kind": "ComponentBuildReceiptBinding",
-          }
-          if binding_raw != canonical_binding or binding != expected_binding:
-              raise SystemExit("controller-historical-receipt-binding-invalid")
-          if os.environ["DESIRED_SOURCE_SHA"] != expected_binding["desiredSourceSha"]:
-              raise SystemExit("controller-historical-desired-source-intent-mismatch")
-          if os.environ["IMAGE_REPOSITORY"] != expected_artifact["repository"]:
-              raise SystemExit("controller-historical-repository-intent-mismatch")
-          PY
-      - name: Fresh registry GET from exact historical Controller receipt
-        id: publish
-        env:
-          FUGUE_CONTROL_PLANE_IMAGE_TARGETS: controller
-          FUGUE_IMAGE_TAG: 5966e295d9f9bf4a65c690108084c2018f945a75
-          FUGUE_IMAGE_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
-          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-build-source/receipt.json
-          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE: "true"
-        run: timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh
-      - name: Seal unchanged Controller receipt for current run
-        env:
-          RECEIPT_JSON: ${{ steps.publish.outputs.verified_image_artifacts_json }}
-          RECEIPT_DIGEST: ${{ steps.publish.outputs.verified_image_artifacts_digest }}
-          CONTROLLER_IMAGE_DIGEST: ${{ steps.publish.outputs.controller_image_digest }}
-        run: |
-          set -euo pipefail
-          source_dir="${RUNNER_TEMP}/fugue-controller-build-source"
-          target_dir="${RUNNER_TEMP}/fugue-controller-build"
-          [[ ! -e "${target_dir}" && ! -L "${target_dir}" ]]
-          install -d -m 0700 "${RUNNER_TEMP}/fugue-controller-build"
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          source = Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build-source" / "receipt.json"
-          raw = source.read_bytes()
-          if os.environ["RECEIPT_JSON"].encode("ascii") != raw:
-              raise SystemExit("controller-reused-receipt-output-bytes-mismatch")
-          digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-          if digest != os.environ["RECEIPT_DIGEST"] or digest != "sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e":
-              raise SystemExit("controller-reused-receipt-output-digest-mismatch")
-          if os.environ["CONTROLLER_IMAGE_DIGEST"] != "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98":
-              raise SystemExit("controller-reused-image-output-digest-mismatch")
-          PY
-          install -m 0600 "${source_dir}/receipt.json" "${target_dir}/receipt.json"
-          install -m 0600 "${source_dir}/binding.json" "${target_dir}/binding.json"
-          cmp -s "${source_dir}/receipt.json" "${target_dir}/receipt.json"
-          cmp -s "${source_dir}/binding.json" "${target_dir}/binding.json"
-      - name: Upload canonical Controller build receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fugue-controller-build-${{ github.sha }}
-          path: ${{ runner.temp }}/fugue-controller-build
-          if-no-files-found: error
-          include-hidden-files: false
-          retention-days: 7
-
-  controller-deploy:
-    needs:
-      - prepush
-      - controller-build
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.controller-build.result == 'success' && needs.prepush.outputs.controller_release == 'true' }}
-    timeout-minutes: 10
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
-      - fugue
-      - control-plane
+  deploy_telemetry:
+    needs: [prepush, component-build]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'telemetry') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency:
-      group: fugue-production-cluster-mutation-v1
-      cancel-in-progress: false
-    permissions:
-      actions: read
-      contents: read
+    concurrency: {group: fugue-production-telemetry, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
     steps:
-      - name: Checkout exact push and Git LKG history
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Verify exact production Controller release intent
-        id: intent
-        env:
-          BUILT_DESIRED_SOURCE_SHA: ${{ needs.controller-build.outputs.desired_source_sha }}
-          BUILT_EXPECTED_PREVIOUS_IMAGE_DIGEST: ${{ needs.controller-build.outputs.expected_previous_image_digest }}
-          BUILT_EXPECTED_PREVIOUS_SOURCE_SHA: ${{ needs.controller-build.outputs.expected_previous_source_sha }}
-          BUILT_IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          plan="$(mktemp "${RUNNER_TEMP}/fugue-controller-production-intent.XXXXXX")"
-          trap 'rm -f "${plan}"' EXIT
-          FUGUE_RELEASE_CHANGED_FILES_SET=true \
-            FUGUE_RELEASE_CHANGED_FILES='deploy/environments/production/controller/release.json' \
-            GITHUB_OUTPUT="${plan}" \
-            ./scripts/compute_control_plane_image_build_plan.sh
-          grep -Fxq 'targets=controller' "${plan}"
-          grep -Fxq 'target_count=1' "${plan}"
-          python3 - "${GITHUB_OUTPUT}" <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import re
-          import sys
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: telemetry, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          value = json.loads(Path("deploy/environments/production/controller/release.json").read_bytes())
-          desired = value.get("desiredSourceSha")
-          previous_digest = value.get("expectedPreviousImageDigest")
-          previous = value.get("expectedPreviousSourceSha")
-          repository = value.get("repository")
-          for observed, expected, label in (
-              (desired, os.environ["BUILT_DESIRED_SOURCE_SHA"], "desired-source"),
-              (previous_digest, os.environ["BUILT_EXPECTED_PREVIOUS_IMAGE_DIGEST"], "previous-image-digest"),
-              (previous, os.environ["BUILT_EXPECTED_PREVIOUS_SOURCE_SHA"], "previous-source"),
-              (repository, os.environ["BUILT_IMAGE_REPOSITORY"], "repository"),
-          ):
-              if observed != expected:
-                  raise SystemExit(f"controller-production-intent-build-{label}-mismatch")
-          if re.fullmatch(r"[0-9a-f]{40}", desired or "") is None:
-              raise SystemExit("controller-production-desired-source-invalid")
-          if re.fullmatch(r"[0-9a-f]{40}", previous or "") is None:
-              raise SystemExit("controller-production-previous-source-invalid")
-          if re.fullmatch(r"sha256:[0-9a-f]{64}", previous_digest or "") is None:
-              raise SystemExit("controller-production-previous-image-digest-invalid")
-          with Path(sys.argv[1]).open("a", encoding="ascii") as output:
-              output.write(f"desired_source_sha={desired}\n")
-              output.write(f"expected_previous_image_digest={previous_digest}\n")
-              output.write(f"expected_previous_source_sha={previous}\n")
-          PY
-      - name: Download canonical Controller build receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: fugue-controller-build-${{ github.sha }}
-          path: ${{ runner.temp }}/fugue-controller-build
-      - name: Verify historical artifact binding and current config separation
-        env:
-          CURRENT_CONFIG_SHA: ${{ github.sha }}
-          ARTIFACT_CONFIG_SHA: 5966e295d9f9bf4a65c690108084c2018f945a75
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-          RECEIPT_DIGEST: ${{ needs.controller-build.outputs.receipt_digest }}
-        run: |
-          set -euo pipefail
-          [[ "${CURRENT_CONFIG_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${CURRENT_CONFIG_SHA}" ]]
-          [[ "${ARTIFACT_CONFIG_SHA}" == 5966e295d9f9bf4a65c690108084c2018f945a75 ]]
-          [[ "${CURRENT_CONFIG_SHA}" != "${ARTIFACT_CONFIG_SHA}" ]]
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
+  deploy_api:
+    needs: [prepush, component-build, deploy_schema]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'api') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-api, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: api, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          root = Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build"
-          receipt = root / "receipt.json"
-          binding_path = root / "binding.json"
-          receipt_bytes = receipt.read_bytes()
-          binding_bytes = binding_path.read_bytes()
-          if not receipt_bytes or len(receipt_bytes) > 128 * 1024:
-              raise SystemExit("controller-build-receipt-size-invalid")
-          if not binding_bytes or len(binding_bytes) > 16 * 1024:
-              raise SystemExit("controller-build-binding-size-invalid")
-          binding = json.loads(binding_bytes)
-          canonical_binding = json.dumps(
-              binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          if binding_bytes != canonical_binding:
-              raise SystemExit("controller-build-binding-noncanonical")
-          receipt_value = json.loads(receipt_bytes)
-          canonical_receipt = json.dumps(
-              receipt_value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          expected_artifact = {
-              "component": "controller",
-              "config_digest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
-              "immutable_ref": "ghcr.io/yym68686/fugue-controller@sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
-              "oci_revision": "58fc2e560064214e3f329765c9ec7839ee513c27",
-              "platform_manifest_digest": "sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
-              "repository": "ghcr.io/yym68686/fugue-controller",
-              "source_tag": "5966e295d9f9bf4a65c690108084c2018f945a75",
-              "top_digest": "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
-              "verification": "registry_manifest_config_and_layer_get",
-          }
-          if receipt_bytes != canonical_receipt or receipt_value != [expected_artifact]:
-              raise SystemExit("controller-build-receipt-canonical-artifact-mismatch")
-          receipt_digest = "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()
-          expected = {
-              "apiVersion": "release.fugue.dev/v1",
-              "artifactReceiptDigest": os.environ["RECEIPT_DIGEST"],
-              "component": "controller",
-              "configSha": os.environ["ARTIFACT_CONFIG_SHA"],
-              "desiredSourceSha": os.environ["DESIRED_SOURCE_SHA"],
-              "kind": "ComponentBuildReceiptBinding",
-          }
-          if binding != expected or receipt_digest != expected["artifactReceiptDigest"]:
-              raise SystemExit("controller-build-binding-identity-or-digest-mismatch")
-          PY
-      - name: Fresh registry GET and canonical receipt readback
-        id: receipt
-        env:
-          FUGUE_CONTROL_PLANE_IMAGE_TARGETS: controller
-          FUGUE_IMAGE_TAG: 5966e295d9f9bf4a65c690108084c2018f945a75
-          FUGUE_IMAGE_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
-          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-build/receipt.json
-          FUGUE_CONTROL_PLANE_BUILD_RECEIPT_REUSE: "true"
-        run: timeout --signal=TERM --kill-after=1s 19s ./scripts/build_control_plane_images.sh
-      - name: Verify receipt outputs are exact
-        env:
-          EXPECTED_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
-          EXPECTED_DIGEST: ${{ needs.controller-build.outputs.image_digest }}
-          EXPECTED_RECEIPT_DIGEST: ${{ needs.controller-build.outputs.receipt_digest }}
-          OBSERVED_DIGEST: ${{ steps.receipt.outputs.controller_image_digest }}
-          OBSERVED_RECEIPT_DIGEST: ${{ steps.receipt.outputs.verified_image_artifacts_digest }}
-        run: |
-          set -euo pipefail
-          [[ "${EXPECTED_REPOSITORY}" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+$ ]]
-          [[ "${EXPECTED_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ && "${OBSERVED_DIGEST}" == "${EXPECTED_DIGEST}" ]]
-          [[ "${EXPECTED_RECEIPT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${OBSERVED_RECEIPT_DIGEST}" == "${EXPECTED_RECEIPT_DIGEST}" ]]
-      - name: Render digest-pinned forward and exact live LKG manifests
-        id: manifests
-        env:
-          IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
-          FORWARD_DIGEST: ${{ needs.controller-build.outputs.image_digest }}
-          DESIRED_SOURCE_SHA: ${{ steps.intent.outputs.desired_source_sha }}
-          EXPECTED_PREVIOUS_IMAGE_DIGEST: ${{ steps.intent.outputs.expected_previous_image_digest }}
-          EXPECTED_PREVIOUS_SOURCE_SHA: ${{ steps.intent.outputs.expected_previous_source_sha }}
-        run: |
-          set -euo pipefail
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
-          [[ "${IMAGE_REPOSITORY}" =~ ^[a-z0-9.-]+/[a-z0-9._/-]+$ ]]
-          [[ "${FORWARD_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${DESIRED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${EXPECTED_PREVIOUS_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${EXPECTED_PREVIOUS_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${DESIRED_SOURCE_SHA}" != "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]]
-          root="${RUNNER_TEMP}/fugue-controller-manifests"
-          install -d -m 0700 "${root}"
-          kubectl get deployment fugue-fugue-controller --namespace fugue-system --output json >"${root}/live.json"
-          readarray -t live_identity < <(python3 - "${root}/live.json" "${EXPECTED_PREVIOUS_SOURCE_SHA}" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
+  deploy_controller:
+    needs: [prepush, component-build, deploy_schema]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'controller') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-controller, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: controller, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          value = json.loads(Path(sys.argv[1]).read_text())
-          metadata = value.get("metadata") or {}
-          annotations = metadata.get("annotations") or {}
-          owner = annotations.get("fugue.pro/controller-ownership")
-          if owner is None:
-              owner = "legacy"
-              manifest_revision = sys.argv[2]
-          elif owner == "helm":
-              manifest_revision = sys.argv[2]
-          elif owner == "declarative":
-              manifest_revision = annotations.get("fugue.pro/controller-manifest-revision", "")
-          else:
-              raise SystemExit("controller-live-owner-invalid")
-          containers = value.get("spec", {}).get("template", {}).get("spec", {}).get("containers")
-          if type(containers) is not list or len(containers) != 1 or containers[0].get("name") != "controller":
-              raise SystemExit("controller-live-container-invalid")
-          pod_annotations = value.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations") or {}
-          pod_source_commit = pod_annotations.get("fugue.pro/source-commit", "")
-          image = containers[0].get("image", "")
-          if re.fullmatch(r"[a-z0-9.-]+/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", image) is None:
-              raise SystemExit("controller-live-image-not-immutable")
-          repository, digest = image.rsplit("@", 1)
-          if re.fullmatch(r"[0-9a-f]{40}", manifest_revision) is None:
-              raise SystemExit("controller-lkg-manifest-revision-invalid")
-          if pod_source_commit and re.fullmatch(r"[0-9a-f]{40}", pod_source_commit) is None:
-              raise SystemExit("controller-lkg-pod-source-commit-invalid")
-          print(owner)
-          print(repository)
-          print(digest)
-          print(manifest_revision)
-          print(pod_source_commit)
-          PY
-          )
-          [[ "${#live_identity[@]}" -eq 5 ]]
-          live_owner="${live_identity[0]}"
-          [[ "${live_identity[1]}" == "${IMAGE_REPOSITORY}" ]]
-          lkg_digest="${live_identity[2]}"
-          lkg_source_sha="${live_identity[3]}"
-          live_pod_source_commit="${live_identity[4]}"
-          [[ "${lkg_digest}" == "${EXPECTED_PREVIOUS_IMAGE_DIGEST}" ]] || {
-            printf 'controller-live-image-predecessor-digest-mismatch\n' >&2
-            exit 1
-          }
-          git cat-file -e "${lkg_source_sha}^{commit}"
-          python3 ./scripts/verify_registry_image.py \
-            --image "${IMAGE_REPOSITORY}@${lkg_digest}" \
-            --platform linux/amd64 \
-            --metadata-only \
-            --timeout-seconds 18 \
-            --request-timeout-seconds 5 \
-            --max-attempts 2 \
-            --retry-delay-seconds 0.1 >"${root}/lkg-registry.json"
-          lkg_oci_revision="$(python3 - "${root}/lkg-registry.json" <<'PY'
-          import json
-          from pathlib import Path
-          import re
-          import sys
+  deploy_edge_control_de:
+    needs: [prepush, component-build, deploy_api]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-control-de') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-edge-control-de, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: edge-control-de, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          value = json.loads(Path(sys.argv[1]).read_text())
-          revision = value.get("oci_revision") if type(value) is dict else None
-          if re.fullmatch(r"[0-9a-f]{40}", revision or "") is None:
-              raise SystemExit("controller-lkg-oci-revision-invalid")
-          print(revision)
-          PY
-          )"
-          [[ "${lkg_oci_revision}" =~ ^[0-9a-f]{40}$ ]]
-          case "${live_owner}" in
-            legacy|helm)
-              [[ -z "${live_pod_source_commit}" || "${live_pod_source_commit}" == "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]] || {
-                printf 'controller-live-pre-ssa-pod-source-predecessor-mismatch\n' >&2
-                exit 1
-              }
-              ;;
-            declarative)
-              [[ "${live_pod_source_commit}" == "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]] || {
-                printf 'controller-live-pod-source-predecessor-mismatch\n' >&2
-                exit 1
-              }
-              ;;
-            *)
-              printf 'controller-live-owner-predecessor-validation-invalid\n' >&2
-              exit 1
-              ;;
-          esac
-          [[ "${lkg_oci_revision}" == "${EXPECTED_PREVIOUS_SOURCE_SHA}" ]] || {
-            printf 'controller-live-registry-source-predecessor-mismatch\n' >&2
-            exit 1
-          }
-          git cat-file -e "${lkg_oci_revision}^{commit}"
-          install -d -m 0700 "${root}/forward/base" "${root}/lkg/base"
-          cp deploy/kustomize/controller/deployment.json deploy/kustomize/controller/kustomization.yaml "${root}/forward/base/"
-          cp deploy/kustomize/controller/deployment.json deploy/kustomize/controller/kustomization.yaml "${root}/lkg/base/"
-          ROOT="${root}" IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" FORWARD_DIGEST="${FORWARD_DIGEST}" \
-            LKG_DIGEST="${lkg_digest}" SOURCE_SHA="${GITHUB_SHA}" LKG_SOURCE_SHA="${lkg_source_sha}" \
-            FORWARD_OCI_REVISION="${DESIRED_SOURCE_SHA}" LKG_OCI_REVISION="${lkg_oci_revision}" python3 - <<'PY'
-          import os
-          from pathlib import Path
-          import re
+  deploy_edge_control_us:
+    needs: [prepush, component-build, deploy_api, deploy_edge_control_de]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control_de.result == 'success' || needs.deploy_edge_control_de.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-control-us') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-edge-control-us, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: edge-control-us, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          root = Path(os.environ["ROOT"])
-          repository = os.environ["IMAGE_REPOSITORY"]
-          values = {
-              "forward": (os.environ["FORWARD_DIGEST"], os.environ["SOURCE_SHA"], os.environ["FORWARD_OCI_REVISION"]),
-              "lkg": (os.environ["LKG_DIGEST"], os.environ["LKG_SOURCE_SHA"], os.environ["LKG_OCI_REVISION"]),
-          }
-          if re.fullmatch(r"[a-z0-9.-]+/[a-z0-9._/-]+", repository) is None:
-              raise SystemExit("controller-kustomize-repository-invalid")
-          for name, (digest, revision, oci_revision) in values.items():
-              if (re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None or
-                      re.fullmatch(r"[0-9a-f]{40}", revision) is None or
-                      re.fullmatch(r"[0-9a-f]{40}", oci_revision) is None):
-                  raise SystemExit("controller-kustomize-pin-invalid")
-              content = (
-                  "apiVersion: kustomize.config.k8s.io/v1beta1\n"
-                  "kind: Kustomization\n"
-                  "resources:\n  - base\n"
-                  "images:\n"
-                  f"  - name: {repository}\n    newName: {repository}\n    digest: {digest}\n"
-                  "patches:\n"
-                  "  - target:\n"
-                  "      group: apps\n"
-                  "      version: v1\n"
-                  "      kind: Deployment\n"
-                  "      name: fugue-fugue-controller\n"
-                  "    patch: |-\n"
-                  "      - op: add\n"
-                  "        path: /metadata/annotations/fugue.pro~1controller-manifest-revision\n"
-                  f"        value: {revision}\n"
-                  "      - op: replace\n"
-                  "        path: /spec/template/metadata/annotations/fugue.pro~1source-commit\n"
-                  f"        value: {oci_revision}\n"
-              )
-              path = root / name / "kustomization.yaml"
-              path.write_text(content, encoding="ascii")
-              path.chmod(0o600)
-          PY
-          kubectl kustomize "${root}/forward" --output "${root}/forward.json"
-          kubectl kustomize "${root}/lkg" --output "${root}/lkg.json"
-          chmod 0600 "${root}/forward.json" "${root}/lkg.json"
-          {
-            echo "forward_manifest=${root}/forward.json"
-            echo "lkg_manifest=${root}/lkg.json"
-            echo "lkg_digest=${lkg_digest}"
-            echo "lkg_source_sha=${lkg_source_sha}"
-            echo "lkg_oci_revision=${lkg_oci_revision}"
-          } >>"${GITHUB_OUTPUT}"
-      - name: Prepare durable Controller observed-state plan
-        id: prepare
-        env:
-          FUGUE_CONTROLLER_NAMESPACE: fugue-system
-          FUGUE_CONTROLLER_HELM_RELEASE: fugue
-          FUGUE_CONTROLLER_HELM_CHART: ${{ github.workspace }}/deploy/helm/fugue
-          FUGUE_CONTROLLER_DEPLOYMENT: fugue-fugue-controller
-          FUGUE_CONTROLLER_API_DEPLOYMENT: fugue-fugue-api
-          FUGUE_CONTROLLER_LEADER_LEASE: fugue-fugue-controller
-          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
-          FUGUE_CONTROLLER_IMAGE_DIGEST: ${{ needs.controller-build.outputs.image_digest }}
-          FUGUE_CONTROLLER_LKG_IMAGE_DIGEST: ${{ steps.manifests.outputs.lkg_digest }}
-          FUGUE_CONTROLLER_SOURCE_SHA: ${{ github.sha }}
-          FUGUE_CONTROLLER_LKG_SOURCE_SHA: ${{ steps.manifests.outputs.lkg_source_sha }}
-          FUGUE_CONTROLLER_OCI_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_CONTROLLER_LKG_OCI_REVISION: ${{ steps.manifests.outputs.lkg_oci_revision }}
-          FUGUE_CONTROLLER_DECLARATIVE_MODE: prepare
-          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST: ''
-          FUGUE_CONTROLLER_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-build/receipt.json
-          FUGUE_CONTROLLER_BUILD_BINDING_FILE: ${{ runner.temp }}/fugue-controller-build/binding.json
-          FORWARD_MANIFEST: ${{ steps.manifests.outputs.forward_manifest }}
-          LKG_MANIFEST: ${{ steps.manifests.outputs.lkg_manifest }}
-        run: |
-          set -euo pipefail
-          plan_dir="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR}"
-          [[ ! -e "${plan_dir}" && ! -L "${plan_dir}" ]]
-          ./scripts/apply_controller_declarative.sh "${FORWARD_MANIFEST}" "${LKG_MANIFEST}"
-          fresh_helm_dir="$(mktemp -d "${RUNNER_TEMP}/fugue-controller-fresh-helm-status.XXXXXX")"
-          chmod 0700 "${fresh_helm_dir}"
-          cleanup_fresh_helm_status() {
-            rm -rf -- "${fresh_helm_dir}"
-          }
-          trap cleanup_fresh_helm_status EXIT
-          fresh_helm_status="${fresh_helm_dir}/status.json"
-          timeout --signal=TERM --kill-after=1s 19s \
-            helm status "${FUGUE_CONTROLLER_HELM_RELEASE}" \
-              --namespace "${FUGUE_CONTROLLER_NAMESPACE}" --output json >"${fresh_helm_status}"
-          chmod 0600 "${fresh_helm_status}"
-          fresh_helm_revision="$(python3 - "${fresh_helm_status}" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
+  deploy_edge_worker_de:
+    needs: [prepush, component-build, deploy_api, deploy_edge_control_de]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control_de.result == 'success' || needs.deploy_edge_control_de.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-worker-de') }}
+    timeout-minutes: 30
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-edge-worker-de, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: edge-worker-de, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          raw = Path(sys.argv[1]).read_bytes()
-          if not raw or len(raw) > 4 * 1024 * 1024:
-              raise SystemExit("controller-fresh-helm-status-size-invalid")
+  deploy_edge_worker_us:
+    needs: [prepush, component-build, deploy_api, deploy_edge_control_us, deploy_edge_worker_de]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') && (needs.deploy_edge_control_us.result == 'success' || needs.deploy_edge_control_us.result == 'skipped') && (needs.deploy_edge_worker_de.result == 'success' || needs.deploy_edge_worker_de.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-worker-us') }}
+    timeout-minutes: 30
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-edge-worker-us, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: edge-worker-us, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-          def strict_object(pairs):
-              value = {}
-              for key, item in pairs:
-                  if key in value:
-                      raise ValueError("duplicate JSON key")
-                  value[key] = item
-              return value
-
-          def reject_constant(value):
-              raise ValueError("non-finite JSON number: " + value)
-
-          try:
-              status = json.loads(
-                  raw.decode("utf-8"),
-                  object_pairs_hook=strict_object,
-                  parse_constant=reject_constant,
-              )
-          except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-              raise SystemExit("controller-fresh-helm-status-json-invalid")
-          revision = status.get("version") if type(status) is dict else None
-          info = status.get("info") if type(status) is dict else None
-          if type(info) is not dict or info.get("status") != "deployed":
-              raise SystemExit("controller-fresh-helm-status-not-deployed")
-          if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
-              raise SystemExit("controller-fresh-helm-revision-invalid")
-          print(revision)
-          PY
-          )"
-          [[ "${fresh_helm_revision}" =~ ^[1-9][0-9]*$ ]]
-          rm -rf -- "${fresh_helm_dir}"
-          trap - EXIT
-          PLAN_DIR="${plan_dir}" CURRENT_CONFIG_SHA="${GITHUB_SHA}" \
-            CURRENT_RUN_ID="${GITHUB_RUN_ID}" CURRENT_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}" \
-            FRESH_HELM_REVISION="${fresh_helm_revision}" \
-            python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import stat
-
-          root = Path(os.environ["PLAN_DIR"])
-          info = root.lstat()
-          if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
-              raise SystemExit("controller-observed-plan-directory-invalid")
-          expected_files = {
-              "artifact-binding.json",
-              "artifact-receipt.json",
-              "forward.json",
-              "lkg.json",
-              "plan.digest",
-              "plan.json",
-              "prepare-receipt.json",
-          }
-          if {path.name for path in root.iterdir()} != expected_files:
-              raise SystemExit("controller-observed-plan-file-set-invalid")
-          for path in root.iterdir():
-              file_info = path.lstat()
-              if not stat.S_ISREG(file_info.st_mode) or stat.S_ISLNK(file_info.st_mode) or stat.S_IMODE(file_info.st_mode) != 0o600:
-                  raise SystemExit("controller-observed-plan-file-mode-invalid")
-          for copied, source in (
-              (root / "forward.json", Path(os.environ["FORWARD_MANIFEST"])),
-              (root / "lkg.json", Path(os.environ["LKG_MANIFEST"])),
-              (root / "artifact-receipt.json", Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build" / "receipt.json"),
-              (root / "artifact-binding.json", Path(os.environ["RUNNER_TEMP"]) / "fugue-controller-build" / "binding.json"),
-          ):
-              if copied.read_bytes() != source.read_bytes():
-                  raise SystemExit("controller-observed-plan-copied-input-drift")
-          plan_raw = (root / "plan.json").read_bytes()
-          plan = json.loads(plan_raw)
-          canonical_plan = json.dumps(
-              plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          if plan_raw != canonical_plan:
-              raise SystemExit("controller-observed-plan-noncanonical")
-          embedded_digest = plan.pop("planDigest", None)
-          unsigned = json.dumps(
-              plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          actual_digest = "sha256:" + hashlib.sha256(unsigned).hexdigest()
-          sidecar_digest = (root / "plan.digest").read_text().strip()
-          if embedded_digest != actual_digest or sidecar_digest != actual_digest:
-              raise SystemExit("controller-observed-plan-digest-invalid")
-          if plan.get("kind") != "ControllerDeclarativeObservedStateRecoveryPlan":
-              raise SystemExit("controller-observed-plan-kind-invalid")
-          if plan.get("configSha") != os.environ["CURRENT_CONFIG_SHA"]:
-              raise SystemExit("controller-observed-plan-current-config-invalid")
-          if plan.get("runId") != int(os.environ["CURRENT_RUN_ID"]) or plan.get("runAttempt") != int(os.environ["CURRENT_RUN_ATTEMPT"]):
-              raise SystemExit("controller-observed-plan-run-identity-invalid")
-          if (plan.get("helm") or {}).get("revision") != int(os.environ["FRESH_HELM_REVISION"]):
-              raise SystemExit("controller-observed-plan-helm-revision-invalid")
-          expected_artifact = {
-              "configDigest": "sha256:ade6f0010c5c1bf7153ecbcf8688580ca8a5250d92745c941eed1d3b4db30342",
-              "platformManifestDigest": "sha256:53abf0d8e794f98776ad9634463b2de850f24ee345f99ec61c2fda650e0d8d2b",
-              "receiptDigest": "sha256:83e4c9ae448a799e5477a10e803bc78fc5456aea73a003bfb45940fe57acef2e",
-              "sourceTag": "5966e295d9f9bf4a65c690108084c2018f945a75",
-              "topDigest": "sha256:ff1560967d395ca58af1d69fdb216511dd9afb8ad8786c6abc47c30bb1392a98",
-          }
-          if plan.get("artifact") != expected_artifact:
-              raise SystemExit("controller-observed-plan-artifact-invalid")
-          receipt_raw = (root / "prepare-receipt.json").read_bytes()
-          receipt = json.loads(receipt_raw)
-          canonical_receipt = json.dumps(
-              receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-          ).encode("ascii")
-          expected_receipt = {
-              "apiVersion": "release.fugue.dev/v1",
-              "configSha": os.environ["CURRENT_CONFIG_SHA"],
-              "kind": "ControllerDeclarativePrepareReceipt",
-              "planDigest": actual_digest,
-              "productionWriteAttempted": False,
-              "runAttempt": int(os.environ["CURRENT_RUN_ATTEMPT"]),
-              "runId": int(os.environ["CURRENT_RUN_ID"]),
-              "status": "prepared-and-durable-before-write",
-          }
-          if receipt_raw != canonical_receipt or receipt != expected_receipt:
-              raise SystemExit("controller-observed-plan-receipt-invalid")
-          PY
-      - name: Upload durable Controller observed-state plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          include-hidden-files: false
-          retention-days: 7
-          overwrite: false
-      - name: Execute Controller plan with exact live LKG compensation
-        env:
-          FUGUE_CONTROLLER_NAMESPACE: fugue-system
-          FUGUE_CONTROLLER_HELM_RELEASE: fugue
-          FUGUE_CONTROLLER_HELM_CHART: ${{ github.workspace }}/deploy/helm/fugue
-          FUGUE_CONTROLLER_DEPLOYMENT: fugue-fugue-controller
-          FUGUE_CONTROLLER_API_DEPLOYMENT: fugue-fugue-api
-          FUGUE_CONTROLLER_LEADER_LEASE: fugue-fugue-controller
-          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.controller-build.outputs.image_repository }}
-          FUGUE_CONTROLLER_IMAGE_DIGEST: ${{ needs.controller-build.outputs.image_digest }}
-          FUGUE_CONTROLLER_LKG_IMAGE_DIGEST: ${{ steps.manifests.outputs.lkg_digest }}
-          FUGUE_CONTROLLER_SOURCE_SHA: ${{ github.sha }}
-          FUGUE_CONTROLLER_LKG_SOURCE_SHA: ${{ steps.manifests.outputs.lkg_source_sha }}
-          FUGUE_CONTROLLER_OCI_REVISION: ${{ steps.intent.outputs.desired_source_sha }}
-          FUGUE_CONTROLLER_LKG_OCI_REVISION: ${{ steps.manifests.outputs.lkg_oci_revision }}
-          FUGUE_CONTROLLER_DECLARATIVE_MODE: execute
-          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST: ${{ steps.prepare.outputs.plan_digest }}
-          FUGUE_CONTROLLER_BUILD_RECEIPT_FILE: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}/artifact-receipt.json
-          FUGUE_CONTROLLER_BUILD_BINDING_FILE: ${{ runner.temp }}/fugue-controller-observed-plan-${{ github.run_id }}-${{ github.run_attempt }}/artifact-binding.json
-        run: |
-          set -euo pipefail
-          plan_dir="${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIR}"
-          [[ "${FUGUE_CONTROLLER_DECLARATIVE_PLAN_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          ./scripts/apply_controller_declarative.sh \
-            "${plan_dir}/forward.json" "${plan_dir}/lkg.json"
+  deploy_image_cache:
+    needs: [prepush, component-build, deploy_controller]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && (needs.deploy_controller.result == 'success' || needs.deploy_controller.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'image-cache') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-image-cache, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: image-cache, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   audit:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - name: Run full audit suite
+      - name: Run the full asynchronous audit
         run: make test

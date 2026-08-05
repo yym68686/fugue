@@ -18,7 +18,6 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
 DEFAULT_MAX_ELAPSED_SECONDS = 60.0
-CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS = 120.0
 TEST_HUNK_RE = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ func "
     r"(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\("
@@ -50,21 +49,15 @@ def command_env() -> dict[str, str]:
 
 
 def task_timeout_seconds(name: str, remaining: float) -> float:
-    if name == "controller-declarative-tests":
-        return CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS
     return remaining
 
 
 def elapsed_timeout_seconds(check_names: set[str]) -> float:
-    if "controller-declarative-tests" in check_names:
-        return CONTROLLER_DECLARATIVE_TIMEOUT_SECONDS
     return DEFAULT_MAX_ELAPSED_SECONDS
 
 
 def elapsed_timeout_exceeded(check_names: set[str], elapsed_ms: int) -> bool:
     limit_ms = round(elapsed_timeout_seconds(check_names) * 1000)
-    if "controller-declarative-tests" in check_names:
-        return elapsed_ms > limit_ms
     return elapsed_ms >= limit_ms
 
 
@@ -250,10 +243,6 @@ def helm_check(timeout: float) -> tuple[int, str]:
             "helm", "template", "fugue", "deploy/helm/fugue", "--namespace", "fugue-system",
             "--values", "deploy/helm/fugue/values-production-ha.yaml",
         ],
-        [
-            "go", "test", "./cmd/fugue-release-domain-evidence",
-            "-run", "^TestReleasePreflightValidatesCurrentChartDownwardAPI$", "-count=1",
-        ],
     ]
     for command in commands:
         remaining = deadline - time.monotonic()
@@ -341,33 +330,24 @@ def main() -> int:
         go_dependent_tasks["affected-vet"] = ["go", "vet", *packages]
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
         non_go_tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
-    if any(name in {
-        ".github/workflows/deploy-control-plane.yml",
-        "scripts/build_control_plane_images.sh",
-        "scripts/test_control_plane_build_reuse.py",
-        "scripts/test_verify_registry_image.py",
-        "scripts/verify_registry_image.py",
-    } for name in paths):
-        non_go_tasks["control-plane-build-reuse-tests"] = [
-            "python3", "-m", "unittest",
-            "scripts.test_control_plane_build_reuse", "scripts.test_verify_registry_image",
+    if any(name in {"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py"} for name in paths):
+        non_go_tasks["registry-verifier-tests"] = [
+            "python3", "-m", "unittest", "scripts.test_verify_registry_image",
         ]
-    if any(name in {
-        "scripts/apply_telemetry_declarative.sh",
-        "scripts/test_apply_telemetry_declarative.sh",
-    } for name in paths):
-        non_go_tasks["telemetry-declarative-tests"] = [
-            "bash", "./scripts/test_apply_telemetry_declarative.sh",
+
+    if any(
+        name == ".github/workflows/ci.yml"
+        or name.startswith(".github/actions/deploy-declarative-component/")
+        or name == "deploy/releases/components.json"
+        or name.startswith("deploy/releases/")
+        or name.startswith("cmd/fugue-declarative-release/")
+        or name.startswith("internal/declarativerelease/")
+        or name in {"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py"}
+        for name in paths
+    ):
+        non_go_tasks["declarative-release-tests"] = [
+            "go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release",
         ]
-    if any(name in {
-        "scripts/apply_controller_declarative.sh",
-        "scripts/test_apply_controller_declarative.sh",
-        "deploy/environments/production/controller/release.json",
-    } for name in paths):
-        non_go_tasks["controller-declarative-tests"] = [
-            "bash", "./scripts/test_apply_controller_declarative.sh",
-        ]
-    controller_task = non_go_tasks.pop("controller-declarative-tests", None)
 
     local_checks = {
         "diff-check": lambda remaining: diff_check(base, paths, remaining),
@@ -441,13 +421,6 @@ def main() -> int:
                 name = phase_one_futures[future]
                 status, output, before = future.result()
                 record(name, before, status, output)
-
-    if controller_task is not None:
-        if failures:
-            checks["controller-declarative-tests"] = {"durationMs": 0, "status": "skipped"}
-        else:
-            status, output, before = execute("controller-declarative-tests", controller_task)
-            record("controller-declarative-tests", before, status, output)
 
     for name in ("affected-tests", "affected-vet", "helm-lint-render"):
         if name not in checks:
