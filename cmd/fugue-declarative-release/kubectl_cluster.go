@@ -650,14 +650,11 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	if !target.Present {
 		return declarativerelease.Observation{}, errors.New("cannot wait healthy for an absent target")
 	}
-	soak := time.Duration(0)
-	if release.Transition != nil && release.Transition.EdgeGroupAB != nil {
-		soak = time.Duration(release.Transition.EdgeGroupAB.SoakSeconds) * time.Second
-	}
+	allowHistoricalRestarts := allowsHistoricalRestarts(release, target)
+	soak := healthSoakDuration(release, allowHistoricalRestarts)
 	deadline := time.Now().Add(cluster.timeout + soak)
 	var lastErr error
 	tracker := healthSoakTracker{required: soak}
-	allowHistoricalRestarts := allowsHistoricalRestarts(release, target)
 	allowLegacyManager := allowHistoricalRestarts
 	for {
 		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowHistoricalRestarts)
@@ -688,6 +685,13 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func healthSoakDuration(release declarativerelease.PlanRelease, bootstrap bool) time.Duration {
+	if bootstrap || release.Transition == nil || release.Transition.EdgeGroupAB == nil {
+		return 0
+	}
+	return time.Duration(release.Transition.EdgeGroupAB.SoakSeconds) * time.Second
 }
 
 func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
@@ -851,6 +855,7 @@ func sanitizeObservedResource(value map[string]any) map[string]any {
 
 func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, observation declarativerelease.Observation) (string, error) {
 	evidence := make([]string, 0, len(release.Health))
+	bootstrap := allowsHistoricalRestarts(release, target)
 	for _, probe := range release.Health {
 		switch probe.Type {
 		case "deployment", "daemonset", "job":
@@ -882,7 +887,8 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			for _, pod := range pods {
 				resource := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:%s/proxy%s", release.Workload.Namespace, pod, probe.Port, probe.Path)
 				body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", resource)
-				if err != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
+				expected := probeExpectedBody(probe, bootstrap)
+				if err != nil || (expected != "" && !bytes.Contains(body, []byte(expected))) {
 					return "", fmt.Errorf("pod health probe %q failed", pod)
 				}
 				evidence = append(evidence, probe.Type+":"+pod+":"+digestBytesLocal(body))
@@ -907,7 +913,6 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			if err != nil {
 				return "", err
 			}
-			bootstrap := allowsHistoricalRestarts(release, target)
 			if !bootstrap {
 				if err := validateEdgeGroupAuthority(state, transition); err != nil {
 					return "", err
@@ -930,6 +935,13 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 	}
 	sort.Strings(evidence)
 	return digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
+}
+
+func probeExpectedBody(probe declarativerelease.HealthProbe, bootstrap bool) string {
+	if bootstrap && probe.Type == "pod-http" {
+		return ""
+	}
+	return probe.Expected
 }
 
 func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, kind, name string) (declarativerelease.Observation, error) {

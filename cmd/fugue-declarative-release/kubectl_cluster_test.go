@@ -498,6 +498,27 @@ func TestHealthSoakTrackerRequiresOneContinuousWindow(t *testing.T) {
 	}
 }
 
+func TestBootstrapHealthKeepsReadinessButNotForwardAuthorityOrSoak(t *testing.T) {
+	release := declarativerelease.PlanRelease{Transition: &declarativerelease.Transition{EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{SoakSeconds: 180}}}
+	probe := declarativerelease.HealthProbe{Type: "pod-http", Expected: `"route_authority":"edge-control"`}
+	if got := healthSoakDuration(release, true); got != 0 {
+		t.Fatalf("bootstrap inherited forward soak: %s", got)
+	}
+	if got := probeExpectedBody(probe, true); got != "" {
+		t.Fatalf("bootstrap required future authority body: %q", got)
+	}
+	if got := healthSoakDuration(release, false); got != 180*time.Second {
+		t.Fatalf("forward soak changed: %s", got)
+	}
+	if got := probeExpectedBody(probe, false); got != probe.Expected {
+		t.Fatalf("forward authority predicate changed: %q", got)
+	}
+	serviceProbe := declarativerelease.HealthProbe{Type: "service-http", Expected: "ok"}
+	if got := probeExpectedBody(serviceProbe, true); got != "ok" {
+		t.Fatalf("bootstrap weakened unrelated probe: %q", got)
+	}
+}
+
 func TestBootstrapAuxiliaryIdentityAndEveryArtifactImageAreExact(t *testing.T) {
 	source := strings.Repeat("a", 40)
 	edgeDigest := strings.Repeat("b", 64)
