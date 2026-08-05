@@ -189,11 +189,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	alreadyConverged := false
 	if lkgObserveErr == nil && prewrite.Matches(lkg, release, true) {
 		if release.ExpectedPreviousPresent {
-			var healthyLKG Observation
-			healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
-			if err == nil && healthyLKG.HealthDigest != prewrite.HealthDigest {
-				err = errors.New("LKG pod health changed during prewrite validation")
-			}
+			_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
 			if err == nil {
 				var predecessorWitness []byte
 				predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)
@@ -203,7 +199,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				if err == nil {
 					var freshLKG Observation
 					freshLKG, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
-					if err == nil && freshLKG.HealthDigest != healthyLKG.HealthDigest {
+					if err == nil && freshLKG.HealthDigest != prewrite.HealthDigest {
 						err = errors.New("LKG pod health changed after convergence validation")
 					}
 					prewrite = freshLKG

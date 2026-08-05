@@ -16,13 +16,19 @@ import (
 	"fugue/internal/observability"
 )
 
+const (
+	telemetryAgentMemoryLimitBytes int64 = 64 << 20
+	telemetryAgentBatchSize              = 64
+)
+
 func main() {
 	cfg := config.TelemetryAgentFromEnv()
+	observabilityConfig := boundTelemetryAgentMemory(cfg.Observability)
 	logger := log.Default()
 	agent := telemetryAgent{
-		cfg:      cfg.Observability.Normalize(),
+		cfg:      observabilityConfig,
 		logger:   logger,
-		pipeline: observability.NewPipeline(cfg.Observability, logger),
+		pipeline: observability.NewPipeline(observabilityConfig, logger),
 	}
 	if err := agent.cfg.Validate(); err != nil {
 		logger.Printf("observability configuration degraded: %v", err)
@@ -63,6 +69,17 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("listen and serve: %v", err)
 	}
+}
+
+func boundTelemetryAgentMemory(cfg observability.Config) observability.Config {
+	cfg = cfg.Normalize()
+	if cfg.MemoryLimitBytes > telemetryAgentMemoryLimitBytes {
+		cfg.MemoryLimitBytes = telemetryAgentMemoryLimitBytes
+	}
+	if cfg.BatchSize > telemetryAgentBatchSize {
+		cfg.BatchSize = telemetryAgentBatchSize
+	}
+	return cfg
 }
 
 type telemetryAgent struct {

@@ -148,9 +148,19 @@ func TestPrepareRejectsAnLKGRestartDuringPrewriteValidation(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	changed := lkg
 	changed.HealthDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	fake := &fakeCluster{observations: []Observation{lkg}, health: []Observation{changed}}
+	fake := &fakeCluster{observations: []Observation{lkg, changed}, health: []Observation{lkg}}
 	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "health changed") {
 		t.Fatalf("changing LKG health witness was accepted: %v", err)
+	}
+}
+
+func TestPrepareComparesPodHealthUsingTheSameObservationSemantics(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	probeAugmented := lkg
+	probeAugmented.HealthDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{probeAugmented}}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err != nil {
+		t.Fatalf("probe-augmented health witness was compared with the pod-only witness: %v", err)
 	}
 }
 
