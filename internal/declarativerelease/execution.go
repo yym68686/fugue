@@ -426,7 +426,7 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 			return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: %w", convergenceErr)
 		}
 		second, secondErr := cluster.Observe(ctx, release, lkg, lkgManifest)
-		if secondErr != nil || !second.Matches(lkg, release, true) || !second.SameSpecIdentity(first) || second.HealthDigest != healthy.HealthDigest {
+		if secondErr != nil || !second.Matches(lkg, release, true) || !second.SameSpecIdentity(first) || second.HealthDigest != first.HealthDigest {
 			return Observation{}, errors.New("bootstrap predecessor identity changed during validation")
 		}
 		return second, nil

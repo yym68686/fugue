@@ -293,7 +293,9 @@ func TestPrepareBindsExplicitOwnershipAdoptionToLKGAndLiveCAS(t *testing.T) {
 	}
 	lkg.FieldManagers = []string{"helm"}
 	lkg.Resources[0].FieldManagers = []string{"helm"}
-	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	probeAugmented := lkg
+	probeAugmented.HealthDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{probeAugmented}}
 	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
 	if err != nil {
 		t.Fatal(err)
