@@ -374,18 +374,23 @@ func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 
 func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
 	allowed := errors.New(`command failed: exit status 1: error: Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.containers[name="edge-front"].image`)
-	if err := validateAdoptionConflicts(allowed, "kubectl-patch", []string{"/spec/template"}); err != nil {
+	managers := []string{"helm", "kubectl-patch"}
+	if err := validateAdoptionConflicts(allowed, managers, []string{"/spec/template"}); err != nil {
 		t.Fatalf("reviewed conflict was rejected: %v", err)
 	}
-	if err := validateAdoptionConflicts(allowed, "helm", []string{"/spec/template"}); err == nil {
+	if err := validateAdoptionConflicts(allowed, []string{"helm"}, []string{"/spec/template"}); err == nil {
 		t.Fatal("unreviewed field manager was accepted")
 	}
-	if err := validateAdoptionConflicts(allowed, "kubectl-patch", []string{"/metadata/annotations"}); err == nil {
+	if err := validateAdoptionConflicts(allowed, managers, []string{"/metadata/annotations"}); err == nil {
 		t.Fatal("out-of-scope conflict field was accepted")
 	}
 	inconsistent := errors.New(`error: Apply failed with 2 conflicts: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.containers[name="edge-front"].image`)
-	if err := validateAdoptionConflicts(inconsistent, "kubectl-patch", []string{"/spec/template"}); err == nil {
+	if err := validateAdoptionConflicts(inconsistent, managers, []string{"/spec/template"}); err == nil {
 		t.Fatal("inconsistent conflict count was accepted")
+	}
+	grouped := errors.New("command failed: error: Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:\n- .spec.template.spec.containers[name=\"caddy\"].image\n- .spec.template.spec.containers[name=\"edge\"].image")
+	if err := validateAdoptionConflicts(grouped, managers, []string{"/spec/template"}); err != nil {
+		t.Fatalf("reviewed grouped conflicts were rejected: %v", err)
 	}
 }
 

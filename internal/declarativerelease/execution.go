@@ -83,17 +83,18 @@ type ExecutionPlan struct {
 }
 
 type OwnershipAdoptionPlan struct {
-	Component          string                          `json:"component"`
-	BootstrapLKGDigest string                          `json:"bootstrapLkgDigest"`
-	UID                string                          `json:"uid"`
-	ResourceVersion    string                          `json:"resourceVersion"`
-	Generation         int64                           `json:"generation"`
-	LegacyFieldManager string                          `json:"legacyFieldManager"`
-	Resources          []OwnershipAdoptionResourcePlan `json:"resources"`
-	ImageRef           string                          `json:"imageRef"`
-	ConfigSHA          string                          `json:"configSha"`
-	ManifestSHA        string                          `json:"manifestSha"`
-	OCIRevision        string                          `json:"ociRevision"`
+	Component           string                          `json:"component"`
+	BootstrapLKGDigest  string                          `json:"bootstrapLkgDigest"`
+	UID                 string                          `json:"uid"`
+	ResourceVersion     string                          `json:"resourceVersion"`
+	Generation          int64                           `json:"generation"`
+	LegacyFieldManager  string                          `json:"legacyFieldManager"`
+	LegacyFieldManagers []string                        `json:"legacyFieldManagers"`
+	Resources           []OwnershipAdoptionResourcePlan `json:"resources"`
+	ImageRef            string                          `json:"imageRef"`
+	ConfigSHA           string                          `json:"configSha"`
+	ManifestSHA         string                          `json:"manifestSha"`
+	OCIRevision         string                          `json:"ociRevision"`
 }
 
 type OwnershipAdoptionResourcePlan struct {
@@ -389,9 +390,10 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Obs
 	result := &OwnershipAdoptionPlan{
 		Component: release.ComponentID, BootstrapLKGDigest: lkg.ManifestDigest,
 		UID: prewrite.UID, ResourceVersion: prewrite.ResourceVersion, Generation: prewrite.Generation,
-		LegacyFieldManager: release.OwnershipAdoption.LegacyFieldManager,
-		Resources:          boundResources,
-		ImageRef:           lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA, OCIRevision: lkg.OCIRevision,
+		LegacyFieldManager:  release.OwnershipAdoption.LegacyFieldManager,
+		LegacyFieldManagers: append([]string(nil), release.OwnershipAdoption.legacyManagers()...),
+		Resources:           boundResources,
+		ImageRef:            lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA, OCIRevision: lkg.OCIRevision,
 	}
 	return result, nil
 }
@@ -838,6 +840,7 @@ func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
 		adoption.BootstrapLKGDigest != plan.LKG.ManifestDigest || adoption.UID != plan.Prewrite.UID ||
 		adoption.ResourceVersion != plan.Prewrite.ResourceVersion || adoption.Generation != plan.Prewrite.Generation ||
 		adoption.LegacyFieldManager != release.OwnershipAdoption.LegacyFieldManager ||
+		!equalStrings(adoption.LegacyFieldManagers, release.OwnershipAdoption.legacyManagers()) ||
 		adoption.ImageRef != plan.LKG.ImageRef || adoption.ConfigSHA != plan.LKG.ConfigSHA ||
 		adoption.ManifestSHA != plan.LKG.ManifestSHA || adoption.OCIRevision != plan.LKG.OCIRevision {
 		return errors.New("execution ownership adoption identity is invalid")

@@ -32,6 +32,7 @@ const maxKubernetesOutputBytes = 4 << 20
 var (
 	adoptionConflictCountPattern = regexp.MustCompile(`Apply failed with ([1-9][0-9]*) conflicts?`)
 	adoptionConflictPattern      = regexp.MustCompile(`conflict with "([^"]+)" using [^:]+: (\.[^[:space:]]+)`)
+	adoptionConflictGroupPattern = regexp.MustCompile(`conflicts with "([^"]+)" using [^:]+:`)
 )
 
 type kubectlCluster struct {
@@ -274,7 +275,7 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 			if !exists {
 				return fmt.Errorf("adopt %s/%s has no reviewed scope", identity.Kind, identity.Name)
 			}
-			if err := validateAdoptionConflicts(applyErr, adoption.LegacyFieldManager, scope.Fields); err != nil {
+			if err := validateAdoptionConflicts(applyErr, adoption.LegacyFieldManagers, scope.Fields); err != nil {
 				return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
 			}
 			forceArguments, err := adoptionForceApplyArguments(release, dryRun)
@@ -289,26 +290,52 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 	return nil
 }
 
-func validateAdoptionConflicts(applyErr error, manager string, fields []string) error {
-	if applyErr == nil || manager == "" || len(fields) == 0 {
+func validateAdoptionConflicts(applyErr error, managers, fields []string) error {
+	if applyErr == nil || len(managers) == 0 || len(fields) == 0 {
 		return errors.New("ownership adoption conflict evidence is incomplete")
 	}
 	raw := applyErr.Error()
 	countMatch := adoptionConflictCountPattern.FindStringSubmatch(raw)
-	matches := adoptionConflictPattern.FindAllStringSubmatch(raw, -1)
-	if len(countMatch) != 2 || len(matches) == 0 {
+	type conflict struct{ manager, field string }
+	conflicts := make([]conflict, 0)
+	groupManager := ""
+	for _, line := range strings.Split(raw, "\n") {
+		if match := adoptionConflictPattern.FindStringSubmatch(line); len(match) == 3 {
+			conflicts = append(conflicts, conflict{manager: match[1], field: match[2]})
+			groupManager = ""
+			continue
+		}
+		if match := adoptionConflictGroupPattern.FindStringSubmatch(line); len(match) == 2 {
+			groupManager = match[1]
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if groupManager != "" && strings.HasPrefix(trimmed, "- .") {
+			conflicts = append(conflicts, conflict{manager: groupManager, field: strings.TrimPrefix(trimmed, "- ")})
+			continue
+		}
+		if groupManager != "" && trimmed != "" {
+			groupManager = ""
+		}
+	}
+	if len(countMatch) != 2 || len(conflicts) == 0 {
 		return errors.New("ownership adoption failure is not a typed SSA conflict")
 	}
 	count, err := strconv.Atoi(countMatch[1])
-	if err != nil || count != len(matches) {
+	if err != nil || count != len(conflicts) {
 		return errors.New("ownership adoption conflict count is inconsistent")
 	}
-	for _, match := range matches {
-		if match[1] != manager || !adoptionFieldAllowed(match[2], fields) {
-			return fmt.Errorf("ownership adoption conflict %s:%s is outside the reviewed allowlist", match[1], match[2])
+	for _, conflict := range conflicts {
+		if !stringInSortedSet(conflict.manager, managers) || !adoptionFieldAllowed(conflict.field, fields) {
+			return fmt.Errorf("ownership adoption conflict %s:%s is outside the reviewed allowlist", conflict.manager, conflict.field)
 		}
 	}
 	return nil
+}
+
+func stringInSortedSet(value string, allowed []string) bool {
+	index := sort.SearchStrings(allowed, value)
+	return index < len(allowed) && allowed[index] == value
 }
 
 func adoptionFieldAllowed(field string, pointers []string) bool {

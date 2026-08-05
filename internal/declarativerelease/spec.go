@@ -77,8 +77,9 @@ type Component struct {
 // copied into the immutable release plan; independent components must not
 // carry it.
 type OwnershipAdoption struct {
-	LegacyFieldManager string                   `json:"legacyFieldManager"`
-	Resources          []OwnershipAdoptionScope `json:"resources"`
+	LegacyFieldManager  string                   `json:"legacyFieldManager"`
+	LegacyFieldManagers []string                 `json:"legacyFieldManagers,omitempty"`
+	Resources           []OwnershipAdoptionScope `json:"resources"`
 }
 
 // OwnershipAdoptionScope limits force-conflicts to named resources and
@@ -397,6 +398,19 @@ func (adoption OwnershipAdoption) validate(component Component) error {
 	if len(adoption.Resources) == 0 || len(adoption.Resources) > 16 {
 		return fmt.Errorf("component %q ownership adoption resource count is invalid", component.ID)
 	}
+	managers := adoption.legacyManagers()
+	if len(managers) == 0 || len(managers) > 8 {
+		return fmt.Errorf("component %q ownership adoption legacy manager count is invalid", component.ID)
+	}
+	for index, manager := range managers {
+		if !fieldManagerPattern.MatchString(manager) || manager == component.Workload.FieldManager ||
+			(index > 0 && managers[index-1] >= manager) {
+			return fmt.Errorf("component %q ownership adoption legacy managers are invalid or unordered", component.ID)
+		}
+	}
+	if !stringSliceContains(managers, adoption.LegacyFieldManager) {
+		return fmt.Errorf("component %q ownership adoption primary legacy manager is absent", component.ID)
+	}
 	previous := ""
 	for index, scope := range adoption.Resources {
 		key := scope.Identity.key()
@@ -416,6 +430,22 @@ func (adoption OwnershipAdoption) validate(component Component) error {
 		previous = key
 	}
 	return nil
+}
+
+func (adoption OwnershipAdoption) legacyManagers() []string {
+	if len(adoption.LegacyFieldManagers) == 0 {
+		return []string{adoption.LegacyFieldManager}
+	}
+	return adoption.LegacyFieldManagers
+}
+
+func stringSliceContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (transition *Transition) validate(component Component) error {
@@ -802,6 +832,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.MigrationState = component.MigrationState
 		if component.OwnershipAdoption != nil {
 			copyAdoption := *component.OwnershipAdoption
+			copyAdoption.LegacyFieldManagers = append([]string(nil), component.OwnershipAdoption.LegacyFieldManagers...)
 			copyAdoption.Resources = append([]OwnershipAdoptionScope(nil), component.OwnershipAdoption.Resources...)
 			for index := range copyAdoption.Resources {
 				copyAdoption.Resources[index].Fields = append([]string(nil), component.OwnershipAdoption.Resources[index].Fields...)
