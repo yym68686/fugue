@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
 DEFAULT_MAX_ELAPSED_SECONDS = 60.0
 GO_TASK_CONCURRENCY = 2
+SERIAL_WARM_TEST_PACKAGES = {"./internal/api"}
 DECLARATIVE_TEST_PACKAGES = {
     "./cmd/fugue-declarative-release",
     "./internal/declarativerelease",
@@ -175,6 +176,15 @@ def without_dedicated_declarative_tests(commands: list[list[str]]) -> list[list[
             and command[2] in DECLARATIVE_TEST_PACKAGES
         )
     ]
+
+
+def warm_affected_tests_before_compile(commands: list[list[str]]) -> bool:
+    return any(
+        len(command) >= 3
+        and command[:2] == ["go", "test"]
+        and command[2] in SERIAL_WARM_TEST_PACKAGES
+        for command in commands
+    )
 
 
 def run_test_commands(
@@ -420,12 +430,17 @@ def main() -> int:
                 status, output = run(command, task_timeout_seconds(name, deadline - before))
         return status, output, before
 
-    phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
+    warm_affected = warm_affected_tests_before_compile(test_commands)
+    if warm_affected:
+        status, output, before = execute("affected-tests", None)
+        record("affected-tests", before, status, output)
+
+    phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands and not warm_affected else 0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=phase_one_workers) as phase_one:
         compile_name, compile_command = compile_task
         compile_future = phase_one.submit(execute, compile_name, compile_command)
         affected_futures = {}
-        if test_commands:
+        if test_commands and not warm_affected:
             affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
         non_go_futures = {
             phase_one.submit(execute, name, command): name

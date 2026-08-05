@@ -94,6 +94,27 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
 
+    def test_large_api_tests_warm_cache_before_compile(self) -> None:
+        test_finished = threading.Event()
+        compile_observed = []
+
+        def fake_run(command, _timeout):
+            if command[:3] == ["go", "test", "./internal/api"]:
+                test_finished.set()
+                return 0, ""
+            if command == ["go", "build", "-p", "4", "./..."]:
+                compile_observed.append(test_finished.is_set())
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["internal/api/routes_gen.go"],
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(compile_observed, [True])
+        self.assertEqual(receipt["checks"]["affected-tests"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
+
     def test_other_go_tasks_start_only_after_compile_success(self) -> None:
         compile_finished = threading.Event()
         dependent_observations = []
