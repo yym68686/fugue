@@ -275,8 +275,12 @@ func TestBindIntentsAllowsOneConsecutiveAttemptAgainstTheSameLKG(t *testing.T) {
 	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 1, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
 	current := previous
 	current.Generation = 2
-	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "3333333333333333333333333333333333333333"}); err != nil {
+	bound, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "3333333333333333333333333333333333333333"})
+	if err != nil {
 		t.Fatalf("consecutive attempt against the same LKG was rejected: %v", err)
+	}
+	if len(bound.Releases) != 1 || !bound.Releases[0].RetrySameLKG {
+		t.Fatalf("same-LKG attempt was not bound explicitly: %+v", bound.Releases)
 	}
 	current.ExpectedPreviousImageDigest = "sha256:" + strings.Repeat("c", 64)
 	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "3333333333333333333333333333333333333333"}); err == nil {

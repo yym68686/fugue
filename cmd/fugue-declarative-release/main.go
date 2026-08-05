@@ -339,7 +339,7 @@ func loadLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
 	if !release.ExpectedPreviousPresent {
 		return nil, nil
 	}
-	if release.IntentGeneration == 1 {
+	if release.IntentGeneration == 1 || release.RetrySameLKG {
 		if release.BootstrapLKGPath == "" {
 			return nil, errors.New("first declarative release with a predecessor requires bootstrapLkgPath")
 		}

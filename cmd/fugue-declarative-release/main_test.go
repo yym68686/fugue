@@ -15,6 +15,33 @@ import (
 	"fugue/internal/declarativerelease"
 )
 
+func TestLoadLKGManifestUsesBootstrapOnlyForAnExplicitSameLKGAttempt(t *testing.T) {
+	root := t.TempDir()
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	want := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[],"kind":"ComponentResourceSet"}`)
+	writeFile(t, "deploy/releases/telemetry/lkg.json", want)
+	release := declarativerelease.PlanRelease{
+		IntentGeneration: 3, ExpectedPreviousPresent: true, RetrySameLKG: true,
+		BootstrapLKGPath:          "deploy/releases/telemetry/lkg.json",
+		ExpectedPreviousConfigSHA: strings.Repeat("1", 40), ManifestPath: "deploy/releases/telemetry/resources.json",
+	}
+	got, err := loadLKGManifest(release)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("load retry LKG: got=%s err=%v", got, err)
+	}
+	release.RetrySameLKG = false
+	if _, err := loadLKGManifest(release); err == nil || !strings.Contains(err.Error(), "previous component manifest") {
+		t.Fatalf("normal successor fell back to bootstrap LKG: %v", err)
+	}
+}
+
 func TestPlanCommandBindsFirstProductionAtom(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()

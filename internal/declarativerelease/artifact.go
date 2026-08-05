@@ -90,10 +90,13 @@ func (plan Plan) ValidateBound() error {
 				!digestPattern.MatchString(release.ExpectedPreviousImageDigest) {
 				return fmt.Errorf("bound release %d predecessor is invalid", index)
 			}
-		} else if release.IntentGeneration != 1 || release.ExpectedPreviousConfigSHA != "" ||
+		} else if (!release.RetrySameLKG && release.IntentGeneration != 1) || release.ExpectedPreviousConfigSHA != "" ||
 			release.ExpectedPreviousManifestSHA != "" || release.ExpectedPreviousOCIRevision != "" ||
 			release.ExpectedPreviousImageDigest != "" {
 			return fmt.Errorf("bound release %d absent predecessor is invalid", index)
+		}
+		if release.RetrySameLKG && (release.IntentGeneration < 2 || (release.ExpectedPreviousPresent && release.BootstrapLKGPath == "")) {
+			return fmt.Errorf("bound release %d same-LKG attempt is invalid", index)
 		}
 		if _, exists := seen[release.ComponentID]; exists {
 			return fmt.Errorf("bound plan repeats component %q", release.ComponentID)

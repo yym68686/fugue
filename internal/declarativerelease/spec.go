@@ -169,6 +169,7 @@ type PlanRelease struct {
 	ExpectedPreviousImageDigest string           `json:"expectedPreviousImageDigest"`
 	ManifestPath                string           `json:"manifestPath"`
 	BootstrapLKGPath            string           `json:"bootstrapLkgPath,omitempty"`
+	RetrySameLKG                bool             `json:"retrySameLkg,omitempty"`
 	Artifact                    Artifact         `json:"artifact"`
 	ArtifactTargets             []ArtifactTarget `json:"artifactTargets,omitempty"`
 	Workload                    Workload         `json:"workload"`
@@ -646,6 +647,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			return Plan{}, fmt.Errorf("component %q intent identity mismatch", component.ID)
 		}
 		prior, hasPrior := previous[component.ID]
+		retrySameLKG := false
 		if hasPrior {
 			if err := prior.Validate(); err != nil {
 				return Plan{}, fmt.Errorf("component %q previous intent: %w", component.ID, err)
@@ -657,7 +659,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			normalSuccessor := intent.ExpectedPreviousPresent && shaPattern.MatchString(priorConfigSHA) &&
 				intent.ExpectedPreviousConfigSHA == priorConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == priorConfigSHA && intent.ExpectedPreviousOCIRevision == priorConfigSHA
-			retrySameLKG := intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
+			retrySameLKG = intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
 				intent.ExpectedPreviousOCIRevision == prior.ExpectedPreviousOCIRevision &&
@@ -682,6 +684,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.ExpectedPreviousImageDigest = intent.ExpectedPreviousImageDigest
 		release.ManifestPath = component.ManifestPath
 		release.BootstrapLKGPath = component.BootstrapLKGPath
+		release.RetrySameLKG = retrySameLKG
 		release.Artifact = component.Artifact
 		release.ArtifactTargets = append([]ArtifactTarget(nil), component.ArtifactTargets...)
 		if component.Transition != nil {
