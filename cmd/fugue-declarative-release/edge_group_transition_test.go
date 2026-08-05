@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -120,6 +121,17 @@ func TestAdoptingEdgeGroupAloneMayReadLegacyPodIdentity(t *testing.T) {
 	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
 	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, legacySource); err == nil {
 		t.Fatal("adoption accepted an explicit cross-group identity")
+	}
+}
+
+func TestWorkloadLegacySourceFallsBackToBoundTemplateSourceAfterAdoption(t *testing.T) {
+	raw := []byte(`{"spec":{"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}}}`)
+	got, err := workloadLegacySource(raw, "edge")
+	if err != nil || got != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("bound adopting source was not recovered: got=%q err=%v", got, err)
+	}
+	if _, err := workloadLegacySource(bytes.ReplaceAll(raw, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), []byte("invalid")), "edge"); err == nil {
+		t.Fatal("invalid bound adopting source was accepted")
 	}
 }
 

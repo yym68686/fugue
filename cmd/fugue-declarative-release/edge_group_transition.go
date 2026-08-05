@@ -489,8 +489,13 @@ func workloadLegacySource(raw []byte, containerName string) (string, error) {
 			continue
 		}
 		source := legacySourceTag(stringValue(container["image"]))
-		if source == "" {
-			return "", errors.New("legacy edge workload source tag is invalid")
+		if source != "" {
+			return source, nil
+		}
+		annotations := mapStringField(mapField(mapField(mapField(workload, "spec"), "template"), "metadata"), "annotations")
+		source = annotations["fugue.pro/source-commit"]
+		if len(source) != 40 || strings.Trim(source, "0123456789abcdef") != "" {
+			return "", errors.New("legacy edge workload source identity is invalid")
 		}
 		return source, nil
 	}
