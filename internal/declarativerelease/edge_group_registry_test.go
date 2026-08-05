@@ -57,6 +57,25 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 		transition.WorkerAName != "edge-gamma-worker-a" || transition.WorkerBName != "edge-gamma-worker-b" {
 		t.Fatalf("third group inventory/bundle transition is not isolated: %+v", transition)
 	}
+	for _, component := range []Component{control, worker} {
+		raw, readErr := os.ReadFile(filepath.Join("../..", component.ManifestPath))
+		if readErr != nil {
+			t.Fatalf("read shared %s template: %v", component.ID, readErr)
+		}
+		materialized, materializeErr := MaterializeManifestTemplate(raw, component.ManifestVariables)
+		if materializeErr != nil {
+			t.Fatalf("materialize third-group %s resources: %v", component.ID, materializeErr)
+		}
+		identities, identityErr := ResourceSetIdentities(materialized)
+		if identityErr != nil || len(identities) == 0 {
+			t.Fatalf("third-group %s resources are invalid: identities=%+v err=%v", component.ID, identities, identityErr)
+		}
+		for _, identity := range identities {
+			if strings.Contains(identity.Name, "-de") || strings.Contains(identity.Name, "-us") {
+				t.Fatalf("third-group %s inherited a configured group resource: %+v", component.ID, identity)
+			}
+		}
+	}
 	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
 		"internal/edge/service.go",
 		virtual.Worker.IntentPath,
@@ -87,6 +106,36 @@ func TestProductionGoAndWorkflowDoNotNameConfiguredGroups(t *testing.T) {
 		for _, forbidden := range []string{group.Control.ID, group.Worker.ID} {
 			if strings.Contains(string(workflow), forbidden) {
 				t.Fatalf("workflow contains configured group %q", forbidden)
+			}
+		}
+	}
+	for _, group := range edge.Groups {
+		for _, component := range []Component{group.Control, group.Worker} {
+			raw, readErr := os.ReadFile(filepath.Join("../..", component.ManifestPath))
+			if readErr != nil {
+				t.Fatalf("read %s shared manifest: %v", component.ID, readErr)
+			}
+			materialized, materializeErr := MaterializeManifestTemplate(raw, component.ManifestVariables)
+			if materializeErr != nil {
+				t.Fatalf("materialize %s: %v", component.ID, materializeErr)
+			}
+			identities, identityErr := ResourceSetIdentities(materialized)
+			if identityErr != nil {
+				t.Fatalf("decode %s identities: %v", component.ID, identityErr)
+			}
+			foundPrimary := false
+			for _, identity := range identities {
+				foundPrimary = foundPrimary || (identity.APIVersion == component.Workload.APIVersion && identity.Kind == component.Workload.Kind &&
+					identity.Namespace == component.Workload.Namespace && identity.Name == component.Workload.Name)
+			}
+			if !foundPrimary {
+				t.Fatalf("%s shared manifest omitted primary workload: %+v", component.ID, identities)
+			}
+			for _, other := range edge.Groups {
+				if other.ID != group.ID && (strings.Contains(string(materialized), other.GroupID) ||
+					strings.Contains(string(materialized), other.Control.Workload.Name) || strings.Contains(string(materialized), other.Worker.Workload.Name)) {
+					t.Fatalf("%s materialized resources contain %s identity", component.ID, other.ID)
+				}
 			}
 		}
 	}
@@ -132,6 +181,16 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	if err := ValidateEdgeGroupRegistryUpdate(nil, initial, Plan{}, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "later production atom") {
 		t.Fatalf("initial registry bundled a production intent: %v", err)
 	}
+	pendingTemplate := initial
+	pendingTemplate.Groups = append([]EdgeGroup(nil), initial.Groups...)
+	pendingTemplate.Groups[0].Control.ManifestPath = "internal/edgecontrol/component/resources.authority.group.json"
+	pendingTemplate.Groups[0].Control.ManifestVariables = map[string]string{"CONTROL_NAME": "edge-control-alpha"}
+	if err := ValidateEdgeGroupRegistryUpdate(&initial, pendingTemplate, Plan{}, []string{"deploy/releases/edge-groups.json", pendingTemplate.Groups[0].Control.ManifestPath}); err != nil {
+		t.Fatalf("pending template configuration update: %v", err)
+	}
+	if err := ValidateEdgeGroupRegistryUpdate(&initial, pendingTemplate, Plan{}, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "unselected component") {
+		t.Fatalf("pending template update smuggled a production intent: %v", err)
+	}
 
 	next := initial
 	next.Groups = append([]EdgeGroup(nil), initial.Groups...)
@@ -160,6 +219,20 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	}
 }
 
+func TestPendingSharedEdgeManifestTemplateIsConfigurationOnly(t *testing.T) {
+	base := Registry{APIVersion: RegistryAPIVersion, Kind: RegistryKind, Components: []Component{
+		edgeGroupFixture("gamma", "edge-group-metro-gamma").Control,
+	}}
+	base.Components[0].MigrationState = "pending"
+	plan, err := BuildPlan(base, testSHA1, testSHA2, []string{base.Components[0].ManifestPath})
+	if err != nil || len(plan.Releases) != 0 {
+		t.Fatalf("pending shared template selected production: plan=%+v err=%v", plan, err)
+	}
+	if _, err := BuildPlan(base, testSHA1, testSHA2, []string{"internal/edgecontrol/authority_runtime.go"}); err == nil || !strings.Contains(err.Error(), "missing same-commit production intent") {
+		t.Fatalf("pending product source changed without an intent: %v", err)
+	}
+}
+
 func edgeGroupFixture(id, groupID string) EdgeGroup {
 	controlName := "edge-control-" + id
 	frontName := "edge-" + id + "-front"
@@ -167,7 +240,13 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 	workerBName := "edge-" + id + "-worker-b"
 	control := Component{
 		ID: "edge-control-" + id, Family: "edge",
-		IntentPath: "deploy/releases/edge-control-" + id + "/intent.json", ManifestPath: "internal/edgecontrol/component/resources.authority." + id + ".json",
+		IntentPath: "deploy/releases/edge-control-" + id + "/intent.json", ManifestPath: "internal/edgecontrol/component/resources.authority.group.json",
+		ManifestVariables: map[string]string{
+			"API_ROUTE_CA_SECRET": "fugue-api-route-intent-ca-" + id, "CONTROL_NAME": controlName, "GROUP": id, "GROUP_ID": groupID,
+			"INVENTORY_WRITER_SECRET": "fugue-edge-control-inventory-writer-" + id, "READER_SECRET": "fugue-edge-control-reader-" + id,
+			"RECOVERY_SECRET": "fugue-edge-control-recovery-" + id, "ROUTE_INTENT_IDENTITY_SECRET": "fugue-edge-control-route-intent-identity-" + id,
+			"SIGNING_SECRET": "fugue-edge-control-signing-" + id,
+		},
 		SourceRoots: []string{"Dockerfile.edge-control", "cmd/fugue-edge-control", "internal/edgecontrol"},
 		Artifact:    Artifact{Repository: "ghcr.io/example/fugue-edge-control", Dockerfile: "Dockerfile.edge-control", Context: ".", BuildPackage: "./cmd/fugue-edge-control"},
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", FieldManager: "fugue-edge-control-" + id + "-declarative", Replicas: 1, RolloutMode: "recreate"},
@@ -176,7 +255,13 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 	}
 	worker := Component{
 		ID: "edge-worker-" + id, Family: "edge",
-		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer." + id + ".json", BootstrapLKGPath: "deploy/releases/edge-worker-" + id + "/lkg.json",
+		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer.group.json", BootstrapLKGPath: "deploy/releases/edge-worker-" + id + "/lkg.json",
+		ManifestVariables: map[string]string{
+			"API_SECRET": "fugue-edge-worker-api-" + id, "CONTROL_NAME": controlName, "FRONT_NAME": frontName, "GROUP": id, "GROUP_ID": groupID,
+			"INVENTORY_IDENTITY_A_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-a", "INVENTORY_IDENTITY_B_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-b",
+			"READER_SECRET": "fugue-edge-worker-reader-" + id, "SERVICE_ACCOUNT": "edge-worker-" + id, "VERIFIER_SECRET": "fugue-edge-worker-verifier-" + id,
+			"WORKER_A_NAME": workerAName, "WORKER_B_NAME": workerBName,
+		},
 		HeterogeneousBootstrapLKG: true,
 		SourceRoots:               []string{"Dockerfile.edge", "cmd/fugue-edge", "internal/edge"},
 		Artifact:                  Artifact{Repository: "ghcr.io/example/fugue-edge", Dockerfile: "Dockerfile.edge", Context: ".", BuildPackage: "./cmd/fugue-edge"},

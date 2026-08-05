@@ -1,0 +1,598 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "kind": "ComponentResourceSet",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "@@CONTROL_NAME@@",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "annotations": {
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-manifest-state": "materialization-ready"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "revisionHistoryLimit": 2,
+        "strategy": {
+          "type": "Recreate"
+        },
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "fugue-edge-control",
+            "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+            "app.kubernetes.io/component": "edge-control",
+            "fugue.io/edge-group-id": "@@GROUP_ID@@"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "fugue-edge-control",
+              "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+              "app.kubernetes.io/component": "edge-control",
+              "fugue.io/edge-group-id": "@@GROUP_ID@@"
+            },
+            "annotations": {
+              "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+              "fugue.pro/edge-control-manifest-state": "materialization-ready",
+              "fugue.pro/edge-control-authority": "group-scoped",
+              "fugue.pro/edge-control-mode": "group-authority",
+              "fugue.pro/edge-control-publication": "group-cas"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "@@CONTROL_NAME@@",
+            "automountServiceAccountToken": false,
+            "enableServiceLinks": false,
+            "terminationGracePeriodSeconds": 20,
+            "nodeSelector": {
+              "fugue.io/location-country-code": "@@GROUP@@",
+              "fugue.io/role.edge": "true",
+              "fugue.io/schedulable": "true"
+            },
+            "securityContext": {
+              "runAsNonRoot": true,
+              "runAsUser": 65532,
+              "runAsGroup": 65532,
+              "fsGroup": 65532,
+              "fsGroupChangePolicy": "OnRootMismatch",
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "edge-control",
+                "image": "fugue-artifact://edge-control",
+                "imagePullPolicy": "IfNotPresent",
+                "ports": [
+                  {
+                    "name": "health",
+                    "containerPort": 8092,
+                    "protocol": "TCP"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_BIND_ADDR",
+                    "value": "0.0.0.0:8092"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_SHUTDOWN_TIMEOUT",
+                    "value": "10s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_RUNTIME_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR",
+                    "value": "/var/lib/fugue-edge-control"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL",
+                    "value": "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE",
+                    "value": "/var/run/secrets/fugue-edge-control/route-intent/issuer.json"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID",
+                    "value": "@@GROUP_ID@@"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE",
+                    "value": "/var/run/secrets/fugue-edge-control/route-intent-ca/ca.crt"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME",
+                    "value": "fugue-api-tls.fugue-system.svc"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/inventory-writer"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS",
+                    "value": "@@GROUP_ID@@"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_AUTHORITY_RECONCILE_INTERVAL",
+                    "value": "30s"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_SIGNING_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/group-signing"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_READER_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/group-readers"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_RECOVERY_KEYRING_DIR",
+                    "value": "/var/run/secrets/fugue-edge-control/group-recovery"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY",
+                    "value": "30m"
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "authority-state",
+                    "mountPath": "/var/lib/fugue-edge-control"
+                  },
+                  {
+                    "name": "route-intent-identity",
+                    "mountPath": "/var/run/secrets/fugue-edge-control/route-intent",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "route-intent-ca",
+                    "mountPath": "/var/run/secrets/fugue-edge-control/route-intent-ca",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "inventory-writer-keyring",
+                    "mountPath": "/var/run/secrets/fugue-edge-control/inventory-writer",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "group-signing-keyring",
+                    "mountPath": "/var/run/secrets/fugue-edge-control/group-signing",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "group-reader-keyring",
+                    "mountPath": "/var/run/secrets/fugue-edge-control/group-readers",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "group-recovery-keyring",
+                    "mountPath": "/var/run/secrets/fugue-edge-control/group-recovery",
+                    "readOnly": true
+                  }
+                ],
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "privileged": false,
+                  "readOnlyRootFilesystem": true,
+                  "runAsNonRoot": true,
+                  "runAsUser": 65532,
+                  "runAsGroup": 65532,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  }
+                },
+                "startupProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 2,
+                  "failureThreshold": 15
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 10,
+                  "timeoutSeconds": 2,
+                  "failureThreshold": 3
+                },
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/readyz",
+                    "port": "health"
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 2,
+                  "failureThreshold": 2
+                },
+                "resources": {
+                  "requests": {
+                    "cpu": "50m",
+                    "memory": "128Mi"
+                  },
+                  "limits": {
+                    "cpu": "500m",
+                    "memory": "512Mi"
+                  }
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "authority-state",
+                "persistentVolumeClaim": {
+                  "claimName": "@@CONTROL_NAME@@-state"
+                }
+              },
+              {
+                "name": "route-intent-identity",
+                "secret": {
+                  "secretName": "@@ROUTE_INTENT_IDENTITY_SECRET@@",
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "issuer.json",
+                      "path": "issuer.json"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "route-intent-ca",
+                "secret": {
+                  "secretName": "@@API_ROUTE_CA_SECRET@@",
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "ca.crt",
+                      "path": "ca.crt"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "inventory-writer-keyring",
+                "secret": {
+                  "secretName": "@@INVENTORY_WRITER_SECRET@@",
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "@@GROUP_ID@@.json"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "group-signing-keyring",
+                "secret": {
+                  "secretName": "@@SIGNING_SECRET@@",
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "@@GROUP_ID@@.json"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "group-reader-keyring",
+                "secret": {
+                  "secretName": "@@READER_SECRET@@",
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "@@GROUP_ID@@.json"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "group-recovery-keyring",
+                "secret": {
+                  "secretName": "@@RECOVERY_SECRET@@",
+                  "defaultMode": 384,
+                  "items": [
+                    {
+                      "key": "keyring.json",
+                      "path": "@@GROUP_ID@@.json"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "metadata": {
+        "name": "@@CONTROL_NAME@@",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "annotations": {
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-manifest-state": "materialization-ready"
+        }
+      },
+      "spec": {
+        "podSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "fugue-edge-control",
+            "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+            "app.kubernetes.io/component": "edge-control",
+            "fugue.io/edge-group-id": "@@GROUP_ID@@"
+          }
+        },
+        "policyTypes": [
+          "Ingress",
+          "Egress"
+        ],
+        "ingress": [
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-inventory-writer": "true",
+                    "fugue.io/edge-group-id": "@@GROUP_ID@@"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 8092
+              }
+            ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-client": "true",
+                    "fugue.io/edge-group-id": "@@GROUP_ID@@"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 8092
+              }
+            ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-recovery-client": "true",
+                    "fugue.io/edge-group-id": "@@GROUP_ID@@"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 8092
+              }
+            ]
+          }
+        ],
+        "egress": [
+          {
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-control-route-intent-tls": "true"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 8443
+              }
+            ]
+          },
+          {
+            "to": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "kube-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "k8s-app": "kube-dns"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "UDP",
+                "port": 53
+              },
+              {
+                "protocol": "TCP",
+                "port": 53
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "policy/v1",
+      "kind": "PodDisruptionBudget",
+      "metadata": {
+        "name": "@@CONTROL_NAME@@",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "annotations": {
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-manifest-state": "materialization-ready"
+        }
+      },
+      "spec": {
+        "minAvailable": 1,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/name": "fugue-edge-control",
+            "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+            "app.kubernetes.io/component": "edge-control",
+            "fugue.io/edge-group-id": "@@GROUP_ID@@"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "PersistentVolumeClaim",
+      "metadata": {
+        "name": "@@CONTROL_NAME@@-state",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "annotations": {
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-manifest-state": "materialization-ready",
+          "fugue.pro/edge-control-state-policy": "preserve",
+          "fugue.pro/release-retain-on-rollback": "true"
+        }
+      },
+      "spec": {
+        "accessModes": [
+          "ReadWriteOnce"
+        ],
+        "resources": {
+          "requests": {
+            "storage": "1Gi"
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "@@CONTROL_NAME@@",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "annotations": {
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-manifest-state": "materialization-ready"
+        }
+      },
+      "spec": {
+        "type": "ClusterIP",
+        "selector": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "port": 8092,
+            "targetPort": "health",
+            "protocol": "TCP"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "@@CONTROL_NAME@@",
+        "namespace": "fugue-system",
+        "labels": {
+          "app.kubernetes.io/name": "fugue-edge-control",
+          "app.kubernetes.io/instance": "@@CONTROL_NAME@@",
+          "app.kubernetes.io/component": "edge-control",
+          "fugue.io/edge-group-id": "@@GROUP_ID@@"
+        },
+        "annotations": {
+          "fugue.pro/edge-control-resource-set": "edge-control-static-resources/v1",
+          "fugue.pro/edge-control-manifest-state": "materialization-ready"
+        }
+      },
+      "automountServiceAccountToken": false
+    }
+  ]
+}

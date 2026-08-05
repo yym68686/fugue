@@ -198,6 +198,10 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 				return err
 			}
 			if string(priorJSON) != string(nextJSON) && selected != pair.id {
+				_, intentChanged := changed[pair.next.IntentPath]
+				if selected == "" && pair.previous.MigrationState == "pending" && pair.next.MigrationState == "pending" && !intentChanged {
+					continue
+				}
 				return fmt.Errorf("edge group registry changed unselected component %q", pair.id)
 			}
 		}

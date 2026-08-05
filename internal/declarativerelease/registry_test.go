@@ -172,6 +172,10 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s manifest: %v", component.ID, err)
 		}
+		manifestRaw, err = MaterializeManifestTemplate(manifestRaw, component.ManifestVariables)
+		if err != nil {
+			t.Fatalf("materialize %s manifest: %v", component.ID, err)
+		}
 		resourceSet, err := DecodeResourceSet(bytes.NewReader(manifestRaw))
 		if err != nil {
 			t.Fatalf("decode %s manifest: %v", component.ID, err)

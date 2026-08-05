@@ -395,26 +395,31 @@ func runPrepare(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	manifestFile, err := os.Open(release.ManifestPath)
+	manifestRaw, err := os.ReadFile(release.ManifestPath)
+	if err != nil {
+		return err
+	}
+	manifestRaw, err = declarativerelease.MaterializeManifestTemplate(manifestRaw, release.ManifestVariables)
 	if err != nil {
 		return err
 	}
 	lkgManifest, lkgErr := loadLKGManifest(release)
 	if lkgErr != nil {
-		_ = manifestFile.Close()
 		return lkgErr
+	}
+	if lkgManifest != nil && release.MigrationState != "adopting" {
+		lkgManifest, err = declarativerelease.MaterializeManifestTemplate(lkgManifest, release.ManifestVariables)
+		if err != nil {
+			return err
+		}
 	}
 	var lkgReader io.Reader
 	if lkgManifest != nil {
 		lkgReader = bytes.NewReader(lkgManifest)
 	}
-	rendered, renderErr := declarativerelease.RenderManifests(plan, args[2], receipt, manifestFile, lkgReader)
-	closeManifestErr := manifestFile.Close()
+	rendered, renderErr := declarativerelease.RenderManifests(plan, args[2], receipt, bytes.NewReader(manifestRaw), lkgReader)
 	if renderErr != nil {
 		return renderErr
-	}
-	if closeManifestErr != nil {
-		return closeManifestErr
 	}
 	cluster, err := newKubectlCluster()
 	if err != nil {

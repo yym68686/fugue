@@ -28,12 +28,14 @@ const (
 )
 
 var (
-	componentIDPattern  = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
-	edgeGroupIDPattern  = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
-	shaPattern          = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	digestPattern       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	repositoryPattern   = regexp.MustCompile(`^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$`)
-	fieldManagerPattern = regexp.MustCompile(
+	componentIDPattern           = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
+	edgeGroupIDPattern           = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	shaPattern                   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	digestPattern                = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	repositoryPattern            = regexp.MustCompile(`^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$`)
+	manifestVariableNamePattern  = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	manifestVariableValuePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+	fieldManagerPattern          = regexp.MustCompile(
 		`^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$`,
 	)
 )
@@ -55,6 +57,7 @@ type Component struct {
 	Family                    string             `json:"family"`
 	IntentPath                string             `json:"intentPath"`
 	ManifestPath              string             `json:"manifestPath"`
+	ManifestVariables         map[string]string  `json:"manifestVariables,omitempty"`
 	BootstrapLKGPath          string             `json:"bootstrapLkgPath,omitempty"`
 	HeterogeneousBootstrapLKG bool               `json:"heterogeneousBootstrapLkg,omitempty"`
 	SourceRoots               []string           `json:"sourceRoots"`
@@ -188,6 +191,7 @@ type PlanRelease struct {
 	ExpectedPreviousOCIRevision string             `json:"expectedPreviousOciRevision"`
 	ExpectedPreviousImageDigest string             `json:"expectedPreviousImageDigest"`
 	ManifestPath                string             `json:"manifestPath"`
+	ManifestVariables           map[string]string  `json:"manifestVariables,omitempty"`
 	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
 	HeterogeneousBootstrapLKG   bool               `json:"heterogeneousBootstrapLkg,omitempty"`
 	RetrySameLKG                bool               `json:"retrySameLkg,omitempty"`
@@ -316,6 +320,11 @@ func (component Component) Validate() error {
 	}
 	if component.HeterogeneousBootstrapLKG && (component.BootstrapLKGPath == "" || component.Transition == nil || component.Transition.Type != "edge-group-ab") {
 		return fmt.Errorf("component %q heterogeneous bootstrap LKG requires an edge-group transition", component.ID)
+	}
+	for key, value := range component.ManifestVariables {
+		if !manifestVariableNamePattern.MatchString(key) || !manifestVariableValuePattern.MatchString(value) {
+			return fmt.Errorf("component %q manifest variable %q is invalid", component.ID, key)
+		}
 	}
 	if component.Artifact.Context != "." {
 		if _, err := normalizeRepositoryPath(component.Artifact.Context); err != nil {
@@ -618,6 +627,12 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 				continue
 			}
 			if changedPath == component.ManifestPath {
+				// Pending components have no production writer yet. Their shared
+				// manifest template is configuration-only until the same atom
+				// advances the component to adopting and changes its intent.
+				if component.MigrationState == "pending" {
+					continue
+				}
 				selectedPaths = append(selectedPaths, changedPath)
 				continue
 			}
@@ -753,6 +768,10 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			return Plan{}, fmt.Errorf("component %q adopting predecessor has no explicit ownership adoption", component.ID)
 		}
 		release.ManifestPath = component.ManifestPath
+		release.ManifestVariables = make(map[string]string, len(component.ManifestVariables))
+		for key, value := range component.ManifestVariables {
+			release.ManifestVariables[key] = value
+		}
 		release.BootstrapLKGPath = component.BootstrapLKGPath
 		release.HeterogeneousBootstrapLKG = component.HeterogeneousBootstrapLKG
 		release.RetrySameLKG = retrySameLKG
