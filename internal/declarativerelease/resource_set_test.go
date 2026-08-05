@@ -2,6 +2,7 @@ package declarativerelease
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 )
 
@@ -70,6 +71,7 @@ func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *test
 	for _, removed := range [][]byte{
 		[]byte(`app.kubernetes.io/managed-by`),
 		[]byte(`fugue.pro/artifact-receipt-digest`),
+		[]byte(`fugue.pro/oci-revision`),
 		[]byte(`fugue.pro/production-config-sha`),
 		[]byte(`fugue.pro/release-plan-digest`),
 	} {
@@ -79,13 +81,79 @@ func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *test
 	}
 	for _, retained := range [][]byte{
 		[]byte(`stable.example/key`),
-		[]byte(`fugue.pro/oci-revision`),
 		[]byte(`fugue.pro/source-commit`),
 		[]byte(`"replicas":2`),
 		[]byte(`ghcr.io/example/fugue-api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`),
 	} {
 		if !bytes.Contains(witness, retained) {
 			t.Fatalf("operational predecessor field %q was dropped: %s", retained, witness)
+		}
+	}
+}
+
+func TestPredecessorConvergenceAcceptsLegacyTelemetryWithoutRendererAnnotations(t *testing.T) {
+	const source = "5a3b09c571601993367c50561b257dd6b9e743ca"
+	const image = "ghcr.io/yym68686/fugue-telemetry-agent@sha256:6773f84b084d6808e147cea643becc90ece225972032cf6f7fd8b58988570700"
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{"fugue.pro/artifact-receipt-digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/production-config-sha":"dbbe33daee539f0c38f94965177c2524889adaf5","fugue.pro/release-plan-digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","fugue.pro/telemetry-ownership":"declarative"},"labels":{"app.kubernetes.io/component":"telemetry-agent","app.kubernetes.io/instance":"fugue","app.kubernetes.io/managed-by":"fugue-telemetry-declarative","app.kubernetes.io/name":"fugue"},"name":"fugue-fugue-telemetry-agent","namespace":"fugue-system"},"spec":{"replicas":1,"revisionHistoryLimit":3,"selector":{"matchLabels":{"app.kubernetes.io/component":"telemetry-agent","app.kubernetes.io/instance":"fugue","app.kubernetes.io/name":"fugue"}},"strategy":{"rollingUpdate":{"maxSurge":"25%","maxUnavailable":"25%"},"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"` + source + `","fugue.pro/production-config-sha":"dbbe33daee539f0c38f94965177c2524889adaf5","fugue.pro/source-commit":"` + source + `"},"labels":{"app.kubernetes.io/component":"telemetry-agent","app.kubernetes.io/instance":"fugue","app.kubernetes.io/name":"fugue"}},"spec":{"containers":[{"env":[{"name":"FUGUE_OBSERVABILITY_BATCH_SIZE","value":"512"},{"name":"FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES","value":"134217728"}],"image":"` + image + `","imagePullPolicy":"IfNotPresent","name":"telemetry-agent"}],"serviceAccountName":"fugue-fugue-sa","terminationGracePeriodSeconds":20}}}}],"kind":"ComponentResourceSet"}`)
+	live := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"annotations": map[string]any{"fugue.pro/telemetry-ownership": "declarative", "helm.sh/resource-policy": "keep"},
+			"labels":      map[string]any{"app.kubernetes.io/component": "telemetry-agent", "app.kubernetes.io/instance": "fugue", "app.kubernetes.io/managed-by": "fugue-telemetry-declarative", "app.kubernetes.io/name": "fugue", "helm.sh/chart": "fugue-0.1.0"},
+			"name":        "fugue-fugue-telemetry-agent", "namespace": "fugue-system", "uid": "c456dfa2-f54a-4053-b832-4b205d1dcfcd", "resourceVersion": "68861966", "generation": 423,
+		},
+		"spec": map[string]any{
+			"replicas": 1.0, "revisionHistoryLimit": 3.0,
+			"selector": map[string]any{"matchLabels": map[string]any{"app.kubernetes.io/component": "telemetry-agent", "app.kubernetes.io/instance": "fugue", "app.kubernetes.io/name": "fugue"}},
+			"strategy": map[string]any{"rollingUpdate": map[string]any{"maxSurge": "25%", "maxUnavailable": "25%"}, "type": "RollingUpdate"},
+			"template": map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": source}, "labels": map[string]any{"app.kubernetes.io/component": "telemetry-agent", "app.kubernetes.io/instance": "fugue", "app.kubernetes.io/name": "fugue"}},
+				"spec":     map[string]any{"containers": []any{map[string]any{"env": []any{map[string]any{"name": "FUGUE_OBSERVABILITY_BATCH_SIZE", "value": "512"}, map[string]any{"name": "FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES", "value": "134217728"}}, "image": image, "imagePullPolicy": "IfNotPresent", "name": "telemetry-agent"}}, "serviceAccountName": "fugue-fugue-sa", "terminationGracePeriodSeconds": 20.0},
+			},
+		},
+	}
+	liveRaw, err := CanonicalJSON(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(liveRaw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&live); err != nil {
+		t.Fatal(err)
+	}
+	witnessRaw, err := PredecessorConvergenceManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessSet, err := DecodeResourceSet(bytes.NewReader(witnessRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	witness := witnessSet.Items[0]
+	if !ResourceDesiredSubset(witness, live) {
+		t.Fatal("real legacy Telemetry LKG did not satisfy the normalized predecessor witness")
+	}
+	withRendererAnnotation := deepCopyMap(witness)
+	withRendererAnnotation["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)["fugue.pro/oci-revision"] = source
+	if ResourceDesiredSubset(withRendererAnnotation, live) {
+		t.Fatal("gen7 renderer-owned OCI annotation unexpectedly matched the legacy LKG")
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"image": func(value map[string]any) {
+			value["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"] = "ghcr.io/yym68686/fugue-telemetry-agent@sha256:" + string(bytes.Repeat([]byte{'0'}, 64))
+		},
+		"source": func(value map[string]any) {
+			value["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)["fugue.pro/source-commit"] = string(bytes.Repeat([]byte{'0'}, 40))
+		},
+		"replicas": func(value map[string]any) { value["spec"].(map[string]any)["replicas"] = 2.0 },
+		"env": func(value map[string]any) {
+			value["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["env"].([]any)[0].(map[string]any)["value"] = "64"
+		},
+	} {
+		drifted := deepCopyMap(live)
+		mutate(drifted)
+		if ResourceDesiredSubset(witness, drifted) {
+			t.Fatalf("%s drift was accepted by predecessor convergence", name)
 		}
 	}
 }

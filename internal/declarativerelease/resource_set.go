@@ -230,6 +230,7 @@ func PredecessorConvergenceManifest(manifest []byte) ([]byte, error) {
 				if templateMetadata, ok := template["metadata"].(map[string]any); ok {
 					if templateAnnotations, ok := templateMetadata["annotations"].(map[string]any); ok {
 						delete(templateAnnotations, "fugue.pro/production-config-sha")
+						delete(templateAnnotations, "fugue.pro/oci-revision")
 					}
 				}
 			}
