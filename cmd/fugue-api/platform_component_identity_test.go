@@ -86,6 +86,17 @@ func TestPlatformComponentIdentityKeyringUsesDedicatedRotatingKeys(t *testing.T)
 	}
 }
 
+func TestEdgeRouteIntentIdentityKeyringIsDedicated(t *testing.T) {
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY", "general-secret")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID", "general-key")
+	t.Setenv("FUGUE_EDGE_ROUTE_INTENT_IDENTITY_SIGNING_KEY", "route-secret")
+	t.Setenv("FUGUE_EDGE_ROUTE_INTENT_IDENTITY_SIGNING_KEY_ID", "route-key")
+	keyring := edgeRouteIntentIdentityKeyringFromEnv()
+	if keyring.ActiveKeyID != "route-key" || len(keyring.Keys) != 1 || keyring.Keys["route-key"] == "" || keyring.Keys["general-key"] != "" {
+		t.Fatalf("route intent keyring is not isolated: %+v", keyring)
+	}
+}
+
 func TestPlatformConsumerHeartbeatAuditKeyringIsDedicatedRotatableAndRevocable(t *testing.T) {
 	now := time.Date(2026, 7, 10, 9, 30, 0, 0, time.UTC)
 	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY", "widely-distributed-bundle-key")

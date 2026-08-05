@@ -100,6 +100,36 @@ func TestRequirePlatformComponentIsFailClosedWithoutKeyring(t *testing.T) {
 	}
 }
 
+func TestEdgeRouteIntentKeyringCannotAuthenticateTheGeneralComponentSurface(t *testing.T) {
+	t.Parallel()
+
+	routeKeyring := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "route-key", Keys: map[string]string{"route-key": "route-secret"}}
+	generalKeyring := platformComponentAuthTestKeyring()
+	now := time.Now().UTC()
+	token, err := platformcontrol.IssuePlatformComponentIdentity(routeKeyring, platformcontrol.PlatformComponentIdentityClaims{
+		CredentialID: "edge-control-route-intent-reader", Component: model.PlatformConsumerComponentEdgeControl,
+		NodeID: "edge-group-test", ScopeKey: "global", ArtifactKinds: []string{model.PlatformArtifactKindEdgeRouteIntent},
+	}, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := &Authenticator{PlatformComponentIdentityKeyring: generalKeyring, EdgeRouteIntentIdentityKeyring: routeKeyring}
+	request := func(handler http.Handler) int {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+	terminal := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	if got := request(authenticator.RequireEdgeRouteIntentComponent(terminal)); got != http.StatusNoContent {
+		t.Fatalf("route keyring rejected its endpoint: %d", got)
+	}
+	if got := request(authenticator.RequirePlatformComponent(terminal)); got != http.StatusUnauthorized {
+		t.Fatalf("route keyring escaped onto the general component surface: %d", got)
+	}
+}
+
 func platformComponentAuthTestKeyring() platformcontrol.PlatformComponentIdentityKeyring {
 	return platformcontrol.PlatformComponentIdentityKeyring{
 		ActiveKeyID: "component-key-1",

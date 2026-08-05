@@ -51,6 +51,7 @@ func main() {
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
 	authenticator.PlatformComponentIdentityKeyring = platformComponentIdentityKeyringFromEnv()
+	authenticator.EdgeRouteIntentIdentityKeyring = edgeRouteIntentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		DatabaseURL:                 cfg.DatabaseURL,
@@ -144,6 +145,22 @@ func main() {
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	edgeControlTLSConfig, err := edgeControlRouteIntentTLSConfigFromEnv(os.Getenv)
+	if err != nil {
+		logger.Fatalf("configure edge-control RouteIntent TLS: %v", err)
+	}
+	edgeControlTLSServer, edgeControlTLSListener, err := newEdgeControlRouteIntentTLSServer(edgeControlTLSConfig, server.Handler())
+	if err != nil {
+		logger.Fatalf("configure edge-control RouteIntent TLS listener: %v", err)
+	}
+	if edgeControlTLSServer != nil {
+		go func() {
+			logger.Printf("fugue-api edge-control RouteIntent TLS listening on %s", edgeControlTLSConfig.BindAddr)
+			if err := edgeControlTLSServer.Serve(edgeControlTLSListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Fatalf("edge-control RouteIntent TLS serve: %v", err)
+			}
+		}()
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -159,6 +176,11 @@ func main() {
 		if metricsServer != nil {
 			if err := metricsServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Printf("metrics shutdown error: %v", err)
+			}
+		}
+		if edgeControlTLSServer != nil {
+			if err := edgeControlTLSServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Printf("edge-control RouteIntent TLS shutdown error: %v", err)
 			}
 		}
 	}()

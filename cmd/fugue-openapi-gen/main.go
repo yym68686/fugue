@@ -177,6 +177,12 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 
 	auth := "none"
 	for _, requirement := range security {
+		if _, ok := requirement["EdgeRouteIntentComponentBearerAuth"]; ok {
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
+			}
+			auth = "edge-route-intent-component"
+		}
 		if _, ok := requirement["PlatformComponentBearerAuth"]; ok {
 			if auth != "none" {
 				return "", errors.New("cannot combine bearer auth schemes on the same operation")
@@ -225,6 +231,8 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 			handlerExpr = "s.auth.RequireNodeUpdater(" + handlerExpr + ")"
 		case "platform-component":
 			handlerExpr = "s.auth.RequirePlatformComponent(" + handlerExpr + ")"
+		case "edge-route-intent-component":
+			handlerExpr = "s.auth.RequireEdgeRouteIntentComponent(" + handlerExpr + ")"
 		}
 		fmt.Fprintf(&b, "\tmux.Handle(%q, %s)\n", route.Pattern, handlerExpr)
 	}

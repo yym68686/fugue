@@ -261,7 +261,7 @@ paths:
       tags: [Edge]
       x-fugue-handler: handleEdgeRouteIntents
       security:
-        - PlatformComponentBearerAuth: []
+        - EdgeRouteIntentComponentBearerAuth: []
       responses:
         '200':
           description: Successful response
@@ -10806,6 +10806,11 @@ components:
       scheme: bearer
       bearerFormat: fugue_pc_v1
       description: Short-lived, server-bound identity for Fugue platform components; tenant API keys are not accepted.
+    EdgeRouteIntentComponentBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: fugue_pc_v1
+      description: Short-lived Edge Control identity accepted only by the RouteIntent endpoint.
     EdgeToken:
       type: apiKey
       in: query

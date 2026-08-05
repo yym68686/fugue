@@ -18,7 +18,7 @@ func TestEdgeRouteIntentsRequireExactEdgeControlIdentity(t *testing.T) {
 
 	_, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	keyring := edgeRouteIntentTestKeyring()
-	server.auth.PlatformComponentIdentityKeyring = keyring
+	server.auth.EdgeRouteIntentIdentityKeyring = keyring
 
 	for _, test := range []struct {
 		name       string

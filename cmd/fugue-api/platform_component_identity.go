@@ -23,6 +23,14 @@ func platformComponentIdentityKeyringFromEnv() platformcontrol.PlatformComponent
 	)
 }
 
+func edgeRouteIntentIdentityKeyringFromEnv() platformcontrol.PlatformComponentIdentityKeyring {
+	return platformcontrol.DerivePlatformComponentIdentityKeyring(
+		strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_INTENT_IDENTITY_SIGNING_KEY")),
+		strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_INTENT_IDENTITY_SIGNING_KEY_ID")),
+		"", "", nil,
+	)
+}
+
 func platformConsumerHeartbeatAuditKeyringFromEnv() bundleauth.Keyring {
 	activeKey := strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY"))
 	activeKeyID := strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID"))

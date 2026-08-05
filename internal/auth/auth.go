@@ -25,6 +25,7 @@ type Authenticator struct {
 	BootstrapAdminKey                string
 	WorkloadIdentitySigningKey       string
 	PlatformComponentIdentityKeyring platformcontrol.PlatformComponentIdentityKeyring
+	EdgeRouteIntentIdentityKeyring   platformcontrol.PlatformComponentIdentityKeyring
 }
 
 func New(store *store.Store, bootstrapAdminKey string) *Authenticator {
@@ -98,8 +99,26 @@ func (a *Authenticator) RequireNodeUpdater(next http.Handler) http.Handler {
 }
 
 func (a *Authenticator) RequirePlatformComponent(next http.Handler) http.Handler {
+	var keyring platformcontrol.PlatformComponentIdentityKeyring
+	if a != nil {
+		keyring = a.PlatformComponentIdentityKeyring
+	}
+	return a.requirePlatformComponentWithKeyring(next, keyring)
+}
+
+// RequireEdgeRouteIntentComponent uses a distinct keyring whose credentials
+// cannot authenticate other platform-component endpoints.
+func (a *Authenticator) RequireEdgeRouteIntentComponent(next http.Handler) http.Handler {
+	var keyring platformcontrol.PlatformComponentIdentityKeyring
+	if a != nil {
+		keyring = a.EdgeRouteIntentIdentityKeyring
+	}
+	return a.requirePlatformComponentWithKeyring(next, keyring)
+}
+
+func (a *Authenticator) requirePlatformComponentWithKeyring(next http.Handler, keyring platformcontrol.PlatformComponentIdentityKeyring) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		claims, err := a.authenticatePlatformComponentRequest(r, time.Now().UTC())
+		claims, err := authenticatePlatformComponentRequest(r, keyring, time.Now().UTC())
 		if err != nil {
 			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -120,11 +139,15 @@ func PlatformComponentIdentityFromContext(ctx context.Context) (platformcontrol.
 }
 
 func (a *Authenticator) authenticatePlatformComponentRequest(r *http.Request, now time.Time) (platformcontrol.PlatformComponentIdentityClaims, error) {
+	return authenticatePlatformComponentRequest(r, a.PlatformComponentIdentityKeyring, now)
+}
+
+func authenticatePlatformComponentRequest(r *http.Request, keyring platformcontrol.PlatformComponentIdentityKeyring, now time.Time) (platformcontrol.PlatformComponentIdentityClaims, error) {
 	secret, err := bearerTokenFromRequest(r)
 	if err != nil {
 		return platformcontrol.PlatformComponentIdentityClaims{}, err
 	}
-	return platformcontrol.ParsePlatformComponentIdentity(a.PlatformComponentIdentityKeyring, secret, now)
+	return platformcontrol.ParsePlatformComponentIdentity(keyring, secret, now)
 }
 
 func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, error) {

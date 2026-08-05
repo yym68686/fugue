@@ -54,3 +54,16 @@ func TestRenderRoutesUsesPlatformComponentMiddleware(t *testing.T) {
 		t.Fatalf("generated route did not use platform component middleware:\n%s", rendered)
 	}
 }
+
+func TestRenderRoutesUsesDedicatedEdgeRouteIntentMiddleware(t *testing.T) {
+	t.Parallel()
+	security := openapi3.SecurityRequirements{openapi3.SecurityRequirement{"EdgeRouteIntentComponentBearerAuth": []string{}}}
+	auth, err := inferAuthKind(&openapi3.T{}, &openapi3.Operation{Security: &security})
+	if err != nil || auth != "edge-route-intent-component" {
+		t.Fatalf("infer dedicated route intent auth: %q %v", auth, err)
+	}
+	rendered, err := renderRoutesFile([]routeDefinition{{Method: "GET", Path: "/v1/edge/route-intents", Pattern: "GET /v1/edge/route-intents", OperationID: "edgeRouteIntents", HandlerName: "handleEdgeRouteIntents", Auth: auth}})
+	if err != nil || !strings.Contains(string(rendered), "s.auth.RequireEdgeRouteIntentComponent(http.HandlerFunc(s.handleEdgeRouteIntents))") {
+		t.Fatalf("dedicated route middleware was not generated: %v\n%s", err, rendered)
+	}
+}
