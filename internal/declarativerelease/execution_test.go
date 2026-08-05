@@ -13,6 +13,7 @@ type fakeCluster struct {
 	observations      []Observation
 	observationErrors []error
 	cas               []Observation
+	casManifests      [][]byte
 	degraded          []Observation
 	verifiedTargets   []TargetIdentity
 	verifyErrors      []error
@@ -47,6 +48,7 @@ func (fake *fakeCluster) Observe(context.Context, PlanRelease, TargetIdentity, [
 }
 
 func (fake *fakeCluster) ObserveCAS(ctx context.Context, release PlanRelease, manifest []byte) (Observation, error) {
+	fake.casManifests = append(fake.casManifests, append([]byte(nil), manifest...))
 	if len(fake.cas) == 0 {
 		return fake.Observe(ctx, release, TargetIdentity{}, manifest)
 	}
@@ -357,10 +359,30 @@ func TestExecuteAdoptsReviewedLKGFieldsBeforeOrdinaryForwardApply(t *testing.T) 
 	adopted.Resources[0].FieldManagers = []string{"fugue-api-declarative", "helm"}
 	fake.observations = []Observation{lkg}
 	fake.adoptions = []Observation{adopted}
+	fake.cas = []Observation{casOnlyObservation(lkg), casOnlyObservation(adopted)}
 	fake.health = []Observation{forward}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
-	if result.Status != "verified" || result.Reason != "forward-verified" || fake.dryRuns != 1 || fake.applies != 1 {
+	if result.Status != "verified" || result.Reason != "forward-verified" || fake.dryRuns != 1 || fake.applies != 1 ||
+		len(fake.casManifests) != 2 || !bytes.Equal(fake.casManifests[0], rendered.LKG) || !bytes.Equal(fake.casManifests[1], rendered.Forward) {
 		t.Fatalf("adoption did not converge through ordinary apply: result=%+v dryRuns=%d applies=%d", result, fake.dryRuns, fake.applies)
+	}
+}
+
+func TestForwardResourceCASExtensionAllowsOnlyAbsentNewResources(t *testing.T) {
+	base := casOnlyObservation(stableObservation("1", "10", "ghcr.io/example/api@"+testDigest, testSHA1))
+	extra := ResourceObservation{Identity: ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "api"}}
+	expanded := base
+	expanded.Resources = append(append([]ResourceObservation(nil), base.Resources...), extra)
+	if !expanded.ExtendsResourceCAS(base) {
+		t.Fatal("absent forward-only resource was rejected")
+	}
+	expanded.Resources[len(expanded.Resources)-1] = ResourceObservation{
+		Identity: extra.Identity, Present: true, UID: "new", ResourceVersion: "11", Generation: 0,
+		ObjectDigest:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		FieldManagers: []string{"other"},
+	}
+	if expanded.ExtendsResourceCAS(base) {
+		t.Fatal("pre-existing forward-only resource was accepted")
 	}
 }
 

@@ -519,6 +519,9 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	observationManifest := forwardManifest
+	if prepared.OwnershipAdoption != nil {
+		observationManifest = lkgManifest
+	}
 	var current Observation
 	if prepared.DegradedPredecessor {
 		if prepared.Prewrite.ImageRef == "" {
@@ -560,6 +563,14 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			return sealResult(result)
 		}
 		current = adopted
+		expanded, expandErr := cluster.ObserveCAS(ctx, release, forwardManifest)
+		if expandErr != nil || !expanded.ExtendsResourceCAS(adopted) {
+			result.Status = "recovery-required"
+			result.Reason = "post-adoption-forward-cas-drift"
+			result.Final = adopted
+			return sealResult(result)
+		}
+		current = expanded
 	}
 	if prepared.AlreadyConverged {
 		forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
@@ -611,7 +622,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 				observed, observeErr = cluster.ObserveDegraded(ctx, release, observationManifest)
 			}
 			unchanged = observeErr == nil && observed.SameSpecIdentity(prepared.Prewrite)
-		} else {
+		} else if prepared.OwnershipAdoption == nil {
 			observed, observeErr = cluster.Observe(ctx, release, prepared.LKG, observationManifest)
 			unchanged = observeErr == nil && observed.SameCAS(prepared.Prewrite)
 		}
@@ -999,6 +1010,37 @@ func (observation Observation) SameResourceCAS(other Observation) bool {
 		}
 	}
 	return true
+}
+
+// ExtendsResourceCAS permits a forward manifest to add only resources that are
+// still absent after ownership adoption. Every bootstrap resource must retain
+// its exact post-adoption UID/RV/generation/object/manager identity.
+func (observation Observation) ExtendsResourceCAS(base Observation) bool {
+	if observation.Present != base.Present || observation.Primary != base.Primary ||
+		observation.UID != base.UID || observation.ResourceVersion != base.ResourceVersion ||
+		observation.Generation != base.Generation || len(observation.Resources) < len(base.Resources) {
+		return false
+	}
+	baseResources := make(map[ResourceIdentity]ResourceObservation, len(base.Resources))
+	for _, resource := range base.Resources {
+		baseResources[resource.Identity] = resource
+	}
+	for _, current := range observation.Resources {
+		prior, exists := baseResources[current.Identity]
+		if !exists {
+			if current.Present {
+				return false
+			}
+			continue
+		}
+		if current.Present != prior.Present || current.UID != prior.UID || current.ResourceVersion != prior.ResourceVersion ||
+			current.Generation != prior.Generation || current.ObjectDigest != prior.ObjectDigest ||
+			current.RetainOnRollback != prior.RetainOnRollback || !equalStrings(current.FieldManagers, prior.FieldManagers) {
+			return false
+		}
+		delete(baseResources, current.Identity)
+	}
+	return len(baseResources) == 0
 }
 
 // SameSpecIdentity permits status-only resourceVersion movement while binding
