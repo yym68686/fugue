@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -516,6 +520,39 @@ func TestBootstrapHealthKeepsReadinessButNotForwardAuthorityOrSoak(t *testing.T)
 	serviceProbe := declarativerelease.HealthProbe{Type: "service-http", Expected: "ok"}
 	if got := probeExpectedBody(serviceProbe, true); got != "ok" {
 		t.Fatalf("bootstrap weakened unrelated probe: %q", got)
+	}
+}
+
+func TestPodHTTPUsesBoundReadyPodIPAndNamedPort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/readyz" {
+			t.Fatalf("unexpected health path: %s", request.URL.Path)
+		}
+		_, _ = response.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+	host, portRaw, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := podFixture("edge-front-1", "pod-uid", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	pod["spec"] = map[string]any{"containers": []any{map[string]any{"name": "edge-front", "ports": []any{map[string]any{"name": "health", "containerPort": port}}}}}
+	pod["status"].(map[string]any)["podIP"] = host
+	endpoints, err := podHTTPEndpointsFromJSON(mustJSON(t, map[string]any{"items": []any{pod}}), "edge-front", "health")
+	if err != nil || len(endpoints) != 1 || endpoints[0].Name != "edge-front-1" || endpoints[0].IP != host || endpoints[0].Port != port {
+		t.Fatalf("parse bound pod endpoint: endpoints=%+v err=%v", endpoints, err)
+	}
+	body, err := readPodHTTP(context.Background(), endpoints[0], "/readyz")
+	if err != nil || string(body) != `{"status":"ok"}` {
+		t.Fatalf("direct pod health: body=%q err=%v", body, err)
+	}
+	pod["status"].(map[string]any)["podIP"] = "not-an-ip"
+	if _, err := podHTTPEndpointsFromJSON(mustJSON(t, map[string]any{"items": []any{pod}}), "edge-front", "health"); err == nil {
+		t.Fatal("invalid pod IP was accepted")
 	}
 }
 

@@ -72,6 +72,8 @@ type edgeGroupPod struct {
 	UID                          string
 	ResourceVersion              string
 	NodeName                     string
+	PodIP                        string
+	HealthPort                   int
 	SourceCommit                 string
 	ImageRef                     string
 	ImageID                      string
@@ -324,7 +326,7 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	frontHealth := make(map[string]edgeFrontHealth, len(front))
 	activeSlot := ""
 	for node, pod := range front {
-		health, healthErr := cluster.readEdgeFrontHealth(ctx, release.Workload.Namespace, pod.Name)
+		health, healthErr := cluster.readEdgeFrontHealth(ctx, pod)
 		if healthErr != nil {
 			return edgeGroupState{}, healthErr
 		}
@@ -367,9 +369,29 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPods(ctx context.Context, releas
 	if err != nil {
 		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
 	}
+	portName := "http"
+	if container == "edge-front" {
+		portName = "health"
+	}
+	endpoints, err := podHTTPEndpointsFromJSON(podsRaw, container, portName)
+	if err != nil {
+		return nil, fmt.Errorf("read DaemonSet/%s health endpoints: %w", name, err)
+	}
+	byName := make(map[string]podHTTPEndpoint, len(endpoints))
+	for _, endpoint := range endpoints {
+		byName[endpoint.Name] = endpoint
+	}
+	for node, pod := range pods {
+		endpoint, exists := byName[pod.Name]
+		if !exists {
+			return nil, fmt.Errorf("DaemonSet/%s pod health endpoint is absent", name)
+		}
+		pod.PodIP, pod.HealthPort = endpoint.IP, endpoint.Port
+		pods[node] = pod
+	}
 	if includeWorkerHealth {
 		for node, pod := range pods {
-			health, healthErr := cluster.readEdgeWorkerHealth(ctx, release.Workload.Namespace, pod.Name, groupID)
+			health, healthErr := cluster.readEdgeWorkerHealth(ctx, pod, groupID)
 			if healthErr != nil {
 				return nil, healthErr
 			}
@@ -475,8 +497,8 @@ func workloadLegacySource(raw []byte, containerName string) (string, error) {
 	return "", errors.New("legacy edge workload container is absent")
 }
 
-func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, namespace, pod, groupID string) (edgeWorkerHealth, error) {
-	body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:health/proxy/healthz", namespace, pod))
+func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, pod edgeGroupPod, groupID string) (edgeWorkerHealth, error) {
+	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/healthz")
 	if err != nil {
 		return edgeWorkerHealth{}, err
 	}
@@ -565,8 +587,8 @@ func (cluster *kubectlCluster) waitActiveEdgeWorkerAuthority(ctx context.Context
 	}
 }
 
-func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, namespace, pod string) (edgeFrontHealth, error) {
-	body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:health/proxy/readyz", namespace, pod))
+func (cluster *kubectlCluster) readEdgeFrontHealth(ctx context.Context, pod edgeGroupPod) (edgeFrontHealth, error) {
+	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/readyz")
 	if err != nil {
 		return edgeFrontHealth{}, err
 	}
@@ -694,7 +716,7 @@ func (cluster *kubectlCluster) waitFrontActivation(ctx context.Context, release 
 			health := make(map[string]edgeFrontHealth, len(front))
 			matched := true
 			for node, pod := range front {
-				item, healthErr := cluster.readEdgeFrontHealth(ctx, release.Workload.Namespace, pod.Name)
+				item, healthErr := cluster.readEdgeFrontHealth(ctx, pod)
 				if healthErr != nil || !item.ActivationPresent || item.ActiveSlot != slot || (source != "" && item.WorkerSourceCommit != source) || (digest != "" && item.WorkerImageDigest != digest) {
 					matched = false
 					break

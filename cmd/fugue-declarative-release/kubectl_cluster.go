@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -35,6 +38,12 @@ type kubectlCluster struct {
 type healthSoakTracker struct {
 	required time.Duration
 	since    time.Time
+}
+
+type podHTTPEndpoint struct {
+	Name string
+	IP   string
+	Port int
 }
 
 func (tracker *healthSoakTracker) observe(now time.Time, healthy bool) bool {
@@ -880,18 +889,17 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			if probe.Name != release.Workload.Name {
 				return "", fmt.Errorf("pod health probe %q does not name the primary workload", probe.Name)
 			}
-			pods, err := cluster.readyPodNames(ctx, release)
+			pods, err := cluster.readyPodHTTPEndpoints(ctx, release, probe.Port)
 			if err != nil {
 				return "", err
 			}
 			for _, pod := range pods {
-				resource := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s:%s/proxy%s", release.Workload.Namespace, pod, probe.Port, probe.Path)
-				body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", resource)
+				body, err := readPodHTTP(ctx, pod, probe.Path)
 				expected := probeExpectedBody(probe, bootstrap)
 				if err != nil || (expected != "" && !bytes.Contains(body, []byte(expected))) {
-					return "", fmt.Errorf("pod health probe %q failed", pod)
+					return "", fmt.Errorf("pod health probe %q failed", pod.Name)
 				}
-				evidence = append(evidence, probe.Type+":"+pod+":"+digestBytesLocal(body))
+				evidence = append(evidence, probe.Type+":"+pod.Name+":"+digestBytesLocal(body))
 			}
 		case "leader-lease":
 			leaseRaw, err := cluster.kubectlRun(ctx, nil, "get", "lease", probe.Name,
@@ -1181,7 +1189,7 @@ func workloadFromDeclaredResource(desired map[string]any, identity declarativere
 	return workload, nil
 }
 
-func (cluster *kubectlCluster) readyPodNames(ctx context.Context, release declarativerelease.PlanRelease) ([]string, error) {
+func (cluster *kubectlCluster) readyPodHTTPEndpoints(ctx context.Context, release declarativerelease.PlanRelease, portName string) ([]podHTTPEndpoint, error) {
 	workloadRaw, err := cluster.kubectlRun(ctx, nil, "get", strings.ToLower(release.Workload.Kind), release.Workload.Name,
 		"--namespace", release.Workload.Namespace, "--output", "json")
 	if err != nil {
@@ -1196,7 +1204,86 @@ func (cluster *kubectlCluster) readyPodNames(ctx context.Context, release declar
 	if err != nil {
 		return nil, err
 	}
-	return readyPodNamesFromJSON(podsRaw)
+	return podHTTPEndpointsFromJSON(podsRaw, release.Workload.Container, portName)
+}
+
+func podHTTPEndpointsFromJSON(raw []byte, containerName, portName string) ([]podHTTPEndpoint, error) {
+	value, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	items, ok := value["items"].([]any)
+	if !ok {
+		return nil, errors.New("pod list is invalid")
+	}
+	endpoints := make([]podHTTPEndpoint, 0, len(items))
+	for _, rawItem := range items {
+		pod, ok := rawItem.(map[string]any)
+		if !ok {
+			return nil, errors.New("pod item is invalid")
+		}
+		metadata := mapField(pod, "metadata")
+		status := mapField(pod, "status")
+		if metadata["deletionTimestamp"] != nil || !podReady(status) {
+			continue
+		}
+		name, ip := stringValue(metadata["name"]), stringValue(status["podIP"])
+		if name == "" || net.ParseIP(ip) == nil {
+			return nil, errors.New("ready pod HTTP identity is invalid")
+		}
+		port := 0
+		for _, rawContainer := range anySlice(mapField(pod, "spec")["containers"]) {
+			container, _ := rawContainer.(map[string]any)
+			if stringValue(container["name"]) != containerName {
+				continue
+			}
+			for _, rawPort := range anySlice(container["ports"]) {
+				candidate, _ := rawPort.(map[string]any)
+				if stringValue(candidate["name"]) == portName {
+					if port != 0 {
+						return nil, errors.New("ready pod HTTP port is ambiguous")
+					}
+					port = int(int64Value(candidate["containerPort"]))
+				}
+			}
+		}
+		if port < 1 || port > 65535 {
+			return nil, errors.New("ready pod HTTP port is invalid")
+		}
+		endpoints = append(endpoints, podHTTPEndpoint{Name: name, IP: ip, Port: port})
+	}
+	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].Name < endpoints[j].Name })
+	if len(endpoints) == 0 {
+		return nil, errors.New("no ready pod HTTP endpoints")
+	}
+	return endpoints, nil
+}
+
+func readPodHTTP(ctx context.Context, endpoint podHTTPEndpoint, path string) ([]byte, error) {
+	if endpoint.Name == "" || net.ParseIP(endpoint.IP) == nil || endpoint.Port < 1 || endpoint.Port > 65535 ||
+		!strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#") {
+		return nil, errors.New("pod HTTP endpoint is invalid")
+	}
+	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(endpoint.IP, strconv.Itoa(endpoint.Port))+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK || len(body) > 1<<20 {
+		return nil, errors.New("pod HTTP response is invalid")
+	}
+	return body, nil
 }
 
 func (cluster *kubectlCluster) kubectlRun(ctx context.Context, input []byte, arguments ...string) ([]byte, error) {
