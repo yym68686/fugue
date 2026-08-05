@@ -104,6 +104,26 @@ type inventoryReceiverDeploymentSpec struct {
 				Operator string `json:"operator"`
 				Value    string `json:"value,omitempty"`
 			} `json:"tolerations"`
+			InitContainers []struct {
+				Name            string   `json:"name"`
+				Image           string   `json:"image"`
+				Command         []string `json:"command"`
+				SecurityContext struct {
+					AllowPrivilegeEscalation bool `json:"allowPrivilegeEscalation"`
+					ReadOnlyRootFilesystem   bool `json:"readOnlyRootFilesystem"`
+					RunAsNonRoot             bool `json:"runAsNonRoot"`
+					RunAsUser                int  `json:"runAsUser"`
+					RunAsGroup               int  `json:"runAsGroup"`
+					Capabilities             struct {
+						Add  []string `json:"add"`
+						Drop []string `json:"drop"`
+					} `json:"capabilities"`
+				} `json:"securityContext"`
+				VolumeMounts []struct {
+					Name      string `json:"name"`
+					MountPath string `json:"mountPath"`
+				} `json:"volumeMounts"`
+			} `json:"initContainers"`
 			Containers []struct {
 				Name  string `json:"name"`
 				Image string `json:"image"`
@@ -142,7 +162,7 @@ func TestInventoryReceiverCandidateSelectsOneControlArtifactAndPhysicallyIsolate
 	if err := decodeStrictInventoryReceiverJSON(receiptRaw, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Schema != "edge-control-inventory-receiver-candidate/v1" || receipt.BaseCommit != "c51f6381d862326518bfd84ff167a72db320e597" ||
+	if receipt.Schema != "edge-control-inventory-receiver-candidate/v1" || receipt.BaseCommit != "b9b75596bb84ba701c843b1bafa961cadc74d223" ||
 		!receipt.ProductionMutationAllowed || receipt.AuthorityCutoverAllowedWithoutWorker ||
 		receipt.Artifact.Role != "fugue-artifact://edge-control" || receipt.Artifact.Repository != "ghcr.io/yym68686/fugue-edge-control" ||
 		receipt.Artifact.Dockerfile != "Dockerfile.edge-control" || receipt.Artifact.BuildPackage != "./cmd/fugue-edge-control" ||
@@ -234,6 +254,20 @@ func validateInventoryReceiverResourceSet(t *testing.T, raw []byte, groupID, cou
 			deployment.Template.Spec.Tolerations[0].Operator != "Exists" || deployment.Template.Spec.Tolerations[0].Effect != "NoSchedule" ||
 			deployment.Template.Spec.Tolerations[0].Value != "" {
 			t.Fatalf("%s deployment is not a group-local authority: %+v", groupID, deployment)
+		}
+		if len(deployment.Template.Spec.InitContainers) != 1 {
+			t.Fatalf("%s state permission initializer is missing", groupID)
+		}
+		initializer := deployment.Template.Spec.InitContainers[0]
+		if initializer.Name != "state-permissions" || initializer.Image != "fugue-artifact://edge-control" ||
+			len(initializer.Command) != 3 || initializer.Command[0] != "/bin/sh" || initializer.Command[1] != "-ceu" ||
+			initializer.Command[2] != "chmod 0770 /var/lib/fugue-edge-control && chown 65532:65532 /var/lib/fugue-edge-control" ||
+			initializer.SecurityContext.AllowPrivilegeEscalation || !initializer.SecurityContext.ReadOnlyRootFilesystem ||
+			initializer.SecurityContext.RunAsNonRoot || initializer.SecurityContext.RunAsUser != 0 || initializer.SecurityContext.RunAsGroup != 0 ||
+			len(initializer.SecurityContext.Capabilities.Drop) != 1 || initializer.SecurityContext.Capabilities.Drop[0] != "ALL" ||
+			len(initializer.SecurityContext.Capabilities.Add) != 2 || initializer.SecurityContext.Capabilities.Add[0] != "CHOWN" || initializer.SecurityContext.Capabilities.Add[1] != "FOWNER" ||
+			len(initializer.VolumeMounts) != 1 || initializer.VolumeMounts[0].Name != "authority-state" || initializer.VolumeMounts[0].MountPath != "/var/lib/fugue-edge-control" {
+			t.Fatalf("%s state permission initializer drifted: %+v", groupID, initializer)
 		}
 		container := deployment.Template.Spec.Containers[0]
 		if container.Name != "edge-control" || container.Image != "fugue-artifact://edge-control" {

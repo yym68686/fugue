@@ -11,6 +11,12 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func TestVerifyTargetUsesFixedMetadataOnlyRegistryEvidence(t *testing.T) {
@@ -289,6 +295,35 @@ func TestCreatedResourceDeletionsSelectOnlyAbsentToPresentNonRetainedObjects(t *
 	after.Resources = after.Resources[:2]
 	if _, err := createdResourceDeletions(identities, before, after); err == nil {
 		t.Fatal("missing rollback identity was accepted")
+	}
+}
+
+func TestFreshDeletionPreconditionsRefreshStatusOnlyResourceVersion(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"}
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "policy/v1", "kind": "PodDisruptionBudget",
+		"metadata": map[string]any{"name": "edge-control-de", "namespace": "fugue-system", "uid": "pdb-uid", "resourceVersion": "22", "generation": int64(1)},
+	}}
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+	resource := client.Resource(gvr).Namespace("fugue-system")
+	expected := declarativerelease.ResourceObservation{
+		Identity: declarativerelease.ResourceIdentity{APIVersion: "policy/v1", Kind: "PodDisruptionBudget", Namespace: "fugue-system", Name: "edge-control-de"},
+		Present:  true, UID: "pdb-uid", ResourceVersion: "10", Generation: 1,
+	}
+	uid, rv, present, err := freshDeletionPreconditions(context.Background(), resource, expected)
+	if err != nil || !present || uid != types.UID("pdb-uid") || rv != "22" {
+		t.Fatalf("fresh delete preconditions: uid=%q rv=%q present=%t err=%v", uid, rv, present, err)
+	}
+	expected.UID = "replacement-uid"
+	if _, _, _, err := freshDeletionPreconditions(context.Background(), resource, expected); err == nil {
+		t.Fatal("replacement object entered created-resource rollback")
+	}
+	if err := client.Resource(gvr).Namespace("fugue-system").Delete(context.Background(), "edge-control-de", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	expected.UID = "pdb-uid"
+	if _, _, present, err := freshDeletionPreconditions(context.Background(), resource, expected); err != nil || present {
+		t.Fatalf("already absent object did not reconcile: present=%t err=%v", present, err)
 	}
 }
 

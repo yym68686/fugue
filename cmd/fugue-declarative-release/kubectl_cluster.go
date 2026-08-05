@@ -253,8 +253,13 @@ func (cluster *kubectlCluster) Delete(ctx context.Context, _ declarativerelease.
 		if mapErr != nil {
 			return mapErr
 		}
-		uid := types.UID(resource.UID)
-		rv := resource.ResourceVersion
+		uid, rv, present, refreshErr := freshDeletionPreconditions(ctx, client.Resource(gvr).Namespace(identity.Namespace), resource)
+		if refreshErr != nil {
+			return fmt.Errorf("refresh delete preconditions for %s/%s: %w", identity.Kind, identity.Name, refreshErr)
+		}
+		if !present {
+			continue
+		}
 		foreground := metav1.DeletePropagationForeground
 		options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv}, PropagationPolicy: &foreground}
 		if deleteErr := client.Resource(gvr).Namespace(identity.Namespace).Delete(ctx, identity.Name, options); deleteErr != nil {
@@ -308,8 +313,13 @@ func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativer
 		if mapErr != nil {
 			return mapErr
 		}
-		uid := types.UID(current.UID)
-		rv := current.ResourceVersion
+		uid, rv, present, refreshErr := freshDeletionPreconditions(ctx, client.Resource(gvr).Namespace(identity.Namespace), current)
+		if refreshErr != nil {
+			return fmt.Errorf("refresh created-resource delete preconditions for %s/%s: %w", identity.Kind, identity.Name, refreshErr)
+		}
+		if !present {
+			continue
+		}
 		foreground := metav1.DeletePropagationForeground
 		options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv}, PropagationPolicy: &foreground}
 		if deleteErr := client.Resource(gvr).Namespace(identity.Namespace).Delete(ctx, identity.Name, options); deleteErr != nil {
@@ -335,6 +345,23 @@ func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativer
 		}
 	}
 	return nil
+}
+
+func freshDeletionPreconditions(ctx context.Context, resource dynamic.ResourceInterface, expected declarativerelease.ResourceObservation) (types.UID, string, bool, error) {
+	if resource == nil || expected.UID == "" || expected.ResourceVersion == "" {
+		return "", "", false, errors.New("deletion observation is incomplete")
+	}
+	current, err := resource.Get(ctx, expected.Identity.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if string(current.GetUID()) != expected.UID || (expected.Generation > 0 && current.GetGeneration() != expected.Generation) || current.GetResourceVersion() == "" {
+		return "", "", false, errors.New("deletion resource identity changed")
+	}
+	return current.GetUID(), current.GetResourceVersion(), true, nil
 }
 
 func createdResourceDeletions(identities []declarativerelease.ResourceIdentity, before, after declarativerelease.Observation) ([]declarativerelease.ResourceObservation, error) {

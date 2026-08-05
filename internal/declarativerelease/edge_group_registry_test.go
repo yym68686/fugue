@@ -271,6 +271,10 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		},
 		SourceRoots: []string{"Dockerfile.edge-control", "cmd/fugue-edge-control", "internal/edgecontrol"},
 		Artifact:    Artifact{Repository: "ghcr.io/example/fugue-edge-control", Dockerfile: "Dockerfile.edge-control", Context: ".", BuildPackage: "./cmd/fugue-edge-control"},
+		ArtifactTargets: []ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "state-permissions", ContainerType: "init-container"},
+		},
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", FieldManager: "fugue-edge-control-" + id + "-declarative", Replicas: 1, RolloutMode: "recreate"},
 		Health:      []HealthProbe{{Type: "deployment", Name: controlName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/readyz"}},
 		Concurrency: "fugue-production-edge-control-" + id, MigrationState: "independent",

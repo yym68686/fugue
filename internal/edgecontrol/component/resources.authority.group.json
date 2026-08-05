@@ -76,6 +76,43 @@
                 "type": "RuntimeDefault"
               }
             },
+            "initContainers": [
+              {
+                "name": "state-permissions",
+                "image": "fugue-artifact://edge-control",
+                "imagePullPolicy": "IfNotPresent",
+                "command": [
+                  "/bin/sh",
+                  "-ceu",
+                  "chmod 0770 /var/lib/fugue-edge-control && chown 65532:65532 /var/lib/fugue-edge-control"
+                ],
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ],
+                    "add": [
+                      "CHOWN",
+                      "FOWNER"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsNonRoot": false,
+                  "runAsUser": 0,
+                  "runAsGroup": 0,
+                  "seccompProfile": {
+                    "type": "RuntimeDefault"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "authority-state",
+                    "mountPath": "/var/lib/fugue-edge-control"
+                  }
+                ]
+              }
+            ],
             "containers": [
               {
                 "name": "edge-control",
