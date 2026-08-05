@@ -225,6 +225,43 @@ func TestObservedVerificationImageBindsLegacySourceTagToPodDigestOnlyDuringAdopt
 	}
 }
 
+func TestParseObservationRecoversExactLegacyOnDeleteUpdatedStatusOnlyDuringAdoption(t *testing.T) {
+	source := strings.Repeat("1", 40)
+	digest := strings.Repeat("a", 64)
+	release := declarativerelease.PlanRelease{
+		ComponentID: "edge-worker-gamma",
+		Workload: declarativerelease.Workload{Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-front",
+			Container: "edge-front", FieldManager: "fugue-edge-worker-gamma-declarative", RolloutMode: "on-delete"},
+	}
+	workload := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "edge-gamma-front", "namespace": "fugue-system", "uid": "front-uid", "resourceVersion": "42", "generation": 79,
+			"annotations": map[string]any{"fugue.pro/production-config-sha": source}, "managedFields": []any{map[string]any{"manager": "helm"}}},
+		"spec": map[string]any{
+			"selector": map[string]any{"matchLabels": map[string]any{"app": "edge-front"}},
+			"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": source}},
+				"spec": map[string]any{"containers": []any{map[string]any{"name": "edge-front", "image": "ghcr.io/example/fugue-edge:" + source}}}},
+		},
+		"status": map[string]any{"observedGeneration": 79, "desiredNumberScheduled": 1, "currentNumberScheduled": 1,
+			"numberReady": 1, "numberAvailable": 1, "numberMisscheduled": 0},
+	}
+	pod := podFixture("edge-front-1", "pod-uid", source, digest)
+	pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["name"] = "edge-front"
+	pods := map[string]any{"items": []any{pod}}
+	adoption, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, true)
+	if err != nil || adoption.Updated != 1 {
+		t.Fatalf("exact healthy legacy OnDelete cohort was not recovered: observation=%+v err=%v", adoption, err)
+	}
+	workload["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"] = "ghcr.io/example/fugue-edge@sha256:" + digest
+	independent, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false)
+	if err != nil {
+		t.Fatalf("read immutable independent cohort: %v", err)
+	}
+	if independent.Updated != 0 {
+		t.Fatal("independent observation inherited legacy OnDelete updated compatibility")
+	}
+}
+
 func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousPresent:     true,

@@ -1342,6 +1342,12 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
+	if allowHistoricalRestarts && release.Workload.Kind == "DaemonSet" && observation.Updated == 0 &&
+		int32(int64Value(status["currentNumberScheduled"])) == observation.Desired &&
+		int32(int64Value(status["numberMisscheduled"])) == 0 && observation.Ready == observation.Desired &&
+		observation.Available == observation.Desired && observation.Unavailable == 0 {
+		observation.Updated = observation.Desired
+	}
 	observation.ImageID = imageID
 	observation.HealthDigest = healthDigest
 	return observation, nil
