@@ -188,7 +188,24 @@ func executionFixtureForPlan(t *testing.T, plan Plan) (Plan, ArtifactReceipt, Re
 		t.Fatal(err)
 	}
 	base := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{},"spec":{"containers":[{"image":"ghcr.io/example/fugue-api:old","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
-	rendered, err := RenderManifests(plan, "api", receipt, bytesReader(base), bytesReader(base))
+	lkgInput := base
+	release := plan.Releases[0]
+	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.HeterogeneousBootstrapLKG {
+		set, decodeErr := DecodeResourceSet(bytes.NewReader(base))
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if patchErr := patchResourceSet(&set, release, release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest,
+			release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision,
+			plan.PlanDigest, receipt.ReceiptDigest); patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		lkgInput, err = CanonicalJSON(set)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rendered, err := RenderManifests(plan, "api", receipt, bytesReader(base), bytesReader(lkgInput))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +277,20 @@ func TestPrepareBindsExplicitOwnershipAdoptionToLKGAndLiveCAS(t *testing.T) {
 	}
 	plan.PlanDigest = digestOf(unsigned)
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	rendered.LKG = bytes.ReplaceAll(rendered.LKG, []byte("ghcr.io/example/fugue-api:old"), []byte(lkg.ImageRef))
+	rendered.LKGDigest = digestOf(rendered.LKG)
+	if _, err := BootstrapPredecessorConvergenceManifest(rendered.LKG, *release); err != nil {
+		set, decodeErr := DecodeResourceSet(bytes.NewReader(rendered.LKG))
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		primary, primaryErr := set.Primary(release.Workload)
+		if primaryErr != nil {
+			t.Fatal(primaryErr)
+		}
+		image, _ := workloadContainerImage(primary, release.Workload.Container, "container")
+		t.Fatalf("bootstrap retry fixture identity: image=%q expected=%q err=%v", image, release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest, err)
+	}
 	lkg.FieldManagers = []string{"helm"}
 	lkg.Resources[0].FieldManagers = []string{"helm"}
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
@@ -493,6 +524,41 @@ func TestBootstrapArtifactCompatibilityRequiresExplicitAdoptionAndExactLKG(t *te
 		if allowsBootstrapArtifactVerification(copyRelease, copyLKG) {
 			t.Fatalf("%s gained bootstrap artifact compatibility", name)
 		}
+	}
+}
+
+func TestPrepareBootstrapRetryUsesHealthyLegacyObservationInsteadOfOwnedDegraded(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.IntentGeneration = 2
+	release.RetrySameLKG = true
+	release.MigrationState = "adopting"
+	release.HeterogeneousBootstrapLKG = true
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+		Fields:   []string{"/spec/template"},
+	}}}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{"helm"}
+	lkg.Resources[0].FieldManagers = []string{"helm"}
+	fake := &fakeCluster{
+		observationErrors: []error{errors.New("forward absent")},
+		observations:      []Observation{lkg, lkg},
+		health:            []Observation{lkg},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.OwnershipAdoption == nil || len(fake.degraded) != 0 || len(fake.cas) != 0 || len(fake.verifiedTargets) != 1 || fake.dryRunAdoptions != 1 {
+		t.Fatalf("bootstrap retry did not remain in the explicit adoption path: prepared=%+v fake=%+v", prepared.OwnershipAdoption, fake)
 	}
 }
 

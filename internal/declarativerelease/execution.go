@@ -227,7 +227,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			}
 		} else {
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
-			degradedPredecessor = err == nil
+			degradedPredecessor = err == nil && !allowsBootstrapArtifactVerification(release, lkg)
 		}
 	} else {
 		var lkgObserveErr error
@@ -408,6 +408,28 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	}
 	if verifyErr != nil {
 		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
+	}
+	if allowsBootstrapArtifactVerification(release, lkg) {
+		first, observeErr := cluster.Observe(ctx, release, lkg, lkgManifest)
+		if observeErr != nil || !first.Matches(lkg, release, true) {
+			return Observation{}, fmt.Errorf("observe exact bootstrap predecessor: %w", observeErr)
+		}
+		healthy, healthErr := cluster.WaitHealthy(ctx, release, lkg, lkgManifest)
+		if healthErr != nil || !healthy.Matches(lkg, release, true) {
+			return Observation{}, fmt.Errorf("verify exact bootstrap predecessor health: %w", healthErr)
+		}
+		witness, witnessErr := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
+		if witnessErr != nil {
+			return Observation{}, witnessErr
+		}
+		if convergenceErr := cluster.Converged(ctx, release, witness); convergenceErr != nil {
+			return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: %w", convergenceErr)
+		}
+		second, secondErr := cluster.Observe(ctx, release, lkg, lkgManifest)
+		if secondErr != nil || !second.Matches(lkg, release, true) || !second.SameSpecIdentity(first) || second.HealthDigest != healthy.HealthDigest {
+			return Observation{}, errors.New("bootstrap predecessor identity changed during validation")
+		}
+		return second, nil
 	}
 	witness, err := PredecessorConvergenceManifest(lkgManifest)
 	if err != nil {

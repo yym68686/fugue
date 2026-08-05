@@ -747,10 +747,12 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
-		"--image", partial.ImageRef, "--platform", "linux/amd64", "--expected-revision", expectedOCI,
-		"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
-		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	arguments := []string{"python3", cluster.verifier, "--image", partial.ImageRef, "--platform", "linux/amd64"}
+	if !allowHistoricalRestarts {
+		arguments = append(arguments, "--expected-revision", expectedOCI)
+	}
+	arguments = append(arguments, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	verificationRaw, err := cluster.run(ctx, nil, arguments[0], arguments[1:]...)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("verify live image provenance: %w", err)
 	}
@@ -758,10 +760,11 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if verification.Image != partial.ImageRef || verification.OCIRevision != expectedOCI {
+	if verification.Image != partial.ImageRef || (!allowHistoricalRestarts && verification.OCIRevision != expectedOCI) ||
+		(allowHistoricalRestarts && verification.OCIRevision != "" && verification.OCIRevision != expectedOCI) {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
 	}
-	partial.OCIRevision = verification.OCIRevision
+	partial.OCIRevision = expectedOCI
 	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -886,10 +889,13 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			if err != nil {
 				return "", err
 			}
-			if err := validateEdgeGroupAuthority(state, transition); err != nil {
-				return "", err
+			bootstrap := allowsHistoricalRestarts(release, target)
+			if !bootstrap {
+				if err := validateEdgeGroupAuthority(state, transition); err != nil {
+					return "", err
+				}
 			}
-			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot}
+			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot, "bootstrap=" + strconv.FormatBool(bootstrap)}
 			for _, slot := range []struct {
 				name string
 				pods map[string]edgeGroupPod
