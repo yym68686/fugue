@@ -653,13 +653,16 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			if prior.Component != component.ID || intent.Generation != prior.Generation+1 {
 				return Plan{}, fmt.Errorf("component %q intent generation is not consecutive", component.ID)
 			}
-			if !intent.ExpectedPreviousPresent {
-				return Plan{}, fmt.Errorf("component %q successor cannot declare an absent predecessor", component.ID)
-			}
 			priorConfigSHA := previousConfigSHA[component.ID]
-			if !shaPattern.MatchString(priorConfigSHA) ||
-				intent.ExpectedPreviousConfigSHA != priorConfigSHA ||
-				intent.ExpectedPreviousManifestSHA != priorConfigSHA || intent.ExpectedPreviousOCIRevision != priorConfigSHA {
+			normalSuccessor := intent.ExpectedPreviousPresent && shaPattern.MatchString(priorConfigSHA) &&
+				intent.ExpectedPreviousConfigSHA == priorConfigSHA &&
+				intent.ExpectedPreviousManifestSHA == priorConfigSHA && intent.ExpectedPreviousOCIRevision == priorConfigSHA
+			retrySameLKG := intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
+				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
+				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
+				intent.ExpectedPreviousOCIRevision == prior.ExpectedPreviousOCIRevision &&
+				intent.ExpectedPreviousImageDigest == prior.ExpectedPreviousImageDigest && intent.Rollback == prior.Rollback
+			if !normalSuccessor && !retrySameLKG {
 				return Plan{}, fmt.Errorf("component %q predecessor is not the prior production atom", component.ID)
 			}
 		} else if intent.Generation != 1 {

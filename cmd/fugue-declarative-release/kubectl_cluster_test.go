@@ -35,7 +35,7 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 		podFixture("api-1", "uid-1", strings.Repeat("1", 40), strings.Repeat("b", 64)),
 		podFixture("api-2", "uid-2", strings.Repeat("1", 40), strings.Repeat("b", 64)),
 	}}
-	observation, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release)
+	observation, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false)
 	if err != nil {
 		t.Fatalf("parse observation: %v", err)
 	}
@@ -45,8 +45,55 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 		t.Fatalf("unexpected observation: %+v", observation)
 	}
 	pods["items"].([]any)[1] = podFixture("api-2", "uid-2", strings.Repeat("1", 40), strings.Repeat("c", 64))
-	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release); err == nil || !strings.Contains(err.Error(), "mixed image IDs") {
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false); err == nil || !strings.Contains(err.Error(), "mixed image IDs") {
 		t.Fatalf("mixed cohort was accepted: %v", err)
+	}
+}
+
+func TestParseObservationAllowsOnlyStableHistoricalLKGRestarts(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		ComponentID: "telemetry",
+		Workload: declarativerelease.Workload{
+			Kind: "Deployment", Namespace: "fugue-system", Name: "telemetry",
+			Container: "api", FieldManager: "fugue-telemetry-declarative", Replicas: 1,
+		},
+	}
+	source := strings.Repeat("1", 40)
+	workload := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"name": "telemetry", "namespace": "fugue-system", "uid": "telemetry-uid",
+			"resourceVersion": "42", "generation": 7,
+			"annotations":   map[string]any{"fugue.pro/production-config-sha": source},
+			"managedFields": []any{map[string]any{"manager": "fugue-telemetry-declarative"}},
+		},
+		"spec": map[string]any{
+			"replicas": 1,
+			"selector": map[string]any{"matchLabels": map[string]any{"app": "telemetry"}},
+			"template": map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": source}},
+				"spec":     map[string]any{"containers": []any{map[string]any{"name": "api", "image": "ghcr.io/example/telemetry@sha256:" + strings.Repeat("a", 64)}}},
+			},
+		},
+		"status": map[string]any{"observedGeneration": 7, "updatedReplicas": 1, "readyReplicas": 1, "availableReplicas": 1},
+	}
+	pod := podFixture("telemetry-1", "uid-1", source, strings.Repeat("b", 64))
+	pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 3
+	pods := map[string]any{"items": []any{pod}}
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false); err == nil || !strings.Contains(err.Error(), "restarted") {
+		t.Fatalf("ordinary target accepted a restarted pod: %v", err)
+	}
+	first, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, true)
+	if err != nil {
+		t.Fatalf("historical LKG restart was rejected: %v", err)
+	}
+	pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 4
+	second, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, true)
+	if err != nil {
+		t.Fatalf("read historical LKG restart: %v", err)
+	}
+	if first.HealthDigest == second.HealthDigest {
+		t.Fatal("historical restart count did not enter the health witness")
 	}
 }
 

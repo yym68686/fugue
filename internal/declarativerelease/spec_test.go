@@ -265,3 +265,21 @@ func TestBindIntentsUsesPriorComponentAtomAcrossUnrelatedCommits(t *testing.T) {
 		t.Fatal("wrong previous component atom was accepted")
 	}
 }
+
+func TestBindIntentsAllowsOneConsecutiveAttemptAgainstTheSameLKG(t *testing.T) {
+	registry := testRegistry()
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: "api", Generation: 1, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
+	current := previous
+	current.Generation = 2
+	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "3333333333333333333333333333333333333333"}); err != nil {
+		t.Fatalf("consecutive attempt against the same LKG was rejected: %v", err)
+	}
+	current.ExpectedPreviousImageDigest = "sha256:" + strings.Repeat("c", 64)
+	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": "3333333333333333333333333333333333333333"}); err == nil {
+		t.Fatal("attempt with a changed LKG was accepted")
+	}
+}

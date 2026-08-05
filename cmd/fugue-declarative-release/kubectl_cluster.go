@@ -63,7 +63,14 @@ func newKubectlCluster() (*kubectlCluster, error) {
 }
 
 func (cluster *kubectlCluster) Observe(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
-	return cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
+	return cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowsHistoricalRestarts(release, target))
+}
+
+func allowsHistoricalRestarts(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) bool {
+	return release.ExpectedPreviousPresent && target.Present &&
+		target.ConfigSHA == release.ExpectedPreviousConfigSHA &&
+		target.ManifestSHA == release.ExpectedPreviousManifestSHA &&
+		target.OCIRevision == release.ExpectedPreviousOCIRevision
 }
 
 func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) (declarativerelease.Observation, error) {
@@ -383,8 +390,9 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	deadline := time.Now().Add(cluster.timeout + soak)
 	var lastErr error
 	tracker := healthSoakTracker{required: soak}
+	allowHistoricalRestarts := allowsHistoricalRestarts(release, target)
 	for {
-		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
+		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowHistoricalRestarts)
 		if err == nil && observation.Matches(target, release, release.IntentGeneration == 1) {
 			probeDigest, probeErr := cluster.verifyProbes(ctx, release, target, manifest, observation)
 			if probeErr == nil {
@@ -442,7 +450,7 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 	return nil
 }
 
-func (cluster *kubectlCluster) observeExpected(ctx context.Context, release declarativerelease.PlanRelease, expectedOCI string, manifest []byte) (declarativerelease.Observation, error) {
+func (cluster *kubectlCluster) observeExpected(ctx context.Context, release declarativerelease.PlanRelease, expectedOCI string, manifest []byte, allowHistoricalRestarts bool) (declarativerelease.Observation, error) {
 	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	workloadRaw, err := cluster.getResource(ctx, primary)
 	if err != nil {
@@ -464,7 +472,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	partial, err := parseObservation(workloadRaw, podsRaw, release)
+	partial, err := parseObservation(workloadRaw, podsRaw, release, allowHistoricalRestarts)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -635,7 +643,7 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 	}
 	auxiliaryRelease := release
 	auxiliaryRelease.Workload = workload
-	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, target.OCIRevision, manifest)
+	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, target.OCIRevision, manifest, false)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("observe health workload %s/%s: %w", kind, name, err)
 	}
@@ -753,7 +761,7 @@ func selectorFromWorkload(raw []byte) (string, error) {
 	return strings.Join(parts, ","), nil
 }
 
-func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease) (declarativerelease.Observation, error) {
+func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease, allowHistoricalRestarts bool) (declarativerelease.Observation, error) {
 	workload, err := decodeJSONObject(workloadRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -838,7 +846,7 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	if release.Workload.Kind == "Job" {
 		imageID, healthDigest, err = parseSucceededJobPod(podsRaw, release, manifestSHA)
 	} else {
-		imageID, healthDigest, err = parseReadyPods(podsRaw, release, observation.Desired-int32(release.Workload.PreservedUnavailable), manifestSHA)
+		imageID, healthDigest, err = parseReadyPods(podsRaw, release, observation.Desired-int32(release.Workload.PreservedUnavailable), manifestSHA, allowHistoricalRestarts)
 	}
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -922,7 +930,7 @@ func legacySourceTag(image string) string {
 	return value
 }
 
-func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired int32, manifestSHA string) (string, string, error) {
+func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired int32, manifestSHA string, allowHistoricalRestarts bool) (string, string, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil {
 		return "", "", err
@@ -956,12 +964,14 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 			continue
 		}
 		found := false
+		restartCount := int64(0)
 		for _, rawStatus := range containerStatuses {
 			containerStatus, ok := rawStatus.(map[string]any)
 			if !ok || stringValue(containerStatus["name"]) != release.Workload.Container {
 				continue
 			}
-			if int64Value(containerStatus["restartCount"]) != 0 {
+			restartCount = int64Value(containerStatus["restartCount"])
+			if restartCount != 0 && !allowHistoricalRestarts {
 				return "", "", errors.New("ready workload pod restarted")
 			}
 			digest, err := imageIDDigest(stringValue(containerStatus["imageID"]))
@@ -978,7 +988,7 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 			continue
 		}
 		readyCount++
-		evidence = append(evidence, stringValue(metadata["name"])+":"+stringValue(metadata["uid"])+":"+imageID)
+		evidence = append(evidence, stringValue(metadata["name"])+":"+stringValue(metadata["uid"])+":"+imageID+":"+strconv.FormatInt(restartCount, 10))
 	}
 	if readyCount != desired || desired < 1 || imageID == "" {
 		return "", "", fmt.Errorf("ready workload pod count mismatch: got=%d want=%d", readyCount, desired)

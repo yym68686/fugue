@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +141,16 @@ func TestExecuteVerifiesForwardAndReconcilesCommitUnknown(t *testing.T) {
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "verified" || result.Reason != "forward-commit-unknown-reconciled" || result.ForwardApplyCount != 1 || result.LKGApplyCount != 0 || fake.applies != 1 {
 		t.Fatalf("unexpected execution result: %+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestPrepareRejectsAnLKGRestartDuringPrewriteValidation(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	changed := lkg
+	changed.HealthDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	fake := &fakeCluster{observations: []Observation{lkg}, health: []Observation{changed}}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "health changed") {
+		t.Fatalf("changing LKG health witness was accepted: %v", err)
 	}
 }
 
