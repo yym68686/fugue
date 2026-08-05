@@ -167,6 +167,37 @@ func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarat
 	return nil
 }
 
+func (cluster *kubectlCluster) VerifyBootstrapTarget(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) error {
+	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil || !release.RetrySameLKG ||
+		!release.HeterogeneousBootstrapLKG || release.BootstrapLKGPath == "" || !release.ExpectedPreviousPresent || !target.Present ||
+		target.ConfigSHA != release.ExpectedPreviousConfigSHA || target.ManifestSHA != release.ExpectedPreviousManifestSHA ||
+		target.OCIRevision != release.ExpectedPreviousOCIRevision || immutableRefDigestLocal(target.ImageRef) != release.ExpectedPreviousImageDigest {
+		return errors.New("bootstrap registry compatibility is not explicitly adoption-bound")
+	}
+	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
+		"--image", target.ImageRef, "--platform", "linux/amd64", "--metadata-only", "--timeout-seconds", "18",
+		"--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	if err != nil {
+		return fmt.Errorf("verify bootstrap registry target: %w", err)
+	}
+	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
+	if err != nil {
+		return err
+	}
+	if verification.Image != target.ImageRef || (verification.OCIRevision != "" && verification.OCIRevision != target.OCIRevision) {
+		return errors.New("bootstrap registry target identity mismatch")
+	}
+	return nil
+}
+
+func immutableRefDigestLocal(ref string) string {
+	parts := strings.Split(ref, "@")
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
+}
+
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err

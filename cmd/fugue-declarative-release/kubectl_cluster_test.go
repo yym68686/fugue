@@ -40,6 +40,37 @@ print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifes
 	}
 }
 
+func TestVerifyBootstrapTargetAllowsMissingRevisionOnlyForExactAdoptionLKG(t *testing.T) {
+	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64)
+	revision := strings.Repeat("a", 40)
+	script := filepath.Join(t.TempDir(), "verify.py")
+	program := `import json, sys
+image = "ghcr.io/example/fugue-edge@sha256:" + "b" * 64
+expected = ["--image", image, "--platform", "linux/amd64", "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1"]
+if sys.argv[1:] != expected:
+    raise SystemExit(2)
+print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifest_digest": "sha256:" + "c" * 64, "config_digest": "sha256:" + "d" * 64, "oci_revision": "", "platform": "linux/amd64", "verification": "registry_manifest_config_get", "blob_count": 0, "layer_get_probe_count": 0, "request_count": 3, "total_layer_bytes": 0}, separators=(",", ":")))
+`
+	if err := os.WriteFile(script, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
+		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
+		ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision, ExpectedPreviousOCIRevision: revision,
+		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64), OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm"},
+	}
+	target := declarativerelease.TargetIdentity{Present: true, ImageRef: image, ConfigSHA: revision, ManifestSHA: revision, OCIRevision: revision}
+	cluster := &kubectlCluster{verifier: script, timeout: time.Second}
+	if err := cluster.VerifyBootstrapTarget(context.Background(), release, target); err != nil {
+		t.Fatalf("verify legacy immutable bootstrap: %v", err)
+	}
+	release.MigrationState = "independent"
+	if err := cluster.VerifyBootstrapTarget(context.Background(), release, target); err == nil {
+		t.Fatal("independent release accepted bootstrap registry compatibility")
+	}
+}
+
 func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ComponentID: "api",

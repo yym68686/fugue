@@ -123,6 +123,7 @@ type Cluster interface {
 	ObserveCAS(context.Context, PlanRelease, []byte) (Observation, error)
 	ObserveDegraded(context.Context, PlanRelease, []byte) (Observation, error)
 	VerifyTarget(context.Context, TargetIdentity) error
+	VerifyBootstrapTarget(context.Context, PlanRelease, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
 	DryRunOwnershipAdoption(context.Context, PlanRelease, OwnershipAdoptionPlan, []byte) error
 	AdoptOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error)
@@ -399,8 +400,14 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if !release.RetrySameLKG || !release.ExpectedPreviousPresent || !lkg.Present {
 		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
 	}
-	if err := cluster.VerifyTarget(ctx, lkg); err != nil {
-		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", err)
+	var verifyErr error
+	if allowsBootstrapArtifactVerification(release, lkg) {
+		verifyErr = cluster.VerifyBootstrapTarget(ctx, release, lkg)
+	} else {
+		verifyErr = cluster.VerifyTarget(ctx, lkg)
+	}
+	if verifyErr != nil {
+		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
 	}
 	witness, err := PredecessorConvergenceManifest(lkgManifest)
 	if err != nil {
@@ -427,6 +434,21 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 		return Observation{}, errors.New("degraded predecessor identity changed during validation")
 	}
 	return second, nil
+}
+
+func allowsBootstrapArtifactVerification(release PlanRelease, lkg TargetIdentity) bool {
+	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.RetrySameLKG &&
+		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" && release.ExpectedPreviousPresent && lkg.Present &&
+		lkg.ConfigSHA == release.ExpectedPreviousConfigSHA && lkg.ManifestSHA == release.ExpectedPreviousManifestSHA &&
+		lkg.OCIRevision == release.ExpectedPreviousOCIRevision && immutableRefDigest(lkg.ImageRef) == release.ExpectedPreviousImageDigest
+}
+
+func immutableRefDigest(ref string) string {
+	parts := strings.Split(ref, "@")
+	if len(parts) != 2 {
+		return ""
+	}
+	return parts[1]
 }
 
 func prepareOwnedDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, forwardManifest []byte, lkgDrift error) (Observation, error) {

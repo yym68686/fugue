@@ -74,6 +74,16 @@ func (fake *fakeCluster) VerifyTarget(_ context.Context, target TargetIdentity) 
 	return err
 }
 
+func (fake *fakeCluster) VerifyBootstrapTarget(_ context.Context, _ PlanRelease, target TargetIdentity) error {
+	fake.verifiedTargets = append(fake.verifiedTargets, target)
+	if len(fake.verifyErrors) == 0 {
+		return nil
+	}
+	err := fake.verifyErrors[0]
+	fake.verifyErrors = fake.verifyErrors[1:]
+	return err
+}
+
 func (fake *fakeCluster) DryRunApply(context.Context, PlanRelease, []byte) error {
 	fake.dryRuns++
 	return nil
@@ -456,6 +466,33 @@ func TestPrepareDegradedPredecessorFailsClosedOnArtifactOrSpecDrift(t *testing.T
 	fake = &fakeCluster{cas: []Observation{degraded, drift}}
 	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "identity changed") || fake.dryRuns != 0 {
 		t.Fatalf("changing predecessor spec was accepted: dryRuns=%d err=%v", fake.dryRuns, err)
+	}
+}
+
+func TestBootstrapArtifactCompatibilityRequiresExplicitAdoptionAndExactLKG(t *testing.T) {
+	release := PlanRelease{
+		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
+		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
+		ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1,
+		ExpectedPreviousImageDigest: testDigest, OwnershipAdoption: &OwnershipAdoption{LegacyFieldManager: "helm"},
+	}
+	lkg := TargetIdentity{Present: true, ImageRef: "ghcr.io/example/fugue-edge@" + testDigest, ConfigSHA: testSHA1, ManifestSHA: testSHA1, OCIRevision: testSHA1}
+	if !allowsBootstrapArtifactVerification(release, lkg) {
+		t.Fatal("exact explicit adoption bootstrap was rejected")
+	}
+	for name, mutate := range map[string]func(*PlanRelease, *TargetIdentity){
+		"independent":    func(value *PlanRelease, _ *TargetIdentity) { value.MigrationState = "independent" },
+		"no ownership":   func(value *PlanRelease, _ *TargetIdentity) { value.OwnershipAdoption = nil },
+		"ordinary retry": func(value *PlanRelease, _ *TargetIdentity) { value.RetrySameLKG = false },
+		"wrong digest": func(_ *PlanRelease, target *TargetIdentity) {
+			target.ImageRef = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("c", 64)
+		},
+	} {
+		copyRelease, copyLKG := release, lkg
+		mutate(&copyRelease, &copyLKG)
+		if allowsBootstrapArtifactVerification(copyRelease, copyLKG) {
+			t.Fatalf("%s gained bootstrap artifact compatibility", name)
+		}
 	}
 }
 
