@@ -93,6 +93,25 @@ func TestPredecessorConvergenceManifestOnlyDropsReleaseOwnershipMetadata(t *test
 	}
 }
 
+func TestBootstrapPredecessorAllowsOnlyAbsentForwardInitContainer(t *testing.T) {
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-worker-a","namespace":"fugue-system"},"spec":{"template":{"metadata":{},"spec":{"containers":[{"image":"ghcr.io/example/fugue-edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"edge"}]}}}}],"kind":"ComponentResourceSet"}`)
+	release := PlanRelease{ArtifactTargets: []ArtifactTarget{
+		{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker-a", Container: "edge", ContainerType: "container"},
+		{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker-a", Container: "edge-workload-identity", ContainerType: "init-container"},
+	}}
+	witness, err := BootstrapPredecessorConvergenceManifest(manifest, release)
+	if err != nil {
+		t.Fatalf("forward-only init container made bootstrap LKG invalid: %v", err)
+	}
+	if bytes.Contains(witness, []byte("ghcr.io/example/fugue-edge")) {
+		t.Fatal("bootstrap convergence witness retained primary image identity")
+	}
+	invalid := bytes.Replace(manifest, []byte(`"containers":[`), []byte(`"containers":"invalid","ignored":[`), 1)
+	if _, err := BootstrapPredecessorConvergenceManifest(invalid, release); err == nil {
+		t.Fatal("invalid primary container list was accepted")
+	}
+}
+
 func TestRetryPredecessorConvergenceManifestDropsOnlyRenderedTargetIdentity(t *testing.T) {
 	release := PlanRelease{
 		Workload: Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "telemetry", Container: "telemetry-agent", FieldManager: "fugue-telemetry-declarative"},

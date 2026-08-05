@@ -399,7 +399,11 @@ func BootstrapPredecessorConvergenceManifest(manifest []byte, release PlanReleas
 		if target.ContainerType == "init-container" {
 			field = "initContainers"
 		}
-		containers, ok := templateSpec[field].([]any)
+		rawContainers, exists := templateSpec[field]
+		if !exists && target.ContainerType == "init-container" {
+			continue
+		}
+		containers, ok := rawContainers.([]any)
 		if !ok {
 			return nil, errors.New("bootstrap predecessor container list is invalid")
 		}
