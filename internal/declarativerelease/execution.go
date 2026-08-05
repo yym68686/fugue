@@ -551,6 +551,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		}
 	}
 	if err != nil {
+		result.Status = "failed-no-write"
 		result.Reason = "prewrite-cas-drift"
 		return sealResult(result)
 	}

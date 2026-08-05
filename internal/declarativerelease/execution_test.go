@@ -576,7 +576,7 @@ func TestExecuteDegradedPredecessorRejectsSpecDriftBeforeApply(t *testing.T) {
 	drift.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	fake.cas = []Observation{drift}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
-	if result.Reason != "prewrite-cas-drift" || result.ForwardApplyCount != 0 || fake.applies != 0 {
+	if result.Status != "failed-no-write" || result.Reason != "prewrite-cas-drift" || result.ForwardApplyCount != 0 || fake.applies != 0 {
 		t.Fatalf("degraded predecessor drift reached apply: result=%+v applies=%d", result, fake.applies)
 	}
 }
@@ -688,8 +688,23 @@ func TestExecuteFailsClosedOnPrewriteDriftWithoutApply(t *testing.T) {
 	drift.ResourceVersion = "12"
 	fake.observations = []Observation{drift}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
-	if result.Reason != "prewrite-cas-drift" || fake.applies != 0 {
+	if result.Status != "failed-no-write" || result.Reason != "prewrite-cas-drift" || fake.applies != 0 {
 		t.Fatalf("prewrite drift did not stop before write: %+v", result)
+	}
+}
+
+func TestExecuteClassifiesPrewriteObservationFailureAsNoWrite(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.observationErrors = []error{errors.New("transient observation failure")}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "failed-no-write" || result.Reason != "prewrite-cas-drift" ||
+		result.ForwardApplyCount != 0 || result.LKGApplyCount != 0 || fake.applies != 0 {
+		t.Fatalf("prewrite observation failure retained a false recovery fence: result=%+v applies=%d", result, fake.applies)
 	}
 }
 
