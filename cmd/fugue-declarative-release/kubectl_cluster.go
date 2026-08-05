@@ -1469,7 +1469,17 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 			continue
 		}
 		annotations := mapStringField(metadata, "annotations")
-		if annotations["fugue.pro/source-commit"] != manifestSHA {
+		podSource := annotations["fugue.pro/source-commit"]
+		if podSource == "" && allowHistoricalRestarts {
+			for _, rawContainer := range anySlice(mapField(pod, "spec")["containers"]) {
+				container, _ := rawContainer.(map[string]any)
+				if stringValue(container["name"]) == release.Workload.Container {
+					podSource = legacySourceTag(stringValue(container["image"]))
+					break
+				}
+			}
+		}
+		if podSource != manifestSHA {
 			continue
 		}
 		status := mapField(pod, "status")

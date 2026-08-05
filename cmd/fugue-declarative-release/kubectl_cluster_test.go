@@ -192,6 +192,18 @@ func TestParseObservationAllowsOnlyStableHistoricalLKGRestarts(t *testing.T) {
 	if first.HealthDigest == second.HealthDigest {
 		t.Fatal("historical restart count did not enter the health witness")
 	}
+	delete(pod["metadata"].(map[string]any)["annotations"].(map[string]any), "fugue.pro/source-commit")
+	pod["spec"] = map[string]any{"containers": []any{map[string]any{"name": "api", "image": "ghcr.io/example/telemetry:" + source}}}
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, true); err != nil {
+		t.Fatalf("explicit adoption did not recover the exact legacy pod source tag: %v", err)
+	}
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false); err == nil {
+		t.Fatal("ordinary target recovered a missing pod source from a legacy tag")
+	}
+	pod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"] = "ghcr.io/example/telemetry:" + strings.Repeat("2", 40)
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, true); err == nil {
+		t.Fatal("adoption accepted a legacy pod tag for another source")
+	}
 }
 
 func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
