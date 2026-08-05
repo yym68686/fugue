@@ -98,6 +98,27 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 	return observation, nil
 }
 
+func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarativerelease.TargetIdentity) error {
+	if !target.Present || target.ImageRef == "" || target.OCIRevision == "" {
+		return errors.New("registry target identity is incomplete")
+	}
+	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
+		"--image", target.ImageRef, "--platform", "linux/amd64", "--expected-revision", target.OCIRevision,
+		"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
+		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	if err != nil {
+		return fmt.Errorf("verify registry target: %w", err)
+	}
+	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
+	if err != nil {
+		return err
+	}
+	if verification.Image != target.ImageRef || verification.OCIRevision != target.OCIRevision {
+		return errors.New("registry target identity mismatch")
+	}
+	return nil
+}
+
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
 	return cluster.applyResourceSet(ctx, release, manifest, true)
 }

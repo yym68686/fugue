@@ -1,13 +1,37 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/declarativerelease"
 )
+
+func TestVerifyTargetUsesFixedMetadataOnlyRegistryEvidence(t *testing.T) {
+	image := "ghcr.io/example/fugue-telemetry-agent@sha256:" + strings.Repeat("b", 64)
+	revision := strings.Repeat("a", 40)
+	script := filepath.Join(t.TempDir(), "verify.py")
+	program := `import json, sys
+image = "ghcr.io/example/fugue-telemetry-agent@sha256:" + "b" * 64
+revision = "a" * 40
+expected = ["--image", image, "--platform", "linux/amd64", "--expected-revision", revision, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1"]
+if sys.argv[1:] != expected:
+    raise SystemExit(2)
+print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifest_digest": "sha256:" + "c" * 64, "config_digest": "sha256:" + "d" * 64, "oci_revision": revision, "platform": "linux/amd64", "verification": "registry_manifest_config_get", "blob_count": 0, "layer_get_probe_count": 0, "request_count": 3, "total_layer_bytes": 0}, separators=(",", ":")))
+`
+	if err := os.WriteFile(script, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &kubectlCluster{verifier: script, timeout: time.Second}
+	if err := cluster.VerifyTarget(context.Background(), declarativerelease.TargetIdentity{Present: true, ImageRef: image, OCIRevision: revision}); err != nil {
+		t.Fatalf("verify exact immutable predecessor: %v", err)
+	}
+}
 
 func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	release := declarativerelease.PlanRelease{

@@ -13,6 +13,8 @@ type fakeCluster struct {
 	observations      []Observation
 	observationErrors []error
 	cas               []Observation
+	verifiedTargets   []TargetIdentity
+	verifyErrors      []error
 	dryRuns           int
 	applies           int
 	applyErrors       []error
@@ -46,6 +48,16 @@ func (fake *fakeCluster) ObserveCAS(context.Context, PlanRelease, []byte) (Obser
 	value := fake.cas[0]
 	fake.cas = fake.cas[1:]
 	return value, nil
+}
+
+func (fake *fakeCluster) VerifyTarget(_ context.Context, target TargetIdentity) error {
+	fake.verifiedTargets = append(fake.verifiedTargets, target)
+	if len(fake.verifyErrors) == 0 {
+		return nil
+	}
+	err := fake.verifyErrors[0]
+	fake.verifyErrors = fake.verifyErrors[1:]
+	return err
 }
 
 func (fake *fakeCluster) DryRunApply(context.Context, PlanRelease, []byte) error {
@@ -95,7 +107,26 @@ func (fake *fakeCluster) Converged(_ context.Context, _ PlanRelease, manifest []
 
 func executionFixture(t *testing.T) (Plan, ArtifactReceipt, RenderedManifests, Observation, Observation) {
 	t.Helper()
+	return executionFixtureForPlan(t, boundAPIPlan(t))
+}
+
+func retryExecutionFixture(t *testing.T) (Plan, ArtifactReceipt, RenderedManifests, Observation, Observation) {
+	t.Helper()
 	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	plan.Releases[0].IntentGeneration = 2
+	plan.Releases[0].RetrySameLKG = true
+	plan.Releases[0].BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	return executionFixtureForPlan(t, plan)
+}
+
+func executionFixtureForPlan(t *testing.T, plan Plan) (Plan, ArtifactReceipt, RenderedManifests, Observation, Observation) {
+	t.Helper()
 	verification := RegistryVerification{
 		Image:          "ghcr.io/example/fugue-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		IndexDigest:    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -116,6 +147,14 @@ func executionFixture(t *testing.T) (Plan, ArtifactReceipt, RenderedManifests, O
 	lkg := stableObservation("1", "10", "ghcr.io/example/fugue-api@"+testDigest, testSHA1)
 	forward := stableObservation("1", "11", receipt.ImmutableRef, testSHA2)
 	return plan, receipt, rendered, lkg, forward
+}
+
+func casOnlyObservation(observation Observation) Observation {
+	return Observation{
+		Present: observation.Present, Primary: observation.Primary, UID: observation.UID,
+		ResourceVersion: observation.ResourceVersion, Generation: observation.Generation,
+		Resources: append([]ResourceObservation(nil), observation.Resources...),
+	}
 }
 
 func stableObservation(uid, rv, image, revision string) Observation {
@@ -187,6 +226,61 @@ func TestPrepareRecoversTheDeclaredLKGAfterATransientUnreadyObservation(t *testi
 	}
 	if len(fake.healthTargets) != 1 || fake.healthTargets[0].OCIRevision != plan.Releases[0].ExpectedPreviousOCIRevision {
 		t.Fatalf("prepare waited on the forward target before the declared LKG: %+v", fake.healthTargets)
+	}
+}
+
+func TestPrepareAndExecuteRecoverAnExactDegradedSameLKGPredecessor(t *testing.T) {
+	plan, receipt, rendered, lkg, forward := retryExecutionFixture(t)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{cas: []Observation{degraded, degraded}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || fake.dryRuns != 2 || len(fake.verifiedTargets) != 1 {
+		t.Fatalf("prepare degraded predecessor: plan=%+v dryRuns=%d verified=%d err=%v", prepared, fake.dryRuns, len(fake.verifiedTargets), err)
+	}
+	if fake.verifiedTargets[0] != prepared.LKG || len(fake.converged) != 1 {
+		t.Fatalf("degraded predecessor identity was not verified exactly: verified=%+v converged=%d", fake.verifiedTargets, len(fake.converged))
+	}
+	current := casOnlyObservation(lkg)
+	current.ResourceVersion = "11"
+	current.Resources[0].ResourceVersion = "11"
+	fake.cas = []Observation{current}
+	fake.health = []Observation{forward}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 || fake.applies != 1 {
+		t.Fatalf("degraded predecessor did not execute with a fresh CAS: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestPrepareDegradedPredecessorFailsClosedOnArtifactOrSpecDrift(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := retryExecutionFixture(t)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{verifyErrors: []error{errors.New("wrong OCI revision")}}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "verify degraded predecessor artifact") || fake.dryRuns != 0 {
+		t.Fatalf("unverified predecessor was accepted: dryRuns=%d err=%v", fake.dryRuns, err)
+	}
+	drift := degraded
+	drift.Resources = append([]ResourceObservation(nil), degraded.Resources...)
+	drift.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	fake = &fakeCluster{cas: []Observation{degraded, drift}}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "identity changed") || fake.dryRuns != 0 {
+		t.Fatalf("changing predecessor spec was accepted: dryRuns=%d err=%v", fake.dryRuns, err)
+	}
+}
+
+func TestExecuteDegradedPredecessorRejectsSpecDriftBeforeApply(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := retryExecutionFixture(t)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{cas: []Observation{degraded, degraded}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drift := casOnlyObservation(lkg)
+	drift.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	fake.cas = []Observation{drift}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Reason != "prewrite-cas-drift" || result.ForwardApplyCount != 0 || fake.applies != 0 {
+		t.Fatalf("degraded predecessor drift reached apply: result=%+v applies=%d", result, fake.applies)
 	}
 }
 

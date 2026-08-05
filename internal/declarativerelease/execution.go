@@ -65,19 +65,20 @@ type TargetIdentity struct {
 }
 
 type ExecutionPlan struct {
-	APIVersion        string         `json:"apiVersion"`
-	Kind              string         `json:"kind"`
-	Component         string         `json:"component"`
-	ConfigSHA         string         `json:"configSha"`
-	ReleasePlanDigest string         `json:"releasePlanDigest"`
-	IntentDigest      string         `json:"intentDigest"`
-	ArtifactDigest    string         `json:"artifactDigest"`
-	Forward           TargetIdentity `json:"forward"`
-	LKG               TargetIdentity `json:"lkg"`
-	Prewrite          Observation    `json:"prewrite"`
-	AlreadyConverged  bool           `json:"alreadyConverged"`
-	PreparedAt        string         `json:"preparedAt"`
-	PlanDigest        string         `json:"planDigest"`
+	APIVersion          string         `json:"apiVersion"`
+	Kind                string         `json:"kind"`
+	Component           string         `json:"component"`
+	ConfigSHA           string         `json:"configSha"`
+	ReleasePlanDigest   string         `json:"releasePlanDigest"`
+	IntentDigest        string         `json:"intentDigest"`
+	ArtifactDigest      string         `json:"artifactDigest"`
+	Forward             TargetIdentity `json:"forward"`
+	LKG                 TargetIdentity `json:"lkg"`
+	Prewrite            Observation    `json:"prewrite"`
+	AlreadyConverged    bool           `json:"alreadyConverged"`
+	DegradedPredecessor bool           `json:"degradedPredecessor,omitempty"`
+	PreparedAt          string         `json:"preparedAt"`
+	PlanDigest          string         `json:"planDigest"`
 }
 
 type ExecutionResult struct {
@@ -97,6 +98,7 @@ type ExecutionResult struct {
 type Cluster interface {
 	Observe(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error)
 	ObserveCAS(context.Context, PlanRelease, []byte) (Observation, error)
+	VerifyTarget(context.Context, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
 	Apply(context.Context, PlanRelease, TargetIdentity, []byte) error
 	Delete(context.Context, PlanRelease, []byte, Observation) error
@@ -185,47 +187,64 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		ManifestSHA: releasePlan.HeadSHA, OCIRevision: releasePlan.HeadSHA,
 		ManifestDigest: rendered.ForwardDigest,
 	}
-	prewrite, lkgObserveErr := cluster.Observe(ctx, release, lkg, rendered.Forward)
+	var prewrite Observation
 	alreadyConverged := false
-	lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
-	lkgHealthVerified := false
-	if release.ExpectedPreviousPresent && lkgObserveErr != nil {
-		var healthyLKG Observation
-		healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
-		if err == nil && healthyLKG.Matches(lkg, release, true) {
-			prewrite, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
-			lkgMatched = err == nil && prewrite.Matches(lkg, release, true)
-			lkgHealthVerified = lkgMatched
-		}
-	}
-	if lkgMatched {
-		if release.ExpectedPreviousPresent {
-			if !lkgHealthVerified {
-				_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
-			}
+	degradedPredecessor := false
+	if release.RetrySameLKG && release.ExpectedPreviousPresent {
+		prewrite, err = cluster.Observe(ctx, release, forward, rendered.Forward)
+		if err == nil && prewrite.Matches(forward, release, false) {
+			prewrite, err = cluster.WaitHealthy(ctx, release, forward, rendered.Forward)
 			if err == nil {
-				var predecessorWitness []byte
-				predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)
-				if err == nil {
-					err = cluster.Converged(ctx, release, predecessorWitness)
-				}
-				if err == nil {
-					var freshLKG Observation
-					freshLKG, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
-					if err == nil && freshLKG.HealthDigest != prewrite.HealthDigest {
-						err = errors.New("LKG pod health changed after convergence validation")
-					}
-					prewrite = freshLKG
-				}
+				err = cluster.Converged(ctx, release, rendered.Forward)
+				alreadyConverged = err == nil
 			}
 		} else {
-			err = prewrite.ValidateMustBeStable()
+			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+			degradedPredecessor = err == nil
 		}
 	} else {
-		prewrite, err = cluster.WaitHealthy(ctx, release, forward, rendered.Forward)
-		if err == nil && prewrite.Matches(forward, release, false) {
-			err = cluster.Converged(ctx, release, rendered.Forward)
-			alreadyConverged = err == nil
+		var lkgObserveErr error
+		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, rendered.Forward)
+		lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
+		lkgHealthVerified := false
+		if release.ExpectedPreviousPresent && lkgObserveErr != nil {
+			var healthyLKG Observation
+			healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+			if err == nil && healthyLKG.Matches(lkg, release, true) {
+				prewrite, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
+				lkgMatched = err == nil && prewrite.Matches(lkg, release, true)
+				lkgHealthVerified = lkgMatched
+			}
+		}
+		if lkgMatched {
+			if release.ExpectedPreviousPresent {
+				if !lkgHealthVerified {
+					_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+				}
+				if err == nil {
+					var predecessorWitness []byte
+					predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)
+					if err == nil {
+						err = cluster.Converged(ctx, release, predecessorWitness)
+					}
+					if err == nil {
+						var freshLKG Observation
+						freshLKG, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
+						if err == nil && freshLKG.HealthDigest != prewrite.HealthDigest {
+							err = errors.New("LKG pod health changed after convergence validation")
+						}
+						prewrite = freshLKG
+					}
+				}
+			} else {
+				err = prewrite.ValidateMustBeStable()
+			}
+		} else {
+			prewrite, err = cluster.WaitHealthy(ctx, release, forward, rendered.Forward)
+			if err == nil && prewrite.Matches(forward, release, false) {
+				err = cluster.Converged(ctx, release, rendered.Forward)
+				alreadyConverged = err == nil
+			}
 		}
 	}
 	if err != nil {
@@ -235,6 +254,10 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		if err := prewrite.Validate(release); err != nil {
 			return ExecutionPlan{}, fmt.Errorf("validate converged prewrite state: %w", err)
 		}
+	} else if degradedPredecessor {
+		if err := prewrite.ValidateDegradedPredecessor(); err != nil {
+			return ExecutionPlan{}, fmt.Errorf("validate degraded LKG prewrite state: %w", err)
+		}
 	} else if release.ExpectedPreviousPresent {
 		if err := prewrite.Validate(release); err != nil {
 			return ExecutionPlan{}, fmt.Errorf("validate LKG prewrite state: %w", err)
@@ -242,7 +265,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	} else if err := prewrite.ValidateMustBeStable(); err != nil {
 		return ExecutionPlan{}, fmt.Errorf("validate absent prewrite state: %w", err)
 	}
-	if !alreadyConverged && !prewrite.Matches(lkg, release, true) {
+	if !alreadyConverged && !degradedPredecessor && !prewrite.Matches(lkg, release, true) {
 		return ExecutionPlan{}, errors.New("live workload matches neither declared LKG nor immutable target")
 	}
 	forwardDryRun, err := BindManifestCAS(rendered.Forward, prewrite)
@@ -266,7 +289,8 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		Component: componentID, ConfigSHA: releasePlan.HeadSHA,
 		ReleasePlanDigest: releasePlan.PlanDigest, IntentDigest: release.IntentDigest,
 		ArtifactDigest: artifact.ReceiptDigest, Forward: forward, LKG: lkg,
-		Prewrite: prewrite, AlreadyConverged: alreadyConverged, PreparedAt: now.UTC().Format(time.RFC3339Nano),
+		Prewrite: prewrite, AlreadyConverged: alreadyConverged, DegradedPredecessor: degradedPredecessor,
+		PreparedAt: now.UTC().Format(time.RFC3339Nano),
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
@@ -274,6 +298,40 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	}
 	plan.PlanDigest = digestOf(unsigned)
 	return plan, nil
+}
+
+func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
+	if !release.RetrySameLKG || !release.ExpectedPreviousPresent || !lkg.Present {
+		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
+	}
+	if err := cluster.VerifyTarget(ctx, lkg); err != nil {
+		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", err)
+	}
+	witness, err := PredecessorConvergenceManifest(lkgManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	first, err := cluster.ObserveCAS(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	if err := first.ValidateDegradedPredecessor(); err != nil {
+		return Observation{}, err
+	}
+	if err := cluster.Converged(ctx, release, witness); err != nil {
+		return Observation{}, fmt.Errorf("degraded predecessor manifest drift: %w", err)
+	}
+	second, err := cluster.ObserveCAS(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	if err := second.ValidateDegradedPredecessor(); err != nil {
+		return Observation{}, err
+	}
+	if !second.SameSpecIdentity(first) {
+		return Observation{}, errors.New("degraded predecessor identity changed during validation")
+	}
+	return second, nil
 }
 
 func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared ExecutionPlan, forwardManifest, lkgManifest []byte) ExecutionResult {
@@ -293,8 +351,26 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	if prepared.AlreadyConverged {
 		currentTarget = prepared.Forward
 	}
-	current, err := cluster.Observe(ctx, release, currentTarget, observationManifest)
-	if err != nil || !current.SameCAS(prepared.Prewrite) {
+	var current Observation
+	if prepared.DegradedPredecessor {
+		current, err = cluster.ObserveCAS(ctx, release, observationManifest)
+		if err == nil && !current.SameSpecIdentity(prepared.Prewrite) {
+			err = errors.New("degraded predecessor identity changed")
+		}
+		if err == nil {
+			var witness []byte
+			witness, err = PredecessorConvergenceManifest(lkgManifest)
+			if err == nil {
+				err = cluster.Converged(ctx, release, witness)
+			}
+		}
+	} else {
+		current, err = cluster.Observe(ctx, release, currentTarget, observationManifest)
+		if err == nil && !current.SameCAS(prepared.Prewrite) {
+			err = errors.New("prewrite CAS changed")
+		}
+	}
+	if err != nil {
 		result.Reason = "prewrite-cas-drift"
 		return sealResult(result)
 	}
@@ -330,8 +406,17 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	if applyErr != nil {
-		observed, observeErr := cluster.Observe(ctx, release, prepared.LKG, observationManifest)
-		if observeErr == nil && observed.SameCAS(prepared.Prewrite) {
+		var observed Observation
+		var observeErr error
+		unchanged := false
+		if prepared.DegradedPredecessor {
+			observed, observeErr = cluster.ObserveCAS(ctx, release, observationManifest)
+			unchanged = observeErr == nil && observed.SameSpecIdentity(prepared.Prewrite)
+		} else {
+			observed, observeErr = cluster.Observe(ctx, release, prepared.LKG, observationManifest)
+			unchanged = observeErr == nil && observed.SameCAS(prepared.Prewrite)
+		}
+		if unchanged {
 			result.Status = "failed-no-write"
 			result.Reason = "forward-apply-rejected-before-commit"
 			result.Final = observed
@@ -487,17 +572,37 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	} else if plan.LKG.ImageRef != "" || plan.LKG.ConfigSHA != "" || plan.LKG.ManifestSHA != "" || plan.LKG.OCIRevision != "" {
 		return errors.New("absent execution LKG carries runtime identity")
 	}
-	if err := plan.Prewrite.ValidateMustBeStable(); err != nil {
+	if plan.DegradedPredecessor {
+		if !release.RetrySameLKG || !release.ExpectedPreviousPresent || plan.AlreadyConverged {
+			return errors.New("degraded predecessor execution is not authorized")
+		}
+		if err := plan.Prewrite.ValidateDegradedPredecessor(); err != nil {
+			return err
+		}
+	} else if err := plan.Prewrite.ValidateMustBeStable(); err != nil {
 		return err
 	}
 	if plan.AlreadyConverged {
 		if !plan.Prewrite.Matches(plan.Forward, release, false) {
 			return errors.New("already-converged execution plan is not bound to the forward target")
 		}
-	} else if !plan.Prewrite.Matches(plan.LKG, release, true) {
+	} else if !plan.DegradedPredecessor && !plan.Prewrite.Matches(plan.LKG, release, true) {
 		return errors.New("execution plan prewrite is not bound to the LKG")
 	}
 	return nil
+}
+
+func (observation Observation) ValidateDegradedPredecessor() error {
+	if !observation.Present || observation.UID == "" || !resourceVersionPattern.MatchString(observation.ResourceVersion) || observation.Generation < 1 {
+		return errors.New("degraded predecessor CAS is invalid")
+	}
+	if observation.ObservedGeneration != 0 || observation.Desired != 0 || observation.Updated != 0 || observation.Ready != 0 ||
+		observation.Available != 0 || observation.Unavailable != 0 || observation.ImageRef != "" || observation.ImageID != "" ||
+		observation.ConfigSHA != "" || observation.ManifestSHA != "" || observation.OCIRevision != "" || observation.TemplateDigest != "" ||
+		observation.HealthDigest != "" || len(observation.FieldManagers) != 0 {
+		return errors.New("degraded predecessor observation carries unverified health state")
+	}
+	return observation.validateResourceCAS()
 }
 
 func (observation Observation) Validate(release PlanRelease) error {
@@ -585,6 +690,26 @@ func (observation Observation) SameCAS(other Observation) bool {
 		left, right := observation.Resources[index], other.Resources[index]
 		if left.Identity != right.Identity || left.Present != right.Present || left.UID != right.UID ||
 			left.RetainOnRollback != right.RetainOnRollback || left.ResourceVersion != right.ResourceVersion || left.Generation != right.Generation ||
+			left.ObjectDigest != right.ObjectDigest || !equalStrings(left.FieldManagers, right.FieldManagers) {
+			return false
+		}
+	}
+	return true
+}
+
+// SameSpecIdentity permits status-only resourceVersion movement while binding
+// an unhealthy predecessor to the same UID, generation, desired object bytes,
+// and managed-field ownership. The caller still uses the newest RV as the
+// immediate server-side-apply CAS precondition.
+func (observation Observation) SameSpecIdentity(other Observation) bool {
+	if observation.Present != other.Present || observation.Primary != other.Primary || observation.UID != other.UID ||
+		observation.Generation != other.Generation || len(observation.Resources) != len(other.Resources) {
+		return false
+	}
+	for index := range observation.Resources {
+		left, right := observation.Resources[index], other.Resources[index]
+		if left.Identity != right.Identity || left.Present != right.Present || left.UID != right.UID ||
+			left.RetainOnRollback != right.RetainOnRollback || left.Generation != right.Generation ||
 			left.ObjectDigest != right.ObjectDigest || !equalStrings(left.FieldManagers, right.FieldManagers) {
 			return false
 		}
