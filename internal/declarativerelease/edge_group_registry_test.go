@@ -168,6 +168,8 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	alpha := edgeGroupFixture("alpha", "edge-group-metro-alpha")
 	alpha.Control.MigrationState = "pending"
 	alpha.Worker.MigrationState = "pending"
+	alpha.Control.AdoptionReceiptPath = ""
+	alpha.Worker.AdoptionReceiptPath = ""
 	initial := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{alpha}}
 	if err := ValidateEdgeGroupRegistryUpdate(nil, initial, Plan{APIVersion: IntentAPIVersion, Kind: "ProductionReleasePlan"}, []string{"deploy/releases/edge-groups.json"}); err != nil {
 		t.Fatalf("pending data-only registry introduction: %v", err)
@@ -175,6 +177,7 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	unsafeInitial := initial
 	unsafeInitial.Groups = append([]EdgeGroup(nil), initial.Groups...)
 	unsafeInitial.Groups[0].Control.MigrationState = "independent"
+	unsafeInitial.Groups[0].Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
 	if err := ValidateEdgeGroupRegistryUpdate(nil, unsafeInitial, Plan{}, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "must begin pending") {
 		t.Fatalf("active initial group was accepted: %v", err)
 	}
@@ -202,12 +205,23 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	independent := next
 	independent.Groups = append([]EdgeGroup(nil), next.Groups...)
 	independent.Groups[0].Control.MigrationState = "independent"
-	if err := ValidateEdgeGroupRegistryUpdate(&next, independent, controlPlan, []string{"deploy/releases/edge-groups.json"}); err != nil {
+	independent.Groups[0].Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
+	if err := ValidateEdgeGroupRegistryUpdate(&next, independent, Plan{}, []string{"deploy/releases/edge-groups.json", independent.Groups[0].Control.AdoptionReceiptPath}); err != nil {
 		t.Fatalf("single control independence: %v", err)
+	}
+	receipt := adoptionReceiptFixture(t, independent.Groups[0].Control, independent.Groups[0].GroupID)
+	if err := ValidateEdgeGroupAdoptionReceipts(&next, independent, func(path string) (OwnershipAdoptionReceipt, error) {
+		if path != independent.Groups[0].Control.AdoptionReceiptPath {
+			t.Fatalf("unexpected adoption receipt path %q", path)
+		}
+		return receipt, nil
+	}); err != nil {
+		t.Fatalf("verified control independence: %v", err)
 	}
 	skipped := initial
 	skipped.Groups = append([]EdgeGroup(nil), initial.Groups...)
 	skipped.Groups[0].Control.MigrationState = "independent"
+	skipped.Groups[0].Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
 	if err := ValidateEdgeGroupRegistryUpdate(&initial, skipped, controlPlan, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "pending to adopting to independent") {
 		t.Fatalf("skipped adoption state was accepted: %v", err)
 	}
@@ -223,6 +237,8 @@ func TestEdgeGroupPublicationHealthMigratesForwardOnly(t *testing.T) {
 	legacy := edgeGroupFixture("alpha", "edge-group-metro-alpha")
 	legacy.Control.MigrationState = "pending"
 	legacy.Worker.MigrationState = "pending"
+	legacy.Control.AdoptionReceiptPath = ""
+	legacy.Worker.AdoptionReceiptPath = ""
 	legacy.Control.Health = append(legacy.Control.Health, HealthProbe{Type: "service-http", Name: legacy.Control.Workload.Name, Port: "http", Path: "/v1/authority/groups/" + legacy.GroupID + "/readyz"})
 	legacy.Worker.Health = append(legacy.Worker.Health[:1], legacy.Worker.Health[2:]...)
 	if err := legacy.validate(); err != nil {
@@ -231,6 +247,8 @@ func TestEdgeGroupPublicationHealthMigratesForwardOnly(t *testing.T) {
 	staged := edgeGroupFixture("alpha", "edge-group-metro-alpha")
 	staged.Control.MigrationState = "pending"
 	staged.Worker.MigrationState = "pending"
+	staged.Control.AdoptionReceiptPath = ""
+	staged.Worker.AdoptionReceiptPath = ""
 	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{legacy}}
 	current := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{staged}}
 	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, Plan{}, []string{"deploy/releases/edge-groups.json"}); err != nil {
@@ -254,6 +272,7 @@ func TestPendingSharedEdgeManifestTemplateIsConfigurationOnly(t *testing.T) {
 		edgeGroupFixture("gamma", "edge-group-metro-gamma").Control,
 	}}
 	base.Components[0].MigrationState = "pending"
+	base.Components[0].AdoptionReceiptPath = ""
 	plan, err := BuildPlan(base, testSHA1, testSHA2, []string{base.Components[0].ManifestPath})
 	if err != nil || len(plan.Releases) != 0 {
 		t.Fatalf("pending shared template selected production: plan=%+v err=%v", plan, err)
@@ -286,6 +305,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", FieldManager: "fugue-edge-control-" + id + "-declarative", Replicas: 1, RolloutMode: "recreate"},
 		Health:      []HealthProbe{{Type: "deployment", Name: controlName}},
 		Concurrency: "fugue-production-edge-control-" + id, MigrationState: "independent",
+		AdoptionReceiptPath: "deploy/releases/edge-control-" + id + "/adoption-receipt.json",
 	}
 	worker := Component{
 		ID: "edge-worker-" + id, Family: "edge",
@@ -308,6 +328,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		Transition:  &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: groupID, FrontName: frontName, WorkerAName: workerAName, WorkerBName: workerBName, WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
 		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "service-http", Name: controlName, Port: "http", Path: "/v1/authority/groups/" + groupID + "/readyz"}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
 		Concurrency: "fugue-production-edge-worker-" + id, MigrationState: "independent",
+		AdoptionReceiptPath: "deploy/releases/edge-worker-" + id + "/adoption-receipt.json",
 	}
 	return EdgeGroup{ID: id, GroupID: groupID, Control: control, Worker: worker}
 }

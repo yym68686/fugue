@@ -78,6 +78,11 @@ func (group EdgeGroup) validate() error {
 	if group.Control.Family != "edge" || group.Worker.Family != "edge" {
 		return errors.New("edge group component family must be edge")
 	}
+	for _, component := range []Component{group.Control, group.Worker} {
+		if component.MigrationState == "independent" && component.AdoptionReceiptPath == "" {
+			return fmt.Errorf("edge group component %q has no verified adoption receipt", component.ID)
+		}
+	}
 	if err := group.Control.Validate(); err != nil {
 		return fmt.Errorf("control component: %w", err)
 	}
@@ -215,6 +220,11 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			}
 			if string(priorJSON) != string(nextJSON) && selected != pair.id {
 				_, intentChanged := changed[pair.next.IntentPath]
+				_, receiptChanged := changed[pair.next.AdoptionReceiptPath]
+				if selected == "" && pair.previous.MigrationState == "adopting" && pair.next.MigrationState == "independent" &&
+					pair.next.AdoptionReceiptPath != "" && receiptChanged {
+					continue
+				}
 				if pair.previous.MigrationState == "pending" && pair.next.MigrationState == "pending" && !intentChanged {
 					continue
 				}
@@ -224,6 +234,40 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 	}
 	if len(before) != 0 {
 		return errors.New("edge group registry cannot remove an existing group")
+	}
+	return nil
+}
+
+// ValidateEdgeGroupAdoptionReceipts makes an adopting-to-independent state
+// transition depend on the terminal production receipt, not on an intent
+// generation or same-LKG retry bit.
+func ValidateEdgeGroupAdoptionReceipts(previous *EdgeGroupRegistry, current EdgeGroupRegistry, load func(string) (OwnershipAdoptionReceipt, error)) error {
+	if previous == nil {
+		return nil
+	}
+	before := make(map[string]EdgeGroup, len(previous.Groups))
+	for _, group := range previous.Groups {
+		before[group.ID] = group
+	}
+	for _, group := range current.Groups {
+		prior, exists := before[group.ID]
+		if !exists {
+			continue
+		}
+		for _, pair := range []struct {
+			previous, next Component
+		}{{prior.Control, group.Control}, {prior.Worker, group.Worker}} {
+			if pair.previous.MigrationState != "adopting" || pair.next.MigrationState != "independent" {
+				continue
+			}
+			receipt, err := load(pair.next.AdoptionReceiptPath)
+			if err != nil {
+				return fmt.Errorf("edge group component %q adoption receipt: %w", pair.next.ID, err)
+			}
+			if err := receipt.Validate(pair.next, group.GroupID); err != nil {
+				return fmt.Errorf("edge group component %q adoption receipt: %w", pair.next.ID, err)
+			}
+		}
 	}
 	return nil
 }

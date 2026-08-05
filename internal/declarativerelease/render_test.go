@@ -113,6 +113,7 @@ func TestRenderManifestsBindsEveryDeclaredArtifactTarget(t *testing.T) {
 func TestBootstrapLKGPreservesGroupLocalImmutableImages(t *testing.T) {
 	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
 	group.Worker.MigrationState = "adopting"
+	group.Worker.AdoptionReceiptPath = ""
 	group.Worker.OwnershipAdoption = &OwnershipAdoption{
 		LegacyFieldManager: "helm",
 		Resources: []OwnershipAdoptionScope{{

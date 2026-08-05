@@ -69,6 +69,7 @@ type Component struct {
 	Concurrency               string             `json:"concurrency"`
 	MigrationState            string             `json:"migrationState"`
 	OwnershipAdoption         *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
+	AdoptionReceiptPath       string             `json:"adoptionReceiptPath,omitempty"`
 }
 
 // OwnershipAdoption is the reviewed, one-time compatibility boundary for a
@@ -357,6 +358,12 @@ func (component Component) Validate() error {
 	}
 	if component.MigrationState == "independent" && component.OwnershipAdoption != nil {
 		return fmt.Errorf("component %q independent lane retains ownership adoption", component.ID)
+	}
+	if component.AdoptionReceiptPath != "" {
+		expected := "deploy/releases/" + component.ID + "/adoption-receipt.json"
+		if component.MigrationState != "independent" || component.AdoptionReceiptPath != expected {
+			return fmt.Errorf("component %q adoption receipt path is invalid", component.ID)
+		}
 	}
 	if component.OwnershipAdoption != nil {
 		if err := component.OwnershipAdoption.validate(component); err != nil {

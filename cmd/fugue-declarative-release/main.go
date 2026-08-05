@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ func main() {
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|prepare|execute|reconcile> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|adoption-receipt|prepare|execute|reconcile> ...")
 	}
 	switch args[0] {
 	case "plan":
@@ -40,6 +41,8 @@ func run(args []string, output io.Writer) error {
 		return runBuild(args, output)
 	case "receipt":
 		return runReceipt(args, output)
+	case "adoption-receipt":
+		return runAdoptionReceipt(args, output)
 	case "prepare":
 		return runPrepare(args, output)
 	case "execute":
@@ -47,8 +50,58 @@ func run(args []string, output io.Writer) error {
 	case "reconcile":
 		return runReconcile(args, output)
 	default:
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|prepare|execute|reconcile> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|adoption-receipt|prepare|execute|reconcile> ...")
 	}
+}
+
+func runAdoptionReceipt(args []string, output io.Writer) error {
+	if len(args) != 7 {
+		return errors.New("usage: fugue-declarative-release adoption-receipt REGISTRY COMPONENT GROUP RUN_ID RUN_ATTEMPT RESULT")
+	}
+	registry, err := loadProductionRegistry(args[1])
+	if err != nil {
+		return err
+	}
+	var component *declarativerelease.Component
+	for index := range registry.Components {
+		if registry.Components[index].ID == args[2] {
+			component = &registry.Components[index]
+			break
+		}
+	}
+	if component == nil {
+		return errors.New("adoption receipt component is not registered")
+	}
+	runID, err := strconv.ParseInt(args[4], 10, 64)
+	if err != nil {
+		return errors.New("adoption receipt run ID is invalid")
+	}
+	runAttempt, err := strconv.Atoi(args[5])
+	if err != nil {
+		return errors.New("adoption receipt run attempt is invalid")
+	}
+	file, err := os.Open(args[6])
+	if err != nil {
+		return err
+	}
+	result, decodeErr := declarativerelease.DecodeExecutionResult(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	receipt, err := declarativerelease.BuildOwnershipAdoptionReceipt(result, *component, args[3], runID, runAttempt)
+	if err != nil {
+		return err
+	}
+	raw, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return err
+	}
+	_, err = output.Write(append(raw, '\n'))
+	return err
 }
 
 func runPlan(args []string, output io.Writer) error {
@@ -89,6 +142,9 @@ func runPlan(args []string, output io.Writer) error {
 		if edgeErr := declarativerelease.ValidateEdgeGroupRegistryUpdate(previousEdge, currentEdge, plan, changed); edgeErr != nil {
 			return edgeErr
 		}
+		if edgeErr := declarativerelease.ValidateEdgeGroupAdoptionReceipts(previousEdge, currentEdge, loadOwnershipAdoptionReceipt); edgeErr != nil {
+			return edgeErr
+		}
 	}
 	if len(plan.Releases) > 0 {
 		parentRaw, parentErr := exec.Command("git", "rev-parse", headSHA+"^").Output()
@@ -124,6 +180,22 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
+}
+
+func loadOwnershipAdoptionReceipt(path string) (declarativerelease.OwnershipAdoptionReceipt, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return declarativerelease.OwnershipAdoptionReceipt{}, err
+	}
+	receipt, decodeErr := declarativerelease.DecodeOwnershipAdoptionReceipt(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return declarativerelease.OwnershipAdoptionReceipt{}, decodeErr
+	}
+	if closeErr != nil {
+		return declarativerelease.OwnershipAdoptionReceipt{}, closeErr
+	}
+	return receipt, nil
 }
 
 func containsPath(paths []string, want string) bool {
