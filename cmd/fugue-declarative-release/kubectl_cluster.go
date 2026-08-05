@@ -753,11 +753,11 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	partial, err := parseObservation(workloadRaw, podsRaw, release, allowHistoricalRestarts)
-	if err != nil {
+	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
+	partial, err := parseObservation(workloadRaw, podsRaw, release, allowHistoricalRestarts, true)
+	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
 	verificationImage, err := observedVerificationImage(partial.ImageRef, partial.ImageID, expectedOCI, allowHistoricalRestarts)
@@ -1370,7 +1370,7 @@ func selectorFromWorkload(raw []byte) (string, error) {
 	return strings.Join(parts, ","), nil
 }
 
-func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease, allowHistoricalRestarts bool) (declarativerelease.Observation, error) {
+func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease, allowHistoricalRestarts, declaredArtifactsVerified bool) (declarativerelease.Observation, error) {
 	workload, err := decodeJSONObject(workloadRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -1455,7 +1455,7 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	if release.Workload.Kind == "Job" {
 		imageID, healthDigest, err = parseSucceededJobPod(podsRaw, release, manifestSHA)
 	} else {
-		imageID, healthDigest, err = parseReadyPods(podsRaw, release, observation.Desired-int32(release.Workload.PreservedUnavailable), manifestSHA, allowHistoricalRestarts)
+		imageID, healthDigest, err = parseReadyPods(podsRaw, release, observation.Desired-int32(release.Workload.PreservedUnavailable), manifestSHA, allowHistoricalRestarts, declaredArtifactsVerified)
 	}
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -1589,7 +1589,7 @@ func legacySourceTag(image string) string {
 	return value
 }
 
-func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired int32, manifestSHA string, allowHistoricalRestarts bool) (string, string, error) {
+func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired int32, manifestSHA string, allowHistoricalRestarts, declaredArtifactsVerified bool) (string, string, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil {
 		return "", "", err
@@ -1616,7 +1616,11 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 			for _, rawContainer := range anySlice(mapField(pod, "spec")["containers"]) {
 				container, _ := rawContainer.(map[string]any)
 				if stringValue(container["name"]) == release.Workload.Container {
-					podSource = legacySourceTag(stringValue(container["image"]))
+					image := stringValue(container["image"])
+					podSource = legacySourceTag(image)
+					if podSource == "" && declaredArtifactsVerified && strings.Contains(image, "@sha256:") {
+						podSource = manifestSHA
+					}
 					break
 				}
 			}
