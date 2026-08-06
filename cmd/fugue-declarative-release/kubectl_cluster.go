@@ -761,9 +761,19 @@ func canOmitLKGCompensationResource(identity declarativerelease.ResourceIdentity
 func ownershipTakeoverForwardOnlyPaths(forward, lkg map[string]any) ([]string, error) {
 	allowed := []string{"/spec/template/spec/serviceAccount", "/spec/template/spec/serviceAccountName", "/spec/template/spec/initContainers"}
 	paths := make([]string, 0, len(allowed))
+	forwardServiceAccountName, forwardServiceAccountNamePresent := ownershipJSONPointer(forward, "/spec/template/spec/serviceAccountName")
+	_, lkgServiceAccountNamePresent := ownershipJSONPointer(lkg, "/spec/template/spec/serviceAccountName")
+	_, lkgLegacyServiceAccountPresent := ownershipJSONPointer(lkg, "/spec/template/spec/serviceAccount")
 	for _, path := range allowed {
 		forwardValue, forwardPresent := ownershipJSONPointer(forward, path)
 		_, lkgPresent := ownershipJSONPointer(lkg, path)
+		// Kubernetes may materialize the deprecated serviceAccount alias
+		// when a forward-only serviceAccountName is applied. Treat that
+		// alias as part of the same reviewed compensation scope so the
+		// historical LKG can actually be restored.
+		if path == "/spec/template/spec/serviceAccount" && forwardServiceAccountNamePresent && !lkgServiceAccountNamePresent && !lkgLegacyServiceAccountPresent {
+			forwardValue, forwardPresent = forwardServiceAccountName, true
+		}
 		if forwardPresent && !lkgPresent {
 			if forwardValue == nil {
 				return nil, fmt.Errorf("forward-only field %s is null", path)

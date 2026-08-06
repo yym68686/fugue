@@ -404,13 +404,20 @@ func TestOwnershipTakeoverForwardOnlyCompensationPathsAreExplicit(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(paths, ",") != "/spec/template/spec/serviceAccountName,/spec/template/spec/initContainers" {
+	if strings.Join(paths, ",") != "/spec/template/spec/serviceAccount,/spec/template/spec/serviceAccountName,/spec/template/spec/initContainers" {
 		t.Fatalf("unexpected explicit compensation paths: %v", paths)
 	}
 	lkg["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["serviceAccountName"] = "edge-worker-de"
 	paths, err = ownershipTakeoverForwardOnlyPaths(forward, lkg)
 	if err != nil || len(paths) != 1 || paths[0] != "/spec/template/spec/initContainers" {
 		t.Fatalf("LKG-owned field was not preserved: %v %v", paths, err)
+	}
+	spec := lkg["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	delete(spec, "serviceAccountName")
+	spec["serviceAccount"] = "edge-worker-de"
+	paths, err = ownershipTakeoverForwardOnlyPaths(forward, lkg)
+	if err != nil || len(paths) != 2 || paths[0] != "/spec/template/spec/serviceAccountName" || paths[1] != "/spec/template/spec/initContainers" {
+		t.Fatalf("legacy LKG serviceAccount alias was not preserved: %v %v", paths, err)
 	}
 }
 
