@@ -265,19 +265,13 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 		return declarativerelease.Observation{}, err
 	}
 	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
-	if verifyErr := cluster.verifyOwnershipAdoption(ctx, release, adoption); verifyErr != nil {
-		if applyErr != nil {
-			return declarativerelease.Observation{}, fmt.Errorf("apply ownership takeover: %v; verify ownership takeover: %w", applyErr, verifyErr)
-		}
-		return declarativerelease.Observation{}, verifyErr
+	verifyErr := cluster.verifyOwnershipAdoption(ctx, release, adoption)
+	convergedErr := cluster.Converged(ctx, release, manifest)
+	observation, observeErr := cluster.ObserveCAS(ctx, release, targetManifest)
+	if err := errors.Join(applyErr, verifyErr, convergedErr, observeErr); err != nil {
+		return observation, fmt.Errorf("verify ownership takeover: %w", err)
 	}
-	if applyErr != nil {
-		return declarativerelease.Observation{}, fmt.Errorf("apply ownership takeover: %w", applyErr)
-	}
-	if err := cluster.Converged(ctx, release, manifest); err != nil {
-		return declarativerelease.Observation{}, fmt.Errorf("verify ownership takeover convergence: %w", err)
-	}
-	return cluster.ObserveCAS(ctx, release, targetManifest)
+	return observation, nil
 }
 
 func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, manifest []byte, dryRun bool) error {

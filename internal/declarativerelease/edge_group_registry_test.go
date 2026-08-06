@@ -164,6 +164,66 @@ func TestProductionGoAndWorkflowDoNotNameConfiguredGroups(t *testing.T) {
 	}
 }
 
+func TestEdgeWorkerTemplatePreservesExternalCaddyAndTenantNodePlacement(t *testing.T) {
+	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := DecodeEdgeGroupRegistry(edgeFile)
+	_ = edgeFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const caddyImage = "docker.io/library/caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
+	for _, group := range edge.Groups {
+		for _, target := range group.Worker.ArtifactTargets {
+			if target.Container == "caddy" {
+				t.Fatalf("group %s treats external Caddy as a Fugue artifact", group.ID)
+			}
+		}
+		raw, readErr := os.ReadFile(filepath.Join("../..", group.Worker.ManifestPath))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		materialized, materializeErr := MaterializeManifestTemplate(raw, group.Worker.ManifestVariables)
+		if materializeErr != nil {
+			t.Fatal(materializeErr)
+		}
+		set, decodeErr := DecodeResourceSet(strings.NewReader(string(materialized)))
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		for _, item := range set.Items {
+			if stringField(item, "kind") != "DaemonSet" {
+				continue
+			}
+			metadata, metadataErr := objectField(item, "metadata")
+			itemSpec, specErr := objectField(item, "spec")
+			template, templateErr := objectField(itemSpec, "template")
+			spec, podSpecErr := objectField(template, "spec")
+			if metadataErr != nil || specErr != nil || templateErr != nil || podSpecErr != nil {
+				t.Fatalf("group %s DaemonSet structure is invalid", group.ID)
+			}
+			foundTenant := false
+			tolerations, _ := spec["tolerations"].([]any)
+			for _, rawToleration := range tolerations {
+				toleration, _ := rawToleration.(map[string]any)
+				foundTenant = foundTenant || (stringField(toleration, "key") == "fugue.io/tenant" && stringField(toleration, "operator") == "Exists" && stringField(toleration, "effect") == "NoSchedule")
+			}
+			if !foundTenant {
+				t.Fatalf("group %s DaemonSet %s cannot schedule on the existing tenant-tainted Edge node", group.ID, stringField(metadata, "name"))
+			}
+			containers, _ := spec["containers"].([]any)
+			for _, rawContainer := range containers {
+				container, _ := rawContainer.(map[string]any)
+				if stringField(container, "name") == "caddy" && stringField(container, "image") != caddyImage {
+					t.Fatalf("group %s Caddy image is not independently pinned: %+v", group.ID, container)
+				}
+			}
+		}
+	}
+}
+
 func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testing.T) {
 	alpha := edgeGroupFixture("alpha", "edge-group-metro-alpha")
 	alpha.Control.MigrationState = "pending"

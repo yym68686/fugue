@@ -591,10 +591,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			var takeoverErr error
 			adopted, takeoverErr = cluster.TakeoverOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.Forward, forwardManifest)
 			if takeoverErr != nil || !adopted.CompletesOwnershipTakeover(prepared.Prewrite, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
-				result.Status = "recovery-required"
-				result.Reason = "ownership-takeover-unknown"
-				result.Final = adopted
-				return sealResult(result)
+				return compensateOwnershipTakeover(ctx, cluster, release, prepared, forwardManifest, lkgManifest, result, adopted)
 			}
 		}
 		current = adopted
@@ -711,6 +708,50 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	result.Reason = "lkg-unproven"
+	result.Final = lkgObservation
+	return sealResult(result)
+}
+
+func compensateOwnershipTakeover(ctx context.Context, cluster Cluster, release PlanRelease, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, result ExecutionResult, observed Observation) ExecutionResult {
+	if !observed.Present || observed.UID == "" || !resourceVersionPattern.MatchString(observed.ResourceVersion) {
+		var observeErr error
+		observed, observeErr = cluster.ObserveCAS(ctx, release, forwardManifest)
+		if observeErr != nil {
+			result.Status = "recovery-required"
+			result.Reason = "ownership-takeover-observation-failed"
+			return sealResult(result)
+		}
+	}
+	if observed.SameResourceCAS(prepared.Prewrite) {
+		result.Status = "failed-no-write"
+		result.Reason = "ownership-takeover-rejected-before-commit"
+		result.Final = observed
+		return sealResult(result)
+	}
+	lkgCAS, err := BindManifestCAS(lkgManifest, observed)
+	if err != nil {
+		result.Status = "recovery-required"
+		result.Reason = "ownership-takeover-lkg-cas-invalid"
+		result.Final = observed
+		return sealResult(result)
+	}
+	result.LKGApplyCount = 1
+	applyErr := cluster.Apply(ctx, release, prepared.LKG, lkgCAS)
+	deleteErr := cluster.DeleteCreated(ctx, release, forwardManifest, prepared.Prewrite, observed)
+	lkgObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.LKG, lkgManifest)
+	convergedErr := cluster.Converged(ctx, release, lkgManifest)
+	if healthErr == nil && convergedErr == nil && lkgObservation.Matches(prepared.LKG, release, true) {
+		result.Status = "compensated"
+		if applyErr != nil || deleteErr != nil {
+			result.Reason = "ownership-takeover-lkg-commit-unknown-reconciled"
+		} else {
+			result.Reason = "ownership-takeover-lkg-restored"
+		}
+		result.Final = lkgObservation
+		return sealResult(result)
+	}
+	result.Status = "recovery-required"
+	result.Reason = "ownership-takeover-lkg-unproven"
 	result.Final = lkgObservation
 	return sealResult(result)
 }

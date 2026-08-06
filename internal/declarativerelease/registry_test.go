@@ -85,8 +85,8 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 				caddyTargets++
 			}
 		}
-		if caddyTargets != 2 {
-			t.Fatalf("%s does not bind both Caddy containers to its immutable Edge artifact", componentID)
+		if caddyTargets != 0 {
+			t.Fatalf("%s incorrectly binds external Caddy containers to its Edge artifact", componentID)
 		}
 		lkgRaw, err := os.ReadFile(filepath.Join("../..", byID[componentID].BootstrapLKGPath))
 		if err != nil {
