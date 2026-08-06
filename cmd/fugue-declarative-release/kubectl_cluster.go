@@ -691,6 +691,12 @@ func (cluster *kubectlCluster) ClearOwnershipTakeoverForwardOnlyFields(ctx conte
 		}
 		lkgItem, err := declarativerelease.ResourceSetItem(lkgManifest, identity)
 		if err != nil {
+			// A historical LKG may omit the forward-only component
+			// ServiceAccount. It is intentionally retained during
+			// compensation, so there are no LKG-owned fields to clear.
+			if canOmitLKGCompensationResource(identity) {
+				continue
+			}
 			return err
 		}
 		paths, err := ownershipTakeoverForwardOnlyPaths(forwardItem, lkgItem)
@@ -746,6 +752,10 @@ func (cluster *kubectlCluster) ClearOwnershipTakeoverForwardOnlyFields(ctx conte
 		}
 	}
 	return nil
+}
+
+func canOmitLKGCompensationResource(identity declarativerelease.ResourceIdentity) bool {
+	return identity.APIVersion == "v1" && identity.Kind == "ServiceAccount"
 }
 
 func ownershipTakeoverForwardOnlyPaths(forward, lkg map[string]any) ([]string, error) {

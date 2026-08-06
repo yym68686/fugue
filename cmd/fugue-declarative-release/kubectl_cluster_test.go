@@ -529,6 +529,18 @@ func TestOwnershipTakeoverCreatedDeletionsPreserveForwardServiceAccounts(t *test
 	}
 }
 
+func TestOwnershipTakeoverCompensationAllowsHistoricalLKGToOmitServiceAccount(t *testing.T) {
+	if !canOmitLKGCompensationResource(declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount"}) {
+		t.Fatal("forward ServiceAccount should be retained when absent from historical LKG")
+	}
+	if canOmitLKGCompensationResource(declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "Service"}) {
+		t.Fatal("non-dependency resource must not be omitted from historical LKG compensation")
+	}
+	if canOmitLKGCompensationResource(declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet"}) {
+		t.Fatal("workload resource must not be omitted from historical LKG compensation")
+	}
+}
+
 func TestFreshDeletionPreconditionsRefreshStatusOnlyResourceVersion(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"}
 	object := &unstructured.Unstructured{Object: map[string]any{
