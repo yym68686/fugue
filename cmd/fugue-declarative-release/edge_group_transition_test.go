@@ -150,6 +150,41 @@ func TestWorkloadLegacySourceFallsBackToBoundTemplateSourceAfterAdoption(t *test
 	}
 }
 
+func TestAdoptingLegacyPodIdentityComesFromExactBootstrapLKG(t *testing.T) {
+	oldSource := strings.Repeat("7", 40)
+	oldDigest := strings.Repeat("d", 64)
+	newSource := strings.Repeat("f", 40)
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "bootstrap.json",
+		ExpectedPreviousPresent: true, OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
+		Workload:   declarativerelease.Workload{Namespace: "fugue-system", FieldManager: "edge-declarative"},
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{}},
+	}
+	bootstrap := []byte(fmt.Sprintf(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"worker-a","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"edge"}},"template":{"metadata":{"labels":{"app":"edge"},"annotations":{"fugue.pro/source-commit":"%s","fugue.pro/oci-revision":"%s"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/fugue-edge@sha256:%s"}]}},"updateStrategy":{"type":"OnDelete"}}}]}`, oldSource, oldSource, oldDigest))
+	target, err := declaredEdgeDaemonSetTarget(bootstrap, release, "worker-a", "edge")
+	if err != nil || target.ConfigSHA != oldSource {
+		t.Fatalf("bind bootstrap LKG target: target=%+v err=%v", target, err)
+	}
+	currentDesired := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"%s"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/edge@sha256:%s"}]}}}}`, newSource, strings.Repeat("e", 64)))
+	if got, err := workloadLegacySource(currentDesired, "edge"); err != nil || got != newSource {
+		t.Fatalf("fixture no longer reproduces the misleading desired-template source: got=%q err=%v", got, err)
+	}
+	pod := edgeGroupPodFixture("worker-a-old", "uid-old", "node-1", "edge-group-country-de", oldSource, oldDigest)
+	metadata := pod["metadata"].(map[string]any)
+	delete(metadata["annotations"].(map[string]any), "fugue.pro/source-commit")
+	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
+	parsed, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-de", true, target.ConfigSHA, true)
+	if err != nil || validateBootstrapLegacyPodImages(parsed, "sha256:"+oldDigest) != nil || !parsed["node-1"].LegacyIdentity || parsed["node-1"].SourceCommit != oldSource || !edgePodsMatchTarget(parsed, target) {
+		t.Fatalf("legacy running Pod was not bound to the exact bootstrap LKG: pods=%+v err=%v", parsed, err)
+	}
+	tampered := parsed["node-1"]
+	tampered.ImageID = "containerd://sha256:" + strings.Repeat("a", 64)
+	parsed["node-1"] = tampered
+	if err := validateBootstrapLegacyPodImages(parsed, "sha256:"+oldDigest); err == nil {
+		t.Fatal("legacy Pod with a non-LKG image was accepted")
+	}
+}
+
 func TestEdgeGroupTargetMatchingRequiresExactSourceAndImmutableRef(t *testing.T) {
 	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: strings.Repeat("1", 40), ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64)}
 	pod := edgeGroupPod{Ready: true, SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef}

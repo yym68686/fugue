@@ -85,6 +85,7 @@ type edgeGroupPod struct {
 	InventoryHeartbeatGeneration uint64
 	InventoryHeartbeatAt         time.Time
 	InventoryHeartbeatError      string
+	LegacyIdentity               bool
 	Ready                        bool
 }
 
@@ -577,14 +578,18 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	}
 	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil
 	legacySource := ""
+	legacyImageDigest := ""
 	if allowLegacy {
-		legacySource, err = workloadLegacySource(workloadRaw, container)
+		legacySource, legacyImageDigest, err = bootstrapLegacyPodIdentity(release, name, container)
 		if err != nil {
 			return nil, err
 		}
 	}
 	pods, err := parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, allowLegacy, legacySource, requireReady)
 	if err != nil {
+		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
+	}
+	if err := validateBootstrapLegacyPodImages(pods, legacyImageDigest); err != nil {
 		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
 	}
 	if !requireReady {
@@ -630,6 +635,38 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	return pods, nil
 }
 
+func bootstrapLegacyPodIdentity(release declarativerelease.PlanRelease, name, container string) (string, string, error) {
+	if !isAdoptingEdgeGroup(release) {
+		return "", "", errors.New("legacy edge Pod identity is not authorized")
+	}
+	manifest, err := loadLKGManifest(release)
+	if err != nil {
+		return "", "", err
+	}
+	target, err := declaredEdgeDaemonSetTarget(manifest, release, name, container)
+	if err != nil {
+		return "", "", fmt.Errorf("bind legacy edge Pod to bootstrap LKG: %w", err)
+	}
+	digest, err := immutableDigestFromRef(target.ImageRef)
+	if err != nil {
+		return "", "", fmt.Errorf("bind legacy edge Pod image to bootstrap LKG: %w", err)
+	}
+	return target.ConfigSHA, digest, nil
+}
+
+func validateBootstrapLegacyPodImages(pods map[string]edgeGroupPod, wantDigest string) error {
+	for _, pod := range pods {
+		if !pod.LegacyIdentity {
+			continue
+		}
+		digest, err := imageIDDigest(pod.ImageID)
+		if err != nil || digest != wantDigest {
+			return errors.New("legacy Pod image is not the exact bootstrap LKG")
+		}
+	}
+	return nil
+}
+
 func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID string, allowLegacy bool, legacySource string) (map[string]edgeGroupPod, error) {
 	return parseEdgeGroupPodsWithReadiness(raw, container, expectedNodes, groupID, allowLegacy, legacySource, true)
 }
@@ -664,6 +701,7 @@ func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes
 			SourceCommit: mapStringField(metadata, "annotations")["fugue.pro/source-commit"]}
 		if pod.SourceCommit == "" && allowLegacy {
 			pod.SourceCommit = legacySource
+			pod.LegacyIdentity = true
 		}
 		containers, _ := spec["containers"].([]any)
 		for _, rawContainer := range containers {
