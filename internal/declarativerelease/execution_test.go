@@ -152,6 +152,10 @@ func (fake *fakeCluster) DeleteCreated(context.Context, PlanRelease, []byte, Obs
 	return nil
 }
 
+func (fake *fakeCluster) ClearOwnershipTakeoverForwardOnlyFields(context.Context, PlanRelease, []byte, []byte, Observation) error {
+	return nil
+}
+
 func (fake *fakeCluster) WaitHealthy(_ context.Context, _ PlanRelease, target TargetIdentity, _ []byte) (Observation, error) {
 	fake.healthTargets = append(fake.healthTargets, target)
 	var value Observation

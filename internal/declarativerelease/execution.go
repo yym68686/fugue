@@ -138,6 +138,13 @@ type Cluster interface {
 	Converged(context.Context, PlanRelease, []byte) error
 }
 
+// ownershipTakeoverCompensator is intentionally narrower than Cluster. Only
+// the Kubernetes adapter implements it; test/fake clusters must opt in so a
+// migration rollback cannot silently skip forward-only field cleanup.
+type ownershipTakeoverCompensator interface {
+	ClearOwnershipTakeoverForwardOnlyFields(context.Context, PlanRelease, []byte, []byte, Observation) error
+}
+
 func DecodeExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lkgManifest []byte) (ExecutionPlan, error) {
 	var plan ExecutionPlan
 	if err := decodeStrict(reader, &plan); err != nil {
@@ -737,10 +744,16 @@ func compensateOwnershipTakeover(ctx context.Context, cluster Cluster, release P
 	}
 	result.LKGApplyCount = 1
 	applyErr := cluster.Apply(ctx, release, prepared.LKG, lkgCAS)
+	clearErr := error(nil)
+	if compensator, ok := cluster.(ownershipTakeoverCompensator); ok {
+		clearErr = compensator.ClearOwnershipTakeoverForwardOnlyFields(ctx, release, forwardManifest, lkgManifest, observed)
+	} else {
+		clearErr = errors.New("ownership takeover compensation adapter is unavailable")
+	}
 	deleteErr := cluster.DeleteCreated(ctx, release, forwardManifest, prepared.Prewrite, observed)
 	lkgObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.LKG, lkgManifest)
 	convergedErr := cluster.Converged(ctx, release, lkgManifest)
-	if healthErr == nil && convergedErr == nil && lkgObservation.Matches(prepared.LKG, release, true) {
+	if healthErr == nil && convergedErr == nil && clearErr == nil && lkgObservation.Matches(prepared.LKG, release, true) {
 		result.Status = "compensated"
 		if applyErr != nil || deleteErr != nil {
 			result.Reason = "ownership-takeover-lkg-commit-unknown-reconciled"
@@ -752,6 +765,9 @@ func compensateOwnershipTakeover(ctx context.Context, cluster Cluster, release P
 	}
 	result.Status = "recovery-required"
 	result.Reason = "ownership-takeover-lkg-unproven"
+	if clearErr != nil {
+		result.Reason = "ownership-takeover-lkg-fields-unproven"
+	}
 	result.Final = lkgObservation
 	return sealResult(result)
 }

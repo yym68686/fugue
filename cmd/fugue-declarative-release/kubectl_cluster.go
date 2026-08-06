@@ -260,6 +260,13 @@ func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release decla
 }
 
 func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, target declarativerelease.TargetIdentity, targetManifest []byte) (declarativerelease.Observation, error) {
+	current, err := cluster.ObserveCAS(ctx, release, targetManifest)
+	if err != nil {
+		return current, fmt.Errorf("refresh ownership takeover CAS: %w", err)
+	}
+	if err := refreshOwnershipTakeoverCAS(&adoption, current); err != nil {
+		return current, err
+	}
 	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -272,6 +279,33 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 		return observation, fmt.Errorf("verify ownership takeover: %w", err)
 	}
 	return observation, nil
+}
+
+// refreshOwnershipTakeoverCAS rebinds only the mutable RV portion of the
+// reviewed adoption scope immediately before the first takeover write. UID and
+// generation remain exact CAS witnesses; a changed generation is a spec drift
+// and therefore fails closed rather than being silently refreshed.
+func refreshOwnershipTakeoverCAS(adoption *declarativerelease.OwnershipAdoptionPlan, current declarativerelease.Observation) error {
+	if adoption == nil || !current.Present || current.UID == "" || current.ResourceVersion == "" {
+		return errors.New("ownership takeover CAS refresh is incomplete")
+	}
+	if current.UID != adoption.UID || current.Generation != adoption.Generation {
+		return errors.New("ownership takeover CAS refresh detected UID or generation drift")
+	}
+	byIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(current.Resources))
+	for _, resource := range current.Resources {
+		byIdentity[resource.Identity] = resource
+	}
+	for index := range adoption.Resources {
+		scope := &adoption.Resources[index]
+		resource, ok := byIdentity[scope.Identity]
+		if !ok || !resource.Present || resource.UID != scope.UID || resource.Generation != scope.Generation || resource.ResourceVersion == "" {
+			return fmt.Errorf("ownership takeover CAS refresh detected drift for %s/%s", scope.Identity.Kind, scope.Identity.Name)
+		}
+		scope.ResourceVersion = resource.ResourceVersion
+	}
+	adoption.ResourceVersion = current.ResourceVersion
+	return nil
 }
 
 func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, manifest []byte, dryRun bool) error {
@@ -595,6 +629,123 @@ func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativer
 		}
 	}
 	return nil
+}
+
+// ClearOwnershipTakeoverForwardOnlyFields removes only fields that the
+// reviewed forward manifest introduces and the LKG intentionally omits. This
+// is a migration-only CAS patch: it never broadens the rollback manifest and
+// never reads Secret values.
+func (cluster *kubectlCluster) ClearOwnershipTakeoverForwardOnlyFields(ctx context.Context, release declarativerelease.PlanRelease, forwardManifest, lkgManifest []byte, observed declarativerelease.Observation) error {
+	forwardIDs, err := declarativerelease.ResourceSetIdentities(forwardManifest)
+	if err != nil {
+		return err
+	}
+	clientConfig, err := loadComponentLeaseClientConfig()
+	if err != nil {
+		return fmt.Errorf("load Kubernetes client config: %w", err)
+	}
+	client, err := dynamic.NewForConfig(clientConfig)
+	if err != nil {
+		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
+	}
+	observedByIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(observed.Resources))
+	for _, resource := range observed.Resources {
+		observedByIdentity[resource.Identity] = resource
+	}
+	for _, identity := range forwardIDs {
+		forwardItem, err := declarativerelease.ResourceSetItem(forwardManifest, identity)
+		if err != nil {
+			return err
+		}
+		lkgItem, err := declarativerelease.ResourceSetItem(lkgManifest, identity)
+		if err != nil {
+			return err
+		}
+		paths, err := ownershipTakeoverForwardOnlyPaths(forwardItem, lkgItem)
+		if err != nil {
+			return fmt.Errorf("derive compensation fields for %s/%s: %w", identity.Kind, identity.Name, err)
+		}
+		if len(paths) == 0 {
+			continue
+		}
+		prior, ok := observedByIdentity[identity]
+		if !ok || !prior.Present || prior.UID == "" {
+			return fmt.Errorf("compensation observation is incomplete for %s/%s", identity.Kind, identity.Name)
+		}
+		gvr, err := resourceGVR(identity)
+		if err != nil {
+			return err
+		}
+		resource := client.Resource(gvr).Namespace(identity.Namespace)
+		live, err := resource.Get(ctx, identity.Name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("read compensation target %s/%s: %w", identity.Kind, identity.Name, err)
+		}
+		if string(live.GetUID()) != prior.UID || live.GetResourceVersion() == "" || (prior.Generation > 0 && live.GetGeneration() < prior.Generation) {
+			return fmt.Errorf("compensation target %s/%s identity drifted", identity.Kind, identity.Name)
+		}
+		patch := []map[string]any{
+			{"op": "test", "path": "/metadata/uid", "value": string(live.GetUID())},
+			{"op": "test", "path": "/metadata/resourceVersion", "value": live.GetResourceVersion()},
+		}
+		for _, path := range paths {
+			if _, present := ownershipJSONPointer(live.Object, path); present {
+				patch = append(patch, map[string]any{"op": "remove", "path": path})
+			}
+		}
+		if len(patch) == 2 {
+			continue
+		}
+		payload, err := json.Marshal(patch)
+		if err != nil {
+			return err
+		}
+		if _, err := resource.Patch(ctx, identity.Name, types.JSONPatchType, payload, metav1.PatchOptions{}); err != nil {
+			return fmt.Errorf("clear compensation fields for %s/%s: %w", identity.Kind, identity.Name, err)
+		}
+		verified, err := resource.Get(ctx, identity.Name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("verify compensation fields for %s/%s: %w", identity.Kind, identity.Name, err)
+		}
+		for _, path := range paths {
+			if _, present := ownershipJSONPointer(verified.Object, path); present {
+				return fmt.Errorf("compensation field %s remains on %s/%s", path, identity.Kind, identity.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func ownershipTakeoverForwardOnlyPaths(forward, lkg map[string]any) ([]string, error) {
+	allowed := []string{"/spec/template/spec/serviceAccount", "/spec/template/spec/serviceAccountName", "/spec/template/spec/initContainers"}
+	paths := make([]string, 0, len(allowed))
+	for _, path := range allowed {
+		forwardValue, forwardPresent := ownershipJSONPointer(forward, path)
+		_, lkgPresent := ownershipJSONPointer(lkg, path)
+		if forwardPresent && !lkgPresent {
+			if forwardValue == nil {
+				return nil, fmt.Errorf("forward-only field %s is null", path)
+			}
+			paths = append(paths, path)
+		}
+	}
+	return paths, nil
+}
+
+func ownershipJSONPointer(value map[string]any, pointer string) (any, bool) {
+	current := any(value)
+	for _, token := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
+		current, ok = object[token]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func freshDeletionPreconditions(ctx context.Context, resource dynamic.ResourceInterface, expected declarativerelease.ResourceObservation) (types.UID, string, bool, error) {

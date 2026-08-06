@@ -372,6 +372,48 @@ func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 	}
 }
 
+func TestRefreshOwnershipTakeoverCASUpdatesOnlyResourceVersions(t *testing.T) {
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge"}
+	adoption := declarativerelease.OwnershipAdoptionPlan{
+		UID: "primary", ResourceVersion: "10", Generation: 7,
+		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{Identity: identity, UID: "resource", ResourceVersion: "10", Generation: 4, Fields: []string{"/spec/template"}}},
+	}
+	current := declarativerelease.Observation{
+		Present: true, UID: "primary", ResourceVersion: "22", Generation: 7,
+		Resources: []declarativerelease.ResourceObservation{{Identity: identity, Present: true, UID: "resource", ResourceVersion: "23", Generation: 4}},
+	}
+	if err := refreshOwnershipTakeoverCAS(&adoption, current); err != nil {
+		t.Fatalf("refresh rejected status-only RV movement: %v", err)
+	}
+	if adoption.ResourceVersion != "22" || adoption.Resources[0].ResourceVersion != "23" || adoption.Generation != 7 {
+		t.Fatalf("refresh changed non-RV CAS identity: %+v", adoption)
+	}
+	current.Resources[0].Generation = 5
+	if err := refreshOwnershipTakeoverCAS(&adoption, current); err == nil {
+		t.Fatal("refresh accepted generation drift")
+	}
+}
+
+func TestOwnershipTakeoverForwardOnlyCompensationPathsAreExplicit(t *testing.T) {
+	forward := map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+		"serviceAccountName": "edge-worker-de",
+		"initContainers":     []any{map[string]any{"name": "edge-workload-identity"}},
+	}}}}
+	lkg := map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{}}}}
+	paths, err := ownershipTakeoverForwardOnlyPaths(forward, lkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, ",") != "/spec/template/spec/serviceAccountName,/spec/template/spec/initContainers" {
+		t.Fatalf("unexpected explicit compensation paths: %v", paths)
+	}
+	lkg["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["serviceAccountName"] = "edge-worker-de"
+	paths, err = ownershipTakeoverForwardOnlyPaths(forward, lkg)
+	if err != nil || len(paths) != 1 || paths[0] != "/spec/template/spec/initContainers" {
+		t.Fatalf("LKG-owned field was not preserved: %v %v", paths, err)
+	}
+}
+
 func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
 	allowed := errors.New(`command failed: exit status 1: error: Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: .spec.template.spec.containers[name="edge-front"].image`)
 	managers := []string{"helm", "kubectl-patch"}
