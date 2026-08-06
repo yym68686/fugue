@@ -305,6 +305,30 @@ func TestBootstrapLKGSelectorRequiresExactAdoptionIdentity(t *testing.T) {
 	}
 }
 
+func TestBootstrapLKGCompensationAcceptsExactPreRolloutWorkloadsOnly(t *testing.T) {
+	frontTarget := edgeTargetFixture("1", "a")
+	workerATarget := edgeTargetFixture("2", "b")
+	workerBTarget := edgeTargetFixture("3", "c")
+	pods := func(name string, target declarativerelease.TargetIdentity) map[string]edgeGroupPod {
+		return map[string]edgeGroupPod{"node-1": {
+			Name: name, UID: name + "-uid", ResourceVersion: "42", NodeName: "node-1", Ready: true,
+			SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef, ImageID: target.ImageRef,
+		}}
+	}
+	front := pods("front", frontTarget)
+	workerA := pods("worker-a", workerATarget)
+	workerB := pods("worker-b", workerBTarget)
+	if !bootstrapWorkloadsMatchLKG(front, workerA, workerB, frontTarget, workerATarget, workerBTarget) {
+		t.Fatal("exact heterogeneous pre-rollout LKG was not accepted for compensation")
+	}
+	tampered := workerB["node-1"]
+	tampered.ImageRef = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("d", 64)
+	workerB["node-1"] = tampered
+	if bootstrapWorkloadsMatchLKG(front, workerA, workerB, frontTarget, workerATarget, workerBTarget) {
+		t.Fatal("non-LKG workload was accepted for direct compensation")
+	}
+}
+
 func edgeGroupPodFixture(name, uid, node, group, source, digest string) map[string]any {
 	return map[string]any{
 		"metadata": map[string]any{

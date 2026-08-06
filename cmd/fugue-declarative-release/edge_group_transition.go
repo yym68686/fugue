@@ -165,6 +165,33 @@ func isEdgeBootstrapLKGTarget(release declarativerelease.PlanRelease, target dec
 // independent.
 func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, release declarativerelease.PlanRelease, _ declarativerelease.TargetIdentity, manifest []byte) error {
 	transition := *release.Transition.EdgeGroupAB
+	frontTarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.FrontName, "edge-front")
+	if err != nil {
+		return err
+	}
+	workerATarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.WorkerAName, transition.WorkerContainer)
+	if err != nil {
+		return err
+	}
+	workerBTarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.WorkerBName, transition.WorkerContainer)
+	if err != nil {
+		return err
+	}
+	// A first ownership takeover changes only the reviewed desired templates.
+	// If it is rejected before any Pod rollout, all three running workloads are
+	// still the exact heterogeneous bootstrap LKG and do not yet expose group
+	// publication health. Restore the CAS-bound desired resource set directly;
+	// requiring new authority here would make the pre-rollout compensation
+	// impossible. Any workload mismatch falls through to the full transition
+	// recovery below.
+	runningFront, frontErr := cluster.readEdgeDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
+	runningWorkerA, workerAErr := cluster.readEdgeDaemonSetPods(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, false)
+	runningWorkerB, workerBErr := cluster.readEdgeDaemonSetPods(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, false)
+	if frontErr == nil && workerAErr == nil && workerBErr == nil &&
+		bootstrapWorkloadsMatchLKG(runningFront, runningWorkerA, runningWorkerB, frontTarget, workerATarget, workerBTarget) {
+		return cluster.applyResourceSet(ctx, release, manifest, false)
+	}
+
 	before, err := cluster.readAdoptingEdgeGroupState(ctx, release, transition)
 	if err != nil {
 		return fmt.Errorf("capture bootstrap LKG recovery state: %w", err)
@@ -179,18 +206,6 @@ func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, releas
 	client, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
-	}
-	frontTarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.FrontName, "edge-front")
-	if err != nil {
-		return err
-	}
-	workerATarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.WorkerAName, transition.WorkerContainer)
-	if err != nil {
-		return err
-	}
-	workerBTarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.WorkerBName, transition.WorkerContainer)
-	if err != nil {
-		return err
 	}
 	if before.ActiveSlot == "a" && !edgePodsMatchTarget(before.WorkerA, workerATarget) {
 		return errors.New("bootstrap LKG active slot a changed before safe compensation")
@@ -252,6 +267,11 @@ func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, releas
 		}
 	}
 	return nil
+}
+
+func bootstrapWorkloadsMatchLKG(front, workerA, workerB map[string]edgeGroupPod, frontTarget, workerATarget, workerBTarget declarativerelease.TargetIdentity) bool {
+	return sameEdgeNodes(front, workerA) && sameEdgeNodes(front, workerB) &&
+		edgePodsMatchTarget(front, frontTarget) && edgePodsMatchTarget(workerA, workerATarget) && edgePodsMatchTarget(workerB, workerBTarget)
 }
 
 func declaredEdgeDaemonSetTarget(manifest []byte, release declarativerelease.PlanRelease, name, container string) (declarativerelease.TargetIdentity, error) {
