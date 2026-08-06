@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -394,6 +395,28 @@ func TestRefreshOwnershipTakeoverCASUpdatesOnlyResourceVersions(t *testing.T) {
 	}
 }
 
+func TestRefreshOwnershipTakeoverPostPatchCASAcceptsOnlyReviewedGenerationMovement(t *testing.T) {
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge"}
+	adoption := declarativerelease.OwnershipAdoptionPlan{
+		UID: "primary", ResourceVersion: "10", Generation: 7,
+		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{Identity: identity, UID: "resource", ResourceVersion: "10", Generation: 4, Fields: []string{"/spec/template"}}},
+	}
+	current := declarativerelease.Observation{
+		Present: true, UID: "primary", ResourceVersion: "22", Generation: 8,
+		Resources: []declarativerelease.ResourceObservation{{Identity: identity, Present: true, UID: "resource", ResourceVersion: "23", Generation: 5}},
+	}
+	if err := refreshOwnershipTakeoverPostPatchCAS(&adoption, current); err != nil {
+		t.Fatalf("post-patch refresh rejected reviewed generation movement: %v", err)
+	}
+	if adoption.ResourceVersion != "22" || adoption.Generation != 8 || adoption.Resources[0].ResourceVersion != "23" || adoption.Resources[0].Generation != 5 {
+		t.Fatalf("post-patch refresh did not bind the newest CAS: %+v", adoption)
+	}
+	current.Resources[0].UID = "changed"
+	if err := refreshOwnershipTakeoverPostPatchCAS(&adoption, current); err == nil {
+		t.Fatal("post-patch refresh accepted UID drift")
+	}
+}
+
 func TestOwnershipTakeoverForwardOnlyCompensationPathsAreExplicit(t *testing.T) {
 	forward := map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 		"serviceAccountName": "edge-worker-de",
@@ -418,6 +441,78 @@ func TestOwnershipTakeoverForwardOnlyCompensationPathsAreExplicit(t *testing.T) 
 	paths, err = ownershipTakeoverForwardOnlyPaths(forward, lkg)
 	if err != nil || len(paths) != 2 || paths[0] != "/spec/template/spec/serviceAccountName" || paths[1] != "/spec/template/spec/initContainers" {
 		t.Fatalf("legacy LKG serviceAccount alias was not preserved: %v %v", paths, err)
+	}
+}
+
+func TestEdgeOwnershipTakeoverTemplatePatchReplacesLegacyAssociativeListMembers(t *testing.T) {
+	targetTemplate := map[string]any{
+		"metadata": map[string]any{"labels": map[string]any{"fugue.io/edge-group-id": "edge-group-gamma"}},
+		"spec": map[string]any{
+			"serviceAccountName": "edge-worker-gamma",
+			"containers": []any{map[string]any{
+				"name": "edge", "image": "example.invalid/edge@sha256:" + strings.Repeat("a", 64),
+				"env": []any{map[string]any{"name": "FUGUE_EDGE_CONTROL_URL", "value": "https://edge-control-gamma"}},
+			}},
+			"volumes": []any{map[string]any{"name": "edge-control-reader", "secret": map[string]any{"secretName": "reader-gamma"}}},
+		},
+	}
+	target := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "edge-gamma-worker-a", "namespace": "fugue-system"},
+		"spec":     map[string]any{"template": targetTemplate},
+	}
+	live := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "edge-gamma-worker-a", "namespace": "fugue-system", "uid": "worker-uid", "resourceVersion": "84", "generation": json.Number("12")},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+			"containers": []any{map[string]any{"name": "edge", "env": []any{
+				map[string]any{"name": "FUGUE_BUNDLE_SIGNING_KEY", "value": "legacy"},
+				map[string]any{"name": "FUGUE_EDGE_CONTROL_URL", "value": "https://edge-control-gamma"},
+			}}},
+			"volumes": []any{
+				map[string]any{"name": "legacy-signing", "secret": map[string]any{"secretName": "legacy"}},
+				map[string]any{"name": "edge-control-reader", "secret": map[string]any{"secretName": "reader-gamma"}},
+			},
+		}}},
+	}
+	scope := declarativerelease.OwnershipAdoptionResourcePlan{
+		Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a"},
+		UID:      "worker-uid", ResourceVersion: "42", Generation: 11, Fields: []string{"/spec/template"},
+	}
+	patch, err := edgeOwnershipTakeoverTemplatePatch(target, live, scope)
+	if err != nil {
+		t.Fatalf("build exact Edge takeover patch: %v", err)
+	}
+	var operations []map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(patch))
+	decoder.UseNumber()
+	if err := decoder.Decode(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 4 || operations[0]["path"] != "/metadata/uid" || operations[0]["value"] != "worker-uid" ||
+		operations[1]["path"] != "/metadata/resourceVersion" || operations[1]["value"] != "84" ||
+		operations[2]["path"] != "/metadata/generation" || fmt.Sprint(operations[2]["value"]) != "12" ||
+		operations[3]["op"] != "replace" || operations[3]["path"] != "/spec/template" {
+		t.Fatalf("unexpected bounded takeover patch: %s", patch)
+	}
+	replacement, ok := operations[3]["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("replacement template is not an object: %s", patch)
+	}
+	replacementRaw, _ := json.Marshal(replacement)
+	if bytes.Contains(replacementRaw, []byte("FUGUE_BUNDLE_SIGNING_KEY")) || bytes.Contains(replacementRaw, []byte("legacy-signing")) ||
+		!bytes.Contains(replacementRaw, []byte("FUGUE_EDGE_CONTROL_URL")) || !bytes.Contains(replacementRaw, []byte("edge-control-reader")) {
+		t.Fatalf("replacement did not remove only legacy list members: %s", replacementRaw)
+	}
+
+	scope.Fields = []string{"/metadata/labels"}
+	if _, err := edgeOwnershipTakeoverTemplatePatch(target, live, scope); err == nil {
+		t.Fatal("takeover patch escaped the reviewed Pod template scope")
+	}
+	scope.Fields = []string{"/spec/template"}
+	live["metadata"].(map[string]any)["uid"] = "changed-uid"
+	if _, err := edgeOwnershipTakeoverTemplatePatch(target, live, scope); err == nil {
+		t.Fatal("takeover patch accepted UID drift")
 	}
 }
 

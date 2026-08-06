@@ -272,6 +272,31 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 		return declarativerelease.Observation{}, err
 	}
 	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
+	// An Edge bootstrap LKG and the immutable target can contain different
+	// associative-list members inside the reviewed Pod template. SSA force
+	// transfers ownership of fields that are present in the target, but it does
+	// not remove legacy-only list members that remain owned by Helm. Replace the
+	// already-reviewed template with UID/RV/generation JSON-patch tests, then
+	// re-apply the scoped SSA manifest so the declarative manager owns the exact
+	// target bytes. This compatibility step is restricted to adopting Edge-group
+	// transitions and is never reachable from the independent path.
+	if applyErr == nil && release.MigrationState == "adopting" && release.Transition != nil && release.Transition.Type == "edge-group-ab" {
+		if replaceErr := cluster.replaceEdgeOwnershipTakeoverTemplates(ctx, release, adoption, targetManifest); replaceErr != nil {
+			applyErr = replaceErr
+		} else {
+			refreshed, refreshErr := cluster.ObserveCAS(ctx, release, targetManifest)
+			if refreshErr == nil {
+				refreshErr = refreshOwnershipTakeoverPostPatchCAS(&adoption, refreshed)
+			}
+			if refreshErr == nil {
+				manifest, refreshErr = declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
+			}
+			if refreshErr == nil {
+				refreshErr = cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
+			}
+			applyErr = refreshErr
+		}
+	}
 	verifyErr := cluster.verifyOwnershipAdoption(ctx, release, adoption)
 	convergedErr := cluster.Converged(ctx, release, manifest)
 	observation, observeErr := cluster.ObserveCAS(ctx, release, targetManifest)
@@ -279,6 +304,90 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 		return observation, fmt.Errorf("verify ownership takeover: %w", err)
 	}
 	return observation, nil
+}
+
+func (cluster *kubectlCluster) replaceEdgeOwnershipTakeoverTemplates(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, targetManifest []byte) error {
+	config, err := loadComponentLeaseClientConfig()
+	if err != nil {
+		return fmt.Errorf("load Kubernetes client config: %w", err)
+	}
+	client, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
+	}
+	for _, scope := range adoption.Resources {
+		targetItem, itemErr := declarativerelease.ResourceSetItem(targetManifest, scope.Identity)
+		if itemErr != nil {
+			return itemErr
+		}
+		gvr, gvrErr := resourceGVR(scope.Identity)
+		if gvrErr != nil {
+			return gvrErr
+		}
+		resource := client.Resource(gvr).Namespace(scope.Identity.Namespace)
+		live, getErr := resource.Get(ctx, scope.Identity.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("read ownership takeover target %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, getErr)
+		}
+		patch, patchErr := edgeOwnershipTakeoverTemplatePatch(targetItem, live.Object, scope)
+		if patchErr != nil {
+			return fmt.Errorf("bind ownership takeover template %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, patchErr)
+		}
+		if _, patchErr = resource.Patch(ctx, scope.Identity.Name, types.JSONPatchType, patch, metav1.PatchOptions{FieldManager: release.Workload.FieldManager}); patchErr != nil {
+			return fmt.Errorf("replace reviewed ownership takeover template %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, patchErr)
+		}
+	}
+	return nil
+}
+
+func edgeOwnershipTakeoverTemplatePatch(target, live map[string]any, scope declarativerelease.OwnershipAdoptionResourcePlan) ([]byte, error) {
+	if scope.Identity.Kind != "DaemonSet" || !stringInSortedSet("/spec/template", scope.Fields) {
+		return nil, errors.New("Edge ownership takeover template is outside the reviewed scope")
+	}
+	metadata := mapField(live, "metadata")
+	if stringValue(metadata["name"]) != scope.Identity.Name || stringValue(metadata["namespace"]) != scope.Identity.Namespace ||
+		stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) == "" ||
+		int64Value(metadata["generation"]) < scope.Generation {
+		return nil, errors.New("Edge ownership takeover template CAS is invalid")
+	}
+	template := mapField(mapField(target, "spec"), "template")
+	if len(template) == 0 {
+		return nil, errors.New("Edge ownership takeover target template is absent")
+	}
+	operations := []map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": scope.UID},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": stringValue(metadata["resourceVersion"])},
+		{"op": "test", "path": "/metadata/generation", "value": int64Value(metadata["generation"])},
+		{"op": "replace", "path": "/spec/template", "value": template},
+	}
+	return declarativerelease.CanonicalJSON(operations)
+}
+
+// refreshOwnershipTakeoverPostPatchCAS binds a second scoped SSA apply to the
+// exact UID/RV/generation produced by the already-CAS-protected template
+// replacement. Unlike the prewrite refresh, generation movement is expected
+// here because the preceding reviewed patch changed the Pod template.
+func refreshOwnershipTakeoverPostPatchCAS(adoption *declarativerelease.OwnershipAdoptionPlan, current declarativerelease.Observation) error {
+	if adoption == nil || !current.Present || current.UID == "" || current.ResourceVersion == "" ||
+		current.UID != adoption.UID || current.Generation < adoption.Generation {
+		return errors.New("post-patch ownership takeover CAS is incomplete")
+	}
+	byIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(current.Resources))
+	for _, resource := range current.Resources {
+		byIdentity[resource.Identity] = resource
+	}
+	for index := range adoption.Resources {
+		scope := &adoption.Resources[index]
+		resource, ok := byIdentity[scope.Identity]
+		if !ok || !resource.Present || resource.UID != scope.UID || resource.Generation < scope.Generation || resource.ResourceVersion == "" {
+			return fmt.Errorf("post-patch ownership takeover CAS detected drift for %s/%s", scope.Identity.Kind, scope.Identity.Name)
+		}
+		scope.ResourceVersion = resource.ResourceVersion
+		scope.Generation = resource.Generation
+	}
+	adoption.ResourceVersion = current.ResourceVersion
+	adoption.Generation = current.Generation
+	return nil
 }
 
 // refreshOwnershipTakeoverCAS rebinds only the mutable RV portion of the
