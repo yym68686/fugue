@@ -19,6 +19,8 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TIMEOUT_SECONDS = 55.0
 DEFAULT_MAX_ELAPSED_SECONDS = 60.0
+MAX_CONFIGURED_TIMEOUT_SECONDS = 180.0
+MAX_CONFIGURED_ELAPSED_SECONDS = 180.0
 GO_TASK_CONCURRENCY = 2
 SERIAL_WARM_TEST_PACKAGES = {"./internal/api"}
 DECLARATIVE_TEST_PACKAGES = {
@@ -60,7 +62,18 @@ def task_timeout_seconds(name: str, remaining: float) -> float:
 
 
 def elapsed_timeout_seconds(check_names: set[str]) -> float:
-    return DEFAULT_MAX_ELAPSED_SECONDS
+    raw = os.environ.get("PREPUSH_MAX_ELAPSED_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_MAX_ELAPSED_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SystemExit("PREPUSH_MAX_ELAPSED_SECONDS must be numeric") from exc
+    if value <= 0 or value > MAX_CONFIGURED_ELAPSED_SECONDS:
+        raise SystemExit(
+            "PREPUSH_MAX_ELAPSED_SECONDS must be greater than zero and at most 180"
+        )
+    return value
 
 
 def elapsed_timeout_exceeded(check_names: set[str], elapsed_ms: int) -> bool:
@@ -346,8 +359,10 @@ def exact_json_types_equal(left: object, right: object) -> bool:
 def main() -> int:
     started = time.monotonic()
     timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
-    if timeout_seconds <= 0 or timeout_seconds >= 60:
-        raise SystemExit("PREPUSH_TIMEOUT_SECONDS must be greater than zero and less than 60")
+    if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
+        raise SystemExit(
+            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 180"
+        )
     deadline = started + timeout_seconds
     base = resolve_base()
     paths = changed_files(base)

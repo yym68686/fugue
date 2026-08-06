@@ -369,6 +369,15 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertFalse(prepush.elapsed_timeout_exceeded({"compile-all"}, 59_999))
         self.assertTrue(prepush.elapsed_timeout_exceeded({"compile-all"}, 60_000))
 
+        with mock.patch.dict(
+            os.environ,
+            {"PREPUSH_TIMEOUT_SECONDS": "150", "PREPUSH_MAX_ELAPSED_SECONDS": "160"},
+            clear=True,
+        ):
+            self.assertEqual(prepush.elapsed_timeout_seconds({"compile-all"}), 160.0)
+            result, _ = self.run_main_with_fake(lambda _command, _timeout: (0, ""))
+            self.assertEqual(result, 0)
+
         result, receipt = self.run_main_with_fake(lambda _command, _timeout: (0, ""))
         self.assertEqual(result, 0)
         self.assertEqual(

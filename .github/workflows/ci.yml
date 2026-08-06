@@ -40,6 +40,8 @@ jobs:
         env:
           PREPUSH_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           PREPUSH_RECEIPT: ${{ runner.temp }}/fugue-prepush-receipt.json
+          PREPUSH_TIMEOUT_SECONDS: "150"
+          PREPUSH_MAX_ELAPSED_SECONDS: "160"
         run: make prepush
       - name: Materialize the exact declarative component plan
         id: release
