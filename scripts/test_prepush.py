@@ -361,13 +361,14 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(peak, 2)
 
     def test_default_deadline_and_receipt_schema_are_unchanged(self) -> None:
-        self.assertEqual(prepush.DEFAULT_TIMEOUT_SECONDS, 55.0)
-        self.assertEqual(prepush.DEFAULT_MAX_ELAPSED_SECONDS, 60.0)
-        for name in ("compile-all", "affected-tests", "declarative-release-tests"):
-            self.assertEqual(prepush.task_timeout_seconds(name, 55.0), 55.0)
-        self.assertEqual(prepush.elapsed_timeout_seconds({"compile-all"}), 60.0)
-        self.assertFalse(prepush.elapsed_timeout_exceeded({"compile-all"}, 59_999))
-        self.assertTrue(prepush.elapsed_timeout_exceeded({"compile-all"}, 60_000))
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(prepush.DEFAULT_TIMEOUT_SECONDS, 55.0)
+            self.assertEqual(prepush.DEFAULT_MAX_ELAPSED_SECONDS, 60.0)
+            for name in ("compile-all", "affected-tests", "declarative-release-tests"):
+                self.assertEqual(prepush.task_timeout_seconds(name, 55.0), 55.0)
+            self.assertEqual(prepush.elapsed_timeout_seconds({"compile-all"}), 60.0)
+            self.assertFalse(prepush.elapsed_timeout_exceeded({"compile-all"}, 59_999))
+            self.assertTrue(prepush.elapsed_timeout_exceeded({"compile-all"}, 60_000))
 
         with mock.patch.dict(
             os.environ,
