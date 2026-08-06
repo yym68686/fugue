@@ -357,6 +357,41 @@ func TestPendingSharedEdgeManifestTemplateIsConfigurationOnly(t *testing.T) {
 	}
 }
 
+func TestEdgeWorkerTemplateOmitsAPIServerDefaultedEmptyEnvValues(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/edge/component/resources.inventory-producer.group.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
+	materialized, err := MaterializeManifestTemplate(raw, group.Worker.ManifestVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := DecodeResourceSet(strings.NewReader(string(materialized)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range set.Items {
+		if item["kind"] != "DaemonSet" {
+			continue
+		}
+		spec, _ := item["spec"].(map[string]any)
+		template, _ := spec["template"].(map[string]any)
+		templateSpec, _ := template["spec"].(map[string]any)
+		containers, _ := templateSpec["containers"].([]any)
+		for _, rawContainer := range containers {
+			container := rawContainer.(map[string]any)
+			environment, _ := container["env"].([]any)
+			for _, rawEnv := range environment {
+				env := rawEnv.(map[string]any)
+				if value, exists := env["value"]; exists && value == "" {
+					t.Fatalf("%s/%s contains an explicit empty EnvVar value that the API server drops", item["kind"], item["metadata"].(map[string]any)["name"])
+				}
+			}
+		}
+	}
+}
+
 func edgeGroupFixture(id, groupID string) EdgeGroup {
 	controlName := "edge-control-" + id
 	frontName := "edge-" + id + "-front"

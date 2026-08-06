@@ -330,8 +330,7 @@
                     }
                   },
                   {
-                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID",
-                    "value": ""
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"
                   },
                   {
                     "name": "FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE",
@@ -842,8 +841,7 @@
                     }
                   },
                   {
-                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID",
-                    "value": ""
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"
                   },
                   {
                     "name": "FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE",
