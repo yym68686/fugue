@@ -789,7 +789,7 @@ func ownershipAdoptionConverged(before, after Observation, manager string, plan 
 	if before.Present != after.Present || before.Primary != after.Primary || before.UID != after.UID || after.Generation < before.Generation ||
 		after.ImageRef != plan.ImageRef || after.ConfigSHA != plan.ConfigSHA || after.ManifestSHA != plan.ManifestSHA ||
 		after.OCIRevision != plan.OCIRevision || !receiptContainsString(after.FieldManagers, manager) ||
-		len(before.Resources) != len(after.Resources) {
+		len(after.Resources) < len(before.Resources) {
 		return false
 	}
 	beforeResources := make(map[ResourceIdentity]ResourceObservation, len(before.Resources))
@@ -799,6 +799,11 @@ func ownershipAdoptionConverged(before, after Observation, manager string, plan 
 	}
 	for _, resource := range after.Resources {
 		afterResources[resource.Identity] = resource
+	}
+	for identity, resource := range afterResources {
+		if _, exists := beforeResources[identity]; !exists && (!isForwardDependencyResource(identity) || !resource.Present) {
+			return false
+		}
 	}
 	for identity, prior := range beforeResources {
 		current, exists := afterResources[identity]
@@ -1135,7 +1140,7 @@ func (observation Observation) ExtendsResourceCAS(base Observation) bool {
 	for _, current := range observation.Resources {
 		prior, exists := baseResources[current.Identity]
 		if !exists {
-			if current.Present {
+			if current.Present && !isForwardDependencyResource(current.Identity) {
 				return false
 			}
 			continue
@@ -1170,7 +1175,7 @@ func (observation Observation) CompletesOwnershipTakeover(base Observation, mana
 		currentResources[current.Identity] = current
 		prior, exists := baseResources[current.Identity]
 		if !exists {
-			if current.Present {
+			if current.Present && !isForwardDependencyResource(current.Identity) {
 				return false
 			}
 			continue
@@ -1191,6 +1196,14 @@ func (observation Observation) CompletesOwnershipTakeover(base Observation, mana
 		}
 	}
 	return true
+}
+
+// isForwardDependencyResource is intentionally narrow: an adopting workload
+// may materialize its explicit ServiceAccount even when a historical LKG
+// predates that dependency. No other new live resource is accepted by the
+// ownership CAS predicates.
+func isForwardDependencyResource(identity ResourceIdentity) bool {
+	return identity.APIVersion == "v1" && identity.Kind == "ServiceAccount"
 }
 
 // SameSpecIdentity permits status-only resourceVersion movement while binding

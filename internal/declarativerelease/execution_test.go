@@ -549,7 +549,7 @@ func TestExecuteAdoptsReviewedLKGFieldsBeforeOrdinaryForwardApply(t *testing.T) 
 	}
 }
 
-func TestForwardResourceCASExtensionAllowsOnlyAbsentNewResources(t *testing.T) {
+func TestForwardResourceCASExtensionAllowsOnlyServiceAccountDependencies(t *testing.T) {
 	base := casOnlyObservation(stableObservation("1", "10", "ghcr.io/example/api@"+testDigest, testSHA1))
 	extra := ResourceObservation{Identity: ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "api"}}
 	expanded := base
@@ -562,8 +562,32 @@ func TestForwardResourceCASExtensionAllowsOnlyAbsentNewResources(t *testing.T) {
 		ObjectDigest:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		FieldManagers: []string{"other"},
 	}
-	if expanded.ExtendsResourceCAS(base) {
-		t.Fatal("pre-existing forward-only resource was accepted")
+	if !expanded.ExtendsResourceCAS(base) {
+		t.Fatal("materialized service-account dependency was rejected")
+	}
+	other := expanded
+	other.Resources = append([]ResourceObservation(nil), expanded.Resources...)
+	other.Resources[len(other.Resources)-1].Identity.Kind = "ConfigMap"
+	if other.ExtendsResourceCAS(base) {
+		t.Fatal("pre-existing non-dependency resource was accepted")
+	}
+}
+
+func TestOwnershipAdoptionConvergedAllowsForwardServiceAccount(t *testing.T) {
+	base := casOnlyObservation(stableObservation("1", "10", "ghcr.io/example/api@"+testDigest, testSHA1))
+	base.FieldManagers = []string{"helm"}
+	base.Resources[0].FieldManagers = []string{"helm"}
+	after := base
+	after.FieldManagers = []string{"fugue-api-declarative", "helm"}
+	after.Resources = append([]ResourceObservation(nil), base.Resources...)
+	after.Resources[0].FieldManagers = []string{"fugue-api-declarative", "helm"}
+	after.Resources = append(after.Resources, ResourceObservation{
+		Identity: ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "api"},
+		Present:  true, UID: "sa-uid", ResourceVersion: "11", Generation: 0,
+	})
+	plan := OwnershipAdoptionPlan{Resources: []OwnershipAdoptionResourcePlan{{Identity: base.Resources[0].Identity}}}
+	if !ownershipAdoptionConverged(base, after, "fugue-api-declarative", plan) {
+		t.Fatal("forward service-account dependency prevented adoption convergence")
 	}
 }
 
