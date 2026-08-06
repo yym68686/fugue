@@ -1192,7 +1192,15 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	partial, err := parseObservation(workloadRaw, podsRaw, release, allowHistoricalRestarts, true)
+	observationWorkloadRaw := workloadRaw
+	if allowHistoricalRestarts && release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
+		release.RetrySameLKG && release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" {
+		observationWorkloadRaw, err = bootstrapObservationWorkload(workloadRaw, manifest, primary)
+		if err != nil {
+			return declarativerelease.Observation{}, err
+		}
+	}
+	partial, err := parseObservation(observationWorkloadRaw, podsRaw, release, allowHistoricalRestarts, true)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -1223,6 +1231,38 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	partial.Resources = resources
 	return partial, nil
+}
+
+// bootstrapObservationWorkload binds the running bootstrap Pod cohort to the
+// exact Git LKG while retaining live Kubernetes CAS, ownership and status.
+// During an adoption retry the desired DaemonSet template may already be the
+// reviewed forward target even though OnDelete Pods still run the heterogeneous
+// bootstrap LKG. This path is explicitly limited to adopting bootstrap calls;
+// convergence independently proves the live desired resource set.
+func bootstrapObservationWorkload(liveRaw, manifest []byte, identity declarativerelease.ResourceIdentity) ([]byte, error) {
+	live, err := decodeJSONObject(liveRaw)
+	if err != nil {
+		return nil, err
+	}
+	expected, err := declarativerelease.ResourceSetItem(manifest, identity)
+	if err != nil {
+		return nil, err
+	}
+	liveMetadata := mapField(live, "metadata")
+	expectedMetadata := mapField(expected, "metadata")
+	for _, field := range []string{"uid", "resourceVersion", "generation", "managedFields"} {
+		value, exists := liveMetadata[field]
+		if !exists {
+			return nil, fmt.Errorf("bootstrap observation live metadata %s is absent", field)
+		}
+		expectedMetadata[field] = value
+	}
+	status, exists := live["status"]
+	if !exists {
+		return nil, errors.New("bootstrap observation live status is absent")
+	}
+	expected["status"] = status
+	return declarativerelease.CanonicalJSON(expected)
 }
 
 func observedVerificationImage(imageRef, imageID, expectedSource string, allowHistorical bool) (string, error) {

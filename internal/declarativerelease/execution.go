@@ -462,7 +462,13 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 			return Observation{}, witnessErr
 		}
 		if convergenceErr := cluster.Converged(ctx, release, witness); convergenceErr != nil {
-			return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: %w", convergenceErr)
+			retryWitness, retryWitnessErr := RetryPredecessorConvergenceManifest(forwardManifest, release)
+			if retryWitnessErr != nil {
+				return Observation{}, retryWitnessErr
+			}
+			if retryErr := cluster.Converged(ctx, release, retryWitness); retryErr != nil {
+				return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: LKG=%v retry=%w", convergenceErr, retryErr)
+			}
 		}
 		second, secondErr := cluster.Observe(ctx, release, lkg, lkgManifest)
 		if secondErr != nil || !second.Matches(lkg, release, true) || !second.SameSpecIdentity(first) || second.HealthDigest != first.HealthDigest {

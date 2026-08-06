@@ -813,6 +813,58 @@ func TestPrepareBootstrapRetryUsesHealthyLegacyObservationInsteadOfOwnedDegraded
 	}
 }
 
+func TestPrepareBootstrapRetryAcceptsOnlyExactOwnedForwardDesiredState(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.IntentGeneration = 2
+	release.RetrySameLKG = true
+	release.MigrationState = "adopting"
+	release.HeterogeneousBootstrapLKG = true
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+		Fields:   []string{"/spec/template"},
+	}}}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{release.Workload.FieldManager}
+	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager}
+	fake := &fakeCluster{
+		observationErrors: []error{errors.New("forward Pod cohort absent")},
+		observations:      []Observation{lkg, lkg},
+		health:            []Observation{lkg},
+		convergedErrors:   []error{errors.New("desired resources no longer equal bootstrap LKG"), nil},
+		cas:               []Observation{lkg},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged || prepared.DegradedPredecessor ||
+		fake.dryRunTakeovers != 1 || len(fake.converged) != 2 {
+		t.Fatalf("owned bootstrap retry did not retain exact LKG Pods and forward desired CAS: prepared=%+v fake=%+v", prepared, fake)
+	}
+
+	fake = &fakeCluster{
+		observationErrors: []error{errors.New("forward Pod cohort absent")},
+		observations:      []Observation{lkg},
+		health:            []Observation{lkg},
+		convergedErrors: []error{
+			errors.New("desired resources no longer equal bootstrap LKG"),
+			errors.New("desired resources do not equal reviewed forward target"),
+		},
+	}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil ||
+		!strings.Contains(err.Error(), "bootstrap predecessor manifest drift") || fake.dryRunTakeovers != 0 {
+		t.Fatalf("unreviewed bootstrap desired drift was accepted: err=%v fake=%+v", err, fake)
+	}
+}
+
 func TestExecuteDegradedPredecessorRejectsSpecDriftBeforeApply(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := retryExecutionFixture(t)
 	degraded := casOnlyObservation(lkg)

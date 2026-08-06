@@ -284,6 +284,52 @@ func TestParseObservationRecoversExactLegacyOnDeleteUpdatedStatusOnlyDuringAdopt
 	}
 }
 
+func TestBootstrapObservationWorkloadKeepsDeclaredLKGIdentityAndLiveCAS(t *testing.T) {
+	source := strings.Repeat("1", 40)
+	forward := strings.Repeat("2", 40)
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"}
+	live := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": identity.Name, "namespace": identity.Namespace, "uid": "live-uid", "resourceVersion": "42", "generation": 9,
+			"annotations":   map[string]any{"fugue.pro/production-config-sha": forward},
+			"managedFields": []any{map[string]any{"manager": "edge-worker-de-declarative"}},
+		},
+		"spec":   map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": forward}}}},
+		"status": map[string]any{"observedGeneration": 9, "desiredNumberScheduled": 1, "numberReady": 1, "numberAvailable": 1},
+	}
+	lkg := declarativerelease.ResourceSet{APIVersion: "release.fugue.dev/v2", Kind: "ComponentResourceSet", Items: []map[string]any{{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": identity.Name, "namespace": identity.Namespace, "annotations": map[string]any{"fugue.pro/production-config-sha": source}},
+		"spec":     map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": source}}}},
+	}}}
+	manifest, err := declarativerelease.CanonicalJSON(lkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := bootstrapObservationWorkload(mustJSON(t, live), manifest, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := decodeJSONObject(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := mapField(value, "metadata")
+	annotations := mapStringField(metadata, "annotations")
+	templateAnnotations := mapStringField(mapField(mapField(mapField(value, "spec"), "template"), "metadata"), "annotations")
+	if annotations["fugue.pro/production-config-sha"] != source || templateAnnotations["fugue.pro/source-commit"] != source ||
+		stringValue(metadata["uid"]) != "live-uid" || stringValue(metadata["resourceVersion"]) != "42" || int64Value(metadata["generation"]) != 9 ||
+		len(managedFieldManagers(metadata)) != 1 || int64Value(mapField(value, "status")["observedGeneration"]) != 9 {
+		t.Fatalf("bootstrap projection mixed desired and live identity: %s", projected)
+	}
+	liveMetadata := mapField(live, "metadata")
+	delete(liveMetadata, "resourceVersion")
+	if _, err := bootstrapObservationWorkload(mustJSON(t, live), manifest, identity); err == nil {
+		t.Fatal("bootstrap projection accepted missing live CAS")
+	}
+}
+
 func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousPresent:     true,
