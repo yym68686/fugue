@@ -372,6 +372,7 @@ def main() -> int:
         test_commands = without_dedicated_declarative_tests(test_commands)
     checks: dict[str, dict[str, object]] = {}
     go_slots = threading.BoundedSemaphore(GO_TASK_CONCURRENCY)
+    declarative_vet_finished = threading.Event()
 
     compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
     go_dependent_tasks: dict[str, list[str] | None] = {
@@ -416,6 +417,10 @@ def main() -> int:
 
     def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
         before = time.monotonic()
+        if name == "declarative-release-tests" and "affected-vet" in non_go_tasks:
+            remaining = deadline - before
+            if remaining <= 0 or not declarative_vet_finished.wait(remaining):
+                return 124, "pre-push deadline exceeded before declarative vet completed", before
         if name == "affected-tests":
             status, output = run_test_commands(test_commands, deadline, go_slots)
         elif name == "helm-lint-render":
@@ -432,6 +437,8 @@ def main() -> int:
                         status, output = run(command, task_timeout_seconds(name, remaining))
             else:
                 status, output = run(command, task_timeout_seconds(name, deadline - before))
+        if name == "affected-vet" and declarative_release_changed:
+            declarative_vet_finished.set()
         return status, output, before
 
     warm_affected = warm_affected_tests_before_compile(test_commands)
