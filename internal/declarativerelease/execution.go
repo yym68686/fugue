@@ -306,9 +306,30 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	if adoption != nil && !adoption.AlreadyConverged {
-		if err := cluster.DryRunOwnershipAdoption(ctx, release, *adoption, rendered.LKG); err != nil {
-			return ExecutionPlan{}, fmt.Errorf("server-side dry-run ownership adoption: %w", err)
+	if adoption != nil {
+		if !adoption.AlreadyConverged {
+			if err := cluster.DryRunOwnershipAdoption(ctx, release, *adoption, rendered.LKG); err != nil {
+				return ExecutionPlan{}, fmt.Errorf("server-side dry-run ownership adoption: %w", err)
+			}
+		} else {
+			expanded, err := cluster.ObserveCAS(ctx, release, rendered.Forward)
+			if err != nil || !expanded.ExtendsResourceCAS(prewrite) {
+				return ExecutionPlan{}, errors.New("already-adopted forward resource CAS is invalid")
+			}
+			forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, expanded)
+			if bindErr != nil {
+				return ExecutionPlan{}, bindErr
+			}
+			if err := cluster.DryRunApply(ctx, release, forwardDryRun); err != nil {
+				return ExecutionPlan{}, fmt.Errorf("server-side dry-run already-adopted forward: %w", err)
+			}
+			lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, expanded)
+			if bindErr != nil {
+				return ExecutionPlan{}, bindErr
+			}
+			if err := cluster.DryRunApply(ctx, release, lkgDryRun); err != nil {
+				return ExecutionPlan{}, fmt.Errorf("server-side dry-run already-adopted LKG: %w", err)
+			}
 		}
 	} else {
 		forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, prewrite)

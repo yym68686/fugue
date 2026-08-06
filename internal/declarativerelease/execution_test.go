@@ -355,6 +355,38 @@ func TestBindOwnershipAdoptionRecognizesAnExactExistingDeclarativeManager(t *tes
 	}
 }
 
+func TestPrepareAlreadyAdoptedOwnershipDryRunsForwardWithoutForce(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm",
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+			Fields:   []string{"/spec/template"},
+		}},
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	fake := &fakeCluster{
+		observations: []Observation{lkg, lkg}, health: []Observation{lkg},
+		cas: []Observation{casOnlyObservation(lkg)},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged ||
+		fake.dryRunAdoptions != 0 || fake.dryRuns != 2 {
+		t.Fatalf("already-adopted prepare did not use bounded ordinary dry-runs: plan=%+v fake=%+v err=%v", prepared.OwnershipAdoption, fake, err)
+	}
+}
+
 func TestExecuteAdoptsReviewedLKGFieldsBeforeOrdinaryForwardApply(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.PlanDigest = ""
