@@ -382,7 +382,11 @@ def main() -> int:
     }
     non_go_tasks: dict[str, list[str] | None] = {}
     if packages:
-        go_dependent_tasks["affected-vet"] = ["go", "vet", *packages]
+        vet_task = ["go", "vet", *packages]
+        if declarative_release_changed:
+            non_go_tasks["affected-vet"] = vet_task
+        else:
+            go_dependent_tasks["affected-vet"] = vet_task
     if any(name in {"scripts/prepush.py", "scripts/test_prepush.py"} for name in paths):
         non_go_tasks["prepush-receipt-tests"] = ["python3", "-m", "unittest", "scripts.test_prepush"]
     if any(name in {"scripts/test_verify_registry_image.py", "scripts/verify_registry_image.py"} for name in paths):

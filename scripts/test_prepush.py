@@ -69,6 +69,35 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["prepush-receipt-tests"]["status"], "pass")
 
+    def test_declarative_vet_warms_in_parallel_before_full_tests(self) -> None:
+        barrier = threading.Barrier(2)
+        vet_finished = threading.Event()
+        full_test_observed = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                barrier.wait(timeout=2)
+                return 0, ""
+            if command[:2] == ["go", "vet"]:
+                barrier.wait(timeout=2)
+                vet_finished.set()
+                return 0, ""
+            if command == [
+                "go", "test", "./internal/declarativerelease",
+                "./cmd/fugue-declarative-release",
+            ]:
+                full_test_observed.append(vet_finished.is_set())
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["cmd/fugue-declarative-release/edge_group_transition.go"],
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(full_test_observed, [True])
+        self.assertEqual(receipt["checks"]["affected-vet"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["declarative-release-tests"]["status"], "pass")
+
     def test_compile_and_affected_tests_overlap(self) -> None:
         barrier = threading.Barrier(2)
         intervals = {}
