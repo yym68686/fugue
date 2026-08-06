@@ -322,10 +322,18 @@ func TestBootstrapLKGCompensationAcceptsExactPreRolloutWorkloadsOnly(t *testing.
 		t.Fatal("exact heterogeneous pre-rollout LKG was not accepted for compensation")
 	}
 	tampered := workerB["node-1"]
-	tampered.ImageRef = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("d", 64)
+	tampered.ImageID = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("d", 64)
 	workerB["node-1"] = tampered
 	if bootstrapWorkloadsMatchLKG(front, workerA, workerB, frontTarget, workerATarget, workerBTarget) {
 		t.Fatal("non-LKG workload was accepted for direct compensation")
+	}
+	legacy := workerA["node-1"]
+	legacy.SourceCommit = workerATarget.ConfigSHA
+	legacy.ImageRef = "ghcr.io/example/fugue-edge:bde0e5e99fd9cc4fc8b9adfc2aa99510273061fa"
+	legacy.ImageID = workerATarget.ImageRef
+	workerA["node-1"] = legacy
+	if !edgePodsMatchBootstrapTarget(workerA, workerATarget) {
+		t.Fatal("legacy tag with exact immutable ImageID was rejected")
 	}
 }
 

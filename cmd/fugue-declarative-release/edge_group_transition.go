@@ -184,9 +184,9 @@ func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, releas
 	// requiring new authority here would make the pre-rollout compensation
 	// impossible. Any workload mismatch falls through to the full transition
 	// recovery below.
-	runningFront, frontErr := cluster.readEdgeDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
-	runningWorkerA, workerAErr := cluster.readEdgeDaemonSetPods(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, false)
-	runningWorkerB, workerBErr := cluster.readEdgeDaemonSetPods(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, false)
+	runningFront, frontErr := cluster.readBootstrapLKGDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, frontTarget)
+	runningWorkerA, workerAErr := cluster.readBootstrapLKGDaemonSetPods(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, workerATarget)
+	runningWorkerB, workerBErr := cluster.readBootstrapLKGDaemonSetPods(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, workerBTarget)
 	if frontErr == nil && workerAErr == nil && workerBErr == nil &&
 		bootstrapWorkloadsMatchLKG(runningFront, runningWorkerA, runningWorkerB, frontTarget, workerATarget, workerBTarget) {
 		return cluster.applyResourceSet(ctx, release, manifest, false)
@@ -271,7 +271,7 @@ func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, releas
 
 func bootstrapWorkloadsMatchLKG(front, workerA, workerB map[string]edgeGroupPod, frontTarget, workerATarget, workerBTarget declarativerelease.TargetIdentity) bool {
 	return sameEdgeNodes(front, workerA) && sameEdgeNodes(front, workerB) &&
-		edgePodsMatchTarget(front, frontTarget) && edgePodsMatchTarget(workerA, workerATarget) && edgePodsMatchTarget(workerB, workerBTarget)
+		edgePodsMatchBootstrapTarget(front, frontTarget) && edgePodsMatchBootstrapTarget(workerA, workerATarget) && edgePodsMatchBootstrapTarget(workerB, workerBTarget)
 }
 
 func declaredEdgeDaemonSetTarget(manifest []byte, release declarativerelease.PlanRelease, name, container string) (declarativerelease.TargetIdentity, error) {
@@ -542,6 +542,23 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPods(ctx context.Context, releas
 
 func (cluster *kubectlCluster) readDegradedEdgeDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string) (map[string]edgeGroupPod, error) {
 	return cluster.readEdgeDaemonSetPodsWithReadiness(ctx, release, name, container, expectedNodes, groupID, false, false)
+}
+
+func (cluster *kubectlCluster) readBootstrapLKGDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: release.Workload.Namespace, Name: name}
+	workloadRaw, err := cluster.getResource(ctx, identity)
+	if err != nil || len(bytes.TrimSpace(workloadRaw)) == 0 {
+		return nil, fmt.Errorf("read DaemonSet/%s: %w", name, err)
+	}
+	selector, err := selectorFromWorkload(workloadRaw)
+	if err != nil {
+		return nil, err
+	}
+	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
+	if err != nil {
+		return nil, err
+	}
+	return parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, true, target.ConfigSHA, true)
 }
 
 func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, includeWorkerHealth, requireReady bool) (map[string]edgeGroupPod, error) {
@@ -999,6 +1016,22 @@ func edgePodsMatchTarget(pods map[string]edgeGroupPod, target declarativerelease
 	}
 	for _, pod := range pods {
 		if !edgePodMatchesTarget(pod, target) {
+			return false
+		}
+	}
+	return true
+}
+
+func edgePodsMatchBootstrapTarget(pods map[string]edgeGroupPod, target declarativerelease.TargetIdentity) bool {
+	if len(pods) == 0 {
+		return false
+	}
+	digest, err := immutableDigestFromRef(target.ImageRef)
+	if err != nil {
+		return false
+	}
+	for _, pod := range pods {
+		if !pod.Ready || pod.SourceCommit != target.ConfigSHA || !strings.HasSuffix(pod.ImageID, digest) {
 			return false
 		}
 	}
