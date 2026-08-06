@@ -69,24 +69,21 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["compile-all"]["status"], "pass")
         self.assertEqual(receipt["checks"]["prepush-receipt-tests"]["status"], "pass")
 
-    def test_declarative_vet_warms_in_parallel_before_full_tests(self) -> None:
-        barrier = threading.Barrier(2)
-        vet_finished = threading.Event()
-        full_test_observed = []
+    def test_declarative_compile_then_vet_warm_full_tests_without_cpu_contention(self) -> None:
+        order = []
 
         def fake_run(command, _timeout):
             if command == ["go", "build", "-p", "4", "./..."]:
-                barrier.wait(timeout=2)
+                order.append("compile")
                 return 0, ""
             if command[:2] == ["go", "vet"]:
-                barrier.wait(timeout=2)
-                vet_finished.set()
+                order.append("vet")
                 return 0, ""
             if command == [
                 "go", "test", "./internal/declarativerelease",
                 "./cmd/fugue-declarative-release",
             ]:
-                full_test_observed.append(vet_finished.is_set())
+                order.append("test")
             return 0, ""
 
         result, receipt = self.run_main_with_fake(
@@ -94,8 +91,30 @@ class CanonicalReceiptTest(unittest.TestCase):
             paths=["cmd/fugue-declarative-release/edge_group_transition.go"],
         )
         self.assertEqual(result, 0)
-        self.assertEqual(full_test_observed, [True])
+        self.assertLess(order.index("compile"), order.index("vet"))
+        self.assertLess(order.index("vet"), order.index("test"))
         self.assertEqual(receipt["checks"]["affected-vet"]["status"], "pass")
+        self.assertEqual(receipt["checks"]["declarative-release-tests"]["status"], "pass")
+
+    def test_data_only_declarative_change_warms_compile_before_full_tests(self) -> None:
+        order = []
+
+        def fake_run(command, _timeout):
+            if command == ["go", "build", "-p", "4", "./..."]:
+                order.append("compile")
+            elif command == [
+                "go", "test", "./internal/declarativerelease",
+                "./cmd/fugue-declarative-release",
+            ]:
+                order.append("test")
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["deploy/releases/edge-worker-de/intent.json"],
+        )
+        self.assertEqual(result, 0)
+        self.assertLess(order.index("compile"), order.index("test"))
         self.assertEqual(receipt["checks"]["declarative-release-tests"]["status"], "pass")
 
     def test_compile_and_affected_tests_overlap(self) -> None:
