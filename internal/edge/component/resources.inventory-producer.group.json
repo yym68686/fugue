@@ -303,6 +303,37 @@
                     "value": "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json"
                   },
                   {
+                    "name": "FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_BUNDLE_SIGNING_KEY",
+                        "name": "fugue-fugue-config"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_KEY_ID",
+                    "value": "control-plane"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
+                        "name": "fugue-fugue-config",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID",
+                    "value": ""
+                  },
+                  {
                     "name": "FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE",
                     "value": "@@CONTROL_NAME@@"
                   },
@@ -498,6 +529,9 @@
                 "securityContext": {
                   "allowPrivilegeEscalation": false,
                   "capabilities": {
+                    "add": [
+                      "NET_BIND_SERVICE"
+                    ],
                     "drop": [
                       "ALL"
                     ]
@@ -781,6 +815,37 @@
                     "value": "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json"
                   },
                   {
+                    "name": "FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_BUNDLE_SIGNING_KEY",
+                        "name": "fugue-fugue-config"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_KEY_ID",
+                    "value": "control-plane"
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
+                        "name": "fugue-fugue-config",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID",
+                    "value": ""
+                  },
+                  {
                     "name": "FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE",
                     "value": "@@CONTROL_NAME@@"
                   },
@@ -976,6 +1041,9 @@
                 "securityContext": {
                   "allowPrivilegeEscalation": false,
                   "capabilities": {
+                    "add": [
+                      "NET_BIND_SERVICE"
+                    ],
                     "drop": [
                       "ALL"
                     ]

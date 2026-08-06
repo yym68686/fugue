@@ -61,18 +61,24 @@ type edgeRouteVerifierKeyring struct {
 // RouteBundleSourceConfig is owned by the Edge worker and remains independent
 // from the Core API configuration used for heartbeat and desired state.
 type RouteBundleSourceConfig struct {
-	URL                 string
-	TokenFile           string
-	VerifierKeyringFile string
+	URL                     string
+	TokenFile               string
+	VerifierKeyringFile     string
+	AdoptionLegacyBootstrap bool
 }
 
 // RouteBundleSourceFromEnv reads only the Edge-owned group publication source.
 func RouteBundleSourceFromEnv() RouteBundleSourceConfig {
 	return RouteBundleSourceConfig{
-		URL:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_URL")),
-		TokenFile:           strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE")),
-		VerifierKeyringFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE")),
+		URL:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_URL")),
+		TokenFile:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE")),
+		VerifierKeyringFile:     strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE")),
+		AdoptionLegacyBootstrap: strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP")) == "true",
 	}
+}
+
+func (s *Service) adoptionLegacyRouteBootstrapEnabled() bool {
+	return s != nil && s.RouteBundleSource.AdoptionLegacyBootstrap && s.edgeControlRouteSourceEnabled()
 }
 
 func (s *Service) edgeControlRouteSourceEnabled() bool {
@@ -326,6 +332,12 @@ func (s *Service) validateCachedRouteSource(cached cacheFile) error {
 			return errors.New("legacy edge route source cannot load an edge-control publication cache")
 		}
 		return nil
+	}
+	if metadata.Source == "" && s.adoptionLegacyRouteBootstrapEnabled() {
+		if cached.Version != cacheFileVersion || strings.TrimSpace(cached.Bundle.Version) == "" {
+			return errors.New("adoption legacy route cache is invalid")
+		}
+		return validateNonCatastrophicGroupBundle(nil, cached.Bundle, false)
 	}
 	if cached.Version != cacheFileVersion || metadata.Source != edgeControlRouteSourceV1 || metadata.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
 		metadata.Generation == "" || metadata.PublicationSequence == 0 || cached.Bundle.Version != groupPublicationVersion(metadata.Generation, metadata.PublicationSequence, metadata.RecoveryEpoch) {

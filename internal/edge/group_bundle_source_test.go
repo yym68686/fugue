@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,6 +138,85 @@ func TestEdgeControlRouteSourceRejectsMismatchedGroupVerifier(t *testing.T) {
 	}
 }
 
+func TestAdoptingWorkerBootstrapsFromLegacyRouteThenConvergesToGroupAuthority(t *testing.T) {
+	const groupID = "edge-group-country-de"
+	const edgeID = "edge-de-1"
+	const readerToken = "reader-token-0123456789-abcdef-0123456789"
+	const groupKeyID = "edge-de-key-v1"
+	const legacyKeyID = "control-plane"
+	groupKey := []byte("0123456789abcdef0123456789abcdef")
+	legacyKey := "abcdef0123456789abcdef0123456789"
+	root := t.TempDir()
+	tokenFile := filepath.Join(root, "reader-token")
+	if err := os.WriteFile(tokenFile, []byte(readerToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyringFile := filepath.Join(root, "verifier-keyring.json")
+	writeEdgeVerifierKeyring(t, keyringFile, groupID, groupKeyID, groupKey)
+
+	legacyBundle := testBundle("legacy-bootstrap")
+	legacyBundle.GeneratedAt = time.Now().UTC()
+	legacyBundle.EdgeGroupID = groupID
+	legacyBundle.Routes[0].EdgeGroupID = groupID
+	legacyBundle = bundleauth.SignEdgeRouteBundleWithKeyring(legacyBundle, bundleauth.NewKeyring(legacyKey, legacyKeyID, "", "", nil), 30*time.Minute)
+	var legacyRequests atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		legacyRequests.Add(1)
+		if request.URL.Path != edgeControlBundlePath || request.URL.Query().Get("token") != "legacy-token" || request.URL.Query().Get("edge_group_id") != groupID {
+			t.Fatalf("unexpected legacy bootstrap request: %s", request.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(legacyBundle)
+	}))
+	defer legacy.Close()
+
+	groupBundle := signedEdgeControlTestBundle(groupID, "group-generation", 1, 0, groupKeyID, groupKey)
+	var groupReady atomic.Bool
+	group := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !groupReady.Load() {
+			http.Error(w, "group_bundle_unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set(edgeControlGroupHeader, groupID)
+		w.Header().Set(edgeControlGenerationHeader, groupBundle.Generation)
+		w.Header().Set(edgeControlPublicationHeader, "1")
+		w.Header().Set(edgeControlRecoveryEpochHeader, "0")
+		_ = json.NewEncoder(w).Encode(groupBundle)
+	}))
+	defer group.Close()
+
+	cfg := config.EdgeConfig{APIURL: legacy.URL, EdgeToken: "legacy-token", EdgeID: edgeID, EdgeGroupID: groupID,
+		CachePath: filepath.Join(root, "routes-cache.json"), BundleSigningKey: legacyKey, BundleSigningKeyID: legacyKeyID, HTTPTimeout: time.Second}
+	routeCfg := RouteBundleSourceConfig{URL: group.URL + edgeControlBundlePath, TokenFile: tokenFile, VerifierKeyringFile: keyringFile, AdoptionLegacyBootstrap: true}
+	service := NewServiceWithRouteBundleSource(cfg, routeCfg, log.New(io.Discard, "", 0))
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("adoption bootstrap sync: %v", err)
+	}
+	if status := service.Status(); !status.Healthy || status.RouteBundleSource != "" || status.BundleVersion != legacyBundle.Version || legacyRequests.Load() != 1 {
+		t.Fatalf("legacy bootstrap was not bounded and healthy: status=%+v requests=%d", status, legacyRequests.Load())
+	}
+
+	groupReady.Store(true)
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("group authority convergence: %v", err)
+	}
+	if status := service.Status(); status.RouteBundleSource != edgeControlRouteSourceV1 || status.PublicationSequence != 1 || status.ServingGeneration != groupBundle.Generation || legacyRequests.Load() != 1 {
+		t.Fatalf("group authority did not supersede bootstrap: status=%+v requests=%d", status, legacyRequests.Load())
+	}
+
+	independent := NewServiceWithRouteBundleSource(cfg, RouteBundleSourceConfig{URL: routeCfg.URL, TokenFile: tokenFile, VerifierKeyringFile: keyringFile}, log.New(io.Discard, "", 0))
+	if err := independent.LoadCache(); err != nil {
+		t.Fatalf("independent worker rejected the group-authority LKG: %v", err)
+	}
+	groupReady.Store(false)
+	independent.Config.CachePath = filepath.Join(root, "independent-empty.json")
+	if err := independent.SyncOnce(context.Background()); err == nil {
+		t.Fatal("independent worker unexpectedly used adoption legacy bootstrap")
+	}
+	if legacyRequests.Load() != 1 {
+		t.Fatal("independent worker contacted the legacy route source")
+	}
+}
+
 func TestEdgeControlRouteHTTPClientIgnoresEnvironmentProxyAndRedirects(t *testing.T) {
 	client := newEdgeRouteBundleHTTPClient(time.Second)
 	transport, ok := client.Transport.(*http.Transport)
@@ -177,13 +257,14 @@ func TestRouteBundleSourceFromEnvIsIndependentFromHeartbeatAPI(t *testing.T) {
 	t.Setenv("FUGUE_EDGE_ROUTE_BUNDLE_URL", "http://edge-control-us.fugue-system.svc:8092/v1/edge/routes")
 	t.Setenv("FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE", "/var/run/secrets/fugue-edge/route-reader/token")
 	t.Setenv("FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE", "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json")
+	t.Setenv("FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP", "true")
 
 	heartbeat := config.EdgeFromEnv()
 	routes := RouteBundleSourceFromEnv()
 	if heartbeat.APIURL != "https://api.example.test" ||
 		routes.URL != "http://edge-control-us.fugue-system.svc:8092/v1/edge/routes" ||
 		routes.TokenFile != "/var/run/secrets/fugue-edge/route-reader/token" ||
-		routes.VerifierKeyringFile != "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json" {
+		routes.VerifierKeyringFile != "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json" || !routes.AdoptionLegacyBootstrap {
 		t.Fatalf("edge route source was not independently configured: heartbeat=%+v routes=%+v", heartbeat, routes)
 	}
 }

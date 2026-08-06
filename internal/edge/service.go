@@ -703,13 +703,66 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		return nil
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		err := statusError{
+		var err error = statusError{
 			StatusCode: resp.StatusCode,
 			Body:       s.redact(strings.TrimSpace(string(body))),
+		}
+		if s.adoptionLegacyRouteBootstrapEnabled() && !s.hasGroupRoutePublication() {
+			if fallbackErr := s.syncAdoptionLegacyRouteBundle(ctx, now); fallbackErr == nil {
+				result = "success"
+				return nil
+			} else {
+				err = errors.Join(err, fmt.Errorf("adoption legacy route bootstrap: %w", fallbackErr))
+			}
 		}
 		s.recordSyncError(err)
 		return err
 	}
+}
+
+func (s *Service) hasGroupRoutePublication() bool {
+	publication, _ := s.currentRoutePublicationAndBundle()
+	return publication.Source == edgeControlRouteSourceV1 && publication.PublicationSequence > 0
+}
+
+func (s *Service) syncAdoptionLegacyRouteBundle(ctx context.Context, now time.Time) error {
+	req, err := s.newLegacyRoutesRequest(ctx)
+	if err != nil {
+		return err
+	}
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch legacy bootstrap route bundle: %s", s.redact(err.Error()))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return statusError{StatusCode: resp.StatusCode, Body: s.redact(strings.TrimSpace(string(body)))}
+	}
+	var bundle model.EdgeRouteBundle
+	if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
+		return fmt.Errorf("decode legacy bootstrap route bundle: %w", err)
+	}
+	if err := s.verifyLegacyBundle(bundle, now); err != nil {
+		return fmt.Errorf("verify legacy bootstrap route bundle: %w", err)
+	}
+	if err := validateNonCatastrophicGroupBundle(nil, bundle, false); err != nil {
+		return err
+	}
+	configSignature, err := s.applyCaddyConfigOnly(ctx, bundle)
+	if err != nil {
+		return fmt.Errorf("apply legacy bootstrap caddy config: %w", err)
+	}
+	etag := strings.TrimSpace(resp.Header.Get("ETag"))
+	if etag == "" {
+		etag = quoteETag(bundle.Version)
+	}
+	if err := s.writeCache(cacheFile{Version: cacheFileVersion, ETag: etag, CachedAt: now, Bundle: bundle}); err != nil {
+		return err
+	}
+	s.recordSyncSuccessWithPublication(bundle, etag, now, false, routePublicationMetadata{})
+	s.scheduleCurrentCaddyWarmup(bundle, configSignature)
+	return nil
 }
 
 func (s *Service) retryCurrentCaddyConfig(ctx context.Context, reason string) {
@@ -769,7 +822,7 @@ func (s *Service) LoadCache() error {
 		}
 		return err
 	}
-	if err := s.verifyCachedBundle(cached.Bundle, time.Now().UTC()); err != nil {
+	if err := s.verifyCachedBundle(cached, time.Now().UTC()); err != nil {
 		err = fmt.Errorf("verify edge route cache: %w", err)
 		s.recordCacheLoad("error")
 		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
@@ -2800,6 +2853,26 @@ func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
 	return req, nil
 }
 
+func (s *Service) newLegacyRoutesRequest(ctx context.Context) (*http.Request, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/")
+	token := strings.TrimSpace(s.Config.EdgeToken)
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" || token == "" {
+		return nil, errors.New("legacy bootstrap edge route source is invalid")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + edgeControlBundlePath
+	query := base.Query()
+	query.Set("token", token)
+	if edgeID := strings.TrimSpace(s.Config.EdgeID); edgeID != "" {
+		query.Set("edge_id", edgeID)
+	}
+	if groupID := strings.TrimSpace(s.Config.EdgeGroupID); groupID != "" {
+		query.Set("edge_group_id", groupID)
+	}
+	base.RawQuery = query.Encode()
+	return http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+}
+
 func (s *Service) RefreshDesiredState(ctx context.Context) error {
 	req, err := s.newDesiredStateRequest(ctx)
 	if err != nil {
@@ -3540,6 +3613,9 @@ func (s *Service) validateConfig() error {
 	if s.edgeControlRouteSourceEnabled() && strings.TrimSpace(s.Config.EdgeGroupID) == "" {
 		return fmt.Errorf("edge-control route source requires a projected edge group identity")
 	}
+	if s.RouteBundleSource.AdoptionLegacyBootstrap && (!s.edgeControlRouteSourceEnabled() || strings.TrimSpace(s.Config.BundleSigningKey) == "") {
+		return errors.New("adoption legacy route bootstrap requires the group source and legacy bundle verifier")
+	}
 	staticTLSCertFile := strings.TrimSpace(s.Config.CaddyStaticTLSCertFile)
 	staticTLSKeyFile := strings.TrimSpace(s.Config.CaddyStaticTLSKeyFile)
 	if (staticTLSCertFile == "") != (staticTLSKeyFile == "") {
@@ -3647,7 +3723,7 @@ func (s *Service) LoadPreviousCache() error {
 			s.recordCacheLoad("error")
 			continue
 		}
-		if err := s.verifyCachedBundle(cached.Bundle, time.Now().UTC()); err != nil {
+		if err := s.verifyCachedBundle(cached, time.Now().UTC()); err != nil {
 			lastErr = fmt.Errorf("verify previous edge route cache %s: %w", candidate.Path, err)
 			s.recordCacheLoad("error")
 			continue
@@ -3677,7 +3753,7 @@ func (s *Service) preservePreviousCache(path string) {
 		if err := json.Unmarshal(data, &cached); err != nil || cached.Bundle.Version == "" {
 			return false
 		}
-		return s.verifyCachedBundle(cached.Bundle, time.Now().UTC()) == nil && s.validateCachedRouteSource(cached) == nil
+		return s.verifyCachedBundle(cached, time.Now().UTC()) == nil && s.validateCachedRouteSource(cached) == nil
 	})
 	if err != nil && !os.IsNotExist(err) && s.Logger != nil {
 		s.Logger.Printf("preserve previous edge route cache failed: %v", err)
@@ -3719,12 +3795,32 @@ func (s *Service) verifyBundle(bundle model.EdgeRouteBundle, now time.Time) erro
 	return nil
 }
 
-func (s *Service) verifyCachedBundle(bundle model.EdgeRouteBundle, now time.Time) error {
-	verifyAt, err := staleBundleVerificationTime(bundle.ValidUntil, now, s.Config.MaxStale)
+func (s *Service) verifyLegacyBundle(bundle model.EdgeRouteBundle, now time.Time) error {
+	keyring := bundleauth.NewKeyring(s.Config.BundleSigningKey, s.Config.BundleSigningKeyID, s.Config.BundleSigningPreviousKey, s.Config.BundleSigningPreviousKeyID, s.Config.BundleRevokedKeyIDs)
+	if strings.TrimSpace(keyring.PrimaryKey) == "" {
+		return errors.New("legacy route bundle verifier is absent")
+	}
+	if err := bundleauth.VerifyEdgeRouteBundleWithKeyring(bundle, keyring, now); err != nil {
+		return err
+	}
+	if strings.TrimSpace(bundle.Version) == "" {
+		return errors.New("legacy route bundle version is required")
+	}
+	return nil
+}
+
+func (s *Service) verifyCachedBundle(cached cacheFile, now time.Time) error {
+	verifyAt, err := staleBundleVerificationTime(cached.Bundle.ValidUntil, now, s.Config.MaxStale)
 	if err != nil {
 		return err
 	}
-	return s.verifyBundle(bundle, verifyAt)
+	if s.edgeControlRouteSourceEnabled() && routePublicationFromCache(cached).Source == "" {
+		if !s.adoptionLegacyRouteBootstrapEnabled() {
+			return errors.New("legacy route cache is forbidden outside adoption")
+		}
+		return s.verifyLegacyBundle(cached.Bundle, verifyAt)
+	}
+	return s.verifyBundle(cached.Bundle, verifyAt)
 }
 
 func staleBundleVerificationTime(validUntil, now time.Time, maxStale time.Duration) (time.Time, error) {

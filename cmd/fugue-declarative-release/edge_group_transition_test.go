@@ -124,6 +124,21 @@ func TestAdoptingEdgeGroupAloneMayReadLegacyPodIdentity(t *testing.T) {
 	}
 }
 
+func TestAdoptingEdgeGroupCanInspectOnlyAnUnreadyInactivePodForExactRecovery(t *testing.T) {
+	pod := edgeGroupPodFixture("worker-broken", "uid-broken", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	status := pod["status"].(map[string]any)
+	status["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
+	status["containerStatuses"] = []any{map[string]any{"name": "edge", "imageID": "containerd://sha256:" + strings.Repeat("a", 64), "restartCount": 7}}
+	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
+	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, ""); err == nil {
+		t.Fatal("strict edge state accepted an unready Pod")
+	}
+	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", true, "", false)
+	if err != nil || got["node-1"].Ready || got["node-1"].UID != "uid-broken" || got["node-1"].ResourceVersion != "42" {
+		t.Fatalf("degraded adoption recovery lost exact Pod preconditions: got=%+v err=%v", got, err)
+	}
+}
+
 func TestWorkloadLegacySourceFallsBackToBoundTemplateSourceAfterAdoption(t *testing.T) {
 	raw := []byte(`{"spec":{"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}}}`)
 	got, err := workloadLegacySource(raw, "edge")
@@ -238,6 +253,55 @@ func TestEdgeGroupAuthorityRequiresPublicationOnBothSlotsAndInventoryOnActive(t 
 	state.WorkerA["node-1"] = pod
 	if err := validateEdgeGroupAuthority(state, transition); err == nil || !strings.Contains(err.Error(), "inventory") {
 		t.Fatalf("missing active inventory was accepted: %v", err)
+	}
+}
+
+func TestLegacyRouteBootstrapIsAdoptionOnlyAndNeverSatisfiesFinalAuthority(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "deploy/releases/edge-worker-us/lkg.json",
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: strings.Repeat("1", 40), OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{}},
+	}
+	target := edgeTargetFixture("2", "b")
+	legacy := edgeGroupPod{Ready: true, BundleGeneration: "legacy-generation", ServingGeneration: "legacy-generation"}
+	if !allowsAdoptionRouteBootstrap(release, target) || !edgePodHasAdoptionLegacyRoute(legacy) {
+		t.Fatal("explicit adopting target could not use the bounded bootstrap route")
+	}
+	release.MigrationState = "independent"
+	if allowsAdoptionRouteBootstrap(release, target) {
+		t.Fatal("independent release retained legacy route bootstrap")
+	}
+	state := edgeStateFixture("a", target, edgeFrontHealth{ActiveSlot: "a"})
+	pod := state.WorkerB["node-1"]
+	pod.RouteBundleSource = ""
+	pod.PublicationSequence = 0
+	state.WorkerB["node-1"] = pod
+	if err := validateEdgeGroupAuthority(state, edgeTransitionFixture()); err == nil {
+		t.Fatal("legacy bootstrap route satisfied final group authority")
+	}
+}
+
+func TestBootstrapLKGSelectorRequiresExactAdoptionIdentity(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	previous := strings.Repeat("1", 40)
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "deploy/releases/edge-worker-us/lkg.json",
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: previous, ExpectedPreviousManifestSHA: previous, ExpectedPreviousOCIRevision: previous,
+		ExpectedPreviousImageDigest: digest, OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
+		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{}},
+	}
+	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: previous, ManifestSHA: previous, OCIRevision: previous, ImageRef: "ghcr.io/example/edge@" + digest}
+	if !isEdgeBootstrapLKGTarget(release, target) {
+		t.Fatal("exact adoption bootstrap LKG did not select heterogeneous compensation")
+	}
+	tampered := target
+	tampered.OCIRevision = strings.Repeat("2", 40)
+	if isEdgeBootstrapLKGTarget(release, tampered) {
+		t.Fatal("tampered bootstrap LKG selected heterogeneous compensation")
+	}
+	release.MigrationState = "independent"
+	if isEdgeBootstrapLKGTarget(release, target) {
+		t.Fatal("independent release selected adoption compensation")
 	}
 }
 

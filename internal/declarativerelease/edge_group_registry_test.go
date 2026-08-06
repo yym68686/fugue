@@ -1,6 +1,7 @@
 package declarativerelease
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -216,8 +217,15 @@ func TestEdgeWorkerTemplatePreservesExternalCaddyAndTenantNodePlacement(t *testi
 			containers, _ := spec["containers"].([]any)
 			for _, rawContainer := range containers {
 				container, _ := rawContainer.(map[string]any)
-				if stringField(container, "name") == "caddy" && stringField(container, "image") != caddyImage {
-					t.Fatalf("group %s Caddy image is not independently pinned: %+v", group.ID, container)
+				if stringField(container, "name") == "caddy" {
+					if stringField(container, "image") != caddyImage {
+						t.Fatalf("group %s Caddy image is not independently pinned: %+v", group.ID, container)
+					}
+					security, _ := container["securityContext"].(map[string]any)
+					capabilities, _ := security["capabilities"].(map[string]any)
+					if fmt.Sprint(capabilities["add"]) != "[NET_BIND_SERVICE]" || fmt.Sprint(capabilities["drop"]) != "[ALL]" || security["allowPrivilegeEscalation"] != false {
+						t.Fatalf("group %s Caddy cannot bind its declared low ports with the minimum capability: %+v", group.ID, security)
+					}
 				}
 			}
 		}

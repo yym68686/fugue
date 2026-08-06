@@ -572,6 +572,9 @@ func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerel
 		return err
 	}
 	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
+		if isEdgeBootstrapLKGTarget(release, target) {
+			return cluster.applyEdgeBootstrapLKG(ctx, release, target, manifest)
+		}
 		return cluster.applyEdgeGroupAB(ctx, release, target, manifest)
 	}
 	return cluster.applyResourceSet(ctx, release, manifest, false)
