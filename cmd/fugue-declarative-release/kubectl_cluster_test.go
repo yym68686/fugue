@@ -504,6 +504,31 @@ func TestCreatedResourceDeletionsSelectOnlyAbsentToPresentNonRetainedObjects(t *
 	}
 }
 
+func TestOwnershipTakeoverCreatedDeletionsPreserveForwardServiceAccounts(t *testing.T) {
+	serviceAccount := declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "edge-worker-de"}
+	service := declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "Service", Namespace: "fugue-system", Name: "edge-service"}
+	identities := []declarativerelease.ResourceIdentity{serviceAccount, service}
+	before := declarativerelease.Observation{Resources: []declarativerelease.ResourceObservation{{Identity: serviceAccount}, {Identity: service}}}
+	after := declarativerelease.Observation{Resources: []declarativerelease.ResourceObservation{
+		{Identity: serviceAccount, Present: true, UID: "sa-uid", ResourceVersion: "10"},
+		{Identity: service, Present: true, UID: "service-uid", ResourceVersion: "11"},
+	}}
+	deletions, err := createdResourceDeletions(identities, before, after)
+	if err != nil || len(deletions) != 2 {
+		t.Fatalf("unexpected created resources: %+v err=%v", deletions, err)
+	}
+	preserve := map[declarativerelease.ResourceIdentity]struct{}{serviceAccount: {}}
+	filtered := deletions[:0]
+	for _, deletion := range deletions {
+		if _, keep := preserve[deletion.Identity]; !keep {
+			filtered = append(filtered, deletion)
+		}
+	}
+	if len(filtered) != 1 || filtered[0].Identity != service {
+		t.Fatalf("service account was not excluded from takeover compensation: %+v", filtered)
+	}
+}
+
 func TestFreshDeletionPreconditionsRefreshStatusOnlyResourceVersion(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"}
 	object := &unstructured.Unstructured{Object: map[string]any{

@@ -572,6 +572,28 @@ func (cluster *kubectlCluster) Delete(ctx context.Context, _ declarativerelease.
 }
 
 func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativerelease.PlanRelease, forwardManifest []byte, before, after declarativerelease.Observation) error {
+	return cluster.deleteCreated(ctx, forwardManifest, nil, before, after)
+}
+
+// DeleteCreatedForOwnershipTakeover preserves forward ServiceAccount
+// dependencies during migration compensation. A historical LKG can omit the
+// account even while the live workload references it; deleting the newly
+// materialized account would make a restarted DaemonSet unschedulable.
+func (cluster *kubectlCluster) DeleteCreatedForOwnershipTakeover(ctx context.Context, _ declarativerelease.PlanRelease, forwardManifest, _ []byte, before, after declarativerelease.Observation) error {
+	identities, err := declarativerelease.ResourceSetIdentities(forwardManifest)
+	if err != nil {
+		return err
+	}
+	preserve := make(map[declarativerelease.ResourceIdentity]struct{})
+	for _, identity := range identities {
+		if identity.APIVersion == "v1" && identity.Kind == "ServiceAccount" {
+			preserve[identity] = struct{}{}
+		}
+	}
+	return cluster.deleteCreated(ctx, forwardManifest, preserve, before, after)
+}
+
+func (cluster *kubectlCluster) deleteCreated(ctx context.Context, forwardManifest []byte, preserve map[declarativerelease.ResourceIdentity]struct{}, before, after declarativerelease.Observation) error {
 	identities, err := declarativerelease.ResourceSetIdentities(forwardManifest)
 	if err != nil {
 		return err
@@ -579,6 +601,16 @@ func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativer
 	deletions, err := createdResourceDeletions(identities, before, after)
 	if err != nil {
 		return err
+	}
+	if len(preserve) > 0 {
+		filtered := deletions[:0]
+		for _, deletion := range deletions {
+			if _, keep := preserve[deletion.Identity]; keep {
+				continue
+			}
+			filtered = append(filtered, deletion)
+		}
+		deletions = filtered
 	}
 	config, err := loadComponentLeaseClientConfig()
 	if err != nil {

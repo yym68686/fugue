@@ -152,6 +152,11 @@ func (fake *fakeCluster) DeleteCreated(context.Context, PlanRelease, []byte, Obs
 	return nil
 }
 
+func (fake *fakeCluster) DeleteCreatedForOwnershipTakeover(context.Context, PlanRelease, []byte, []byte, Observation, Observation) error {
+	fake.deleteCreated++
+	return nil
+}
+
 func (fake *fakeCluster) ClearOwnershipTakeoverForwardOnlyFields(context.Context, PlanRelease, []byte, []byte, Observation) error {
 	return nil
 }

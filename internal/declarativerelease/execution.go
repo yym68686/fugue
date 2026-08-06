@@ -145,6 +145,14 @@ type ownershipTakeoverCompensator interface {
 	ClearOwnershipTakeoverForwardOnlyFields(context.Context, PlanRelease, []byte, []byte, Observation) error
 }
 
+// ownershipTakeoverCreatedResourceCompensator preserves explicit workload
+// dependencies that are introduced by the forward resource set. A bootstrap
+// LKG may predate such a dependency even though the live workload already
+// references it; deleting it during compensation can strand a recreated pod.
+type ownershipTakeoverCreatedResourceCompensator interface {
+	DeleteCreatedForOwnershipTakeover(context.Context, PlanRelease, []byte, []byte, Observation, Observation) error
+}
+
 func DecodeExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lkgManifest []byte) (ExecutionPlan, error) {
 	var plan ExecutionPlan
 	if err := decodeStrict(reader, &plan); err != nil {
@@ -750,7 +758,12 @@ func compensateOwnershipTakeover(ctx context.Context, cluster Cluster, release P
 	} else {
 		clearErr = errors.New("ownership takeover compensation adapter is unavailable")
 	}
-	deleteErr := cluster.DeleteCreated(ctx, release, forwardManifest, prepared.Prewrite, observed)
+	deleteErr := error(nil)
+	if compensator, ok := cluster.(ownershipTakeoverCreatedResourceCompensator); ok {
+		deleteErr = compensator.DeleteCreatedForOwnershipTakeover(ctx, release, forwardManifest, lkgManifest, prepared.Prewrite, observed)
+	} else {
+		deleteErr = cluster.DeleteCreated(ctx, release, forwardManifest, prepared.Prewrite, observed)
+	}
 	lkgObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.LKG, lkgManifest)
 	convergedErr := cluster.Converged(ctx, release, lkgManifest)
 	if healthErr == nil && convergedErr == nil && clearErr == nil && lkgObservation.Matches(prepared.LKG, release, true) {
