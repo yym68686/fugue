@@ -128,7 +128,9 @@ type Cluster interface {
 	VerifyBootstrapTarget(context.Context, PlanRelease, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
 	DryRunOwnershipAdoption(context.Context, PlanRelease, OwnershipAdoptionPlan, []byte) error
+	DryRunOwnershipTakeover(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) error
 	AdoptOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error)
+	TakeoverOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error)
 	Apply(context.Context, PlanRelease, TargetIdentity, []byte) error
 	Delete(context.Context, PlanRelease, []byte, Observation) error
 	DeleteCreated(context.Context, PlanRelease, []byte, Observation, Observation) error
@@ -316,12 +318,8 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			if err != nil || !expanded.ExtendsResourceCAS(prewrite) {
 				return ExecutionPlan{}, errors.New("already-adopted forward resource CAS is invalid")
 			}
-			forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, expanded)
-			if bindErr != nil {
-				return ExecutionPlan{}, bindErr
-			}
-			if err := cluster.DryRunApply(ctx, release, forwardDryRun); err != nil {
-				return ExecutionPlan{}, fmt.Errorf("server-side dry-run already-adopted forward: %w", err)
+			if err := cluster.DryRunOwnershipTakeover(ctx, release, *adoption, forward, rendered.Forward); err != nil {
+				return ExecutionPlan{}, fmt.Errorf("server-side dry-run reviewed ownership takeover: %w", err)
 			}
 			lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, expanded)
 			if bindErr != nil {
@@ -589,16 +587,27 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 				result.Final = adopted
 				return sealResult(result)
 			}
+		} else {
+			var takeoverErr error
+			adopted, takeoverErr = cluster.TakeoverOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.Forward, forwardManifest)
+			if takeoverErr != nil || !adopted.CompletesOwnershipTakeover(prepared.Prewrite, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
+				result.Status = "recovery-required"
+				result.Reason = "ownership-takeover-unknown"
+				result.Final = adopted
+				return sealResult(result)
+			}
 		}
 		current = adopted
-		expanded, expandErr := cluster.ObserveCAS(ctx, release, forwardManifest)
-		if expandErr != nil || !expanded.ExtendsResourceCAS(adopted) {
-			result.Status = "recovery-required"
-			result.Reason = "post-adoption-forward-cas-drift"
-			result.Final = adopted
-			return sealResult(result)
+		if !prepared.OwnershipAdoption.AlreadyConverged {
+			expanded, expandErr := cluster.ObserveCAS(ctx, release, forwardManifest)
+			if expandErr != nil || !expanded.ExtendsResourceCAS(adopted) {
+				result.Status = "recovery-required"
+				result.Reason = "post-adoption-forward-cas-drift"
+				result.Final = adopted
+				return sealResult(result)
+			}
+			current = expanded
 		}
-		current = expanded
 	}
 	if prepared.AlreadyConverged {
 		forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
@@ -1069,6 +1078,49 @@ func (observation Observation) ExtendsResourceCAS(base Observation) bool {
 		delete(baseResources, current.Identity)
 	}
 	return len(baseResources) == 0
+}
+
+// CompletesOwnershipTakeover accepts the exact UID-preserving CAS movement
+// caused by applying reviewed forward fields with the declarative manager.
+// The adapter separately proves those desired bytes match the immutable
+// target; this predicate only permits generation/RV movement on scoped
+// resources and absent forward-only resources.
+func (observation Observation) CompletesOwnershipTakeover(base Observation, manager string, plan OwnershipAdoptionPlan) bool {
+	if !observation.Present || observation.Primary != base.Primary || observation.UID != base.UID ||
+		observation.Generation < base.Generation || !resourceVersionPattern.MatchString(observation.ResourceVersion) ||
+		len(observation.Resources) < len(base.Resources) || manager == "" {
+		return false
+	}
+	baseResources := make(map[ResourceIdentity]ResourceObservation, len(base.Resources))
+	for _, resource := range base.Resources {
+		baseResources[resource.Identity] = resource
+	}
+	currentResources := make(map[ResourceIdentity]ResourceObservation, len(observation.Resources))
+	for _, current := range observation.Resources {
+		currentResources[current.Identity] = current
+		prior, exists := baseResources[current.Identity]
+		if !exists {
+			if current.Present {
+				return false
+			}
+			continue
+		}
+		if current.Present != prior.Present || current.UID != prior.UID || current.Generation < prior.Generation ||
+			current.RetainOnRollback != prior.RetainOnRollback || !resourceVersionPattern.MatchString(current.ResourceVersion) {
+			return false
+		}
+		delete(baseResources, current.Identity)
+	}
+	if len(baseResources) != 0 {
+		return false
+	}
+	for _, scope := range plan.Resources {
+		current, exists := currentResources[scope.Identity]
+		if !exists || !receiptContainsString(current.FieldManagers, manager) {
+			return false
+		}
+	}
+	return true
 }
 
 // SameSpecIdentity permits status-only resourceVersion movement while binding

@@ -19,8 +19,11 @@ type fakeCluster struct {
 	verifyErrors      []error
 	dryRuns           int
 	dryRunAdoptions   int
+	dryRunTakeovers   int
 	adoptions         []Observation
 	adoptionErrors    []error
+	takeovers         []Observation
+	takeoverErrors    []error
 	applies           int
 	applyErrors       []error
 	deleteCreated     int
@@ -96,6 +99,11 @@ func (fake *fakeCluster) DryRunOwnershipAdoption(context.Context, PlanRelease, O
 	return nil
 }
 
+func (fake *fakeCluster) DryRunOwnershipTakeover(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) error {
+	fake.dryRunTakeovers++
+	return nil
+}
+
 func (fake *fakeCluster) AdoptOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error) {
 	var observation Observation
 	if len(fake.adoptions) > 0 {
@@ -107,6 +115,20 @@ func (fake *fakeCluster) AdoptOwnership(context.Context, PlanRelease, OwnershipA
 	}
 	err := fake.adoptionErrors[0]
 	fake.adoptionErrors = fake.adoptionErrors[1:]
+	return observation, err
+}
+
+func (fake *fakeCluster) TakeoverOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error) {
+	var observation Observation
+	if len(fake.takeovers) > 0 {
+		observation = fake.takeovers[0]
+		fake.takeovers = fake.takeovers[1:]
+	}
+	if len(fake.takeoverErrors) == 0 {
+		return observation, nil
+	}
+	err := fake.takeoverErrors[0]
+	fake.takeoverErrors = fake.takeoverErrors[1:]
 	return observation, err
 }
 
@@ -382,8 +404,54 @@ func TestPrepareAlreadyAdoptedOwnershipDryRunsForwardWithoutForce(t *testing.T) 
 	}
 	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
 	if err != nil || prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged ||
-		fake.dryRunAdoptions != 0 || fake.dryRuns != 2 {
+		fake.dryRunAdoptions != 0 || fake.dryRunTakeovers != 1 || fake.dryRuns != 1 {
 		t.Fatalf("already-adopted prepare did not use bounded ordinary dry-runs: plan=%+v fake=%+v err=%v", prepared.OwnershipAdoption, fake, err)
+	}
+}
+
+func TestExecuteAlreadyAdoptedOwnershipPerformsReviewedTakeoverBeforeForward(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm",
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+			Fields:   []string{"/spec/template"},
+		}},
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, forward := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	fake := &fakeCluster{
+		observations: []Observation{lkg, lkg}, health: []Observation{lkg},
+		cas: []Observation{casOnlyObservation(lkg)},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged {
+		t.Fatalf("prepare resumed adoption: plan=%+v err=%v", prepared.OwnershipAdoption, err)
+	}
+	takeover := casOnlyObservation(lkg)
+	takeover.ResourceVersion = "12"
+	takeover.Generation++
+	takeover.Resources[0].ResourceVersion = "12"
+	takeover.Resources[0].Generation++
+	takeover.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	takeover.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	fake.cas = []Observation{casOnlyObservation(lkg)}
+	fake.takeovers = []Observation{takeover}
+	fake.health = []Observation{forward}
+	fake.dryRuns = 0
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || fake.dryRuns != 1 || fake.applies != 1 || len(fake.takeovers) != 0 {
+		t.Fatalf("reviewed ownership takeover did not precede ordinary forward: result=%+v fake=%+v", result, fake)
 	}
 }
 
@@ -445,6 +513,28 @@ func TestForwardResourceCASExtensionAllowsOnlyAbsentNewResources(t *testing.T) {
 	}
 	if expanded.ExtendsResourceCAS(base) {
 		t.Fatal("pre-existing forward-only resource was accepted")
+	}
+}
+
+func TestOwnershipTakeoverCASAllowsOnlyUIDPreservingScopedMovement(t *testing.T) {
+	base := casOnlyObservation(stableObservation("1", "10", "ghcr.io/example/api@"+testDigest, testSHA1))
+	manager := "fugue-api-declarative"
+	plan := OwnershipAdoptionPlan{Resources: []OwnershipAdoptionResourcePlan{{Identity: base.Resources[0].Identity}}}
+	current := base
+	current.ResourceVersion = "11"
+	current.Generation++
+	current.Resources = append([]ResourceObservation(nil), base.Resources...)
+	current.Resources[0].ResourceVersion = "11"
+	current.Resources[0].Generation++
+	current.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	current.Resources[0].FieldManagers = []string{manager, "helm"}
+	current.Resources = append(current.Resources, ResourceObservation{Identity: ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "api"}})
+	if !current.CompletesOwnershipTakeover(base, manager, plan) {
+		t.Fatal("UID-preserving reviewed takeover was rejected")
+	}
+	current.Resources[0].UID = "replaced"
+	if current.CompletesOwnershipTakeover(base, manager, plan) {
+		t.Fatal("resource replacement was accepted as ownership takeover")
 	}
 }
 

@@ -229,6 +229,14 @@ func (cluster *kubectlCluster) DryRunOwnershipAdoption(ctx context.Context, rele
 	return cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, true)
 }
 
+func (cluster *kubectlCluster) DryRunOwnershipTakeover(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, target declarativerelease.TargetIdentity, targetManifest []byte) error {
+	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
+	if err != nil {
+		return err
+	}
+	return cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, true)
+}
+
 func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkg declarativerelease.TargetIdentity, lkgManifest []byte) (declarativerelease.Observation, error) {
 	manifest, err := declarativerelease.BuildOwnershipAdoptionManifest(lkgManifest, adoption)
 	if err != nil {
@@ -249,6 +257,27 @@ func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release decla
 		return declarativerelease.Observation{}, observeErr
 	}
 	return observation, nil
+}
+
+func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, target declarativerelease.TargetIdentity, targetManifest []byte) (declarativerelease.Observation, error) {
+	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
+	if verifyErr := cluster.verifyOwnershipAdoption(ctx, release, adoption); verifyErr != nil {
+		if applyErr != nil {
+			return declarativerelease.Observation{}, fmt.Errorf("apply ownership takeover: %v; verify ownership takeover: %w", applyErr, verifyErr)
+		}
+		return declarativerelease.Observation{}, verifyErr
+	}
+	if applyErr != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("apply ownership takeover: %w", applyErr)
+	}
+	if err := cluster.Converged(ctx, release, manifest); err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("verify ownership takeover convergence: %w", err)
+	}
+	return cluster.ObserveCAS(ctx, release, targetManifest)
 }
 
 func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, manifest []byte, dryRun bool) error {

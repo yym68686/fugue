@@ -17,7 +17,24 @@ func BuildOwnershipAdoptionManifest(lkgManifest []byte, adoption OwnershipAdopti
 		len(adoption.Resources) == 0 {
 		return nil, errors.New("ownership adoption is not bound to its bootstrap LKG")
 	}
-	set, err := DecodeResourceSet(bytes.NewReader(lkgManifest))
+	return buildOwnershipScopedManifest(lkgManifest, adoption)
+}
+
+// BuildOwnershipTakeoverManifest materializes only the reviewed fields from
+// the immutable forward target after an equal-value bootstrap adoption. This
+// is the bounded adopting-only path for transferring legacy leaf ownership.
+func BuildOwnershipTakeoverManifest(targetManifest []byte, adoption OwnershipAdoptionPlan, target TargetIdentity) ([]byte, error) {
+	if !adoption.AlreadyConverged || !target.Present || !digestPattern.MatchString(target.ManifestDigest) ||
+		target.ManifestDigest != digestOf(targetManifest) || !shaPattern.MatchString(target.ConfigSHA) ||
+		target.ManifestSHA != target.ConfigSHA || target.OCIRevision != target.ConfigSHA ||
+		!strings.Contains(target.ImageRef, "@sha256:") || len(adoption.Resources) == 0 {
+		return nil, errors.New("ownership takeover is not bound to its immutable forward target")
+	}
+	return buildOwnershipScopedManifest(targetManifest, adoption)
+}
+
+func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdoptionPlan) ([]byte, error) {
+	set, err := DecodeResourceSet(bytes.NewReader(sourceManifest))
 	if err != nil {
 		return nil, err
 	}
@@ -26,7 +43,7 @@ func BuildOwnershipAdoptionManifest(lkgManifest []byte, adoption OwnershipAdopti
 		if scope.UID == "" || !resourceVersionPattern.MatchString(scope.ResourceVersion) || scope.Generation < 1 || len(scope.Fields) == 0 {
 			return nil, fmt.Errorf("ownership adoption resource %s/%s has invalid CAS", scope.Identity.Kind, scope.Identity.Name)
 		}
-		source, err := ResourceSetItem(lkgManifest, scope.Identity)
+		source, err := ResourceSetItem(sourceManifest, scope.Identity)
 		if err != nil {
 			return nil, err
 		}
