@@ -47,6 +47,26 @@ print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifes
 	}
 }
 
+func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
+	kubectl := filepath.Join(t.TempDir(), "kubectl")
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf 'null\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release := declarativerelease.PlanRelease{
+		ComponentID: "edge-control-us",
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-us",
+			Container: "edge-control", FieldManager: "fugue-edge-control-us-declarative", Replicas: 1,
+		},
+	}
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[]}`)
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	observation, err := cluster.Observe(context.Background(), release, declarativerelease.TargetIdentity{Present: false}, manifest)
+	if err != nil || observation.Present || observation.Primary.Name != "edge-control-us" {
+		t.Fatalf("JSON null was not treated as absent: observation=%+v err=%v", observation, err)
+	}
+}
+
 func TestVerifyBootstrapTargetAllowsMissingRevisionOnlyForExactAdoptionLKG(t *testing.T) {
 	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64)
 	revision := strings.Repeat("a", 40)

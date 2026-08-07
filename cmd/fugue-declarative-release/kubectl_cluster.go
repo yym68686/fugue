@@ -1265,12 +1265,16 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if len(bytes.TrimSpace(workloadRaw)) == 0 {
-		resources, resourceErr := cluster.observeResources(ctx, manifest, release, workloadRaw)
-		if resourceErr != nil {
-			return declarativerelease.Observation{}, resourceErr
-		}
-		return declarativerelease.Observation{Present: false, Primary: primary, Resources: resources}, nil
+	trimmedWorkload := bytes.TrimSpace(workloadRaw)
+	// kubectl versions differ for --ignore-not-found -o json: some emit an
+	// empty stream while others emit the JSON null sentinel. Both mean that an
+	// explicitly absent first-install predecessor was observed; treating null
+	// as a workload makes prepare wait for a target that cannot exist yet.
+	if len(trimmedWorkload) == 0 || bytes.Equal(trimmedWorkload, []byte("null")) {
+		// A first-install LKG is the canonical empty resource set. There are no
+		// predecessor resources to observe or bind; auxiliary resources enter the
+		// receipt only after the forward apply creates them.
+		return declarativerelease.Observation{Present: false, Primary: primary}, nil
 	}
 	selector, err := selectorFromWorkload(workloadRaw)
 	if err != nil {
