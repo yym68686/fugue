@@ -1271,10 +1271,18 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	// explicitly absent first-install predecessor was observed; treating null
 	// as a workload makes prepare wait for a target that cannot exist yet.
 	if len(trimmedWorkload) == 0 || bytes.Equal(trimmedWorkload, []byte("null")) {
-		// A first-install LKG is the canonical empty resource set. There are no
-		// predecessor resources to observe or bind; auxiliary resources enter the
-		// receipt only after the forward apply creates them.
-		return declarativerelease.Observation{Present: false, Primary: primary, Resources: []declarativerelease.ResourceObservation{{Identity: primary}}}, nil
+		// A first-install LKG is the canonical empty resource set. Keep an
+		// absent CAS witness for every declared resource so the prewrite bind can
+		// prove that no predecessor object existed, including auxiliary objects.
+		identities, identityErr := declarativerelease.ResourceSetIdentities(manifest)
+		if identityErr != nil {
+			return declarativerelease.Observation{}, identityErr
+		}
+		resources := make([]declarativerelease.ResourceObservation, 0, len(identities))
+		for _, identity := range identities {
+			resources = append(resources, declarativerelease.ResourceObservation{Identity: identity})
+		}
+		return declarativerelease.Observation{Present: false, Primary: primary, Resources: resources}, nil
 	}
 	selector, err := selectorFromWorkload(workloadRaw)
 	if err != nil {
