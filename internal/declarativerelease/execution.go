@@ -254,7 +254,14 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		}
 	} else {
 		var lkgObserveErr error
-		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, rendered.LKG)
+		// A first-install LKG has no resources by definition. Observe against
+		// the forward resource schema so the CAS witness covers every declared
+		// object while still requiring each one to be absent.
+		lkgObservationManifest := rendered.LKG
+		if !release.ExpectedPreviousPresent {
+			lkgObservationManifest = rendered.Forward
+		}
+		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, lkgObservationManifest)
 		lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
 		lkgHealthVerified := false
 		if release.ExpectedPreviousPresent && errors.Is(lkgObserveErr, ErrDegradedPredecessorHealth) {

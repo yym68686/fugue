@@ -1151,6 +1151,9 @@ func TestFirstInstallCompensatesToUIDBoundAbsentLKG(t *testing.T) {
 	if err != nil || fake.dryRuns != 1 || prepared.LKG.Present {
 		t.Fatalf("prepare first install: plan=%+v dryRuns=%d err=%v", prepared, fake.dryRuns, err)
 	}
+	if len(fake.observedManifests) != 1 || !bytes.Equal(fake.observedManifests[0], rendered.Forward) {
+		t.Fatalf("first-install CAS did not use the forward resource schema: %d observations", len(fake.observedManifests))
+	}
 	forward := stableObservation("new-uid", "10", receipt.ImmutableRef, testSHA2)
 	forward.Ready = 0
 	fake.observations = []Observation{absent, absent}
