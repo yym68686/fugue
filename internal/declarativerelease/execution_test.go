@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -664,6 +665,22 @@ func TestPrepareRecoversTheDeclaredLKGAfterATransientUnreadyObservation(t *testi
 	}
 	if len(fake.healthTargets) != 1 || fake.healthTargets[0].OCIRevision != plan.Releases[0].ExpectedPreviousOCIRevision {
 		t.Fatalf("prepare waited on the forward target before the declared LKG: %+v", fake.healthTargets)
+	}
+}
+
+func TestPrepareIndependentReleaseAdvancesFromExactRestartedLKG(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{
+		observationErrors: []error{fmt.Errorf("%w: ready workload pod restarted", ErrDegradedPredecessorHealth)},
+		cas:               []Observation{degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || len(fake.verifiedTargets) != 1 || len(fake.healthTargets) != 0 {
+		t.Fatalf("independent degraded predecessor: plan=%+v verified=%d health_waits=%d err=%v", prepared, len(fake.verifiedTargets), len(fake.healthTargets), err)
+	}
+	if fake.verifiedTargets[0] != prepared.LKG || len(fake.converged) != 1 || fake.dryRuns != 2 {
+		t.Fatalf("independent degraded predecessor was not exact-CAS verified: verified=%+v converged=%d dryRuns=%d", fake.verifiedTargets, len(fake.converged), fake.dryRuns)
 	}
 }
 

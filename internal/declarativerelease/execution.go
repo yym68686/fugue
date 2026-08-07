@@ -138,6 +138,8 @@ type Cluster interface {
 	Converged(context.Context, PlanRelease, []byte) error
 }
 
+var ErrDegradedPredecessorHealth = errors.New("declarative predecessor health is degraded")
+
 // ownershipTakeoverCompensator is intentionally narrower than Cluster. Only
 // the Kubernetes adapter implements it; test/fake clusters must opt in so a
 // migration rollback cannot silently skip forward-only field cleanup.
@@ -253,7 +255,10 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, rendered.LKG)
 		lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
 		lkgHealthVerified := false
-		if release.ExpectedPreviousPresent && lkgObserveErr != nil {
+		if release.ExpectedPreviousPresent && errors.Is(lkgObserveErr, ErrDegradedPredecessorHealth) {
+			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+			degradedPredecessor = err == nil
+		} else if release.ExpectedPreviousPresent && lkgObserveErr != nil {
 			var healthyLKG Observation
 			healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
 			if err == nil && healthyLKG.Matches(lkg, release, true) {
@@ -262,7 +267,10 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				lkgHealthVerified = lkgMatched
 			}
 		}
-		if lkgMatched {
+		if degradedPredecessor {
+			// The exact immutable predecessor is stable at the resource CAS but
+			// its Pod health cannot recover without replacing the workload.
+		} else if lkgMatched {
 			if release.ExpectedPreviousPresent {
 				if !lkgHealthVerified {
 					_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
@@ -442,7 +450,7 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Obs
 }
 
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
-	if !release.RetrySameLKG || !release.ExpectedPreviousPresent || !lkg.Present {
+	if !release.ExpectedPreviousPresent || !lkg.Present || (release.MigrationState == "adopting" && !release.RetrySameLKG) {
 		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
 	}
 	var verifyErr error

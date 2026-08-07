@@ -2215,7 +2215,7 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 			}
 			restartCount = int64Value(containerStatus["restartCount"])
 			if restartCount != 0 && !allowHistoricalRestarts {
-				return "", "", errors.New("ready workload pod restarted")
+				return "", "", fmt.Errorf("%w: ready workload pod restarted", declarativerelease.ErrDegradedPredecessorHealth)
 			}
 			digest, err := imageIDDigest(stringValue(containerStatus["imageID"]))
 			if err != nil {
