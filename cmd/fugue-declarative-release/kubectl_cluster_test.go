@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -839,6 +840,15 @@ func TestEdgeWorkerHealthUsesCanonicalNamedPort(t *testing.T) {
 	}
 	if _, err := podHTTPEndpointsFromJSON(raw, "edge", "http"); err == nil {
 		t.Fatal("non-canonical worker health port was accepted")
+	}
+}
+
+func TestEdgeHealthPortNamesKeepLegacyFallbackAdoptionScoped(t *testing.T) {
+	if got := edgeHealthPortNames(false); !reflect.DeepEqual(got, []string{"health"}) {
+		t.Fatalf("independent path accepted legacy health ports: %v", got)
+	}
+	if got := edgeHealthPortNames(true); !reflect.DeepEqual(got, []string{"health", "http"}) {
+		t.Fatalf("adoption path did not preserve exact legacy port fallback: %v", got)
 	}
 }
 

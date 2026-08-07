@@ -599,8 +599,17 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	// on the canonical named port "health".  The worker resources have always
 	// declared that name; using "http" here made prewrite adoption reject the
 	// healthy live bootstrap cohort before any production write.
-	portName := "health"
-	endpoints, err := podHTTPEndpointsFromJSON(podsRaw, container, portName)
+	var endpoints []podHTTPEndpoint
+	var endpointErr error
+	for _, portName := range edgeHealthPortNames(allowLegacy) {
+		endpoints, endpointErr = podHTTPEndpointsFromJSON(podsRaw, container, portName)
+		if endpointErr == nil {
+			break
+		}
+	}
+	if endpointErr != nil {
+		err = endpointErr
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read DaemonSet/%s health endpoints: %w", name, err)
 	}
@@ -634,6 +643,16 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 		}
 	}
 	return pods, nil
+}
+
+func edgeHealthPortNames(allowLegacy bool) []string {
+	if allowLegacy {
+		// The adopting bootstrap may contain the prior worker template, whose
+		// exact LKG names this port "http". Independent releases accept only
+		// the canonical target name below.
+		return []string{"health", "http"}
+	}
+	return []string{"health"}
 }
 
 func bootstrapLegacyPodIdentity(release declarativerelease.PlanRelease, name, container string) (string, string, error) {
