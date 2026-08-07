@@ -1418,6 +1418,12 @@ func sanitizeObservedResource(value map[string]any) map[string]any {
 	for _, key := range []string{"creationTimestamp", "generation", "managedFields", "resourceVersion", "uid"} {
 		delete(metadata, key)
 	}
+	// The DaemonSet controller rewrites this annotation as it observes
+	// template generations. It is not declarative intent and must not turn a
+	// prewrite CAS into a false drift between two read-only observations.
+	if annotations, ok := metadata["annotations"].(map[string]any); ok {
+		delete(annotations, "deprecated.daemonset.template.generation")
+	}
 	return copyValue
 }
 

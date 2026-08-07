@@ -146,6 +146,28 @@ func TestNormalizeAdoptionBootstrapDegradedIdentityRejectsWrongSourceTag(t *test
 	}
 }
 
+func TestSanitizeObservedResourceDropsDaemonSetControllerGenerationAnnotation(t *testing.T) {
+	resource := map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{
+			"deprecated.daemonset.template.generation": "109",
+			"fugue.pro/source-commit":                  strings.Repeat("a", 40),
+		}},
+		"spec":   map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "edge", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64)}}}}},
+		"status": map[string]any{"numberReady": 1},
+	}
+	clean := sanitizeObservedResource(resource)
+	annotations := mapField(clean["metadata"].(map[string]any), "annotations")
+	if _, ok := annotations["deprecated.daemonset.template.generation"]; ok {
+		t.Fatal("controller-owned generation annotation remained in CAS digest")
+	}
+	if annotations["fugue.pro/source-commit"] != strings.Repeat("a", 40) {
+		t.Fatal("declarative source identity was removed")
+	}
+	if _, ok := clean["status"]; ok {
+		t.Fatal("status remained in CAS digest")
+	}
+}
+
 func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ComponentID: "api",
