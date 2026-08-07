@@ -169,6 +169,18 @@ func runPlan(args []string, output io.Writer) error {
 			previous[release.ComponentID] = prior
 			previousConfigSHA[release.ComponentID] = priorSHA
 		}
+		if intent.SupersedesFailedConfigSHA != "" {
+			if !found || intent.SupersedesFailedConfigSHA != priorSHA {
+				return fmt.Errorf("component %q superseded failed atom is not the immediately prior component intent", release.ComponentID)
+			}
+			if err := exec.Command("git", "merge-base", "--is-ancestor", intent.ExpectedPreviousConfigSHA, baseSHA).Run(); err != nil {
+				return fmt.Errorf("component %q recovered predecessor is not in the trusted base ancestry", release.ComponentID)
+			}
+			recoveredRaw, recoveredErr := exec.Command("git", "rev-list", "-1", intent.ExpectedPreviousConfigSHA, "--", release.IntentPath).CombinedOutput()
+			if recoveredErr != nil || strings.TrimSpace(string(recoveredRaw)) != intent.ExpectedPreviousConfigSHA {
+				return fmt.Errorf("component %q recovered predecessor is not an exact production intent atom", release.ComponentID)
+			}
+		}
 	}
 	bound, err := declarativerelease.BindIntents(registry, plan, current, previous, previousConfigSHA)
 	if err != nil {

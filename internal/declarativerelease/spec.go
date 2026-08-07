@@ -169,6 +169,7 @@ type Intent struct {
 	ExpectedPreviousManifestSHA string `json:"expectedPreviousManifestSha"`
 	ExpectedPreviousOCIRevision string `json:"expectedPreviousOciRevision"`
 	ExpectedPreviousImageDigest string `json:"expectedPreviousImageDigest"`
+	SupersedesFailedConfigSHA   string `json:"supersedesFailedConfigSha,omitempty"`
 	Rollback                    string `json:"rollback"`
 }
 
@@ -192,6 +193,7 @@ type PlanRelease struct {
 	ExpectedPreviousManifestSHA string             `json:"expectedPreviousManifestSha"`
 	ExpectedPreviousOCIRevision string             `json:"expectedPreviousOciRevision"`
 	ExpectedPreviousImageDigest string             `json:"expectedPreviousImageDigest"`
+	SupersedesFailedConfigSHA   string             `json:"supersedesFailedConfigSha,omitempty"`
 	ManifestPath                string             `json:"manifestPath"`
 	ManifestVariables           map[string]string  `json:"manifestVariables,omitempty"`
 	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
@@ -623,6 +625,12 @@ func (intent Intent) Validate() error {
 		intent.ExpectedPreviousOCIRevision != "" || intent.ExpectedPreviousImageDigest != "" {
 		return errors.New("absent production predecessor must be the first empty identity")
 	}
+	if intent.SupersedesFailedConfigSHA != "" {
+		if !intent.ExpectedPreviousPresent || !shaPattern.MatchString(intent.SupersedesFailedConfigSHA) ||
+			intent.SupersedesFailedConfigSHA == intent.ExpectedPreviousConfigSHA {
+			return errors.New("superseded failed production atom identity is invalid")
+		}
+	}
 	if intent.Rollback != "previous-git-lkg" {
 		return errors.New("production intent rollback must be previous-git-lkg")
 	}
@@ -782,12 +790,16 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			normalSuccessor := intent.ExpectedPreviousPresent && shaPattern.MatchString(priorConfigSHA) &&
 				intent.ExpectedPreviousConfigSHA == priorConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == priorConfigSHA && intent.ExpectedPreviousOCIRevision == priorConfigSHA
+			failedAtomSuccessor := intent.SupersedesFailedConfigSHA == priorConfigSHA &&
+				intent.ExpectedPreviousPresent && intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousManifestSHA &&
+				intent.ExpectedPreviousConfigSHA == intent.ExpectedPreviousOCIRevision
 			retrySameLKG = intent.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
 				intent.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
 				intent.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
 				intent.ExpectedPreviousOCIRevision == prior.ExpectedPreviousOCIRevision &&
-				intent.ExpectedPreviousImageDigest == prior.ExpectedPreviousImageDigest && intent.Rollback == prior.Rollback
-			if !normalSuccessor && !retrySameLKG {
+				intent.ExpectedPreviousImageDigest == prior.ExpectedPreviousImageDigest && intent.Rollback == prior.Rollback &&
+				intent.SupersedesFailedConfigSHA == ""
+			if !normalSuccessor && !failedAtomSuccessor && !retrySameLKG {
 				return Plan{}, fmt.Errorf("component %q predecessor is not the prior production atom", component.ID)
 			}
 		} else if intent.Generation != 1 {
@@ -805,6 +817,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.ExpectedPreviousManifestSHA = intent.ExpectedPreviousManifestSHA
 		release.ExpectedPreviousOCIRevision = intent.ExpectedPreviousOCIRevision
 		release.ExpectedPreviousImageDigest = intent.ExpectedPreviousImageDigest
+		release.SupersedesFailedConfigSHA = intent.SupersedesFailedConfigSHA
 		if component.MigrationState == "adopting" && intent.ExpectedPreviousPresent && component.OwnershipAdoption == nil {
 			return Plan{}, fmt.Errorf("component %q adopting predecessor has no explicit ownership adoption", component.ID)
 		}
