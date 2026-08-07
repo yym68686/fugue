@@ -386,6 +386,25 @@ func BootstrapPredecessorConvergenceManifest(manifest []byte, release PlanReleas
 		if annotations, ok := metadata["annotations"].(map[string]any); ok {
 			delete(annotations, "fugue.pro/source-commit")
 		}
+		// Legacy bootstrap workloads may represent sidecar images as mutable
+		// tags while the reviewed LKG stores the same image immutably. Image
+		// identity is verified separately from Pod imageIDs and the declared
+		// artifact targets; no container image is part of this structural witness.
+		templateSpec, specErr := objectField(template, "spec")
+		if specErr != nil {
+			return nil, specErr
+		}
+		for _, field := range []string{"initContainers", "containers"} {
+			if containers, ok := templateSpec[field].([]any); ok {
+				for _, raw := range containers {
+					container, containerOK := raw.(map[string]any)
+					if !containerOK {
+						return nil, errors.New("bootstrap predecessor container is invalid")
+					}
+					delete(container, "image")
+				}
+			}
+		}
 	}
 	targets := release.ArtifactTargets
 	if len(targets) == 0 {
