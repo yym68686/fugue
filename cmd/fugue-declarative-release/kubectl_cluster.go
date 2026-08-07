@@ -109,7 +109,7 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	observation := declarativerelease.Observation{Present: len(bytes.TrimSpace(workloadRaw)) > 0, Primary: primary, Resources: resources}
+	observation := declarativerelease.Observation{Present: !resourceAbsent(workloadRaw), Primary: primary, Resources: resources}
 	if !observation.Present {
 		return observation, nil
 	}
@@ -1270,7 +1270,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	// empty stream while others emit the JSON null sentinel. Both mean that an
 	// explicitly absent first-install predecessor was observed; treating null
 	// as a workload makes prepare wait for a target that cannot exist yet.
-	if len(trimmedWorkload) == 0 || bytes.Equal(trimmedWorkload, []byte("null")) {
+	if resourceAbsent(trimmedWorkload) {
 		// A first-install LKG is the canonical empty resource set. Keep an
 		// absent CAS witness for every declared resource so the prewrite bind can
 		// prove that no predecessor object existed, including auxiliary objects.
@@ -1410,7 +1410,7 @@ func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []
 		}
 		desiredMetadata := mapField(desired, "metadata")
 		resource.RetainOnRollback = mapStringField(desiredMetadata, "annotations")["fugue.pro/release-retain-on-rollback"] == "true"
-		if len(bytes.TrimSpace(raw)) == 0 {
+		if resourceAbsent(raw) {
 			resources = append(resources, resource)
 			continue
 		}
@@ -1428,6 +1428,11 @@ func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []
 		resources = append(resources, resource)
 	}
 	return resources, nil
+}
+
+func resourceAbsent(raw []byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 func (cluster *kubectlCluster) getResource(ctx context.Context, identity declarativerelease.ResourceIdentity) ([]byte, error) {

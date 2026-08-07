@@ -68,6 +68,10 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	if observation.Resources[0].Present || observation.Resources[1].Present || observation.Resources[0].Identity == observation.Resources[1].Identity {
 		t.Fatalf("absent first-install resources were not fully witnessed: %+v", observation.Resources)
 	}
+	cas, err := cluster.ObserveCAS(context.Background(), release, manifest)
+	if err != nil || !cas.SameResourceCAS(observation) {
+		t.Fatalf("JSON null changed between full and CAS observations: observation=%+v cas=%+v err=%v", observation, cas, err)
+	}
 }
 
 func TestVerifyBootstrapTargetAllowsMissingRevisionOnlyForExactAdoptionLKG(t *testing.T) {
