@@ -123,6 +123,7 @@ type edgeGroupTransitionRuntime interface {
 	ApplyResources(context.Context) error
 	Roll(context.Context, string, declarativerelease.TargetIdentity, bool) (map[string]edgeGroupPod, error)
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
+	ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error)
 	ActivationCAS(context.Context, edgeGroupPod, edgeActivationRequest) (edgeActivationReceipt, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
 	WaitActiveWorkerAuthority(context.Context, string, declarativerelease.TargetIdentity) error
@@ -339,6 +340,20 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 			if digestErr != nil {
 				return fmt.Errorf("active edge slot %s on node %s image: %w", activeSlot, node, digestErr)
 			}
+			existing, exists, readErr := runtime.ReadActivation(ctx, executor)
+			if readErr != nil {
+				return fmt.Errorf("read edge activation on node %s: %w", node, readErr)
+			}
+			if exists {
+				if existing.Schema != edgeActivationStateSchema || existing.GroupID != transition.GroupID || existing.Generation == 0 ||
+					existing.ActiveSlot != activeSlot || existing.Authority != edgeActivationAuthority {
+					return fmt.Errorf("existing edge activation on node %s is not bound to the live group and slot", node)
+				}
+				frontHealth[node] = edgeFrontHealth{ActiveSlot: existing.ActiveSlot, ActivationPresent: true, Generation: existing.Generation,
+					BundleGeneration: existing.BundleGeneration, WorkerSourceCommit: existing.WorkerSourceCommit,
+					WorkerImageDigest: existing.WorkerImageDigest, RouteAuthority: existing.Authority}
+				continue
+			}
 			receipt, err := runtime.ActivationCAS(ctx, executor, edgeActivationRequest{
 				GroupID: transition.GroupID, ExpectedGeneration: 0, ExpectedSlot: activeSlot, TargetSlot: activeSlot,
 				BundleGeneration: current.BundleGeneration, WorkerSourceCommit: current.SourceCommit, WorkerImageDigest: currentDigest,
@@ -444,6 +459,10 @@ func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, t
 
 func (runtime *kubectlEdgeGroupRuntime) SelectCASExecutor(ctx context.Context, candidates ...edgeGroupPod) (edgeGroupPod, error) {
 	return runtime.cluster.selectEdgeCASExecutor(ctx, runtime.release.Workload.Namespace, runtime.transition, candidates...)
+}
+
+func (runtime *kubectlEdgeGroupRuntime) ReadActivation(ctx context.Context, pod edgeGroupPod) (edgeActivationState, bool, error) {
+	return runtime.cluster.readEdgeActivationState(ctx, runtime.release, runtime.transition, pod)
 }
 
 func (runtime *kubectlEdgeGroupRuntime) ActivationCAS(ctx context.Context, pod edgeGroupPod, request edgeActivationRequest) (edgeActivationReceipt, error) {
@@ -1023,6 +1042,29 @@ func (cluster *kubectlCluster) runEdgeActivationCAS(ctx context.Context, release
 		return edgeActivationReceipt{}, errors.New("edge activation receipt is not bound to the request")
 	}
 	return receipt, nil
+}
+
+func (cluster *kubectlCluster) readEdgeActivationState(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, pod edgeGroupPod) (edgeActivationState, bool, error) {
+	raw, err := cluster.kubectlRun(ctx, nil, "exec", "--namespace", release.Workload.Namespace, pod.Name, "--container", transition.WorkerContainer,
+		"--", "sh", "-ceu", `if [ ! -e "$1" ]; then printf 'absent\n'; exit 0; fi; cat "$1"`, "sh", transition.ActivationStatePath)
+	if err != nil {
+		return edgeActivationState{}, false, err
+	}
+	if string(raw) == "absent\n" {
+		return edgeActivationState{}, false, nil
+	}
+	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 64<<10))
+	decoder.DisallowUnknownFields()
+	var state edgeActivationState
+	if err := decoder.Decode(&state); err != nil {
+		return edgeActivationState{}, false, errors.New("edge activation state is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || state.Schema != edgeActivationStateSchema ||
+		state.GroupID != transition.GroupID || state.Generation == 0 || state.Authority != edgeActivationAuthority ||
+		(state.ActiveSlot != "a" && state.ActiveSlot != "b") {
+		return edgeActivationState{}, false, errors.New("edge activation state identity is invalid")
+	}
+	return state, true, nil
 }
 
 func (cluster *kubectlCluster) waitFrontActivation(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, slot, source, digest string) (map[string]edgeFrontHealth, error) {

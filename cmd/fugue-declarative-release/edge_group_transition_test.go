@@ -13,12 +13,13 @@ import (
 )
 
 type fakeEdgeGroupRuntime struct {
-	snapshots     []edgeGroupState
-	rolls         map[string]map[string]edgeGroupPod
-	waits         []map[string]edgeFrontHealth
-	calls         []string
-	requests      []edgeActivationRequest
-	rollAuthority []bool
+	snapshots       []edgeGroupState
+	rolls           map[string]map[string]edgeGroupPod
+	waits           []map[string]edgeFrontHealth
+	calls           []string
+	requests        []edgeActivationRequest
+	rollAuthority   []bool
+	activationState *edgeActivationState
 }
 
 func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, error) {
@@ -54,6 +55,14 @@ func (fake *fakeEdgeGroupRuntime) SelectCASExecutor(_ context.Context, candidate
 		}
 	}
 	return edgeGroupPod{}, fmt.Errorf("no executor")
+}
+
+func (fake *fakeEdgeGroupRuntime) ReadActivation(context.Context, edgeGroupPod) (edgeActivationState, bool, error) {
+	fake.calls = append(fake.calls, "read-activation")
+	if fake.activationState == nil {
+		return edgeActivationState{}, false, nil
+	}
+	return *fake.activationState, true, nil
 }
 
 func (fake *fakeEdgeGroupRuntime) ActivationCAS(_ context.Context, _ edgeGroupPod, request edgeActivationRequest) (edgeActivationReceipt, error) {
@@ -239,7 +248,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply", "roll:" + transition.WorkerBName, "cas:initialize:a", "roll:" + transition.FrontName, "wait-front:a", "select-cas", "cas:promote:b", "wait-front:b", "roll:" + transition.WorkerAName, "wait-worker-authority:" + transition.WorkerBName, "snapshot"}
+	want := []string{"snapshot", "apply", "roll:" + transition.WorkerBName, "read-activation", "cas:initialize:a", "roll:" + transition.FrontName, "wait-front:a", "select-cas", "cas:promote:b", "wait-front:b", "roll:" + transition.WorkerAName, "wait-worker-authority:" + transition.WorkerBName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
@@ -248,6 +257,35 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	}
 	if got, want := fmt.Sprint(runtime.rollAuthority), "[false true true]"; got != want {
 		t.Fatalf("edge adoption authority gates=%s want=%s", got, want)
+	}
+}
+
+func TestExecuteEdgeGroupABContinuesFromExistingGroupBoundActivation(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	target := edgeTargetFixture("2", "b")
+	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
+	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 4, WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
+	final := edgeStateFixture("b", target, finalHealth)
+	runtime := &fakeEdgeGroupRuntime{
+		snapshots: []edgeGroupState{before, final},
+		rolls: map[string]map[string]edgeGroupPod{
+			transition.WorkerBName: final.WorkerB,
+			transition.FrontName:   final.Front,
+			transition.WorkerAName: final.WorkerA,
+		},
+		waits: []map[string]edgeFrontHealth{
+			{"node-1": {ActiveSlot: "a", ActivationPresent: true, Generation: 3, RouteAuthority: edgeActivationAuthority}},
+			{"node-1": finalHealth},
+		},
+		activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID, Generation: 3, ActiveSlot: "a", Authority: edgeActivationAuthority},
+	}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, MigrationState: "adopting", OwnershipAdoption: &declarativerelease.OwnershipAdoption{}, HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "bootstrap-lkg.json", Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationPromote || runtime.requests[0].ExpectedGeneration != 3 {
+		t.Fatalf("existing activation was not continued by exact CAS: %+v", runtime.requests)
 	}
 }
 
