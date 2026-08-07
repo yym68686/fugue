@@ -325,7 +325,9 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	}
 
 	frontHealth := before.FrontHealth
+	resumedExistingActivation := false
 	if !allFrontActivationPresent(frontHealth) {
+		resumedExistingActivation = true
 		activeWorkers := edgeWorkerPods(before, activeSlot)
 		for _, node := range sortedEdgeNodes(before.Front) {
 			if frontHealth[node].ActivationPresent {
@@ -354,6 +356,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 					WorkerImageDigest: existing.WorkerImageDigest, RouteAuthority: existing.Authority}
 				continue
 			}
+			resumedExistingActivation = false
 			receipt, err := runtime.ActivationCAS(ctx, executor, edgeActivationRequest{
 				GroupID: transition.GroupID, ExpectedGeneration: 0, ExpectedSlot: activeSlot, TargetSlot: activeSlot,
 				BundleGeneration: current.BundleGeneration, WorkerSourceCommit: current.SourceCommit, WorkerImageDigest: currentDigest,
@@ -375,9 +378,11 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		if err != nil {
 			return fmt.Errorf("roll edge front: %w", err)
 		}
-		frontHealth, err = runtime.WaitFront(ctx, activeSlot, "", "")
-		if err != nil {
-			return fmt.Errorf("verify edge front after rollout: %w", err)
+		if !resumedExistingActivation {
+			frontHealth, err = runtime.WaitFront(ctx, activeSlot, "", "")
+			if err != nil {
+				return fmt.Errorf("verify edge front after rollout: %w", err)
+			}
 		}
 	}
 

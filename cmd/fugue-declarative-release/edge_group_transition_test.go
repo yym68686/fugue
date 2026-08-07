@@ -274,10 +274,7 @@ func TestExecuteEdgeGroupABContinuesFromExistingGroupBoundActivation(t *testing.
 			transition.FrontName:   final.Front,
 			transition.WorkerAName: final.WorkerA,
 		},
-		waits: []map[string]edgeFrontHealth{
-			{"node-1": {ActiveSlot: "a", ActivationPresent: true, Generation: 3, RouteAuthority: edgeActivationAuthority}},
-			{"node-1": finalHealth},
-		},
+		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
 		activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID, Generation: 3, ActiveSlot: "a", Authority: edgeActivationAuthority},
 	}
 	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, MigrationState: "adopting", OwnershipAdoption: &declarativerelease.OwnershipAdoption{}, HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "bootstrap-lkg.json", Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
@@ -286,6 +283,9 @@ func TestExecuteEdgeGroupABContinuesFromExistingGroupBoundActivation(t *testing.
 	}
 	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationPromote || runtime.requests[0].ExpectedGeneration != 3 {
 		t.Fatalf("existing activation was not continued by exact CAS: %+v", runtime.requests)
+	}
+	if strings.Contains(strings.Join(runtime.calls, "\n"), "wait-front:a") {
+		t.Fatalf("existing exact activation performed redundant pre-CAS wait: %v", runtime.calls)
 	}
 }
 
