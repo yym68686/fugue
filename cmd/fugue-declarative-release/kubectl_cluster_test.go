@@ -109,6 +109,9 @@ func TestNormalizeAdoptionBootstrapDegradedIdentityBindsLegacyShape(t *testing.T
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
 		t.Fatalf("normalized observation is not valid: %v", err)
 	}
+	if !allowsLegacyBootstrapRegistryRevision(release, observation) {
+		t.Fatal("exact adoption bootstrap did not allow a missing legacy registry revision")
+	}
 
 	independent := release
 	independent.MigrationState = "independent"
@@ -120,6 +123,9 @@ func TestNormalizeAdoptionBootstrapDegradedIdentityBindsLegacyShape(t *testing.T
 	}
 	if untouched.ImageRef != "ghcr.io/example/fugue-edge:"+revision || untouched.ConfigSHA != "" {
 		t.Fatalf("independent path changed legacy identity: %+v", untouched)
+	}
+	if allowsLegacyBootstrapRegistryRevision(independent, observation) {
+		t.Fatal("independent release allowed a missing registry revision")
 	}
 }
 

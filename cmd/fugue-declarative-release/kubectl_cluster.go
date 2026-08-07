@@ -148,10 +148,15 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
-		"--image", observation.ImageRef, "--platform", "linux/amd64", "--expected-revision", observation.OCIRevision,
-		"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
+	verificationArgs := []string{"--image", observation.ImageRef, "--platform", "linux/amd64"}
+	allowMissingRevision := allowsLegacyBootstrapRegistryRevision(release, observation)
+	if !allowMissingRevision {
+		verificationArgs = append(verificationArgs, "--expected-revision", observation.OCIRevision)
+	}
+	verificationArgs = append(verificationArgs, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
 		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	commandArgs := append([]string{cluster.verifier}, verificationArgs...)
+	verificationRaw, err := cluster.run(ctx, nil, "python3", commandArgs...)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("verify degraded predecessor registry identity: %w", err)
 	}
@@ -159,10 +164,19 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if verification.Image != observation.ImageRef || verification.OCIRevision != observation.OCIRevision {
+	if verification.Image != observation.ImageRef || (!allowMissingRevision && verification.OCIRevision != observation.OCIRevision) ||
+		(allowMissingRevision && verification.OCIRevision != "" && verification.OCIRevision != observation.OCIRevision) {
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
+}
+
+func allowsLegacyBootstrapRegistryRevision(release declarativerelease.PlanRelease, observation declarativerelease.Observation) bool {
+	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.RetrySameLKG &&
+		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" && release.ExpectedPreviousPresent &&
+		observation.Present && observation.ConfigSHA == release.ExpectedPreviousConfigSHA &&
+		observation.ManifestSHA == release.ExpectedPreviousManifestSHA && observation.OCIRevision == release.ExpectedPreviousOCIRevision &&
+		immutableRefDigestLocal(observation.ImageRef) == release.ExpectedPreviousImageDigest
 }
 
 // normalizeAdoptionBootstrapDegradedIdentity is the narrow compatibility
