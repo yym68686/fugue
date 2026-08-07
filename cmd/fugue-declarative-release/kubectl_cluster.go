@@ -1183,6 +1183,7 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	soak := healthSoakDuration(release, allowHistoricalRestarts)
 	deadline := time.Now().Add(cluster.timeout + soak)
 	var lastErr error
+	var lastFailure error
 	tracker := healthSoakTracker{required: soak}
 	allowLegacyManager := allowHistoricalRestarts
 	for {
@@ -1202,9 +1203,16 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 			tracker.observe(time.Now(), false)
 		}
 		lastErr = err
+		if err != nil {
+			lastFailure = err
+		}
 		if time.Now().After(deadline) {
 			if lastErr == nil {
-				lastErr = errors.New("workload did not converge to target")
+				if lastFailure != nil {
+					lastErr = fmt.Errorf("continuous health window reset by: %w", lastFailure)
+				} else {
+					lastErr = errors.New("workload did not converge to target")
+				}
 			}
 			return observation, lastErr
 		}
