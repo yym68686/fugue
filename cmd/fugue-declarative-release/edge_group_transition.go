@@ -984,7 +984,11 @@ func (cluster *kubectlCluster) rollEdgeDaemonSet(ctx context.Context, client dyn
 
 func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
 	container := transition.WorkerContainer
-	includeHealth := requireGroupAuthority
+	// Inactive workers may be pre-authority during adoption, but their
+	// immutable bundle generation is still required by the activation CAS.
+	// Keep worker health evidence enabled while leaving the authority gate
+	// controlled independently by requireGroupAuthority.
+	includeHealth := edgeRollIncludesWorkerHealth(transition, name)
 	if name == transition.FrontName {
 		container = "edge-front"
 		includeHealth = false
@@ -1009,6 +1013,10 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 		}
 	}
 	return cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+}
+
+func edgeRollIncludesWorkerHealth(transition declarativerelease.EdgeGroupABTransition, name string) bool {
+	return name != transition.FrontName
 }
 
 func deleteEdgePodExact(ctx context.Context, client dynamic.Interface, namespace string, pod edgeGroupPod) error {

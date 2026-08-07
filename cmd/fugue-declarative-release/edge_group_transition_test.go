@@ -350,6 +350,16 @@ func TestEdgeCASExecutorRequiresBinaryAndWritableSharedStateMount(t *testing.T) 
 	}
 }
 
+func TestInactiveWorkerRollCollectsBundleHealthBeforeActivationCAS(t *testing.T) {
+	transition := edgeTransitionFixture()
+	if !edgeRollIncludesWorkerHealth(transition, transition.WorkerBName) {
+		t.Fatal("inactive worker roll disabled bundle-health collection")
+	}
+	if edgeRollIncludesWorkerHealth(transition, transition.FrontName) {
+		t.Fatal("front roll unexpectedly requested worker bundle health")
+	}
+}
+
 func TestEdgeActivationCommitUnknownRequiresExactStateOrPrecondition(t *testing.T) {
 	request := edgeActivationRequest{GroupID: "edge-group-country-de", ExpectedGeneration: 3, ExpectedSlot: "a", TargetSlot: "b", BundleGeneration: "bundle-4",
 		WorkerSourceCommit: strings.Repeat("1", 40), WorkerImageDigest: "sha256:" + strings.Repeat("a", 64), Operation: edgeActivationPromote}
