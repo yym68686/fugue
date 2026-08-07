@@ -472,7 +472,40 @@ func (runtime *kubectlEdgeGroupRuntime) ReadActivation(ctx context.Context, pod 
 }
 
 func (runtime *kubectlEdgeGroupRuntime) ActivationCAS(ctx context.Context, pod edgeGroupPod, request edgeActivationRequest) (edgeActivationReceipt, error) {
-	return runtime.cluster.runEdgeActivationCAS(ctx, runtime.release, runtime.transition, pod, request)
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		receipt, err := runtime.cluster.runEdgeActivationCAS(ctx, runtime.release, runtime.transition, pod, request)
+		if err == nil {
+			return receipt, nil
+		}
+		lastErr = err
+		state, exists, readErr := runtime.cluster.readEdgeActivationState(ctx, runtime.release, runtime.transition, pod)
+		if readErr != nil {
+			return edgeActivationReceipt{}, errors.Join(lastErr, readErr)
+		}
+		if exists && edgeActivationStateMatchesRequest(state, request) {
+			return edgeActivationReceipt{Schema: edgeActivationReceiptSchema, GroupID: request.GroupID, Current: state}, nil
+		}
+		if attempt != 0 || !edgeActivationStateMatchesPrecondition(state, exists, request) {
+			break
+		}
+	}
+	return edgeActivationReceipt{}, lastErr
+}
+
+func edgeActivationStateMatchesRequest(state edgeActivationState, request edgeActivationRequest) bool {
+	return state.Schema == edgeActivationStateSchema && state.GroupID == request.GroupID && state.Generation == request.ExpectedGeneration+1 &&
+		state.ActiveSlot == request.TargetSlot && state.BundleGeneration == request.BundleGeneration && state.WorkerSourceCommit == request.WorkerSourceCommit &&
+		state.WorkerImageDigest == request.WorkerImageDigest && state.Authority == edgeActivationAuthority && state.Operation == request.Operation &&
+		state.RollbackOfGeneration == request.RollbackOfGeneration
+}
+
+func edgeActivationStateMatchesPrecondition(state edgeActivationState, exists bool, request edgeActivationRequest) bool {
+	if !exists {
+		return request.Operation == edgeActivationInitialize && request.ExpectedGeneration == 0 && request.ExpectedSlot == request.TargetSlot
+	}
+	return state.Schema == edgeActivationStateSchema && state.GroupID == request.GroupID && state.Generation == request.ExpectedGeneration &&
+		state.ActiveSlot == request.ExpectedSlot && state.Authority == edgeActivationAuthority
 }
 
 func (runtime *kubectlEdgeGroupRuntime) WaitFront(ctx context.Context, slot, source, digest string) (map[string]edgeFrontHealth, error) {
@@ -1014,17 +1047,27 @@ func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release de
 
 func (cluster *kubectlCluster) selectEdgeCASExecutor(ctx context.Context, namespace string, transition declarativerelease.EdgeGroupABTransition, candidates ...edgeGroupPod) (edgeGroupPod, error) {
 	probe := edgeCASExecutorProbeArguments(transition)
-	for _, pod := range candidates {
-		if pod.Name == "" {
-			continue
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		for _, pod := range candidates {
+			if pod.Name == "" {
+				continue
+			}
+			arguments := []string{"exec", "--namespace", namespace, pod.Name, "--container", transition.WorkerContainer, "--"}
+			arguments = append(arguments, probe...)
+			if _, err := cluster.kubectlRun(ctx, nil, arguments...); err == nil {
+				return pod, nil
+			}
 		}
-		arguments := []string{"exec", "--namespace", namespace, pod.Name, "--container", transition.WorkerContainer, "--"}
-		arguments = append(arguments, probe...)
-		if _, err := cluster.kubectlRun(ctx, nil, arguments...); err == nil {
-			return pod, nil
+		if time.Now().After(deadline) {
+			return edgeGroupPod{}, errors.New("no group-local worker contains the fixed activation CAS binary and writable state mount")
+		}
+		select {
+		case <-ctx.Done():
+			return edgeGroupPod{}, ctx.Err()
+		case <-time.After(time.Second):
 		}
 	}
-	return edgeGroupPod{}, errors.New("no group-local worker contains the fixed activation CAS binary and writable state mount")
 }
 
 func edgeCASExecutorProbeArguments(transition declarativerelease.EdgeGroupABTransition) []string {

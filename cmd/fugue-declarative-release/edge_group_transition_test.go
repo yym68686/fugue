@@ -350,6 +350,22 @@ func TestEdgeCASExecutorRequiresBinaryAndWritableSharedStateMount(t *testing.T) 
 	}
 }
 
+func TestEdgeActivationCommitUnknownRequiresExactStateOrPrecondition(t *testing.T) {
+	request := edgeActivationRequest{GroupID: "edge-group-country-de", ExpectedGeneration: 3, ExpectedSlot: "a", TargetSlot: "b", BundleGeneration: "bundle-4",
+		WorkerSourceCommit: strings.Repeat("1", 40), WorkerImageDigest: "sha256:" + strings.Repeat("a", 64), Operation: edgeActivationPromote}
+	precondition := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: request.GroupID, Generation: 3, ActiveSlot: "a", Authority: edgeActivationAuthority}
+	committed := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: request.GroupID, Generation: 4, ActiveSlot: "b", BundleGeneration: request.BundleGeneration,
+		WorkerSourceCommit: request.WorkerSourceCommit, WorkerImageDigest: request.WorkerImageDigest, Authority: edgeActivationAuthority, Operation: request.Operation}
+	if !edgeActivationStateMatchesPrecondition(precondition, true, request) || !edgeActivationStateMatchesRequest(committed, request) {
+		t.Fatal("exact activation precondition or committed state was rejected")
+	}
+	precondition.ActiveSlot = "b"
+	committed.WorkerImageDigest = "sha256:" + strings.Repeat("b", 64)
+	if edgeActivationStateMatchesPrecondition(precondition, true, request) || edgeActivationStateMatchesRequest(committed, request) {
+		t.Fatal("activation CAS drift was accepted")
+	}
+}
+
 func TestLegacyRouteBootstrapIsAdoptionOnlyAndNeverSatisfiesFinalAuthority(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "deploy/releases/edge-worker-us/lkg.json",
