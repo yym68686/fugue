@@ -420,6 +420,43 @@ func TestApplyArgumentsNeverImplicitlyForceOwnershipHandoff(t *testing.T) {
 	}
 }
 
+func TestApplyResourceSetConsumesDependentCASBeforeStartingTheWorkload(t *testing.T) {
+	directory := t.TempDir()
+	logPath := filepath.Join(directory, "order.log")
+	kubectl := filepath.Join(directory, "kubectl")
+	program := `#!/bin/sh
+set -eu
+python3 -c 'import json,os,sys; value=json.load(sys.stdin); open(os.environ["ORDER_LOG"], "a").write(value["kind"]+"/"+value["metadata"]["name"]+"\n")'
+printf '{}\n'
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORDER_LOG", logPath)
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de",
+		FieldManager: "fugue-edge-control-de-declarative",
+	}}
+	manifest := mustJSON(t, map[string]any{
+		"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{
+			map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "edge-control-de", "namespace": "fugue-system"}},
+			map[string]any{"apiVersion": "policy/v1", "kind": "PodDisruptionBudget", "metadata": map[string]any{"name": "edge-control-de", "namespace": "fugue-system"}},
+			map[string]any{"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": "edge-control-de", "namespace": "fugue-system"}},
+		},
+	})
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	if err := cluster.applyResourceSet(context.Background(), release, manifest, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(raw), "PodDisruptionBudget/edge-control-de\nService/edge-control-de\nDeployment/edge-control-de\n"; got != want {
+		t.Fatalf("apply order=%q want=%q", got, want)
+	}
+}
+
 func TestRefreshOwnershipTakeoverCASUpdatesOnlyResourceVersions(t *testing.T) {
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge"}
 	adoption := declarativerelease.OwnershipAdoptionPlan{

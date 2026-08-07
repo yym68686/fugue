@@ -976,6 +976,29 @@ func (cluster *kubectlCluster) applyResourceSet(ctx context.Context, release dec
 	if err != nil {
 		return err
 	}
+	primary := declarativerelease.ResourceIdentity{
+		APIVersion: release.Workload.APIVersion,
+		Kind:       release.Workload.Kind,
+		Namespace:  release.Workload.Namespace,
+		Name:       release.Workload.Name,
+	}
+	ordered := make([]declarativerelease.ResourceIdentity, 0, len(identities))
+	primaryFound := false
+	for _, identity := range identities {
+		if identity == primary {
+			primaryFound = true
+			continue
+		}
+		ordered = append(ordered, identity)
+	}
+	if !primaryFound {
+		return errors.New("component resource set does not contain its primary workload")
+	}
+	// Apply the workload last. Starting a rollout can immediately update the
+	// status/resourceVersion of PDBs and other dependent resources. Applying
+	// those resources first preserves every prewrite UID/RV CAS until it is
+	// consumed, while still keeping the workload as the atom's final write.
+	identities = append(ordered, primary)
 	for _, identity := range identities {
 		item, itemErr := declarativerelease.ResourceSetItem(manifest, identity)
 		if itemErr != nil {
