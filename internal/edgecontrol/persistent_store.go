@@ -326,7 +326,7 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 		return fmt.Errorf("open edge-control group lock: %w", err)
 	}
 	defer lockFile.Close()
-	if info, err := lockFile.Stat(); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if info, err := lockFile.Stat(); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o007 != 0 {
 		return errors.New("edge-control group lock must be a private regular file")
 	}
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
@@ -363,7 +363,7 @@ func (store *PersistentGroupStore) readGroupState(path, groupID string) (persist
 		return persistentGroupState{}, errors.New("edge-control group state size is invalid")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o007 != 0 {
 		return persistentGroupState{}, errors.New("edge-control group state must be a private regular file")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

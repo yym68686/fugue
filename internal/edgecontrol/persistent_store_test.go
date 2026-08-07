@@ -6,9 +6,55 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
+
+func TestPersistentGroupStoreAcceptsFirstProducerInventoryAfterMissingInventoryLedger(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 8, 7, 7, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	nodeID := "vps-84c8f0a9"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}
+	failed, err := compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || failed.Failed != 1 || failed.Results[0].FailureCode != GroupShadowFailureInventoryRead {
+		t.Fatalf("missing-inventory reconcile = %+v, %v", failed, err)
+	}
+	published, err := (GroupAuthorityPublisher{
+		Store: store, Signer: &fixtureGroupSigner{keys: map[string][]byte{groupID: []byte("0123456789abcdef0123456789abcdef")}},
+		Now: func() time.Time { return now },
+	}).Publish(ctx, failed)
+	if err != nil || published.Failed != 1 || published.Results[0].FailureCode != GroupShadowFailureInventoryRead {
+		t.Fatalf("missing-inventory authority publication = %+v, %v", published, err)
+	}
+	for _, path := range []string{store.groupStatePath(groupID), store.groupStatePath(groupID) + ".lock"} {
+		if err := os.Chmod(path, 0o660); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err = OpenPersistentGroupStore(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := authorityInventoryHeartbeatFixture(groupID, nodeID, 0, 1, now, "heartbeat-de-bootstrap-000001")
+	heartbeat.Inventory.ActiveEpoch.ReleaseEpoch = strings.Repeat("5", 40)
+	heartbeat.Inventory.Instances[0].ReleaseEpoch = heartbeat.Inventory.ActiveEpoch.ReleaseEpoch
+	identity := GroupInventoryProducerIdentity{CredentialID: "edge-inventory-producer", TokenID: "token-de-1", NodeID: nodeID, GroupID: groupID}
+	stored, err := store.StoreGroupInventoryProducerHeartbeat(ctx, identity, heartbeat, now)
+	if err != nil {
+		t.Fatalf("store first producer inventory after missing-inventory ledger: %v", err)
+	}
+	if stored.Sequence != 1 || stored.Generation == "" || len(stored.Instances) != 1 {
+		t.Fatalf("stored first producer inventory = %+v", stored)
+	}
+}
 
 func TestPersistentGroupStoreSurvivesRestartAndPreservesLKG(t *testing.T) {
 	t.Parallel()
@@ -177,6 +223,38 @@ func TestPersistentGroupStoreAcceptsFSGroupPrivateVolumeAndRejectsWorldAccess(t 
 	}
 	if _, err := OpenPersistentGroupStore(worldAccessible); err == nil {
 		t.Fatal("world-accessible state directory unexpectedly accepted")
+	}
+}
+
+func TestPersistentGroupStoreRejectsWorldAccessibleStateAndLock(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, model.EdgeSlotA, "epoch-de-a", "inventory-de-1", false)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+	statePath := store.groupStatePath(groupID)
+	lockPath := statePath + ".lock"
+	if err := os.Chmod(statePath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadGroupInventory(ctx, groupID); err == nil || !strings.Contains(err.Error(), "private regular file") {
+		t.Fatalf("world-accessible state file was accepted: %v", err)
+	}
+	if err := os.Chmod(statePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadGroupInventory(ctx, groupID); err == nil || !strings.Contains(err.Error(), "private regular file") {
+		t.Fatalf("world-accessible lock file was accepted: %v", err)
 	}
 }
 
