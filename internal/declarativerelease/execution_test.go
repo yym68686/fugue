@@ -12,6 +12,7 @@ import (
 type fakeCluster struct {
 	observations      []Observation
 	observationErrors []error
+	observedManifests [][]byte
 	cas               []Observation
 	casManifests      [][]byte
 	degraded          []Observation
@@ -34,7 +35,8 @@ type fakeCluster struct {
 	convergedErrors   []error
 }
 
-func (fake *fakeCluster) Observe(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error) {
+func (fake *fakeCluster) Observe(_ context.Context, _ PlanRelease, _ TargetIdentity, manifest []byte) (Observation, error) {
+	fake.observedManifests = append(fake.observedManifests, append([]byte(nil), manifest...))
 	if len(fake.observationErrors) > 0 {
 		err := fake.observationErrors[0]
 		fake.observationErrors = fake.observationErrors[1:]
@@ -288,6 +290,22 @@ func TestExecuteVerifiesForwardAndReconcilesCommitUnknown(t *testing.T) {
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "verified" || result.Reason != "forward-commit-unknown-reconciled" || result.ForwardApplyCount != 1 || result.LKGApplyCount != 0 || fake.applies != 1 {
 		t.Fatalf("unexpected execution result: %+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestPrepareObservesTheLivePredecessorAgainstTheLKGManifest(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.observedManifests) != 2 {
+		t.Fatalf("observations=%d want=2", len(fake.observedManifests))
+	}
+	for index, manifest := range fake.observedManifests {
+		if !bytes.Equal(manifest, rendered.LKG) {
+			t.Fatalf("observation %d used the forward manifest to validate the live predecessor", index)
+		}
 	}
 }
 

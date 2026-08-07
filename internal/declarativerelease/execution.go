@@ -250,14 +250,14 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		}
 	} else {
 		var lkgObserveErr error
-		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, rendered.Forward)
+		prewrite, lkgObserveErr = cluster.Observe(ctx, release, lkg, rendered.LKG)
 		lkgMatched := lkgObserveErr == nil && prewrite.Matches(lkg, release, true)
 		lkgHealthVerified := false
 		if release.ExpectedPreviousPresent && lkgObserveErr != nil {
 			var healthyLKG Observation
 			healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
 			if err == nil && healthyLKG.Matches(lkg, release, true) {
-				prewrite, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
+				prewrite, err = cluster.Observe(ctx, release, lkg, rendered.LKG)
 				lkgMatched = err == nil && prewrite.Matches(lkg, release, true)
 				lkgHealthVerified = lkgMatched
 			}
@@ -280,7 +280,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 					}
 					if err == nil {
 						var freshLKG Observation
-						freshLKG, err = cluster.Observe(ctx, release, lkg, rendered.Forward)
+						freshLKG, err = cluster.Observe(ctx, release, lkg, rendered.LKG)
 						if err == nil && freshLKG.HealthDigest != prewrite.HealthDigest {
 							err = errors.New("LKG pod health changed after convergence validation")
 						}
