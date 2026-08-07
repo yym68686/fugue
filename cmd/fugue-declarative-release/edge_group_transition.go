@@ -121,7 +121,7 @@ type edgeGroupState struct {
 type edgeGroupTransitionRuntime interface {
 	Snapshot(context.Context) (edgeGroupState, error)
 	ApplyResources(context.Context) error
-	Roll(context.Context, string, declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error)
+	Roll(context.Context, string, declarativerelease.TargetIdentity, bool) (map[string]edgeGroupPod, error)
 	SelectCASExecutor(context.Context, ...edgeGroupPod) (edgeGroupPod, error)
 	ActivationCAS(context.Context, edgeGroupPod, edgeActivationRequest) (edgeActivationReceipt, error)
 	WaitFront(context.Context, string, string, string) (map[string]edgeFrontHealth, error)
@@ -313,7 +313,12 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return err
 	}
 
-	inactive, err := runtime.Roll(ctx, inactiveName, target)
+	// During first adoption the inventory producer is intentionally inactive
+	// until this slot wins the activation CAS. Requiring fresh group authority
+	// here would make activation depend on the heartbeat that activation itself
+	// enables. The post-CAS gate below still requires fresh inventory and a
+	// verified group publication before the previous active slot is touched.
+	inactive, err := runtime.Roll(ctx, inactiveName, target, !isAdoptingEdgeGroup(release))
 	if err != nil {
 		return fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err)
 	}
@@ -351,7 +356,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 	rollback := target.ConfigSHA == release.ExpectedPreviousConfigSHA
 	frontPods := before.Front
 	if !rollback && !edgePodsMatchTarget(frontPods, target) {
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, target)
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, target, true)
 		if err != nil {
 			return fmt.Errorf("roll edge front: %w", err)
 		}
@@ -391,13 +396,13 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		if err != nil {
 			return fmt.Errorf("verify promoted edge activation: %w", err)
 		}
-		if _, err := runtime.Roll(ctx, activeName, target); err != nil {
+		if _, err := runtime.Roll(ctx, activeName, target, true); err != nil {
 			return fmt.Errorf("roll previous active edge slot %s: %w", activeSlot, err)
 		}
 		activeSlot = inactiveSlot
 	}
 	if !edgePodsMatchTarget(frontPods, target) {
-		frontPods, err = runtime.Roll(ctx, transition.FrontName, target)
+		frontPods, err = runtime.Roll(ctx, transition.FrontName, target, true)
 		if err != nil {
 			return fmt.Errorf("roll edge front after activation: %w", err)
 		}
@@ -433,8 +438,8 @@ func (runtime *kubectlEdgeGroupRuntime) ApplyResources(ctx context.Context) erro
 	return runtime.cluster.applyResourceSet(ctx, runtime.release, runtime.manifest, false)
 }
 
-func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
-	return runtime.cluster.rollEdgeDaemonSet(ctx, runtime.client, runtime.release, runtime.transition, name, target)
+func (runtime *kubectlEdgeGroupRuntime) Roll(ctx context.Context, name string, target declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
+	return runtime.cluster.rollEdgeDaemonSetTarget(ctx, runtime.client, runtime.release, runtime.transition, name, target, requireGroupAuthority)
 }
 
 func (runtime *kubectlEdgeGroupRuntime) SelectCASExecutor(ctx context.Context, candidates ...edgeGroupPod) (edgeGroupPod, error) {

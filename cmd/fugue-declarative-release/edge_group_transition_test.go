@@ -13,11 +13,12 @@ import (
 )
 
 type fakeEdgeGroupRuntime struct {
-	snapshots []edgeGroupState
-	rolls     map[string]map[string]edgeGroupPod
-	waits     []map[string]edgeFrontHealth
-	calls     []string
-	requests  []edgeActivationRequest
+	snapshots     []edgeGroupState
+	rolls         map[string]map[string]edgeGroupPod
+	waits         []map[string]edgeFrontHealth
+	calls         []string
+	requests      []edgeActivationRequest
+	rollAuthority []bool
 }
 
 func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, error) {
@@ -35,8 +36,9 @@ func (fake *fakeEdgeGroupRuntime) ApplyResources(context.Context) error {
 	return nil
 }
 
-func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, _ declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
+func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, _ declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
 	fake.calls = append(fake.calls, "roll:"+name)
+	fake.rollAuthority = append(fake.rollAuthority, requireGroupAuthority)
 	value, exists := fake.rolls[name]
 	if !exists {
 		return nil, fmt.Errorf("unexpected roll %s", name)
@@ -226,7 +228,14 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 			{"node-1": final.FrontHealth["node-1"]},
 		},
 	}
-	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA}
+	release := declarativerelease.PlanRelease{
+		ExpectedPreviousConfigSHA: old.ConfigSHA,
+		MigrationState:            "adopting",
+		OwnershipAdoption:         &declarativerelease.OwnershipAdoption{},
+		HeterogeneousBootstrapLKG: true,
+		BootstrapLKGPath:          "bootstrap-lkg.json",
+		Transition:                &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition},
+	}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
@@ -236,6 +245,9 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	}
 	if len(runtime.requests) != 2 || runtime.requests[1].WorkerSourceCommit != target.ConfigSHA || runtime.requests[1].Operation != edgeActivationPromote {
 		t.Fatalf("edge forward CAS requests are not target-bound: %+v", runtime.requests)
+	}
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[false true true]"; got != want {
+		t.Fatalf("edge adoption authority gates=%s want=%s", got, want)
 	}
 }
 
