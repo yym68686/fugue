@@ -831,6 +831,41 @@ func TestPrepareBootstrapRetryUsesHealthyLegacyObservationInsteadOfOwnedDegraded
 	}
 }
 
+func TestPrepareBootstrapRetryAcceptsMixedOnDeletePodsWithExactLKGTemplates(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.IntentGeneration = 2
+	release.RetrySameLKG = true
+	release.MigrationState = "adopting"
+	release.HeterogeneousBootstrapLKG = true
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm"}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	degraded := lkg
+	degraded.ObservedGeneration = 0
+	degraded.Desired, degraded.Updated, degraded.Ready, degraded.Available, degraded.Unavailable = 0, 0, 0, 0, 0
+	degraded.ImageID, degraded.HealthDigest = "", ""
+	degraded.FieldManagers = []string{release.Workload.FieldManager}
+	fake := &fakeCluster{
+		observationErrors: []error{errors.New("forward Pod cohort is target-shaped"), errors.New("front Pod is not bootstrap LKG")},
+		degraded:          []Observation{degraded, degraded},
+		cas:               []Observation{casOnlyObservation(degraded)},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.DegradedPredecessor || len(fake.degraded) != 0 || fake.dryRunTakeovers != 1 || fake.dryRuns != 1 {
+		t.Fatalf("mixed bootstrap state did not use bounded degraded path: prepared=%+v fake=%+v", prepared, fake)
+	}
+}
+
 func TestPrepareBootstrapRetryAcceptsOnlyExactOwnedForwardDesiredState(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.PlanDigest = ""

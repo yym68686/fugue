@@ -246,7 +246,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			}
 		} else {
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
-			degradedPredecessor = err == nil && !allowsBootstrapArtifactVerification(release, lkg)
+			degradedPredecessor = err == nil && !prewrite.Matches(lkg, release, true)
 		}
 	} else {
 		var lkgObserveErr error
@@ -319,7 +319,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if !alreadyConverged && !degradedPredecessor && !prewrite.Matches(lkg, release, true) {
 		return ExecutionPlan{}, errors.New("live workload matches neither declared LKG nor immutable target")
 	}
-	adoption, err := bindOwnershipAdoption(release, lkg, prewrite)
+	adoption, err := bindOwnershipAdoption(release, lkg, prewrite, degradedPredecessor)
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
@@ -379,14 +379,20 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	return plan, nil
 }
 
-func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Observation) (*OwnershipAdoptionPlan, error) {
+func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Observation, degraded ...bool) (*OwnershipAdoptionPlan, error) {
 	if release.MigrationState != "adopting" || !release.ExpectedPreviousPresent {
 		if release.OwnershipAdoption != nil {
 			return nil, errors.New("ownership adoption is present outside an adopting predecessor")
 		}
 		return nil, nil
 	}
-	if release.OwnershipAdoption == nil || !lkg.Present || !prewrite.Matches(lkg, release, true) {
+	degradedPredecessor := len(degraded) > 0 && degraded[0]
+	lkgIdentityBound := prewrite.Matches(lkg, release, true)
+	if degradedPredecessor {
+		lkgIdentityBound = prewrite.Present && prewrite.ImageRef == lkg.ImageRef && prewrite.ConfigSHA == lkg.ConfigSHA &&
+			prewrite.ManifestSHA == lkg.ManifestSHA && prewrite.OCIRevision == lkg.OCIRevision && prewrite.TemplateDigest != ""
+	}
+	if release.OwnershipAdoption == nil || !lkg.Present || !lkgIdentityBound {
 		return nil, errors.New("ownership adoption is not bound to the exact bootstrap LKG")
 	}
 	legacyManager := false
@@ -451,6 +457,12 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if allowsBootstrapArtifactVerification(release, lkg) {
 		first, observeErr := cluster.Observe(ctx, release, lkg, lkgManifest)
 		if observeErr != nil || !first.Matches(lkg, release, true) {
+			if degraded, degradedErr := prepareOwnedDegradedPredecessor(ctx, cluster, release, forwardManifest, observeErr); degradedErr == nil {
+				return degraded, nil
+			}
+			if observeErr == nil {
+				observeErr = errors.New("bootstrap predecessor observation does not match the exact LKG")
+			}
 			return Observation{}, fmt.Errorf("observe exact bootstrap predecessor: %w", observeErr)
 		}
 		healthy, healthErr := cluster.WaitHealthy(ctx, release, lkg, lkgManifest)
