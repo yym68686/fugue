@@ -621,7 +621,9 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		}
 		if err == nil {
 			var witness []byte
-			if prepared.Prewrite.ImageRef == "" {
+			if prepared.OwnershipAdoption != nil {
+				witness, err = BootstrapPredecessorConvergenceManifest(lkgManifest, release)
+			} else if prepared.Prewrite.ImageRef == "" {
 				witness, err = PredecessorConvergenceManifest(lkgManifest)
 			} else {
 				witness, err = RetryPredecessorConvergenceManifest(forwardManifest, release)
