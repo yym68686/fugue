@@ -142,6 +142,9 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, err
 	}
 	observation.Resources = resources
+	if err := normalizeAdoptionBootstrapDegradedIdentity(&observation, release); err != nil {
+		return declarativerelease.Observation{}, err
+	}
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -160,6 +163,45 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
+}
+
+// normalizeAdoptionBootstrapDegradedIdentity is the narrow compatibility
+// bridge for a legacy Helm-owned LKG.  Older Edge workloads may omit the
+// declarative config annotation (and, for older releases, use a source tag),
+// while the adoption intent carries the exact immutable identity.  This is
+// only reachable for an explicitly adopting, heterogeneous bootstrap bound
+// to that exact predecessor; independent releases never get this fallback.
+func normalizeAdoptionBootstrapDegradedIdentity(observation *declarativerelease.Observation, release declarativerelease.PlanRelease) error {
+	if observation == nil {
+		return errors.New("degraded predecessor observation is nil")
+	}
+	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil || !release.RetrySameLKG ||
+		!release.HeterogeneousBootstrapLKG || release.BootstrapLKGPath == "" || !release.ExpectedPreviousPresent {
+		return nil
+	}
+	if observation.ManifestSHA != release.ExpectedPreviousManifestSHA || observation.OCIRevision != release.ExpectedPreviousOCIRevision {
+		return errors.New("legacy bootstrap predecessor source identity is invalid")
+	}
+	if observation.ConfigSHA != "" && observation.ConfigSHA != release.ExpectedPreviousConfigSHA {
+		return errors.New("legacy bootstrap predecessor config identity is invalid")
+	}
+	if observation.ConfigSHA == "" {
+		observation.ConfigSHA = release.ExpectedPreviousConfigSHA
+	}
+	if digest := immutableRefDigestLocal(observation.ImageRef); digest != "" {
+		if digest != release.ExpectedPreviousImageDigest {
+			return errors.New("legacy bootstrap predecessor image identity is invalid")
+		}
+		return nil
+	}
+	if legacySourceTag(observation.ImageRef) != release.ExpectedPreviousOCIRevision {
+		return errors.New("legacy bootstrap predecessor image tag is not source-bound")
+	}
+	if release.Artifact.Repository == "" {
+		return errors.New("legacy bootstrap predecessor repository is missing")
+	}
+	observation.ImageRef = release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
+	return nil
 }
 
 func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarativerelease.TargetIdentity) error {

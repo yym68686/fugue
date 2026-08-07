@@ -78,6 +78,68 @@ print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifes
 	}
 }
 
+func TestNormalizeAdoptionBootstrapDegradedIdentityBindsLegacyShape(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
+		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
+		ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision,
+		ExpectedPreviousOCIRevision: revision, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64),
+		Artifact:          declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-edge"},
+		Workload:          declarativerelease.Workload{FieldManager: "fugue-edge-worker-de-declarative"},
+		OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm"},
+	}
+	observation := declarativerelease.Observation{
+		Present: true, UID: "uid", ResourceVersion: "42", Generation: 7,
+		ImageRef: "ghcr.io/example/fugue-edge:" + revision, ManifestSHA: revision, OCIRevision: revision,
+		TemplateDigest: "sha256:" + strings.Repeat("c", 64),
+		FieldManagers:  []string{"fugue-edge-worker-de-declarative", "helm"},
+		Primary:        declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"},
+	}
+	observation.Resources = []declarativerelease.ResourceObservation{{
+		Identity: observation.Primary, Present: true, UID: "uid", ResourceVersion: "42", Generation: 7,
+		ObjectDigest: "sha256:" + strings.Repeat("d", 64), FieldManagers: []string{"fugue-edge-worker-de-declarative", "helm"},
+	}}
+	if err := normalizeAdoptionBootstrapDegradedIdentity(&observation, release); err != nil {
+		t.Fatalf("normalize legacy bootstrap identity: %v", err)
+	}
+	if observation.ImageRef != release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest || observation.ConfigSHA != revision {
+		t.Fatalf("unexpected normalized identity: %+v", observation)
+	}
+	if err := observation.ValidateDegradedPredecessor(release); err != nil {
+		t.Fatalf("normalized observation is not valid: %v", err)
+	}
+
+	independent := release
+	independent.MigrationState = "independent"
+	untouched := observation
+	untouched.ImageRef = "ghcr.io/example/fugue-edge:" + revision
+	untouched.ConfigSHA = ""
+	if err := normalizeAdoptionBootstrapDegradedIdentity(&untouched, independent); err != nil {
+		t.Fatalf("independent observation should not invoke adoption fallback: %v", err)
+	}
+	if untouched.ImageRef != "ghcr.io/example/fugue-edge:"+revision || untouched.ConfigSHA != "" {
+		t.Fatalf("independent path changed legacy identity: %+v", untouched)
+	}
+}
+
+func TestNormalizeAdoptionBootstrapDegradedIdentityRejectsWrongSourceTag(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
+		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
+		ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision,
+		ExpectedPreviousOCIRevision: revision, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64),
+		Artifact:          declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-edge"},
+		Workload:          declarativerelease.Workload{FieldManager: "fugue-edge-worker-de-declarative"},
+		OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm"},
+	}
+	observation := declarativerelease.Observation{Present: true, ImageRef: "ghcr.io/example/fugue-edge:" + strings.Repeat("c", 40), ManifestSHA: revision, OCIRevision: revision}
+	if err := normalizeAdoptionBootstrapDegradedIdentity(&observation, release); err == nil {
+		t.Fatal("wrong source tag was accepted")
+	}
+}
+
 func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		ComponentID: "api",
