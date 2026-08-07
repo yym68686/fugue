@@ -115,6 +115,7 @@ type ExecutionResult struct {
 	Status              string      `json:"status"`
 	Reason              string      `json:"reason"`
 	FailureClass        string      `json:"failureClass,omitempty"`
+	FailureDetail       string      `json:"failureDetail,omitempty"`
 	ForwardApplyCount   int         `json:"forwardApplyCount"`
 	LKGApplyCount       int         `json:"lkgApplyCount"`
 	Final               Observation `json:"final"`
@@ -745,6 +746,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	rollbackBase := forwardObservation
 	result.FailureClass = forwardFailureClass(applyErr, healthErr, convergedErr, forwardObservation, prepared.Forward, release)
+	result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
 	if !rollbackBase.Present || rollbackBase.UID == "" || !resourceVersionPattern.MatchString(rollbackBase.ResourceVersion) {
 		rollbackBase, err = cluster.ObserveCAS(ctx, release, forwardManifest)
 		if err != nil {
@@ -787,6 +789,25 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	result.Reason = "lkg-unproven"
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func forwardFailureDetail(healthErr, convergedErr error) string {
+	var detail string
+	if healthErr != nil {
+		detail = healthErr.Error()
+	} else if convergedErr != nil {
+		detail = convergedErr.Error()
+	}
+	detail = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, detail)
+	if len(detail) > 512 {
+		detail = detail[:512]
+	}
+	return detail
 }
 
 func forwardFailureClass(applyErr, healthErr, convergedErr error, observed Observation, target TargetIdentity, release PlanRelease) string {
