@@ -595,10 +595,11 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	if !requireReady {
 		return pods, nil
 	}
-	portName := "http"
-	if container == "edge-front" {
-		portName = "health"
-	}
+	// Both the front and worker edge containers expose their readiness endpoint
+	// on the canonical named port "health".  The worker resources have always
+	// declared that name; using "http" here made prewrite adoption reject the
+	// healthy live bootstrap cohort before any production write.
+	portName := "health"
 	endpoints, err := podHTTPEndpointsFromJSON(podsRaw, container, portName)
 	if err != nil {
 		return nil, fmt.Errorf("read DaemonSet/%s health endpoints: %w", name, err)

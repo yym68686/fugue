@@ -826,6 +826,22 @@ func TestPodHTTPUsesBoundReadyPodIPAndNamedPort(t *testing.T) {
 	}
 }
 
+func TestEdgeWorkerHealthUsesCanonicalNamedPort(t *testing.T) {
+	pod := podFixture("edge-worker-a-1", "pod-uid", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	pod["status"].(map[string]any)["podIP"] = "10.42.0.17"
+	pod["spec"] = map[string]any{"containers": []any{map[string]any{
+		"name":  "edge",
+		"ports": []any{map[string]any{"name": "health", "containerPort": 7832}},
+	}}}
+	raw := mustJSON(t, map[string]any{"items": []any{pod}})
+	if endpoints, err := podHTTPEndpointsFromJSON(raw, "edge", "health"); err != nil || len(endpoints) != 1 || endpoints[0].Port != 7832 {
+		t.Fatalf("canonical worker health port was not accepted: endpoints=%+v err=%v", endpoints, err)
+	}
+	if _, err := podHTTPEndpointsFromJSON(raw, "edge", "http"); err == nil {
+		t.Fatal("non-canonical worker health port was accepted")
+	}
+}
+
 func TestHealthWorkloadContainerUsesTransitionBoundEdgeWorker(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		Workload: declarativerelease.Workload{Namespace: "fugue-system"},
