@@ -203,16 +203,28 @@ func TestAdoptingWorkerBootstrapsFromLegacyRouteThenConvergesToGroupAuthority(t 
 		t.Fatalf("group authority did not supersede bootstrap: status=%+v requests=%d", status, legacyRequests.Load())
 	}
 
-	independent := NewServiceWithRouteBundleSource(cfg, RouteBundleSourceConfig{URL: routeCfg.URL, TokenFile: tokenFile, VerifierKeyringFile: keyringFile}, log.New(io.Discard, "", 0))
-	if err := independent.LoadCache(); err != nil {
-		t.Fatalf("independent worker rejected the group-authority LKG: %v", err)
-	}
+	// A previously accepted group publication cannot permanently suppress the
+	// adoption bridge after it expires. Otherwise the active worker reports
+	// degraded inventory while Edge Control waits for healthy inventory before
+	// publishing its replacement, creating a closed bootstrap cycle.
+	service.mu.Lock()
+	service.bundle.ValidUntil = time.Now().UTC().Add(-time.Minute)
+	service.snapshot.StaleCache = true
+	service.mu.Unlock()
 	groupReady.Store(false)
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("expired group publication did not return to the bounded adoption bootstrap: %v", err)
+	}
+	if status := service.Status(); !status.Healthy || status.RouteBundleSource != "" || status.BundleVersion != legacyBundle.Version || legacyRequests.Load() != 2 {
+		t.Fatalf("expired group publication blocked adoption recovery: status=%+v requests=%d", status, legacyRequests.Load())
+	}
+
+	independent := NewServiceWithRouteBundleSource(cfg, RouteBundleSourceConfig{URL: routeCfg.URL, TokenFile: tokenFile, VerifierKeyringFile: keyringFile}, log.New(io.Discard, "", 0))
 	independent.Config.CachePath = filepath.Join(root, "independent-empty.json")
 	if err := independent.SyncOnce(context.Background()); err == nil {
 		t.Fatal("independent worker unexpectedly used adoption legacy bootstrap")
 	}
-	if legacyRequests.Load() != 1 {
+	if legacyRequests.Load() != 2 {
 		t.Fatal("independent worker contacted the legacy route source")
 	}
 }

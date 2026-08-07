@@ -721,8 +721,9 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 }
 
 func (s *Service) hasGroupRoutePublication() bool {
-	publication, _ := s.currentRoutePublicationAndBundle()
-	return publication.Source == edgeControlRouteSourceV1 && publication.PublicationSequence > 0
+	publication, bundle := s.currentRoutePublicationAndBundle()
+	return publication.Source == edgeControlRouteSourceV1 && publication.PublicationSequence > 0 && bundle != nil &&
+		!bundle.ValidUntil.IsZero() && time.Now().UTC().Before(bundle.ValidUntil.UTC())
 }
 
 func (s *Service) syncAdoptionLegacyRouteBundle(ctx context.Context, now time.Time) error {
