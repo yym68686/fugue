@@ -188,7 +188,7 @@ func parseComponentLease(value *coordinationv1.Lease) (string, int64, time.Time,
 	if value == nil || value.GetUID() == "" || value.GetResourceVersion() == "" {
 		return "", 0, time.Time{}, errors.New("component lease metadata is invalid")
 	}
-	if value.Spec.LeaseDurationSeconds == nil || value.Spec.RenewTime == nil {
+	if value.Spec.LeaseDurationSeconds == nil {
 		return "", 0, time.Time{}, errors.New("component lease spec is invalid")
 	}
 	duration := int64(*value.Spec.LeaseDurationSeconds)
@@ -198,6 +198,14 @@ func parseComponentLease(value *coordinationv1.Lease) (string, int64, time.Time,
 	holder := ""
 	if value.Spec.HolderIdentity != nil {
 		holder = *value.Spec.HolderIdentity
+	}
+	// A released Lease has no holder and may have no timestamps.  The holder is
+	// the concurrency authority; timestamps are required only while it is held.
+	if holder == "" {
+		return "", duration, time.Time{}, nil
+	}
+	if value.Spec.RenewTime == nil {
+		return "", 0, time.Time{}, errors.New("component lease spec is invalid")
 	}
 	return holder, duration, value.Spec.RenewTime.Time, nil
 }

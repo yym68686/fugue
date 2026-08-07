@@ -128,6 +128,35 @@ func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *t
 	}
 }
 
+func TestComponentLeaseAcquiresReleasedLeaseWithoutTimestamps(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 10, 0, 0, time.UTC)
+	release := testLeaseRelease()
+	released := testLeaseObject(release, "", now.Add(-time.Hour))
+	released.Spec.AcquireTime = nil
+	released.Spec.RenewTime = nil
+	client := kubernetesfake.NewSimpleClientset(released)
+	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), now: func() time.Time { return now }}
+	t.Setenv("GITHUB_REPOSITORY", "example/fugue")
+	t.Setenv("GITHUB_RUN_ID", "31176668421")
+	t.Setenv("GITHUB_RUN_ATTEMPT", "1")
+	held, err := coordinator.acquire(context.Background(), release, strings.Repeat("c", 40))
+	if err != nil {
+		t.Fatalf("acquire released lease without timestamps: %v", err)
+	}
+	if held.Holder != "github:example/fugue:31176668421:1:"+strings.Repeat("c", 40)+":controller" {
+		t.Fatalf("unexpected holder: %+v", held)
+	}
+}
+
+func TestComponentLeaseRejectsHeldLeaseWithoutRenewTime(t *testing.T) {
+	release := testLeaseRelease()
+	held := testLeaseObject(release, "github:other/repo:1:1:"+strings.Repeat("a", 40)+":controller", time.Now().UTC())
+	held.Spec.RenewTime = nil
+	if _, _, _, err := parseComponentLease(held); err == nil {
+		t.Fatal("held lease without renewTime was accepted")
+	}
+}
+
 func TestComponentLeaseIdentityIsStrict(t *testing.T) {
 	release := testLeaseRelease()
 	t.Setenv("GITHUB_REPOSITORY", "example/fugue")
