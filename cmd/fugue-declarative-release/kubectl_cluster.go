@@ -1280,7 +1280,15 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 		}
 		resources := make([]declarativerelease.ResourceObservation, 0, len(identities))
 		for _, identity := range identities {
-			resources = append(resources, declarativerelease.ResourceObservation{Identity: identity})
+			desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
+			if desiredErr != nil {
+				return declarativerelease.Observation{}, desiredErr
+			}
+			metadata := mapField(desired, "metadata")
+			resources = append(resources, declarativerelease.ResourceObservation{
+				Identity:         identity,
+				RetainOnRollback: mapStringField(metadata, "annotations")["fugue.pro/release-retain-on-rollback"] == "true",
+			})
 		}
 		return declarativerelease.Observation{Present: false, Primary: primary, Resources: resources}, nil
 	}

@@ -59,7 +59,7 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 			Container: "edge-control", FieldManager: "fugue-edge-control-us-declarative", Replicas: 1,
 		},
 	}
-	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"edge-control-us","namespace":"fugue-system"}},{"apiVersion":"v1","kind":"Service","metadata":{"name":"edge-control-us","namespace":"fugue-system"}}]}`)
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"edge-control-us","namespace":"fugue-system"}},{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"annotations":{"fugue.pro/release-retain-on-rollback":"true"},"name":"edge-control-us-state","namespace":"fugue-system"}}]}`)
 	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
 	observation, err := cluster.Observe(context.Background(), release, declarativerelease.TargetIdentity{Present: false}, manifest)
 	if err != nil || observation.Present || observation.Primary.Name != "edge-control-us" || len(observation.Resources) != 2 {
@@ -67,6 +67,9 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	}
 	if observation.Resources[0].Present || observation.Resources[1].Present || observation.Resources[0].Identity == observation.Resources[1].Identity {
 		t.Fatalf("absent first-install resources were not fully witnessed: %+v", observation.Resources)
+	}
+	if !observation.Resources[1].RetainOnRollback {
+		t.Fatalf("absent retain-on-rollback marker was lost: %+v", observation.Resources)
 	}
 	cas, err := cluster.ObserveCAS(context.Background(), release, manifest)
 	if err != nil || !cas.SameResourceCAS(observation) {
