@@ -98,6 +98,21 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 	}
 }
 
+func TestInventoryProducerStatusSurvivesRouteSyncSnapshotReplacement(t *testing.T) {
+	now := time.Date(2026, 8, 7, 20, 30, 0, 0, time.UTC)
+	service := NewService(config.EdgeConfig{
+		EdgeID: "edge-node-de-1", EdgeGroupID: "edge-group-country-de", EdgeSlot: model.EdgeSlotA,
+	}, log.New(io.Discard, "", 0))
+	service.recordInventoryHeartbeatSuccess(42, now)
+	service.recordSyncSuccess(testBundle("route-generation-after-heartbeat"), `"etag"`, now.Add(time.Second), false)
+
+	status := service.Status()
+	if !status.InventoryProducerActive || status.InventoryHeartbeatGeneration != 42 || status.InventoryHeartbeatAt == nil ||
+		!status.InventoryHeartbeatAt.Equal(now) || status.InventoryHeartbeatError != "" {
+		t.Fatalf("route sync dropped verified inventory heartbeat evidence: %+v", status)
+	}
+}
+
 func TestInventoryProducerInteroperatesWithGroupAuthorityVerifierAndDurableLedger(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	groupID := "edge-group-country-de"

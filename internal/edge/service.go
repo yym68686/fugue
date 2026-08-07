@@ -4349,6 +4349,14 @@ func edgeProxyObservationResult(observed edgeProxyObservation) string {
 }
 
 func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt time.Time, successAt *time.Time, stale bool) Status {
+	// Inventory producer evidence is updated by its independent heartbeat loop.
+	// Route syncs also rebuild the status snapshot, so carry that evidence across
+	// a sync instead of making the declarative release health window observe a
+	// false heartbeat gap between the two intervals.
+	previousInventoryActive := s.snapshot.InventoryProducerActive
+	previousInventoryAt := s.snapshot.InventoryHeartbeatAt
+	previousInventoryGeneration := s.snapshot.InventoryHeartbeatGeneration
+	previousInventoryError := s.snapshot.InventoryHeartbeatError
 	status := "ok"
 	if stale {
 		status = "stale"
@@ -4394,6 +4402,10 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 	if !validUntil.IsZero() {
 		out.BundleValidUntil = &validUntil
 	}
+	out.InventoryProducerActive = previousInventoryActive
+	out.InventoryHeartbeatAt = previousInventoryAt
+	out.InventoryHeartbeatGeneration = previousInventoryGeneration
+	out.InventoryHeartbeatError = previousInventoryError
 	s.decorateCaddyStatusLocked(&out)
 	return out
 }
