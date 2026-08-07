@@ -341,6 +341,15 @@ func TestEdgeGroupAuthorityRequiresPublicationOnBothSlotsAndInventoryOnActive(t 
 	}
 }
 
+func TestEdgeCASExecutorRequiresBinaryAndWritableSharedStateMount(t *testing.T) {
+	transition := edgeTransitionFixture()
+	got := edgeCASExecutorProbeArguments(transition)
+	want := []string{"sh", "-ceu", `test -x "$1" && test -d "$2" && test -w "$2"`, "sh", transition.CASBinary, "/var/lib/fugue-edge-front"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("CAS executor probe=%q want=%q", got, want)
+	}
+}
+
 func TestLegacyRouteBootstrapIsAdoptionOnlyAndNeverSatisfiesFinalAuthority(t *testing.T) {
 	release := declarativerelease.PlanRelease{
 		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "deploy/releases/edge-worker-us/lkg.json",

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1012,15 +1013,22 @@ func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release de
 }
 
 func (cluster *kubectlCluster) selectEdgeCASExecutor(ctx context.Context, namespace string, transition declarativerelease.EdgeGroupABTransition, candidates ...edgeGroupPod) (edgeGroupPod, error) {
+	probe := edgeCASExecutorProbeArguments(transition)
 	for _, pod := range candidates {
 		if pod.Name == "" {
 			continue
 		}
-		if _, err := cluster.kubectlRun(ctx, nil, "exec", "--namespace", namespace, pod.Name, "--container", transition.WorkerContainer, "--", "test", "-x", transition.CASBinary); err == nil {
+		arguments := []string{"exec", "--namespace", namespace, pod.Name, "--container", transition.WorkerContainer, "--"}
+		arguments = append(arguments, probe...)
+		if _, err := cluster.kubectlRun(ctx, nil, arguments...); err == nil {
 			return pod, nil
 		}
 	}
-	return edgeGroupPod{}, errors.New("no group-local worker contains the fixed activation CAS binary")
+	return edgeGroupPod{}, errors.New("no group-local worker contains the fixed activation CAS binary and writable state mount")
+}
+
+func edgeCASExecutorProbeArguments(transition declarativerelease.EdgeGroupABTransition) []string {
+	return []string{"sh", "-ceu", `test -x "$1" && test -d "$2" && test -w "$2"`, "sh", transition.CASBinary, path.Dir(transition.ActivationStatePath)}
 }
 
 func (cluster *kubectlCluster) runEdgeActivationCAS(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, pod edgeGroupPod, request edgeActivationRequest) (edgeActivationReceipt, error) {
