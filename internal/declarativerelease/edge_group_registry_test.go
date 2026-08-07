@@ -422,7 +422,7 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer.group.json", BootstrapLKGPath: "deploy/releases/edge-worker-" + id + "/lkg.json",
 		ManifestVariables: map[string]string{
 			"API_SECRET": "fugue-edge-worker-api-" + id, "CONTROL_NAME": controlName, "FRONT_NAME": frontName, "GROUP": id, "GROUP_ID": groupID,
-			"INVENTORY_IDENTITY_A_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-a", "INVENTORY_IDENTITY_B_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-b", "ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP": "false",
+			"INVENTORY_IDENTITY_A_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-a", "INVENTORY_IDENTITY_B_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-b",
 			"READER_SECRET": "fugue-edge-worker-reader-" + id, "SERVICE_ACCOUNT": "edge-worker-" + id, "VERIFIER_SECRET": "fugue-edge-worker-verifier-" + id,
 			"WORKER_A_NAME": workerAName, "WORKER_B_NAME": workerBName,
 		},
