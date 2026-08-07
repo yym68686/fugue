@@ -1274,7 +1274,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 		// A first-install LKG is the canonical empty resource set. There are no
 		// predecessor resources to observe or bind; auxiliary resources enter the
 		// receipt only after the forward apply creates them.
-		return declarativerelease.Observation{Present: false, Primary: primary}, nil
+		return declarativerelease.Observation{Present: false, Primary: primary, Resources: []declarativerelease.ResourceObservation{{Identity: primary}}}, nil
 	}
 	selector, err := selectorFromWorkload(workloadRaw)
 	if err != nil {
