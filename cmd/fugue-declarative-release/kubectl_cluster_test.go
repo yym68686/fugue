@@ -712,6 +712,17 @@ func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
 	}
 }
 
+func TestAdoptionConflictProofAllowsExistingDeclarativeManagerOnlyWhenExplicitlyReviewed(t *testing.T) {
+	conflict := errors.New(`command failed: exit status 1: error: Apply failed with 1 conflict: conflict with "fugue-edge-worker-de-declarative" using apps/v1: .spec.template.metadata.annotations.fugue.pro/oci-revision`)
+	managers := []string{"fugue-edge-worker-de-declarative", "helm", "kubectl-patch"}
+	if err := validateAdoptionConflicts(conflict, managers, []string{"/spec/template"}); err != nil {
+		t.Fatalf("existing declarative manager conflict in reviewed takeover scope was rejected: %v", err)
+	}
+	if err := validateAdoptionConflicts(conflict, []string{"helm", "kubectl-patch"}, []string{"/spec/template"}); err == nil {
+		t.Fatal("declarative manager was implicitly accepted without already-converged authorization")
+	}
+}
+
 func TestParseLeaderLeaseRequiresTypedRenewTime(t *testing.T) {
 	raw := []byte(`{"spec":{"holderIdentity":"controller-1","renewTime":"2026-08-05T01:02:03.123456Z"}}`)
 	holder, renew, err := parseLeaderLease(raw)

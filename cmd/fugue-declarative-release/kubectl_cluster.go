@@ -500,7 +500,12 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 			if !exists {
 				return fmt.Errorf("adopt %s/%s has no reviewed scope", identity.Kind, identity.Name)
 			}
-			if err := validateAdoptionConflicts(applyErr, adoption.LegacyFieldManagers, scope.Fields); err != nil {
+			managers := append([]string(nil), adoption.LegacyFieldManagers...)
+			if adoption.AlreadyConverged {
+				managers = append(managers, release.Workload.FieldManager)
+				sort.Strings(managers)
+			}
+			if err := validateAdoptionConflicts(applyErr, managers, scope.Fields); err != nil {
 				return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
 			}
 			forceArguments, err := adoptionForceApplyArguments(release, dryRun)
