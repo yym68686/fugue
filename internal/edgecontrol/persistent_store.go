@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	persistentGroupStateSchemaV1 = "edge-control-persistent-group-state/v1"
-	maxPersistentGroupStateBytes = 32 << 20
+	persistentGroupStateSchemaV1  = "edge-control-persistent-group-state/v1"
+	maxPersistentGroupStateBytes  = 32 << 20
+	retainedGroupCandidateBundles = 8
 )
 
 var (
@@ -227,7 +228,7 @@ func (store *PersistentGroupStore) ReadGroupRecoveryTarget(ctx context.Context, 
 				targetCandidateSequence = entry.CandidateLedgerSequence
 			}
 		}
-		if targetCandidateSequence == 0 || targetCandidateSequence > uint64(len(state.Ledger)) {
+		if targetCandidateSequence == 0 || targetCandidateSequence > uint64(len(state.Ledger)) || state.Ledger[targetCandidateSequence-1].Bundle == nil {
 			return errors.New("edge-control recovery target was never published")
 		}
 		candidate = cloneGroupShadowLedgerEntry(state.Ledger[targetCandidateSequence-1])
@@ -256,7 +257,7 @@ func (store *PersistentGroupStore) RecoverGroupAuthorityCAS(ctx context.Context,
 			return ErrGroupAuthorityCASConflict
 		}
 		candidateSequence := entry.CandidateLedgerSequence
-		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) {
+		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) || state.Ledger[candidateSequence-1].Bundle == nil {
 			return ErrGroupAuthorityCandidateCAS
 		}
 		previouslyPublished := false
@@ -347,6 +348,7 @@ func (store *PersistentGroupStore) withGroupState(ctx context.Context, groupID s
 	if !write {
 		return nil
 	}
+	compactPersistentGroupState(&state)
 	state.Revision++
 	return store.writeGroupState(statePath, state)
 }
@@ -378,7 +380,41 @@ func (store *PersistentGroupStore) readGroupState(path, groupID string) (persist
 	if err := validatePersistentGroupState(state, groupID); err != nil {
 		return persistentGroupState{}, err
 	}
-	return clonePersistentGroupState(state), nil
+	return state, nil
+}
+
+// compactPersistentGroupState keeps the current published LKG and a bounded
+// recent recovery window. Older decisions retain their checksummed identity
+// and sequence but not another full copy of the route bundle.
+func compactPersistentGroupState(state *persistentGroupState) {
+	if state == nil || len(state.Ledger) == 0 {
+		return
+	}
+	keep := make(map[uint64]struct{}, retainedGroupCandidateBundles+1)
+	if state.Published != nil && state.Published.CandidateLedgerSequence > 0 {
+		keep[state.Published.CandidateLedgerSequence] = struct{}{}
+	}
+	remaining := retainedGroupCandidateBundles
+	for index := len(state.Ledger) - 1; index >= 0 && remaining > 0; index-- {
+		entry := state.Ledger[index]
+		if entry.Status != GroupShadowStatusCompiled || entry.Bundle == nil {
+			continue
+		}
+		keep[entry.Sequence] = struct{}{}
+		remaining--
+	}
+	for index := range state.Ledger {
+		entry := &state.Ledger[index]
+		if entry.Status != GroupShadowStatusCompiled || entry.Bundle == nil {
+			continue
+		}
+		if _, retained := keep[entry.Sequence]; retained {
+			entry.BundleArchived = false
+			continue
+		}
+		entry.Bundle = nil
+		entry.BundleArchived = true
+	}
 }
 
 func (store *PersistentGroupStore) writeGroupState(path string, state persistentGroupState) error {
@@ -455,6 +491,18 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 	}
 	validated := make([]GroupShadowLedgerEntry, 0, len(state.Ledger))
 	for index, persisted := range state.Ledger {
+		if persisted.BundleArchived {
+			if persisted.Schema != GroupShadowLedgerSchemaV1 || normalizeGroupID(persisted.GroupID) != groupID ||
+				persisted.Sequence != uint64(index+1) || persisted.Status != GroupShadowStatusCompiled || persisted.Bundle != nil ||
+				persisted.Authority != "none" || persisted.PublicationEnabled || strings.TrimSpace(persisted.RouteIntentGeneration) == "" ||
+				!strings.HasPrefix(persisted.InputDigest, "sha256:") || len(persisted.InputDigest) != len("sha256:")+sha256.Size*2 ||
+				persisted.RecordedAt.IsZero() || persisted.BundleGeneration == "" || persisted.FailureCode != "" ||
+				persisted.LastSuccessfulBundleGeneration != persisted.BundleGeneration {
+				return errors.New("edge-control archived group candidate is invalid")
+			}
+			validated = append(validated, persisted)
+			continue
+		}
 		candidate := cloneGroupShadowLedgerEntry(persisted)
 		if candidate.Sequence != uint64(index+1) {
 			return errors.New("edge-control persistent group ledger sequence is invalid")
@@ -464,7 +512,7 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 		if err != nil || appended.Sequence != persisted.Sequence {
 			return errors.New("edge-control persistent group ledger transition is invalid")
 		}
-		validated = append(validated, appended)
+		validated = append(validated, persisted)
 	}
 	lastPublishedGeneration := ""
 	lastPublishedSequence := uint64(0)
@@ -497,7 +545,8 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 				return errors.New("edge-control persistent group published authority entry is invalid")
 			}
 			candidate := state.Ledger[entry.CandidateLedgerSequence-1]
-			if candidate.Status != GroupShadowStatusCompiled || candidate.Bundle == nil || candidate.BundleGeneration != entry.BundleGeneration {
+			if candidate.Status != GroupShadowStatusCompiled || candidate.BundleGeneration != entry.BundleGeneration ||
+				(candidate.Bundle == nil && !candidate.BundleArchived) || (candidate.Bundle != nil && candidate.Bundle.Generation != entry.BundleGeneration) {
 				return errors.New("edge-control persistent group authority entry lost candidate binding")
 			}
 			lastPublishedGeneration = entry.BundleGeneration
@@ -520,7 +569,7 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 		if state.Published.PublicationSequence != lastPublishedSequence || state.Published.CandidateLedgerSequence != lastPublishedCandidate ||
 			state.Published.Bundle.Generation != lastPublishedGeneration || state.Published.Digest != lastPublishedDigest || state.Published.RecoveryEpoch != lastRecoveryEpoch ||
 			lastPublishedCandidate == 0 || lastPublishedCandidate > uint64(len(state.Ledger)) ||
-			state.Ledger[lastPublishedCandidate-1].Bundle == nil ||
+			state.Ledger[lastPublishedCandidate-1].Bundle == nil || state.Ledger[lastPublishedCandidate-1].BundleArchived ||
 			groupAuthorityCandidateDigest(*state.Ledger[lastPublishedCandidate-1].Bundle) != groupAuthorityCandidateDigest(state.Published.Bundle) {
 			return errors.New("edge-control persistent group published head does not match authority ledger")
 		}

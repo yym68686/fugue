@@ -112,6 +112,7 @@ type GroupShadowLedgerEntry struct {
 	PublicationEnabled             bool                   `json:"publication_enabled"`
 	RecordedAt                     time.Time              `json:"recorded_at"`
 	Bundle                         *model.EdgeRouteBundle `json:"bundle,omitempty"`
+	BundleArchived                 bool                   `json:"bundle_archived,omitempty"`
 }
 
 // GroupShadowLedger provides one CAS sequence per edge group. Implementations
@@ -890,7 +891,7 @@ func prepareGroupShadowLedgerAppend(groupID string, expectedSequence uint64, ent
 	if groupID == "" || normalizeGroupID(entry.GroupID) != groupID || entry.Schema != GroupShadowLedgerSchemaV1 || entry.Sequence != 0 {
 		return GroupShadowLedgerEntry{}, errors.New("invalid edge-control group shadow ledger entry")
 	}
-	if entry.Authority != "none" || entry.PublicationEnabled || (entry.Status != GroupShadowStatusCompiled && entry.Status != GroupShadowStatusFailed) {
+	if entry.Authority != "none" || entry.PublicationEnabled || entry.BundleArchived || (entry.Status != GroupShadowStatusCompiled && entry.Status != GroupShadowStatusFailed) {
 		return GroupShadowLedgerEntry{}, errors.New("unsafe edge-control group shadow ledger entry")
 	}
 	if strings.TrimSpace(entry.RouteIntentGeneration) == "" || !strings.HasPrefix(entry.InputDigest, "sha256:") || len(entry.InputDigest) != len("sha256:")+sha256.Size*2 || entry.RecordedAt.IsZero() {

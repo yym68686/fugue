@@ -3,6 +3,7 @@ package edgecontrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,59 @@ import (
 
 	"fugue/internal/model"
 )
+
+func TestPersistentGroupStoreCompactsCandidateBundlesWithoutLosingSequence(t *testing.T) {
+	t.Parallel()
+
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := persistentGroupState{Schema: persistentGroupStateSchemaV1, GroupID: groupID, Revision: 1}
+	for index := 0; index < retainedGroupCandidateBundles+4; index++ {
+		generation := fmt.Sprintf("generation-%02d", index+1)
+		bundle := model.EdgeRouteBundle{EdgeGroupID: groupID, Generation: generation, Issuer: groupShadowIssuer}
+		entry := GroupShadowLedgerEntry{
+			Schema: GroupShadowLedgerSchemaV1, GroupID: groupID, Status: GroupShadowStatusCompiled,
+			RouteIntentGeneration: generation, InputDigest: "sha256:" + strings.Repeat(fmt.Sprintf("%x", index%16), 64),
+			BundleGeneration: generation, LastSuccessfulBundleGeneration: generation, Authority: "none",
+			RecordedAt: time.Date(2026, 8, 7, 0, index, 0, 0, time.UTC), Bundle: &bundle,
+		}
+		appended, appendErr := prepareGroupShadowLedgerAppend(groupID, uint64(index), state.Ledger, entry)
+		if appendErr != nil {
+			t.Fatalf("append candidate %d: %v", index+1, appendErr)
+		}
+		state.Ledger = append(state.Ledger, appended)
+	}
+	compactPersistentGroupState(&state)
+	retained := 0
+	for index, entry := range state.Ledger {
+		if entry.Bundle != nil {
+			retained++
+			if index < 4 {
+				t.Fatalf("old candidate %d retained its full bundle", index+1)
+			}
+		} else if !entry.BundleArchived {
+			t.Fatalf("candidate %d lost its bundle without an archive marker", index+1)
+		}
+	}
+	if retained != retainedGroupCandidateBundles {
+		t.Fatalf("retained bundles=%d want=%d", retained, retainedGroupCandidateBundles)
+	}
+	state.Revision++
+	if err := store.writeGroupState(store.groupStatePath(groupID), state); err != nil {
+		t.Fatalf("persist compacted state: %v", err)
+	}
+	head, exists, err := store.Head(context.Background(), groupID)
+	if err != nil || !exists || head.Sequence != uint64(len(state.Ledger)) || head.Bundle == nil || head.BundleArchived {
+		t.Fatalf("compacted head=%+v exists=%v err=%v", head, exists, err)
+	}
+	history, err := store.History(context.Background(), groupID)
+	if err != nil || len(history) != len(state.Ledger) || !history[0].BundleArchived || history[0].Bundle != nil {
+		t.Fatalf("compacted history did not preserve archived identity: len=%d err=%v first=%+v", len(history), err, history[0])
+	}
+}
 
 func TestPersistentGroupStoreAcceptsFirstProducerInventoryAfterMissingInventoryLedger(t *testing.T) {
 	t.Parallel()
