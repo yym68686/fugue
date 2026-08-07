@@ -208,9 +208,6 @@ func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, releas
 	if err != nil {
 		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
 	}
-	if before.ActiveSlot == "a" && !edgePodsMatchTarget(before.WorkerA, workerATarget) {
-		return errors.New("bootstrap LKG active slot a changed before safe compensation")
-	}
 	if err := cluster.applyResourceSet(ctx, release, manifest, false); err != nil {
 		return err
 	}
@@ -218,6 +215,16 @@ func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, releas
 	workerA := before.WorkerA
 	workerB := before.WorkerB
 	if before.ActiveSlot == "a" {
+		// OnDelete workloads do not recycle when the template is restored. The
+		// active slot is still safe to repair in place: keep authority on slot A,
+		// but replace each forward Pod one at a time and wait for the exact LKG
+		// identity before touching the other slot.
+		if !edgePodsMatchTarget(workerA, workerATarget) {
+			workerA, err = cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.WorkerAName, workerATarget, false)
+			if err != nil {
+				return fmt.Errorf("restore bootstrap active slot a: %w", err)
+			}
+		}
 		if !edgePodsMatchTarget(workerB, workerBTarget) {
 			workerB, err = cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.WorkerBName, workerBTarget, false)
 			if err != nil {
