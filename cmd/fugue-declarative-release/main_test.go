@@ -173,6 +173,14 @@ func TestReconcileRefusesToReplaceAnExistingCanonicalTerminalReceipt(t *testing.
 	}
 }
 
+func TestEveryCanonicalExecutorResultFinalizesItsHeldComponentLease(t *testing.T) {
+	for _, status := range []string{"verified", "compensated", "failed-no-write", "recovery-required"} {
+		if !finalizeComponentLeaseStatus(status) {
+			t.Fatalf("terminal status %q was not marked for lease finalization", status)
+		}
+	}
+}
+
 func TestPlanCommandBindsSuccessorToLastComponentIntentCommit(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()

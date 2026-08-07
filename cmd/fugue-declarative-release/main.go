@@ -587,10 +587,14 @@ func runExecute(args []string, output io.Writer) error {
 		return fmt.Errorf("acquire component mutation lease: %w", err)
 	}
 	result := declarativerelease.Execute(ctx, cluster, plan, prepared, files["forward.json"], files["lkg.json"])
-	var leaseReleaseErr error
-	if result.Status != "recovery-required" {
-		leaseReleaseErr = leaseCoordinator.release(ctx, heldLease)
+	// Every executor result is a canonical terminal result, including a
+	// compensated or terminal failure result. Finalize the component lease with
+	// the held UID/RV/holder CAS on every path; an unknown CAS result remains an
+	// explicit error and never becomes an unconditional cleanup.
+	if !finalizeComponentLeaseStatus(result.Status) {
+		return errors.New("component release produced a non-terminal status")
 	}
+	leaseReleaseErr := leaseCoordinator.release(ctx, heldLease)
 	encoded, err := declarativerelease.CanonicalJSON(result)
 	if err != nil {
 		return err
@@ -599,12 +603,21 @@ func runExecute(args []string, output io.Writer) error {
 		return err
 	}
 	if leaseReleaseErr != nil {
-		return fmt.Errorf("component release terminal state is verified but lease release is unproven: %w", leaseReleaseErr)
+		return fmt.Errorf("component release terminal state is recorded but lease release is unproven: %w", leaseReleaseErr)
 	}
 	if result.Status != "verified" {
 		return fmt.Errorf("component release ended with status=%s reason=%s", result.Status, result.Reason)
 	}
 	return nil
+}
+
+func finalizeComponentLeaseStatus(status string) bool {
+	switch status {
+	case "verified", "compensated", "failed-no-write", "recovery-required":
+		return true
+	default:
+		return false
+	}
 }
 
 func runReconcile(args []string, output io.Writer) error {
