@@ -114,6 +114,7 @@ type ExecutionResult struct {
 	ExecutionPlanDigest string      `json:"executionPlanDigest"`
 	Status              string      `json:"status"`
 	Reason              string      `json:"reason"`
+	FailureClass        string      `json:"failureClass,omitempty"`
 	ForwardApplyCount   int         `json:"forwardApplyCount"`
 	LKGApplyCount       int         `json:"lkgApplyCount"`
 	Final               Observation `json:"final"`
@@ -743,6 +744,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		}
 	}
 	rollbackBase := forwardObservation
+	result.FailureClass = forwardFailureClass(applyErr, healthErr, convergedErr, forwardObservation, prepared.Forward, release)
 	if !rollbackBase.Present || rollbackBase.UID == "" || !resourceVersionPattern.MatchString(rollbackBase.ResourceVersion) {
 		rollbackBase, err = cluster.ObserveCAS(ctx, release, forwardManifest)
 		if err != nil {
@@ -785,6 +787,21 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	result.Reason = "lkg-unproven"
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func forwardFailureClass(applyErr, healthErr, convergedErr error, observed Observation, target TargetIdentity, release PlanRelease) string {
+	switch {
+	case applyErr != nil:
+		return "forward_apply"
+	case healthErr != nil:
+		return "forward_health"
+	case convergedErr != nil:
+		return "forward_convergence"
+	case !observed.Matches(target, release, false):
+		return "forward_identity"
+	default:
+		return "forward_unknown"
+	}
 }
 
 func compensateOwnershipTakeover(ctx context.Context, cluster Cluster, release PlanRelease, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, result ExecutionResult, observed Observation) ExecutionResult {
