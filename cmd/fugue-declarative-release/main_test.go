@@ -38,8 +38,62 @@ func TestLoadLKGManifestUsesBootstrapOnlyForExplicitAdoption(t *testing.T) {
 		t.Fatalf("load retry LKG: got=%s err=%v", got, err)
 	}
 	release.MigrationState = "independent"
-	if _, err := loadLKGManifest(release); err == nil || !strings.Contains(err.Error(), "previous component manifest") {
+	if _, err := loadLKGManifest(release); err == nil || !strings.Contains(err.Error(), "previous production registry") {
 		t.Fatalf("independent same-LKG retry fell back to bootstrap LKG: %v", err)
+	}
+}
+
+func TestLoadLKGManifestUsesTheHistoricalRegistryManifestPath(t *testing.T) {
+	root := t.TempDir()
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	componentsRaw, err := os.ReadFile(filepath.Join(previousDirectory, "../..", "deploy/releases/components.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeRaw, err := os.ReadFile(filepath.Join(previousDirectory, "../..", "deploy/releases/edge-groups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(edgeRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldPath = "internal/edge/component/previous-worker-us.json"
+	for index := range edge.Groups {
+		if edge.Groups[index].Worker.ID == "edge-worker-us" {
+			edge.Groups[index].Worker.ManifestPath = oldPath
+		}
+	}
+	edgeRaw, err = declarativerelease.CanonicalJSON(edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	runGit(t, "init", "--initial-branch=main")
+	runGit(t, "config", "user.email", "release@example.test")
+	runGit(t, "config", "user.name", "Release Test")
+	writeFile(t, "deploy/releases/components.json", componentsRaw)
+	writeFile(t, "deploy/releases/edge-groups.json", append(edgeRaw, '\n'))
+	want := []byte(`{"historical":"worker-us"}`)
+	writeFile(t, oldPath, want)
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "historical registry")
+	revisionRaw, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := strings.TrimSpace(string(revisionRaw))
+	release := declarativerelease.PlanRelease{ComponentID: "edge-worker-us", ExpectedPreviousPresent: true,
+		ExpectedPreviousConfigSHA: revision, ManifestPath: "internal/edge/component/current-worker-us.json", MigrationState: "independent"}
+	got, err := loadLKGManifest(release)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("load historical manifest path: got=%s err=%v", got, err)
 	}
 }
 

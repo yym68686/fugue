@@ -544,12 +544,48 @@ func loadLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
 		}
 		return content, nil
 	}
-	object := release.ExpectedPreviousConfigSHA + ":" + release.ManifestPath
+	manifestPath, err := historicalComponentManifestPath(release.ExpectedPreviousConfigSHA, release.ComponentID)
+	if err != nil {
+		return nil, err
+	}
+	object := release.ExpectedPreviousConfigSHA + ":" + manifestPath
 	content, err := exec.Command("git", "show", object).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("read previous component manifest: %w", err)
 	}
 	return content, nil
+}
+
+func historicalComponentManifestPath(revision, componentID string) (string, error) {
+	const registryPath = "deploy/releases/components.json"
+	raw, err := exec.Command("git", "show", revision+":"+registryPath).Output()
+	if err != nil {
+		return "", fmt.Errorf("read previous production registry: %w", err)
+	}
+	registry, err := declarativerelease.DecodeRegistry(bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("decode previous production registry: %w", err)
+	}
+	if registry.EdgeGroupRegistryPath != "" {
+		edgeRaw, readErr := exec.Command("git", "show", revision+":"+registry.EdgeGroupRegistryPath).Output()
+		if readErr != nil {
+			return "", fmt.Errorf("read previous edge group registry: %w", readErr)
+		}
+		edge, decodeErr := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(edgeRaw))
+		if decodeErr != nil {
+			return "", fmt.Errorf("decode previous edge group registry: %w", decodeErr)
+		}
+		registry, err = declarativerelease.MergeEdgeGroupRegistry(registry, edge)
+		if err != nil {
+			return "", fmt.Errorf("merge previous edge group registry: %w", err)
+		}
+	}
+	for _, component := range registry.Components {
+		if component.ID == componentID {
+			return component.ManifestPath, nil
+		}
+	}
+	return "", fmt.Errorf("previous production registry does not contain component %q", componentID)
 }
 
 func runExecute(args []string, output io.Writer) error {
