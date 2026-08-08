@@ -183,6 +183,7 @@ func TestComponentDependencyGraphIncludesTransitiveRepositoryPackages(t *testing
 	for index := range registry.Components {
 		if registry.Components[index].ID == "api" {
 			registry.Components[index].MigrationState = "independent"
+			registry.Components[index].OwnershipAdoption = nil
 		}
 	}
 	expanded, err := expandComponentDependencyRoots(registry)
