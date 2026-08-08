@@ -81,6 +81,9 @@ func (group EdgeGroup) validate() error {
 		if component.MigrationState == "adopting" || component.OwnershipAdoption != nil {
 			return fmt.Errorf("edge group component %q retains legacy adoption state", component.ID)
 		}
+		if component.AdoptionReceiptPath != "" || component.BootstrapLKGPath != "" {
+			return fmt.Errorf("edge group component %q retains legacy adoption metadata", component.ID)
+		}
 	}
 	if err := group.Control.Validate(); err != nil {
 		return fmt.Errorf("control component: %w", err)
@@ -218,9 +221,6 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			}
 			if string(priorJSON) != string(nextJSON) && selected != pair.id {
 				_, intentChanged := changed[pair.next.IntentPath]
-				if selected == "" && edgeLegacyMigrationMetadataRemoved(pair.previous, pair.next, changed) {
-					continue
-				}
 				if pair.previous.MigrationState == "pending" && pair.next.MigrationState == "pending" && !intentChanged {
 					continue
 				}
@@ -232,27 +232,6 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 		return errors.New("edge group registry cannot remove an existing group")
 	}
 	return nil
-}
-
-func edgeLegacyMigrationMetadataRemoved(previous, next Component, changed map[string]struct{}) bool {
-	if previous.MigrationState != "independent" || next.MigrationState != "independent" ||
-		next.AdoptionReceiptPath != "" || next.BootstrapLKGPath != "" ||
-		(previous.AdoptionReceiptPath == "" && previous.BootstrapLKGPath == "") {
-		return false
-	}
-	for _, path := range []string{previous.AdoptionReceiptPath, previous.BootstrapLKGPath} {
-		if path == "" {
-			continue
-		}
-		if _, ok := changed[path]; !ok {
-			return false
-		}
-	}
-	previous.AdoptionReceiptPath, previous.BootstrapLKGPath = "", ""
-	next.AdoptionReceiptPath, next.BootstrapLKGPath = "", ""
-	previousJSON, previousErr := CanonicalJSON(previous)
-	nextJSON, nextErr := CanonicalJSON(next)
-	return previousErr == nil && nextErr == nil && string(previousJSON) == string(nextJSON)
 }
 
 func edgeGroupUsesStagedHealth(group EdgeGroup) bool {

@@ -296,20 +296,8 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 
 	legacy := edgeGroupFixture("alpha", "edge-group-metro-alpha")
 	legacy.Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
-	legacy.Worker.AdoptionReceiptPath = "deploy/releases/edge-worker-alpha/adoption-receipt.json"
-	legacy.Worker.BootstrapLKGPath = "deploy/releases/edge-worker-alpha/lkg.json"
-	clean := legacy
-	clean.Control.AdoptionReceiptPath = ""
-	clean.Worker.AdoptionReceiptPath = ""
-	clean.Worker.BootstrapLKGPath = ""
-	changed := []string{"deploy/releases/edge-groups.json", legacy.Control.AdoptionReceiptPath, legacy.Worker.AdoptionReceiptPath, legacy.Worker.BootstrapLKGPath}
-	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{legacy}}
-	current := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{clean}}
-	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, Plan{}, changed); err != nil {
-		t.Fatalf("retired Edge adoption metadata cleanup: %v", err)
-	}
-	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, Plan{}, changed[:1]); err == nil || !strings.Contains(err.Error(), "unselected component") {
-		t.Fatalf("metadata cleanup without deleting its evidence was accepted: %v", err)
+	if err := legacy.validate(); err == nil || !strings.Contains(err.Error(), "legacy adoption metadata") {
+		t.Fatalf("retired Edge adoption metadata was accepted: %v", err)
 	}
 }
 
