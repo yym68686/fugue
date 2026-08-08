@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+const (
+	publicDataPlaneEdgeImagePath         = "/spec/template/spec/containers/0/image"
+	publicDataPlaneEdgeIdentityImagePath = "/spec/template/spec/initContainers/0/image"
+	publicDataPlaneEdgeIdentityContainer = "edge-workload-identity"
+)
+
 // ImageActivationPlanInput is the complete side-effect-free input for
 // deriving actual image activations from a conservative build plan and the
 // exact live-relative rendered workload diff.
