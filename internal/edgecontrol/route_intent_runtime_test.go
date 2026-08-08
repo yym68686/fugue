@@ -31,6 +31,14 @@ import (
 
 const routeIntentTestServerName = "route-intent.test"
 
+func reconcileRouteIntents(ctx context.Context, source RouteIntentSource, compiler GroupShadowCompiler, groups []string) (GroupShadowBatch, error) {
+	snapshot, err := source.FetchRouteIntents(ctx)
+	if err != nil {
+		return GroupShadowBatch{}, err
+	}
+	return compiler.Reconcile(ctx, snapshot, groups)
+}
+
 func TestRouteIntentClientAuthenticatesAndBindsVersion(t *testing.T) {
 	t.Parallel()
 
@@ -119,8 +127,7 @@ func TestRouteIntentClientCredentialFailuresAreClosedBeforeLedger(t *testing.T) 
 			if err := store.StoreGroupInventoryCAS(context.Background(), groupID, 0, inventory); err != nil {
 				t.Fatal(err)
 			}
-			runtime := ShadowRuntime{RouteIntents: client, Compiler: GroupShadowCompiler{Inventory: store, Ledger: store}, GroupIDs: []string{groupID}}
-			if _, err := runtime.RunOnce(context.Background()); !errors.Is(err, ErrRouteIntentCredential) && !errors.Is(err, ErrRouteIntentUnauthorized) {
+			if _, err := reconcileRouteIntents(context.Background(), client, GroupShadowCompiler{Inventory: store, Ledger: store}, []string{groupID}); !errors.Is(err, ErrRouteIntentCredential) && !errors.Is(err, ErrRouteIntentUnauthorized) {
 				t.Fatalf("RunOnce() error = %v", err)
 			}
 			if requests.Load() != 0 {
@@ -316,8 +323,7 @@ func TestRouteIntentClientRejectsMalformedCAUntrustedChainAndSANMismatch(t *test
 	if err := store.StoreGroupInventoryCAS(context.Background(), groupID, 0, inventory); err != nil {
 		t.Fatal(err)
 	}
-	runtime := ShadowRuntime{RouteIntents: client, Compiler: GroupShadowCompiler{Inventory: store, Ledger: store}, GroupIDs: []string{groupID}}
-	if _, err := runtime.RunOnce(context.Background()); !errors.Is(err, ErrRouteIntentFetch) {
+	if _, err := reconcileRouteIntents(context.Background(), client, GroupShadowCompiler{Inventory: store, Ledger: store}, []string{groupID}); !errors.Is(err, ErrRouteIntentFetch) {
 		t.Fatalf("RouteIntent SAN mismatch error=%v", err)
 	}
 	if history, err := store.History(context.Background(), groupID); err != nil || len(history) != 0 {
@@ -405,48 +411,6 @@ func TestRouteIntentClientRejectsProjectedSecretEscape(t *testing.T) {
 	}
 	if _, err := client.readBoundCredential(now); !errors.Is(err, ErrRouteIntentCredential) {
 		t.Fatalf("escaped projected credential error = %v", err)
-	}
-}
-
-func TestShadowRuntimeLoopStopsAfterObservedReconcile(t *testing.T) {
-	t.Parallel()
-
-	groupID := "edge-group-country-us"
-	runtime := ShadowRuntime{
-		RouteIntents: staticRouteIntentSource{snapshot: routeIntentFixture()},
-		Compiler: GroupShadowCompiler{
-			Inventory: &shadowInventoryReader{snapshots: map[string]GroupInventorySnapshot{
-				groupID: groupInventoryFixture(groupID, model.EdgeSlotB, "epoch-us-b", "inventory-us-1", false),
-			}},
-			Ledger: NewMemoryGroupShadowLedger(),
-		},
-		GroupIDs: []string{groupID},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	observed := make(chan ShadowRuntimeObservation, 1)
-	go func() {
-		done <- runtime.Run(ctx, time.Hour, func(observation ShadowRuntimeObservation) {
-			observed <- observation
-			cancel()
-		})
-	}()
-	select {
-	case observation := <-observed:
-		if observation.FailureCode != "" || observation.Succeeded != 1 || observation.Failed != 0 {
-			t.Fatalf("unexpected runtime observation: %+v", observation)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("shadow runtime did not reconcile")
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("shadow runtime stop error = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("shadow runtime did not stop after cancellation")
 	}
 }
 

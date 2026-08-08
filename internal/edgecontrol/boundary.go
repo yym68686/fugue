@@ -11,7 +11,7 @@ import (
 
 const BoundarySchemaV1 = "edge-control-boundary/v1"
 
-// BoundaryStatus explicitly distinguishes the inert and shadow modes from the
+// BoundaryStatus explicitly distinguishes the inert boundary from the
 // group-authority runtime.
 type BoundaryStatus struct {
 	Schema                 string `json:"schema"`
@@ -38,17 +38,13 @@ func NewBoundary(enabled bool) *Boundary {
 	return &Boundary{enabled: enabled, mode: "boundary-only"}
 }
 
-func NewShadowBoundary(enabled bool) *Boundary {
-	return &Boundary{enabled: enabled, mode: "shadow-only"}
-}
-
 func NewAuthorityBoundary(enabled bool) *Boundary {
 	return &Boundary{enabled: enabled, mode: "group-authority", authority: true}
 }
 
 func (b *Boundary) Status(status string) BoundaryStatus {
 	mode := "boundary-only"
-	if b != nil && (b.mode == "shadow-only" || b.mode == "group-authority") {
+	if b != nil && b.mode == "group-authority" {
 		mode = b.mode
 	}
 	authority := "none"

@@ -13,6 +13,7 @@ const (
 	AuthorityStatusPathV1       = "/v1/authority/status"
 	AuthorityStatusSchemaV1     = "edge-control-group-authority-status/v1"
 	AuthorityGroupReadyPrefixV1 = "/v1/authority/groups/"
+	EdgeControlReadyPathV1      = "/readyz"
 
 	GroupAuthorityHealthReady       = "ready"
 	GroupAuthorityHealthServingLKG  = "serving_lkg"
@@ -134,7 +135,7 @@ func (handler *authorityStatusHandler) ServeHTTP(w http.ResponseWriter, request 
 		http.NotFound(w, request)
 		return
 	}
-	if request.URL.Path == ShadowReadyPathV1 {
+	if request.URL.Path == EdgeControlReadyPathV1 {
 		writeJSON(w, http.StatusOK, handler.processReadySnapshot())
 		return
 	}
@@ -307,7 +308,7 @@ func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery h
 	}
 	mux := http.NewServeMux()
 	mux.Handle("POST "+GroupAuthorityInventoryHeartbeatPathV1, heartbeat)
-	mux.Handle("GET "+ShadowReadyPathV1, status)
+	mux.Handle("GET "+EdgeControlReadyPathV1, status)
 	mux.Handle("GET "+AuthorityStatusPathV1, status)
 	mux.Handle("GET "+AuthorityGroupReadyPrefixV1, status)
 	mux.Handle("GET "+GroupBundleReadPathV1, bundles)

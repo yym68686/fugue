@@ -42,10 +42,6 @@ func TestPlanRepositoryEdgeControlBoundaryIsShadowOnly(t *testing.T) {
 		"Dockerfile.edge-control",
 		"deploy/helm/fugue-edge-control/values.yaml",
 		"scripts/test_edge_control_image.sh",
-		"scripts/deploy_edge_control_shadow.sh",
-		"scripts/test_deploy_edge_control_shadow.sh",
-		".github/workflows/publish-edge-control-image.yml",
-		".github/workflows/deploy-edge-control-shadow.yml",
 	}
 	plan, err := PlanChanges(manifest, paths)
 	if err != nil {

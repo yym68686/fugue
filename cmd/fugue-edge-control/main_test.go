@@ -28,149 +28,11 @@ func TestConfigDefaultsAreLocalAndNonAuthoritative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Enabled || cfg.BindAddr != defaultBindAddr || cfg.ShutdownTimeout != defaultShutdownTimeout || cfg.ShadowRuntimeEnabled || cfg.ShadowPollInterval != 0 || len(cfg.ShadowGroupIDs) != 0 {
+	if cfg.Enabled || cfg.BindAddr != defaultBindAddr || cfg.ShutdownTimeout != defaultShutdownTimeout || cfg.AuthorityRuntimeEnabled {
 		t.Fatalf("unsafe defaults: %+v", cfg)
 	}
 }
-
-func TestConfigAcceptsExplicitDefaultOffShadowRuntime(t *testing.T) {
-	t.Parallel()
-
-	values := map[string]string{
-		"FUGUE_EDGE_CONTROL_ENABLED":                       "true",
-		"FUGUE_EDGE_CONTROL_SHADOW_RUNTIME_ENABLED":        "true",
-		"FUGUE_EDGE_CONTROL_SHADOW_STATE_DIR":              "/var/lib/fugue-edge-control",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL":              "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE":      "/var/run/secrets/fugue/route-intent/issuer.json",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID": "edge-control-test",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE":          "/var/run/secrets/fugue/route-intent-ca/ca.crt",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME":      "fugue-api-tls.fugue-system.svc",
-		"FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_FILE": "/var/run/secrets/fugue/inventory-writer-keyring.json",
-		"FUGUE_EDGE_CONTROL_SHADOW_GROUP_IDS":              "edge-group-country-de,edge-group-country-us",
-		"FUGUE_EDGE_CONTROL_SHADOW_RECONCILE_INTERVAL":     "30s",
-	}
-	cfg, err := configFromEnv(func(key string) string { return values[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.ShadowRuntimeEnabled || cfg.ShadowStateDir != values["FUGUE_EDGE_CONTROL_SHADOW_STATE_DIR"] ||
-		cfg.RouteIntentURL != values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL"] || cfg.RouteIntentIssuerFile != values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE"] ||
-		cfg.RouteIntentCAFile != values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE"] || cfg.RouteIntentServerName != values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME"] ||
-		cfg.InventoryKeyringFile != values["FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_FILE"] ||
-		cfg.ShadowPollInterval != 30*time.Second || !reflect.DeepEqual(cfg.ShadowGroupIDs, []string{"edge-group-country-de", "edge-group-country-us"}) {
-		t.Fatalf("unexpected shadow runtime config: %+v", cfg)
-	}
-}
-
-func TestConfigRejectsIncompleteOrUnsafeShadowRuntime(t *testing.T) {
-	t.Parallel()
-
-	base := map[string]string{
-		"FUGUE_EDGE_CONTROL_ENABLED":                       "true",
-		"FUGUE_EDGE_CONTROL_SHADOW_RUNTIME_ENABLED":        "true",
-		"FUGUE_EDGE_CONTROL_SHADOW_STATE_DIR":              "/var/lib/fugue-edge-control",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL":              "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE":      "/var/run/secrets/fugue/route-intent/issuer.json",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID": "edge-control-test",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE":          "/var/run/secrets/fugue/route-intent-ca/ca.crt",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME":      "fugue-api-tls.fugue-system.svc",
-		"FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_FILE": "/var/run/secrets/fugue/inventory-writer-keyring.json",
-		"FUGUE_EDGE_CONTROL_SHADOW_GROUP_IDS":              "edge-group-country-us",
-		"FUGUE_EDGE_CONTROL_SHADOW_RECONCILE_INTERVAL":     "30s",
-	}
-	for name, mutate := range map[string]func(map[string]string){
-		"boundary disabled":   func(values map[string]string) { values["FUGUE_EDGE_CONTROL_ENABLED"] = "false" },
-		"missing state":       func(values map[string]string) { delete(values, "FUGUE_EDGE_CONTROL_SHADOW_STATE_DIR") },
-		"relative token":      func(values map[string]string) { values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE"] = "token" },
-		"relative CA":         func(values map[string]string) { values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE"] = "ca.crt" },
-		"missing CA":          func(values map[string]string) { delete(values, "FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE") },
-		"missing server name": func(values map[string]string) { delete(values, "FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME") },
-		"wildcard server name": func(values map[string]string) {
-			values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME"] = "*.fugue-system.svc"
-		},
-		"relative keyring": func(values map[string]string) {
-			values["FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_FILE"] = "keyring.json"
-		},
-		"missing keyring": func(values map[string]string) { delete(values, "FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_FILE") },
-		"plain HTTP": func(values map[string]string) {
-			values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL"] = "http://api.example.test/v1/edge/route-intents"
-		},
-		"wrong path": func(values map[string]string) {
-			values["FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL"] = "https://api.example.test/v1/edge/routes"
-		},
-		"duplicate group": func(values map[string]string) {
-			values["FUGUE_EDGE_CONTROL_SHADOW_GROUP_IDS"] = "edge-group-country-us,edge-group-country-us"
-		},
-		"fast interval": func(values map[string]string) { values["FUGUE_EDGE_CONTROL_SHADOW_RECONCILE_INTERVAL"] = "1s" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			values := make(map[string]string, len(base))
-			for key, value := range base {
-				values[key] = value
-			}
-			mutate(values)
-			if _, err := configFromEnv(func(key string) string { return values[key] }); err == nil {
-				t.Fatal("unsafe shadow runtime config unexpectedly accepted")
-			}
-		})
-	}
-}
-
-func TestBuildShadowRuntimeIsDefaultOffAndSideEffectFree(t *testing.T) {
-	t.Parallel()
-
-	root := filepath.Join(t.TempDir(), "must-not-exist")
-	runtime, err := buildShadowRuntime(config{BindAddr: defaultBindAddr, ShutdownTimeout: time.Second, ShadowStateDir: root})
-	if err != nil || runtime != nil {
-		t.Fatalf("default-off build = %v, %v", runtime, err)
-	}
-	if _, err := os.Stat(root); !os.IsNotExist(err) {
-		t.Fatalf("default-off runtime touched state path: %v", err)
-	}
-}
-
-func TestBuildShadowProcessWiresOnlyAuthenticatedShadowEndpoints(t *testing.T) {
-	t.Parallel()
-
-	root := filepath.Join(t.TempDir(), "state")
-	cfg := config{
-		Enabled: true, BindAddr: defaultBindAddr, ShutdownTimeout: time.Second,
-		ShadowRuntimeEnabled: true, ShadowStateDir: root,
-		RouteIntentURL:          "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents",
-		RouteIntentIssuerFile:   "/var/run/secrets/fugue-edge-control/route-intent/token",
-		RouteIntentIdentityNode: "edge-control-test",
-		RouteIntentCAFile:       writeRouteIntentCAFixture(t),
-		RouteIntentServerName:   "fugue-api-tls.fugue-system.svc",
-		InventoryKeyringFile:    "/var/run/secrets/fugue-edge-control/inventory-writer/keyring.json",
-		ShadowGroupIDs:          []string{"edge-group-country-de", "edge-group-country-us"}, ShadowPollInterval: 30 * time.Second,
-	}
-	runtime, handler, err := buildShadowProcess(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime == nil || handler == nil || len(runtime.GroupIDs) != 2 {
-		t.Fatalf("incomplete shadow process: runtime=%+v handler=%v", runtime, handler)
-	}
-	for path, wantCode := range map[string]int{
-		"/v1/status":        http.StatusOK,
-		"/v1/shadow/status": http.StatusOK,
-		"/readyz":           http.StatusServiceUnavailable,
-		"/v1/authority":     http.StatusNotFound,
-	} {
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
-		if recorder.Code != wantCode {
-			t.Fatalf("GET %s status=%d body=%s", path, recorder.Code, recorder.Body.String())
-		}
-	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/shadow/group-inventory-heartbeats", strings.NewReader("{}")))
-	if recorder.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("unauthenticated inventory endpoint status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-}
-
-func TestConfigAndProcessWireGroupAuthorityDefaultOffFromShadow(t *testing.T) {
+func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -195,7 +57,7 @@ func TestConfigAndProcessWireGroupAuthorityDefaultOffFromShadow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.AuthorityRuntimeEnabled || cfg.ShadowRuntimeEnabled || cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
+	if !cfg.AuthorityRuntimeEnabled || cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
 		cfg.AuthorityPollInterval != 30*time.Second || cfg.GroupBundleValidity != 30*time.Minute ||
 		!reflect.DeepEqual(cfg.AuthorityGroupIDs, []string{"edge-group-country-us"}) {
 		t.Fatalf("unexpected authority config: %+v", cfg)
@@ -270,7 +132,6 @@ func TestConfigRejectsAmbiguousOrUnsafeAuthorityRuntime(t *testing.T) {
 		"FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY":         "30m",
 	}
 	for name, mutate := range map[string]func(map[string]string){
-		"both runtimes":  func(values map[string]string) { values["FUGUE_EDGE_CONTROL_SHADOW_RUNTIME_ENABLED"] = "true" },
 		"relative state": func(values map[string]string) { values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] = "state" },
 		"unsafe group path": func(values map[string]string) {
 			values["FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS"] = "../edge-group-country-us"
@@ -297,7 +158,7 @@ func TestConfigRejectsAmbiguousOrUnsafeAuthorityRuntime(t *testing.T) {
 	}
 }
 
-func TestConfigAcceptsExplicitShadowProcessSettings(t *testing.T) {
+func TestConfigAcceptsExplicitProcessSettings(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]string{
@@ -309,7 +170,7 @@ func TestConfigAcceptsExplicitShadowProcessSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Enabled || cfg.BindAddr != "0.0.0.0:8092" || cfg.ShutdownTimeout != 30*time.Second || cfg.ShadowRuntimeEnabled {
+	if !cfg.Enabled || cfg.BindAddr != "0.0.0.0:8092" || cfg.ShutdownTimeout != 30*time.Second {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }

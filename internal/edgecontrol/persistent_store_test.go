@@ -133,12 +133,7 @@ func TestPersistentGroupStoreSurvivesRestartAndPreservesLKG(t *testing.T) {
 			t.Fatalf("persistent Edge Control inventory leaked Core field %q", forbidden)
 		}
 	}
-	runtime := ShadowRuntime{
-		RouteIntents: staticRouteIntentSource{snapshot: routeIntentFixture()},
-		Compiler:     GroupShadowCompiler{Inventory: store, Ledger: store},
-		GroupIDs:     []string{groupID},
-	}
-	first, err := runtime.RunOnce(ctx)
+	first, err := reconcileRouteIntents(ctx, staticRouteIntentSource{snapshot: routeIntentFixture()}, GroupShadowCompiler{Inventory: store, Ledger: store}, []string{groupID})
 	if err != nil || first.Succeeded != 1 || first.Results[0].BundleGeneration == "" {
 		t.Fatalf("initial RunOnce() = %+v, %v", first, err)
 	}
@@ -165,12 +160,7 @@ func TestPersistentGroupStoreSurvivesRestartAndPreservesLKG(t *testing.T) {
 	if err := restarted.StoreGroupInventoryCAS(ctx, groupID, 1, badInventory); err != nil {
 		t.Fatalf("store bad group-local inventory: %v", err)
 	}
-	restartedRuntime := ShadowRuntime{
-		RouteIntents: staticRouteIntentSource{snapshot: routeIntentFixture()},
-		Compiler:     GroupShadowCompiler{Inventory: restarted, Ledger: restarted},
-		GroupIDs:     []string{groupID},
-	}
-	second, err := restartedRuntime.RunOnce(ctx)
+	second, err := reconcileRouteIntents(ctx, staticRouteIntentSource{snapshot: routeIntentFixture()}, GroupShadowCompiler{Inventory: restarted, Ledger: restarted}, []string{groupID})
 	if err != nil {
 		t.Fatalf("failed group RunOnce() returned global error: %v", err)
 	}
@@ -208,12 +198,7 @@ func TestPersistentGroupStoreCorruptionIsGroupScoped(t *testing.T) {
 			t.Fatalf("store %s inventory: %v", groupID, err)
 		}
 	}
-	runtime := ShadowRuntime{
-		RouteIntents: staticRouteIntentSource{snapshot: routeIntentFixture()},
-		Compiler:     GroupShadowCompiler{Inventory: store, Ledger: store},
-		GroupIDs:     groups,
-	}
-	first, err := runtime.RunOnce(ctx)
+	first, err := reconcileRouteIntents(ctx, staticRouteIntentSource{snapshot: routeIntentFixture()}, GroupShadowCompiler{Inventory: store, Ledger: store}, groups)
 	if err != nil || first.Succeeded != 2 {
 		t.Fatalf("initial RunOnce() = %+v, %v", first, err)
 	}
@@ -221,7 +206,7 @@ func TestPersistentGroupStoreCorruptionIsGroupScoped(t *testing.T) {
 		t.Fatalf("corrupt DE fixture: %v", err)
 	}
 
-	second, err := runtime.RunOnce(ctx)
+	second, err := reconcileRouteIntents(ctx, staticRouteIntentSource{snapshot: routeIntentFixture()}, GroupShadowCompiler{Inventory: store, Ledger: store}, groups)
 	if err != nil {
 		t.Fatalf("group corruption returned global error: %v", err)
 	}
