@@ -1943,7 +1943,7 @@ release_changed_files_match() {
       public:deploy/helm/fugue/values-production-ha.yaml|\
       public:scripts/render_fugue_edge_systemd_unit.sh|\
       public:scripts/render_fugue_dns_systemd_unit.sh|\
-      public:scripts/release_fugue_public_data_plane.sh|\
+      public:scripts/release_fugue_authoritative_dns.sh|\
       public:.github/workflows/release-public-data-plane.yml)
         return 0
         ;;
@@ -2218,7 +2218,7 @@ release_safety_changed_file_subsystems() {
       scripts/lib/authoritative_dns_dig.sh|\
       scripts/prepare_authoritative_dns_dig.sh|\
       scripts/upgrade_fugue_control_plane.sh|\
-      scripts/release_fugue_public_data_plane.sh|\
+      scripts/release_fugue_authoritative_dns.sh|\
       scripts/build_control_plane_images.sh|\
       scripts/compute_control_plane_image_build_plan.sh|\
       scripts/compute_release_changed_files_from_live.sh|\
@@ -18170,7 +18170,7 @@ case "${action}" in
     fail "unsupported DNS manifest library action: ${action}"
     ;;
 esac
-' bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" "${action}" "${snapshot_file}" "${target_state_file}" "${identity_file}"
+' bash "${REPO_ROOT}/scripts/release_fugue_authoritative_dns.sh" "${action}" "${snapshot_file}" "${target_state_file}" "${identity_file}"
 }
 
 prepare_dns_manifest_transaction() {
@@ -18284,7 +18284,7 @@ run_dns_manifest_transaction_after_helm() {
     FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR}" \
     KUBECTL="${KUBECTL:-}" \
     run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
-      "DNS manifest transaction" bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"; then
+      "DNS manifest transaction" bash "${REPO_ROOT}/scripts/release_fugue_authoritative_dns.sh"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi

@@ -791,7 +791,7 @@ func TestObservedLiveActivationAuthorizesHelmStateAdoptionOnlyWithExactWitness(t
 	)
 	input.ReleasePlan = BuildPlan(PlanInput{
 		Files: FileClassification{Unknown: []Evidence{{
-			Source: "file", Subject: "scripts/release_fugue_public_data_plane.sh",
+			Source: "file", Subject: "scripts/release_fugue_authoritative_dns.sh",
 			Reason: "fixture keeps the source classification conservative",
 		}}},
 		Rendered: input.ReleasePlan.Rendered,
@@ -839,7 +839,7 @@ func TestObservedLiveActivationAuthorizesHelmStateAdoptionOnlyWithExactWitness(t
 	)
 	changed := ChangedFileEvidence{
 		baseCommit: md0BaseCommit, targetCommit: md0TargetCommit, digest: md0Digest("f"),
-		changes: []ChangedFile{{Status: ChangeModified, Path: "scripts/release_fugue_public_data_plane.sh"}},
+		changes: []ChangedFile{{Status: ChangeModified, Path: "scripts/release_fugue_authoritative_dns.sh"}},
 	}
 	report, err := BuildOperationalDomainEvidenceFromObservedLiveActivation(
 		changed, input.BuildPlan, activationPlan, activationEvidence, rendered,

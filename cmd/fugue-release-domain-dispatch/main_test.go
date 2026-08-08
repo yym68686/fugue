@@ -878,7 +878,7 @@ func newObservedLiveOperationalActivationFixture(t *testing.T) (commandFixture, 
 	fixture := newCommandFixture(t, nil, releasedomain.OutcomeUnknown)
 	changedBytes := testChangedEvidence(t, fixture.baseCommit, fixture.targetCommit, []releasedomain.ChangedFile{{
 		Status: releasedomain.ChangeModified,
-		Path:   "scripts/release_fugue_public_data_plane.sh",
+		Path:   "scripts/release_fugue_authoritative_dns.sh",
 	}})
 	overwritePrivateFile(t, flagValue(t, fixture.args, "--changed-evidence"), changedBytes)
 	ownershipBytes := mustReadFile(t, flagValue(t, fixture.args, "--ownership"))
