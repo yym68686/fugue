@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"fugue/internal/config"
-	"fugue/internal/edgecontrol"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
@@ -76,13 +75,13 @@ func validateInventoryProducerConfig(producer InventoryProducerConfig, edgeConfi
 	rawURL := strings.TrimSpace(producer.URL)
 	endpoint, err := url.Parse(rawURL)
 	if err != nil || endpoint.Scheme != "http" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
-		endpoint.Opaque != "" || endpoint.RawPath != "" || endpoint.Path != edgecontrol.GroupAuthorityInventoryHeartbeatPathV1 ||
+		endpoint.Opaque != "" || endpoint.RawPath != "" || endpoint.Path != groupAuthorityInventoryHeartbeatPathV1 ||
 		endpoint.Hostname() != strings.ToLower(endpoint.Hostname()) || endpoint.Port() != "8092" {
 		return errors.New("Edge inventory producer endpoint must be exact cluster-local HTTP authority heartbeat URL")
 	}
 	groupID := strings.TrimSpace(edgeConfig.EdgeGroupID)
 	groupSuffix := strings.TrimPrefix(groupID, "edge-group-country-")
-	expectedURL := "http://edge-control-" + groupSuffix + ".fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1
+	expectedURL := "http://edge-control-" + groupSuffix + ".fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1
 	if groupSuffix == groupID || groupSuffix == "" || strings.Contains(groupSuffix, ".") || rawURL != expectedURL {
 		return errors.New("Edge inventory producer endpoint is not bound to its exact group Service")
 	}
@@ -192,18 +191,18 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 	nextProducerGeneration := producerGeneration + 1
 	nodeStatus := edgeHealthStatus(status)
 	effectiveHealthy := nodeStatus == model.EdgeHealthHealthy && !edgeConfig.Draining && strings.TrimSpace(status.FailureClass) == ""
-	heartbeat := edgecontrol.GroupInventoryHeartbeat{
-		Schema: edgecontrol.GroupInventoryHeartbeatSchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID),
+	heartbeat := groupInventoryHeartbeat{
+		Schema: groupInventoryHeartbeatSchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID),
 		ProducerNodeID: strings.TrimSpace(edgeConfig.EdgeID), ProducerGeneration: nextProducerGeneration,
 		ExpectedSequence: sequence, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(), Nonce: nonce,
-		Inventory: edgecontrol.GroupInventorySnapshot{
-			Schema: edgecontrol.GroupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Sequence: sequence + 1,
-			Generation: edgecontrol.ProducerInventoryEnvelopeGeneration(nextProducerGeneration), ObservedAt: now,
-			ActiveEpoch: edgecontrol.GroupActiveEpoch{
+		Inventory: groupInventorySnapshot{
+			Schema: groupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Sequence: sequence + 1,
+			Generation: producerInventoryEnvelopeGeneration(nextProducerGeneration), ObservedAt: now,
+			ActiveEpoch: groupActiveEpoch{
 				GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: activation.ActiveSlot, ReleaseEpoch: activation.WorkerSourceCommit,
 				FenceSequence: activation.Generation, MinHealthyInstances: 1,
 			},
-			Instances: []edgecontrol.GroupInstance{{
+			Instances: []groupInstance{{
 				EdgeID: strings.TrimSpace(edgeConfig.EdgeID), GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: strings.TrimSpace(edgeConfig.EdgeSlot),
 				InstanceUID: strings.TrimSpace(edgeConfig.EdgeInstanceUID), ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
 				EffectiveHealthy: effectiveHealthy, NodeHealthy: status.Healthy, NodeStatus: nodeStatus, Draining: edgeConfig.Draining,
@@ -231,13 +230,13 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxInventoryProducerResponseBytes))
 		return fmt.Errorf("Edge inventory producer heartbeat returned status %d", response.StatusCode)
 	}
-	var receipt edgecontrol.GroupInventoryHeartbeatReceipt
+	var receipt groupInventoryHeartbeatReceipt
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxInventoryProducerResponseBytes+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&receipt); err != nil {
 		return errors.New("Edge inventory producer receipt is invalid")
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || receipt.Schema != edgecontrol.GroupInventoryHeartbeatReceiptSchemaV1 ||
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || receipt.Schema != groupInventoryHeartbeatReceiptSchemaV1 ||
 		receipt.GroupID != heartbeat.GroupID || receipt.Sequence != heartbeat.Inventory.Sequence || strings.TrimSpace(receipt.Generation) == "" ||
 		receipt.Authority != "edge-control" || !receipt.Publication || receipt.ProducerNodeID != heartbeat.ProducerNodeID ||
 		receipt.ProducerGeneration != heartbeat.ProducerGeneration {
@@ -252,7 +251,7 @@ func (s *Service) readInventoryProducerCursor(ctx context.Context, groupID strin
 	if err != nil {
 		return 0, 0, errors.New("Edge inventory producer endpoint is invalid")
 	}
-	endpoint.Path = edgecontrol.AuthorityGroupReadyPrefixV1 + strings.TrimSpace(groupID) + "/readyz"
+	endpoint.Path = authorityGroupReadyPrefixV1 + strings.TrimSpace(groupID) + "/readyz"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return 0, 0, errors.New("Edge inventory producer cursor request could not be built")
@@ -266,7 +265,7 @@ func (s *Service) readInventoryProducerCursor(ctx context.Context, groupID strin
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
 		return 0, 0, fmt.Errorf("Edge inventory producer cursor returned status %d", response.StatusCode)
 	}
-	var status edgecontrol.AuthorityGroupStatus
+	var status authorityGroupStatus
 	decoder := json.NewDecoder(io.LimitReader(response.Body, maxInventoryProducerResponseBytes+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&status); err != nil {
@@ -290,7 +289,7 @@ func issueBoundInventoryProducerIdentity(path string, edgeConfig config.EdgeConf
 	if err := decoder.Decode(&file); err != nil {
 		return "", errors.New("Edge inventory producer identity keyring is invalid")
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || file.Schema != edgecontrol.InventoryPlatformIdentityKeyringSchemaV1 ||
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || file.Schema != inventoryPlatformIdentityKeyringSchemaV1 ||
 		file.Generation == 0 || file.GroupID != strings.TrimSpace(edgeConfig.EdgeGroupID) || strings.TrimSpace(file.ActiveKeyID) == "" ||
 		len(strings.TrimSpace(file.ActiveKey)) < 32 || (file.PreviousKeyID == "") != (file.PreviousKey == "") {
 		return "", errors.New("Edge inventory producer identity keyring is invalid")
