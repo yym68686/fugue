@@ -517,6 +517,9 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if err := cluster.Converged(ctx, release, witness); err != nil {
 		return prepareOwnedDegradedPredecessor(ctx, cluster, release, forwardManifest, err)
 	}
+	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil {
+		return prepareAdoptingDegradedLKG(ctx, cluster, release, lkg, lkgManifest, witness)
+	}
 	second, err := cluster.ObserveCAS(ctx, release, forwardManifest)
 	if err != nil {
 		return Observation{}, err
@@ -528,6 +531,45 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 		return Observation{}, errors.New("degraded predecessor identity changed during validation")
 	}
 	return second, nil
+}
+
+// prepareAdoptingDegradedLKG replaces the deliberately CAS-only degraded
+// observation with the registry-bound immutable identity required by the
+// ownership adapter. It is reached only after the exact LKG artifact and
+// desired object bytes have already been verified. Two observations around a
+// second LKG convergence witness prevent status movement from being confused
+// with source, image, spec, or manager drift.
+func prepareAdoptingDegradedLKG(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, lkgManifest, witness []byte) (Observation, error) {
+	first, err := cluster.ObserveDegraded(ctx, release, lkgManifest)
+	if err != nil {
+		return Observation{}, fmt.Errorf("observe adopting degraded LKG: %w", err)
+	}
+	if err := first.ValidateDegradedPredecessor(release); err != nil {
+		return Observation{}, err
+	}
+	if !degradedObservationMatchesTarget(first, lkg) {
+		return Observation{}, errors.New("adopting degraded predecessor is not the exact LKG")
+	}
+	if err := cluster.Converged(ctx, release, witness); err != nil {
+		return Observation{}, fmt.Errorf("adopting degraded LKG drift: %w", err)
+	}
+	second, err := cluster.ObserveDegraded(ctx, release, lkgManifest)
+	if err != nil {
+		return Observation{}, fmt.Errorf("reobserve adopting degraded LKG: %w", err)
+	}
+	if err := second.ValidateDegradedPredecessor(release); err != nil {
+		return Observation{}, err
+	}
+	if !degradedObservationMatchesTarget(second, lkg) || !second.SameSpecIdentity(first) {
+		return Observation{}, errors.New("adopting degraded LKG identity changed during validation")
+	}
+	return second, nil
+}
+
+func degradedObservationMatchesTarget(observation Observation, target TargetIdentity) bool {
+	return observation.Present == target.Present && observation.ImageRef == target.ImageRef &&
+		observation.ConfigSHA == target.ConfigSHA && observation.ManifestSHA == target.ManifestSHA &&
+		observation.OCIRevision == target.OCIRevision && observation.TemplateDigest != ""
 }
 
 func prepareOwnedDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, forwardManifest []byte, lkgDrift error) (Observation, error) {

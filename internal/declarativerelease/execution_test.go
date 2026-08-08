@@ -744,7 +744,8 @@ func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailur
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
 	lkg.FieldManagers = []string{"fugue-api-declarative", "helm"}
 	lkg.Resources[0].FieldManagers = append([]string(nil), lkg.FieldManagers...)
-	degraded := casOnlyObservation(lkg)
+	degradedCAS := casOnlyObservation(lkg)
+	degraded := degradedCAS
 	degraded.ImageRef = lkg.ImageRef
 	degraded.ConfigSHA = lkg.ConfigSHA
 	degraded.ManifestSHA = lkg.ManifestSHA
@@ -755,7 +756,8 @@ func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailur
 	fake := &fakeCluster{
 		observations: []Observation{lkg, lkg},
 		healthErrors: []error{errors.New("auxiliary DNS is not ready")},
-		cas:          []Observation{degraded, degraded, degraded},
+		cas:          []Observation{degradedCAS, degraded},
+		degraded:     []Observation{degraded, degraded},
 	}
 	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
 	if err != nil || !prepared.DegradedPredecessor || prepared.OwnershipAdoption == nil ||
@@ -765,6 +767,22 @@ func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailur
 	}
 	if len(fake.healthTargets) != 1 || fake.dryRunAdoptions != 0 {
 		t.Fatalf("degraded retry bypassed or repeated the typed health boundary: health=%d adoption=%d", len(fake.healthTargets), fake.dryRunAdoptions)
+	}
+	if len(fake.converged) != 2 || len(fake.degraded) != 0 {
+		t.Fatalf("adopting degraded LKG did not perform the bounded full-identity revalidation: converged=%d remaining=%d", len(fake.converged), len(fake.degraded))
+	}
+
+	drifted := degraded
+	drifted.ImageRef = "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("9", 64)
+	fake = &fakeCluster{
+		observations: []Observation{lkg, lkg},
+		healthErrors: []error{errors.New("auxiliary DNS is not ready")},
+		cas:          []Observation{degradedCAS},
+		degraded:     []Observation{drifted},
+	}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil ||
+		!strings.Contains(err.Error(), "not the exact LKG") || fake.dryRunTakeovers != 0 {
+		t.Fatalf("adopting degraded recovery accepted registry identity drift: takeovers=%d err=%v", fake.dryRunTakeovers, err)
 	}
 
 	fake = &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, convergedErrors: []error{errors.New("spec drift")}}
