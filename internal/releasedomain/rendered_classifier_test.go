@@ -469,6 +469,7 @@ func renderCurrentProductionProfile(t *testing.T) []byte {
 		"--namespace", "fugue-system",
 		"--skip-tests",
 		"-f", filepath.Join(chartDir, "values-production-ha.yaml"),
+		"--set-string", "controller.ownership=helm",
 		"--set-string", "configSecret.existingSecretName=release-domain-test-config",
 		"--set-string", "platformComponentIdentity.existingSecretName=release-domain-test-identity",
 		"--set", "nodeLocalDNS.enabled=true",

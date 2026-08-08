@@ -39,6 +39,7 @@ api:
       memory: 2Gi
 
 controller:
+  ownership: declarative
   replicaCount: 3
   foregroundActivateWorkers: 4
   githubSyncImportWorkers: 0
