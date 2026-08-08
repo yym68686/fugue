@@ -3310,6 +3310,7 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 		t.Fatalf("rendered manifest missing edge front daemonset:\n%s", manifest)
 	}
 	for _, want := range []string{
+		`helm.sh/resource-policy: keep`,
 		`image: "fugue-edge:latest"`,
 		`- /usr/local/bin/fugue-edge-front`,
 		`fugue.io/rollout-mode: node-local-blue-green-front`,
@@ -3342,6 +3343,7 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 			t.Fatalf("rendered manifest missing %s:\n%s", tc.name, manifest)
 		}
 		for _, want := range []string{
+			`helm.sh/resource-policy: keep`,
 			`image: "fugue-edge:latest"`,
 			`image: "caddy:2.10.2-alpine"`,
 			`fugue.io/rollout-mode: node-local-blue-green-worker`,

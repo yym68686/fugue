@@ -150,6 +150,7 @@ placeholder.
 {{- $edgeImageTag := .edgeImageTag -}}
 {{- $edgeImageDigest := .edgeImageDigest -}}
 {{- $edgeImagePullPolicy := .edgeImagePullPolicy -}}
+{{- $ledgerKeep := default false .ledgerKeep -}}
 {{- $caddyEnabled := .caddyEnabled -}}
 {{- $caddyImageRepository := .caddyImageRepository -}}
 {{- $caddyImageTag := .caddyImageTag -}}
@@ -254,6 +255,10 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ $daemonBase }}-front
+  {{- if $ledgerKeep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
   labels:
     {{- include "fugue.componentLabels" (dict "root" $root "component" (printf "%s-front" $componentBase)) | nindent 4 }}
     fugue.io/rollout-subsystem: public-data-plane
@@ -428,6 +433,10 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ $daemonBase }}-worker-{{ $slot.name }}
+  {{- if $ledgerKeep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
   labels:
     {{- include "fugue.componentLabels" (dict "root" $root "component" (printf "%s-worker-%s" $componentBase $slot.name)) | nindent 4 }}
     fugue.io/rollout-subsystem: public-data-plane
@@ -835,6 +844,7 @@ spec:
   "httpTimeout" .Values.edge.httpTimeout
   "routeCacheHostPath" .Values.edge.persistence.hostPath
   "extraEnv" (list)
+  "ledgerKeep" true
 ) }}
 {{- range $group := .Values.edge.groups }}
 {{- $name := required "edge.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
@@ -911,6 +921,7 @@ spec:
   "httpTimeout" (default $.Values.edge.httpTimeout $group.httpTimeout)
   "routeCacheHostPath" $.Values.edge.persistence.hostPath
   "extraEnv" (default (list) $group.extraEnv)
+  "ledgerKeep" true
 ) }}
 {{- end }}
 {{- $dynamic := default dict .Values.edge.dynamic -}}
