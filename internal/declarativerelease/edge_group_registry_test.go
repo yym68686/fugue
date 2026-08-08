@@ -50,8 +50,8 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 	control := byID[virtual.Control.ID]
 	worker := byID[virtual.Worker.ID]
 	if control.Workload.Name != "edge-control-gamma" || control.Concurrency != "fugue-production-edge-control-gamma" ||
-		worker.Concurrency != "fugue-production-edge-worker-gamma" || worker.BootstrapLKGPath != "deploy/releases/edge-worker-gamma/lkg.json" {
-		t.Fatalf("third group did not get independent resources, Lease, and LKG: control=%+v worker=%+v", control, worker)
+		worker.Concurrency != "fugue-production-edge-worker-gamma" || worker.BootstrapLKGPath != "" {
+		t.Fatalf("third group did not get independent resources and Lease: control=%+v worker=%+v", control, worker)
 	}
 	transition := worker.Transition.EdgeGroupAB
 	if transition.GroupID != virtual.GroupID || transition.FrontName != "edge-gamma-front" ||
@@ -271,66 +271,45 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	alpha.Worker.MigrationState = "pending"
 	alpha.Control.AdoptionReceiptPath = ""
 	alpha.Worker.AdoptionReceiptPath = ""
+	alpha.Worker.BootstrapLKGPath = ""
 	initial := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{alpha}}
-	if err := ValidateEdgeGroupRegistryUpdate(nil, initial, Plan{APIVersion: IntentAPIVersion, Kind: "ProductionReleasePlan"}, []string{"deploy/releases/edge-groups.json"}); err != nil {
+	if err := ValidateEdgeGroupRegistryUpdate(nil, initial, Plan{}, []string{"deploy/releases/edge-groups.json"}); err != nil {
 		t.Fatalf("pending data-only registry introduction: %v", err)
-	}
-	unsafeInitial := initial
-	unsafeInitial.Groups = append([]EdgeGroup(nil), initial.Groups...)
-	unsafeInitial.Groups[0].Control.MigrationState = "independent"
-	unsafeInitial.Groups[0].Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
-	if err := ValidateEdgeGroupRegistryUpdate(nil, unsafeInitial, Plan{}, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "must begin pending") {
-		t.Fatalf("active initial group was accepted: %v", err)
 	}
 	if err := ValidateEdgeGroupRegistryUpdate(nil, initial, Plan{}, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "later production atom") {
 		t.Fatalf("initial registry bundled a production intent: %v", err)
 	}
-	pendingTemplate := initial
-	pendingTemplate.Groups = append([]EdgeGroup(nil), initial.Groups...)
-	pendingTemplate.Groups[0].Control.ManifestPath = "internal/edgecontrol/component/resources.authority.group.json"
-	pendingTemplate.Groups[0].Control.ManifestVariables = map[string]string{"CONTROL_NAME": "edge-control-alpha"}
-	if err := ValidateEdgeGroupRegistryUpdate(&initial, pendingTemplate, Plan{}, []string{"deploy/releases/edge-groups.json", pendingTemplate.Groups[0].Control.ManifestPath}); err != nil {
-		t.Fatalf("pending template configuration update: %v", err)
-	}
-	if err := ValidateEdgeGroupRegistryUpdate(&initial, pendingTemplate, Plan{}, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "unselected component") {
-		t.Fatalf("pending template update smuggled a production intent: %v", err)
-	}
 
-	next := initial
-	next.Groups = append([]EdgeGroup(nil), initial.Groups...)
-	next.Groups[0].Control.MigrationState = "adopting"
-	controlPlan := Plan{Releases: []PlanRelease{{ComponentID: alpha.Control.ID}}}
-	if err := ValidateEdgeGroupRegistryUpdate(&initial, next, controlPlan, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err != nil {
-		t.Fatalf("single control adoption: %v", err)
-	}
-	independent := next
-	independent.Groups = append([]EdgeGroup(nil), next.Groups...)
+	independent := initial
+	independent.Groups = append([]EdgeGroup(nil), initial.Groups...)
 	independent.Groups[0].Control.MigrationState = "independent"
-	independent.Groups[0].Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
-	if err := ValidateEdgeGroupRegistryUpdate(&next, independent, Plan{}, []string{"deploy/releases/edge-groups.json", independent.Groups[0].Control.AdoptionReceiptPath}); err != nil {
+	controlPlan := Plan{Releases: []PlanRelease{{ComponentID: alpha.Control.ID}}}
+	if err := ValidateEdgeGroupRegistryUpdate(&initial, independent, controlPlan, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err != nil {
 		t.Fatalf("single control independence: %v", err)
 	}
-	receipt := adoptionReceiptFixture(t, independent.Groups[0].Control, independent.Groups[0].GroupID)
-	if err := ValidateEdgeGroupAdoptionReceipts(&next, independent, func(path string) (OwnershipAdoptionReceipt, error) {
-		if path != independent.Groups[0].Control.AdoptionReceiptPath {
-			t.Fatalf("unexpected adoption receipt path %q", path)
-		}
-		return receipt, nil
-	}); err != nil {
-		t.Fatalf("verified control independence: %v", err)
+	adopting := initial
+	adopting.Groups = append([]EdgeGroup(nil), initial.Groups...)
+	adopting.Groups[0].Control.MigrationState = "adopting"
+	if err := ValidateEdgeGroupRegistryUpdate(&initial, adopting, controlPlan, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "legacy adoption state") {
+		t.Fatalf("Edge adoption state was accepted: %v", err)
 	}
-	skipped := initial
-	skipped.Groups = append([]EdgeGroup(nil), initial.Groups...)
-	skipped.Groups[0].Control.MigrationState = "independent"
-	skipped.Groups[0].Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
-	if err := ValidateEdgeGroupRegistryUpdate(&initial, skipped, controlPlan, []string{"deploy/releases/edge-groups.json"}); err == nil || !strings.Contains(err.Error(), "pending to adopting to independent") {
-		t.Fatalf("skipped adoption state was accepted: %v", err)
+
+	legacy := edgeGroupFixture("alpha", "edge-group-metro-alpha")
+	legacy.Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
+	legacy.Worker.AdoptionReceiptPath = "deploy/releases/edge-worker-alpha/adoption-receipt.json"
+	legacy.Worker.BootstrapLKGPath = "deploy/releases/edge-worker-alpha/lkg.json"
+	clean := legacy
+	clean.Control.AdoptionReceiptPath = ""
+	clean.Worker.AdoptionReceiptPath = ""
+	clean.Worker.BootstrapLKGPath = ""
+	changed := []string{"deploy/releases/edge-groups.json", legacy.Control.AdoptionReceiptPath, legacy.Worker.AdoptionReceiptPath, legacy.Worker.BootstrapLKGPath}
+	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{legacy}}
+	current := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{clean}}
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, Plan{}, changed); err != nil {
+		t.Fatalf("retired Edge adoption metadata cleanup: %v", err)
 	}
-	crossGroup := next
-	crossGroup.Groups = append([]EdgeGroup(nil), next.Groups...)
-	crossGroup.Groups[0].Worker.MigrationState = "adopting"
-	if err := ValidateEdgeGroupRegistryUpdate(&initial, crossGroup, controlPlan, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "unselected component") {
-		t.Fatalf("cross-component registry drift was accepted: %v", err)
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, Plan{}, changed[:1]); err == nil || !strings.Contains(err.Error(), "unselected component") {
+		t.Fatalf("metadata cleanup without deleting its evidence was accepted: %v", err)
 	}
 }
 
@@ -448,11 +427,10 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		Workload:    Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: controlName, Container: "edge-control", FieldManager: "fugue-edge-control-" + id + "-declarative", Replicas: 1, RolloutMode: "recreate"},
 		Health:      []HealthProbe{{Type: "deployment", Name: controlName}},
 		Concurrency: "fugue-production-edge-control-" + id, MigrationState: "independent",
-		AdoptionReceiptPath: "deploy/releases/edge-control-" + id + "/adoption-receipt.json",
 	}
 	worker := Component{
 		ID: "edge-worker-" + id, Family: "edge",
-		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer.group.json", BootstrapLKGPath: "deploy/releases/edge-worker-" + id + "/lkg.json",
+		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer.group.json",
 		ManifestVariables: map[string]string{
 			"API_SECRET": "fugue-edge-worker-api-" + id, "CONTROL_NAME": controlName, "FRONT_NAME": frontName, "GROUP": id, "GROUP_ID": groupID,
 			"FRONT_COMPONENT":             "edge-" + id + "-front",
@@ -461,9 +439,8 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 			"WORKER_A_COMPONENT": "edge-" + id + "-worker-a", "WORKER_A_NAME": workerAName,
 			"WORKER_B_COMPONENT": "edge-" + id + "-worker-b", "WORKER_B_NAME": workerBName,
 		},
-		HeterogeneousBootstrapLKG: true,
-		SourceRoots:               []string{"Dockerfile.edge", "cmd/fugue-edge", "internal/edge"},
-		Artifact:                  Artifact{Repository: "ghcr.io/example/fugue-edge", Dockerfile: "Dockerfile.edge", Context: ".", BuildPackage: "./cmd/fugue-edge"},
+		SourceRoots: []string{"Dockerfile.edge", "cmd/fugue-edge", "internal/edge"},
+		Artifact:    Artifact{Repository: "ghcr.io/example/fugue-edge", Dockerfile: "Dockerfile.edge", Context: ".", BuildPackage: "./cmd/fugue-edge"},
 		ArtifactTargets: []ArtifactTarget{
 			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: frontName, Container: "edge-front", ContainerType: "container"},
 			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: workerAName, Container: "edge", ContainerType: "container"},
@@ -473,7 +450,6 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		Transition:  &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: groupID, FrontName: frontName, WorkerAName: workerAName, WorkerBName: workerBName, WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
 		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "edge-group-authority", Name: groupID}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
 		Concurrency: "fugue-production-edge-worker-" + id, MigrationState: "independent",
-		AdoptionReceiptPath: "deploy/releases/edge-worker-" + id + "/adoption-receipt.json",
 	}
 	return EdgeGroup{ID: id, GroupID: groupID, Control: control, Worker: worker}
 }

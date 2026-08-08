@@ -110,57 +110,6 @@ func TestRenderManifestsBindsEveryDeclaredArtifactTarget(t *testing.T) {
 	}
 }
 
-func TestBootstrapLKGPreservesGroupLocalImmutableImages(t *testing.T) {
-	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
-	group.Worker.MigrationState = "adopting"
-	group.Worker.AdoptionReceiptPath = ""
-	group.Worker.OwnershipAdoption = &OwnershipAdoption{
-		LegacyFieldManager: "helm",
-		Resources: []OwnershipAdoptionScope{{
-			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-front"},
-			Fields:   []string{"/spec/template"},
-		}},
-	}
-	registry := Registry{APIVersion: RegistryAPIVersion, Kind: RegistryKind, Components: []Component{group.Worker}}
-	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"internal/edge/service.go", group.Worker.IntentPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	intent := Intent{APIVersion: IntentAPIVersion, Kind: IntentKind, Component: group.Worker.ID, Generation: 1, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: testSHA1, ExpectedPreviousManifestSHA: testSHA1, ExpectedPreviousOCIRevision: testSHA1, ExpectedPreviousImageDigest: testDigest, Rollback: "previous-git-lkg"}
-	plan, err = BindIntents(registry, plan, map[string]Intent{group.Worker.ID: intent}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receipt, err := MaterializeArtifactReceipt(plan, group.Worker.ID, RegistryVerification{
-		Image: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64), IndexDigest: "sha256:" + strings.Repeat("b", 64),
-		ManifestDigest: "sha256:" + strings.Repeat("c", 64), ConfigDigest: "sha256:" + strings.Repeat("d", 64), OCIRevision: testSHA2,
-		Platform: "linux/amd64", Verification: "registry_manifest_config_and_layer_get", BlobCount: 2, LayerProbeCount: 1, RequestCount: 5, TotalLayerBytes: 10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	forward := edgeWorkerResourceSetFixture("placeholder", "placeholder", testSHA2)
-	lkg := edgeWorkerResourceSetFixture("ghcr.io/example/fugue-edge@"+testDigest, "ghcr.io/example/fugue-edge@sha256:"+strings.Repeat("e", 64), testSHA1)
-	rendered, err := RenderManifests(plan, group.Worker.ID, receipt, bytes.NewReader(forward), bytes.NewReader(lkg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(rendered.LKG, []byte("sha256:"+strings.Repeat("e", 64))) {
-		t.Fatalf("auxiliary group-local LKG image was overwritten: %s", rendered.LKG)
-	}
-	if bytes.Count(rendered.Forward, []byte(receipt.ImmutableRef)) != 3 {
-		t.Fatalf("forward artifact was not bound across the group: %s", rendered.Forward)
-	}
-	wrong := bytes.Replace(lkg, []byte(testDigest), []byte("sha256:"+strings.Repeat("f", 64)), 1)
-	if _, err := RenderManifests(plan, group.Worker.ID, receipt, bytes.NewReader(forward), bytes.NewReader(wrong)); err == nil {
-		t.Fatal("bootstrap LKG with a mismatched primary digest was accepted")
-	}
-}
-
-func edgeWorkerResourceSetFixture(frontImage, workerImage, source string) []byte {
-	return []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-gamma-front","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"front"}},"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"` + source + `","fugue.pro/source-commit":"` + source + `"},"labels":{"app":"front"}},"spec":{"containers":[{"image":"` + frontImage + `","name":"edge-front"}]}},"updateStrategy":{"type":"OnDelete"}}},{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-gamma-worker-a","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"worker-a"}},"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"` + source + `","fugue.pro/source-commit":"` + source + `"},"labels":{"app":"worker-a"}},"spec":{"containers":[{"image":"` + workerImage + `","name":"edge"}]}},"updateStrategy":{"type":"OnDelete"}}},{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-gamma-worker-b","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"worker-b"}},"template":{"metadata":{"annotations":{"fugue.pro/oci-revision":"` + source + `","fugue.pro/source-commit":"` + source + `"},"labels":{"app":"worker-b"}},"spec":{"containers":[{"image":"` + workerImage + `","name":"edge"}]}},"updateStrategy":{"type":"OnDelete"}}}],"kind":"ComponentResourceSet"}`)
-}
-
 func TestRenderManifestsRejectsMutableOrPlaceholderSidecars(t *testing.T) {
 	for _, image := range []string{
 		"caddy:latest",

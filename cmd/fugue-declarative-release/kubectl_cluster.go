@@ -1116,7 +1116,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	observationWorkloadRaw := workloadRaw
 	if allowHistoricalRestarts && release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-		release.RetrySameLKG && release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" {
+		release.RetrySameLKG && release.BootstrapLKGPath != "" {
 		observationWorkloadRaw, err = bootstrapObservationWorkload(workloadRaw, manifest, primary)
 		if err != nil {
 			return declarativerelease.Observation{}, err
@@ -1386,8 +1386,7 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 	auxiliaryRelease := release
 	auxiliaryRelease.Workload = workload
 	expected := target
-	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" &&
+	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" &&
 		target.ConfigSHA == release.ExpectedPreviousConfigSHA && target.OCIRevision == release.ExpectedPreviousOCIRevision
 	if allowLegacy {
 		expected, err = targetIdentityFromDeclaredWorkload(desired, workload)

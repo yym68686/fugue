@@ -88,37 +88,8 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		if caddyTargets != 0 {
 			t.Fatalf("%s incorrectly binds external Caddy containers to its Edge artifact", componentID)
 		}
-		lkgRaw, err := os.ReadFile(filepath.Join("../..", byID[componentID].BootstrapLKGPath))
-		if err != nil {
-			t.Fatalf("read %s semantic LKG: %v", componentID, err)
-		}
-		lkg, err := DecodeResourceSet(bytes.NewReader(lkgRaw))
-		if err != nil {
-			t.Fatalf("decode %s semantic LKG: %v", componentID, err)
-		}
-		intentRaw, err := os.ReadFile(filepath.Join("../..", byID[componentID].IntentPath))
-		if err != nil && (!os.IsNotExist(err) || byID[componentID].MigrationState != "pending") {
-			t.Fatalf("read %s bootstrap intent: %v", componentID, err)
-		}
-		if err == nil {
-			intent, decodeErr := DecodeIntent(bytes.NewReader(intentRaw))
-			if decodeErr != nil {
-				t.Fatalf("decode %s bootstrap intent: %v", componentID, decodeErr)
-			}
-			release := PlanRelease{
-				ComponentID: componentID, IntentGeneration: intent.Generation,
-				ExpectedPreviousConfigSHA: intent.ExpectedPreviousConfigSHA, ExpectedPreviousManifestSHA: intent.ExpectedPreviousManifestSHA,
-				ExpectedPreviousOCIRevision: intent.ExpectedPreviousOCIRevision, ExpectedPreviousImageDigest: intent.ExpectedPreviousImageDigest,
-				Artifact: byID[componentID].Artifact, Workload: byID[componentID].Workload,
-			}
-			if identityErr := validateBootstrapLKGIdentity(lkg, release); identityErr != nil {
-				t.Fatalf("validate %s semantic LKG: %v", componentID, identityErr)
-			}
-		}
-		identities, err := ResourceSetIdentities(lkgRaw)
-		if err != nil || len(identities) != 3 || identities[0].Name != group.Worker.Transition.EdgeGroupAB.FrontName ||
-			identities[1].Name != group.Worker.Transition.EdgeGroupAB.WorkerAName || identities[2].Name != group.Worker.Transition.EdgeGroupAB.WorkerBName {
-			t.Fatalf("%s semantic LKG resources are not group-local: %+v err=%v", componentID, identities, err)
+		if byID[componentID].BootstrapLKGPath != "" {
+			t.Fatalf("%s retains a legacy bootstrap LKG", componentID)
 		}
 	}
 	baseFile, err := os.Open(filename)

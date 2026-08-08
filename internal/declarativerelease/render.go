@@ -70,8 +70,7 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if !lkgResourceIdentitiesSubset(forward, lkg) {
 			return RenderedManifests{}, errors.New("LKG resource identities are not a subset of forward")
 		}
-		bootstrap := release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-			release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != ""
+		bootstrap := release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != ""
 		if bootstrap {
 			if err := validateBootstrapLKGIdentity(lkg, *release); err != nil {
 				return RenderedManifests{}, err

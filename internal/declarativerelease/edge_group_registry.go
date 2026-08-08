@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strings"
 )
 
 const (
@@ -79,8 +78,8 @@ func (group EdgeGroup) validate() error {
 		return errors.New("edge group component family must be edge")
 	}
 	for _, component := range []Component{group.Control, group.Worker} {
-		if component.MigrationState == "independent" && component.AdoptionReceiptPath == "" {
-			return fmt.Errorf("edge group component %q has no verified adoption receipt", component.ID)
+		if component.MigrationState == "adopting" || component.OwnershipAdoption != nil {
+			return fmt.Errorf("edge group component %q retains legacy adoption state", component.ID)
 		}
 	}
 	if err := group.Control.Validate(); err != nil {
@@ -118,9 +117,6 @@ func (group EdgeGroup) validate() error {
 	}
 	if !legacyControlPublicationReady && (!controlProcessReady || !publicationReady) {
 		return errors.New("edge control process and worker publication health must be group-bound")
-	}
-	if group.Worker.BootstrapLKGPath == "" || !strings.Contains(group.Worker.BootstrapLKGPath, group.ID) {
-		return errors.New("edge worker semantic LKG is not group-scoped")
 	}
 	return nil
 }
@@ -209,9 +205,8 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			previous, next Component
 		}{{group.Control.ID, prior.Control, group.Control}, {group.Worker.ID, prior.Worker, group.Worker}} {
 			if pair.previous.MigrationState != pair.next.MigrationState &&
-				!((pair.previous.MigrationState == "pending" && pair.next.MigrationState == "adopting") ||
-					(pair.previous.MigrationState == "adopting" && pair.next.MigrationState == "independent")) {
-				return fmt.Errorf("edge group component %q migration state must advance pending to adopting to independent", pair.id)
+				!(pair.previous.MigrationState == "pending" && pair.next.MigrationState == "independent") {
+				return fmt.Errorf("edge group component %q migration state must advance pending to independent", pair.id)
 			}
 			priorJSON, err := CanonicalJSON(pair.previous)
 			if err != nil {
@@ -223,9 +218,7 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			}
 			if string(priorJSON) != string(nextJSON) && selected != pair.id {
 				_, intentChanged := changed[pair.next.IntentPath]
-				_, receiptChanged := changed[pair.next.AdoptionReceiptPath]
-				if selected == "" && pair.previous.MigrationState == "adopting" && pair.next.MigrationState == "independent" &&
-					pair.next.AdoptionReceiptPath != "" && receiptChanged {
+				if selected == "" && edgeLegacyMigrationMetadataRemoved(pair.previous, pair.next, changed) {
 					continue
 				}
 				if pair.previous.MigrationState == "pending" && pair.next.MigrationState == "pending" && !intentChanged {
@@ -241,38 +234,25 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 	return nil
 }
 
-// ValidateEdgeGroupAdoptionReceipts makes an adopting-to-independent state
-// transition depend on the terminal production receipt, not on an intent
-// generation or same-LKG retry bit.
-func ValidateEdgeGroupAdoptionReceipts(previous *EdgeGroupRegistry, current EdgeGroupRegistry, load func(string) (OwnershipAdoptionReceipt, error)) error {
-	if previous == nil {
-		return nil
+func edgeLegacyMigrationMetadataRemoved(previous, next Component, changed map[string]struct{}) bool {
+	if previous.MigrationState != "independent" || next.MigrationState != "independent" ||
+		next.AdoptionReceiptPath != "" || next.BootstrapLKGPath != "" ||
+		(previous.AdoptionReceiptPath == "" && previous.BootstrapLKGPath == "") {
+		return false
 	}
-	before := make(map[string]EdgeGroup, len(previous.Groups))
-	for _, group := range previous.Groups {
-		before[group.ID] = group
-	}
-	for _, group := range current.Groups {
-		prior, exists := before[group.ID]
-		if !exists {
+	for _, path := range []string{previous.AdoptionReceiptPath, previous.BootstrapLKGPath} {
+		if path == "" {
 			continue
 		}
-		for _, pair := range []struct {
-			previous, next Component
-		}{{prior.Control, group.Control}, {prior.Worker, group.Worker}} {
-			if pair.previous.MigrationState != "adopting" || pair.next.MigrationState != "independent" {
-				continue
-			}
-			receipt, err := load(pair.next.AdoptionReceiptPath)
-			if err != nil {
-				return fmt.Errorf("edge group component %q adoption receipt: %w", pair.next.ID, err)
-			}
-			if err := receipt.Validate(pair.next, group.GroupID); err != nil {
-				return fmt.Errorf("edge group component %q adoption receipt: %w", pair.next.ID, err)
-			}
+		if _, ok := changed[path]; !ok {
+			return false
 		}
 	}
-	return nil
+	previous.AdoptionReceiptPath, previous.BootstrapLKGPath = "", ""
+	next.AdoptionReceiptPath, next.BootstrapLKGPath = "", ""
+	previousJSON, previousErr := CanonicalJSON(previous)
+	nextJSON, nextErr := CanonicalJSON(next)
+	return previousErr == nil && nextErr == nil && string(previousJSON) == string(nextJSON)
 }
 
 func edgeGroupUsesStagedHealth(group EdgeGroup) bool {

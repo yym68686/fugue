@@ -53,23 +53,22 @@ type Registry struct {
 // Component contains only static release mechanics. Runtime version choices
 // belong to Intent and immutable build receipts.
 type Component struct {
-	ID                        string             `json:"id"`
-	Family                    string             `json:"family"`
-	IntentPath                string             `json:"intentPath"`
-	ManifestPath              string             `json:"manifestPath"`
-	ManifestVariables         map[string]string  `json:"manifestVariables,omitempty"`
-	BootstrapLKGPath          string             `json:"bootstrapLkgPath,omitempty"`
-	HeterogeneousBootstrapLKG bool               `json:"heterogeneousBootstrapLkg,omitempty"`
-	SourceRoots               []string           `json:"sourceRoots"`
-	Artifact                  Artifact           `json:"artifact"`
-	ArtifactTargets           []ArtifactTarget   `json:"artifactTargets,omitempty"`
-	Workload                  Workload           `json:"workload"`
-	Transition                *Transition        `json:"transition,omitempty"`
-	Health                    []HealthProbe      `json:"health"`
-	Concurrency               string             `json:"concurrency"`
-	MigrationState            string             `json:"migrationState"`
-	OwnershipAdoption         *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
-	AdoptionReceiptPath       string             `json:"adoptionReceiptPath,omitempty"`
+	ID                  string             `json:"id"`
+	Family              string             `json:"family"`
+	IntentPath          string             `json:"intentPath"`
+	ManifestPath        string             `json:"manifestPath"`
+	ManifestVariables   map[string]string  `json:"manifestVariables,omitempty"`
+	BootstrapLKGPath    string             `json:"bootstrapLkgPath,omitempty"`
+	SourceRoots         []string           `json:"sourceRoots"`
+	Artifact            Artifact           `json:"artifact"`
+	ArtifactTargets     []ArtifactTarget   `json:"artifactTargets,omitempty"`
+	Workload            Workload           `json:"workload"`
+	Transition          *Transition        `json:"transition,omitempty"`
+	Health              []HealthProbe      `json:"health"`
+	Concurrency         string             `json:"concurrency"`
+	MigrationState      string             `json:"migrationState"`
+	OwnershipAdoption   *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
+	AdoptionReceiptPath string             `json:"adoptionReceiptPath,omitempty"`
 }
 
 // OwnershipAdoption is the reviewed, one-time compatibility boundary for a
@@ -197,7 +196,6 @@ type PlanRelease struct {
 	ManifestPath                string             `json:"manifestPath"`
 	ManifestVariables           map[string]string  `json:"manifestVariables,omitempty"`
 	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
-	HeterogeneousBootstrapLKG   bool               `json:"heterogeneousBootstrapLkg,omitempty"`
 	RetrySameLKG                bool               `json:"retrySameLkg,omitempty"`
 	Artifact                    Artifact           `json:"artifact"`
 	ArtifactTargets             []ArtifactTarget   `json:"artifactTargets,omitempty"`
@@ -321,9 +319,6 @@ func (component Component) Validate() error {
 		if normalized, err := normalizeRepositoryPath(component.BootstrapLKGPath); err != nil || normalized != component.BootstrapLKGPath {
 			return fmt.Errorf("component %q bootstrapLkgPath is invalid", component.ID)
 		}
-	}
-	if component.HeterogeneousBootstrapLKG && (component.BootstrapLKGPath == "" || component.Transition == nil || component.Transition.Type != "edge-group-ab") {
-		return fmt.Errorf("component %q heterogeneous bootstrap LKG requires an edge-group transition", component.ID)
 	}
 	for key, value := range component.ManifestVariables {
 		if !manifestVariableNamePattern.MatchString(key) || !manifestVariableValuePattern.MatchString(value) {
@@ -827,7 +822,6 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			release.ManifestVariables[key] = value
 		}
 		release.BootstrapLKGPath = component.BootstrapLKGPath
-		release.HeterogeneousBootstrapLKG = component.HeterogeneousBootstrapLKG
 		release.RetrySameLKG = retrySameLKG
 		release.Artifact = component.Artifact
 		release.ArtifactTargets = append([]ArtifactTarget(nil), component.ArtifactTargets...)

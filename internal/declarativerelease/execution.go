@@ -285,8 +285,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				}
 				if err == nil {
 					var predecessorWitness []byte
-					if release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-						release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" {
+					if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
 						predecessorWitness, err = BootstrapPredecessorConvergenceManifest(rendered.LKG, release)
 					} else {
 						predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)

@@ -216,7 +216,7 @@ func executionFixtureForPlan(t *testing.T, plan Plan) (Plan, ArtifactReceipt, Re
 	base := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{},"spec":{"containers":[{"image":"ghcr.io/example/fugue-api:old","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
 	lkgInput := base
 	release := plan.Releases[0]
-	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.HeterogeneousBootstrapLKG {
+	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
 		set, decodeErr := DecodeResourceSet(bytes.NewReader(base))
 		if decodeErr != nil {
 			t.Fatal(decodeErr)

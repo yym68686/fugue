@@ -142,9 +142,6 @@ func runPlan(args []string, output io.Writer) error {
 		if edgeErr := declarativerelease.ValidateEdgeGroupRegistryUpdate(previousEdge, currentEdge, plan, changed); edgeErr != nil {
 			return edgeErr
 		}
-		if edgeErr := declarativerelease.ValidateEdgeGroupAdoptionReceipts(previousEdge, currentEdge, loadOwnershipAdoptionReceipt); edgeErr != nil {
-			return edgeErr
-		}
 	}
 	if len(plan.Releases) > 0 {
 		parentRaw, parentErr := exec.Command("git", "rev-parse", headSHA+"^").Output()
@@ -192,22 +189,6 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
-}
-
-func loadOwnershipAdoptionReceipt(path string) (declarativerelease.OwnershipAdoptionReceipt, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return declarativerelease.OwnershipAdoptionReceipt{}, err
-	}
-	receipt, decodeErr := declarativerelease.DecodeOwnershipAdoptionReceipt(file)
-	closeErr := file.Close()
-	if decodeErr != nil {
-		return declarativerelease.OwnershipAdoptionReceipt{}, decodeErr
-	}
-	if closeErr != nil {
-		return declarativerelease.OwnershipAdoptionReceipt{}, closeErr
-	}
-	return receipt, nil
 }
 
 func containsPath(paths []string, want string) bool {
