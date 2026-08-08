@@ -118,7 +118,9 @@ func TestOwnershipAssociativePointerClaimsOnlyOneEnvironmentValue(t *testing.T) 
 		BootstrapLKGDigest: digestOf(bootstrap), ImageRef: "example/edge@sha256:" + strings.Repeat("a", 64),
 		Resources: []OwnershipAdoptionResourcePlan{{
 			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-dns-country-de"},
-			Fields:   []string{pointer}, UID: "dns-uid", ResourceVersion: "42", Generation: 7,
+			Fields:   []string{pointer}, ValidationScaffolds: []OwnershipValidationScaffold{{
+				Pointer: "/spec/template/spec/containers[name=dns]/image", Value: "example/edge@sha256:" + strings.Repeat("a", 64),
+			}}, UID: "dns-uid", ResourceVersion: "42", Generation: 7,
 		}},
 	}
 	identity := TargetIdentity{Present: true, ImageRef: "example/edge@sha256:" + strings.Repeat("b", 64),
@@ -171,5 +173,22 @@ func TestOwnershipAssociativePointerClaimsOnlyOneEnvironmentValue(t *testing.T) 
 		if _, err := BuildOwnershipAdoptionManifest(bootstrap, plan); err == nil {
 			t.Fatalf("invalid associative pointer %q was accepted", invalid)
 		}
+	}
+}
+
+func TestBindOwnershipValidationScaffoldsUsesTheReviewedAuxiliaryLKG(t *testing.T) {
+	lkg := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"dns-de","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"image":"example/edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"dns"}]}}}},{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"ssh-de","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"image":"example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"ssh-front"}]}}}}],"kind":"ComponentResourceSet"}`)
+	scope := OwnershipAdoptionScope{
+		Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "dns-de"},
+		Fields:   []string{"/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"},
+	}
+	scaffolds, err := bindOwnershipValidationScaffolds(lkg, scope)
+	if err != nil || len(scaffolds) != 1 || scaffolds[0].Pointer != "/spec/template/spec/containers[name=dns]/image" ||
+		scaffolds[0].Value != "example/edge@sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("auxiliary scaffold was not bound to its own LKG resource: scaffolds=%+v err=%v", scaffolds, err)
+	}
+	scope.Identity.Name = "missing"
+	if _, err := bindOwnershipValidationScaffolds(lkg, scope); err == nil {
+		t.Fatal("missing auxiliary LKG resource was accepted")
 	}
 }

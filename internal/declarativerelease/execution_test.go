@@ -385,12 +385,12 @@ func TestBindOwnershipAdoptionRecognizesAnExactExistingDeclarativeManager(t *tes
 	prewrite := stableObservation("uid", "10", lkg.ImageRef, lkg.ConfigSHA)
 	prewrite.FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	prewrite.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
-	adoption, err := bindOwnershipAdoption(release, lkg, prewrite)
+	adoption, err := bindOwnershipAdoption(release, lkg, nil, prewrite)
 	if err != nil || adoption == nil || !adoption.AlreadyConverged {
 		t.Fatalf("exact existing declarative ownership was not resumable: adoption=%+v err=%v", adoption, err)
 	}
 	prewrite.Resources[0].FieldManagers = []string{"helm"}
-	if _, err := bindOwnershipAdoption(release, lkg, prewrite); err == nil {
+	if _, err := bindOwnershipAdoption(release, lkg, nil, prewrite); err == nil {
 		t.Fatal("partially adopted ownership was accepted")
 	}
 }

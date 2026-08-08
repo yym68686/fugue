@@ -274,14 +274,15 @@ func (cluster *kubectlCluster) verifyOwnershipTakeoverScaffolds(ctx context.Cont
 		if len(scaffolds) == 0 {
 			continue
 		}
-		primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
-		if scope.Identity != primary {
-			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is outside the primary workload", scope.Identity.Kind, scope.Identity.Name)
-		}
-		for _, pointer := range scaffolds {
-			if !strings.Contains(pointer, "containers[name="+release.Workload.Container+"]") {
-				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is outside the primary workload container", scope.Identity.Kind, scope.Identity.Name)
+		expected := make(map[string]string, len(scope.ValidationScaffolds))
+		for _, scaffold := range scope.ValidationScaffolds {
+			if _, exists := expected[scaffold.Pointer]; exists {
+				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is duplicated", scope.Identity.Kind, scope.Identity.Name)
 			}
+			expected[scaffold.Pointer] = scaffold.Value
+		}
+		if len(expected) != len(scaffolds) {
+			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is incomplete", scope.Identity.Kind, scope.Identity.Name)
 		}
 		raw, err := cluster.getResource(ctx, scope.Identity)
 		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
@@ -291,9 +292,12 @@ func (cluster *kubectlCluster) verifyOwnershipTakeoverScaffolds(ctx context.Cont
 		if err != nil {
 			return err
 		}
-		image, found, err := declaredContainerImageOptional(value, release.Workload.Container, "container")
-		if err != nil || !found || image != adoption.ImageRef {
-			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not the exact live bootstrap image", scope.Identity.Kind, scope.Identity.Name)
+		for _, pointer := range scaffolds {
+			container, ok := ownershipScaffoldContainer(pointer)
+			image, found, imageErr := declaredContainerImageOptional(value, container, "container")
+			if !ok || imageErr != nil || !found || image != expected[pointer] {
+				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not the exact live bootstrap image", scope.Identity.Kind, scope.Identity.Name)
+			}
 		}
 		metadata := mapField(value, "metadata")
 		if stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) != scope.ResourceVersion ||
@@ -308,6 +312,16 @@ func (cluster *kubectlCluster) verifyOwnershipTakeoverScaffolds(ctx context.Cont
 		}
 	}
 	return nil
+}
+
+func ownershipScaffoldContainer(pointer string) (string, bool) {
+	const prefix = "/spec/template/spec/containers[name="
+	const suffix = "]/image"
+	if !strings.HasPrefix(pointer, prefix) || !strings.HasSuffix(pointer, suffix) {
+		return "", false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(pointer, prefix), suffix)
+	return name, name != ""
 }
 
 // refreshOwnershipTakeoverCAS rebinds only the mutable RV portion of the

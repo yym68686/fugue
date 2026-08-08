@@ -99,11 +99,17 @@ type OwnershipAdoptionPlan struct {
 }
 
 type OwnershipAdoptionResourcePlan struct {
-	Identity        ResourceIdentity `json:"identity"`
-	Fields          []string         `json:"fields"`
-	UID             string           `json:"uid"`
-	ResourceVersion string           `json:"resourceVersion"`
-	Generation      int64            `json:"generation"`
+	Identity            ResourceIdentity              `json:"identity"`
+	Fields              []string                      `json:"fields"`
+	ValidationScaffolds []OwnershipValidationScaffold `json:"validationScaffolds,omitempty"`
+	UID                 string                        `json:"uid"`
+	ResourceVersion     string                        `json:"resourceVersion"`
+	Generation          int64                         `json:"generation"`
+}
+
+type OwnershipValidationScaffold struct {
+	Pointer string `json:"pointer"`
+	Value   string `json:"value"`
 }
 
 type ExecutionResult struct {
@@ -340,7 +346,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if !alreadyConverged && !degradedPredecessor && !prewrite.Matches(lkg, release, true) {
 		return ExecutionPlan{}, errors.New("live workload matches neither declared LKG nor immutable target")
 	}
-	adoption, err := bindOwnershipAdoption(release, lkg, prewrite, degradedPredecessor)
+	adoption, err := bindOwnershipAdoption(release, lkg, rendered.LKG, prewrite, degradedPredecessor)
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
@@ -434,7 +440,7 @@ func prepareAdoptingRetryPredecessor(ctx context.Context, cluster Cluster, relea
 	return second, nil
 }
 
-func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Observation, degraded ...bool) (*OwnershipAdoptionPlan, error) {
+func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest []byte, prewrite Observation, degraded ...bool) (*OwnershipAdoptionPlan, error) {
 	if release.MigrationState != "adopting" || !release.ExpectedPreviousPresent {
 		if release.OwnershipAdoption != nil {
 			return nil, errors.New("ownership adoption is present outside an adopting predecessor")
@@ -479,9 +485,14 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Obs
 		if (!legacyManager && !declarativeManager) || declarativeManager != adoptionAlreadyConverged {
 			return nil, fmt.Errorf("ownership adoption resource %s/%s field manager identity is invalid", scope.Identity.Kind, scope.Identity.Name)
 		}
+		scaffolds, err := bindOwnershipValidationScaffolds(lkgManifest, scope)
+		if err != nil {
+			return nil, err
+		}
 		boundResources = append(boundResources, OwnershipAdoptionResourcePlan{
 			Identity: scope.Identity, Fields: append([]string(nil), scope.Fields...),
-			UID: resource.UID, ResourceVersion: resource.ResourceVersion, Generation: resource.Generation,
+			ValidationScaffolds: scaffolds,
+			UID:                 resource.UID, ResourceVersion: resource.ResourceVersion, Generation: resource.Generation,
 		})
 	}
 	result := &OwnershipAdoptionPlan{
@@ -492,6 +503,30 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Obs
 		Resources:           boundResources,
 		ImageRef:            lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA, OCIRevision: lkg.OCIRevision,
 		AlreadyConverged: adoptionAlreadyConverged,
+	}
+	return result, nil
+}
+
+func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptionScope) ([]OwnershipValidationScaffold, error) {
+	pointers, err := OwnershipTakeoverValidationScaffolds(scope.Fields)
+	if err != nil || len(pointers) == 0 {
+		return nil, err
+	}
+	resource, err := ResourceSetItem(lkgManifest, scope.Identity)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]OwnershipValidationScaffold, 0, len(pointers))
+	for _, pointer := range pointers {
+		value, err := adoptionPointerValue(resource, pointer)
+		if err != nil {
+			return nil, fmt.Errorf("ownership validation scaffold %s: %w", pointer, err)
+		}
+		image, ok := value.(string)
+		if !ok || !strings.Contains(image, "@sha256:") {
+			return nil, fmt.Errorf("ownership validation scaffold %s is not an immutable image", pointer)
+		}
+		result = append(result, OwnershipValidationScaffold{Pointer: pointer, Value: image})
 	}
 	return result, nil
 }
@@ -1072,6 +1107,9 @@ func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
 		prewrite, exists := resources[resource.Identity]
 		if !exists || resource.UID != prewrite.UID || resource.ResourceVersion != prewrite.ResourceVersion || resource.Generation != prewrite.Generation {
 			return errors.New("execution ownership adoption resource CAS is invalid")
+		}
+		if _, err := validateOwnershipValidationScaffolds(resource); err != nil {
+			return errors.New("execution ownership adoption validation scaffold is invalid")
 		}
 		scopes = append(scopes, OwnershipAdoptionScope{Identity: resource.Identity, Fields: resource.Fields})
 	}

@@ -66,15 +66,12 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 			}
 		}
 		if takeover {
-			scaffolds, err := OwnershipTakeoverValidationScaffolds(scope.Fields)
+			scaffolds, err := validateOwnershipValidationScaffolds(scope)
 			if err != nil {
 				return nil, err
 			}
-			if len(scaffolds) > 0 && !strings.Contains(adoption.ImageRef, "@sha256:") {
-				return nil, errors.New("ownership takeover validation scaffold is not bound to the bootstrap image")
-			}
-			for _, pointer := range scaffolds {
-				if err := setAdoptionPointer(item, pointer, adoption.ImageRef); err != nil {
+			for _, scaffold := range scaffolds {
+				if err := setAdoptionPointer(item, scaffold.Pointer, scaffold.Value); err != nil {
 					return nil, err
 				}
 			}
@@ -86,6 +83,25 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		return nil, errors.New("ownership adoption resource set expanded unexpectedly")
 	}
 	return CanonicalJSON(result)
+}
+
+func validateOwnershipValidationScaffolds(scope OwnershipAdoptionResourcePlan) ([]OwnershipValidationScaffold, error) {
+	pointers, err := OwnershipTakeoverValidationScaffolds(scope.Fields)
+	if err != nil {
+		return nil, err
+	}
+	if len(pointers) != len(scope.ValidationScaffolds) {
+		return nil, errors.New("ownership takeover validation scaffolds are incomplete")
+	}
+	result := append([]OwnershipValidationScaffold(nil), scope.ValidationScaffolds...)
+	sort.Slice(result, func(i, j int) bool { return result[i].Pointer < result[j].Pointer })
+	for index, pointer := range pointers {
+		if result[index].Pointer != pointer || !strings.Contains(result[index].Value, "@sha256:") ||
+			(index > 0 && result[index-1].Pointer == pointer) {
+			return nil, errors.New("ownership takeover validation scaffold is invalid")
+		}
+	}
+	return result, nil
 }
 
 // OwnershipTakeoverValidationScaffolds returns fields required only to make a

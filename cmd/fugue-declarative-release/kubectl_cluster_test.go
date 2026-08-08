@@ -485,7 +485,7 @@ func TestManagedFieldsOwnershipRequiresEveryReviewedPointer(t *testing.T) {
 	}
 }
 
-func TestOwnershipTakeoverValidationScaffoldMustBeExclusivelyPreowned(t *testing.T) {
+func TestAuxiliaryOwnershipTakeoverValidationScaffoldMustBeExclusivelyPreowned(t *testing.T) {
 	directory := t.TempDir()
 	kubectl := filepath.Join(directory, "kubectl")
 	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$LIVE_JSON\"\n"), 0o700); err != nil {
@@ -512,14 +512,17 @@ func TestOwnershipTakeoverValidationScaffoldMustBeExclusivelyPreowned(t *testing
 	}
 	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
 	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
-		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-dns-country-de",
-		Container: "dns", FieldManager: "fugue-edge-client-de-declarative",
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-edge-country-de-ssh-front",
+		Container: "ssh-front", FieldManager: "fugue-edge-client-de-declarative",
 	}}
 	adoption := declarativerelease.OwnershipAdoptionPlan{
 		LegacyFieldManager: "helm", LegacyFieldManagers: []string{"helm"}, ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64),
 		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{
 			Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-dns-country-de"},
-			Fields:   []string{"/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"}, UID: "dns-uid", ResourceVersion: "42", Generation: 7,
+			Fields:   []string{"/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"},
+			ValidationScaffolds: []declarativerelease.OwnershipValidationScaffold{{
+				Pointer: "/spec/template/spec/containers[name=dns]/image", Value: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64),
+			}}, UID: "dns-uid", ResourceVersion: "42", Generation: 7,
 		}},
 	}
 	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
