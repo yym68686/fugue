@@ -45,6 +45,22 @@ print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifes
 	}
 }
 
+func TestSelectorFromWorkloadNarrowsSharedSelectorWithPodComponent(t *testing.T) {
+	raw := []byte(`{"spec":{"selector":{"matchLabels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/name":"fugue"}},"template":{"metadata":{"labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/name":"fugue","app.kubernetes.io/component":"api"}}}}}`)
+	selector, err := selectorFromWorkload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selector != "app.kubernetes.io/component=api,app.kubernetes.io/instance=fugue,app.kubernetes.io/name=fugue" {
+		t.Fatalf("selector = %q", selector)
+	}
+
+	conflicting := []byte(`{"spec":{"selector":{"matchLabels":{"app.kubernetes.io/component":"controller"}},"template":{"metadata":{"labels":{"app.kubernetes.io/component":"api"}}}}}`)
+	if _, err := selectorFromWorkload(conflicting); err == nil {
+		t.Fatal("conflicting selector and Pod component label was accepted")
+	}
+}
+
 func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	kubectl := filepath.Join(t.TempDir(), "kubectl")
 	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf 'null\\n'\n"), 0o700); err != nil {

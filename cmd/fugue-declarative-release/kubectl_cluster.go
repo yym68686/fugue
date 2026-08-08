@@ -1815,6 +1815,17 @@ func selectorFromWorkload(raw []byte) (string, error) {
 	if len(labels) == 0 {
 		return "", errors.New("workload selector has no matchLabels")
 	}
+	// Some legacy Helm Deployments share only the instance/name selector with
+	// sibling control-plane workloads. The Pod template's component label is
+	// immutable for the observed generation and safely narrows the read to this
+	// workload without changing its Kubernetes selector.
+	templateLabels := mapField(mapField(mapField(spec, "template"), "metadata"), "labels")
+	if component, ok := templateLabels["app.kubernetes.io/component"].(string); ok && strings.TrimSpace(component) != "" {
+		if existing, exists := labels["app.kubernetes.io/component"]; exists && existing != component {
+			return "", errors.New("workload selector conflicts with Pod component label")
+		}
+		labels["app.kubernetes.io/component"] = component
+	}
 	keys := make([]string, 0, len(labels))
 	for key, rawValue := range labels {
 		if _, ok := rawValue.(string); !ok || strings.ContainsAny(key, ",=") {
