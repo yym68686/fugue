@@ -30,3 +30,17 @@ func TestManifestTemplateAddsAThirdGroupUsingOnlyRegistryData(t *testing.T) {
 		t.Fatal("unused registry variable was accepted")
 	}
 }
+
+func TestPredecessorTemplateAllowsOnlyNewUnusedRegistryVariables(t *testing.T) {
+	predecessor := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"@@NAME@@","namespace":"fugue-system"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"edge"}},"template":{"metadata":{"labels":{"app":"edge"}},"spec":{"containers":[{"image":"fugue-artifact://edge","name":"edge"}]}}}}],"kind":"ComponentResourceSet"}`)
+	variables := map[string]string{"NAME": "edge-gamma", "NEW_COMPONENT": "edge-gamma-worker"}
+	if _, err := MaterializePredecessorManifestTemplate(predecessor, variables); err != nil {
+		t.Fatalf("new current registry variable rejected for predecessor: %v", err)
+	}
+	if _, err := MaterializeManifestTemplate(predecessor, variables); err == nil {
+		t.Fatal("current forward template accepted an unused registry variable")
+	}
+	if _, err := MaterializePredecessorManifestTemplate(predecessor, map[string]string{"NEW_COMPONENT": "edge-gamma-worker"}); err == nil {
+		t.Fatal("predecessor template accepted an unresolved historical placeholder")
+	}
+}

@@ -492,7 +492,7 @@ func runPrepare(args []string, output io.Writer) error {
 		return lkgErr
 	}
 	if lkgManifest != nil && release.MigrationState != "adopting" {
-		lkgManifest, err = declarativerelease.MaterializeManifestTemplate(lkgManifest, release.ManifestVariables)
+		lkgManifest, err = declarativerelease.MaterializePredecessorManifestTemplate(lkgManifest, release.ManifestVariables)
 		if err != nil {
 			return err
 		}
