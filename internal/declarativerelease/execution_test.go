@@ -696,6 +696,31 @@ func TestPrepareAndExecuteRecoverAnExactDegradedSameLKGPredecessor(t *testing.T)
 	}
 }
 
+func TestPrepareAdoptingRetryRevalidatesUnchangedBootstrapLKG(t *testing.T) {
+	plan, _, rendered, lkg, _ := retryExecutionFixture(t)
+	release := plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.OwnershipAdoption = &OwnershipAdoption{Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}, Fields: []string{"/spec/template"},
+	}}}
+	target := TargetIdentity{Present: true, ImageRef: release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest,
+		ConfigSHA: release.ExpectedPreviousConfigSHA, ManifestSHA: release.ExpectedPreviousManifestSHA,
+		OCIRevision: release.ExpectedPreviousOCIRevision, ManifestDigest: rendered.LKGDigest}
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+	observed, err := prepareAdoptingRetryPredecessor(context.Background(), fake, release, target, rendered.LKG)
+	if err != nil || !observed.Matches(target, release, true) || len(fake.converged) != 1 {
+		t.Fatalf("adopting retry did not revalidate the bootstrap LKG: observation=%+v converged=%d err=%v", observed, len(fake.converged), err)
+	}
+	if bytes.Contains(fake.converged[0], []byte("fugue.pro/source-commit")) || bytes.Contains(fake.converged[0], []byte("ghcr.io/example/fugue-api")) {
+		t.Fatalf("adopting retry structural witness retained renderer identity: %s", fake.converged[0])
+	}
+
+	fake = &fakeCluster{observations: []Observation{lkg}, health: []Observation{lkg}, convergedErrors: []error{errors.New("spec drift")}}
+	if _, err := prepareAdoptingRetryPredecessor(context.Background(), fake, release, target, rendered.LKG); err == nil || !strings.Contains(err.Error(), "bootstrap LKG drift") {
+		t.Fatalf("adopting retry accepted bootstrap drift: %v", err)
+	}
+}
+
 func TestPrepareAndExecuteRecoverAnOwnedDegradedPriorAttempt(t *testing.T) {
 	plan, receipt, rendered, lkg, forward := retryExecutionFixture(t)
 	legacyCAS := casOnlyObservation(lkg)

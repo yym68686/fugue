@@ -247,6 +247,8 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				err = cluster.Converged(ctx, release, rendered.Forward)
 				alreadyConverged = err == nil
 			}
+		} else if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
+			prewrite, err = prepareAdoptingRetryPredecessor(ctx, cluster, release, lkg, rendered.LKG)
 		} else {
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 			degradedPredecessor = err == nil && !prewrite.Matches(lkg, release, true)
@@ -392,6 +394,40 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	}
 	plan.PlanDigest = digestOf(unsigned)
 	return plan, nil
+}
+
+func prepareAdoptingRetryPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, lkgManifest []byte) (Observation, error) {
+	first, err := cluster.Observe(ctx, release, lkg, lkgManifest)
+	if err != nil || !first.Matches(lkg, release, true) {
+		if err == nil {
+			err = errors.New("adopting retry does not match the bootstrap LKG")
+		}
+		return Observation{}, err
+	}
+	if healthy, healthErr := cluster.WaitHealthy(ctx, release, lkg, lkgManifest); healthErr != nil || !healthy.Matches(lkg, release, true) {
+		if healthErr == nil {
+			healthErr = errors.New("adopting retry bootstrap LKG is unhealthy")
+		}
+		return Observation{}, healthErr
+	}
+	witness, err := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
+	if err != nil {
+		return Observation{}, err
+	}
+	if err := cluster.Converged(ctx, release, witness); err != nil {
+		return Observation{}, fmt.Errorf("adopting retry bootstrap LKG drift: %w", err)
+	}
+	second, err := cluster.Observe(ctx, release, lkg, lkgManifest)
+	if err != nil || !second.Matches(lkg, release, true) {
+		if err == nil {
+			err = errors.New("adopting retry bootstrap LKG changed")
+		}
+		return Observation{}, err
+	}
+	if second.HealthDigest != first.HealthDigest {
+		return Observation{}, errors.New("adopting retry bootstrap LKG health changed")
+	}
+	return second, nil
 }
 
 func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, prewrite Observation, degraded ...bool) (*OwnershipAdoptionPlan, error) {
