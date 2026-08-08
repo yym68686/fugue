@@ -9,24 +9,12 @@ import (
 	"strconv"
 	"syscall"
 
-	"fugue/internal/config"
 	"fugue/internal/edgegroupfront"
 )
 
 func main() {
 	logger := log.Default()
-	legacy := config.EdgeFrontFromEnv()
-	cfg := edgegroupfront.Config{
-		HTTPListenAddr: legacy.HTTPListenAddr, HTTPSListenAddr: legacy.HTTPSListenAddr, HealthAddr: legacy.HealthAddr,
-		EdgeID: legacy.EdgeID, EdgeGroupID: legacy.EdgeGroupID, NodeHost: legacy.NodeHost, HTTPMode: legacy.HTTPMode,
-		ActiveSlotFile: legacy.ActiveSlotFile, DefaultSlot: legacy.DefaultSlot, DialTimeout: legacy.DialTimeout,
-		ShutdownTimeout: legacy.ShutdownTimeout, ProxyProtocol: legacy.ProxyProtocol,
-		ProcNetSNMPPath: legacy.ProcNetSNMPPath, ProcNetNetstatPath: legacy.ProcNetNetstatPath,
-		Slots: make(map[string]edgegroupfront.SlotTargets, len(legacy.Slots)),
-	}
-	for slot, target := range legacy.Slots {
-		cfg.Slots[slot] = edgegroupfront.SlotTargets{HTTPAddress: target.HTTPAddress, HTTPSAddress: target.HTTPSAddress}
-	}
+	cfg := edgegroupfront.ConfigFromEnv()
 	if raw := os.Getenv("FUGUE_EDGE_FRONT_REQUIRE_ACTIVATION_STATE"); raw != "" {
 		required, err := strconv.ParseBool(raw)
 		if err != nil {

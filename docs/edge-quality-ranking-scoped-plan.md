@@ -33,7 +33,7 @@ which edge group and edge node should receive this request?
   - 在控制平面构建 DNS answer candidate、latency-aware score、scoped candidate。
 - `internal/dnsserver/service.go`
   - 在 DNS server 内根据 candidate score、geo hint、exploration 和 policy 返回 answer。
-- `internal/edgefront/service.go`
+- `internal/edgegroupfront/service.go`
   - 采集 public TCP connection 的 `TCP_INFO` 和 node TCP counters。
 - `internal/tcpdiag/tcpdiag.go`
   - 解析 Linux TCP diagnostics 字段。

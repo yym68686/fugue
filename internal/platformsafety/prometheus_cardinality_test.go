@@ -9,7 +9,7 @@ import (
 func TestProductionPrometheusSurfacesExcludeHighCardinalityIdentity(t *testing.T) {
 	t.Parallel()
 	worker := readFunctionSource(t, "../../internal/edge/service.go", "func (s *Service) handleMetrics(")
-	front := readFunctionSource(t, "../../internal/edgefront/service.go", "func (s *Service) handleMetrics(")
+	front := readFunctionSource(t, "../../internal/edgegroupfront/service.go", "func (s *Service) handleMetrics(")
 	pipeline := readFunctionSource(t, "../../internal/observability/pipeline.go", "func (p *Pipeline) PrometheusMetrics(")
 	prometheus := readTextFile(t, "../../deploy/helm/fugue/templates/observability-prometheus-configmap.yaml")
 	alertmanager := readTextFile(t, "../../deploy/helm/fugue/templates/observability-alertmanager-configmap.yaml")

@@ -734,7 +734,7 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 			return Plan{}, fmt.Errorf("runtime commit affects distinct component artifacts %q and %q; split the shared product boundary first", selected.component.ID, item.component.ID)
 		}
 		for _, changedPath := range item.selectedPaths {
-			if changedPath == item.component.ManifestPath {
+			if changedPath == item.component.ManifestPath && changedPath != selected.component.ManifestPath {
 				return Plan{}, fmt.Errorf("runtime commit changes multiple component manifests %q and %q", selected.component.ID, item.component.ID)
 			}
 			if _, shared := selectedPathSet[changedPath]; !shared {

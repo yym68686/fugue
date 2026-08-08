@@ -119,7 +119,7 @@ func (group EdgeGroup) validate() error {
 	if !legacyControlPublicationReady && (!controlProcessReady || !publicationReady) {
 		return errors.New("edge control process and worker publication health must be group-bound")
 	}
-	if group.Worker.BootstrapLKGPath == "" || !group.Worker.HeterogeneousBootstrapLKG || !strings.Contains(group.Worker.BootstrapLKGPath, group.ID) {
+	if group.Worker.BootstrapLKGPath == "" || !strings.Contains(group.Worker.BootstrapLKGPath, group.ID) {
 		return errors.New("edge worker semantic LKG is not group-scoped")
 	}
 	return nil

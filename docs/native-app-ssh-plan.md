@@ -62,7 +62,7 @@ Relevant implementation points:
 - `internal/model/edge_routes.go` models edge route bundles around hostname,
   path prefix, HTTP upstream URL, TLS policy, and cache policy.
 - `internal/edge/service.go` proxies HTTP routes and applies Caddy host routes.
-- `internal/edgefront/service.go` already contains reusable TCP copy/proxy
+- `internal/edgegroupfront/service.go` already contains reusable TCP copy/proxy
   mechanics, but only for public 80/443 blue-green fronting today.
 - Helm edge charts expose fixed public host ports for HTTP/HTTPS. Dynamic
   per-app SSH ports require a different listener model.
@@ -646,7 +646,7 @@ implementation.
 - [x] Implement last-known-good SSH route bundle cache.
 - [x] Implement dynamic listener reconciliation.
 - [x] Implement TCP proxy by local listener port.
-- [x] Reuse or extract existing TCP copy helpers from `internal/edgefront`.
+- [x] Reuse or extract existing TCP copy helpers from `internal/edgegroupfront`.
 - [x] Add dial timeout and idle timeout handling.
 - [x] Add graceful shutdown for active listeners.
 - [x] Add per-IP connection rate limiting.

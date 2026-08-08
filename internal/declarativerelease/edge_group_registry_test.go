@@ -140,7 +140,7 @@ func TestProductionGoAndWorkflowDoNotNameConfiguredGroups(t *testing.T) {
 			}
 		}
 	}
-	for _, root := range []string{"../edge", "../edgecontrol", "../edgefront"} {
+	for _, root := range []string{"../edge", "../edgecontrol", "../edgegroupfront"} {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
@@ -162,6 +162,39 @@ func TestProductionGoAndWorkflowDoNotNameConfiguredGroups(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestSharedEdgeWorkerManifestRollsOneGroupPerIntent(t *testing.T) {
+	baseFile, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := DecodeRegistry(baseFile)
+	_ = baseFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := DecodeEdgeGroupRegistry(edgeFile)
+	_ = edgeFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := MergeEdgeGroupRegistry(base, edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := edge.Groups[0].Worker
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{selected.ManifestPath, selected.IntentPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Releases) != 1 || plan.Releases[0].ComponentID != selected.ID {
+		t.Fatalf("shared manifest did not remain single-group: %+v", plan.Releases)
 	}
 }
 
@@ -422,9 +455,11 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		IntentPath: "deploy/releases/edge-worker-" + id + "/intent.json", ManifestPath: "internal/edge/component/resources.inventory-producer.group.json", BootstrapLKGPath: "deploy/releases/edge-worker-" + id + "/lkg.json",
 		ManifestVariables: map[string]string{
 			"API_SECRET": "fugue-edge-worker-api-" + id, "CONTROL_NAME": controlName, "FRONT_NAME": frontName, "GROUP": id, "GROUP_ID": groupID,
+			"FRONT_COMPONENT":             "edge-" + id + "-front",
 			"INVENTORY_IDENTITY_A_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-a", "INVENTORY_IDENTITY_B_SECRET": "fugue-edge-worker-inventory-identity-" + id + "-b",
 			"READER_SECRET": "fugue-edge-worker-reader-" + id, "SERVICE_ACCOUNT": "edge-worker-" + id, "VERIFIER_SECRET": "fugue-edge-worker-verifier-" + id,
-			"WORKER_A_NAME": workerAName, "WORKER_B_NAME": workerBName,
+			"WORKER_A_COMPONENT": "edge-" + id + "-worker-a", "WORKER_A_NAME": workerAName,
+			"WORKER_B_COMPONENT": "edge-" + id + "-worker-b", "WORKER_B_NAME": workerBName,
 		},
 		HeterogeneousBootstrapLKG: true,
 		SourceRoots:               []string{"Dockerfile.edge", "cmd/fugue-edge", "internal/edge"},

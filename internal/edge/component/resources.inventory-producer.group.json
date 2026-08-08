@@ -11,7 +11,7 @@
           "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
         },
         "labels": {
-          "app.kubernetes.io/component": "edge-country-@@GROUP@@-front",
+        "app.kubernetes.io/component": "@@FRONT_COMPONENT@@",
           "app.kubernetes.io/instance": "fugue",
           "app.kubernetes.io/name": "fugue",
           "fugue.io/edge-group-id": "@@GROUP_ID@@"
@@ -23,7 +23,7 @@
         "revisionHistoryLimit": 2,
         "selector": {
           "matchLabels": {
-            "app.kubernetes.io/component": "edge-country-@@GROUP@@-front",
+          "app.kubernetes.io/component": "@@FRONT_COMPONENT@@",
             "app.kubernetes.io/instance": "fugue",
             "app.kubernetes.io/name": "fugue"
           }
@@ -35,7 +35,7 @@
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
             },
             "labels": {
-              "app.kubernetes.io/component": "edge-country-@@GROUP@@-front",
+            "app.kubernetes.io/component": "@@FRONT_COMPONENT@@",
               "app.kubernetes.io/instance": "fugue",
               "app.kubernetes.io/name": "fugue",
               "fugue.io/edge-group-id": "@@GROUP_ID@@"
@@ -237,7 +237,7 @@
           "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
         },
         "labels": {
-          "app.kubernetes.io/component": "edge-country-@@GROUP@@-worker-a",
+        "app.kubernetes.io/component": "@@WORKER_A_COMPONENT@@",
           "app.kubernetes.io/instance": "fugue",
           "app.kubernetes.io/name": "fugue",
           "fugue.io/edge-group-id": "@@GROUP_ID@@",
@@ -250,7 +250,7 @@
         "revisionHistoryLimit": 2,
         "selector": {
           "matchLabels": {
-            "app.kubernetes.io/component": "edge-country-@@GROUP@@-worker-a",
+          "app.kubernetes.io/component": "@@WORKER_A_COMPONENT@@",
             "app.kubernetes.io/instance": "fugue",
             "app.kubernetes.io/name": "fugue"
           }
@@ -263,7 +263,7 @@
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
             },
             "labels": {
-              "app.kubernetes.io/component": "edge-country-@@GROUP@@-worker-a",
+            "app.kubernetes.io/component": "@@WORKER_A_COMPONENT@@",
               "app.kubernetes.io/instance": "fugue",
               "app.kubernetes.io/name": "fugue",
               "fugue.io/edge-control-client": "true",
@@ -301,36 +301,6 @@
                   {
                     "name": "FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE",
                     "value": "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json"
-                  },
-                {
-                  "name": "FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP",
-                  "value": "false"
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "key": "FUGUE_BUNDLE_SIGNING_KEY",
-                        "name": "fugue-fugue-config"
-                      }
-                    }
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_KEY_ID",
-                    "value": "control-plane"
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "key": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
-                        "name": "fugue-fugue-config",
-                        "optional": true
-                      }
-                    }
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"
                   },
                   {
                     "name": "FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE",
@@ -748,7 +718,7 @@
           "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
         },
         "labels": {
-          "app.kubernetes.io/component": "edge-country-@@GROUP@@-worker-b",
+        "app.kubernetes.io/component": "@@WORKER_B_COMPONENT@@",
           "app.kubernetes.io/instance": "fugue",
           "app.kubernetes.io/name": "fugue",
           "fugue.io/edge-group-id": "@@GROUP_ID@@",
@@ -761,7 +731,7 @@
         "revisionHistoryLimit": 2,
         "selector": {
           "matchLabels": {
-            "app.kubernetes.io/component": "edge-country-@@GROUP@@-worker-b",
+          "app.kubernetes.io/component": "@@WORKER_B_COMPONENT@@",
             "app.kubernetes.io/instance": "fugue",
             "app.kubernetes.io/name": "fugue"
           }
@@ -774,7 +744,7 @@
               "fugue.pro/edge-worker-resource-set": "edge-worker-static-resources/v1"
             },
             "labels": {
-              "app.kubernetes.io/component": "edge-country-@@GROUP@@-worker-b",
+            "app.kubernetes.io/component": "@@WORKER_B_COMPONENT@@",
               "app.kubernetes.io/instance": "fugue",
               "app.kubernetes.io/name": "fugue",
               "fugue.io/edge-control-client": "true",
@@ -812,36 +782,6 @@
                   {
                     "name": "FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE",
                     "value": "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json"
-                  },
-                {
-                  "name": "FUGUE_EDGE_ROUTE_BUNDLE_ADOPTION_LEGACY_BOOTSTRAP",
-                  "value": "false"
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "key": "FUGUE_BUNDLE_SIGNING_KEY",
-                        "name": "fugue-fugue-config"
-                      }
-                    }
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_KEY_ID",
-                    "value": "control-plane"
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "key": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY",
-                        "name": "fugue-fugue-config",
-                        "optional": true
-                      }
-                    }
-                  },
-                  {
-                    "name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID"
                   },
                   {
                     "name": "FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE",
