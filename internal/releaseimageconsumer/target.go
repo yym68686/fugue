@@ -202,9 +202,6 @@ type releaseTopology struct {
 	ImagePrePull    bool
 	TelemetryAgent  bool
 	ImageCache      bool
-	EdgeDirect      bool
-	EdgeBlueGreen   bool
-	EdgeDynamic     bool
 	EdgeSSHFront    bool
 	DNS             bool
 	MeshRecovery    bool
@@ -742,13 +739,6 @@ func buildExpectedConsumers(objects map[objectKey]manifestObject, fullname, name
 		{"controller", "imagePrePull.image", "DaemonSet", fullname + "-image-prepull", "image-prepull", topology.ImagePrePull},
 		{"telemetry_agent", "observability.agent.image", "Deployment", fullname + "-telemetry-agent", "telemetry-agent", topology.TelemetryAgent},
 		{"image_cache", "imageCache.image", "DaemonSet", fullname + "-image-cache", "image-cache", topology.ImageCache},
-		{"edge", "edge.image", "DaemonSet", fullname + "-edge", "edge", topology.EdgeDirect},
-		{"edge", "edge.blueGreen.front.image", "DaemonSet", fullname + "-edge-front", "edge-front", topology.EdgeBlueGreen},
-		{"edge", "edge.blueGreen.slots.a.image", "DaemonSet", fullname + "-edge-worker-a", "edge", topology.EdgeBlueGreen},
-		{"edge", "edge.blueGreen.slots.b.image", "DaemonSet", fullname + "-edge-worker-b", "edge", topology.EdgeBlueGreen},
-		{"edge", "edge.dynamic.blueGreen.front.image", "DaemonSet", fullname + "-edge-dynamic-front", "edge-front", topology.EdgeDynamic},
-		{"edge", "edge.dynamic.blueGreen.slots.a.image", "DaemonSet", fullname + "-edge-dynamic-worker-a", "edge", topology.EdgeDynamic},
-		{"edge", "edge.dynamic.blueGreen.slots.b.image", "DaemonSet", fullname + "-edge-dynamic-worker-b", "edge", topology.EdgeDynamic},
 		{"edge", "edge.sshFront.image", "DaemonSet", fullname + "-edge-ssh-front", "ssh-front", topology.EdgeSSHFront},
 		{"edge", "meshRecovery.image", "DaemonSet", fullname + "-mesh-recovery", "mesh-recovery", topology.MeshRecovery},
 	}
@@ -774,25 +764,11 @@ func buildExpectedConsumers(objects map[objectKey]manifestObject, fullname, name
 	for family, names := range groups {
 		for index, group := range names {
 			if family == "edge" {
-				candidates := []struct {
-					path, name, container string
-				}{
-					{fmt.Sprintf("edge.groups[%d].image", index), fullname + "-edge-" + group, "edge"},
-					{fmt.Sprintf("edge.groups[%d].blueGreen.front.image", index), fullname + "-edge-" + group + "-front", "edge-front"},
-					{fmt.Sprintf("edge.groups[%d].blueGreen.slots.a.image", index), fullname + "-edge-" + group + "-worker-a", "edge"},
-					{fmt.Sprintf("edge.groups[%d].blueGreen.slots.b.image", index), fullname + "-edge-" + group + "-worker-b", "edge"},
-					{fmt.Sprintf("edge.groups[%d].sshFront.image", index), fullname + "-edge-" + group + "-ssh-front", "ssh-front"},
-				}
-				for _, candidate := range candidates {
-					enabled := topology.EdgeDirect
-					if strings.Contains(candidate.path, ".blueGreen.") {
-						enabled = topology.EdgeBlueGreen
-					} else if strings.Contains(candidate.path, ".sshFront.") {
-						enabled = topology.EdgeSSHFront
-					}
-					if err := addPod("edge", candidate.path, "DaemonSet", candidate.name, candidate.container, enabled); err != nil {
-						return nil, err
-					}
+				if err := addPod(
+					"edge", fmt.Sprintf("edge.groups[%d].sshFront.image", index), "DaemonSet",
+					fullname+"-edge-"+group+"-ssh-front", "ssh-front", topology.EdgeSSHFront,
+				); err != nil {
+					return nil, err
 				}
 			} else if family == "dns" {
 				if err := addDNS(fmt.Sprintf("dns.groups[%d].image", index), fullname+"-dns-"+group, topology.DNS); err != nil {
@@ -2412,22 +2388,6 @@ func effectiveReleaseTopology(defaults, config map[string]any) (releaseTopology,
 	if err != nil {
 		return releaseTopology{}, err
 	}
-	blueGreen, err := boolValue(false, "edge", "blueGreen", "enabled")
-	if err != nil {
-		return releaseTopology{}, err
-	}
-	keepLegacy, err := boolValue(false, "edge", "blueGreen", "migration", "keepLegacyDirect")
-	if err != nil {
-		return releaseTopology{}, err
-	}
-	dynamicEnabled, err := boolValue(false, "edge", "dynamic", "enabled")
-	if err != nil {
-		return releaseTopology{}, err
-	}
-	dynamicBlueGreen, err := boolValue(true, "edge", "dynamic", "blueGreen", "enabled")
-	if err != nil {
-		return releaseTopology{}, err
-	}
 	sshFront, err := boolValue(true, "edge", "sshFront", "enabled")
 	if err != nil {
 		return releaseTopology{}, err
@@ -2448,9 +2408,6 @@ func effectiveReleaseTopology(defaults, config map[string]any) (releaseTopology,
 		ImagePrePull:    imagePrePullEnabled && imageCount > 0,
 		TelemetryAgent:  agentEnabled,
 		ImageCache:      imageCache,
-		EdgeDirect:      edgeEnabled && (!blueGreen || keepLegacy),
-		EdgeBlueGreen:   edgeEnabled && blueGreen,
-		EdgeDynamic:     edgeEnabled && blueGreen && dynamicEnabled && dynamicBlueGreen,
 		EdgeSSHFront:    edgeEnabled && sshFront,
 		DNS:             dns,
 		MeshRecovery:    meshRecovery,

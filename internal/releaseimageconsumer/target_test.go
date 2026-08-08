@@ -371,171 +371,12 @@ func TestVerifyTargetRenderRequiresIndependentFiles(t *testing.T) {
 	}
 }
 
-func TestVerifyTargetRenderRejectsMissingPreserveActivationEvenForUnknownRepository(t *testing.T) {
-	lock := testLock()
-	manifest := baseManifest(lock) + `---
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: edge-workload-identity
-          image: registry.example.com/previous-edge:stable
-      containers:
-        - name: edge
-          image: registry.example.com/previous-edge:stable
-`
-	helm := helmFixture(manifest)
-	helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
-	if _, err := invokeTarget(t, lock, helm, helm); err == nil || !strings.Contains(err.Error(), "consumer count") {
-		t.Fatalf("missing preserve activation was not rejected: %v", err)
-	}
-}
-
-func TestVerifyTargetRenderCanonicalizesLegalPinnedTagDigestSelection(t *testing.T) {
-	lock := testLock()
-	repository := "registry.example.com/previous-edge"
-	digest := testDigest("7")
-	lock.Activations = append(lock.Activations, Activation{
-		Component: "edge", SourceMode: "preserve",
-		SourceTemplateRef: repository + ":stable@" + digest,
-		SelectedRef:       repository + ":stable@" + digest,
-		Repository:        repository, SourceTag: "stable", Digest: digest, RuntimeManifestDigest: testDigest("8"),
-		PinState: "pinned", HelmPath: "edge.image", Workload: Workload{Kind: "DaemonSet", Name: "fugue-fugue-edge", Container: "edge"},
-	})
-	manifest := baseManifest(lock) + fmt.Sprintf(`---
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: edge-workload-identity
-          image: %[1]s@%[2]s
-      containers:
-        - name: edge
-          image: %[1]s@%[2]s
-`, repository, digest)
-	helm := helmFixture(manifest)
-	helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
-	evidence, err := invokeTarget(t, lock, helm, helm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, binding := range evidence.Bindings {
-		if binding.HelmPath == "edge.image" {
-			found = true
-			if binding.SelectedRef != repository+"@"+digest {
-				t.Fatalf("evidence did not record canonical rendered ref: %#v", binding)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("edge binding missing from evidence")
-	}
-}
-
-func TestVerifyTargetRenderAcceptsExplicitLegacyUnpinnedPreserveSelection(t *testing.T) {
-	lock := testLock()
-	repository := "registry.example.com/legacy-edge"
-	lock.Activations = append(lock.Activations, Activation{
-		Component: "edge", SourceMode: "preserve",
-		SourceTemplateRef: repository + ":stable", SelectedRef: repository + ":stable",
-		Repository: repository, SourceTag: "stable", PinState: "legacy_unpinned", MigrationAllowed: true,
-		HelmPath: "edge.image", Workload: Workload{Kind: "DaemonSet", Name: "fugue-fugue-edge", Container: "edge"},
-	})
-	manifest := baseManifest(lock) + fmt.Sprintf(`---
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: edge-workload-identity
-          image: %[1]s:stable
-      containers:
-        - name: edge
-          image: %[1]s:stable
-`, repository)
-	helm := helmFixture(manifest)
-	helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
-	evidence, err := invokeTarget(t, lock, helm, helm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, binding := range evidence.Bindings {
-		if binding.HelmPath == "edge.image" && binding.SelectedRef != repository+":stable" {
-			t.Fatalf("legacy rendered ref drifted: %#v", binding)
-		}
-	}
-}
-
 func TestVerifyTargetRenderRejectsManagedRepositoryInInitContainer(t *testing.T) {
 	lock := testLock()
 	manifest := strings.Replace(baseManifest(lock), "      containers:\n        - name: api", fmt.Sprintf("      initContainers:\n        - name: hidden\n          image: %s\n      containers:\n        - name: api", lock.Activations[0].SelectedRef), 1)
 	helm := helmFixture(manifest)
 	if _, err := invokeTarget(t, lock, helm, helm); err == nil || !strings.Contains(err.Error(), "unclassified initContainer") {
 		t.Fatalf("managed initContainer was not rejected: %v", err)
-	}
-}
-
-func TestVerifyTargetRenderBindsEdgeIdentityInitToLogicalActivation(t *testing.T) {
-	lock := testLock()
-	edge := testArtifact("edge", "registry.example.com/fugue-edge", testDigest("7"), testDigest("8"))
-	lock.Artifacts = append(lock.Artifacts, edge)
-	lock.Activations = append(lock.Activations, testBuiltActivation(edge, "edge.image", "DaemonSet", "fugue-fugue-edge", "edge"))
-	manifest := func(identityInit string) string {
-		return baseManifest(lock) + fmt.Sprintf(`---
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      %s
-      containers:
-        - name: edge
-          image: %s
-`, identityInit, edge.ImmutableRef)
-	}
-	wrapper := func(identityInit string) map[string]any {
-		helm := helmFixture(manifest(identityInit))
-		helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
-		return helm
-	}
-	boundInit := fmt.Sprintf("initContainers:\n        - name: %s\n          image: %s", edgeWorkloadIdentityContainer, edge.ImmutableRef)
-	bound := wrapper(boundInit)
-	evidence, err := invokeTarget(t, lock, bound, bound)
-	if err != nil {
-		t.Fatalf("bound Edge identity init was rejected: %v", err)
-	}
-	if len(evidence.Bindings) != len(lock.Activations) {
-		t.Fatalf("identity init created a second logical activation: bindings=%d activations=%d", len(evidence.Bindings), len(lock.Activations))
-	}
-
-	for name, identityInit := range map[string]string{
-		"missing":     "",
-		"split-image": fmt.Sprintf("initContainers:\n        - name: %s\n          image: registry.example.com/fugue-edge@%s", edgeWorkloadIdentityContainer, testDigest("9")),
-	} {
-		t.Run(name, func(t *testing.T) {
-			candidate := wrapper(identityInit)
-			if _, err := invokeTarget(t, lock, candidate, candidate); err == nil || !strings.Contains(err.Error(), "identity init") {
-				t.Fatalf("invalid Edge identity init binding was not rejected: %v", err)
-			}
-		})
 	}
 }
 
@@ -1488,23 +1329,11 @@ func TestVerifyTargetRenderRejectsCommentOnlyHook(t *testing.T) {
 	}
 }
 
-func TestVerifyTargetRenderMapsNormalizedGroupIndexAndDNSContainer(t *testing.T) {
+func TestVerifyTargetRenderMapsNormalizedDNSGroupIndexAndContainer(t *testing.T) {
 	lock := testLock()
 	edgeRepository := "registry.example.com/fugue-edge"
 	edgeDigest := testDigest("7")
 	for _, activation := range []Activation{
-		{
-			Component: "edge", SourceMode: "preserve", SourceTemplateRef: edgeRepository + "@" + edgeDigest,
-			SelectedRef: edgeRepository + "@" + edgeDigest, Repository: edgeRepository, SourceTag: "stable",
-			Digest: edgeDigest, RuntimeManifestDigest: testDigest("8"), PinState: "pinned",
-			HelmPath: "edge.image", Workload: Workload{Kind: "DaemonSet", Name: "fugue-fugue-edge", Container: "edge"},
-		},
-		{
-			Component: "edge", SourceMode: "preserve", SourceTemplateRef: edgeRepository + "@" + edgeDigest,
-			SelectedRef: edgeRepository + "@" + edgeDigest, Repository: edgeRepository, SourceTag: "stable",
-			Digest: edgeDigest, RuntimeManifestDigest: testDigest("8"), PinState: "pinned",
-			HelmPath: "edge.groups[0].image", Workload: Workload{Kind: "DaemonSet", Name: "fugue-fugue-edge-country-de", Container: "edge"},
-		},
 		{
 			Component: "edge", SourceMode: "preserve", SourceTemplateRef: edgeRepository + "@" + edgeDigest,
 			SelectedRef: edgeRepository + "@" + edgeDigest, Repository: edgeRepository, SourceTag: "stable",
@@ -1524,36 +1353,6 @@ func TestVerifyTargetRenderMapsNormalizedGroupIndexAndDNSContainer(t *testing.T)
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: fugue-fugue-edge
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: edge-workload-identity
-          image: %[1]s
-      containers:
-        - name: edge
-          image: %[1]s
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge-country-de
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: edge-workload-identity
-          image: %[2]s
-      containers:
-        - name: edge
-          image: %[2]s
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
   name: fugue-fugue-dns
   namespace: fugue-system
 spec:
@@ -1561,7 +1360,7 @@ spec:
     spec:
       containers:
         - name: custom-dns
-          image: %s
+          image: %[1]s
           command:
             - /usr/local/bin/fugue-dns
           env:
@@ -1578,17 +1377,16 @@ spec:
     spec:
       containers:
         - name: custom-dns
-          image: %s
+          image: %[1]s
           command:
             - /usr/local/bin/fugue-dns
           env:
             - name: FUGUE_DNS_ZONE
               value: example.com
-`, edgeRepository+"@"+edgeDigest, edgeRepository+"@"+edgeDigest, edgeRepository+"@"+edgeDigest, edgeRepository+"@"+edgeDigest)
+`, edgeRepository+"@"+edgeDigest)
 	helm := helmFixture(manifest)
 	helm["config"] = map[string]any{
-		"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}, "groups": []any{map[string]any{"name": "Country_DE"}}},
-		"dns":  map[string]any{"enabled": true, "groups": []any{map[string]any{"name": "Country_DE"}}},
+		"dns": map[string]any{"enabled": true, "groups": []any{map[string]any{"name": "Country_DE"}}},
 	}
 	if _, err := invokeTarget(t, lock, helm, helm); err != nil {
 		t.Fatal(err)
@@ -1607,32 +1405,8 @@ func TestVerifyTargetRenderRejectsNormalizedGroupCollision(t *testing.T) {
 	}
 }
 
-func TestVerifyTargetRenderEnforcesEnabledTopologyAndCompleteBlueGreenSet(t *testing.T) {
+func TestVerifyTargetRenderEnforcesEnabledTopology(t *testing.T) {
 	lock := testLock()
-	frontRef := "registry.example.com/fugue-edge@" + testDigest("7")
-	manifest := baseManifest(lock) + fmt.Sprintf(`---
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge-front
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      containers:
-        - name: edge-front
-          image: %s
-`, frontRef)
-	helm := helmFixture(manifest)
-	helm["config"] = map[string]any{"edge": map[string]any{
-		"enabled":   true,
-		"blueGreen": map[string]any{"enabled": true},
-		"sshFront":  map[string]any{"enabled": false},
-	}}
-	if _, err := invokeTarget(t, lock, helm, helm); err == nil || !strings.Contains(err.Error(), "edge-worker-a") {
-		t.Fatalf("partial blue/green topology was not rejected: %v", err)
-	}
-
 	for name, config := range map[string]map[string]any{
 		"image-cache":      {"imageCache": map[string]any{"enabled": true}},
 		"telemetry":        {"observability": map[string]any{"enabled": true, "agent": map[string]any{"enabled": true}}},
@@ -1719,32 +1493,6 @@ func TestVerifyTargetRenderRejectsDefaultEntrypointOverrides(t *testing.T) {
 		})
 	}
 
-	edge := testArtifact("edge", "registry.example.com/fugue-edge", testDigest("7"), testDigest("8"))
-	lock.Artifacts = append(lock.Artifacts, edge)
-	lock.Activations = append(lock.Activations, testBuiltActivation(edge, "edge.image", "DaemonSet", "fugue-fugue-edge", "edge"))
-	manifest := baseManifest(lock) + fmt.Sprintf(`---
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: fugue-fugue-edge
-  namespace: fugue-system
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: edge-workload-identity
-          image: %[1]s
-      containers:
-        - name: edge
-          image: %[1]s
-          args:
-            - unsafe
-`, edge.ImmutableRef)
-	helm := helmFixture(manifest)
-	helm["config"] = map[string]any{"edge": map[string]any{"enabled": true, "sshFront": map[string]any{"enabled": false}}}
-	if _, err := invokeTarget(t, lock, helm, helm); err == nil || !strings.Contains(err.Error(), "authoritative image entrypoint") {
-		t.Fatalf("edge worker default entrypoint override was not rejected: %v", err)
-	}
 }
 
 func TestExactFugueExecutableConsumersRejectArguments(t *testing.T) {
@@ -2252,7 +2000,7 @@ func TestComplexCurrentChartDryRunPassesFullConsumerVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inventory complex current chart consumers: %v", err)
 	}
-	if len(expected) < 20 {
+	if len(expected) < 10 {
 		t.Fatalf("complex current chart unexpectedly has only %d consumers", len(expected))
 	}
 	lock := preserveLockForRenderedConsumers(t, expected)
