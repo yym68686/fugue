@@ -64,7 +64,8 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if err != nil {
 			return RenderedManifests{}, fmt.Errorf("decode LKG resource set: %w", err)
 		}
-		if _, err := lkg.Primary(release.Workload); err != nil {
+		lkgWorkload := bootstrapLKGWorkload(*release)
+		if _, err := lkg.Primary(lkgWorkload); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG primary workload: %w", err)
 		}
 		if !lkgResourceIdentitiesSubset(forward, lkg) {
@@ -72,7 +73,7 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		}
 		bootstrap := release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != ""
 		if bootstrap {
-			if err := validateBootstrapLKGIdentity(lkg, *release); err != nil {
+			if err := validateBootstrapLKGIdentity(lkg, *release, lkgWorkload); err != nil {
 				return RenderedManifests{}, err
 			}
 		} else {
@@ -101,13 +102,34 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 	}, nil
 }
 
+func bootstrapLKGWorkload(release PlanRelease) Workload {
+	workload := release.Workload
+	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil ||
+		workload.Kind != "DaemonSet" || workload.RolloutMode != "rolling" {
+		return workload
+	}
+	for _, scope := range release.OwnershipAdoption.Resources {
+		if scope.Identity.APIVersion != workload.APIVersion || scope.Identity.Kind != workload.Kind ||
+			scope.Identity.Namespace != workload.Namespace || scope.Identity.Name != workload.Name {
+			continue
+		}
+		for _, field := range scope.Fields {
+			if field == "/spec/updateStrategy" {
+				workload.RolloutMode = "on-delete"
+				return workload
+			}
+		}
+	}
+	return workload
+}
+
 // validateBootstrapLKGIdentity permits a first ownership handoff from a
 // heterogeneous legacy resource set. Each reviewed LKG container must already
 // be immutable; the primary workload remains bound to the intent's exact
 // source and digest while auxiliary front/slot/sidecar images retain their own
 // reviewed LKG identities.
-func validateBootstrapLKGIdentity(lkg ResourceSet, release PlanRelease) error {
-	primary, err := lkg.Primary(release.Workload)
+func validateBootstrapLKGIdentity(lkg ResourceSet, release PlanRelease, lkgWorkload Workload) error {
+	primary, err := lkg.Primary(lkgWorkload)
 	if err != nil {
 		return err
 	}

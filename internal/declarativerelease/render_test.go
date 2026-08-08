@@ -189,3 +189,27 @@ func TestRenderManifestsPreservesExplicitLKGConfigurationAndIdentitySet(t *testi
 		t.Fatal("LKG with a different resource identity was accepted")
 	}
 }
+
+func TestBootstrapLKGAllowsOnlyExplicitOnDeleteToRollingAdoption(t *testing.T) {
+	workload := Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-client", Container: "edge", FieldManager: "fugue-edge-client-declarative", RolloutMode: "rolling"}
+	release := PlanRelease{MigrationState: "adopting", Workload: workload, OwnershipAdoption: &OwnershipAdoption{
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: workload.APIVersion, Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name},
+			Fields:   []string{"/spec/template", "/spec/updateStrategy"},
+		}},
+	}}
+	if got := bootstrapLKGWorkload(release); got.RolloutMode != "on-delete" {
+		t.Fatalf("explicit strategy adoption did not bind the OnDelete LKG: %+v", got)
+	}
+
+	release.OwnershipAdoption.Resources[0].Fields = []string{"/spec/template"}
+	if got := bootstrapLKGWorkload(release); got.RolloutMode != "rolling" {
+		t.Fatalf("unreviewed strategy takeover changed the LKG mode: %+v", got)
+	}
+
+	release.MigrationState = "independent"
+	release.OwnershipAdoption = nil
+	if got := bootstrapLKGWorkload(release); got.RolloutMode != "rolling" {
+		t.Fatalf("independent release retained bootstrap strategy compatibility: %+v", got)
+	}
+}
