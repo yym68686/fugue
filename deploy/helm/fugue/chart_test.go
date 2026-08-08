@@ -4688,6 +4688,66 @@ func TestImageCacheOnDeleteStrategyPreservesPodTemplate(t *testing.T) {
 	}
 }
 
+func TestImageCacheOwnershipHandoffIsKeepThenOmit(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	render := func(ownership string) string {
+		args := []string{
+			"template", "fugue", chartDir,
+			"--set-string", "configSecret.existingSecretName=fugue-config-existing",
+			"--set-string", "platformComponentIdentity.existingSecretName=fugue-platform-identity-existing",
+		}
+		if ownership != "" {
+			args = append(args, "--set-string", "imageCache.ownership="+ownership)
+		}
+		cmd := exec.Command("helm", args...)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template image-cache ownership=%q failed: %v\n%s", ownership, err, output)
+		}
+		return string(output)
+	}
+
+	helmOwned := render("")
+	daemonSet := manifestDocumentForKindAndName(helmOwned, "DaemonSet", "fugue-fugue-image-cache")
+	if daemonSet == "" ||
+		!strings.Contains(daemonSet, "helm.sh/resource-policy: keep") ||
+		!strings.Contains(daemonSet, "fugue.pro/image-cache-ownership: helm") {
+		t.Fatalf("Helm-owned image-cache must be retained before handoff:\n%s", daemonSet)
+	}
+
+	declarative := render("declarative")
+	if got := manifestDocumentForKindAndName(declarative, "DaemonSet", "fugue-fugue-image-cache"); got != "" {
+		t.Fatalf("declarative ownership left a second image-cache writer:\n%s", got)
+	}
+	withoutImageCacheDaemonSet := func(manifest string) string {
+		kept := make([]string, 0)
+		for _, document := range strings.Split(manifest, "\n---") {
+			document = strings.TrimSpace(document)
+			if document == "" || manifestDocumentForKindAndName(document, "DaemonSet", "fugue-fugue-image-cache") != "" {
+				continue
+			}
+			kept = append(kept, document)
+		}
+		return strings.Join(kept, "\n---\n")
+	}
+	if withoutImageCacheDaemonSet(helmOwned) != withoutImageCacheDaemonSet(declarative) {
+		t.Fatal("image-cache ownership handoff changed another Helm object")
+	}
+
+	invalid := exec.Command("helm", "template", "fugue", chartDir, "--set-string", "imageCache.ownership=shared")
+	invalid.Dir = chartDir
+	if output, err := invalid.CombinedOutput(); err == nil || !strings.Contains(string(output), "imageCache.ownership must be helm or declarative") {
+		t.Fatalf("invalid image-cache ownership did not fail closed: err=%v\n%s", err, output)
+	}
+}
+
 func TestSingletonDependenciesDeclareIsolatedRolloutSemantics(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

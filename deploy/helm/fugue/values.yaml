@@ -820,6 +820,7 @@ imagePrePull:
 
 imageCache:
   enabled: true
+  ownership: helm
   updateStrategy:
     type: RollingUpdate
   image:

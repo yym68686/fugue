@@ -1,4 +1,9 @@
 {{- if .Values.imageCache.enabled }}
+{{- $ownership := default "helm" .Values.imageCache.ownership -}}
+{{- if not (has $ownership (list "helm" "declarative")) -}}
+{{- fail "imageCache.ownership must be helm or declarative" -}}
+{{- end -}}
+{{- if eq $ownership "helm" }}
 {{- $updateStrategyType := required "imageCache.updateStrategy.type is required" .Values.imageCache.updateStrategy.type -}}
 {{- if not (has $updateStrategyType (list "OnDelete" "RollingUpdate")) -}}
 {{- fail "imageCache.updateStrategy.type must be OnDelete or RollingUpdate" -}}
@@ -7,6 +12,9 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ include "fugue.imageCacheName" . }}
+  annotations:
+    helm.sh/resource-policy: keep
+    fugue.pro/image-cache-ownership: helm
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "image-cache") | nindent 4 }}
     fugue.io/rollout-subsystem: node-local-build-plane
@@ -112,4 +120,5 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
 {{- end }}

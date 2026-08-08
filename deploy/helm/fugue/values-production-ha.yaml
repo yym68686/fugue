@@ -71,6 +71,7 @@ imageStore:
 
 imageCache:
   enabled: true
+  ownership: declarative
   registryBase: registry.fugue.internal:5000
   upstreamBase: ""
 

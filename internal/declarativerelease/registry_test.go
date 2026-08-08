@@ -59,6 +59,89 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		schema.Workload.Name != "fugue-schema-migrator" || schema.Workload.Replicas != 1 || schema.Workload.RolloutMode != "rolling" {
 		t.Fatalf("schema lane is not a repeatable declarative Deployment: %+v", schema)
 	}
+	imageCache := byID["image-cache"]
+	if imageCache.MigrationState != "adopting" || imageCache.Workload.PreservedUnavailable != 1 || imageCache.OwnershipAdoption == nil {
+		t.Fatalf("image-cache lane does not preserve its single offline node during adoption: %+v", imageCache)
+	}
+	wantLegacyManagers := []string{"helm", "kubectl-patch"}
+	wantOwnershipFields := []string{
+		"/metadata/labels/app.kubernetes.io~1managed-by",
+		"/spec/template/spec/containers[name=image-cache]/image",
+		"/spec/updateStrategy",
+	}
+	if imageCache.OwnershipAdoption.LegacyFieldManager != "helm" ||
+		!reflect.DeepEqual(imageCache.OwnershipAdoption.LegacyFieldManagers, wantLegacyManagers) ||
+		len(imageCache.OwnershipAdoption.Resources) != 1 ||
+		!reflect.DeepEqual(imageCache.OwnershipAdoption.Resources[0].Fields, wantOwnershipFields) {
+		t.Fatalf("image-cache ownership adoption is not bound to the reviewed live conflicts: %+v", imageCache.OwnershipAdoption)
+	}
+	for filename, contract := range map[string]struct {
+		strategy    string
+		unavailable int64
+	}{
+		"../../deploy/releases/image-cache/lkg.json":       {strategy: "OnDelete"},
+		"../../deploy/releases/image-cache/daemonset.json": {strategy: "RollingUpdate", unavailable: 2},
+	} {
+		raw, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatalf("read image-cache resource set %s: %v", filename, err)
+		}
+		resourceSet, err := DecodeResourceSet(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("decode image-cache resource set %s: %v", filename, err)
+		}
+		workload := imageCache.Workload
+		if contract.strategy == "OnDelete" {
+			workload.RolloutMode = "on-delete"
+		}
+		primary, err := resourceSet.Primary(workload)
+		if err != nil {
+			t.Fatalf("select image-cache primary from %s: %v", filename, err)
+		}
+		spec, err := objectField(primary, "spec")
+		if err != nil {
+			t.Fatal(err)
+		}
+		updateStrategy, err := objectField(spec, "updateStrategy")
+		if err != nil || stringField(updateStrategy, "type") != contract.strategy {
+			t.Fatalf("image-cache strategy in %s = %+v, %v", filename, updateStrategy, err)
+		}
+		if contract.unavailable == 0 {
+			if _, present := updateStrategy["rollingUpdate"]; present {
+				t.Fatalf("bootstrap LKG must retain the observed OnDelete strategy: %+v", updateStrategy)
+			}
+			if _, present := spec["minReadySeconds"]; present {
+				t.Fatal("bootstrap LKG invented minReadySeconds absent from the live predecessor")
+			}
+			template, err := objectField(spec, "template")
+			if err != nil {
+				t.Fatal(err)
+			}
+			podSpec, err := objectField(template, "spec")
+			if err != nil {
+				t.Fatal(err)
+			}
+			containers, ok := podSpec["containers"].([]any)
+			if !ok || len(containers) != 1 {
+				t.Fatalf("bootstrap LKG image-cache containers are invalid: %+v", podSpec["containers"])
+			}
+			container, ok := containers[0].(map[string]any)
+			if !ok || stringField(container, "name") != "image-cache" {
+				t.Fatalf("bootstrap LKG image-cache container is invalid: %+v", containers[0])
+			}
+			for _, field := range []string{"livenessProbe", "readinessProbe", "startupProbe"} {
+				if _, present := container[field]; present {
+					t.Fatalf("bootstrap LKG invented %s absent from the live predecessor", field)
+				}
+			}
+			continue
+		}
+		rollingUpdate, err := objectField(updateStrategy, "rollingUpdate")
+		gotUnavailable, ok := integerField(rollingUpdate["maxUnavailable"])
+		if err != nil || !ok || gotUnavailable != contract.unavailable {
+			t.Fatalf("forward image-cache rollout does not reserve one offline plus one active slot: %+v", updateStrategy)
+		}
+	}
 	for _, group := range edgeRegistry.Groups {
 		for _, component := range []Component{byID[group.Control.ID], byID[group.Worker.ID]} {
 			if !strings.HasPrefix(component.ManifestPath, "internal/edge") {
