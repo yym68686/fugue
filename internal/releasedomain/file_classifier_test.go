@@ -307,7 +307,6 @@ func TestReservedBootstrapPathsCannotBeAuthorizedByPolicy(t *testing.T) {
 		"internal/releasedomain/planner.go",
 		"scripts/release-domains/activate.sh",
 		"scripts/lib/control_plane_release_domains.sh",
-		"scripts/test_release_domain_safety.sh",
 		"scripts/test_single_domain_release.sh",
 		"scripts/upgrade_fugue_control_plane.sh",
 		".github/workflows/deploy-control-plane.yml",

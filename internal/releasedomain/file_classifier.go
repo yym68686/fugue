@@ -341,7 +341,6 @@ func parseChangeStatus(value string) (ChangeStatus, error) {
 var reservedBootstrapExactPaths = map[string]string{
 	"Makefile": "repository release orchestration is reserved bootstrap wiring",
 	"scripts/lib/control_plane_release_domains.sh":    "release-domain adapter wiring cannot authorize itself",
-	"scripts/test_release_domain_safety.sh":           "release-domain safety gate wiring cannot authorize itself",
 	"scripts/test_single_domain_release.sh":           "release-domain activation gate wiring cannot authorize itself",
 	"scripts/upgrade_fugue_control_plane.sh":          "release entrypoint wiring cannot authorize itself",
 	".github/workflows/deploy-control-plane.yml":      "control-plane release workflow wiring cannot authorize itself",

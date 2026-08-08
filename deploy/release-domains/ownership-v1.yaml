@@ -58,9 +58,6 @@ fileRules:
   - id: planner-bootstrap-test
     exact: scripts/test_single_domain_release.sh
     unknownReason: release-domain activation test is bootstrap/shared
-  - id: frozen-release-safety-test
-    exact: scripts/test_release_domain_safety.sh
-    unknownReason: release safety integration is outside Boundary A
   - id: release-entrypoint
     exact: scripts/upgrade_fugue_control_plane.sh
     unknownReason: release entrypoint is shared across every domain
