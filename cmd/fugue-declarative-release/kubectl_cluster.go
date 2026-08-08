@@ -1111,8 +1111,22 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
+	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, allowHistoricalRestarts); err != nil {
 		return declarativerelease.Observation{}, err
+	}
+	bootstrapRuntime := adoptingBootstrapRuntime(release, allowHistoricalRestarts)
+	if bootstrapRuntime != nil {
+		image := release.Artifact.Repository + "@" + bootstrapRuntime.ImageDigest
+		arguments := []string{"python3", cluster.verifier, "--image", image, "--platform", "linux/amd64", "--expected-revision", bootstrapRuntime.OCIRevision,
+			"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1"}
+		verificationRaw, verifyErr := cluster.run(ctx, nil, arguments[0], arguments[1:]...)
+		if verifyErr != nil {
+			return declarativerelease.Observation{}, fmt.Errorf("verify adoption bootstrap runtime: %w", verifyErr)
+		}
+		verification, decodeErr := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
+		if decodeErr != nil || verification.Image != image || verification.OCIRevision != bootstrapRuntime.OCIRevision {
+			return declarativerelease.Observation{}, errors.New("adoption bootstrap runtime registry identity mismatch")
+		}
 	}
 	observationWorkloadRaw := workloadRaw
 	if allowHistoricalRestarts && release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
@@ -1495,7 +1509,7 @@ func targetIdentityFromDeclaredWorkload(desired map[string]any, workload declara
 	return declarativerelease.TargetIdentity{Present: true, ImageRef: image, ConfigSHA: configSHA, ManifestSHA: manifestSHA, OCIRevision: ociRevision}, nil
 }
 
-func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease) error {
+func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease, allowHistorical bool) error {
 	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	desired, err := declarativerelease.ResourceSetItem(manifest, identity)
 	if err != nil {
@@ -1521,6 +1535,9 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 			return imageErr
 		}
 		expected["container\x00"+release.Workload.Container] = image
+	}
+	if bootstrap := adoptingBootstrapRuntime(release, allowHistorical); bootstrap != nil {
+		expected["container\x00"+bootstrap.Container] = release.Artifact.Repository + "@" + bootstrap.ImageDigest
 	}
 	list, err := decodeJSONObject(podsRaw)
 	if err != nil {
@@ -1565,6 +1582,17 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		}
 	}
 	return nil
+}
+
+func adoptingBootstrapRuntime(release declarativerelease.PlanRelease, allowHistorical bool) *declarativerelease.BootstrapRuntime {
+	bootstrap := release.BootstrapRuntime
+	if !allowHistorical || release.MigrationState != "adopting" || release.OwnershipAdoption == nil || bootstrap == nil ||
+		bootstrap.Resource.APIVersion != release.Workload.APIVersion || bootstrap.Resource.Kind != release.Workload.Kind ||
+		bootstrap.Resource.Namespace != release.Workload.Namespace || bootstrap.Resource.Name != release.Workload.Name ||
+		bootstrap.Container != release.Workload.Container {
+		return nil
+	}
+	return bootstrap
 }
 
 func declaredContainerImage(desired map[string]any, name, containerType string) (string, error) {
@@ -2031,6 +2059,10 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 		return "", "", errors.New("pod list is invalid")
 	}
 	evidence := make([]string, 0, len(items))
+	podManifestSHA := manifestSHA
+	if bootstrap := adoptingBootstrapRuntime(release, allowHistoricalRestarts); bootstrap != nil {
+		podManifestSHA = bootstrap.OCIRevision
+	}
 	imageID := ""
 	readyCount := int32(0)
 	for _, rawItem := range items {
@@ -2057,7 +2089,7 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 				}
 			}
 		}
-		if podSource != manifestSHA {
+		if podSource != podManifestSHA {
 			continue
 		}
 		status := mapField(pod, "status")

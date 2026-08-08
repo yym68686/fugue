@@ -102,6 +102,16 @@ func (plan Plan) ValidateBound() error {
 			(release.OwnershipAdoption == nil || release.BootstrapLKGPath == "") {
 			return fmt.Errorf("bound release %d adoption identity is incomplete", index)
 		}
+		if release.BootstrapRuntime != nil {
+			bootstrap := release.BootstrapRuntime
+			if release.MigrationState != "adopting" || release.OwnershipAdoption == nil || release.BootstrapLKGPath == "" ||
+				bootstrap.Resource.APIVersion != release.Workload.APIVersion || bootstrap.Resource.Kind != release.Workload.Kind ||
+				bootstrap.Resource.Namespace != release.Workload.Namespace || bootstrap.Resource.Name != release.Workload.Name ||
+				bootstrap.Container != release.Workload.Container || !digestPattern.MatchString(bootstrap.ImageDigest) ||
+				!shaPattern.MatchString(bootstrap.OCIRevision) {
+				return fmt.Errorf("bound release %d bootstrap runtime is invalid", index)
+			}
+		}
 		if _, exists := seen[release.ComponentID]; exists {
 			return fmt.Errorf("bound plan repeats component %q", release.ComponentID)
 		}

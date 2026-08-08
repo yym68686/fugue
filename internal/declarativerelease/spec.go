@@ -59,6 +59,7 @@ type Component struct {
 	ManifestPath        string             `json:"manifestPath"`
 	ManifestVariables   map[string]string  `json:"manifestVariables,omitempty"`
 	BootstrapLKGPath    string             `json:"bootstrapLkgPath,omitempty"`
+	BootstrapRuntime    *BootstrapRuntime  `json:"bootstrapRuntime,omitempty"`
 	SourceRoots         []string           `json:"sourceRoots"`
 	Artifact            Artifact           `json:"artifact"`
 	ArtifactTargets     []ArtifactTarget   `json:"artifactTargets,omitempty"`
@@ -107,6 +108,16 @@ type Artifact struct {
 	Dockerfile   string `json:"dockerfile"`
 	Context      string `json:"context"`
 	BuildPackage string `json:"buildPackage"`
+}
+
+// BootstrapRuntime binds a healthy legacy OnDelete Pod cohort whose running
+// image differs from the workload's desired LKG template. It exists only for
+// the explicit adopting phase and is removed once ownership converges.
+type BootstrapRuntime struct {
+	Resource    ResourceIdentity `json:"resource"`
+	Container   string           `json:"container"`
+	ImageDigest string           `json:"imageDigest"`
+	OCIRevision string           `json:"ociRevision"`
 }
 
 type Workload struct {
@@ -196,6 +207,7 @@ type PlanRelease struct {
 	ManifestPath                string             `json:"manifestPath"`
 	ManifestVariables           map[string]string  `json:"manifestVariables,omitempty"`
 	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
+	BootstrapRuntime            *BootstrapRuntime  `json:"bootstrapRuntime,omitempty"`
 	RetrySameLKG                bool               `json:"retrySameLkg,omitempty"`
 	Artifact                    Artifact           `json:"artifact"`
 	ArtifactTargets             []ArtifactTarget   `json:"artifactTargets,omitempty"`
@@ -356,6 +368,16 @@ func (component Component) Validate() error {
 	}
 	if component.MigrationState == "independent" && component.OwnershipAdoption != nil {
 		return fmt.Errorf("component %q independent lane retains ownership adoption", component.ID)
+	}
+	if component.BootstrapRuntime != nil {
+		bootstrap := component.BootstrapRuntime
+		if component.MigrationState != "adopting" || component.OwnershipAdoption == nil || component.BootstrapLKGPath == "" ||
+			bootstrap.Resource.APIVersion != component.Workload.APIVersion || bootstrap.Resource.Kind != component.Workload.Kind ||
+			bootstrap.Resource.Namespace != component.Workload.Namespace || bootstrap.Resource.Name != component.Workload.Name ||
+			bootstrap.Container != component.Workload.Container || !digestPattern.MatchString(bootstrap.ImageDigest) ||
+			!shaPattern.MatchString(bootstrap.OCIRevision) {
+			return fmt.Errorf("component %q bootstrap runtime identity is invalid", component.ID)
+		}
 	}
 	if component.AdoptionReceiptPath != "" {
 		expected := "deploy/releases/" + component.ID + "/adoption-receipt.json"
@@ -822,6 +844,10 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			release.ManifestVariables[key] = value
 		}
 		release.BootstrapLKGPath = component.BootstrapLKGPath
+		if component.BootstrapRuntime != nil {
+			copyBootstrap := *component.BootstrapRuntime
+			release.BootstrapRuntime = &copyBootstrap
+		}
 		release.RetrySameLKG = retrySameLKG
 		release.Artifact = component.Artifact
 		release.ArtifactTargets = append([]ArtifactTarget(nil), component.ArtifactTargets...)

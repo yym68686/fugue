@@ -924,12 +924,27 @@ func TestBootstrapAuxiliaryIdentityAndEveryArtifactImageAreExact(t *testing.T) {
 			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a", Container: "edge", ContainerType: "container"},
 		},
 	}
-	if err := verifyDeclaredArtifactImageIDs(pods, manifest, release); err != nil {
+	if err := verifyDeclaredArtifactImageIDs(pods, manifest, release, false); err != nil {
 		t.Fatal(err)
 	}
 	tampered := bytes.Replace(pods, []byte(caddyDigest), []byte(strings.Repeat("d", 64)), 1)
-	if err := verifyDeclaredArtifactImageIDs(tampered, manifest, release); err == nil {
+	if err := verifyDeclaredArtifactImageIDs(tampered, manifest, release, false); err == nil {
 		t.Fatal("cross-container LKG image drift was accepted")
+	}
+	runtimeDigest := strings.Repeat("d", 64)
+	release.MigrationState = "adopting"
+	release.OwnershipAdoption = &declarativerelease.OwnershipAdoption{}
+	release.Artifact.Repository = "ghcr.io/example/fugue-edge"
+	release.BootstrapRuntime = &declarativerelease.BootstrapRuntime{
+		Resource:  declarativerelease.ResourceIdentity{APIVersion: workload.APIVersion, Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name},
+		Container: "edge", ImageDigest: "sha256:" + runtimeDigest, OCIRevision: strings.Repeat("e", 40),
+	}
+	runtimePods := bytes.Replace(pods, []byte(edgeDigest), []byte(runtimeDigest), 1)
+	if err := verifyDeclaredArtifactImageIDs(runtimePods, manifest, release, true); err != nil {
+		t.Fatalf("explicit adoption runtime was not used: %v", err)
+	}
+	if err := verifyDeclaredArtifactImageIDs(runtimePods, manifest, release, false); err == nil {
+		t.Fatal("independent observation accepted the adoption runtime override")
 	}
 }
 

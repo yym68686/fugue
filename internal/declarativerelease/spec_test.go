@@ -59,6 +59,35 @@ func TestRegistryAndIntentAreStrict(t *testing.T) {
 	}
 }
 
+func TestBootstrapRuntimeIsRestrictedToExactAdoptionPrimary(t *testing.T) {
+	registry := testRegistry()
+	component := &registry.Components[0]
+	component.MigrationState = "adopting"
+	component.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	component.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name},
+		Fields:   []string{"/spec/template"},
+	}}}
+	component.BootstrapRuntime = &BootstrapRuntime{
+		Resource:  ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name},
+		Container: component.Workload.Container, ImageDigest: testDigest, OCIRevision: testSHA1,
+	}
+	if err := registry.Validate(); err != nil {
+		t.Fatalf("exact adoption bootstrap runtime was rejected: %v", err)
+	}
+	component.MigrationState = "independent"
+	component.OwnershipAdoption = nil
+	if err := registry.Validate(); err == nil {
+		t.Fatal("independent component retained bootstrap runtime compatibility")
+	}
+	component.MigrationState = "adopting"
+	component.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{Identity: component.BootstrapRuntime.Resource, Fields: []string{"/spec/template"}}}}
+	component.BootstrapRuntime.Resource.Name = "other"
+	if err := registry.Validate(); err == nil {
+		t.Fatal("bootstrap runtime for another resource was accepted")
+	}
+}
+
 func TestRegistryArtifactTargetsAreStrictAndContainPrimary(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].ArtifactTargets = []ArtifactTarget{
