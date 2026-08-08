@@ -119,6 +119,7 @@ type Server struct {
 	newFilesystemPodLister                 func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner                   filesystemPodExecRunner
 	appProxyTransport                      http.RoundTripper
+	edgeDNSAuthorityHTTPClient             *http.Client
 	appRequestHTTPClient                   *http.Client
 	openAppDatabase                        func(driverName, dsn string) (*sql.DB, error)
 	appDatabaseImportRunner                func(context.Context, model.AppDatabaseImportJob) (string, error)

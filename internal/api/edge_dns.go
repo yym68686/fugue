@@ -28,12 +28,13 @@ const (
 )
 
 type edgeDNSBundleOptions struct {
-	DNSNodeID       string
-	EdgeGroupID     string
-	Zone            string
-	AnswerIPs       []string
-	RouteAAnswerIPs []string
-	TTL             int
+	DNSNodeID        string
+	EdgeGroupID      string
+	AuthorityService string
+	Zone             string
+	AnswerIPs        []string
+	RouteAAnswerIPs  []string
+	TTL              int
 }
 
 func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
@@ -115,12 +116,13 @@ func (s *Server) edgeDNSBundleOptionsFromRequest(r *http.Request) (edgeDNSBundle
 	}
 
 	return edgeDNSBundleOptions{
-		DNSNodeID:       strings.TrimSpace(query.Get("dns_node_id")),
-		EdgeGroupID:     strings.TrimSpace(query.Get("edge_group_id")),
-		Zone:            zone,
-		AnswerIPs:       answerIPs,
-		RouteAAnswerIPs: routeAAnswerIPs,
-		TTL:             ttl,
+		DNSNodeID:        strings.TrimSpace(query.Get("dns_node_id")),
+		EdgeGroupID:      strings.TrimSpace(query.Get("edge_group_id")),
+		AuthorityService: strings.TrimSpace(query.Get("authority_service")),
+		Zone:             zone,
+		AnswerIPs:        answerIPs,
+		RouteAAnswerIPs:  routeAAnswerIPs,
+		TTL:              ttl,
 	}, nil
 }
 
@@ -188,6 +190,14 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	healthyEdgeGroups, healthyEdgeNodeIDsByGroup, err := s.edgeRouteHealthyEdgeGroupInventory()
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
+	}
+	if options.AuthorityService != "" {
+		groupID, nodeIDs, err := s.edgeDNSAuthorityReady(r.Context(), options.AuthorityService, options.EdgeGroupID, time.Now().UTC())
+		if err != nil {
+			return model.EdgeDNSBundle{}, err
+		}
+		healthyEdgeGroups[groupID] = true
+		healthyEdgeNodeIDsByGroup[groupID] = nodeIDs
 	}
 	acmeChallenges, err := s.store.ListDNSACMEChallenges(options.Zone, false)
 	if err != nil {
