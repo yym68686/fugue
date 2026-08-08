@@ -1,0 +1,147 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "annotations": {
+          "fugue.pro/schema-ownership": "declarative"
+        },
+        "labels": {
+          "app.kubernetes.io/component": "schema-migrator",
+          "app.kubernetes.io/instance": "fugue",
+          "app.kubernetes.io/name": "fugue"
+        },
+        "name": "fugue-schema-migrator",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "minReadySeconds": 3,
+        "progressDeadlineSeconds": 420,
+        "replicas": 1,
+        "revisionHistoryLimit": 2,
+        "selector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "schema-migrator",
+            "app.kubernetes.io/instance": "fugue",
+            "app.kubernetes.io/name": "fugue"
+          }
+        },
+        "strategy": {
+          "rollingUpdate": {
+            "maxSurge": 1,
+            "maxUnavailable": 0
+          },
+          "type": "RollingUpdate"
+        },
+        "template": {
+          "metadata": {
+            "annotations": {
+              "fugue.pro/source-commit": "0000000000000000000000000000000000000000"
+            },
+            "labels": {
+              "app.kubernetes.io/component": "schema-migrator",
+              "app.kubernetes.io/instance": "fugue",
+              "app.kubernetes.io/name": "fugue"
+            }
+          },
+          "spec": {
+            "automountServiceAccountToken": false,
+            "containers": [
+              {
+                "env": [
+                  {
+                    "name": "FUGUE_DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "FUGUE_DATABASE_URL",
+                        "name": "fugue-fugue-config"
+                      }
+                    }
+                  }
+                ],
+                "image": "registry.invalid/fugue/schema-migrate@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "imagePullPolicy": "IfNotPresent",
+                "livenessProbe": {
+                  "failureThreshold": 3,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health",
+                    "scheme": "HTTP"
+                  },
+                  "periodSeconds": 10,
+                  "timeoutSeconds": 1
+                },
+                "name": "schema-migrate",
+                "ports": [
+                  {
+                    "containerPort": 8081,
+                    "name": "health",
+                    "protocol": "TCP"
+                  }
+                ],
+                "readinessProbe": {
+                  "failureThreshold": 2,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health",
+                    "scheme": "HTTP"
+                  },
+                  "periodSeconds": 2,
+                  "successThreshold": 1,
+                  "timeoutSeconds": 1
+                },
+                "resources": {
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  },
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "128Mi"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsGroup": 65532,
+                  "runAsNonRoot": true,
+                  "runAsUser": 65532
+                },
+                "startupProbe": {
+                  "failureThreshold": 210,
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "health",
+                    "scheme": "HTTP"
+                  },
+                  "periodSeconds": 2,
+                  "timeoutSeconds": 1
+                }
+              }
+            ],
+            "enableServiceLinks": false,
+            "restartPolicy": "Always",
+            "securityContext": {
+              "runAsGroup": 65532,
+              "runAsNonRoot": true,
+              "runAsUser": 65532,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "serviceAccountName": "fugue-fugue-control-plane-sa",
+            "terminationGracePeriodSeconds": 30
+          }
+        }
+      }
+    }
+  ],
+  "kind": "ComponentResourceSet"
+}

@@ -1,0 +1,19 @@
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+RUN apk add --no-cache ca-certificates
+COPY go.mod ./
+COPY go.sum ./
+RUN go mod download
+COPY cmd/fugue-schema-migrate ./cmd/fugue-schema-migrate
+COPY internal/schemamigrate ./internal/schemamigrate
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w' -o /out/fugue-schema-migrate ./cmd/fugue-schema-migrate
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/fugue-schema-migrate /fugue-schema-migrate
+USER 65532:65532
+ENTRYPOINT ["/fugue-schema-migrate"]
