@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -114,88 +113,6 @@ func TestParseEdgeGroupPodsRequiresOneReadyGroupBoundPodPerNode(t *testing.T) {
 	}
 }
 
-func TestAdoptingEdgeGroupAloneMayReadLegacyPodIdentity(t *testing.T) {
-	pod := edgeGroupPodFixture("worker-legacy", "uid-legacy", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))
-	metadata := pod["metadata"].(map[string]any)
-	delete(metadata["labels"].(map[string]any), "fugue.io/edge-group-id")
-	delete(metadata["annotations"].(map[string]any), "fugue.pro/source-commit")
-	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
-	legacySource := strings.Repeat("2", 40)
-	got, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, legacySource)
-	if err != nil || got["node-1"].SourceCommit != legacySource {
-		t.Fatalf("explicit adoption did not recover the reviewed legacy identity: got=%+v err=%v", got, err)
-	}
-	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", false, ""); err == nil {
-		t.Fatal("independent edge group accepted legacy pod identity")
-	}
-	metadata["labels"].(map[string]any)["fugue.io/edge-group-id"] = "edge-group-country-de"
-	raw, _ = json.Marshal(map[string]any{"items": []any{pod}})
-	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, legacySource); err == nil {
-		t.Fatal("adoption accepted an explicit cross-group identity")
-	}
-}
-
-func TestAdoptingEdgeGroupCanInspectOnlyAnUnreadyInactivePodForExactRecovery(t *testing.T) {
-	pod := edgeGroupPodFixture("worker-broken", "uid-broken", "node-1", "edge-group-country-us", strings.Repeat("1", 40), strings.Repeat("a", 64))
-	status := pod["status"].(map[string]any)
-	status["conditions"] = []any{map[string]any{"type": "Ready", "status": "False"}}
-	status["containerStatuses"] = []any{map[string]any{"name": "edge", "imageID": "containerd://sha256:" + strings.Repeat("a", 64), "restartCount": 7}}
-	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
-	if _, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-us", true, ""); err == nil {
-		t.Fatal("strict edge state accepted an unready Pod")
-	}
-	got, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-us", true, "", false)
-	if err != nil || got["node-1"].Ready || got["node-1"].UID != "uid-broken" || got["node-1"].ResourceVersion != "42" {
-		t.Fatalf("degraded adoption recovery lost exact Pod preconditions: got=%+v err=%v", got, err)
-	}
-}
-
-func TestWorkloadLegacySourceFallsBackToBoundTemplateSourceAfterAdoption(t *testing.T) {
-	raw := []byte(`{"spec":{"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}}}`)
-	got, err := workloadLegacySource(raw, "edge")
-	if err != nil || got != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Fatalf("bound adopting source was not recovered: got=%q err=%v", got, err)
-	}
-	if _, err := workloadLegacySource(bytes.ReplaceAll(raw, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), []byte("invalid")), "edge"); err == nil {
-		t.Fatal("invalid bound adopting source was accepted")
-	}
-}
-
-func TestAdoptingLegacyPodIdentityComesFromExactBootstrapLKG(t *testing.T) {
-	oldSource := strings.Repeat("7", 40)
-	oldDigest := strings.Repeat("d", 64)
-	newSource := strings.Repeat("f", 40)
-	release := declarativerelease.PlanRelease{
-		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "bootstrap.json",
-		ExpectedPreviousPresent: true, OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
-		Workload:   declarativerelease.Workload{Namespace: "fugue-system", FieldManager: "edge-declarative"},
-		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{}},
-	}
-	bootstrap := []byte(fmt.Sprintf(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"worker-a","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"edge"}},"template":{"metadata":{"labels":{"app":"edge"},"annotations":{"fugue.pro/source-commit":"%s","fugue.pro/oci-revision":"%s"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/fugue-edge@sha256:%s"}]}},"updateStrategy":{"type":"OnDelete"}}}]}`, oldSource, oldSource, oldDigest))
-	target, err := declaredEdgeDaemonSetTarget(bootstrap, release, "worker-a", "edge")
-	if err != nil || target.ConfigSHA != oldSource {
-		t.Fatalf("bind bootstrap LKG target: target=%+v err=%v", target, err)
-	}
-	currentDesired := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"%s"}},"spec":{"containers":[{"name":"edge","image":"ghcr.io/example/edge@sha256:%s"}]}}}}`, newSource, strings.Repeat("e", 64)))
-	if got, err := workloadLegacySource(currentDesired, "edge"); err != nil || got != newSource {
-		t.Fatalf("fixture no longer reproduces the misleading desired-template source: got=%q err=%v", got, err)
-	}
-	pod := edgeGroupPodFixture("worker-a-old", "uid-old", "node-1", "edge-group-country-de", oldSource, oldDigest)
-	metadata := pod["metadata"].(map[string]any)
-	delete(metadata["annotations"].(map[string]any), "fugue.pro/source-commit")
-	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
-	parsed, err := parseEdgeGroupPodsWithReadiness(raw, "edge", 1, "edge-group-country-de", true, target.ConfigSHA, true)
-	if err != nil || validateBootstrapLegacyPodImages(parsed, "sha256:"+oldDigest) != nil || !parsed["node-1"].LegacyIdentity || parsed["node-1"].SourceCommit != oldSource || !edgePodsMatchTarget(parsed, target) {
-		t.Fatalf("legacy running Pod was not bound to the exact bootstrap LKG: pods=%+v err=%v", parsed, err)
-	}
-	tampered := parsed["node-1"]
-	tampered.ImageID = "containerd://sha256:" + strings.Repeat("a", 64)
-	parsed["node-1"] = tampered
-	if err := validateBootstrapLegacyPodImages(parsed, "sha256:"+oldDigest); err == nil {
-		t.Fatal("legacy Pod with a non-LKG image was accepted")
-	}
-}
-
 func TestEdgeGroupTargetMatchingRequiresExactSourceAndImmutableRef(t *testing.T) {
 	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: strings.Repeat("1", 40), ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64)}
 	pod := edgeGroupPod{Ready: true, SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef}
@@ -239,10 +156,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	}
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousConfigSHA: old.ConfigSHA,
-		MigrationState:            "adopting",
-		OwnershipAdoption:         &declarativerelease.OwnershipAdoption{},
-		HeterogeneousBootstrapLKG: true,
-		BootstrapLKGPath:          "bootstrap-lkg.json",
+		MigrationState:            "independent",
 		Transition:                &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition},
 	}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
@@ -255,8 +169,8 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if len(runtime.requests) != 2 || runtime.requests[1].WorkerSourceCommit != target.ConfigSHA || runtime.requests[1].Operation != edgeActivationPromote {
 		t.Fatalf("edge forward CAS requests are not target-bound: %+v", runtime.requests)
 	}
-	if got, want := fmt.Sprint(runtime.rollAuthority), "[false true true]"; got != want {
-		t.Fatalf("edge adoption authority gates=%s want=%s", got, want)
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true true]"; got != want {
+		t.Fatalf("edge authority gates=%s want=%s", got, want)
 	}
 }
 
@@ -373,87 +287,6 @@ func TestEdgeActivationCommitUnknownRequiresExactStateOrPrecondition(t *testing.
 	committed.WorkerImageDigest = "sha256:" + strings.Repeat("b", 64)
 	if edgeActivationStateMatchesPrecondition(precondition, true, request) || edgeActivationStateMatchesRequest(committed, request) {
 		t.Fatal("activation CAS drift was accepted")
-	}
-}
-
-func TestLegacyRouteBootstrapIsAdoptionOnlyAndNeverSatisfiesFinalAuthority(t *testing.T) {
-	release := declarativerelease.PlanRelease{
-		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "deploy/releases/edge-worker-us/lkg.json",
-		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: strings.Repeat("1", 40), OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
-		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{}},
-	}
-	target := edgeTargetFixture("2", "b")
-	legacy := edgeGroupPod{Ready: true, BundleGeneration: "legacy-generation", ServingGeneration: "legacy-generation"}
-	if !allowsAdoptionRouteBootstrap(release, target) || !edgePodHasAdoptionLegacyRoute(legacy) {
-		t.Fatal("explicit adopting target could not use the bounded bootstrap route")
-	}
-	release.MigrationState = "independent"
-	if allowsAdoptionRouteBootstrap(release, target) {
-		t.Fatal("independent release retained legacy route bootstrap")
-	}
-	state := edgeStateFixture("a", target, edgeFrontHealth{ActiveSlot: "a"})
-	pod := state.WorkerB["node-1"]
-	pod.RouteBundleSource = ""
-	pod.PublicationSequence = 0
-	state.WorkerB["node-1"] = pod
-	if err := validateEdgeGroupAuthority(state, edgeTransitionFixture()); err == nil {
-		t.Fatal("legacy bootstrap route satisfied final group authority")
-	}
-}
-
-func TestBootstrapLKGSelectorRequiresExactAdoptionIdentity(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("a", 64)
-	previous := strings.Repeat("1", 40)
-	release := declarativerelease.PlanRelease{
-		MigrationState: "adopting", HeterogeneousBootstrapLKG: true, BootstrapLKGPath: "deploy/releases/edge-worker-us/lkg.json",
-		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: previous, ExpectedPreviousManifestSHA: previous, ExpectedPreviousOCIRevision: previous,
-		ExpectedPreviousImageDigest: digest, OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
-		Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{}},
-	}
-	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: previous, ManifestSHA: previous, OCIRevision: previous, ImageRef: "ghcr.io/example/edge@" + digest}
-	if !isEdgeBootstrapLKGTarget(release, target) {
-		t.Fatal("exact adoption bootstrap LKG did not select heterogeneous compensation")
-	}
-	tampered := target
-	tampered.OCIRevision = strings.Repeat("2", 40)
-	if isEdgeBootstrapLKGTarget(release, tampered) {
-		t.Fatal("tampered bootstrap LKG selected heterogeneous compensation")
-	}
-	release.MigrationState = "independent"
-	if isEdgeBootstrapLKGTarget(release, target) {
-		t.Fatal("independent release selected adoption compensation")
-	}
-}
-
-func TestBootstrapLKGCompensationAcceptsExactPreRolloutWorkloadsOnly(t *testing.T) {
-	frontTarget := edgeTargetFixture("1", "a")
-	workerATarget := edgeTargetFixture("2", "b")
-	workerBTarget := edgeTargetFixture("3", "c")
-	pods := func(name string, target declarativerelease.TargetIdentity) map[string]edgeGroupPod {
-		return map[string]edgeGroupPod{"node-1": {
-			Name: name, UID: name + "-uid", ResourceVersion: "42", NodeName: "node-1", Ready: true,
-			SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef, ImageID: target.ImageRef,
-		}}
-	}
-	front := pods("front", frontTarget)
-	workerA := pods("worker-a", workerATarget)
-	workerB := pods("worker-b", workerBTarget)
-	if !bootstrapWorkloadsMatchLKG(front, workerA, workerB, frontTarget, workerATarget, workerBTarget) {
-		t.Fatal("exact heterogeneous pre-rollout LKG was not accepted for compensation")
-	}
-	tampered := workerB["node-1"]
-	tampered.ImageID = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("d", 64)
-	workerB["node-1"] = tampered
-	if bootstrapWorkloadsMatchLKG(front, workerA, workerB, frontTarget, workerATarget, workerBTarget) {
-		t.Fatal("non-LKG workload was accepted for direct compensation")
-	}
-	legacy := workerA["node-1"]
-	legacy.SourceCommit = workerATarget.ConfigSHA
-	legacy.ImageRef = "ghcr.io/example/fugue-edge:bde0e5e99fd9cc4fc8b9adfc2aa99510273061fa"
-	legacy.ImageID = workerATarget.ImageRef
-	workerA["node-1"] = legacy
-	if !edgePodsMatchBootstrapTarget(workerA, workerATarget) {
-		t.Fatal("legacy tag with exact immutable ImageID was rejected")
 	}
 }
 

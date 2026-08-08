@@ -142,17 +142,10 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, err
 	}
 	observation.Resources = resources
-	if err := normalizeAdoptionBootstrapDegradedIdentity(&observation, release); err != nil {
-		return declarativerelease.Observation{}, err
-	}
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	verificationArgs := []string{"--image", observation.ImageRef, "--platform", "linux/amd64"}
-	allowMissingRevision := allowsLegacyBootstrapRegistryRevision(release, observation)
-	if !allowMissingRevision {
-		verificationArgs = append(verificationArgs, "--expected-revision", observation.OCIRevision)
-	}
+	verificationArgs := []string{"--image", observation.ImageRef, "--platform", "linux/amd64", "--expected-revision", observation.OCIRevision}
 	verificationArgs = append(verificationArgs, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
 		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
 	commandArgs := append([]string{cluster.verifier}, verificationArgs...)
@@ -164,58 +157,10 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if verification.Image != observation.ImageRef || (!allowMissingRevision && verification.OCIRevision != observation.OCIRevision) ||
-		(allowMissingRevision && verification.OCIRevision != "" && verification.OCIRevision != observation.OCIRevision) {
+	if verification.Image != observation.ImageRef || verification.OCIRevision != observation.OCIRevision {
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
-}
-
-func allowsLegacyBootstrapRegistryRevision(release declarativerelease.PlanRelease, observation declarativerelease.Observation) bool {
-	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.RetrySameLKG &&
-		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" && release.ExpectedPreviousPresent &&
-		observation.Present && observation.ConfigSHA == release.ExpectedPreviousConfigSHA &&
-		observation.ManifestSHA == release.ExpectedPreviousManifestSHA && observation.OCIRevision == release.ExpectedPreviousOCIRevision &&
-		immutableRefDigestLocal(observation.ImageRef) == release.ExpectedPreviousImageDigest
-}
-
-// normalizeAdoptionBootstrapDegradedIdentity is the narrow compatibility
-// bridge for a legacy Helm-owned LKG.  Older Edge workloads may omit the
-// declarative config annotation (and, for older releases, use a source tag),
-// while the adoption intent carries the exact immutable identity.  This is
-// only reachable for an explicitly adopting, heterogeneous bootstrap bound
-// to that exact predecessor; independent releases never get this fallback.
-func normalizeAdoptionBootstrapDegradedIdentity(observation *declarativerelease.Observation, release declarativerelease.PlanRelease) error {
-	if observation == nil {
-		return errors.New("degraded predecessor observation is nil")
-	}
-	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil || !release.RetrySameLKG ||
-		!release.HeterogeneousBootstrapLKG || release.BootstrapLKGPath == "" || !release.ExpectedPreviousPresent {
-		return nil
-	}
-	if observation.ManifestSHA != release.ExpectedPreviousManifestSHA || observation.OCIRevision != release.ExpectedPreviousOCIRevision {
-		return errors.New("legacy bootstrap predecessor source identity is invalid")
-	}
-	if observation.ConfigSHA != "" && observation.ConfigSHA != release.ExpectedPreviousConfigSHA {
-		return errors.New("legacy bootstrap predecessor config identity is invalid")
-	}
-	if observation.ConfigSHA == "" {
-		observation.ConfigSHA = release.ExpectedPreviousConfigSHA
-	}
-	if digest := immutableRefDigestLocal(observation.ImageRef); digest != "" {
-		if digest != release.ExpectedPreviousImageDigest {
-			return errors.New("legacy bootstrap predecessor image identity is invalid")
-		}
-		return nil
-	}
-	if legacySourceTag(observation.ImageRef) != release.ExpectedPreviousOCIRevision {
-		return errors.New("legacy bootstrap predecessor image tag is not source-bound")
-	}
-	if release.Artifact.Repository == "" {
-		return errors.New("legacy bootstrap predecessor repository is missing")
-	}
-	observation.ImageRef = release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
-	return nil
 }
 
 func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarativerelease.TargetIdentity) error {
@@ -235,29 +180,6 @@ func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarat
 	}
 	if verification.Image != target.ImageRef || verification.OCIRevision != target.OCIRevision {
 		return errors.New("registry target identity mismatch")
-	}
-	return nil
-}
-
-func (cluster *kubectlCluster) VerifyBootstrapTarget(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) error {
-	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil || !release.RetrySameLKG ||
-		!release.HeterogeneousBootstrapLKG || release.BootstrapLKGPath == "" || !release.ExpectedPreviousPresent || !target.Present ||
-		target.ConfigSHA != release.ExpectedPreviousConfigSHA || target.ManifestSHA != release.ExpectedPreviousManifestSHA ||
-		target.OCIRevision != release.ExpectedPreviousOCIRevision || immutableRefDigestLocal(target.ImageRef) != release.ExpectedPreviousImageDigest {
-		return errors.New("bootstrap registry compatibility is not explicitly adoption-bound")
-	}
-	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier,
-		"--image", target.ImageRef, "--platform", "linux/amd64", "--metadata-only", "--timeout-seconds", "18",
-		"--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1")
-	if err != nil {
-		return fmt.Errorf("verify bootstrap registry target: %w", err)
-	}
-	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
-	if err != nil {
-		return err
-	}
-	if verification.Image != target.ImageRef || (verification.OCIRevision != "" && verification.OCIRevision != target.OCIRevision) {
-		return errors.New("bootstrap registry target identity mismatch")
 	}
 	return nil
 }
@@ -328,31 +250,6 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 		return declarativerelease.Observation{}, err
 	}
 	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
-	// An Edge bootstrap LKG and the immutable target can contain different
-	// associative-list members inside the reviewed Pod template. SSA force
-	// transfers ownership of fields that are present in the target, but it does
-	// not remove legacy-only list members that remain owned by Helm. Replace the
-	// already-reviewed template with UID/RV/generation JSON-patch tests, then
-	// re-apply the scoped SSA manifest so the declarative manager owns the exact
-	// target bytes. This compatibility step is restricted to adopting Edge-group
-	// transitions and is never reachable from the independent path.
-	if applyErr == nil && release.MigrationState == "adopting" && release.Transition != nil && release.Transition.Type == "edge-group-ab" {
-		if replaceErr := cluster.replaceEdgeOwnershipTakeoverTemplates(ctx, release, adoption, targetManifest); replaceErr != nil {
-			applyErr = replaceErr
-		} else {
-			refreshed, refreshErr := cluster.ObserveCAS(ctx, release, targetManifest)
-			if refreshErr == nil {
-				refreshErr = refreshOwnershipTakeoverPostPatchCAS(&adoption, refreshed)
-			}
-			if refreshErr == nil {
-				manifest, refreshErr = declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
-			}
-			if refreshErr == nil {
-				refreshErr = cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
-			}
-			applyErr = refreshErr
-		}
-	}
 	verifyErr := cluster.verifyOwnershipAdoption(ctx, release, adoption)
 	convergedErr := cluster.Converged(ctx, release, manifest)
 	observation, observeErr := cluster.ObserveCAS(ctx, release, targetManifest)
@@ -360,90 +257,6 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 		return observation, fmt.Errorf("verify ownership takeover: %w", err)
 	}
 	return observation, nil
-}
-
-func (cluster *kubectlCluster) replaceEdgeOwnershipTakeoverTemplates(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, targetManifest []byte) error {
-	config, err := loadComponentLeaseClientConfig()
-	if err != nil {
-		return fmt.Errorf("load Kubernetes client config: %w", err)
-	}
-	client, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
-	}
-	for _, scope := range adoption.Resources {
-		targetItem, itemErr := declarativerelease.ResourceSetItem(targetManifest, scope.Identity)
-		if itemErr != nil {
-			return itemErr
-		}
-		gvr, gvrErr := resourceGVR(scope.Identity)
-		if gvrErr != nil {
-			return gvrErr
-		}
-		resource := client.Resource(gvr).Namespace(scope.Identity.Namespace)
-		live, getErr := resource.Get(ctx, scope.Identity.Name, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("read ownership takeover target %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, getErr)
-		}
-		patch, patchErr := edgeOwnershipTakeoverTemplatePatch(targetItem, live.Object, scope)
-		if patchErr != nil {
-			return fmt.Errorf("bind ownership takeover template %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, patchErr)
-		}
-		if _, patchErr = resource.Patch(ctx, scope.Identity.Name, types.JSONPatchType, patch, metav1.PatchOptions{FieldManager: release.Workload.FieldManager}); patchErr != nil {
-			return fmt.Errorf("replace reviewed ownership takeover template %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, patchErr)
-		}
-	}
-	return nil
-}
-
-func edgeOwnershipTakeoverTemplatePatch(target, live map[string]any, scope declarativerelease.OwnershipAdoptionResourcePlan) ([]byte, error) {
-	if scope.Identity.Kind != "DaemonSet" || !stringInSortedSet("/spec/template", scope.Fields) {
-		return nil, errors.New("Edge ownership takeover template is outside the reviewed scope")
-	}
-	metadata := mapField(live, "metadata")
-	if stringValue(metadata["name"]) != scope.Identity.Name || stringValue(metadata["namespace"]) != scope.Identity.Namespace ||
-		stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) == "" ||
-		int64Value(metadata["generation"]) < scope.Generation {
-		return nil, errors.New("Edge ownership takeover template CAS is invalid")
-	}
-	template := mapField(mapField(target, "spec"), "template")
-	if len(template) == 0 {
-		return nil, errors.New("Edge ownership takeover target template is absent")
-	}
-	operations := []map[string]any{
-		{"op": "test", "path": "/metadata/uid", "value": scope.UID},
-		{"op": "test", "path": "/metadata/resourceVersion", "value": stringValue(metadata["resourceVersion"])},
-		{"op": "test", "path": "/metadata/generation", "value": int64Value(metadata["generation"])},
-		{"op": "replace", "path": "/spec/template", "value": template},
-	}
-	return declarativerelease.CanonicalJSON(operations)
-}
-
-// refreshOwnershipTakeoverPostPatchCAS binds a second scoped SSA apply to the
-// exact UID/RV/generation produced by the already-CAS-protected template
-// replacement. Unlike the prewrite refresh, generation movement is expected
-// here because the preceding reviewed patch changed the Pod template.
-func refreshOwnershipTakeoverPostPatchCAS(adoption *declarativerelease.OwnershipAdoptionPlan, current declarativerelease.Observation) error {
-	if adoption == nil || !current.Present || current.UID == "" || current.ResourceVersion == "" ||
-		current.UID != adoption.UID || current.Generation < adoption.Generation {
-		return errors.New("post-patch ownership takeover CAS is incomplete")
-	}
-	byIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(current.Resources))
-	for _, resource := range current.Resources {
-		byIdentity[resource.Identity] = resource
-	}
-	for index := range adoption.Resources {
-		scope := &adoption.Resources[index]
-		resource, ok := byIdentity[scope.Identity]
-		if !ok || !resource.Present || resource.UID != scope.UID || resource.Generation < scope.Generation || resource.ResourceVersion == "" {
-			return fmt.Errorf("post-patch ownership takeover CAS detected drift for %s/%s", scope.Identity.Kind, scope.Identity.Name)
-		}
-		scope.ResourceVersion = resource.ResourceVersion
-		scope.Generation = resource.Generation
-	}
-	adoption.ResourceVersion = current.ResourceVersion
-	adoption.Generation = current.Generation
-	return nil
 }
 
 // refreshOwnershipTakeoverCAS rebinds only the mutable RV portion of the
@@ -633,9 +446,6 @@ func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerel
 		return err
 	}
 	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
-		if isEdgeBootstrapLKGTarget(release, target) {
-			return cluster.applyEdgeBootstrapLKG(ctx, release, target, manifest)
-		}
 		return cluster.applyEdgeGroupAB(ctx, release, target, manifest)
 	}
 	return cluster.applyResourceSet(ctx, release, manifest, false)

@@ -127,7 +127,6 @@ type Cluster interface {
 	ObserveCAS(context.Context, PlanRelease, []byte) (Observation, error)
 	ObserveDegraded(context.Context, PlanRelease, []byte) (Observation, error)
 	VerifyTarget(context.Context, TargetIdentity) error
-	VerifyBootstrapTarget(context.Context, PlanRelease, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
 	DryRunOwnershipAdoption(context.Context, PlanRelease, OwnershipAdoptionPlan, []byte) error
 	DryRunOwnershipTakeover(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) error
@@ -462,49 +461,8 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if !release.ExpectedPreviousPresent || !lkg.Present || (release.MigrationState == "adopting" && !release.RetrySameLKG) {
 		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
 	}
-	var verifyErr error
-	if allowsBootstrapArtifactVerification(release, lkg) {
-		verifyErr = cluster.VerifyBootstrapTarget(ctx, release, lkg)
-	} else {
-		verifyErr = cluster.VerifyTarget(ctx, lkg)
-	}
-	if verifyErr != nil {
+	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
 		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
-	}
-	if allowsBootstrapArtifactVerification(release, lkg) {
-		first, observeErr := cluster.Observe(ctx, release, lkg, lkgManifest)
-		if observeErr != nil || !first.Matches(lkg, release, true) {
-			degraded, degradedErr := prepareMixedBootstrapPredecessor(ctx, cluster, release, lkgManifest, observeErr)
-			if degradedErr == nil {
-				return degraded, nil
-			}
-			if observeErr == nil {
-				observeErr = errors.New("bootstrap predecessor observation does not match the exact LKG")
-			}
-			return Observation{}, fmt.Errorf("observe exact bootstrap predecessor: %w; degraded predecessor: %v", observeErr, degradedErr)
-		}
-		healthy, healthErr := cluster.WaitHealthy(ctx, release, lkg, lkgManifest)
-		if healthErr != nil || !healthy.Matches(lkg, release, true) {
-			return Observation{}, fmt.Errorf("verify exact bootstrap predecessor health: %w", healthErr)
-		}
-		witness, witnessErr := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
-		if witnessErr != nil {
-			return Observation{}, witnessErr
-		}
-		if convergenceErr := cluster.Converged(ctx, release, witness); convergenceErr != nil {
-			retryWitness, retryWitnessErr := RetryPredecessorConvergenceManifest(forwardManifest, release)
-			if retryWitnessErr != nil {
-				return Observation{}, retryWitnessErr
-			}
-			if retryErr := cluster.Converged(ctx, release, retryWitness); retryErr != nil {
-				return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: LKG=%v retry=%w", convergenceErr, retryErr)
-			}
-		}
-		second, secondErr := cluster.Observe(ctx, release, lkg, lkgManifest)
-		if secondErr != nil || !second.Matches(lkg, release, true) || !second.SameSpecIdentity(first) || second.HealthDigest != first.HealthDigest {
-			return Observation{}, errors.New("bootstrap predecessor identity changed during validation")
-		}
-		return second, nil
 	}
 	witness, err := PredecessorConvergenceManifest(lkgManifest)
 	if err != nil {
@@ -529,52 +487,6 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	}
 	if !second.SameSpecIdentity(first) {
 		return Observation{}, errors.New("degraded predecessor identity changed during validation")
-	}
-	return second, nil
-}
-
-func allowsBootstrapArtifactVerification(release PlanRelease, lkg TargetIdentity) bool {
-	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.RetrySameLKG &&
-		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" && release.ExpectedPreviousPresent && lkg.Present &&
-		lkg.ConfigSHA == release.ExpectedPreviousConfigSHA && lkg.ManifestSHA == release.ExpectedPreviousManifestSHA &&
-		lkg.OCIRevision == release.ExpectedPreviousOCIRevision && immutableRefDigest(lkg.ImageRef) == release.ExpectedPreviousImageDigest
-}
-
-func immutableRefDigest(ref string) string {
-	parts := strings.Split(ref, "@")
-	if len(parts) != 2 {
-		return ""
-	}
-	return parts[1]
-}
-
-func prepareMixedBootstrapPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkgManifest []byte, mismatchErr error) (Observation, error) {
-	witness, err := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
-	if err != nil {
-		return Observation{}, err
-	}
-	first, err := cluster.ObserveDegraded(ctx, release, lkgManifest)
-	if err != nil {
-		return Observation{}, fmt.Errorf("observe mixed bootstrap predecessor: %w", err)
-	}
-	if err := first.ValidateDegradedPredecessor(release); err != nil {
-		return Observation{}, err
-	}
-	if err := cluster.Converged(ctx, release, witness); err != nil {
-		if mismatchErr != nil {
-			return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: mixed=%v initial=%w", err, mismatchErr)
-		}
-		return Observation{}, fmt.Errorf("bootstrap predecessor manifest drift: %w", err)
-	}
-	second, err := cluster.ObserveDegraded(ctx, release, lkgManifest)
-	if err != nil {
-		return Observation{}, err
-	}
-	if err := second.ValidateDegradedPredecessor(release); err != nil {
-		return Observation{}, err
-	}
-	if !second.SameSpecIdentity(first) {
-		return Observation{}, errors.New("mixed bootstrap predecessor identity changed during validation")
 	}
 	return second, nil
 }

@@ -155,135 +155,6 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 	return executeEdgeGroupAB(ctx, runtime, release, transition, target)
 }
 
-func isEdgeBootstrapLKGTarget(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) bool {
-	return isAdoptingEdgeGroup(release) && release.ExpectedPreviousPresent && target.Present &&
-		target.ConfigSHA == release.ExpectedPreviousConfigSHA && target.ManifestSHA == release.ExpectedPreviousManifestSHA &&
-		target.OCIRevision == release.ExpectedPreviousOCIRevision && immutableRefDigestLocal(target.ImageRef) == release.ExpectedPreviousImageDigest
-}
-
-// applyEdgeBootstrapLKG restores the exact heterogeneous pre-adoption
-// front/A/B identities. It intentionally bypasses group-publication checks:
-// the Git LKG predates that authority. The path is selected only by the exact
-// adoption-bound predecessor identity above and is unreachable once a group is
-// independent.
-func (cluster *kubectlCluster) applyEdgeBootstrapLKG(ctx context.Context, release declarativerelease.PlanRelease, _ declarativerelease.TargetIdentity, manifest []byte) error {
-	transition := *release.Transition.EdgeGroupAB
-	frontTarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.FrontName, "edge-front")
-	if err != nil {
-		return err
-	}
-	workerATarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.WorkerAName, transition.WorkerContainer)
-	if err != nil {
-		return err
-	}
-	workerBTarget, err := declaredEdgeDaemonSetTarget(manifest, release, transition.WorkerBName, transition.WorkerContainer)
-	if err != nil {
-		return err
-	}
-	// A first ownership takeover changes only the reviewed desired templates.
-	// If it is rejected before any Pod rollout, all three running workloads are
-	// still the exact heterogeneous bootstrap LKG and do not yet expose group
-	// publication health. Restore the CAS-bound desired resource set directly;
-	// requiring new authority here would make the pre-rollout compensation
-	// impossible. Any workload mismatch falls through to the full transition
-	// recovery below.
-	runningFront, frontErr := cluster.readBootstrapLKGDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, frontTarget)
-	runningWorkerA, workerAErr := cluster.readBootstrapLKGDaemonSetPods(ctx, release, transition.WorkerAName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, workerATarget)
-	runningWorkerB, workerBErr := cluster.readBootstrapLKGDaemonSetPods(ctx, release, transition.WorkerBName, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, workerBTarget)
-	if frontErr == nil && workerAErr == nil && workerBErr == nil &&
-		bootstrapWorkloadsMatchLKG(runningFront, runningWorkerA, runningWorkerB, frontTarget, workerATarget, workerBTarget) {
-		return cluster.applyResourceSet(ctx, release, manifest, false)
-	}
-
-	before, err := cluster.readAdoptingEdgeGroupState(ctx, release, transition)
-	if err != nil {
-		return fmt.Errorf("capture bootstrap LKG recovery state: %w", err)
-	}
-	if before.ActiveSlot == "b" && !allFrontActivationPresent(before.FrontHealth) {
-		return errors.New("bootstrap LKG recovery cannot switch an unbound active slot")
-	}
-	config, err := loadComponentLeaseClientConfig()
-	if err != nil {
-		return fmt.Errorf("load Kubernetes client config: %w", err)
-	}
-	client, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
-	}
-	if err := cluster.applyResourceSet(ctx, release, manifest, false); err != nil {
-		return err
-	}
-
-	workerA := before.WorkerA
-	workerB := before.WorkerB
-	if before.ActiveSlot == "a" {
-		// OnDelete workloads do not recycle when the template is restored. The
-		// active slot is still safe to repair in place: keep authority on slot A,
-		// but replace each forward Pod one at a time and wait for the exact LKG
-		// identity before touching the other slot.
-		if !edgePodsMatchTarget(workerA, workerATarget) {
-			workerA, err = cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.WorkerAName, workerATarget, false)
-			if err != nil {
-				return fmt.Errorf("restore bootstrap active slot a: %w", err)
-			}
-		}
-		if !edgePodsMatchTarget(workerB, workerBTarget) {
-			workerB, err = cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.WorkerBName, workerBTarget, false)
-			if err != nil {
-				return fmt.Errorf("restore bootstrap inactive slot b: %w", err)
-			}
-		}
-	} else {
-		if !edgePodsMatchTarget(workerA, workerATarget) {
-			workerA, err = cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.WorkerAName, workerATarget, false)
-			if err != nil {
-				return fmt.Errorf("restore bootstrap inactive slot a: %w", err)
-			}
-		}
-		for _, node := range sortedEdgeNodes(before.Front) {
-			state := before.FrontHealth[node]
-			executor, execErr := cluster.selectEdgeCASExecutor(ctx, release.Workload.Namespace, transition, workerB[node], workerA[node])
-			if execErr != nil {
-				return fmt.Errorf("select bootstrap LKG CAS executor on node %s: %w", node, execErr)
-			}
-			digest, digestErr := immutableDigestFromRef(workerATarget.ImageRef)
-			if digestErr != nil {
-				return digestErr
-			}
-			receipt, casErr := cluster.runEdgeActivationCAS(ctx, release, transition, executor, edgeActivationRequest{
-				GroupID: transition.GroupID, ExpectedGeneration: state.Generation, ExpectedSlot: "b", TargetSlot: "a",
-				BundleGeneration: workerA[node].BundleGeneration, WorkerSourceCommit: workerATarget.ConfigSHA, WorkerImageDigest: digest,
-				Operation: edgeActivationRollback, RollbackOfGeneration: state.Generation, Reason: "restore heterogeneous bootstrap LKG",
-			})
-			if casErr != nil {
-				return fmt.Errorf("restore bootstrap activation on node %s: %w", node, casErr)
-			}
-			if receipt.Current.ActiveSlot != "a" || receipt.Current.Generation != state.Generation+1 {
-				return fmt.Errorf("restore bootstrap activation on node %s returned an unbound receipt", node)
-			}
-		}
-		if _, err := cluster.waitFrontActivation(ctx, release, transition, "a", workerATarget.ConfigSHA, ""); err != nil {
-			return fmt.Errorf("verify bootstrap LKG activation: %w", err)
-		}
-		if !edgePodsMatchTarget(workerB, workerBTarget) {
-			if _, err := cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.WorkerBName, workerBTarget, false); err != nil {
-				return fmt.Errorf("restore bootstrap former active slot b: %w", err)
-			}
-		}
-	}
-	if !edgePodsMatchTarget(before.Front, frontTarget) {
-		if _, err := cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, transition.FrontName, frontTarget, false); err != nil {
-			return fmt.Errorf("restore bootstrap edge front: %w", err)
-		}
-	}
-	return nil
-}
-
-func bootstrapWorkloadsMatchLKG(front, workerA, workerB map[string]edgeGroupPod, frontTarget, workerATarget, workerBTarget declarativerelease.TargetIdentity) bool {
-	return sameEdgeNodes(front, workerA) && sameEdgeNodes(front, workerB) &&
-		edgePodsMatchBootstrapTarget(front, frontTarget) && edgePodsMatchBootstrapTarget(workerA, workerATarget) && edgePodsMatchBootstrapTarget(workerB, workerBTarget)
-}
-
 func declaredEdgeDaemonSetTarget(manifest []byte, release declarativerelease.PlanRelease, name, container string) (declarativerelease.TargetIdentity, error) {
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: release.Workload.Namespace, Name: name}
 	desired, err := declarativerelease.ResourceSetItem(manifest, identity)
@@ -315,12 +186,7 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 		return err
 	}
 
-	// During first adoption the inventory producer is intentionally inactive
-	// until this slot wins the activation CAS. Requiring fresh group authority
-	// here would make activation depend on the heartbeat that activation itself
-	// enables. The post-CAS gate below still requires fresh inventory and a
-	// verified group publication before the previous active slot is touched.
-	inactive, err := runtime.Roll(ctx, inactiveName, target, !isAdoptingEdgeGroup(release))
+	inactive, err := runtime.Roll(ctx, inactiveName, target, true)
 	if err != nil {
 		return fmt.Errorf("roll inactive edge slot %s: %w", inactiveSlot, err)
 	}
@@ -449,9 +315,6 @@ func executeEdgeGroupAB(ctx context.Context, runtime edgeGroupTransitionRuntime,
 }
 
 func (runtime *kubectlEdgeGroupRuntime) Snapshot(ctx context.Context) (edgeGroupState, error) {
-	if isAdoptingEdgeGroup(runtime.release) {
-		return runtime.cluster.readAdoptingEdgeGroupState(ctx, runtime.release, runtime.transition)
-	}
 	return runtime.cluster.readEdgeGroupState(ctx, runtime.release, runtime.transition)
 }
 
@@ -552,84 +415,8 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	return edgeGroupState{Front: front, FrontHealth: frontHealth, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
 }
 
-func isAdoptingEdgeGroup(release declarativerelease.PlanRelease) bool {
-	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-		release.HeterogeneousBootstrapLKG && release.BootstrapLKGPath != "" && release.Transition != nil && release.Transition.Type == "edge-group-ab"
-}
-
-// readAdoptingEdgeGroupState preserves the healthy front/active-slot authority
-// while allowing only the inactive slot to be degraded. This is the bounded
-// recovery surface needed to replace a failed first-adoption Pod; independent
-// groups always use the strict all-slots snapshot above.
-func (cluster *kubectlCluster) readAdoptingEdgeGroupState(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition) (edgeGroupState, error) {
-	front, err := cluster.readEdgeDaemonSetPods(ctx, release, transition.FrontName, "edge-front", transition.ExpectedNodes, transition.GroupID, false)
-	if err != nil {
-		return edgeGroupState{}, err
-	}
-	frontHealth := make(map[string]edgeFrontHealth, len(front))
-	activeSlot := ""
-	for node, pod := range front {
-		health, healthErr := cluster.readEdgeFrontHealth(ctx, pod)
-		if healthErr != nil {
-			return edgeGroupState{}, healthErr
-		}
-		if activeSlot == "" {
-			activeSlot = health.ActiveSlot
-		} else if activeSlot != health.ActiveSlot {
-			return edgeGroupState{}, errors.New("edge group front nodes disagree on active slot")
-		}
-		frontHealth[node] = health
-	}
-	if activeSlot != "a" && activeSlot != "b" {
-		return edgeGroupState{}, errors.New("edge group active slot is invalid")
-	}
-	readWorker := func(name, slot string) (map[string]edgeGroupPod, error) {
-		if slot == activeSlot {
-			return cluster.readEdgeDaemonSetPods(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
-		}
-		pods, strictErr := cluster.readEdgeDaemonSetPods(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID, true)
-		if strictErr == nil {
-			return pods, nil
-		}
-		return cluster.readDegradedEdgeDaemonSetPods(ctx, release, name, transition.WorkerContainer, transition.ExpectedNodes, transition.GroupID)
-	}
-	workerA, err := readWorker(transition.WorkerAName, "a")
-	if err != nil {
-		return edgeGroupState{}, err
-	}
-	workerB, err := readWorker(transition.WorkerBName, "b")
-	if err != nil {
-		return edgeGroupState{}, err
-	}
-	if !sameEdgeNodes(front, workerA) || !sameEdgeNodes(front, workerB) {
-		return edgeGroupState{}, errors.New("edge group workloads do not share one exact node cohort")
-	}
-	return edgeGroupState{Front: front, FrontHealth: frontHealth, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
-}
-
 func (cluster *kubectlCluster) readEdgeDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, includeWorkerHealth bool) (map[string]edgeGroupPod, error) {
 	return cluster.readEdgeDaemonSetPodsWithReadiness(ctx, release, name, container, expectedNodes, groupID, includeWorkerHealth, true)
-}
-
-func (cluster *kubectlCluster) readDegradedEdgeDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string) (map[string]edgeGroupPod, error) {
-	return cluster.readEdgeDaemonSetPodsWithReadiness(ctx, release, name, container, expectedNodes, groupID, false, false)
-}
-
-func (cluster *kubectlCluster) readBootstrapLKGDaemonSetPods(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
-	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: release.Workload.Namespace, Name: name}
-	workloadRaw, err := cluster.getResource(ctx, identity)
-	if err != nil || len(bytes.TrimSpace(workloadRaw)) == 0 {
-		return nil, fmt.Errorf("read DaemonSet/%s: %w", name, err)
-	}
-	selector, err := selectorFromWorkload(workloadRaw)
-	if err != nil {
-		return nil, err
-	}
-	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
-	if err != nil {
-		return nil, err
-	}
-	return parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, true, target.ConfigSHA, true)
 }
 
 func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Context, release declarativerelease.PlanRelease, name, container string, expectedNodes int, groupID string, includeWorkerHealth, requireReady bool) (map[string]edgeGroupPod, error) {
@@ -646,20 +433,8 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	if err != nil {
 		return nil, err
 	}
-	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil
-	legacySource := ""
-	legacyImageDigest := ""
-	if allowLegacy {
-		legacySource, legacyImageDigest, err = bootstrapLegacyPodIdentity(release, name, container)
-		if err != nil {
-			return nil, err
-		}
-	}
-	pods, err := parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, allowLegacy, legacySource, requireReady)
+	pods, err := parseEdgeGroupPodsWithReadiness(podsRaw, container, expectedNodes, groupID, false, "", requireReady)
 	if err != nil {
-		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
-	}
-	if err := validateBootstrapLegacyPodImages(pods, legacyImageDigest); err != nil {
 		return nil, fmt.Errorf("parse DaemonSet/%s pods: %w", name, err)
 	}
 	if !requireReady {
@@ -671,7 +446,7 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	// healthy live bootstrap cohort before any production write.
 	var endpoints []podHTTPEndpoint
 	var endpointErr error
-	for _, portName := range edgeHealthPortNames(allowLegacy) {
+	for _, portName := range edgeHealthPortNames() {
 		endpoints, endpointErr = podHTTPEndpointsFromJSON(podsRaw, container, portName)
 		if endpointErr == nil {
 			break
@@ -715,46 +490,8 @@ func (cluster *kubectlCluster) readEdgeDaemonSetPodsWithReadiness(ctx context.Co
 	return pods, nil
 }
 
-func edgeHealthPortNames(allowLegacy bool) []string {
-	if allowLegacy {
-		// The adopting bootstrap may contain the prior worker template, whose
-		// exact LKG names this port "http". Independent releases accept only
-		// the canonical target name below.
-		return []string{"health", "http"}
-	}
+func edgeHealthPortNames() []string {
 	return []string{"health"}
-}
-
-func bootstrapLegacyPodIdentity(release declarativerelease.PlanRelease, name, container string) (string, string, error) {
-	if !isAdoptingEdgeGroup(release) {
-		return "", "", errors.New("legacy edge Pod identity is not authorized")
-	}
-	manifest, err := loadLKGManifest(release)
-	if err != nil {
-		return "", "", err
-	}
-	target, err := declaredEdgeDaemonSetTarget(manifest, release, name, container)
-	if err != nil {
-		return "", "", fmt.Errorf("bind legacy edge Pod to bootstrap LKG: %w", err)
-	}
-	digest, err := immutableDigestFromRef(target.ImageRef)
-	if err != nil {
-		return "", "", fmt.Errorf("bind legacy edge Pod image to bootstrap LKG: %w", err)
-	}
-	return target.ConfigSHA, digest, nil
-}
-
-func validateBootstrapLegacyPodImages(pods map[string]edgeGroupPod, wantDigest string) error {
-	for _, pod := range pods {
-		if !pod.LegacyIdentity {
-			continue
-		}
-		digest, err := imageIDDigest(pod.ImageID)
-		if err != nil || digest != wantDigest {
-			return errors.New("legacy Pod image is not the exact bootstrap LKG")
-		}
-	}
-	return nil
 }
 
 func parseEdgeGroupPods(raw []byte, container string, expectedNodes int, groupID string, allowLegacy bool, legacySource string) (map[string]edgeGroupPod, error) {
@@ -896,14 +633,6 @@ func edgePodHasGroupAuthority(pod edgeGroupPod) bool {
 	return pod.RouteBundleSource == edgeGroupAuthoritySource && pod.PublicationSequence > 0 && pod.ServingGeneration != ""
 }
 
-func edgePodHasAdoptionLegacyRoute(pod edgeGroupPod) bool {
-	return pod.RouteBundleSource == "" && pod.BundleGeneration != "" && pod.ServingGeneration != ""
-}
-
-func allowsAdoptionRouteBootstrap(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) bool {
-	return isAdoptingEdgeGroup(release) && target.Present && target.ConfigSHA != release.ExpectedPreviousConfigSHA
-}
-
 func edgePodHasActiveInventory(pod edgeGroupPod) bool {
 	return edgePodHasGroupAuthority(pod) && pod.InventoryProducerActive && pod.InventoryHeartbeatGeneration > 0 &&
 		!pod.InventoryHeartbeatAt.IsZero() && pod.InventoryHeartbeatError == ""
@@ -994,9 +723,6 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 		includeHealth = false
 	}
 	current, err := cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
-	if err != nil && isAdoptingEdgeGroup(release) {
-		current, err = cluster.readDegradedEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID)
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -1036,8 +762,7 @@ func (cluster *kubectlCluster) waitEdgePodTarget(ctx context.Context, release de
 		pods, err := cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
 		if err == nil {
 			pod, exists := pods[node]
-			authorityReady := !includeHealth || !requireGroupAuthority || edgePodHasGroupAuthority(pod) ||
-				(allowsAdoptionRouteBootstrap(release, target) && edgePodHasAdoptionLegacyRoute(pod))
+			authorityReady := !includeHealth || !requireGroupAuthority || edgePodHasGroupAuthority(pod)
 			if exists && pod.UID != priorUID && edgePodMatchesTarget(pod, target) && authorityReady {
 				return pod, nil
 			}
@@ -1192,22 +917,6 @@ func edgePodsMatchTarget(pods map[string]edgeGroupPod, target declarativerelease
 	}
 	for _, pod := range pods {
 		if !edgePodMatchesTarget(pod, target) {
-			return false
-		}
-	}
-	return true
-}
-
-func edgePodsMatchBootstrapTarget(pods map[string]edgeGroupPod, target declarativerelease.TargetIdentity) bool {
-	if len(pods) == 0 {
-		return false
-	}
-	digest, err := immutableDigestFromRef(target.ImageRef)
-	if err != nil {
-		return false
-	}
-	for _, pod := range pods {
-		if !pod.Ready || pod.SourceCommit != target.ConfigSHA || !strings.HasSuffix(pod.ImageID, digest) {
 			return false
 		}
 	}

@@ -5,13 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -74,105 +72,6 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	cas, err := cluster.ObserveCAS(context.Background(), release, manifest)
 	if err != nil || !cas.SameResourceCAS(observation) {
 		t.Fatalf("JSON null changed between full and CAS observations: observation=%+v cas=%+v err=%v", observation, cas, err)
-	}
-}
-
-func TestVerifyBootstrapTargetAllowsMissingRevisionOnlyForExactAdoptionLKG(t *testing.T) {
-	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64)
-	revision := strings.Repeat("a", 40)
-	script := filepath.Join(t.TempDir(), "verify.py")
-	program := `import json, sys
-image = "ghcr.io/example/fugue-edge@sha256:" + "b" * 64
-expected = ["--image", image, "--platform", "linux/amd64", "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1"]
-if sys.argv[1:] != expected:
-    raise SystemExit(2)
-print(json.dumps({"image": image, "index_digest": "sha256:" + "b" * 64, "manifest_digest": "sha256:" + "c" * 64, "config_digest": "sha256:" + "d" * 64, "oci_revision": "", "platform": "linux/amd64", "verification": "registry_manifest_config_get", "blob_count": 0, "layer_get_probe_count": 0, "request_count": 3, "total_layer_bytes": 0}, separators=(",", ":")))
-`
-	if err := os.WriteFile(script, []byte(program), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	release := declarativerelease.PlanRelease{
-		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
-		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
-		ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision, ExpectedPreviousOCIRevision: revision,
-		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64), OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm"},
-	}
-	target := declarativerelease.TargetIdentity{Present: true, ImageRef: image, ConfigSHA: revision, ManifestSHA: revision, OCIRevision: revision}
-	cluster := &kubectlCluster{verifier: script, timeout: time.Second}
-	if err := cluster.VerifyBootstrapTarget(context.Background(), release, target); err != nil {
-		t.Fatalf("verify legacy immutable bootstrap: %v", err)
-	}
-	release.MigrationState = "independent"
-	if err := cluster.VerifyBootstrapTarget(context.Background(), release, target); err == nil {
-		t.Fatal("independent release accepted bootstrap registry compatibility")
-	}
-}
-
-func TestNormalizeAdoptionBootstrapDegradedIdentityBindsLegacyShape(t *testing.T) {
-	revision := strings.Repeat("a", 40)
-	release := declarativerelease.PlanRelease{
-		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
-		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
-		ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision,
-		ExpectedPreviousOCIRevision: revision, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64),
-		Artifact:          declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-edge"},
-		Workload:          declarativerelease.Workload{FieldManager: "fugue-edge-worker-de-declarative"},
-		OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm"},
-	}
-	observation := declarativerelease.Observation{
-		Present: true, UID: "uid", ResourceVersion: "42", Generation: 7,
-		ImageRef: "ghcr.io/example/fugue-edge:" + revision, ManifestSHA: revision, OCIRevision: revision,
-		TemplateDigest: "sha256:" + strings.Repeat("c", 64),
-		FieldManagers:  []string{"fugue-edge-worker-de-declarative", "helm"},
-		Primary:        declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"},
-	}
-	observation.Resources = []declarativerelease.ResourceObservation{{
-		Identity: observation.Primary, Present: true, UID: "uid", ResourceVersion: "42", Generation: 7,
-		ObjectDigest: "sha256:" + strings.Repeat("d", 64), FieldManagers: []string{"fugue-edge-worker-de-declarative", "helm"},
-	}}
-	if err := normalizeAdoptionBootstrapDegradedIdentity(&observation, release); err != nil {
-		t.Fatalf("normalize legacy bootstrap identity: %v", err)
-	}
-	if observation.ImageRef != release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest || observation.ConfigSHA != revision {
-		t.Fatalf("unexpected normalized identity: %+v", observation)
-	}
-	if err := observation.ValidateDegradedPredecessor(release); err != nil {
-		t.Fatalf("normalized observation is not valid: %v", err)
-	}
-	if !allowsLegacyBootstrapRegistryRevision(release, observation) {
-		t.Fatal("exact adoption bootstrap did not allow a missing legacy registry revision")
-	}
-
-	independent := release
-	independent.MigrationState = "independent"
-	untouched := observation
-	untouched.ImageRef = "ghcr.io/example/fugue-edge:" + revision
-	untouched.ConfigSHA = ""
-	if err := normalizeAdoptionBootstrapDegradedIdentity(&untouched, independent); err != nil {
-		t.Fatalf("independent observation should not invoke adoption fallback: %v", err)
-	}
-	if untouched.ImageRef != "ghcr.io/example/fugue-edge:"+revision || untouched.ConfigSHA != "" {
-		t.Fatalf("independent path changed legacy identity: %+v", untouched)
-	}
-	if allowsLegacyBootstrapRegistryRevision(independent, observation) {
-		t.Fatal("independent release allowed a missing registry revision")
-	}
-}
-
-func TestNormalizeAdoptionBootstrapDegradedIdentityRejectsWrongSourceTag(t *testing.T) {
-	revision := strings.Repeat("a", 40)
-	release := declarativerelease.PlanRelease{
-		MigrationState: "adopting", RetrySameLKG: true, HeterogeneousBootstrapLKG: true,
-		BootstrapLKGPath: "deploy/releases/edge-worker-de/lkg.json", ExpectedPreviousPresent: true,
-		ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision,
-		ExpectedPreviousOCIRevision: revision, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64),
-		Artifact:          declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-edge"},
-		Workload:          declarativerelease.Workload{FieldManager: "fugue-edge-worker-de-declarative"},
-		OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm"},
-	}
-	observation := declarativerelease.Observation{Present: true, ImageRef: "ghcr.io/example/fugue-edge:" + strings.Repeat("c", 40), ManifestSHA: revision, OCIRevision: revision}
-	if err := normalizeAdoptionBootstrapDegradedIdentity(&observation, release); err == nil {
-		t.Fatal("wrong source tag was accepted")
 	}
 }
 
@@ -599,28 +498,6 @@ func TestRefreshOwnershipTakeoverCASUpdatesOnlyResourceVersions(t *testing.T) {
 	}
 }
 
-func TestRefreshOwnershipTakeoverPostPatchCASAcceptsOnlyReviewedGenerationMovement(t *testing.T) {
-	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge"}
-	adoption := declarativerelease.OwnershipAdoptionPlan{
-		UID: "primary", ResourceVersion: "10", Generation: 7,
-		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{Identity: identity, UID: "resource", ResourceVersion: "10", Generation: 4, Fields: []string{"/spec/template"}}},
-	}
-	current := declarativerelease.Observation{
-		Present: true, UID: "primary", ResourceVersion: "22", Generation: 8,
-		Resources: []declarativerelease.ResourceObservation{{Identity: identity, Present: true, UID: "resource", ResourceVersion: "23", Generation: 5}},
-	}
-	if err := refreshOwnershipTakeoverPostPatchCAS(&adoption, current); err != nil {
-		t.Fatalf("post-patch refresh rejected reviewed generation movement: %v", err)
-	}
-	if adoption.ResourceVersion != "22" || adoption.Generation != 8 || adoption.Resources[0].ResourceVersion != "23" || adoption.Resources[0].Generation != 5 {
-		t.Fatalf("post-patch refresh did not bind the newest CAS: %+v", adoption)
-	}
-	current.Resources[0].UID = "changed"
-	if err := refreshOwnershipTakeoverPostPatchCAS(&adoption, current); err == nil {
-		t.Fatal("post-patch refresh accepted UID drift")
-	}
-}
-
 func TestOwnershipTakeoverForwardOnlyCompensationPathsAreExplicit(t *testing.T) {
 	forward := map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 		"serviceAccountName": "edge-worker-de",
@@ -645,78 +522,6 @@ func TestOwnershipTakeoverForwardOnlyCompensationPathsAreExplicit(t *testing.T) 
 	paths, err = ownershipTakeoverForwardOnlyPaths(forward, lkg)
 	if err != nil || len(paths) != 2 || paths[0] != "/spec/template/spec/serviceAccountName" || paths[1] != "/spec/template/spec/initContainers" {
 		t.Fatalf("legacy LKG serviceAccount alias was not preserved: %v %v", paths, err)
-	}
-}
-
-func TestEdgeOwnershipTakeoverTemplatePatchReplacesLegacyAssociativeListMembers(t *testing.T) {
-	targetTemplate := map[string]any{
-		"metadata": map[string]any{"labels": map[string]any{"fugue.io/edge-group-id": "edge-group-gamma"}},
-		"spec": map[string]any{
-			"serviceAccountName": "edge-worker-gamma",
-			"containers": []any{map[string]any{
-				"name": "edge", "image": "example.invalid/edge@sha256:" + strings.Repeat("a", 64),
-				"env": []any{map[string]any{"name": "FUGUE_EDGE_CONTROL_URL", "value": "https://edge-control-gamma"}},
-			}},
-			"volumes": []any{map[string]any{"name": "edge-control-reader", "secret": map[string]any{"secretName": "reader-gamma"}}},
-		},
-	}
-	target := map[string]any{
-		"apiVersion": "apps/v1", "kind": "DaemonSet",
-		"metadata": map[string]any{"name": "edge-gamma-worker-a", "namespace": "fugue-system"},
-		"spec":     map[string]any{"template": targetTemplate},
-	}
-	live := map[string]any{
-		"apiVersion": "apps/v1", "kind": "DaemonSet",
-		"metadata": map[string]any{"name": "edge-gamma-worker-a", "namespace": "fugue-system", "uid": "worker-uid", "resourceVersion": "84", "generation": json.Number("12")},
-		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
-			"containers": []any{map[string]any{"name": "edge", "env": []any{
-				map[string]any{"name": "FUGUE_BUNDLE_SIGNING_KEY", "value": "legacy"},
-				map[string]any{"name": "FUGUE_EDGE_CONTROL_URL", "value": "https://edge-control-gamma"},
-			}}},
-			"volumes": []any{
-				map[string]any{"name": "legacy-signing", "secret": map[string]any{"secretName": "legacy"}},
-				map[string]any{"name": "edge-control-reader", "secret": map[string]any{"secretName": "reader-gamma"}},
-			},
-		}}},
-	}
-	scope := declarativerelease.OwnershipAdoptionResourcePlan{
-		Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-gamma-worker-a"},
-		UID:      "worker-uid", ResourceVersion: "42", Generation: 11, Fields: []string{"/spec/template"},
-	}
-	patch, err := edgeOwnershipTakeoverTemplatePatch(target, live, scope)
-	if err != nil {
-		t.Fatalf("build exact Edge takeover patch: %v", err)
-	}
-	var operations []map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(patch))
-	decoder.UseNumber()
-	if err := decoder.Decode(&operations); err != nil {
-		t.Fatal(err)
-	}
-	if len(operations) != 4 || operations[0]["path"] != "/metadata/uid" || operations[0]["value"] != "worker-uid" ||
-		operations[1]["path"] != "/metadata/resourceVersion" || operations[1]["value"] != "84" ||
-		operations[2]["path"] != "/metadata/generation" || fmt.Sprint(operations[2]["value"]) != "12" ||
-		operations[3]["op"] != "replace" || operations[3]["path"] != "/spec/template" {
-		t.Fatalf("unexpected bounded takeover patch: %s", patch)
-	}
-	replacement, ok := operations[3]["value"].(map[string]any)
-	if !ok {
-		t.Fatalf("replacement template is not an object: %s", patch)
-	}
-	replacementRaw, _ := json.Marshal(replacement)
-	if bytes.Contains(replacementRaw, []byte("FUGUE_BUNDLE_SIGNING_KEY")) || bytes.Contains(replacementRaw, []byte("legacy-signing")) ||
-		!bytes.Contains(replacementRaw, []byte("FUGUE_EDGE_CONTROL_URL")) || !bytes.Contains(replacementRaw, []byte("edge-control-reader")) {
-		t.Fatalf("replacement did not remove only legacy list members: %s", replacementRaw)
-	}
-
-	scope.Fields = []string{"/metadata/labels"}
-	if _, err := edgeOwnershipTakeoverTemplatePatch(target, live, scope); err == nil {
-		t.Fatal("takeover patch escaped the reviewed Pod template scope")
-	}
-	scope.Fields = []string{"/spec/template"}
-	live["metadata"].(map[string]any)["uid"] = "changed-uid"
-	if _, err := edgeOwnershipTakeoverTemplatePatch(target, live, scope); err == nil {
-		t.Fatal("takeover patch accepted UID drift")
 	}
 }
 
@@ -1008,15 +813,6 @@ func TestEdgeWorkerHealthUsesCanonicalNamedPort(t *testing.T) {
 	}
 	if _, err := podHTTPEndpointsFromJSON(raw, "edge", "http"); err == nil {
 		t.Fatal("non-canonical worker health port was accepted")
-	}
-}
-
-func TestEdgeHealthPortNamesKeepLegacyFallbackAdoptionScoped(t *testing.T) {
-	if got := edgeHealthPortNames(false); !reflect.DeepEqual(got, []string{"health"}) {
-		t.Fatalf("independent path accepted legacy health ports: %v", got)
-	}
-	if got := edgeHealthPortNames(true); !reflect.DeepEqual(got, []string{"health", "http"}) {
-		t.Fatalf("adoption path did not preserve exact legacy port fallback: %v", got)
 	}
 }
 
