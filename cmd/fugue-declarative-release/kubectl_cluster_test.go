@@ -605,6 +605,22 @@ func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
 	}
 }
 
+func TestAPIContainerAdoptionConflictProofAcceptsOnlyLegacyImageLeaf(t *testing.T) {
+	allowed := errors.New("Apply failed with 1 conflict: conflict with \"kubectl-patch\" using apps/v1: .spec.template.spec.containers[name=\"api\"].image")
+	fields := []string{"/spec/template/spec/containers"}
+	if err := validateAdoptionConflicts(allowed, []string{"kubectl-patch"}, fields); err != nil {
+		t.Fatalf("exact legacy API image conflict was rejected: %v", err)
+	}
+	for _, conflict := range []error{
+		errors.New("Apply failed with 1 conflict: conflict with \"helm\" using apps/v1: .spec.template.spec.containers[name=\"api\"].image"),
+		errors.New("Apply failed with 1 conflict: conflict with \"kubectl-patch\" using apps/v1: .spec.template.spec.volumes"),
+	} {
+		if err := validateAdoptionConflicts(conflict, []string{"kubectl-patch"}, fields); err == nil {
+			t.Fatalf("out-of-scope API conflict was accepted: %v", conflict)
+		}
+	}
+}
+
 func TestAdoptionConflictProofAllowsExistingDeclarativeManagerOnlyWhenExplicitlyReviewed(t *testing.T) {
 	conflict := errors.New(`command failed: exit status 1: error: Apply failed with 1 conflict: conflict with "fugue-edge-worker-de-declarative" using apps/v1: .spec.template.metadata.annotations.fugue.pro/oci-revision`)
 	managers := []string{"fugue-edge-worker-de-declarative", "helm", "kubectl-patch"}

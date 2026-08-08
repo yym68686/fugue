@@ -85,6 +85,26 @@ func adoptionPointerValue(value map[string]any, pointer string) (any, error) {
 			return nil, errors.New("pointer is absent from bootstrap LKG")
 		}
 	}
+	if pointer == "/spec/template/spec/containers" {
+		containers, ok := current.([]any)
+		if !ok || len(containers) == 0 {
+			return nil, errors.New("ownership adoption containers are invalid")
+		}
+		scoped := make([]any, 0, len(containers))
+		for _, raw := range containers {
+			container, ok := raw.(map[string]any)
+			if !ok {
+				return nil, errors.New("ownership adoption container is invalid")
+			}
+			name, nameOK := container["name"].(string)
+			image, imageOK := container["image"].(string)
+			if !nameOK || name == "" || !imageOK || image == "" {
+				return nil, errors.New("ownership adoption container identity is incomplete")
+			}
+			scoped = append(scoped, map[string]any{"name": name, "image": image})
+		}
+		current = scoped
+	}
 	raw, err := json.Marshal(current)
 	if err != nil {
 		return nil, err

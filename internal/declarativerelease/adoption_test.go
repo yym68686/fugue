@@ -63,3 +63,49 @@ func TestOwnershipTakeoverManifestContainsOnlyReviewedImmutableTargetFields(t *t
 		t.Fatal("ownership takeover accepted a mismatched immutable target")
 	}
 }
+
+func TestOwnershipContainerManifestKeepsOnlyNameAndImage(t *testing.T) {
+	bootstrap := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"env":[{"name":"MODE","value":"bootstrap"}],"image":"example/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","livenessProbe":{"httpGet":{"path":"/healthz","port":"http"}},"name":"api","ports":[{"containerPort":8080,"name":"http"}],"resources":{"requests":{"cpu":"100m"}},"volumeMounts":[{"mountPath":"/secret","name":"tls"}]}],"volumes":[{"name":"tls","secret":{"secretName":"api-tls"}}]}}}}],"kind":"ComponentResourceSet"}`)
+	forward := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"env":[{"name":"MODE","value":"forward"}],"image":"example/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"api","ports":[{"containerPort":9090,"name":"metrics"}],"readinessProbe":{"httpGet":{"path":"/readyz","port":"metrics"}},"resources":{"limits":{"cpu":"1"}},"volumeMounts":[{"mountPath":"/other","name":"config"}]}],"volumes":[{"configMap":{"name":"api-config"},"name":"config"}]}}}}],"kind":"ComponentResourceSet"}`)
+	plan := OwnershipAdoptionPlan{
+		BootstrapLKGDigest: digestOf(bootstrap),
+		Resources: []OwnershipAdoptionResourcePlan{{
+			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+			Fields:   []string{"/spec/template/spec/containers"}, UID: "api-uid", ResourceVersion: "42", Generation: 7,
+		}},
+	}
+	forwardIdentity := TargetIdentity{
+		Present: true, ImageRef: "example/api@sha256:" + strings.Repeat("b", 64), ConfigSHA: strings.Repeat("2", 40),
+		ManifestSHA: strings.Repeat("2", 40), OCIRevision: strings.Repeat("2", 40), ManifestDigest: digestOf(forward),
+	}
+	tests := []struct {
+		name      string
+		wantImage string
+		build     func() ([]byte, error)
+	}{
+		{name: "bootstrap", wantImage: strings.Repeat("a", 64), build: func() ([]byte, error) {
+			return BuildOwnershipAdoptionManifest(bootstrap, plan)
+		}},
+		{name: "takeover", wantImage: strings.Repeat("b", 64), build: func() ([]byte, error) {
+			plan.AlreadyConverged = true
+			return BuildOwnershipTakeoverManifest(forward, plan, forwardIdentity)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := test.build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `"containers":[{"image":"example/api@sha256:` + test.wantImage + `","name":"api"}]`
+			if !bytes.Contains(raw, []byte(want)) {
+				t.Fatalf("ownership-scoped container lost name/image: %s", raw)
+			}
+			for _, forbidden := range []string{`"env"`, `"ports"`, `"resources"`, `"livenessProbe"`, `"readinessProbe"`, `"volumeMounts"`, `"volumes"`} {
+				if bytes.Contains(raw, []byte(forbidden)) {
+					t.Fatalf("ownership-scoped container copied %s: %s", forbidden, raw)
+				}
+			}
+		})
+	}
+}
