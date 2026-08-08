@@ -385,7 +385,12 @@ func adoptionFieldAllowed(field string, pointers []string) bool {
 	for _, pointer := range pointers {
 		parts := strings.Split(strings.TrimPrefix(pointer, "/"), "/")
 		for index, part := range parts {
-			parts[index] = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+			part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+			if open := strings.Index(part, "[name="); open > 0 && strings.HasSuffix(part, "]") {
+				name := part[open+len("[name=") : len(part)-1]
+				part = part[:open] + `[name="` + name + `"]`
+			}
+			parts[index] = part
 		}
 		prefix := "." + strings.Join(parts, ".")
 		if field == prefix || strings.HasPrefix(field, prefix+".") || strings.HasPrefix(field, prefix+"[") {

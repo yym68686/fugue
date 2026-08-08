@@ -445,6 +445,9 @@ func (adoption OwnershipAdoption) validate(component Component) error {
 				(fieldIndex > 0 && scope.Fields[fieldIndex-1] >= field) {
 				return fmt.Errorf("component %q ownership adoption fields must be strict ordered JSON pointers", component.ID)
 			}
+			if _, err := parseAdoptionPointer(field); err != nil {
+				return fmt.Errorf("component %q ownership adoption field %q: %w", component.ID, field, err)
+			}
 		}
 		previous = key
 	}

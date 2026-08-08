@@ -621,6 +621,24 @@ func TestAPIContainerAdoptionConflictProofAcceptsOnlyLegacyImageLeaf(t *testing.
 	}
 }
 
+func TestAssociativeAdoptionConflictProofAcceptsOnlyNamedEnvironmentLeaf(t *testing.T) {
+	field := `.spec.template.spec.containers[name="dns"].env[name="FUGUE_API_URL"].value`
+	pointer := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"
+	allowed := errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: ` + field)
+	if err := validateAdoptionConflicts(allowed, []string{"helm"}, []string{pointer}); err != nil {
+		t.Fatalf("exact named environment conflict was rejected: %v", err)
+	}
+	for _, conflict := range []error{
+		errors.New(`Apply failed with 1 conflict: conflict with "kubectl-patch" using apps/v1: ` + field),
+		errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="dns"].env[name="OTHER"].value`),
+		errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="dns"].image`),
+	} {
+		if err := validateAdoptionConflicts(conflict, []string{"helm"}, []string{pointer}); err == nil {
+			t.Fatalf("out-of-scope associative conflict was accepted: %v", conflict)
+		}
+	}
+}
+
 func TestAdoptionConflictProofAllowsExistingDeclarativeManagerOnlyWhenExplicitlyReviewed(t *testing.T) {
 	conflict := errors.New(`command failed: exit status 1: error: Apply failed with 1 conflict: conflict with "fugue-edge-worker-de-declarative" using apps/v1: .spec.template.metadata.annotations.fugue.pro/oci-revision`)
 	managers := []string{"fugue-edge-worker-de-declarative", "helm", "kubectl-patch"}

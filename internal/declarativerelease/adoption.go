@@ -75,14 +75,35 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 
 func adoptionPointerValue(value map[string]any, pointer string) (any, error) {
 	current := any(value)
-	for _, token := range adoptionPointerTokens(pointer) {
+	steps, err := parseAdoptionPointer(pointer)
+	if err != nil {
+		return nil, err
+	}
+	for _, step := range steps {
 		object, ok := current.(map[string]any)
 		if !ok {
 			return nil, errors.New("pointer crosses a non-object value")
 		}
-		current, ok = object[token]
+		current, ok = object[step.Field]
 		if !ok {
 			return nil, errors.New("pointer is absent from bootstrap LKG")
+		}
+		if step.Name != "" {
+			items, ok := current.([]any)
+			if !ok {
+				return nil, errors.New("ownership adoption selector crosses a non-list value")
+			}
+			current = nil
+			for _, item := range items {
+				candidate, ok := item.(map[string]any)
+				if ok && candidate["name"] == step.Name {
+					current = candidate
+					break
+				}
+			}
+			if current == nil {
+				return nil, errors.New("ownership adoption selector is absent from bootstrap LKG")
+			}
 		}
 	}
 	if pointer == "/spec/template/spec/containers" {
@@ -119,16 +140,44 @@ func adoptionPointerValue(value map[string]any, pointer string) (any, error) {
 }
 
 func setAdoptionPointer(value map[string]any, pointer string, field any) error {
-	tokens := adoptionPointerTokens(pointer)
-	if len(tokens) == 0 {
-		return errors.New("ownership adoption cannot claim the whole resource")
+	steps, err := parseAdoptionPointer(pointer)
+	if err != nil {
+		return err
+	}
+	if steps[len(steps)-1].Name != "" {
+		return errors.New("ownership adoption selector cannot terminate a pointer")
 	}
 	current := value
-	for _, token := range tokens[:len(tokens)-1] {
-		next, exists := current[token]
+	for _, step := range steps[:len(steps)-1] {
+		next, exists := current[step.Field]
+		if step.Name != "" {
+			var items []any
+			if exists {
+				var ok bool
+				items, ok = next.([]any)
+				if !ok {
+					return errors.New("ownership adoption fields overlap incompatibly")
+				}
+			}
+			var selected map[string]any
+			for _, item := range items {
+				candidate, ok := item.(map[string]any)
+				if ok && candidate["name"] == step.Name {
+					selected = candidate
+					break
+				}
+			}
+			if selected == nil {
+				selected = map[string]any{"name": step.Name}
+				items = append(items, selected)
+				current[step.Field] = items
+			}
+			current = selected
+			continue
+		}
 		if !exists {
 			object := map[string]any{}
-			current[token] = object
+			current[step.Field] = object
 			current = object
 			continue
 		}
@@ -138,17 +187,59 @@ func setAdoptionPointer(value map[string]any, pointer string, field any) error {
 		}
 		current = object
 	}
-	current[tokens[len(tokens)-1]] = field
+	current[steps[len(steps)-1].Field] = field
 	return nil
 }
 
-func adoptionPointerTokens(pointer string) []string {
+type adoptionPointerStep struct {
+	Field string
+	Name  string
+}
+
+// parseAdoptionPointer accepts ordinary JSON pointers plus Kubernetes
+// associative-list selectors such as containers[name=dns]. Selectors are
+// intentionally limited to the canonical "name" merge key so an adoption
+// manifest can claim one exact container/env leaf without claiming the whole
+// Pod template.
+func parseAdoptionPointer(pointer string) ([]adoptionPointerStep, error) {
 	if pointer == "" || pointer[0] != '/' {
-		return nil
+		return nil, errors.New("ownership adoption pointer is invalid")
 	}
 	raw := strings.Split(pointer[1:], "/")
-	for index := range raw {
-		raw[index] = strings.ReplaceAll(strings.ReplaceAll(raw[index], "~1", "/"), "~0", "~")
+	steps := make([]adoptionPointerStep, 0, len(raw))
+	for _, encoded := range raw {
+		token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+		if token == "" {
+			return nil, errors.New("ownership adoption pointer contains an empty token")
+		}
+		step := adoptionPointerStep{Field: token}
+		if open := strings.Index(token, "[name="); open >= 0 {
+			if open == 0 || !strings.HasSuffix(token, "]") || strings.Count(token, "[name=") != 1 {
+				return nil, errors.New("ownership adoption selector is invalid")
+			}
+			step.Field = token[:open]
+			step.Name = token[open+len("[name=") : len(token)-1]
+			if !validAdoptionSelectorName(step.Name) {
+				return nil, errors.New("ownership adoption selector name is invalid")
+			}
+		} else if strings.ContainsAny(token, "[]") {
+			return nil, errors.New("ownership adoption selector is invalid")
+		}
+		steps = append(steps, step)
 	}
-	return raw
+	return steps, nil
+}
+
+func validAdoptionSelectorName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }

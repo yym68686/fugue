@@ -88,6 +88,30 @@ func TestBootstrapRuntimeIsRestrictedToExactAdoptionPrimary(t *testing.T) {
 	}
 }
 
+func TestOwnershipAdoptionAssociativePointersAreValidated(t *testing.T) {
+	registry := testRegistry()
+	component := &registry.Components[0]
+	component.MigrationState = "adopting"
+	component.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name},
+		Fields:   []string{"/spec/template/spec/containers[name=api]/env[name=FUGUE_API_URL]/value"},
+	}}}
+	if err := registry.Validate(); err != nil {
+		t.Fatalf("valid associative ownership pointer was rejected: %v", err)
+	}
+	for _, invalid := range []string{
+		"/spec/template/spec/containers[name=]/image",
+		"/spec/template/spec/containers[name=api/image",
+		"/spec/template/spec/containers[name=api~1sidecar]/image",
+		"/spec/template/spec/containers[other=api]/image",
+	} {
+		component.OwnershipAdoption.Resources[0].Fields = []string{invalid}
+		if err := registry.Validate(); err == nil {
+			t.Fatalf("invalid ownership pointer %q was accepted", invalid)
+		}
+	}
+}
+
 func TestRegistryArtifactTargetsAreStrictAndContainPrimary(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].ArtifactTargets = []ArtifactTarget{
