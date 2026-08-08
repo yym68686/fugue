@@ -87,6 +87,42 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{/*
+Overlay an existing image map without reviving a fallback digest. Repository
+and tag remain sparse for backwards compatibility. Once either is overridden,
+the override's digest (including empty or omitted) wins as part of the new
+identity. Sparse maps may also explicitly override or clear digest alone; a
+generated map whose complete identity tuple is empty remains an inheritance
+placeholder.
+*/}}
+{{- define "fugue.sparseImageIdentity" -}}
+{{- $fallback := default dict .fallback -}}
+{{- $override := default dict .override -}}
+{{- $repositoryOverride := false -}}
+{{- $tagOverride := false -}}
+{{- $digestOverride := false -}}
+{{- $repositoryOverride = not (empty (get $override "repository")) -}}
+{{- $tagOverride = not (empty (get $override "tag")) -}}
+{{- if .identityKeysDefineOverride -}}
+{{- $allIdentityPlaceholders := and (hasKey $override "repository") (hasKey $override "tag") (hasKey $override "digest") (empty (get $override "repository")) (empty (get $override "tag")) (empty (get $override "digest")) -}}
+{{- $digestOverride = and (hasKey $override "digest") (not $allIdentityPlaceholders) -}}
+{{- else -}}
+{{- $digestOverride = not (empty (get $override "digest")) -}}
+{{- end -}}
+{{- $repository := get $fallback "repository" -}}
+{{- $tag := get $fallback "tag" -}}
+{{- $digest := get $fallback "digest" -}}
+{{- if $repositoryOverride }}{{- $repository = get $override "repository" -}}{{- end -}}
+{{- if $tagOverride }}{{- $tag = get $override "tag" -}}{{- end -}}
+{{- if or $repositoryOverride $tagOverride $digestOverride }}{{- $digest = get $override "digest" -}}{{- end -}}
+{{- dict
+  "repository" $repository
+  "tag" $tag
+  "digest" $digest
+  "pullPolicy" (default (get $fallback "pullPolicy") (get $override "pullPolicy"))
+  | toJson -}}
+{{- end -}}
+
 {{- define "fugue.internalMaintenanceAffinity" -}}
 nodeAffinity:
   requiredDuringSchedulingIgnoredDuringExecution:
