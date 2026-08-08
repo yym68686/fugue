@@ -267,6 +267,48 @@ func TestObservedVerificationImageBindsLegacySourceTagToPodDigestOnlyDuringAdopt
 	}
 }
 
+func TestBindAdoptingImmutableSourceRequiresExactRegistryIdentity(t *testing.T) {
+	source := strings.Repeat("1", 40)
+	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64)
+	verification := declarativerelease.RegistryVerification{Image: image, OCIRevision: source}
+
+	adopting := declarativerelease.Observation{ImageRef: image}
+	if err := bindAdoptingImmutableSource(&adopting, verification, source, true); err != nil {
+		t.Fatal(err)
+	}
+	if adopting.ConfigSHA != source || adopting.ManifestSHA != source {
+		t.Fatalf("registry source was not bound: %+v", adopting)
+	}
+
+	independent := declarativerelease.Observation{ImageRef: image}
+	if err := bindAdoptingImmutableSource(&independent, verification, source, false); err != nil {
+		t.Fatal(err)
+	}
+	if independent.ConfigSHA != "" || independent.ManifestSHA != "" {
+		t.Fatal("independent observation accepted the adoption-only fallback")
+	}
+
+	for name, changed := range map[string]declarativerelease.RegistryVerification{
+		"image":    {Image: "ghcr.io/example/other@sha256:" + strings.Repeat("a", 64), OCIRevision: source},
+		"revision": {Image: image, OCIRevision: strings.Repeat("2", 40)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			observation := declarativerelease.Observation{ImageRef: image}
+			if err := bindAdoptingImmutableSource(&observation, changed, source, true); err == nil {
+				t.Fatal("adoption accepted mismatched registry identity")
+			}
+		})
+	}
+
+	partial := declarativerelease.Observation{ImageRef: image, ManifestSHA: source}
+	if err := bindAdoptingImmutableSource(&partial, verification, source, true); err != nil {
+		t.Fatal(err)
+	}
+	if partial.ConfigSHA != "" {
+		t.Fatal("adoption synthesized a partially missing source identity")
+	}
+}
+
 func TestParseObservationRecoversExactLegacyOnDeleteUpdatedStatusOnlyDuringAdoption(t *testing.T) {
 	source := strings.Repeat("1", 40)
 	digest := strings.Repeat("a", 64)

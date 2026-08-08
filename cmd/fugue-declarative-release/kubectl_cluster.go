@@ -1146,6 +1146,9 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if !observedRegistryIdentityMatches(verification, verificationImage, expectedOCI, allowHistoricalRestarts) {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
 	}
+	if err := bindAdoptingImmutableSource(&partial, verification, expectedOCI, allowHistoricalRestarts); err != nil {
+		return declarativerelease.Observation{}, err
+	}
 	partial.OCIRevision = expectedOCI
 	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
 	if err != nil {
@@ -1153,6 +1156,23 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	partial.Resources = resources
 	return partial, nil
+}
+
+// bindAdoptingImmutableSource is the one-time bridge for a legacy workload
+// that already runs an immutable image but predates source annotations. The
+// registry revision is accepted only inside an explicit adoption observation
+// and only when it is the exact expected bootstrap revision. Independent
+// components never enter this path.
+func bindAdoptingImmutableSource(observation *declarativerelease.Observation, verification declarativerelease.RegistryVerification, expectedOCI string, allowHistorical bool) error {
+	if observation.ConfigSHA != "" || observation.ManifestSHA != "" || !allowHistorical {
+		return nil
+	}
+	if !strings.Contains(observation.ImageRef, "@sha256:") || verification.Image != observation.ImageRef || verification.OCIRevision != expectedOCI {
+		return errors.New("immutable adoption bootstrap source is not registry-bound")
+	}
+	observation.ConfigSHA = expectedOCI
+	observation.ManifestSHA = expectedOCI
+	return nil
 }
 
 // bootstrapObservationWorkload binds the running bootstrap Pod cohort to the

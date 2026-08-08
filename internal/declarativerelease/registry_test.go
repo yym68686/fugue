@@ -41,7 +41,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	for _, component := range registry.Components {
 		got = append(got, component.ID)
 	}
-	want := []string{"api", "controller"}
+	want := []string{"api", "controller", "edge-client-de", "edge-client-us"}
 	for _, group := range edgeRegistry.Groups {
 		want = append(want, group.Control.ID, group.Worker.ID)
 	}
