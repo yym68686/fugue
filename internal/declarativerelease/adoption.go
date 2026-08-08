@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -17,7 +18,7 @@ func BuildOwnershipAdoptionManifest(lkgManifest []byte, adoption OwnershipAdopti
 		len(adoption.Resources) == 0 {
 		return nil, errors.New("ownership adoption is not bound to its bootstrap LKG")
 	}
-	return buildOwnershipScopedManifest(lkgManifest, adoption)
+	return buildOwnershipScopedManifest(lkgManifest, adoption, false)
 }
 
 // BuildOwnershipTakeoverManifest materializes only the reviewed fields from
@@ -30,10 +31,10 @@ func BuildOwnershipTakeoverManifest(targetManifest []byte, adoption OwnershipAdo
 		!strings.Contains(target.ImageRef, "@sha256:") || len(adoption.Resources) == 0 {
 		return nil, errors.New("ownership takeover is not bound to its immutable forward target")
 	}
-	return buildOwnershipScopedManifest(targetManifest, adoption)
+	return buildOwnershipScopedManifest(targetManifest, adoption, true)
 }
 
-func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdoptionPlan) ([]byte, error) {
+func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdoptionPlan, takeover bool) ([]byte, error) {
 	set, err := DecodeResourceSet(bytes.NewReader(sourceManifest))
 	if err != nil {
 		return nil, err
@@ -64,6 +65,20 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 				return nil, err
 			}
 		}
+		if takeover {
+			scaffolds, err := OwnershipTakeoverValidationScaffolds(scope.Fields)
+			if err != nil {
+				return nil, err
+			}
+			if len(scaffolds) > 0 && !strings.Contains(adoption.ImageRef, "@sha256:") {
+				return nil, errors.New("ownership takeover validation scaffold is not bound to the bootstrap image")
+			}
+			for _, pointer := range scaffolds {
+				if err := setAdoptionPointer(item, pointer, adoption.ImageRef); err != nil {
+					return nil, err
+				}
+			}
+		}
 		result.Items = append(result.Items, item)
 	}
 	sortResourceSet(&result)
@@ -71,6 +86,34 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		return nil, errors.New("ownership adoption resource set expanded unexpectedly")
 	}
 	return CanonicalJSON(result)
+}
+
+// OwnershipTakeoverValidationScaffolds returns fields required only to make a
+// reviewed leaf-level Pod container apply structurally valid. They are not
+// takeover fields: the Kubernetes adapter must prove that the declarative
+// manager already owns each scaffold and that no legacy manager owns it before
+// executing the reviewed force-conflicts apply.
+func OwnershipTakeoverValidationScaffolds(fields []string) ([]string, error) {
+	set := map[string]struct{}{}
+	for _, pointer := range fields {
+		steps, err := parseAdoptionPointer(pointer)
+		if err != nil {
+			return nil, err
+		}
+		if len(steps) < 5 || steps[0].Field != "spec" || steps[1].Field != "template" ||
+			steps[2].Field != "spec" || steps[3].Field != "containers" || steps[3].Name == "" ||
+			steps[4].Field == "image" {
+			continue
+		}
+		pointer := "/spec/template/spec/containers[name=" + steps[3].Name + "]/image"
+		set[pointer] = struct{}{}
+	}
+	result := make([]string, 0, len(set))
+	for pointer := range set {
+		result = append(result, pointer)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func adoptionPointerValue(value map[string]any, pointer string) (any, error) {

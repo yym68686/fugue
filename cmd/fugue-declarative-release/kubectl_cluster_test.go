@@ -444,20 +444,100 @@ func TestHistoricalLKGAllowsLegacyManagerOnlyDuringAdoption(t *testing.T) {
 }
 
 func TestManagedFieldsOwnershipRequiresEveryReviewedPointer(t *testing.T) {
-	metadata := map[string]any{"managedFields": []any{map[string]any{
-		"manager": "edge-worker-declarative", "operation": "Apply", "fieldsV1": map[string]any{
-			"f:metadata": map[string]any{"f:labels": map[string]any{"f:fugue.io/edge-group-id": map[string]any{}}},
-			"f:spec":     map[string]any{"f:selector": map[string]any{}, "f:template": map[string]any{}},
+	declarativeFields := map[string]any{
+		"f:metadata": map[string]any{"f:labels": map[string]any{"f:fugue.io/edge-group-id": map[string]any{}}},
+		"f:spec": map[string]any{
+			"f:selector": map[string]any{},
+			"f:template": map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{
+				`k:{"name":"dns"}`: map[string]any{
+					"f:image": map[string]any{},
+					"f:env":   map[string]any{`k:{"name":"FUGUE_API_URL"}`: map[string]any{"f:value": map[string]any{}}},
+				},
+			}}},
 		},
-	}}}
+	}
+	legacyFields := map[string]any{"f:spec": map[string]any{"f:template": map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{
+		`k:{"name":"dns"}`: map[string]any{"f:env": map[string]any{`k:{"name":"FUGUE_API_URL"}`: map[string]any{"f:value": map[string]any{}}}},
+	}}}}}
+	metadata := map[string]any{"managedFields": []any{
+		map[string]any{"manager": "edge-worker-declarative", "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": declarativeFields},
+		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": legacyFields},
+	}}
 	if !managedFieldsOwnPointers(metadata, "edge-worker-declarative", []string{"/metadata/labels", "/spec/selector", "/spec/template"}) {
 		t.Fatal("reviewed ownership pointers were not recognized")
+	}
+	leaf := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"
+	image := "/spec/template/spec/containers[name=dns]/image"
+	if !managedFieldsOwnPointers(metadata, "edge-worker-declarative", []string{leaf, image}) {
+		t.Fatal("associative managed-fields ownership was not recognized")
+	}
+	if !managedFieldsOwnAnyPointer(metadata, "helm", []string{leaf}) || managedFieldsOwnAnyPointer(metadata, "helm", []string{image}) {
+		t.Fatal("legacy Update ownership was not distinguished from the declarative image scaffold")
+	}
+	if managedFieldsOwnPointers(metadata, "helm", []string{leaf}) {
+		t.Fatal("legacy Update ownership was mistaken for declarative Apply ownership")
 	}
 	if managedFieldsOwnPointers(metadata, "edge-worker-declarative", []string{"/spec/updateStrategy"}) {
 		t.Fatal("an unowned pointer was accepted")
 	}
 	if managedFieldsOwnPointers(metadata, "helm", []string{"/spec/template"}) {
 		t.Fatal("the legacy manager was accepted as the declarative owner")
+	}
+}
+
+func TestOwnershipTakeoverValidationScaffoldMustBeExclusivelyPreowned(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$LIVE_JSON\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	imageFields := map[string]any{"f:spec": map[string]any{"f:template": map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{
+		`k:{"name":"dns"}`: map[string]any{"f:image": map[string]any{}},
+	}}}}}
+	leafFields := map[string]any{"f:spec": map[string]any{"f:template": map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{
+		`k:{"name":"dns"}`: map[string]any{"f:env": map[string]any{`k:{"name":"FUGUE_API_URL"}`: map[string]any{"f:value": map[string]any{}}}},
+	}}}}}
+	live := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": "fugue-fugue-dns-country-de", "namespace": "fugue-system", "uid": "dns-uid", "resourceVersion": "42", "generation": 7,
+			"managedFields": []any{
+				map[string]any{"manager": "fugue-edge-client-de-declarative", "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": imageFields},
+				map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": leafFields},
+			},
+		},
+		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{
+			map[string]any{"name": "dns", "image": "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64)},
+		}}}},
+	}
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-dns-country-de",
+		Container: "dns", FieldManager: "fugue-edge-client-de-declarative",
+	}}
+	adoption := declarativerelease.OwnershipAdoptionPlan{
+		LegacyFieldManager: "helm", LegacyFieldManagers: []string{"helm"}, ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64),
+		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{
+			Identity: declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-dns-country-de"},
+			Fields:   []string{"/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"}, UID: "dns-uid", ResourceVersion: "42", Generation: 7,
+		}},
+	}
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err != nil {
+		t.Fatalf("exclusive declarative scaffold was rejected: %v", err)
+	}
+	container := live["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["image"] = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("b", 64)
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "exact live bootstrap image") {
+		t.Fatalf("non-LKG validation scaffold was accepted: %v", err)
+	}
+	container["image"] = adoption.ImageRef
+	liveMetadata := live["metadata"].(map[string]any)
+	liveMetadata["managedFields"].([]any)[1].(map[string]any)["fieldsV1"] = imageFields
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "legacy manager") {
+		t.Fatalf("legacy-owned validation scaffold was accepted: %v", err)
 	}
 }
 

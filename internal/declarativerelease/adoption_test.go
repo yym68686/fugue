@@ -68,7 +68,7 @@ func TestOwnershipContainerManifestKeepsOnlyNameAndImage(t *testing.T) {
 	bootstrap := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"env":[{"name":"MODE","value":"bootstrap"}],"image":"example/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","livenessProbe":{"httpGet":{"path":"/healthz","port":"http"}},"name":"api","ports":[{"containerPort":8080,"name":"http"}],"resources":{"requests":{"cpu":"100m"}},"volumeMounts":[{"mountPath":"/secret","name":"tls"}]}],"volumes":[{"name":"tls","secret":{"secretName":"api-tls"}}]}}}}],"kind":"ComponentResourceSet"}`)
 	forward := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"env":[{"name":"MODE","value":"forward"}],"image":"example/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"api","ports":[{"containerPort":9090,"name":"metrics"}],"readinessProbe":{"httpGet":{"path":"/readyz","port":"metrics"}},"resources":{"limits":{"cpu":"1"}},"volumeMounts":[{"mountPath":"/other","name":"config"}]}],"volumes":[{"configMap":{"name":"api-config"},"name":"config"}]}}}}],"kind":"ComponentResourceSet"}`)
 	plan := OwnershipAdoptionPlan{
-		BootstrapLKGDigest: digestOf(bootstrap),
+		BootstrapLKGDigest: digestOf(bootstrap), ImageRef: "example/edge@sha256:" + strings.Repeat("a", 64),
 		Resources: []OwnershipAdoptionResourcePlan{{
 			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
 			Fields:   []string{"/spec/template/spec/containers"}, UID: "api-uid", ResourceVersion: "42", Generation: 7,
@@ -115,7 +115,7 @@ func TestOwnershipAssociativePointerClaimsOnlyOneEnvironmentValue(t *testing.T) 
 	forward := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"fugue-fugue-dns-country-de","namespace":"fugue-system"},"spec":{"template":{"spec":{"containers":[{"env":[{"name":"FUGUE_API_URL","value":"https://api.fugue.pro/v1/edge/dns?authority_service=edge-control-de"},{"name":"OTHER","value":"changed-but-unowned"}],"image":"example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"dns"},{"image":"example/sidecar@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","name":"sidecar"}]}}}}],"kind":"ComponentResourceSet"}`)
 	pointer := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"
 	plan := OwnershipAdoptionPlan{
-		BootstrapLKGDigest: digestOf(bootstrap),
+		BootstrapLKGDigest: digestOf(bootstrap), ImageRef: "example/edge@sha256:" + strings.Repeat("a", 64),
 		Resources: []OwnershipAdoptionResourcePlan{{
 			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-dns-country-de"},
 			Fields:   []string{pointer}, UID: "dns-uid", ResourceVersion: "42", Generation: 7,
@@ -124,13 +124,14 @@ func TestOwnershipAssociativePointerClaimsOnlyOneEnvironmentValue(t *testing.T) 
 	identity := TargetIdentity{Present: true, ImageRef: "example/edge@sha256:" + strings.Repeat("b", 64),
 		ConfigSHA: strings.Repeat("2", 40), ManifestSHA: strings.Repeat("2", 40), OCIRevision: strings.Repeat("2", 40), ManifestDigest: digestOf(forward)}
 	tests := []struct {
-		name, value string
-		build       func() ([]byte, error)
+		name, value  string
+		wantScaffold bool
+		build        func() ([]byte, error)
 	}{
-		{name: "bootstrap", value: "https://api.fugue.pro/v1/edge/dns", build: func() ([]byte, error) {
+		{name: "bootstrap", value: "https://api.fugue.pro/v1/edge/dns", wantScaffold: false, build: func() ([]byte, error) {
 			return BuildOwnershipAdoptionManifest(bootstrap, plan)
 		}},
-		{name: "takeover", value: "https://api.fugue.pro/v1/edge/dns?authority_service=edge-control-de", build: func() ([]byte, error) {
+		{name: "takeover", value: "https://api.fugue.pro/v1/edge/dns?authority_service=edge-control-de", wantScaffold: true, build: func() ([]byte, error) {
 			plan.AlreadyConverged = true
 			return BuildOwnershipTakeoverManifest(forward, plan, identity)
 		}},
@@ -141,14 +142,21 @@ func TestOwnershipAssociativePointerClaimsOnlyOneEnvironmentValue(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := `"containers":[{"env":[{"name":"FUGUE_API_URL","value":"` + test.value + `"}],"name":"dns"}]`
+			image := ""
+			if test.wantScaffold {
+				image = `,"image":"example/edge@sha256:` + strings.Repeat("a", 64) + `"`
+			}
+			want := `"containers":[{"env":[{"name":"FUGUE_API_URL","value":"` + test.value + `"}]` + image + `,"name":"dns"}]`
 			if !bytes.Contains(raw, []byte(want)) {
 				t.Fatalf("ownership manifest did not contain the exact associative leaf: %s", raw)
 			}
-			for _, forbidden := range []string{`"image"`, `"OTHER"`, `"sidecar"`, `"volumeMounts"`, `"volumes"`} {
+			for _, forbidden := range []string{`"OTHER"`, `"sidecar"`, `"volumeMounts"`, `"volumes"`} {
 				if bytes.Contains(raw, []byte(forbidden)) {
 					t.Fatalf("ownership manifest claimed unreviewed %s: %s", forbidden, raw)
 				}
+			}
+			if !test.wantScaffold && bytes.Contains(raw, []byte(`"image"`)) {
+				t.Fatalf("equal-value adoption unexpectedly included a takeover validation scaffold: %s", raw)
 			}
 		})
 	}

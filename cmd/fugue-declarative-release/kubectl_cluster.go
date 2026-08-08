@@ -208,6 +208,9 @@ func (cluster *kubectlCluster) DryRunOwnershipAdoption(ctx context.Context, rele
 }
 
 func (cluster *kubectlCluster) DryRunOwnershipTakeover(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, target declarativerelease.TargetIdentity, targetManifest []byte) error {
+	if err := cluster.verifyOwnershipTakeoverScaffolds(ctx, release, adoption); err != nil {
+		return err
+	}
 	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
 	if err != nil {
 		return err
@@ -245,18 +248,66 @@ func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release de
 	if err := refreshOwnershipTakeoverCAS(&adoption, current); err != nil {
 		return current, err
 	}
+	if err := cluster.verifyOwnershipTakeoverScaffolds(ctx, release, adoption); err != nil {
+		return current, err
+	}
 	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
 	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
-	verifyErr := cluster.verifyOwnershipAdoption(ctx, release, adoption)
+	verifyErr := cluster.verifyOwnershipTakeover(ctx, release, adoption)
 	convergedErr := cluster.Converged(ctx, release, manifest)
 	observation, observeErr := cluster.ObserveCAS(ctx, release, targetManifest)
 	if err := errors.Join(applyErr, verifyErr, convergedErr, observeErr); err != nil {
 		return observation, fmt.Errorf("verify ownership takeover: %w", err)
 	}
 	return observation, nil
+}
+
+func (cluster *kubectlCluster) verifyOwnershipTakeoverScaffolds(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
+	for _, scope := range adoption.Resources {
+		scaffolds, err := declarativerelease.OwnershipTakeoverValidationScaffolds(scope.Fields)
+		if err != nil {
+			return err
+		}
+		if len(scaffolds) == 0 {
+			continue
+		}
+		primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+		if scope.Identity != primary {
+			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is outside the primary workload", scope.Identity.Kind, scope.Identity.Name)
+		}
+		for _, pointer := range scaffolds {
+			if !strings.Contains(pointer, "containers[name="+release.Workload.Container+"]") {
+				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is outside the primary workload container", scope.Identity.Kind, scope.Identity.Name)
+			}
+		}
+		raw, err := cluster.getResource(ctx, scope.Identity)
+		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+			return fmt.Errorf("read ownership takeover scaffold %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, err)
+		}
+		value, err := decodeJSONObject(raw)
+		if err != nil {
+			return err
+		}
+		image, found, err := declaredContainerImageOptional(value, release.Workload.Container, "container")
+		if err != nil || !found || image != adoption.ImageRef {
+			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not the exact live bootstrap image", scope.Identity.Kind, scope.Identity.Name)
+		}
+		metadata := mapField(value, "metadata")
+		if stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) != scope.ResourceVersion ||
+			int64Value(metadata["generation"]) != scope.Generation ||
+			!managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scaffolds) {
+			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not CAS-bound to existing declarative ownership", scope.Identity.Kind, scope.Identity.Name)
+		}
+		for _, manager := range ownershipPlanLegacyManagers(adoption) {
+			if managedFieldsOwnAnyPointer(metadata, manager, scaffolds) {
+				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is still owned by legacy manager %s", scope.Identity.Kind, scope.Identity.Name, manager)
+			}
+		}
+	}
+	return nil
 }
 
 // refreshOwnershipTakeoverCAS rebinds only the mutable RV portion of the
@@ -419,6 +470,39 @@ func (cluster *kubectlCluster) verifyOwnershipAdoption(ctx context.Context, rele
 	return nil
 }
 
+func (cluster *kubectlCluster) verifyOwnershipTakeover(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
+	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
+		return err
+	}
+	for _, scope := range adoption.Resources {
+		raw, err := cluster.getResource(ctx, scope.Identity)
+		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+			return fmt.Errorf("read ownership takeover %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, err)
+		}
+		value, err := decodeJSONObject(raw)
+		if err != nil {
+			return err
+		}
+		metadata := mapField(value, "metadata")
+		for _, manager := range ownershipPlanLegacyManagers(adoption) {
+			if managedFieldsOwnAnyPointer(metadata, manager, scope.Fields) {
+				return fmt.Errorf("ownership takeover %s/%s retained legacy manager %s", scope.Identity.Kind, scope.Identity.Name, manager)
+			}
+		}
+	}
+	return nil
+}
+
+func ownershipPlanLegacyManagers(adoption declarativerelease.OwnershipAdoptionPlan) []string {
+	if len(adoption.LegacyFieldManagers) > 0 {
+		return adoption.LegacyFieldManagers
+	}
+	if adoption.LegacyFieldManager != "" {
+		return []string{adoption.LegacyFieldManager}
+	}
+	return nil
+}
+
 func managedFieldsOwnPointers(metadata map[string]any, manager string, pointers []string) bool {
 	for _, rawEntry := range anySlice(metadata["managedFields"]) {
 		entry, _ := rawEntry.(map[string]any)
@@ -426,24 +510,65 @@ func managedFieldsOwnPointers(metadata map[string]any, manager string, pointers 
 			continue
 		}
 		fields := mapField(entry, "fieldsV1")
-		all := true
-		for _, pointer := range pointers {
-			current := fields
-			for _, token := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
-				token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
-				next, ok := current["f:"+token].(map[string]any)
+		if managedFieldsEntryOwnsPointers(fields, pointers, true) {
+			return true
+		}
+	}
+	return false
+}
+
+func managedFieldsOwnAnyPointer(metadata map[string]any, manager string, pointers []string) bool {
+	for _, rawEntry := range anySlice(metadata["managedFields"]) {
+		entry, _ := rawEntry.(map[string]any)
+		if stringValue(entry["manager"]) != manager || stringValue(entry["subresource"]) != "" {
+			continue
+		}
+		if managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), pointers, false) {
+			return true
+		}
+	}
+	return false
+}
+
+func managedFieldsEntryOwnsPointers(fields map[string]any, pointers []string, requireAll bool) bool {
+	matched := 0
+	for _, pointer := range pointers {
+		current := fields
+		owned := true
+		for _, encoded := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+			token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+			field := token
+			selector := ""
+			if open := strings.Index(token, "[name="); open > 0 && strings.HasSuffix(token, "]") {
+				field = token[:open]
+				selector = token[open+len("[name=") : len(token)-1]
+			}
+			next, ok := current["f:"+field].(map[string]any)
+			if !ok {
+				owned = false
+				break
+			}
+			current = next
+			if selector != "" {
+				keyRaw, _ := json.Marshal(selector)
+				next, ok = current[`k:{"name":`+string(keyRaw)+`}`].(map[string]any)
 				if !ok {
-					all = false
+					owned = false
 					break
 				}
 				current = next
 			}
 		}
-		if all {
-			return true
+		if owned {
+			matched++
+			if !requireAll {
+				return true
+			}
+		} else if requireAll {
+			return false
 		}
 	}
-	return false
+	return requireAll && matched == len(pointers)
 }
 
 func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) error {
