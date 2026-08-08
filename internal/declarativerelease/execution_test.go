@@ -721,6 +721,59 @@ func TestPrepareAdoptingRetryRevalidatesUnchangedBootstrapLKG(t *testing.T) {
 	}
 }
 
+func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailure(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.IntentGeneration = 2
+	release.RetrySameLKG = true
+	release.MigrationState = "adopting"
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm", LegacyFieldManagers: []string{"helm"},
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+			Fields:   []string{"/spec/template/spec/containers[name=api]/image"},
+		}},
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{"fugue-api-declarative", "helm"}
+	lkg.Resources[0].FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	degraded := casOnlyObservation(lkg)
+	degraded.ImageRef = lkg.ImageRef
+	degraded.ConfigSHA = lkg.ConfigSHA
+	degraded.ManifestSHA = lkg.ManifestSHA
+	degraded.OCIRevision = lkg.OCIRevision
+	degraded.TemplateDigest = lkg.TemplateDigest
+	degraded.FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	degraded.Resources[0].FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	fake := &fakeCluster{
+		observations: []Observation{lkg, lkg},
+		healthErrors: []error{errors.New("auxiliary DNS is not ready")},
+		cas:          []Observation{degraded, degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || !prepared.DegradedPredecessor || prepared.OwnershipAdoption == nil ||
+		!prepared.OwnershipAdoption.AlreadyConverged || fake.dryRunTakeovers != 1 || len(fake.verifiedTargets) != 1 {
+		t.Fatalf("typed adopting degraded recovery was not prepared: plan=%+v takeovers=%d verified=%d err=%v",
+			prepared, fake.dryRunTakeovers, len(fake.verifiedTargets), err)
+	}
+	if len(fake.healthTargets) != 1 || fake.dryRunAdoptions != 0 {
+		t.Fatalf("degraded retry bypassed or repeated the typed health boundary: health=%d adoption=%d", len(fake.healthTargets), fake.dryRunAdoptions)
+	}
+
+	fake = &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, convergedErrors: []error{errors.New("spec drift")}}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil ||
+		!strings.Contains(err.Error(), "bootstrap LKG drift") || len(fake.verifiedTargets) != 0 {
+		t.Fatalf("non-health adopting drift entered degraded recovery: verified=%d err=%v", len(fake.verifiedTargets), err)
+	}
+}
+
 func TestPrepareAndExecuteRecoverAnOwnedDegradedPriorAttempt(t *testing.T) {
 	plan, receipt, rendered, lkg, forward := retryExecutionFixture(t)
 	legacyCAS := casOnlyObservation(lkg)

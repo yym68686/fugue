@@ -249,6 +249,10 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			}
 		} else if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
 			prewrite, err = prepareAdoptingRetryPredecessor(ctx, cluster, release, lkg, rendered.LKG)
+			if errors.Is(err, ErrDegradedPredecessorHealth) {
+				prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+				degradedPredecessor = err == nil
+			}
 		} else {
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 			degradedPredecessor = err == nil && !prewrite.Matches(lkg, release, true)
@@ -408,7 +412,7 @@ func prepareAdoptingRetryPredecessor(ctx context.Context, cluster Cluster, relea
 		if healthErr == nil {
 			healthErr = errors.New("adopting retry bootstrap LKG is unhealthy")
 		}
-		return Observation{}, healthErr
+		return Observation{}, fmt.Errorf("%w: %v", ErrDegradedPredecessorHealth, healthErr)
 	}
 	witness, err := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
 	if err != nil {
