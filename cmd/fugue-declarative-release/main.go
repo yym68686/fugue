@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -169,12 +168,9 @@ func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativereleas
 	if err != nil {
 		return nil, fmt.Errorf("read previous production registry: %w", err)
 	}
-	var base declarativerelease.Registry
-	if err := decodePriorReleaseData(raw, &base); err != nil {
+	base, err := declarativerelease.DecodeRegistry(bytes.NewReader(raw))
+	if err != nil {
 		return nil, fmt.Errorf("decode previous production registry: %w", err)
-	}
-	if err := base.Validate(); err != nil {
-		return nil, fmt.Errorf("validate previous production registry: %w", err)
 	}
 	if base.EdgeGroupRegistryPath == "" {
 		return nil, nil
@@ -183,34 +179,11 @@ func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativereleas
 	if err != nil {
 		return nil, fmt.Errorf("read previous edge group registry: %w", err)
 	}
-	var edge declarativerelease.EdgeGroupRegistry
-	if err := decodePriorReleaseData(raw, &edge); err != nil {
+	edge, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(raw))
+	if err != nil {
 		return nil, fmt.Errorf("decode previous edge group registry: %w", err)
 	}
-	if err := edge.Validate(); err != nil {
-		return nil, fmt.Errorf("validate previous edge group registry: %w", err)
-	}
 	return &edge, nil
-}
-
-// decodePriorReleaseData is a one-atom read-only bridge for deleting fields
-// from repository data. It ignores fields unknown to the current schema but
-// still requires exactly one JSON value and runs the current typed validator
-// before the data can influence the plan. It is removed in the next cleanup
-// atom after the repository parent uses the current schema.
-func decodePriorReleaseData(raw []byte, value any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(value); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return errors.New("previous release data contains multiple JSON values")
-		}
-		return err
-	}
-	return nil
 }
 
 func loadProductionRegistry(registryPath string) (declarativerelease.Registry, error) {
