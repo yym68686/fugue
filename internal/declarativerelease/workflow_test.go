@@ -49,7 +49,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client_de", "deploy_edge_client_us", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_schema", "deploy_telemetry", "prepush",
+		"deploy_image_cache", "deploy_schema", "deploy_telemetry", "prepush", "retire_helm_api_ledger",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -74,6 +74,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"edge_control_matrix",
 		"edge_worker_matrix",
 		"needs: [prepush, component-build, deploy_controller]",
+		"run: scripts/retire_helm_api_ledger.sh",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("CI workflow is missing %q", required)

@@ -23,6 +23,7 @@ jobs:
       edge_control_matrix: ${{ steps.release.outputs.edge_control_matrix }}
       edge_worker_count: ${{ steps.release.outputs.edge_worker_count }}
       edge_worker_matrix: ${{ steps.release.outputs.edge_worker_matrix }}
+      helm_api_retirement: ${{ steps.release.outputs.helm_api_retirement }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -60,6 +61,12 @@ jobs:
           go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
           "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
           "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
+          if [[ -f deploy/releases/helm-api-retirement/intent.json ]] &&
+             grep -Fxq 'deploy/releases/helm-api-retirement/intent.json' "${CHANGED}"; then
+            echo 'helm_api_retirement=true' >>"${GITHUB_OUTPUT}"
+          else
+            echo 'helm_api_retirement=false' >>"${GITHUB_OUTPUT}"
+          fi
       - name: Upload the immutable release plan
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -260,6 +267,34 @@ jobs:
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: image-cache, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+
+  retire_helm_api_ledger:
+    needs: [prepush]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.helm_api_retirement == 'true' }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-api, cancel-in-progress: false}
+    permissions: {contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with: {go-version-file: go.mod}
+      - name: Retire API from Helm and restore the verified declarative runtime
+        env:
+          FUGUE_HELM_API_RETIREMENT_EXECUTE: "true"
+          FUGUE_HELM_API_RETIREMENT_RESULT: ${{ runner.temp }}/fugue-helm-api-retirement-result.json
+        run: scripts/retire_helm_api_ledger.sh
+      - name: Upload the terminal API ledger receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-helm-api-retirement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-helm-api-retirement-result.json
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 30
 
   audit:
     if: github.event_name == 'schedule'
