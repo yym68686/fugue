@@ -107,7 +107,7 @@ func (s *Server) buildResilienceInventory(rSubject string) []model.ResilienceInv
 	out := []model.ResilienceInventoryItem{
 		{Category: "documentation", Subject: "docs/self-healing-robustness-plan.md", Status: "audited", Summary: "baseline robustness document is now superseded by self-organization inventory and checklist", UpdatedAt: now},
 		{Category: "request_attribution", Subject: "edge_performance_sample", Status: "partial", Summary: "request id, hostname, route generation, edge, body read, origin phases, TCP, cache, and error class fields are captured; runtime pod/node propagation remains a gap", UpdatedAt: now},
-		{Category: "release_pipeline", Subject: "scripts/upgrade_fugue_control_plane.sh", Status: "guarded", Summary: "pre-deploy robustness baseline, smoke probe, post-deploy robustness gate, and Helm rollback path are present", UpdatedAt: now},
+		{Category: "release_pipeline", Subject: ".github/actions/deploy-declarative-component/action.yml", Status: "active", Summary: "exact component plans, immutable artifacts, component leases, server-side apply, terminal receipts, health verification, and LKG compensation use the single declarative production entrypoint", UpdatedAt: now},
 	}
 	for _, contract := range platformStateConsumerContracts() {
 		out = append(out, model.ResilienceInventoryItem{

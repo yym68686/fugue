@@ -30,7 +30,6 @@ release_surfaces=(
   internal/api/discovery.go
   internal/config/config.go
   scripts/install_fugue_ha.sh
-  scripts/upgrade_fugue_control_plane.sh
   scripts/render_fugue_edge_systemd_unit.sh
   scripts/render_fugue_dns_systemd_unit.sh
   scripts/render_fugue_mesh_recovery_systemd_unit.sh

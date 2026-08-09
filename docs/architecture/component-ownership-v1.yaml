@@ -32,8 +32,9 @@ components:
       - internal/componentmanifest
       - internal/platformcontrol
       - internal/releasecontrol
-      - scripts/upgrade_fugue_control_plane.sh
-      - .github/workflows/deploy-control-plane.yml
+      - cmd/fugue-declarative-release
+      - .github/actions/deploy-declarative-component
+      - .github/workflows/ci.yml
     artifactKinds: [release-control, component-release-plan]
     releaseLane: release-control
     coordinator: release-control
