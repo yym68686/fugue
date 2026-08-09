@@ -66,6 +66,20 @@ func TestImageCacheIndependentTransitionReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if intent.Generation != 12 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
+		intent.ExpectedPreviousConfigSHA != "b4777d453c3053ce3142a08a5092f22ee9a861a9" ||
+		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA ||
+		intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
+		intent.ExpectedPreviousImageDigest != "sha256:cf0c5959727ae297c08916a5a6a2b628ad8245af2a7c6498e8c66d3f5e70d19b" {
+		t.Fatalf("image-cache successor is not bound to the verified independent LKG: %+v", intent)
+	}
+	// Keep the historical receipt fallback matrix bound to the exact transition
+	// for which it was created. Ordinary successors use the Git predecessor.
+	intent.Generation = 11
+	intent.ExpectedPreviousConfigSHA = receipt.Final.ConfigSHA
+	intent.ExpectedPreviousManifestSHA = receipt.Final.ManifestSHA
+	intent.ExpectedPreviousOCIRevision = receipt.Final.OCIRevision
+	intent.ExpectedPreviousImageDigest = strings.TrimPrefix(receipt.Final.ImageRef, component.Artifact.Repository+"@")
 	previous := intent
 	previous.Generation--
 	plan, err := BuildPlan(registry,
@@ -110,6 +124,18 @@ func TestImageCacheIndependentTransitionReceipt(t *testing.T) {
 	forwardRaw, err := os.ReadFile("../../" + component.ManifestPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	item, err := ResourceSetItem(forwardRaw, ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-image-cache"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := objectField(item, "metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations, _ := metadata["annotations"].(map[string]any)
+	if annotations["helm.sh/resource-policy"] != "keep" {
+		t.Fatalf("image-cache is not protected from the final Helm ledger retirement: %#v", annotations)
 	}
 	lkgRaw, err := os.ReadFile("../../deploy/releases/image-cache/lkg.json")
 	if err != nil {
