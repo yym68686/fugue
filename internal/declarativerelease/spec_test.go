@@ -1,6 +1,7 @@
 package declarativerelease
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -239,16 +240,20 @@ func TestBuildPlanSerializesGroupsThatShareOneArtifact(t *testing.T) {
 	}
 }
 
-func TestBuildPlanRejectsSharedCodeAcrossDistinctArtifacts(t *testing.T) {
+func TestBuildPlanSerializesSharedCodeAcrossDistinctArtifacts(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].SourceRoots = append(registry.Components[0].SourceRoots, "internal/shared-runtime")
 	registry.Components[1].SourceRoots = append(registry.Components[1].SourceRoots, "internal/shared-runtime")
-	_, err := BuildPlan(registry, testSHA1, testSHA2, []string{
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
 		"internal/shared-runtime/runtime.go",
 		"deploy/releases/api/intent.json",
 	})
-	if err == nil || !strings.Contains(err.Error(), "distinct component artifacts") {
-		t.Fatalf("shared code across distinct artifacts was accepted: %v", err)
+	if err != nil {
+		t.Fatalf("select first shared-source component: %v", err)
+	}
+	if len(plan.Releases) != 1 || plan.Releases[0].ComponentID != "api" ||
+		!reflect.DeepEqual(plan.Releases[0].ChangedPaths, []string{"internal/shared-runtime/runtime.go"}) {
+		t.Fatalf("shared source was not serialized to the selected intent: %+v", plan.Releases)
 	}
 }
 
