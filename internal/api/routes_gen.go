@@ -26,8 +26,6 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/automations", s.auth.RequireAPI(http.HandlerFunc(s.handleListAutomationPolicies)))
 	mux.Handle("GET /v1/admin/automations/{policy_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAutomationPolicy)))
 	mux.Handle("GET /v1/admin/backups/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAdminBackupStatus)))
-	mux.Handle("POST /v1/admin/composite-release-transactions", s.auth.RequireAPI(http.HandlerFunc(s.handlePrepareCompositeReleaseTransaction)))
-	mux.Handle("POST /v1/admin/composite-release-transactions/{transaction_id}/execute-noop", s.auth.RequireAPI(http.HandlerFunc(s.handleRunCompositeReleaseTransactionNoop)))
 	mux.Handle("POST /v1/admin/control-plane/store/promote", s.auth.RequireAPI(http.HandlerFunc(s.handlePromoteControlPlaneStore)))
 	mux.Handle("GET /v1/admin/control-plane/store/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetControlPlaneStoreStatus)))
 	mux.Handle("GET /v1/admin/dns/full-zone/preflight", s.auth.RequireAPI(http.HandlerFunc(s.handleDNSFullZonePreflight)))
