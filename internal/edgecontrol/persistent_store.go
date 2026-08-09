@@ -167,6 +167,30 @@ func (store *PersistentGroupStore) ReadGroupAuthority(ctx context.Context, group
 	return snapshot, err
 }
 
+func (store *PersistentGroupStore) ReadGroupAuthorityStatus(ctx context.Context, groupID string) (AuthorityGroupStoreSnapshot, error) {
+	var snapshot AuthorityGroupStoreSnapshot
+	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
+		if state.Inventory != nil {
+			snapshot.Inventory = cloneGroupInventorySnapshot(*state.Inventory)
+			snapshot.InventoryExists = true
+		}
+		if state.InventoryProducer != nil {
+			snapshot.Producer = cloneGroupInventoryProducerState(*state.InventoryProducer)
+			snapshot.ProducerExists = true
+		}
+		if len(state.AuthorityLedger) > 0 {
+			snapshot.Authority.LedgerHead = state.AuthorityLedger[len(state.AuthorityLedger)-1]
+			snapshot.Authority.LedgerExists = true
+		}
+		if state.Published != nil {
+			snapshot.Authority.Published = cloneGroupPublishedBundle(*state.Published)
+			snapshot.Authority.PublishedExists = true
+		}
+		return nil
+	})
+	return snapshot, err
+}
+
 func (store *PersistentGroupStore) AppendGroupAuthorityCAS(ctx context.Context, groupID string, expectedSequence, expectedCandidateSequence uint64,
 	entry GroupAuthorityLedgerEntry, signed *model.EdgeRouteBundle) (GroupAuthorityLedgerEntry, error) {
 	if entry.RecoveryEpoch != 0 || entry.RecoveryReason != "" {

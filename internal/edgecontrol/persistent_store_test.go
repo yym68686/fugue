@@ -272,6 +272,32 @@ func TestPersistentGroupStoreKeysAndRevisionsAreGroupScoped(t *testing.T) {
 	}
 }
 
+func TestPersistentGroupStoreAuthorityStatusSnapshotIsDefensive(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	groupID := "edge-group-region-test"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, model.EdgeSlotB, "epoch-test-b", "inventory-test-1", false)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.ReadGroupAuthorityStatus(ctx, groupID)
+	if err != nil || !first.InventoryExists || first.Inventory.Generation != inventory.Generation || first.ProducerExists || first.Authority.LedgerExists || first.Authority.PublishedExists {
+		t.Fatalf("first authority status snapshot = %+v, %v", first, err)
+	}
+	first.Inventory.Generation = "forged"
+	first.Inventory.Instances[0].EdgeID = "forged"
+	second, err := store.ReadGroupAuthorityStatus(ctx, groupID)
+	if err != nil || second.Inventory.Generation != inventory.Generation || second.Inventory.Instances[0].EdgeID != inventory.Instances[0].EdgeID {
+		t.Fatalf("authority status snapshot exposed mutable state: %+v, %v", second, err)
+	}
+}
+
 func TestPersistentGroupStoreRejectsInventoryCASRollback(t *testing.T) {
 	t.Parallel()
 

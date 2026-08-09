@@ -25,9 +25,19 @@ const (
 )
 
 type AuthorityStatusStore interface {
-	ReadGroupInventory(context.Context, string) (GroupInventorySnapshot, error)
-	ReadGroupInventoryProducerState(context.Context, string) (GroupInventoryProducerState, bool, error)
-	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
+	ReadGroupAuthorityStatus(context.Context, string) (AuthorityGroupStoreSnapshot, error)
+}
+
+// AuthorityGroupStoreSnapshot is the group-local publication state needed by
+// the readiness endpoint. Persistent stores return all three projections from
+// one exact state revision so a status read neither mixes revisions nor
+// repeatedly decodes a large append-only group ledger.
+type AuthorityGroupStoreSnapshot struct {
+	Inventory       GroupInventorySnapshot
+	InventoryExists bool
+	Producer        GroupInventoryProducerState
+	ProducerExists  bool
+	Authority       GroupAuthorityState
 }
 
 type AuthorityGroupStatus struct {
@@ -220,13 +230,19 @@ func (handler *authorityStatusHandler) snapshot(ctx context.Context) AuthoritySt
 
 func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupID string, now time.Time) AuthorityGroupStatus {
 	group := AuthorityGroupStatus{GroupID: groupID, Status: GroupAuthorityHealthUnavailable, LKGState: GroupAuthorityLKGMissing}
-	inventory, inventoryErr := handler.store.ReadGroupInventory(ctx, groupID)
+	stored, storeErr := handler.store.ReadGroupAuthorityStatus(ctx, groupID)
+	inventoryErr := storeErr
+	if storeErr == nil && !stored.InventoryExists {
+		inventoryErr = ErrGroupInventoryNotFound
+	}
 	if inventoryErr == nil {
+		inventory := stored.Inventory
 		group.InventorySequence = inventory.Sequence
 		group.InventoryGeneration = inventory.Generation
 	}
-	producer, producerExists, producerErr := handler.store.ReadGroupInventoryProducerState(ctx, groupID)
-	if producerErr == nil && producerExists {
+	producerErr := storeErr
+	if producerErr == nil && stored.ProducerExists {
+		producer := stored.Producer
 		group.InventoryProducerGeneration = producer.Generation
 		nodes := make(map[string]struct{}, len(producer.Observations))
 		var latest time.Time
@@ -243,7 +259,8 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 			group.InventoryHeartbeatAt = &latest
 		}
 	}
-	authority, authorityErr := handler.store.ReadGroupAuthority(ctx, groupID)
+	authority := stored.Authority
+	authorityErr := storeErr
 	if authorityErr == nil && authority.LedgerExists {
 		group.PublicationSequence = authority.LedgerHead.Sequence
 		group.PublicationDecision = authority.LedgerHead.Status
