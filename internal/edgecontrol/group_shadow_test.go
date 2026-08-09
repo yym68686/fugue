@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -159,6 +160,104 @@ func TestGroupShadowCompilerLedgerCASFailureIsGroupScoped(t *testing.T) {
 	}
 }
 
+func TestGroupShadowCompilerRefreshesOnlyConflictedGroupAfterInputCAS(t *testing.T) {
+	t.Parallel()
+
+	const (
+		usGroup    = "edge-group-country-us"
+		deGroup    = "edge-group-country-de"
+		thirdGroup = "edge-group-region-test"
+	)
+	usInitial := groupInventoryFixture(usGroup, "b", "epoch-us-b", "inventory-us-1", false)
+	usFresh := groupInventoryFixture(usGroup, "b", "epoch-us-b", "inventory-us-2", false)
+	usFresh.Sequence = 2
+	reader := &sequencedShadowInventoryReader{snapshots: map[string][]GroupInventorySnapshot{
+		usGroup:    {usInitial, usFresh},
+		deGroup:    {groupInventoryFixture(deGroup, "b", "epoch-de-b", "inventory-de-1", false)},
+		thirdGroup: {groupInventoryFixture(thirdGroup, "b", "epoch-third-b", "inventory-third-1", false)},
+	}}
+	inner := NewMemoryGroupShadowLedger()
+	ledger := &scriptedShadowLedger{
+		GroupShadowLedger: inner,
+		errors: map[string][]error{
+			usGroup: {ErrGroupShadowInputCAS},
+		},
+	}
+	compiler := GroupShadowCompiler{Inventory: reader, Ledger: ledger}
+
+	batch, err := compiler.Reconcile(context.Background(), routeIntentFixture(), []string{usGroup, deGroup, thirdGroup})
+	if err != nil || batch.Succeeded != 3 || batch.Failed != 0 {
+		t.Fatalf("Reconcile() = %+v, %v", batch, err)
+	}
+	if got := reader.ReadCalls(usGroup); got != 2 {
+		t.Fatalf("US inventory reads = %d, want 2", got)
+	}
+	if got := ledger.AppendCalls(usGroup); got != 2 {
+		t.Fatalf("US append calls = %d, want 2", got)
+	}
+	for _, groupID := range []string{deGroup, thirdGroup} {
+		if got := reader.ReadCalls(groupID); got != 1 {
+			t.Fatalf("%s inventory reads = %d, want 1", groupID, got)
+		}
+		if got := ledger.AppendCalls(groupID); got != 1 {
+			t.Fatalf("%s append calls = %d, want 1", groupID, got)
+		}
+	}
+	history := inner.History(usGroup)
+	if len(history) != 1 || history[0].InventoryGeneration != usFresh.Generation || history[0].InventoryDigest != groupInventorySemanticDigest(usFresh) {
+		t.Fatalf("US retry did not bind the fresh exact inventory: %+v", history)
+	}
+	for _, groupID := range []string{deGroup, thirdGroup} {
+		if history := inner.History(groupID); len(history) != 1 || history[0].Sequence != 1 {
+			t.Fatalf("%s ledger was contaminated by US retry: %+v", groupID, history)
+		}
+	}
+}
+
+func TestGroupShadowCompilerCASRefreshIsBoundedAndExact(t *testing.T) {
+	t.Parallel()
+
+	const groupID = "edge-group-region-test"
+	newCompiler := func(script []error) (GroupShadowCompiler, *sequencedShadowInventoryReader, *scriptedShadowLedger) {
+		reader := &sequencedShadowInventoryReader{snapshots: map[string][]GroupInventorySnapshot{
+			groupID: {
+				groupInventoryFixture(groupID, "b", "epoch-test-b", "inventory-test-1", false),
+				groupInventoryFixture(groupID, "b", "epoch-test-b", "inventory-test-2", false),
+			},
+		}}
+		ledger := &scriptedShadowLedger{GroupShadowLedger: NewMemoryGroupShadowLedger(), errors: map[string][]error{groupID: script}}
+		return GroupShadowCompiler{Inventory: reader, Ledger: ledger}, reader, ledger
+	}
+
+	t.Run("persistent exact CAS conflict stops after one refresh", func(t *testing.T) {
+		compiler, reader, ledger := newCompiler([]error{ErrGroupShadowInputCAS, ErrGroupShadowLedgerConflict})
+		batch, err := compiler.Reconcile(context.Background(), routeIntentFixture(), []string{groupID})
+		if err != nil || batch.Failed != 1 || batch.Results[0].FailureCode != GroupShadowFailureLedgerCAS {
+			t.Fatalf("Reconcile() = %+v, %v", batch, err)
+		}
+		if got := reader.ReadCalls(groupID); got != groupShadowCASAttempts {
+			t.Fatalf("inventory reads = %d, want %d", got, groupShadowCASAttempts)
+		}
+		if got := ledger.AppendCalls(groupID); got != groupShadowCASAttempts {
+			t.Fatalf("append calls = %d, want %d", got, groupShadowCASAttempts)
+		}
+	})
+
+	t.Run("non CAS failure is not retried", func(t *testing.T) {
+		compiler, reader, ledger := newCompiler([]error{errors.New("durable ledger unavailable")})
+		batch, err := compiler.Reconcile(context.Background(), routeIntentFixture(), []string{groupID})
+		if err != nil || batch.Failed != 1 || batch.Results[0].FailureCode != GroupShadowFailureLedgerCAS {
+			t.Fatalf("Reconcile() = %+v, %v", batch, err)
+		}
+		if got := reader.ReadCalls(groupID); got != 1 {
+			t.Fatalf("inventory reads = %d, want 1", got)
+		}
+		if got := ledger.AppendCalls(groupID); got != 1 {
+			t.Fatalf("append calls = %d, want 1", got)
+		}
+	})
+}
+
 func TestGroupShadowCompilerCandidateGenerationIsCanonical(t *testing.T) {
 	t.Parallel()
 
@@ -284,6 +383,67 @@ func (r *shadowInventoryReader) ReadGroupInventory(_ context.Context, groupID st
 type rejectingShadowLedger struct {
 	GroupShadowLedger
 	rejectGroup string
+}
+
+type sequencedShadowInventoryReader struct {
+	mu        sync.Mutex
+	snapshots map[string][]GroupInventorySnapshot
+	readCalls map[string]int
+}
+
+func (r *sequencedShadowInventoryReader) ReadGroupInventory(_ context.Context, groupID string) (GroupInventorySnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readCalls == nil {
+		r.readCalls = make(map[string]int)
+	}
+	index := r.readCalls[groupID]
+	r.readCalls[groupID]++
+	snapshots := r.snapshots[groupID]
+	if len(snapshots) == 0 {
+		return GroupInventorySnapshot{}, errors.New("inventory fixture is missing")
+	}
+	if index >= len(snapshots) {
+		index = len(snapshots) - 1
+	}
+	return snapshots[index], nil
+}
+
+func (r *sequencedShadowInventoryReader) ReadCalls(groupID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.readCalls[groupID]
+}
+
+type scriptedShadowLedger struct {
+	GroupShadowLedger
+	mu          sync.Mutex
+	errors      map[string][]error
+	appendCalls map[string]int
+}
+
+func (l *scriptedShadowLedger) AppendCAS(ctx context.Context, groupID string, expectedSequence uint64, entry GroupShadowLedgerEntry) (GroupShadowLedgerEntry, error) {
+	l.mu.Lock()
+	if l.appendCalls == nil {
+		l.appendCalls = make(map[string]int)
+	}
+	call := l.appendCalls[groupID]
+	l.appendCalls[groupID]++
+	var scripted error
+	if call < len(l.errors[groupID]) {
+		scripted = l.errors[groupID][call]
+	}
+	l.mu.Unlock()
+	if scripted != nil {
+		return GroupShadowLedgerEntry{}, scripted
+	}
+	return l.GroupShadowLedger.AppendCAS(ctx, groupID, expectedSequence, entry)
+}
+
+func (l *scriptedShadowLedger) AppendCalls(groupID string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendCalls[groupID]
 }
 
 func (l *rejectingShadowLedger) AppendCAS(ctx context.Context, groupID string, expectedSequence uint64, entry GroupShadowLedgerEntry) (GroupShadowLedgerEntry, error) {

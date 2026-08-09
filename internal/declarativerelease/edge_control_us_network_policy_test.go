@@ -86,9 +86,9 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	if intent.Generation != 9 || intent.ExpectedPreviousConfigSHA != "a6095a75ce1411270ca23083368642aedf9a72ee" ||
+	if intent.Generation != 10 || intent.ExpectedPreviousConfigSHA != "ae2df16abf0fb7f120629e6d1b2239293f249412" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:8138462ccb5c5d185f4c08b7176e334026fab9be7699f856c5534f47c0126f88" {
+		intent.ExpectedPreviousImageDigest != "sha256:1af6f7954bf4ac817f791d6e4d1cd91053aa53ef13e262e1b2cc48eca98eaf2a" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
 	registry, err := MergeEdgeGroupRegistry(base, edge)
@@ -100,11 +100,11 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 8
-	prior.ExpectedPreviousConfigSHA = "c35df94220f86420cc66dcf324e2fc48d5a8bde0"
+	prior.Generation = 9
+	prior.ExpectedPreviousConfigSHA = "a6095a75ce1411270ca23083368642aedf9a72ee"
 	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
 	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousImageDigest = "sha256:06861240ee9da42b7a40d6209da22245a210696fbec0d639d54e25196a952661"
+	prior.ExpectedPreviousImageDigest = "sha256:8138462ccb5c5d185f4c08b7176e334026fab9be7699f856c5534f47c0126f88"
 	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior},
 		map[string]string{us.Control.ID: intent.ExpectedPreviousConfigSHA})
 	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {

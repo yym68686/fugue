@@ -222,6 +222,56 @@ func TestPersistentGroupStoreCorruptionIsGroupScoped(t *testing.T) {
 	}
 }
 
+func TestPersistentGroupStoreKeysAndRevisionsAreGroupScoped(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := []string{"edge-group-country-de", "edge-group-country-us", "edge-group-region-test"}
+	paths := make(map[string]string, len(groups))
+	for _, groupID := range groups {
+		inventory := groupInventoryFixture(groupID, model.EdgeSlotB, "epoch-"+groupID+"-b", "inventory-"+groupID+"-1", false)
+		if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+			t.Fatalf("store %s inventory: %v", groupID, err)
+		}
+		path := store.groupStatePath(groupID)
+		for existingGroup, existingPath := range paths {
+			if path == existingPath {
+				t.Fatalf("groups %s and %s share state key %s", groupID, existingGroup, path)
+			}
+		}
+		paths[groupID] = path
+	}
+
+	usGroup := "edge-group-country-us"
+	usInventory, err := store.ReadGroupInventory(ctx, usGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usInventory.Sequence++
+	usInventory.Generation = "inventory-us-2"
+	if err := store.StoreGroupInventoryCAS(ctx, usGroup, usInventory.Sequence-1, usInventory); err != nil {
+		t.Fatalf("advance US inventory: %v", err)
+	}
+
+	for _, groupID := range groups {
+		state, err := store.readGroupState(paths[groupID], groupID)
+		if err != nil {
+			t.Fatalf("read %s state: %v", groupID, err)
+		}
+		wantRevision := uint64(1)
+		if groupID == usGroup {
+			wantRevision = 2
+		}
+		if state.Revision != wantRevision {
+			t.Fatalf("%s revision = %d, want %d", groupID, state.Revision, wantRevision)
+		}
+	}
+}
+
 func TestPersistentGroupStoreRejectsInventoryCASRollback(t *testing.T) {
 	t.Parallel()
 

@@ -33,6 +33,11 @@ const (
 	GroupShadowFailureLedgerCAS        = "ledger_cas_failed"
 
 	groupShadowIssuer = "fugue-edge-control-shadow"
+
+	// One bounded retry lets a group compiler refresh an inventory heartbeat or
+	// ledger head that changed between its read and exact CAS append. Persistent
+	// conflicts remain visible instead of weakening CAS or spinning forever.
+	groupShadowCASAttempts = 2
 )
 
 var (
@@ -195,9 +200,21 @@ func (compiler GroupShadowCompiler) Reconcile(ctx context.Context, snapshot mode
 }
 
 func (compiler GroupShadowCompiler) reconcileGroup(ctx context.Context, snapshot model.EdgeRouteIntentSnapshot, intentDigest, groupID string, now time.Time) GroupShadowResult {
+	var result GroupShadowResult
+	for attempt := 0; attempt < groupShadowCASAttempts; attempt++ {
+		var appendErr error
+		result, appendErr = compiler.reconcileGroupAttempt(ctx, snapshot, intentDigest, groupID, now)
+		if appendErr == nil || !groupShadowCASConflict(appendErr) {
+			return result
+		}
+	}
+	return result
+}
+
+func (compiler GroupShadowCompiler) reconcileGroupAttempt(ctx context.Context, snapshot model.EdgeRouteIntentSnapshot, intentDigest, groupID string, now time.Time) (GroupShadowResult, error) {
 	head, exists, err := compiler.Ledger.Head(ctx, groupID)
 	if err != nil {
-		return GroupShadowResult{GroupID: groupID, Status: GroupShadowStatusFailed, FailureCode: GroupShadowFailureLedgerRead}
+		return GroupShadowResult{GroupID: groupID, Status: GroupShadowStatusFailed, FailureCode: GroupShadowFailureLedgerRead}, nil
 	}
 	expectedSequence := uint64(0)
 	lastSuccessful := ""
@@ -224,7 +241,7 @@ func (compiler GroupShadowCompiler) reconcileGroup(ctx context.Context, snapshot
 		entry.FailureCode = GroupShadowFailureInventoryRead
 		entry.InputDigest = groupShadowInputDigest(intentDigest, groupID, "inventory-read-failed")
 		if sameGroupShadowFailure(head, exists, entry) {
-			return groupShadowResultFromEntry(head)
+			return groupShadowResultFromEntry(head), nil
 		}
 		return compiler.appendResult(ctx, groupID, expectedSequence, entry)
 	}
@@ -246,7 +263,7 @@ func (compiler GroupShadowCompiler) reconcileGroup(ctx context.Context, snapshot
 			entry.FailureCode = GroupShadowFailureNoHealthyActive
 		}
 		if sameGroupShadowFailure(head, exists, entry) {
-			return groupShadowResultFromEntry(head)
+			return groupShadowResultFromEntry(head), nil
 		}
 		return compiler.appendResult(ctx, groupID, expectedSequence, entry)
 	}
@@ -263,7 +280,7 @@ func (compiler GroupShadowCompiler) reconcileGroup(ctx context.Context, snapshot
 			entry.FailureCode = GroupShadowFailureNoRoutableRoutes
 		}
 		if sameGroupShadowFailure(head, exists, entry) {
-			return groupShadowResultFromEntry(head)
+			return groupShadowResultFromEntry(head), nil
 		}
 		return compiler.appendResult(ctx, groupID, expectedSequence, entry)
 	}
@@ -273,12 +290,12 @@ func (compiler GroupShadowCompiler) reconcileGroup(ctx context.Context, snapshot
 	entry.Bundle = &bundle
 	if exists && head.Status == GroupShadowStatusCompiled && head.Bundle != nil && head.InputDigest == entry.InputDigest &&
 		head.RouteIntentGeneration == entry.RouteIntentGeneration && head.BundleGeneration == entry.BundleGeneration {
-		return groupShadowResultFromEntry(head)
+		return groupShadowResultFromEntry(head), nil
 	}
 	return compiler.appendResult(ctx, groupID, expectedSequence, entry)
 }
 
-func (compiler GroupShadowCompiler) appendResult(ctx context.Context, groupID string, expectedSequence uint64, entry GroupShadowLedgerEntry) GroupShadowResult {
+func (compiler GroupShadowCompiler) appendResult(ctx context.Context, groupID string, expectedSequence uint64, entry GroupShadowLedgerEntry) (GroupShadowResult, error) {
 	appended, err := compiler.Ledger.AppendCAS(ctx, groupID, expectedSequence, entry)
 	if err != nil {
 		return GroupShadowResult{
@@ -288,9 +305,13 @@ func (compiler GroupShadowCompiler) appendResult(ctx context.Context, groupID st
 			InputDigest:                    entry.InputDigest,
 			LastSuccessfulBundleGeneration: entry.LastSuccessfulBundleGeneration,
 			FailureCode:                    GroupShadowFailureLedgerCAS,
-		}
+		}, err
 	}
-	return groupShadowResultFromEntry(appended)
+	return groupShadowResultFromEntry(appended), nil
+}
+
+func groupShadowCASConflict(err error) bool {
+	return errors.Is(err, ErrGroupShadowInputCAS) || errors.Is(err, ErrGroupShadowLedgerConflict)
 }
 
 func groupShadowResultFromEntry(entry GroupShadowLedgerEntry) GroupShadowResult {
