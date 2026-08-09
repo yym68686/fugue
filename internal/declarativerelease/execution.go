@@ -147,6 +147,40 @@ type Cluster interface {
 
 var ErrDegradedPredecessorHealth = errors.New("declarative predecessor health is degraded")
 
+type prewritePredecessorHealthWaitKey struct{}
+
+// WithPrewritePredecessorHealthWait marks only the immutable predecessor
+// health wait performed before any production mutation. Kubernetes adapters
+// may use the marker to return an already-typed degraded-health result without
+// consuming the remaining command budget. Forward and rollback waits never
+// carry this marker.
+func WithPrewritePredecessorHealthWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, prewritePredecessorHealthWaitKey{}, true)
+}
+
+func IsPrewritePredecessorHealthWait(ctx context.Context) bool {
+	marked, _ := ctx.Value(prewritePredecessorHealthWaitKey{}).(bool)
+	return marked
+}
+
+// InitialExplicitBootstrapAdoption is the only first-generation adoption that
+// may recover a typed unhealthy predecessor. The explicit runtime binds the
+// live legacy Pod while the expected predecessor remains bound to the
+// canonical immutable bootstrap LKG.
+func InitialExplicitBootstrapAdoption(release PlanRelease) bool {
+	if release.MigrationState != "adopting" || release.IntentGeneration != 1 || release.RetrySameLKG ||
+		release.SupersedesFailedConfigSHA != "" || !release.ExpectedPreviousPresent || release.BootstrapRuntime == nil ||
+		release.BootstrapLKGPath == "" || release.OwnershipAdoption == nil || len(release.OwnershipAdoption.Resources) == 0 {
+		return false
+	}
+	bootstrap := release.BootstrapRuntime
+	return bootstrap.Resource == (ResourceIdentity{
+		APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
+		Namespace: release.Workload.Namespace, Name: release.Workload.Name,
+	}) && bootstrap.Container == release.Workload.Container && digestPattern.MatchString(bootstrap.ImageDigest) &&
+		shaPattern.MatchString(bootstrap.OCIRevision)
+}
+
 // ownershipTakeoverCompensator is intentionally narrower than Cluster. Only
 // the Kubernetes adapter implements it; test/fake clusters must opt in so a
 // migration rollback cannot silently skip forward-only field cleanup.
@@ -280,8 +314,11 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			degradedPredecessor = err == nil
 		} else if release.ExpectedPreviousPresent && lkgObserveErr != nil {
 			var healthyLKG Observation
-			healthyLKG, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
-			if err == nil && healthyLKG.Matches(lkg, release, true) {
+			healthyLKG, err = cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, rendered.LKG)
+			if errors.Is(err, ErrDegradedPredecessorHealth) {
+				prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+				degradedPredecessor = err == nil
+			} else if err == nil && healthyLKG.Matches(lkg, release, true) {
 				prewrite, err = cluster.Observe(ctx, release, lkg, rendered.LKG)
 				lkgMatched = err == nil && prewrite.Matches(lkg, release, true)
 				lkgHealthVerified = lkgMatched
@@ -293,7 +330,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		} else if lkgMatched {
 			if release.ExpectedPreviousPresent {
 				if !lkgHealthVerified {
-					_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+					_, err = cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, rendered.LKG)
 					if errors.Is(err, ErrDegradedPredecessorHealth) {
 						prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 						degradedPredecessor = err == nil
@@ -418,11 +455,11 @@ func prepareAdoptingRetryPredecessor(ctx context.Context, cluster Cluster, relea
 		}
 		return Observation{}, err
 	}
-	if healthy, healthErr := cluster.WaitHealthy(ctx, release, lkg, lkgManifest); healthErr != nil || !healthy.Matches(lkg, release, true) {
-		if healthErr == nil {
-			healthErr = errors.New("adopting retry bootstrap LKG is unhealthy")
+	if healthy, healthErr := cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, lkgManifest); healthErr != nil || !healthy.Matches(lkg, release, true) {
+		if healthErr != nil {
+			return Observation{}, fmt.Errorf("wait for adopting retry bootstrap LKG: %w", healthErr)
 		}
-		return Observation{}, fmt.Errorf("%w: %v", ErrDegradedPredecessorHealth, healthErr)
+		return Observation{}, fmt.Errorf("%w: adopting retry bootstrap LKG is unhealthy", ErrDegradedPredecessorHealth)
 	}
 	witness, err := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
 	if err != nil {
@@ -453,9 +490,12 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 	}
 	degradedPredecessor := len(degraded) > 0 && degraded[0]
 	lkgIdentityBound := prewrite.Matches(lkg, release, true)
+	initialExplicitBootstrap := degradedPredecessor && InitialExplicitBootstrapAdoption(release) &&
+		prewrite.ImageRef == "" && prewrite.ConfigSHA == "" && prewrite.ManifestSHA == "" && prewrite.OCIRevision == "" &&
+		prewrite.TemplateDigest == "" && prewrite.ValidateDegradedPredecessor(release) == nil
 	if degradedPredecessor {
-		lkgIdentityBound = prewrite.Present && prewrite.ImageRef == lkg.ImageRef && prewrite.ConfigSHA == lkg.ConfigSHA &&
-			prewrite.ManifestSHA == lkg.ManifestSHA && prewrite.OCIRevision == lkg.OCIRevision && prewrite.TemplateDigest != ""
+		lkgIdentityBound = initialExplicitBootstrap || (prewrite.Present && prewrite.ImageRef == lkg.ImageRef && prewrite.ConfigSHA == lkg.ConfigSHA &&
+			prewrite.ManifestSHA == lkg.ManifestSHA && prewrite.OCIRevision == lkg.OCIRevision && prewrite.TemplateDigest != "")
 	}
 	if release.OwnershipAdoption == nil || !lkg.Present || !lkgIdentityBound {
 		return nil, errors.New("ownership adoption is not bound to the exact bootstrap LKG")
@@ -465,6 +505,17 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 	for _, manager := range prewrite.FieldManagers {
 		legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
 		declarativeManager = declarativeManager || manager == release.Workload.FieldManager
+	}
+	if initialExplicitBootstrap && !legacyManager && !declarativeManager {
+		for _, resource := range prewrite.Resources {
+			if resource.Identity != prewrite.Primary {
+				continue
+			}
+			for _, manager := range resource.FieldManagers {
+				legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
+				declarativeManager = declarativeManager || manager == release.Workload.FieldManager
+			}
+		}
 	}
 	if !legacyManager && !declarativeManager {
 		return nil, errors.New("ownership adoption live field manager identity is invalid")
@@ -536,13 +587,21 @@ func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptio
 }
 
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
-	if !release.ExpectedPreviousPresent || !lkg.Present || (release.MigrationState == "adopting" && !release.RetrySameLKG) {
+	initialExplicitBootstrap := InitialExplicitBootstrapAdoption(release)
+	if !release.ExpectedPreviousPresent || !lkg.Present ||
+		(release.MigrationState == "adopting" && !release.RetrySameLKG && !initialExplicitBootstrap) {
 		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
 	}
 	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
 		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
 	}
-	witness, err := PredecessorConvergenceManifest(lkgManifest)
+	var witness []byte
+	var err error
+	if initialExplicitBootstrap {
+		witness, err = BootstrapPredecessorConvergenceManifest(lkgManifest, release)
+	} else {
+		witness, err = PredecessorConvergenceManifest(lkgManifest)
+	}
 	if err != nil {
 		return Observation{}, err
 	}
@@ -556,7 +615,7 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if err := cluster.Converged(ctx, release, witness); err != nil {
 		return prepareOwnedDegradedPredecessor(ctx, cluster, release, forwardManifest, err)
 	}
-	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil {
+	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && !initialExplicitBootstrap {
 		return prepareAdoptingDegradedLKG(ctx, cluster, release, lkg, lkgManifest, witness)
 	}
 	second, err := cluster.ObserveCAS(ctx, release, forwardManifest)
@@ -1066,7 +1125,9 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	}
 	if plan.DegradedPredecessor {
 		failedAtomSuccessor := release.MigrationState == "independent" && shaPattern.MatchString(release.SupersedesFailedConfigSHA)
-		if !release.ExpectedPreviousPresent || plan.AlreadyConverged || (!release.RetrySameLKG && !failedAtomSuccessor) {
+		initialExplicitBootstrap := InitialExplicitBootstrapAdoption(release) && plan.OwnershipAdoption != nil
+		if !release.ExpectedPreviousPresent || plan.AlreadyConverged ||
+			(!release.RetrySameLKG && !failedAtomSuccessor && !initialExplicitBootstrap) {
 			return errors.New("degraded predecessor execution is not authorized")
 		}
 		if err := plan.Prewrite.ValidateDegradedPredecessor(release); err != nil {

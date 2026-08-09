@@ -344,6 +344,44 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 	}
 }
 
+func TestTypedHealthShortCircuitIsRestrictedToTheExactPrewritePredecessor(t *testing.T) {
+	revision := strings.Repeat("1", 40)
+	digest := "sha256:" + strings.Repeat("a", 64)
+	release := declarativerelease.PlanRelease{
+		Artifact:                declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-edge"},
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: revision, ExpectedPreviousManifestSHA: revision,
+		ExpectedPreviousOCIRevision: revision, ExpectedPreviousImageDigest: digest,
+	}
+	predecessor := declarativerelease.TargetIdentity{
+		Present: true, ImageRef: release.Artifact.Repository + "@" + digest,
+		ConfigSHA: revision, ManifestSHA: revision, OCIRevision: revision,
+	}
+	marked := declarativerelease.WithPrewritePredecessorHealthWait(context.Background())
+	typed := fmt.Errorf("%w: ready workload pod count mismatch", declarativerelease.ErrDegradedPredecessorHealth)
+	forward := predecessor
+	forward.ConfigSHA = strings.Repeat("2", 40)
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		target declarativerelease.TargetIdentity
+		err    error
+		want   bool
+	}{
+		{name: "exact typed predecessor", ctx: marked, target: predecessor, err: typed, want: true},
+		{name: "forward typed zero ready", ctx: marked, target: forward, err: typed},
+		{name: "unmarked compensation predecessor", ctx: context.Background(), target: predecessor, err: typed},
+		{name: "recoverable non-typed predecessor", ctx: marked, target: predecessor, err: errors.New("temporarily unavailable")},
+		{name: "unknown context predecessor", ctx: marked, target: predecessor, err: context.DeadlineExceeded},
+		{name: "healthy predecessor", ctx: marked, target: predecessor},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldReturnTypedPrewritePredecessorHealth(test.ctx, release, test.target, test.err); got != test.want {
+				t.Fatalf("short-circuit=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestParseDegradedObservationKeepsOwnedIdentityWithoutPodHealth(t *testing.T) {
 	revision := strings.Repeat("9", 40)
 	release := declarativerelease.PlanRelease{

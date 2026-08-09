@@ -1714,6 +1714,9 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		if err != nil {
 			lastFailure = err
 		}
+		if shouldReturnTypedPrewritePredecessorHealth(ctx, release, target, err) {
+			return observation, err
+		}
 		if time.Now().After(deadline) {
 			if lastErr == nil {
 				if lastFailure != nil {
@@ -1730,6 +1733,15 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func shouldReturnTypedPrewritePredecessorHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, err error) bool {
+	exactPredecessor := release.ExpectedPreviousPresent && target.Present &&
+		target.ImageRef == release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest &&
+		target.ConfigSHA == release.ExpectedPreviousConfigSHA && target.ManifestSHA == release.ExpectedPreviousManifestSHA &&
+		target.OCIRevision == release.ExpectedPreviousOCIRevision
+	return declarativerelease.IsPrewritePredecessorHealthWait(ctx) && exactPredecessor &&
+		errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth)
 }
 
 func healthSoakDuration(release declarativerelease.PlanRelease, bootstrap bool) time.Duration {
@@ -1882,7 +1894,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	observationWorkloadRaw := workloadRaw
 	if allowHistoricalRestarts && release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-		release.RetrySameLKG && release.BootstrapLKGPath != "" {
+		(release.RetrySameLKG || declarativerelease.InitialExplicitBootstrapAdoption(release)) && release.BootstrapLKGPath != "" {
 		observationWorkloadRaw, err = bootstrapObservationWorkload(workloadRaw, manifest, primary)
 		if err != nil {
 			return declarativerelease.Observation{}, err

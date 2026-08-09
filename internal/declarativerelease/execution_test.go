@@ -32,6 +32,7 @@ type fakeCluster struct {
 	health            []Observation
 	healthErrors      []error
 	healthTargets     []TargetIdentity
+	healthPrewrite    []bool
 	converged         [][]byte
 	convergedErrors   []error
 }
@@ -154,8 +155,9 @@ func (fake *fakeCluster) ClearOwnershipTakeoverForwardOnlyFields(context.Context
 	return nil
 }
 
-func (fake *fakeCluster) WaitHealthy(_ context.Context, _ PlanRelease, target TargetIdentity, _ []byte) (Observation, error) {
+func (fake *fakeCluster) WaitHealthy(ctx context.Context, _ PlanRelease, target TargetIdentity, _ []byte) (Observation, error) {
 	fake.healthTargets = append(fake.healthTargets, target)
+	fake.healthPrewrite = append(fake.healthPrewrite, IsPrewritePredecessorHealthWait(ctx))
 	var value Observation
 	if len(fake.health) > 0 {
 		value = fake.health[0]
@@ -683,8 +685,8 @@ func TestPrepareFailedAtomSuccessorAdvancesFromTypedReadyCountMismatch(t *testin
 	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || len(fake.verifiedTargets) != 1 || len(fake.healthTargets) != 1 {
 		t.Fatalf("independent degraded predecessor: plan=%+v verified=%d health_waits=%d err=%v", prepared, len(fake.verifiedTargets), len(fake.healthTargets), err)
 	}
-	if fake.healthTargets[0] != prepared.LKG || fake.verifiedTargets[0] != prepared.LKG || len(fake.casManifests) != 2 || len(fake.converged) != 1 || fake.dryRuns != 2 {
-		t.Fatalf("independent degraded predecessor was not exact-CAS verified: health=%+v verified=%+v cas=%d converged=%d dryRuns=%d", fake.healthTargets, fake.verifiedTargets, len(fake.casManifests), len(fake.converged), fake.dryRuns)
+	if fake.healthTargets[0] != prepared.LKG || !fake.healthPrewrite[0] || fake.verifiedTargets[0] != prepared.LKG || len(fake.casManifests) != 2 || len(fake.converged) != 1 || fake.dryRuns != 2 {
+		t.Fatalf("independent degraded predecessor was not exact-CAS verified: health=%+v marked=%+v verified=%+v cas=%d converged=%d dryRuns=%d", fake.healthTargets, fake.healthPrewrite, fake.verifiedTargets, len(fake.casManifests), len(fake.converged), fake.dryRuns)
 	}
 	encoded, err := CanonicalJSON(prepared)
 	if err != nil {
@@ -702,6 +704,127 @@ func TestPrepareFailedAtomSuccessorAdvancesFromTypedReadyCountMismatch(t *testin
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 || fake.applies != 1 {
 		t.Fatalf("failed-atom degraded predecessor did not execute: result=%+v applies=%d", result, fake.applies)
+	}
+}
+
+func TestPrepareFailedAtomSuccessorUsesTypedPredecessorWaitAfterObservationError(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	plan.Releases[0].SupersedesFailedConfigSHA = strings.Repeat("f", 40)
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{
+		observationErrors: []error{errors.New("transient predecessor observation error")},
+		healthErrors: []error{
+			fmt.Errorf("%w: ready workload pod count mismatch: got=0 want=1", ErrDegradedPredecessorHealth),
+		},
+		cas: []Observation{degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
+	if err != nil || !prepared.DegradedPredecessor || len(fake.healthTargets) != 1 || !fake.healthPrewrite[0] || len(fake.verifiedTargets) != 1 || fake.dryRuns != 2 {
+		t.Fatalf("typed predecessor wait did not enter degraded selector: prepared=%+v health=%+v marked=%+v verified=%d dryRuns=%d err=%v",
+			prepared, fake.healthTargets, fake.healthPrewrite, len(fake.verifiedTargets), fake.dryRuns, err)
+	}
+}
+
+func TestInitialExplicitBootstrapAdoptionRequiresEveryBoundedCondition(t *testing.T) {
+	valid := func() PlanRelease {
+		release := boundAPIPlan(t).Releases[0]
+		release.MigrationState = "adopting"
+		release.IntentGeneration = 1
+		release.RetrySameLKG = false
+		release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+		release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+			Fields:   []string{"/spec/template"},
+		}}}
+		release.BootstrapRuntime = &BootstrapRuntime{
+			Resource:  ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+			Container: release.Workload.Container, ImageDigest: "sha256:" + strings.Repeat("9", 64), OCIRevision: strings.Repeat("8", 40),
+		}
+		return release
+	}
+	if !InitialExplicitBootstrapAdoption(valid()) {
+		t.Fatal("complete initial explicit bootstrap adoption was rejected")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*PlanRelease)
+	}{
+		{name: "not adopting", mutate: func(release *PlanRelease) { release.MigrationState = "pending" }},
+		{name: "later generation", mutate: func(release *PlanRelease) { release.IntentGeneration = 2 }},
+		{name: "retry", mutate: func(release *PlanRelease) { release.RetrySameLKG = true }},
+		{name: "failed atom", mutate: func(release *PlanRelease) { release.SupersedesFailedConfigSHA = strings.Repeat("7", 40) }},
+		{name: "absent predecessor", mutate: func(release *PlanRelease) { release.ExpectedPreviousPresent = false }},
+		{name: "missing bootstrap runtime", mutate: func(release *PlanRelease) { release.BootstrapRuntime = nil }},
+		{name: "missing bootstrap LKG", mutate: func(release *PlanRelease) { release.BootstrapLKGPath = "" }},
+		{name: "missing adoption scope", mutate: func(release *PlanRelease) { release.OwnershipAdoption = nil }},
+		{name: "wrong runtime resource", mutate: func(release *PlanRelease) { release.BootstrapRuntime.Resource.Name = "other" }},
+		{name: "wrong runtime container", mutate: func(release *PlanRelease) { release.BootstrapRuntime.Container = "other" }},
+		{name: "mutable runtime image", mutate: func(release *PlanRelease) { release.BootstrapRuntime.ImageDigest = "latest" }},
+		{name: "invalid runtime revision", mutate: func(release *PlanRelease) { release.BootstrapRuntime.OCIRevision = "main" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			release := valid()
+			test.mutate(&release)
+			if InitialExplicitBootstrapAdoption(release) {
+				t.Fatalf("incomplete initial explicit bootstrap adoption was accepted: %+v", release)
+			}
+		})
+	}
+}
+
+func TestPrepareInitialExplicitBootstrapAdoptionRecoversTypedDegradedPredecessor(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.IntentGeneration = 1
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+		Fields:   []string{"/spec/template"},
+	}}}
+	release.BootstrapRuntime = &BootstrapRuntime{
+		Resource:  ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+		Container: release.Workload.Container, ImageDigest: "sha256:" + strings.Repeat("9", 64), OCIRevision: strings.Repeat("8", 40),
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	rendered.LKG = bytes.ReplaceAll(rendered.LKG, []byte("ghcr.io/example/fugue-api:old"), []byte(lkg.ImageRef))
+	rendered.LKGDigest = digestOf(rendered.LKG)
+	lkg.FieldManagers = []string{"helm"}
+	lkg.Resources[0].FieldManagers = []string{"helm"}
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{
+		observations: []Observation{lkg},
+		healthErrors: []error{
+			fmt.Errorf("%w: ready workload pod count mismatch: got=0 want=1", ErrDegradedPredecessorHealth),
+		},
+		cas: []Observation{degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
+	if err != nil || !prepared.DegradedPredecessor || prepared.OwnershipAdoption == nil || prepared.OwnershipAdoption.AlreadyConverged ||
+		len(fake.verifiedTargets) != 1 || len(fake.casManifests) != 2 || len(fake.converged) != 1 ||
+		fake.dryRunAdoptions != 1 || fake.dryRunTakeovers != 0 || fake.dryRuns != 0 {
+		t.Fatalf("initial explicit bootstrap degraded adoption was not prepared: prepared=%+v verified=%d cas=%d converged=%d adoption=%d takeover=%d dryruns=%d err=%v",
+			prepared, len(fake.verifiedTargets), len(fake.casManifests), len(fake.converged), fake.dryRunAdoptions, fake.dryRunTakeovers, fake.dryRuns, err)
+	}
+	encoded, err := CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeExecutionPlan(bytes.NewReader(encoded), plan, rendered.Forward, rendered.LKG); err != nil {
+		t.Fatalf("decode initial explicit bootstrap degraded adoption: %v", err)
 	}
 }
 
@@ -822,7 +945,7 @@ func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailur
 	degraded.Resources[0].FieldManagers = append([]string(nil), lkg.FieldManagers...)
 	fake := &fakeCluster{
 		observations: []Observation{lkg, lkg},
-		healthErrors: []error{errors.New("auxiliary DNS is not ready")},
+		healthErrors: []error{fmt.Errorf("%w: auxiliary DNS is not ready", ErrDegradedPredecessorHealth)},
 		cas:          []Observation{degradedCAS, degraded},
 		degraded:     []Observation{degraded, degraded},
 	}
@@ -843,13 +966,21 @@ func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailur
 	drifted.ImageRef = "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("9", 64)
 	fake = &fakeCluster{
 		observations: []Observation{lkg, lkg},
-		healthErrors: []error{errors.New("auxiliary DNS is not ready")},
+		healthErrors: []error{fmt.Errorf("%w: auxiliary DNS is not ready", ErrDegradedPredecessorHealth)},
 		cas:          []Observation{degradedCAS},
 		degraded:     []Observation{drifted},
 	}
 	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil ||
 		!strings.Contains(err.Error(), "not the exact LKG") || fake.dryRunTakeovers != 0 {
 		t.Fatalf("adopting degraded recovery accepted registry identity drift: takeovers=%d err=%v", fake.dryRunTakeovers, err)
+	}
+
+	fake = &fakeCluster{observations: []Observation{lkg}, healthErrors: []error{context.DeadlineExceeded}}
+	if _, err := prepareAdoptingRetryPredecessor(context.Background(), fake, *release, TargetIdentity{
+		Present: true, ImageRef: lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA,
+		OCIRevision: lkg.OCIRevision, ManifestDigest: rendered.LKGDigest,
+	}, rendered.LKG); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrDegradedPredecessorHealth) {
+		t.Fatalf("raw adopting predecessor timeout was disguised as degraded health: %v", err)
 	}
 
 	fake = &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, convergedErrors: []error{errors.New("spec drift")}}
