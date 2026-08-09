@@ -161,10 +161,6 @@ func TestPlanShadowPersistenceSliceIsCoveredAndFailsClosed(t *testing.T) {
 		"internal/platformcontrol/registry_test.go",
 		"internal/platformsafety/kernel.go",
 		"internal/platformsafety/kernel_test.go",
-		"internal/releasecontrol/component_plan_http_store.go",
-		"internal/releasecontrol/component_plan_http_store_test.go",
-		"internal/releasecontrol/component_plan_reconciler.go",
-		"internal/releasecontrol/component_plan_reconciler_test.go",
 		"internal/store/platform_state.go",
 		"openapi/openapi.yaml",
 	}

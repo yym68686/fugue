@@ -84,35 +84,6 @@ go run ./cmd/fugue-component-plan \
 This only prints JSON. It does not submit the request or acquire a release
 fence.
 
-`internal/releasecontrol` is the first idempotent spec/status control-loop
-boundary. It accepts only a validated `component_release_plan` artifact whose
-ID, generation, and content hash match the supplied spec. Reconciliation uses
-the envelope idempotency key and the existing atomic lane fence to persist one
-shadow release status; replay returns the same release ID, fencing token, lane
-version, and status digest. It rejects any store result that claims a gray/full
-or bypassed release.
-
-The first cross-component adapter is `component-plan-api.fugue.dev/v1`.
-`internal/releasecontrol.HTTPComponentPlanStore` reads the authenticated
-principal and immutable artifact, then writes the shadow observation through
-the existing `/v1` HTTP API. It has no PostgreSQL or Kubernetes capability.
-Every request is context-cancellable and bounded, redirects are disabled,
-credentials are redacted from transport/remote errors, and the adapter rejects
-gray/full, canary, override, force-publish, break-glass, reason drift, and
-idempotency drift before opening a network connection. Required response
-semantics are strict while unknown additive response fields remain compatible
-within v1.
-
-The API now supports a dedicated least-privilege observer identity. A
-release-control credential must explicitly hold only `artifact.read`,
-`artifact.release_shadow`, and `component_plan.observe`; the server binds that
-exception to one validated `component_release_plan`, its envelope-derived
-idempotency key, the fixed observation reason, and the shadow channel. The
-credential cannot release other artifact kinds or request gray/full, canary,
-override, force-publish, or break-glass behavior. A future release-control Pod
-must use this scoped identity and must not mount a platform administrator
-credential.
-
 The caller must obtain the paths from trusted revision evidence; the command
 does not run `git diff`, read live state, or dispatch a workflow. Coordination
 output includes the globally sorted lane/resource lock order and recovery lanes,

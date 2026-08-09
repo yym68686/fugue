@@ -1,6 +1,0 @@
-[
-  {
-    "status": "M",
-    "path": "deploy/helm/fugue/templates/node-local-dns-cache.yaml"
-  }
-]

@@ -31,7 +31,6 @@ components:
       - docs/architecture
       - internal/componentmanifest
       - internal/platformcontrol
-      - internal/releasecontrol
       - cmd/fugue-declarative-release
       - .github/actions/deploy-declarative-component
       - .github/workflows/ci.yml
@@ -68,7 +67,6 @@ components:
     ownershipMode: transitional-shared
     sourceRoots:
       - cmd/fugue-image-cache
-      - internal/releaseimageconsumer
     artifactKinds: [image-cache]
     releaseLane: image-plane
     coordinator: release-control
