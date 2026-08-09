@@ -95,12 +95,6 @@ fileRules:
   - id: node-local-template
     exact: deploy/helm/fugue/templates/node-local-dns-cache.yaml
     domains: [node-local]
-  - id: authoritative-dns-template
-    exact: deploy/helm/fugue/templates/dns-daemonset.yaml
-    domains: [authoritative-dns]
-  - id: authoritative-dns-groups-template
-    exact: deploy/helm/fugue/templates/dns-group-daemonsets.yaml
-    domains: [authoritative-dns]
   - id: control-plane-api-template
     exact: deploy/helm/fugue/templates/deployment.yaml
     domains: [control-plane]
@@ -140,10 +134,6 @@ fileRules:
   - id: backup-restore-drill-template
     exact: deploy/helm/fugue/templates/control-plane-restore-drill-cronjob.yaml
     domains: [backup]
-  - id: image-cache-template
-    exact: deploy/helm/fugue/templates/image-cache-daemonset.yaml
-    domains: [image-cache]
-
   - id: control-plane-api-image
     exact: Dockerfile.api
     domains: [control-plane]

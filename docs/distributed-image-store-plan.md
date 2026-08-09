@@ -76,7 +76,7 @@ target, deletion target, GC target, and upstream fallback for image-cache.
 
 ### Node-local image-cache
 
-- `deploy/helm/fugue/templates/image-cache-daemonset.yaml` creates a DaemonSet
+- `deploy/releases/image-cache/daemonset.json` declares a DaemonSet
   with `hostNetwork: true` and a host port, defaulting to port `5000`.
 - Each pod uses `FUGUE_IMAGE_CACHE_STORE_DIR=/var/lib/fugue/image-cache/registry`
   and mounts the host path `/var/lib/fugue/image-cache`.
