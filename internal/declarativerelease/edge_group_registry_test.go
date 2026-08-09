@@ -290,7 +290,7 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	adopting := initial
 	adopting.Groups = append([]EdgeGroup(nil), initial.Groups...)
 	adopting.Groups[0].Control.MigrationState = "adopting"
-	if err := ValidateEdgeGroupRegistryUpdate(&initial, adopting, controlPlan, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "legacy adoption state") {
+	if err := ValidateEdgeGroupRegistryUpdate(&initial, adopting, controlPlan, []string{"deploy/releases/edge-groups.json", alpha.Control.IntentPath}); err == nil || !strings.Contains(err.Error(), "legacy adoption") {
 		t.Fatalf("Edge adoption state was accepted: %v", err)
 	}
 
@@ -298,6 +298,63 @@ func TestEdgeGroupRegistryUpdateIsConfigurationOnlyThenSingleComponent(t *testin
 	legacy.Control.AdoptionReceiptPath = "deploy/releases/edge-control-alpha/adoption-receipt.json"
 	if err := legacy.validate(); err == nil || !strings.Contains(err.Error(), "legacy adoption metadata") {
 		t.Fatalf("retired Edge adoption metadata was accepted: %v", err)
+	}
+}
+
+func TestEdgeGroupRegistryAllowsOnlyExactImageOwnershipRepair(t *testing.T) {
+	priorGroup := edgeGroupFixture("alpha", "edge-group-metro-alpha")
+	currentGroup := edgeGroupFixture("alpha", "edge-group-metro-alpha")
+	worker := &currentGroup.Worker
+	worker.MigrationState = "adopting"
+	worker.BootstrapLKGPath = "deploy/releases/edge-worker-alpha/lkg.json"
+	worker.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm", LegacyFieldManagers: []string{"helm", "kubectl-patch"},
+		Resources: []OwnershipAdoptionScope{
+			{Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-alpha-front"}, Fields: []string{"/spec/template/spec/containers[name=edge-front]/image"}},
+			{Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-alpha-worker-a"}, Fields: []string{"/spec/template/spec/containers[name=edge]/image"}},
+			{Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-alpha-worker-b"}, Fields: []string{"/spec/template/spec/containers[name=edge]/image"}},
+		},
+	}
+	previous := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{priorGroup}}
+	current := EdgeGroupRegistry{APIVersion: EdgeGroupRegistryAPIVersion, Kind: EdgeGroupRegistryKind, Groups: []EdgeGroup{currentGroup}}
+	plan := Plan{Releases: []PlanRelease{{ComponentID: worker.ID}}}
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, current, plan, []string{"deploy/releases/edge-groups.json", worker.IntentPath}); err != nil {
+		t.Fatalf("exact image ownership repair: %v", err)
+	}
+	release := PlanRelease{
+		ComponentID: worker.ID, MigrationState: worker.MigrationState, RetrySameLKG: true,
+		BootstrapLKGPath: worker.BootstrapLKGPath, ArtifactTargets: worker.ArtifactTargets,
+		Transition: worker.Transition, OwnershipAdoption: worker.OwnershipAdoption,
+	}
+	if !exactEdgeWorkerImageOwnershipRepair(release) {
+		t.Fatal("exact edge worker image repair did not explicitly authorize takeover")
+	}
+	release.RetrySameLKG = false
+	if exactEdgeWorkerImageOwnershipRepair(release) {
+		t.Fatal("non-retry edge worker atom implicitly authorized ownership takeover")
+	}
+
+	bad := current
+	bad.Groups = append([]EdgeGroup(nil), current.Groups...)
+	badWorker := &bad.Groups[0].Worker
+	badWorker.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "helm", LegacyFieldManagers: []string{"helm", "kubectl-patch"},
+		Resources: append([]OwnershipAdoptionScope(nil), worker.OwnershipAdoption.Resources...),
+	}
+	badWorker.OwnershipAdoption.Resources[0].Fields = []string{"/spec/template"}
+	if err := ValidateEdgeGroupRegistryUpdate(&previous, bad, plan, []string{"deploy/releases/edge-groups.json", worker.IntentPath}); err == nil || !strings.Contains(err.Error(), "outside immutable artifact targets") {
+		t.Fatalf("broad worker ownership repair was accepted: %v", err)
+	}
+
+	independent := current
+	independent.Groups = append([]EdgeGroup(nil), current.Groups...)
+	independentWorker := &independent.Groups[0].Worker
+	independentWorker.MigrationState = "independent"
+	independentWorker.BootstrapLKGPath = ""
+	independentWorker.OwnershipAdoption = nil
+	independentWorker.AdoptionReceiptPath = "deploy/releases/edge-worker-alpha/adoption-receipt.json"
+	if err := ValidateEdgeGroupRegistryUpdate(&current, independent, plan, []string{"deploy/releases/edge-groups.json", worker.IntentPath}); err != nil {
+		t.Fatalf("receipt-bound worker independence: %v", err)
 	}
 }
 

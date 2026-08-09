@@ -35,6 +35,38 @@ func TestOwnershipAdoptionManifestContainsOnlyReviewedLKGFieldsAndCAS(t *testing
 	}
 }
 
+func TestArtifactImageOwnershipRepairPreservesDeclarativeSiblingFields(t *testing.T) {
+	lkg := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"labels":{"app":"edge"},"name":"edge-alpha-worker","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"edge"}},"template":{"metadata":{"labels":{"app":"edge"}},"spec":{"containers":[{"image":"example/edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"edge","volumeMounts":[{"mountPath":"/state","name":"worker-state"}]}],"initContainers":[{"image":"example/edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"edge-workload-identity","volumeMounts":[{"mountPath":"/identity","name":"identity"}]}],"volumes":[{"emptyDir":{},"name":"worker-state"},{"emptyDir":{},"name":"identity"}]}}}}],"kind":"ComponentResourceSet"}`)
+	plan := OwnershipAdoptionPlan{
+		BootstrapLKGDigest: digestOf(lkg),
+		Resources: []OwnershipAdoptionResourcePlan{{
+			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-alpha-worker"},
+			Fields: []string{
+				"/spec/template/spec/containers[name=edge]/image",
+				"/spec/template/spec/initContainers[name=edge-workload-identity]/image",
+			},
+			UID: "worker-uid", ResourceVersion: "42", Generation: 7,
+		}},
+	}
+	raw, err := BuildOwnershipAdoptionManifest(lkg, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`"uid":"worker-uid"`, `"resourceVersion":"42"`, `"selector"`, `"volumeMounts"`, `"volumes"`} {
+		if !bytes.Contains(raw, []byte(required)) {
+			t.Fatalf("image ownership repair lost declarative sibling %s: %s", required, raw)
+		}
+	}
+	plan.Resources[0].Fields = append(plan.Resources[0].Fields, "/spec/template/spec/volumes")
+	raw, err = BuildOwnershipAdoptionManifest(lkg, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"selector"`)) || bytes.Contains(raw, []byte(`"labels"`)) {
+		t.Fatalf("non-image adoption unexpectedly claimed the full resource: %s", raw)
+	}
+}
+
 func TestOwnershipTakeoverManifestContainsOnlyReviewedImmutableTargetFields(t *testing.T) {
 	target := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"labels":{"owner":"declarative"},"name":"edge-alpha-front","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"front"}},"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"2222222222222222222222222222222222222222"}},"spec":{"containers":[{"image":"example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"edge-front"}]}}}}],"kind":"ComponentResourceSet"}`)
 	plan := OwnershipAdoptionPlan{

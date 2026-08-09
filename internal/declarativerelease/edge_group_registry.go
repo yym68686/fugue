@@ -77,13 +77,16 @@ func (group EdgeGroup) validate() error {
 	if group.Control.Family != "edge" || group.Worker.Family != "edge" {
 		return errors.New("edge group component family must be edge")
 	}
-	for _, component := range []Component{group.Control, group.Worker} {
-		if component.MigrationState == "adopting" || component.OwnershipAdoption != nil {
-			return fmt.Errorf("edge group component %q retains legacy adoption state", component.ID)
+	if group.Control.MigrationState == "adopting" || group.Control.OwnershipAdoption != nil ||
+		group.Control.AdoptionReceiptPath != "" || group.Control.BootstrapLKGPath != "" {
+		return fmt.Errorf("edge group component %q retains legacy adoption metadata", group.Control.ID)
+	}
+	if group.Worker.MigrationState == "adopting" {
+		if err := validateEdgeWorkerOwnershipRepair(group.Worker); err != nil {
+			return err
 		}
-		if component.AdoptionReceiptPath != "" || component.BootstrapLKGPath != "" {
-			return fmt.Errorf("edge group component %q retains legacy adoption metadata", component.ID)
-		}
+	} else if group.Worker.OwnershipAdoption != nil || group.Worker.BootstrapLKGPath != "" {
+		return fmt.Errorf("edge group component %q retains adopting-only metadata", group.Worker.ID)
 	}
 	if err := group.Control.Validate(); err != nil {
 		return fmt.Errorf("control component: %w", err)
@@ -207,9 +210,8 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			id             string
 			previous, next Component
 		}{{group.Control.ID, prior.Control, group.Control}, {group.Worker.ID, prior.Worker, group.Worker}} {
-			if pair.previous.MigrationState != pair.next.MigrationState &&
-				!(pair.previous.MigrationState == "pending" && pair.next.MigrationState == "independent") {
-				return fmt.Errorf("edge group component %q migration state must advance pending to independent", pair.id)
+			if !validEdgeGroupMigrationTransition(pair.previous, pair.next) {
+				return fmt.Errorf("edge group component %q migration state transition is invalid", pair.id)
 			}
 			priorJSON, err := CanonicalJSON(pair.previous)
 			if err != nil {
@@ -230,6 +232,66 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 	}
 	if len(before) != 0 {
 		return errors.New("edge group registry cannot remove an existing group")
+	}
+	return nil
+}
+
+func validEdgeGroupMigrationTransition(previous, next Component) bool {
+	if previous.MigrationState == next.MigrationState ||
+		previous.MigrationState == "pending" && next.MigrationState == "independent" {
+		return true
+	}
+	// A historical adoption receipt can predate pointer-exclusive ownership
+	// evidence. Re-entering the adopting adapter is allowed only as an exact,
+	// selected component repair: the old receipt is retired and a new bounded
+	// LKG plus reviewed ownership scope must replace it. The ordinary
+	// independent executor still cannot force conflicts.
+	return previous.MigrationState == "independent" && next.MigrationState == "adopting" &&
+		validateEdgeWorkerOwnershipRepair(next) == nil ||
+		previous.MigrationState == "adopting" && next.MigrationState == "independent" &&
+			validateEdgeWorkerOwnershipRepair(previous) == nil &&
+			next.AdoptionReceiptPath == "deploy/releases/"+next.ID+"/adoption-receipt.json" &&
+			next.OwnershipAdoption == nil && next.BootstrapLKGPath == ""
+}
+
+func validateEdgeWorkerOwnershipRepair(component Component) error {
+	if component.MigrationState != "adopting" || component.OwnershipAdoption == nil ||
+		component.BootstrapLKGPath != "deploy/releases/"+component.ID+"/lkg.json" ||
+		component.BootstrapRuntime != nil || component.AdoptionReceiptPath != "" ||
+		component.Transition == nil || component.Transition.Type != "edge-group-ab" || component.Transition.EdgeGroupAB == nil {
+		return fmt.Errorf("edge worker component %q ownership repair identity is invalid", component.ID)
+	}
+	adoption := component.OwnershipAdoption
+	if adoption.LegacyFieldManager != "helm" || len(adoption.LegacyFieldManagers) != 2 ||
+		adoption.LegacyFieldManagers[0] != "helm" || adoption.LegacyFieldManagers[1] != "kubectl-patch" {
+		return fmt.Errorf("edge worker component %q ownership repair managers are invalid", component.ID)
+	}
+	expected := make(map[string]struct{}, len(component.ArtifactTargets))
+	for _, target := range component.ArtifactTargets {
+		list := "containers"
+		if target.ContainerType == "init-container" {
+			list = "initContainers"
+		}
+		key := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name +
+			"\x00/spec/template/spec/" + list + "[name=" + target.Container + "]/image"
+		expected[key] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(expected))
+	for _, resource := range adoption.Resources {
+		for _, field := range resource.Fields {
+			key := resource.Identity.APIVersion + "\x00" + resource.Identity.Kind + "\x00" +
+				resource.Identity.Namespace + "\x00" + resource.Identity.Name + "\x00" + field
+			if _, ok := expected[key]; !ok {
+				return fmt.Errorf("edge worker component %q ownership repair field is outside immutable artifact targets", component.ID)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("edge worker component %q ownership repair repeats a field", component.ID)
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("edge worker component %q ownership repair omits an immutable artifact target", component.ID)
 	}
 	return nil
 }

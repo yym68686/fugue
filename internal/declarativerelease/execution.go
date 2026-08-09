@@ -524,7 +524,7 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 		return nil, errors.New("ownership adoption live field manager identity is invalid")
 	}
 	adoptionAlreadyConverged := true
-	resumeTakeover := InitialExplicitBootstrapFailedAtomSuccessor(release)
+	resumeTakeover := InitialExplicitBootstrapFailedAtomSuccessor(release) || exactEdgeWorkerImageOwnershipRepair(release)
 	resources := make(map[ResourceIdentity]ResourceObservation, len(prewrite.Resources))
 	for _, resource := range prewrite.Resources {
 		resources[resource.Identity] = resource
@@ -567,6 +567,18 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 		ResumeTakeover:   resumeTakeover && !adoptionAlreadyConverged,
 	}
 	return result, nil
+}
+
+func exactEdgeWorkerImageOwnershipRepair(release PlanRelease) bool {
+	if !release.RetrySameLKG {
+		return false
+	}
+	return validateEdgeWorkerOwnershipRepair(Component{
+		ID: release.ComponentID, MigrationState: release.MigrationState,
+		BootstrapLKGPath: release.BootstrapLKGPath, BootstrapRuntime: release.BootstrapRuntime,
+		ArtifactTargets: release.ArtifactTargets, Transition: release.Transition,
+		OwnershipAdoption: release.OwnershipAdoption,
+	}) == nil
 }
 
 func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptionScope) ([]OwnershipValidationScaffold, error) {

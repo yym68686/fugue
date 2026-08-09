@@ -174,8 +174,8 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		if caddyTargets != 0 {
 			t.Fatalf("%s incorrectly binds external Caddy containers to its Edge artifact", componentID)
 		}
-		if byID[componentID].BootstrapLKGPath != "" {
-			t.Fatalf("%s retains a legacy bootstrap LKG", componentID)
+		if byID[componentID].BootstrapLKGPath != "" && validateEdgeWorkerOwnershipRepair(byID[componentID]) != nil {
+			t.Fatalf("%s retains a bootstrap LKG outside an exact image ownership repair", componentID)
 		}
 	}
 	baseFile, err := os.Open(filename)

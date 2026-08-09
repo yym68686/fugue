@@ -49,6 +49,16 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		if err != nil {
 			return nil, err
 		}
+		if ownershipAdoptionUsesOnlyArtifactImages(scope.Fields) {
+			metadata, ok := source["metadata"].(map[string]any)
+			if !ok {
+				return nil, errors.New("ownership adoption resource metadata is invalid")
+			}
+			metadata["uid"] = scope.UID
+			metadata["resourceVersion"] = scope.ResourceVersion
+			result.Items = append(result.Items, source)
+			continue
+		}
 		item := map[string]any{
 			"apiVersion": scope.Identity.APIVersion,
 			"kind":       scope.Identity.Kind,
@@ -90,6 +100,21 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		return nil, errors.New("ownership adoption resource set expanded unexpectedly")
 	}
 	return CanonicalJSON(result)
+}
+
+func ownershipAdoptionUsesOnlyArtifactImages(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	for _, pointer := range fields {
+		steps, err := parseAdoptionPointer(pointer)
+		if err != nil || len(steps) != 5 || steps[0].Field != "spec" || steps[1].Field != "template" ||
+			steps[2].Field != "spec" || (steps[3].Field != "containers" && steps[3].Field != "initContainers") ||
+			steps[3].Name == "" || steps[4].Field != "image" || steps[4].Name != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func adoptionScopeContainsPointer(fields []string, pointer string) bool {
