@@ -970,8 +970,8 @@ func verifyImageCacheTerminalHandoffPreconditions(value map[string]any, release 
 	strategyPointer := imageCacheTerminalHandoffConflicts[1].pointer
 	imagePointer := "/spec/template/spec/containers[name=image-cache]/image"
 	if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, []string{labelPointer, strategyPointer, imagePointer}) ||
-		!managedFieldsOwnPointers(metadata, "helm", []string{labelPointer}) || managedFieldsOwnAnyPointer(metadata, "helm", []string{strategyPointer, imagePointer}) ||
-		!managedFieldsOwnPointers(metadata, "kubectl-patch", []string{strategyPointer}) || managedFieldsOwnAnyPointer(metadata, "kubectl-patch", []string{labelPointer, imagePointer}) {
+		!managedFieldsOwnAnyPointer(metadata, "helm", []string{labelPointer}) || managedFieldsOwnAnyPointer(metadata, "helm", []string{strategyPointer, imagePointer}) ||
+		!managedFieldsOwnAnyPointer(metadata, "kubectl-patch", []string{strategyPointer}) || managedFieldsOwnAnyPointer(metadata, "kubectl-patch", []string{labelPointer, imagePointer}) {
 		return errors.New("Image-cache terminal handoff managedFields witness is not exact")
 	}
 	for _, manager := range managedFieldManagers(metadata) {
