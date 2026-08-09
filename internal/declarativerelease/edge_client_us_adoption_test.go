@@ -71,19 +71,19 @@ func TestEdgeClientUSIndependentTransitionReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if intent.Generation != 6 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
-		intent.ExpectedPreviousConfigSHA != "c35dc970a9a9a50fc6efca3d977b5f1e2a80ba06" ||
+	if intent.Generation != 7 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
+		intent.ExpectedPreviousConfigSHA != "423b58c4a706ff97e6a16c5d00ee87dc9382efc1" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA ||
 		intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:4339cd213fbab0b23470b809c4a0057f7ceeec421bd5bd4059884fe19f27148a" {
+		intent.ExpectedPreviousImageDigest != "sha256:9eee750ba8c7bac3870a7e33db4661e480b77e0f5fd2dddeb46c6180ac99697f" {
 		t.Fatalf("edge-client-us successor is not bound to the verified independent LKG: %+v", intent)
 	}
 	prior := intent
-	prior.Generation = 5
-	prior.ExpectedPreviousConfigSHA = receipt.Final.ConfigSHA
+	prior.Generation = 6
+	prior.ExpectedPreviousConfigSHA = "c35dc970a9a9a50fc6efca3d977b5f1e2a80ba06"
 	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
 	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousImageDigest = "sha256:2af80209adedb678e26adedb15e459c361a4d94cfa01bf898e654b5a450c9642"
+	prior.ExpectedPreviousImageDigest = "sha256:4339cd213fbab0b23470b809c4a0057f7ceeec421bd5bd4059884fe19f27148a"
 	plan, err := BuildPlan(registry, "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", []string{component.IntentPath})
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestEdgeClientUSIndependentTransitionReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(bound.Releases) != 1 || bound.Releases[0].ComponentID != component.ID || bound.Releases[0].RetrySameLKG ||
-		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].IntentGeneration != 6 ||
+		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].IntentGeneration != 7 ||
 		bound.Releases[0].MigrationState != "independent" || bound.Releases[0].OwnershipAdoption != nil ||
 		bound.Releases[0].BootstrapRuntime != nil || bound.Releases[0].BootstrapLKGPath != "" ||
 		bound.Releases[0].AdoptionReceiptPath != component.AdoptionReceiptPath {
