@@ -38,19 +38,20 @@ type retiredResource struct {
 }
 
 type retirementIntent struct {
-	APIVersion                string            `json:"apiVersion"`
-	Kind                      string            `json:"kind"`
-	Release                   string            `json:"release"`
-	Namespace                 string            `json:"namespace"`
-	ExpectedSourceParent      string            `json:"expectedSourceParent"`
-	ExpectedHelmRevision      int               `json:"expectedHelmRevision"`
-	ExpectedHelmStatus        string            `json:"expectedHelmStatus"`
-	ExpectedManifestDigest    string            `json:"expectedManifestDigest"`
-	SourceChartCommit         string            `json:"sourceChartCommit"`
-	SourceChartTree           string            `json:"sourceChartTree"`
-	SourceChartTemplateDigest string            `json:"sourceChartTemplateDigest"`
-	PatchDigest               string            `json:"patchDigest"`
-	RetiredResources          []retiredResource `json:"retiredResources"`
+	APIVersion                  string            `json:"apiVersion"`
+	Kind                        string            `json:"kind"`
+	Release                     string            `json:"release"`
+	Namespace                   string            `json:"namespace"`
+	ExpectedSourceParent        string            `json:"expectedSourceParent"`
+	ExpectedHelmRevision        int               `json:"expectedHelmRevision"`
+	ExpectedHelmStatus          string            `json:"expectedHelmStatus"`
+	ExpectedManifestDigest      string            `json:"expectedManifestDigest"`
+	ExpectedFinalManifestDigest string            `json:"expectedFinalManifestDigest"`
+	SourceChartCommit           string            `json:"sourceChartCommit"`
+	SourceChartTree             string            `json:"sourceChartTree"`
+	SourceChartTemplateDigest   string            `json:"sourceChartTemplateDigest"`
+	PatchDigest                 string            `json:"patchDigest"`
+	RetiredResources            []retiredResource `json:"retiredResources"`
 }
 
 type manifestDocument struct {

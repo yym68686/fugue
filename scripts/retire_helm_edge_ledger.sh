@@ -40,11 +40,23 @@ require_equal() {
   fi
 }
 
+assert_manifest_retired() {
+  local manifest="$1" names="${work}/manifest-resource-names.txt"
+  kubectl create --dry-run=client -f "${manifest}" -o name >"${names}"
+  while IFS= read -r name; do
+    if grep -Fxq "daemonset.apps/${name}" "${names}"; then
+      echo "helm-ledger-retirement: ${name} remains in the Helm manifest" >&2
+      exit 1
+    fi
+  done < <(jq -r '.retiredResources[].name' "${intent}")
+}
+
 jq -e '
   .apiVersion == "release.fugue.dev/v1" and
   .kind == "HelmLedgerRetirementIntent" and
   .release == "fugue" and .namespace == "fugue-system" and
   .expectedHelmRevision == 828 and .expectedHelmStatus == "deployed" and
+  (.expectedFinalManifestDigest | test("^sha256:[0-9a-f]{64}$")) and
   (.retiredResources | length == 5) and
   ([.retiredResources[].name] | unique | length == 5) and
   (all(.retiredResources[]; .apiVersion == "apps/v1" and .kind == "DaemonSet" and
@@ -77,33 +89,47 @@ release="$(jq -r .release "${intent}")"
 namespace="$(jq -r .namespace "${intent}")"
 status_json="${work}/status-before.json"
 helm status "${release}" --namespace "${namespace}" --output json >"${status_json}"
-require_equal "Helm revision" "$(jq -r .version "${status_json}")" "$(jq -r .expectedHelmRevision "${intent}")"
 require_equal "Helm status" "$(jq -r .info.status "${status_json}")" "$(jq -r .expectedHelmStatus "${intent}")"
+expected_revision="$(jq -r .expectedHelmRevision "${intent}")"
+observed_revision="$(jq -r .version "${status_json}")"
+reconcile_existing=false
+if [[ "${observed_revision}" == "$(( expected_revision + 1 ))" ]]; then
+  reconcile_existing=true
+elif [[ "${observed_revision}" != "${expected_revision}" ]]; then
+  echo "helm-ledger-retirement: Helm revision mismatch" >&2
+  exit 1
+fi
 
 current_manifest="${work}/manifest-before.yaml"
 helm get manifest "${release}" --namespace "${namespace}" >"${current_manifest}"
 chmod 600 "${current_manifest}"
-require_equal "Helm manifest digest" "$(sha256_file "${current_manifest}")" "$(jq -r .expectedManifestDigest "${intent}")"
+if [[ "${reconcile_existing}" == "true" ]]; then
+  require_equal "final Helm manifest digest" "$(sha256_file "${current_manifest}")" "$(jq -r .expectedFinalManifestDigest "${intent}")"
+else
+  require_equal "Helm manifest digest" "$(sha256_file "${current_manifest}")" "$(jq -r .expectedManifestDigest "${intent}")"
+fi
 
-release_json="${work}/release.json"
-kubectl --namespace "${namespace}" get secret "sh.helm.release.v1.${release}.v$(jq -r .expectedHelmRevision "${intent}")" -o jsonpath='{.data.release}' |
-  base64 -d | base64 -d | gzip -d >"${release_json}"
-chmod 600 "${release_json}"
-template_list="${work}/chart-template-sha256.tsv"
-jq -r '.chart.templates[] | [.name,.data] | @tsv' "${release_json}" |
-  while IFS=$'\t' read -r name data; do
-    printf '%s\t%s\n' "${name}" "$(printf %s "${data}" | base64 -d | sha256sum | awk '{print $1}')"
-  done | sort >"${template_list}"
-require_equal "stored chart template digest" "$(sha256_file "${template_list}")" "$(jq -r .sourceChartTemplateDigest "${intent}")"
+if [[ "${reconcile_existing}" == "false" ]]; then
+  release_json="${work}/release.json"
+  kubectl --namespace "${namespace}" get secret "sh.helm.release.v1.${release}.v${expected_revision}" -o jsonpath='{.data.release}' |
+    base64 -d | base64 -d | gzip -d >"${release_json}"
+  chmod 600 "${release_json}"
+  template_list="${work}/chart-template-sha256.tsv"
+  jq -r '.chart.templates[] | [.name,.data] | @tsv' "${release_json}" |
+    while IFS=$'\t' read -r name data; do
+      printf '%s\t%s\n' "${name}" "$(printf %s "${data}" | base64 -d | sha256sum | awk '{print $1}')"
+    done | sort >"${template_list}"
+  require_equal "stored chart template digest" "$(sha256_file "${template_list}")" "$(jq -r .sourceChartTemplateDigest "${intent}")"
 
-source_chart_commit="$(jq -r .sourceChartCommit "${intent}")"
-require_equal "source chart tree" "$(git -C "${repo_root}" rev-parse "${source_chart_commit}:deploy/helm/fugue")" "$(jq -r .sourceChartTree "${intent}")"
-require_equal "ownership patch digest" "$(sha256_file "${patch_file}")" "$(jq -r .patchDigest "${intent}")"
-chart="${work}/chart"
-mkdir -m 700 "${chart}"
-git -C "${repo_root}" archive "${source_chart_commit}:deploy/helm/fugue" | tar -x -C "${chart}"
-git -C "${chart}" apply --check "${patch_file}"
-git -C "${chart}" apply "${patch_file}"
+  source_chart_commit="$(jq -r .sourceChartCommit "${intent}")"
+  require_equal "source chart tree" "$(git -C "${repo_root}" rev-parse "${source_chart_commit}:deploy/helm/fugue")" "$(jq -r .sourceChartTree "${intent}")"
+  require_equal "ownership patch digest" "$(sha256_file "${patch_file}")" "$(jq -r .patchDigest "${intent}")"
+  chart="${work}/chart"
+  mkdir -m 700 "${chart}"
+  git -C "${repo_root}" archive "${source_chart_commit}:deploy/helm/fugue" | tar -x -C "${chart}"
+  git -C "${chart}" apply --check "${patch_file}"
+  git -C "${chart}" apply "${patch_file}"
+fi
 
 lease_holders="$(kubectl --namespace "${namespace}" get lease -o json | jq -c '[.items[] | select(.metadata.name | startswith("fugue-production-")) | select((.spec.holderIdentity // "") != "") | .metadata.name]')"
 require_equal "active component leases" "${lease_holders}" "[]"
@@ -127,6 +153,15 @@ while IFS= read -r encoded; do
     (.status.numberUnavailable // 0) == $expected.unavailable
   ' "${live}" >/dev/null || { echo "helm-ledger-retirement: live ${name} CAS/health mismatch" >&2; exit 1; }
 done < <(jq -r '.retiredResources[] | @base64' "${intent}")
+
+if [[ "${reconcile_existing}" == "true" ]]; then
+  assert_manifest_retired "${current_manifest}"
+  require_equal "reconciled active component leases" "$(kubectl --namespace "${namespace}" get lease -o json | jq -c '[.items[] | select(.metadata.name | startswith("fugue-production-")) | select((.spec.holderIdentity // "") != "") | .metadata.name]')" "[]"
+  jq -nc --arg source "${head_sha}" --arg origin "${expected_parent}" --arg final "$(sha256_file "${current_manifest}")" \
+    --argjson revision "${observed_revision}" \
+    '{apiVersion:"release.fugue.dev/v1",kind:"HelmLedgerRetirementResult",status:"verified",reason:"helm-ledger-retired-readback",sourceCommit:$source,originSourceCommit:$origin,productionMutationAttempted:false,productionMutationObserved:true,helmRevision:$revision,finalManifestDigest:$final}' >"${result}"
+  exit 0
+fi
 
 filter="${FUGUE_HELM_LEDGER_FILTER_BINARY:-${work}/helm-ledger-retirement-filter}"
 if [[ -z "${FUGUE_HELM_LEDGER_FILTER_BINARY:-}" ]]; then
@@ -165,12 +200,8 @@ require_equal "final Helm status" "$(jq -r .info.status "${final_status}")" "dep
 final_manifest="${work}/manifest-after.yaml"
 helm get manifest "${release}" --namespace "${namespace}" >"${final_manifest}"
 chmod 600 "${final_manifest}"
-for name in $(jq -r '.retiredResources[].name' "${intent}"); do
-  if grep -Fq "name: ${name}" "${final_manifest}"; then
-    echo "helm-ledger-retirement: ${name} remains in the Helm manifest" >&2
-    exit 1
-  fi
-done
+require_equal "final Helm manifest digest" "$(sha256_file "${final_manifest}")" "$(jq -r .expectedFinalManifestDigest "${intent}")"
+assert_manifest_retired "${final_manifest}"
 
 while IFS= read -r encoded; do
   resource="$(printf %s "${encoded}" | base64 -d)"
