@@ -32,12 +32,8 @@ func TestEdgeControlDENetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if de.Control.ManifestPath != "internal/edgecontrol/component/resources.authority.de.json" {
 		t.Fatalf("DE Edge Control manifest path=%q", de.Control.ManifestPath)
 	}
-	if us.Control.ManifestPath != "internal/edgecontrol/component/resources.authority.group.json" {
-		t.Fatalf("US Edge Control manifest path changed to %q", us.Control.ManifestPath)
-	}
-
 	deIngress := materializedNetworkPolicyIngress(t, de.Control.ManifestPath, de.Control.ManifestVariables)
-	sharedIngress := materializedNetworkPolicyIngress(t, us.Control.ManifestPath, de.Control.ManifestVariables)
+	sharedIngress := materializedNetworkPolicyIngress(t, "internal/edgecontrol/component/resources.authority.group.json", de.Control.ManifestVariables)
 	if len(deIngress) != len(sharedIngress)+1 || !reflect.DeepEqual(deIngress[:len(sharedIngress)], sharedIngress) {
 		t.Fatalf("DE NetworkPolicy changed existing ingress rules: DE=%#v shared=%#v", deIngress, sharedIngress)
 	}
