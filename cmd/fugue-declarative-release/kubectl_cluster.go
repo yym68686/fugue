@@ -756,14 +756,6 @@ func (cluster *kubectlCluster) prepareReceiptBoundImageCacheHandoff(ctx context.
 	if err := validateExactImageCacheTerminalHandoffConflicts(applyErr, receipt); err != nil {
 		return imageCacheTerminalHandoff{}, err
 	}
-	observation, err := cluster.ObserveDegraded(ctx, release, manifest)
-	if err != nil || observation.ImageRef != receipt.Final.ImageRef || observation.ImageID != receipt.Final.ImageID ||
-		observation.UID != receipt.Final.UID || observation.ResourceVersion != receipt.Final.ResourceVersion || observation.Generation != receipt.Final.Generation {
-		if err == nil {
-			err = errors.New("receipt-bound Image-cache LKG observation drifted")
-		}
-		return imageCacheTerminalHandoff{}, err
-	}
 	identity := receipt.Final.Primary
 	raw, err := cluster.getResource(ctx, identity)
 	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
@@ -771,6 +763,9 @@ func (cluster *kubectlCluster) prepareReceiptBoundImageCacheHandoff(ctx context.
 	}
 	value, err := decodeJSONObject(raw)
 	if err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	if err := cluster.verifyImageCacheTerminalHandoffLKG(ctx, release, receipt, manifest, raw); err != nil {
 		return imageCacheTerminalHandoff{}, err
 	}
 	if err := verifyImageCacheTerminalHandoffPreconditions(value, release, receipt, manifest); err != nil {
@@ -814,6 +809,51 @@ func (cluster *kubectlCluster) prepareReceiptBoundImageCacheHandoff(ctx context.
 		receipt: receipt, plan: plan, target: target, manifest: takeoverManifest,
 		preUID: plan.Resources[0].UID, preRV: plan.Resources[0].ResourceVersion, preGen: plan.Resources[0].Generation,
 	}, nil
+}
+
+func (cluster *kubectlCluster) verifyImageCacheTerminalHandoffLKG(ctx context.Context, release declarativerelease.PlanRelease, receipt declarativerelease.OwnershipAdoptionReceipt, manifest, workloadRaw []byte) error {
+	observation, err := parseDegradedObservation(workloadRaw, release)
+	if err != nil {
+		return err
+	}
+	if observation.UID != receipt.Final.UID || observation.ResourceVersion != receipt.Final.ResourceVersion || observation.Generation != receipt.Final.Generation ||
+		observation.TemplateDigest != receipt.Final.TemplateDigest || observation.ImageRef != receipt.Final.ImageRef ||
+		observation.ConfigSHA != "" || observation.ManifestSHA != "" || observation.OCIRevision != "" {
+		return errors.New("receipt-bound Image-cache LKG workload identity drifted")
+	}
+	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
+	if err != nil || len(resources) != len(receipt.Final.Resources) {
+		if err == nil {
+			err = errors.New("receipt-bound Image-cache LKG resource count drifted")
+		}
+		return err
+	}
+	prior := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(receipt.Final.Resources))
+	for _, resource := range receipt.Final.Resources {
+		prior[resource.Identity] = resource
+	}
+	for _, resource := range resources {
+		witness, exists := prior[resource.Identity]
+		if !exists || resource.UID != witness.UID || resource.ResourceVersion != witness.ResourceVersion ||
+			resource.Generation != witness.Generation || resource.ObjectDigest != witness.ObjectDigest {
+			return fmt.Errorf("receipt-bound Image-cache LKG resource %s/%s drifted", resource.Identity.Kind, resource.Identity.Name)
+		}
+	}
+	selector, err := selectorFromWorkload(workloadRaw)
+	if err != nil {
+		return err
+	}
+	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
+	if err != nil {
+		return err
+	}
+	if err := verifyReceiptBoundPodCohort(podsRaw, release, receipt); err != nil {
+		return err
+	}
+	return cluster.VerifyTarget(ctx, declarativerelease.TargetIdentity{
+		Present: true, ImageRef: receipt.Final.ImageRef, ConfigSHA: receipt.Final.ConfigSHA,
+		ManifestSHA: receipt.Final.ManifestSHA, OCIRevision: receipt.Final.OCIRevision,
+	})
 }
 
 func addImageCacheTerminalHandoffScaffold(manifest []byte, identity declarativerelease.ResourceIdentity, container, image string) ([]byte, error) {
