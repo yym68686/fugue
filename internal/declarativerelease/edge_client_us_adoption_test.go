@@ -32,8 +32,8 @@ func TestEdgeClientUSAdoptionIsBoundToTheLiveBootstrap(t *testing.T) {
 		t.Fatalf("edge-client-us adoption metadata is incomplete: %+v", component)
 	}
 	if bootstrap := component.BootstrapRuntime; bootstrap.Container != "ssh-front" ||
-		bootstrap.ImageDigest != "sha256:21f02176acfa73033f9b33ae281fea773b7b6b955d3730dfd2764be555f43fc0" ||
-		bootstrap.OCIRevision != "c4ef766390bf7e79984542290f69a95ec206be6a" || bootstrap.Resource != (ResourceIdentity{
+		bootstrap.ImageDigest != "sha256:b835beb57193cc1b6129edd983edefcd47f30d9d37c33a3cfdfd56234371e81f" ||
+		bootstrap.OCIRevision != "f5d6a6da6198c55371cd508dea5e9cb9f8726861" || bootstrap.Resource != (ResourceIdentity{
 		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-edge-ssh-front",
 	}) {
 		t.Fatalf("edge-client-us bootstrap runtime drifted: %+v", bootstrap)
@@ -66,15 +66,14 @@ func TestEdgeClientUSAdoptionIsBoundToTheLiveBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if intent.Generation != 3 || intent.SupersedesFailedConfigSHA != "" ||
+	if intent.Generation != 4 || intent.SupersedesFailedConfigSHA != "" ||
 		intent.ExpectedPreviousConfigSHA != "cdd6c08679ac78198e42c870b4ac1d5dfa2d78d0" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
 		intent.ExpectedPreviousImageDigest != "sha256:9e75c56633641f6b9f4ebcdf519977180a6a7cf62e48f0aaa56bbbffa5d4fa30" {
 		t.Fatalf("edge-client-us intent is not the exact bootstrap LKG: %+v", intent)
 	}
 	prior := intent
-	prior.Generation = 2
-	prior.SupersedesFailedConfigSHA = "f9edef03ca0a7382c3cc79cf1ce38790e4d46b47"
+	prior.Generation = 3
 	plan, err := BuildPlan(registry, "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", []string{
 		"deploy/releases/components.json", component.IntentPath, component.ManifestPath,
 	})
@@ -87,7 +86,7 @@ func TestEdgeClientUSAdoptionIsBoundToTheLiveBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(bound.Releases) != 1 || bound.Releases[0].ComponentID != component.ID || !bound.Releases[0].RetrySameLKG ||
-		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].IntentGeneration != 3 ||
+		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].IntentGeneration != 4 ||
 		bound.Releases[0].MigrationState != "adopting" || bound.Releases[0].OwnershipAdoption == nil || bound.Releases[0].BootstrapRuntime == nil {
 		t.Fatalf("edge-client-us adoption plan is not exact: %+v", bound.Releases)
 	}

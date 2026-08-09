@@ -26,6 +26,7 @@ type fakeCluster struct {
 	adoptionErrors    []error
 	takeovers         []Observation
 	takeoverErrors    []error
+	takeoverCalls     int
 	applies           int
 	applyErrors       []error
 	deleteCreated     int
@@ -113,6 +114,7 @@ func (fake *fakeCluster) AdoptOwnership(context.Context, PlanRelease, OwnershipA
 }
 
 func (fake *fakeCluster) TakeoverOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error) {
+	fake.takeoverCalls++
 	var observation Observation
 	if len(fake.takeovers) > 0 {
 		observation = fake.takeovers[0]
@@ -440,7 +442,7 @@ func TestPrepareAlreadyAdoptedOwnershipDryRunsForwardWithoutForce(t *testing.T) 
 	}
 }
 
-func TestExecuteAlreadyAdoptedOwnershipPerformsReviewedTakeoverBeforeForward(t *testing.T) {
+func TestExecuteAlreadyAdoptedOwnershipSkipsTakeoverBeforeForward(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.PlanDigest = ""
 	release := &plan.Releases[0]
@@ -470,20 +472,12 @@ func TestExecuteAlreadyAdoptedOwnershipPerformsReviewedTakeoverBeforeForward(t *
 	if err != nil || prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged {
 		t.Fatalf("prepare resumed adoption: plan=%+v err=%v", prepared.OwnershipAdoption, err)
 	}
-	takeover := casOnlyObservation(lkg)
-	takeover.ResourceVersion = "12"
-	takeover.Generation++
-	takeover.Resources[0].ResourceVersion = "12"
-	takeover.Resources[0].Generation++
-	takeover.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	takeover.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	fake.cas = []Observation{casOnlyObservation(lkg)}
-	fake.takeovers = []Observation{takeover}
 	fake.health = []Observation{forward}
 	fake.dryRuns = 0
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
-	if result.Status != "verified" || result.Reason != "forward-verified" || fake.dryRuns != 1 || fake.applies != 1 || len(fake.takeovers) != 0 {
-		t.Fatalf("reviewed ownership takeover did not precede ordinary forward: result=%+v fake=%+v", result, fake)
+	if result.Status != "verified" || result.Reason != "forward-verified" || fake.dryRuns != 1 || fake.applies != 1 || fake.takeoverCalls != 0 {
+		t.Fatalf("exclusive reviewed ownership did not proceed directly to ordinary forward: result=%+v fake=%+v", result, fake)
 	}
 }
 
@@ -492,11 +486,17 @@ func TestExecuteCompensatesAnUnverifiedOwnershipTakeover(t *testing.T) {
 	plan.PlanDigest = ""
 	release := &plan.Releases[0]
 	release.MigrationState = "adopting"
+	release.IntentGeneration = 2
+	release.SupersedesFailedConfigSHA = strings.Repeat("9", 40)
 	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
 	release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
 		Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
-		Fields:   []string{"/spec/template"},
+		Fields:   []string{"/spec/template/spec/containers[name=api]/image"},
 	}}}
+	release.BootstrapRuntime = &BootstrapRuntime{
+		Resource: release.OwnershipAdoption.Resources[0].Identity, Container: release.Workload.Container,
+		ImageDigest: "sha256:" + strings.Repeat("8", 64), OCIRevision: strings.Repeat("7", 40),
+	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
 		t.Fatal(err)
@@ -505,10 +505,10 @@ func TestExecuteCompensatesAnUnverifiedOwnershipTakeover(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
 	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
-	markReviewedOwnership(&lkg, true, true)
+	markReviewedOwnership(&lkg, true, false)
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, cas: []Observation{casOnlyObservation(lkg)}}
 	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
-	if err != nil || prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged {
+	if err != nil || prepared.OwnershipAdoption == nil || prepared.OwnershipAdoption.AlreadyConverged || !prepared.OwnershipAdoption.ResumeTakeover {
 		t.Fatalf("prepare resumed adoption: plan=%+v err=%v", prepared.OwnershipAdoption, err)
 	}
 	partial := casOnlyObservation(lkg)
@@ -525,7 +525,7 @@ func TestExecuteCompensatesAnUnverifiedOwnershipTakeover(t *testing.T) {
 	fake.health = []Observation{lkg}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
 	if result.Status != "compensated" || result.Reason != "ownership-takeover-lkg-restored" || result.ForwardApplyCount != 0 ||
-		result.LKGApplyCount != 1 || fake.applies != 1 || fake.deleteCreated != 1 {
+		result.LKGApplyCount != 1 || fake.applies != 1 || fake.deleteCreated != 1 || fake.takeoverCalls != 1 {
 		t.Fatalf("unverified takeover did not restore LKG: result=%+v fake=%+v", result, fake)
 	}
 }

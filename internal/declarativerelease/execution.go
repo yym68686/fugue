@@ -761,7 +761,17 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	if prepared.OwnershipAdoption != nil {
 		adopted := prepared.Prewrite
-		if !prepared.OwnershipAdoption.AlreadyConverged && !prepared.OwnershipAdoption.ResumeTakeover {
+		if prepared.OwnershipAdoption.AlreadyConverged {
+			// Prepare proved every reviewed pointer is already held exclusively by
+			// the declarative manager. Preserve that prewrite witness; there is no
+			// legacy ownership left to take over.
+		} else if prepared.OwnershipAdoption.ResumeTakeover {
+			var takeoverErr error
+			adopted, takeoverErr = cluster.TakeoverOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.Forward, forwardManifest)
+			if takeoverErr != nil || !adopted.CompletesOwnershipTakeover(prepared.Prewrite, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
+				return compensateOwnershipTakeover(ctx, cluster, release, prepared, forwardManifest, lkgManifest, result, adopted)
+			}
+		} else {
 			var adoptionErr error
 			adopted, adoptionErr = cluster.AdoptOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.LKG, lkgManifest)
 			if adoptionErr != nil || !ownershipAdoptionConverged(prepared.Prewrite, adopted, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
@@ -769,12 +779,6 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 				result.Reason = "ownership-adoption-unknown"
 				result.Final = adopted
 				return sealResult(result)
-			}
-		} else {
-			var takeoverErr error
-			adopted, takeoverErr = cluster.TakeoverOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.Forward, forwardManifest)
-			if takeoverErr != nil || !adopted.CompletesOwnershipTakeover(prepared.Prewrite, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
-				return compensateOwnershipTakeover(ctx, cluster, release, prepared, forwardManifest, lkgManifest, result, adopted)
 			}
 		}
 		current = adopted
