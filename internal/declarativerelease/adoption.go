@@ -49,7 +49,7 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		if err != nil {
 			return nil, err
 		}
-		if ownershipAdoptionUsesOnlyArtifactImages(scope.Fields) {
+		if ownershipAdoptionUsesOnlyArtifactImages(scope.Fields) || ownershipAdoptionUsesExactAPISourceAndImage(adoption.Component, scope) {
 			metadata, ok := source["metadata"].(map[string]any)
 			if !ok {
 				return nil, errors.New("ownership adoption resource metadata is invalid")
@@ -100,6 +100,15 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		return nil, errors.New("ownership adoption resource set expanded unexpectedly")
 	}
 	return CanonicalJSON(result)
+}
+
+func ownershipAdoptionUsesExactAPISourceAndImage(component string, scope OwnershipAdoptionResourcePlan) bool {
+	return component == "api" && scope.Identity == (ResourceIdentity{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+	}) && equalStrings(scope.Fields, []string{
+		"/spec/template/metadata/annotations/fugue.pro~1source-commit",
+		"/spec/template/spec/containers[name=api]/image",
+	})
 }
 
 func ownershipAdoptionUsesOnlyArtifactImages(fields []string) bool {

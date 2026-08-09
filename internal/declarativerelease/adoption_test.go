@@ -67,6 +67,38 @@ func TestArtifactImageOwnershipRepairPreservesDeclarativeSiblingFields(t *testin
 	}
 }
 
+func TestAPITwoPointerOwnershipRepairPreservesAValidDeploymentScaffold(t *testing.T) {
+	lkg := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"labels":{"app":"api"},"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"1111111111111111111111111111111111111111"},"labels":{"app":"api"}},"spec":{"containers":[{"env":[{"name":"MODE","value":"production"}],"image":"example/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
+	plan := OwnershipAdoptionPlan{
+		Component: "api", BootstrapLKGDigest: digestOf(lkg),
+		Resources: []OwnershipAdoptionResourcePlan{{
+			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+			Fields: []string{
+				"/spec/template/metadata/annotations/fugue.pro~1source-commit",
+				"/spec/template/spec/containers[name=api]/image",
+			},
+			UID: "api-uid", ResourceVersion: "42", Generation: 7,
+		}},
+	}
+	raw, err := BuildOwnershipAdoptionManifest(lkg, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`"uid":"api-uid"`, `"selector"`, `"labels"`, `"MODE"`} {
+		if !bytes.Contains(raw, []byte(required)) {
+			t.Fatalf("API ownership repair lost required Deployment scaffold %s: %s", required, raw)
+		}
+	}
+	plan.Resources[0].Fields[1] = "/spec/template/spec/containers"
+	raw, err = BuildOwnershipAdoptionManifest(lkg, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"selector"`)) || bytes.Contains(raw, []byte(`"MODE"`)) {
+		t.Fatalf("broadened API ownership scope borrowed the exact repair scaffold: %s", raw)
+	}
+}
+
 func TestOwnershipTakeoverManifestContainsOnlyReviewedImmutableTargetFields(t *testing.T) {
 	target := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"labels":{"owner":"declarative"},"name":"edge-alpha-front","namespace":"fugue-system"},"spec":{"selector":{"matchLabels":{"app":"front"}},"template":{"metadata":{"annotations":{"fugue.pro/source-commit":"2222222222222222222222222222222222222222"}},"spec":{"containers":[{"image":"example/edge@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"edge-front"}]}}}}],"kind":"ComponentResourceSet"}`)
 	plan := OwnershipAdoptionPlan{
