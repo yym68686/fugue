@@ -17,15 +17,16 @@ const (
 // OwnershipAdoptionReceipt is the durable boundary between the one-time
 // adopting adapter and the ordinary independent component lane.
 type OwnershipAdoptionReceipt struct {
-	APIVersion            string      `json:"apiVersion"`
-	Kind                  string      `json:"kind"`
-	Component             string      `json:"component"`
-	GroupID               string      `json:"groupId"`
-	RunID                 int64       `json:"runId"`
-	RunAttempt            int         `json:"runAttempt"`
-	TerminalReceiptDigest string      `json:"terminalReceiptDigest"`
-	Final                 Observation `json:"final"`
-	ReceiptDigest         string      `json:"receiptDigest"`
+	APIVersion            string                   `json:"apiVersion"`
+	Kind                  string                   `json:"kind"`
+	Component             string                   `json:"component"`
+	GroupID               string                   `json:"groupId"`
+	RunID                 int64                    `json:"runId"`
+	RunAttempt            int                      `json:"runAttempt"`
+	TerminalReceiptDigest string                   `json:"terminalReceiptDigest"`
+	Final                 Observation              `json:"final"`
+	Ownership             []OwnershipAdoptionScope `json:"ownership,omitempty"`
+	ReceiptDigest         string                   `json:"receiptDigest"`
 }
 
 func BuildOwnershipAdoptionReceipt(result ExecutionResult, component Component, groupID string, runID int64, runAttempt int) (OwnershipAdoptionReceipt, error) {
@@ -82,6 +83,21 @@ func (receipt OwnershipAdoptionReceipt) Validate(component Component, groupID st
 		if !resource.Present || resource.UID == "" || resource.ResourceVersion == "" || !digestPattern.MatchString(resource.ObjectDigest) ||
 			!receiptContainsString(resource.FieldManagers, component.Workload.FieldManager) {
 			return fmt.Errorf("ownership adoption receipt resource %s/%s is unverified", resource.Identity.Kind, resource.Identity.Name)
+		}
+	}
+	if len(receipt.Ownership) > 0 {
+		adoption := OwnershipAdoption{LegacyFieldManager: "receipt-proof", Resources: receipt.Ownership}
+		if err := adoption.validate(component); err != nil {
+			return fmt.Errorf("ownership adoption receipt scope: %w", err)
+		}
+		observed := make(map[ResourceIdentity]struct{}, len(final.Resources))
+		for _, resource := range final.Resources {
+			observed[resource.Identity] = struct{}{}
+		}
+		for _, scope := range receipt.Ownership {
+			if _, exists := observed[scope.Identity]; !exists {
+				return fmt.Errorf("ownership adoption receipt scope %s/%s has no resource witness", scope.Identity.Kind, scope.Identity.Name)
+			}
 		}
 	}
 	wantDigest, err := receipt.digest()

@@ -143,7 +143,13 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	}
 	observation.Resources = resources
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
-		return declarativerelease.Observation{}, err
+		observation, err = cluster.bindReceiptBoundDegradedObservation(ctx, release, workloadRaw, observation, resources)
+		if err != nil {
+			return declarativerelease.Observation{}, err
+		}
+		if err := observation.ValidateDegradedPredecessor(release); err != nil {
+			return declarativerelease.Observation{}, err
+		}
 	}
 	verificationArgs := []string{"--image", observation.ImageRef, "--platform", "linux/amd64", "--expected-revision", observation.OCIRevision}
 	verificationArgs = append(verificationArgs, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
@@ -161,6 +167,120 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
+}
+
+func (cluster *kubectlCluster) bindReceiptBoundDegradedObservation(ctx context.Context, release declarativerelease.PlanRelease, workloadRaw []byte, observation declarativerelease.Observation, resources []declarativerelease.ResourceObservation) (declarativerelease.Observation, error) {
+	_, receipt, err := loadValidatedReceiptBoundRelease(release)
+	if err != nil || len(receipt.Ownership) == 0 {
+		if err == nil {
+			err = errors.New("ownership adoption receipt has no exact field scopes")
+		}
+		return declarativerelease.Observation{}, fmt.Errorf("bind receipt-bound degraded observation: %w", err)
+	}
+	final := receipt.Final
+	if observation.UID != final.UID || observation.ResourceVersion != final.ResourceVersion || observation.Generation != final.Generation ||
+		observation.TemplateDigest != final.TemplateDigest || observation.ImageRef != final.ImageRef {
+		return declarativerelease.Observation{}, errors.New("receipt-bound degraded workload CAS or template identity drifted")
+	}
+	for label, value := range map[string]string{
+		"config": observation.ConfigSHA, "manifest": observation.ManifestSHA, "OCI revision": observation.OCIRevision,
+	} {
+		if value != "" {
+			return declarativerelease.Observation{}, fmt.Errorf("receipt-bound degraded workload already has conflicting %s identity", label)
+		}
+	}
+	byIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(resources))
+	for _, resource := range resources {
+		byIdentity[resource.Identity] = resource
+	}
+	finalResources := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(final.Resources))
+	for _, resource := range final.Resources {
+		finalResources[resource.Identity] = resource
+	}
+	if len(byIdentity) != len(finalResources) {
+		return declarativerelease.Observation{}, errors.New("receipt-bound degraded resource witness count drifted")
+	}
+	adoption := declarativerelease.OwnershipAdoptionPlan{Component: release.ComponentID}
+	for _, scope := range receipt.Ownership {
+		current, exists := byIdentity[scope.Identity]
+		prior, witnessed := finalResources[scope.Identity]
+		if !exists || !witnessed || current.UID != prior.UID || current.ResourceVersion != prior.ResourceVersion ||
+			current.Generation != prior.Generation || current.ObjectDigest != prior.ObjectDigest {
+			return declarativerelease.Observation{}, fmt.Errorf("receipt-bound degraded resource %s/%s drifted", scope.Identity.Kind, scope.Identity.Name)
+		}
+		adoption.Resources = append(adoption.Resources, declarativerelease.OwnershipAdoptionResourcePlan{
+			Identity: scope.Identity, Fields: append([]string(nil), scope.Fields...),
+			UID: prior.UID, ResourceVersion: prior.ResourceVersion, Generation: prior.Generation,
+		})
+	}
+	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("verify receipt-bound degraded ownership: %w", err)
+	}
+	selector, err := selectorFromWorkload(workloadRaw)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace,
+		"--selector", selector, "--output", "json")
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	if err := verifyReceiptBoundPodCohort(podsRaw, release, receipt); err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	observation.ConfigSHA = final.ConfigSHA
+	observation.ManifestSHA = final.ManifestSHA
+	observation.OCIRevision = final.OCIRevision
+	observation.ImageID = final.ImageID
+	observation.FieldManagers = append([]string(nil), final.FieldManagers...)
+	observation.Resources = resources
+	return observation, nil
+}
+
+func verifyReceiptBoundPodCohort(raw []byte, release declarativerelease.PlanRelease, receipt declarativerelease.OwnershipAdoptionReceipt) error {
+	value, err := decodeJSONObject(raw)
+	if err != nil {
+		return err
+	}
+	items, ok := value["items"].([]any)
+	if !ok {
+		return errors.New("receipt-bound pod list is invalid")
+	}
+	ready := int32(0)
+	for _, rawItem := range items {
+		pod, ok := rawItem.(map[string]any)
+		if !ok {
+			return errors.New("receipt-bound pod item is invalid")
+		}
+		metadata := mapField(pod, "metadata")
+		if metadata["deletionTimestamp"] != nil {
+			continue
+		}
+		status := mapField(pod, "status")
+		if !podReady(status) {
+			continue
+		}
+		matched := false
+		for _, rawStatus := range anySlice(status["containerStatuses"]) {
+			containerStatus, _ := rawStatus.(map[string]any)
+			if stringValue(containerStatus["name"]) != release.Workload.Container {
+				continue
+			}
+			digest, err := imageIDDigest(stringValue(containerStatus["imageID"]))
+			if err != nil || digest != receipt.Final.ImageID || int64Value(containerStatus["restartCount"]) != 0 {
+				return errors.New("receipt-bound pod image or restart witness drifted")
+			}
+			matched = true
+		}
+		if !matched {
+			return errors.New("receipt-bound pod container witness is absent")
+		}
+		ready++
+	}
+	if ready != receipt.Final.Ready || ready != receipt.Final.Desired-int32(release.Workload.PreservedUnavailable) {
+		return errors.New("receipt-bound ready pod cohort drifted")
+	}
+	return nil
 }
 
 func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarativerelease.TargetIdentity) error {
@@ -1207,10 +1327,64 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 			return decodeErr
 		}
 		if !declarativerelease.ResourceDesiredSubset(desired, live) {
-			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
+			converged, receiptErr := cluster.receiptBoundHistoricalResourceConverged(ctx, release, manifest, identity, desired, live, liveRaw)
+			if receiptErr != nil {
+				return receiptErr
+			}
+			if !converged {
+				return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
+			}
 		}
 	}
 	return nil
+}
+
+func (cluster *kubectlCluster) receiptBoundHistoricalResourceConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, identity declarativerelease.ResourceIdentity, desired, live map[string]any, liveRaw []byte) (bool, error) {
+	primary := declarativerelease.ResourceIdentity{
+		APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
+		Namespace: release.Workload.Namespace, Name: release.Workload.Name,
+	}
+	if release.MigrationState != "independent" || !release.RetrySameLKG || !release.ExpectedPreviousPresent ||
+		release.AdoptionReceiptPath != "deploy/releases/"+release.ComponentID+"/adoption-receipt.json" || identity != primary {
+		return false, nil
+	}
+	spec := mapField(desired, "spec")
+	strategy := mapField(spec, "updateStrategy")
+	if release.Workload.Kind != "DaemonSet" || stringValue(strategy["type"]) != "OnDelete" {
+		return false, nil
+	}
+	liveTemplate := mapField(mapField(live, "spec"), "template")
+	liveAnnotations := mapStringField(mapField(liveTemplate, "metadata"), "annotations")
+	if liveAnnotations["fugue.pro/source-commit"] != "" || liveAnnotations["fugue.pro/oci-revision"] != "" {
+		return false, errors.New("receipt-bound historical workload has conflicting live source identity")
+	}
+	resources, err := cluster.observeResources(ctx, manifest, release, liveRaw)
+	if err != nil {
+		return false, err
+	}
+	observation, err := parseDegradedObservation(liveRaw, release)
+	if err != nil {
+		return false, err
+	}
+	observation.Resources = resources
+	if _, err := cluster.bindReceiptBoundDegradedObservation(ctx, release, liveRaw, observation, resources); err != nil {
+		return false, err
+	}
+	copyRaw, err := json.Marshal(desired)
+	if err != nil {
+		return false, err
+	}
+	reviewed, err := decodeJSONObject(copyRaw)
+	if err != nil {
+		return false, err
+	}
+	template := mapField(mapField(reviewed, "spec"), "template")
+	templateMetadata := mapField(template, "metadata")
+	if annotations, ok := templateMetadata["annotations"].(map[string]any); ok {
+		delete(annotations, "fugue.pro/source-commit")
+		delete(annotations, "fugue.pro/oci-revision")
+	}
+	return declarativerelease.ResourceDesiredSubset(reviewed, live), nil
 }
 
 func (cluster *kubectlCluster) observeExpected(ctx context.Context, release declarativerelease.PlanRelease, expectedOCI string, manifest []byte, allowHistoricalRestarts bool) (declarativerelease.Observation, error) {

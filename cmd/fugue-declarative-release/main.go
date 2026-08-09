@@ -546,45 +546,9 @@ func loadLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
 }
 
 func loadReceiptBoundLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
-	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
-	if release.MigrationState != "independent" || release.AdoptionReceiptPath != expectedReceiptPath ||
-		filepath.ToSlash(filepath.Clean(release.AdoptionReceiptPath)) != release.AdoptionReceiptPath {
-		return nil, errors.New("release plan has no exact independent adoption receipt path")
-	}
-	registry, err := loadProductionRegistry("deploy/releases/components.json")
+	component, receipt, err := loadValidatedReceiptBoundRelease(release)
 	if err != nil {
-		return nil, fmt.Errorf("load current production registry: %w", err)
-	}
-	var component *declarativerelease.Component
-	for index := range registry.Components {
-		if registry.Components[index].ID == release.ComponentID {
-			component = &registry.Components[index]
-			break
-		}
-	}
-	if component == nil || component.AdoptionReceiptPath != release.AdoptionReceiptPath {
-		return nil, errors.New("component adoption receipt path does not match the release plan")
-	}
-	receiptFile, err := os.Open(release.AdoptionReceiptPath)
-	if err != nil {
-		return nil, fmt.Errorf("open ownership adoption receipt: %w", err)
-	}
-	receipt, decodeErr := declarativerelease.DecodeOwnershipAdoptionReceipt(receiptFile)
-	closeErr := receiptFile.Close()
-	if decodeErr != nil {
-		return nil, decodeErr
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if err := receipt.Validate(*component, receipt.GroupID); err != nil {
 		return nil, err
-	}
-	wantImage := component.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
-	if receipt.Final.ConfigSHA != release.ExpectedPreviousConfigSHA ||
-		receipt.Final.ManifestSHA != release.ExpectedPreviousManifestSHA ||
-		receipt.Final.OCIRevision != release.ExpectedPreviousOCIRevision || receipt.Final.ImageRef != wantImage {
-		return nil, errors.New("ownership adoption receipt does not bind the declared LKG")
 	}
 	lkgPath := filepath.Join(filepath.Dir(release.AdoptionReceiptPath), "lkg.json")
 	if filepath.ToSlash(lkgPath) != "deploy/releases/"+release.ComponentID+"/lkg.json" {
@@ -594,10 +558,54 @@ func loadReceiptBoundLKGManifest(release declarativerelease.PlanRelease) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("read receipt-bound LKG manifest: %w", err)
 	}
-	if err := validateReceiptBoundLKGManifest(content, release, *component, receipt); err != nil {
+	if err := validateReceiptBoundLKGManifest(content, release, component, receipt); err != nil {
 		return nil, err
 	}
 	return content, nil
+}
+
+func loadValidatedReceiptBoundRelease(release declarativerelease.PlanRelease) (declarativerelease.Component, declarativerelease.OwnershipAdoptionReceipt, error) {
+	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
+	if release.MigrationState != "independent" || release.AdoptionReceiptPath != expectedReceiptPath ||
+		filepath.ToSlash(filepath.Clean(release.AdoptionReceiptPath)) != release.AdoptionReceiptPath {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, errors.New("release plan has no exact independent adoption receipt path")
+	}
+	registry, err := loadProductionRegistry("deploy/releases/components.json")
+	if err != nil {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, fmt.Errorf("load current production registry: %w", err)
+	}
+	var component *declarativerelease.Component
+	for index := range registry.Components {
+		if registry.Components[index].ID == release.ComponentID {
+			component = &registry.Components[index]
+			break
+		}
+	}
+	if component == nil || component.AdoptionReceiptPath != release.AdoptionReceiptPath {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, errors.New("component adoption receipt path does not match the release plan")
+	}
+	receiptFile, err := os.Open(release.AdoptionReceiptPath)
+	if err != nil {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, fmt.Errorf("open ownership adoption receipt: %w", err)
+	}
+	receipt, decodeErr := declarativerelease.DecodeOwnershipAdoptionReceipt(receiptFile)
+	closeErr := receiptFile.Close()
+	if decodeErr != nil {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, decodeErr
+	}
+	if closeErr != nil {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, closeErr
+	}
+	if err := receipt.Validate(*component, receipt.GroupID); err != nil {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, err
+	}
+	wantImage := component.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
+	if receipt.Final.ConfigSHA != release.ExpectedPreviousConfigSHA ||
+		receipt.Final.ManifestSHA != release.ExpectedPreviousManifestSHA ||
+		receipt.Final.OCIRevision != release.ExpectedPreviousOCIRevision || receipt.Final.ImageRef != wantImage {
+		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, errors.New("ownership adoption receipt does not bind the declared LKG")
+	}
+	return *component, receipt, nil
 }
 
 func validateReceiptBoundLKGManifest(content []byte, release declarativerelease.PlanRelease, component declarativerelease.Component, receipt declarativerelease.OwnershipAdoptionReceipt) error {

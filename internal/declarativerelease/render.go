@@ -108,10 +108,7 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 }
 
 func receiptBoundHistoricalLKGWorkload(release PlanRelease) (Workload, bool) {
-	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
-	if release.MigrationState != "independent" || !release.RetrySameLKG || !release.ExpectedPreviousPresent ||
-		release.AdoptionReceiptPath != expectedReceiptPath || release.BootstrapLKGPath != "" || release.OwnershipAdoption != nil ||
-		release.Workload.Kind != "DaemonSet" || release.Workload.RolloutMode != "rolling" {
+	if !release.receiptBoundHistoricalLKG() || release.Workload.Kind != "DaemonSet" || release.Workload.RolloutMode != "rolling" {
 		return Workload{}, false
 	}
 	workload := release.Workload

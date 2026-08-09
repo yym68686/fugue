@@ -220,6 +220,12 @@ type PlanRelease struct {
 	OwnershipAdoption           *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
 }
 
+func (release PlanRelease) receiptBoundHistoricalLKG() bool {
+	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
+	return release.MigrationState == "independent" && release.RetrySameLKG && release.ExpectedPreviousPresent &&
+		release.AdoptionReceiptPath == expectedReceiptPath && release.BootstrapLKGPath == "" && release.OwnershipAdoption == nil
+}
+
 // DecodeRegistry accepts exactly one strict JSON document.
 func DecodeRegistry(reader io.Reader) (Registry, error) {
 	var registry Registry

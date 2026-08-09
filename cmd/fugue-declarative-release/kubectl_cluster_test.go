@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -111,6 +112,191 @@ func TestSanitizeObservedResourceDropsDaemonSetControllerGenerationAnnotation(t 
 	if _, ok := clean["status"]; ok {
 		t.Fatal("status remained in CAS digest")
 	}
+}
+
+func TestReceiptBoundDegradedObservationRequiresExactAdoptionEvidence(t *testing.T) {
+	cluster, release, manifest, liveRaw, observation, resources := receiptBoundDegradedFixture(t, nil)
+	bound, err := cluster.bindReceiptBoundDegradedObservation(context.Background(), release, liveRaw, observation, resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ConfigSHA != release.ExpectedPreviousConfigSHA || bound.ManifestSHA != release.ExpectedPreviousManifestSHA ||
+		bound.OCIRevision != release.ExpectedPreviousOCIRevision || bound.ImageID != release.ExpectedPreviousImageDigest {
+		t.Fatalf("receipt-bound degraded identity was not restored: %+v", bound)
+	}
+	witness, err := declarativerelease.PredecessorConvergenceManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+	desired, err := declarativerelease.ResourceSetItem(witness, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := decodeJSONObject(liveRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	converged, err := cluster.receiptBoundHistoricalResourceConverged(context.Background(), release, witness, identity, desired, live, liveRaw)
+	if err != nil || !converged {
+		t.Fatalf("receipt-bound predecessor witness did not converge: converged=%v err=%v", converged, err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any, map[string]any, *declarativerelease.PlanRelease){
+		"UID drift": func(live, _ map[string]any, _ *declarativerelease.PlanRelease) {
+			mapField(live, "metadata")["uid"] = "other-uid"
+		},
+		"image drift": func(live, _ map[string]any, _ *declarativerelease.PlanRelease) {
+			containers := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])
+			containers[0].(map[string]any)["image"] = "ghcr.io/yym68686/fugue-image-cache@sha256:" + strings.Repeat("9", 64)
+		},
+		"source conflict": func(live, _ map[string]any, _ *declarativerelease.PlanRelease) {
+			template := mapField(mapField(live, "spec"), "template")
+			mapField(mapField(template, "metadata"), "annotations")["fugue.pro/source-commit"] = strings.Repeat("9", 40)
+		},
+		"manager drift": func(live, _ map[string]any, _ *declarativerelease.PlanRelease) {
+			metadata := mapField(live, "metadata")
+			managed := anySlice(metadata["managedFields"])
+			metadata["managedFields"] = managed[1:]
+		},
+		"pod imageID drift": func(_ map[string]any, pods map[string]any, _ *declarativerelease.PlanRelease) {
+			pod := anySlice(pods["items"])[0].(map[string]any)
+			status := mapField(pod, "status")
+			anySlice(status["containerStatuses"])[0].(map[string]any)["imageID"] = "sha256:" + strings.Repeat("9", 64)
+		},
+		"ordinary independent": func(_ map[string]any, _ map[string]any, release *declarativerelease.PlanRelease) {
+			release.AdoptionReceiptPath = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cluster, release, _, liveRaw, observation, resources := receiptBoundDegradedFixture(t, mutate)
+			if _, err := cluster.bindReceiptBoundDegradedObservation(context.Background(), release, liveRaw, observation, resources); err == nil {
+				t.Fatal("receipt-bound degraded observation accepted drift")
+			}
+		})
+	}
+}
+
+func receiptBoundDegradedFixture(t *testing.T, mutate func(map[string]any, map[string]any, *declarativerelease.PlanRelease)) (*kubectlCluster, declarativerelease.PlanRelease, []byte, []byte, declarativerelease.Observation, []declarativerelease.ResourceObservation) {
+	t.Helper()
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "deploy/releases/components.json")); err != nil {
+		root, err = filepath.Abs("../..")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	receiptFile, err := os.Open("deploy/releases/image-cache/adoption-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := declarativerelease.DecodeOwnershipAdoptionReceipt(receiptFile)
+	_ = receiptFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile("deploy/releases/image-cache/lkg.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := declarativerelease.DecodeResourceSet(bytes.NewReader(manifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := set.Items[0]
+	metadata := mapField(live, "metadata")
+	metadata["uid"] = receipt.Final.UID
+	metadata["resourceVersion"] = receipt.Final.ResourceVersion
+	metadata["generation"] = receipt.Final.Generation
+	metadata["managedFields"] = []any{
+		map[string]any{"manager": "fugue-image-cache-declarative", "operation": "Apply", "fieldsV1": map[string]any{
+			"f:metadata": map[string]any{"f:labels": map[string]any{"f:app.kubernetes.io/managed-by": map[string]any{}}},
+			"f:spec": map[string]any{
+				"f:template":       map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{"k:{\"name\":\"image-cache\"}": map[string]any{".": map[string]any{}, "f:name": map[string]any{}, "f:image": map[string]any{}}}}},
+				"f:updateStrategy": map[string]any{"f:type": map[string]any{}},
+			},
+		}},
+		map[string]any{"manager": "helm", "operation": "Update"},
+		map[string]any{"manager": "k3s", "operation": "Update"},
+		map[string]any{"manager": "kubectl-patch", "operation": "Update"},
+	}
+	template := mapField(mapField(live, "spec"), "template")
+	annotations := mapField(mapField(template, "metadata"), "annotations")
+	delete(annotations, "fugue.pro/source-commit")
+	delete(annotations, "fugue.pro/oci-revision")
+	live["status"] = map[string]any{
+		"observedGeneration": receipt.Final.Generation, "desiredNumberScheduled": 8,
+		"numberReady": 7, "numberAvailable": 7, "numberUnavailable": 1, "currentNumberScheduled": 8,
+	}
+	pods := map[string]any{"items": []any{}}
+	for index := 0; index < 7; index++ {
+		pods["items"] = append(pods["items"].([]any), map[string]any{
+			"metadata": map[string]any{"name": fmt.Sprintf("image-cache-%d", index), "uid": fmt.Sprintf("pod-%d", index)},
+			"status": map[string]any{
+				"conditions":        []any{map[string]any{"type": "Ready", "status": "True"}},
+				"containerStatuses": []any{map[string]any{"name": "image-cache", "imageID": receipt.Final.ImageRef, "restartCount": 0}},
+			},
+		})
+	}
+	release := declarativerelease.PlanRelease{
+		ComponentID: "image-cache", MigrationState: "independent", RetrySameLKG: true, ExpectedPreviousPresent: true,
+		AdoptionReceiptPath:         "deploy/releases/image-cache/adoption-receipt.json",
+		ExpectedPreviousConfigSHA:   receipt.Final.ConfigSHA,
+		ExpectedPreviousManifestSHA: receipt.Final.ManifestSHA,
+		ExpectedPreviousOCIRevision: receipt.Final.OCIRevision,
+		ExpectedPreviousImageDigest: receipt.Final.ImageID,
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-image-cache",
+			Container: "image-cache", FieldManager: "fugue-image-cache-declarative", PreservedUnavailable: 1, RolloutMode: "rolling",
+		},
+	}
+	if mutate != nil {
+		mutate(live, pods, &release)
+	}
+	liveRaw, err := declarativerelease.CanonicalJSON(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	podsRaw, err := declarativerelease.CanonicalJSON(pods)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp := t.TempDir()
+	livePath := filepath.Join(temp, "live.json")
+	podsPath := filepath.Join(temp, "pods.json")
+	if err := os.WriteFile(livePath, liveRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(podsPath, podsRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kubectl := filepath.Join(temp, "kubectl")
+	program := "#!/bin/sh\ncase \" $* \" in *\" get pods \"*) cat " + podsPath + ";; *) cat " + livePath + ";; esac\n"
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	observation, err := parseDegradedObservation(liveRaw, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := cluster.observeResources(context.Background(), manifest, release, liveRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.Resources = resources
+	return cluster, release, manifest, liveRaw, observation, resources
 }
 
 func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
