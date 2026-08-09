@@ -163,6 +163,17 @@ func TestOwnershipAssociativePointerClaimsOnlyOneEnvironmentValue(t *testing.T) 
 		})
 	}
 
+	plan.AlreadyConverged = true
+	plan.Resources[0].Fields = []string{pointer, "/spec/template/spec/containers[name=dns]/image"}
+	raw, err := BuildOwnershipTakeoverManifest(forward, plan, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"image":"example/edge@sha256:`+strings.Repeat("b", 64)+`"`)) ||
+		bytes.Contains(raw, []byte(`"image":"example/edge@sha256:`+strings.Repeat("a", 64)+`"`)) {
+		t.Fatalf("reviewed image was overwritten by its LKG validation scaffold: %s", raw)
+	}
+
 	for _, invalid := range []string{
 		"/spec/template/spec/containers[name=missing]/env[name=FUGUE_API_URL]/value",
 		"/spec/template/spec/containers[name=dns]/env[name=]/value",

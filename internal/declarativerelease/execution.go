@@ -45,14 +45,16 @@ type Observation struct {
 }
 
 type ResourceObservation struct {
-	Identity         ResourceIdentity `json:"identity"`
-	Present          bool             `json:"present"`
-	RetainOnRollback bool             `json:"retainOnRollback"`
-	UID              string           `json:"uid,omitempty"`
-	ResourceVersion  string           `json:"resourceVersion,omitempty"`
-	Generation       int64            `json:"generation,omitempty"`
-	ObjectDigest     string           `json:"objectDigest,omitempty"`
-	FieldManagers    []string         `json:"fieldManagers,omitempty"`
+	Identity                   ResourceIdentity `json:"identity"`
+	Present                    bool             `json:"present"`
+	RetainOnRollback           bool             `json:"retainOnRollback"`
+	UID                        string           `json:"uid,omitempty"`
+	ResourceVersion            string           `json:"resourceVersion,omitempty"`
+	Generation                 int64            `json:"generation,omitempty"`
+	ObjectDigest               string           `json:"objectDigest,omitempty"`
+	FieldManagers              []string         `json:"fieldManagers,omitempty"`
+	ReviewedOwnershipApplied   bool             `json:"reviewedOwnershipApplied,omitempty"`
+	ReviewedOwnershipExclusive bool             `json:"reviewedOwnershipExclusive,omitempty"`
 }
 
 type TargetIdentity struct {
@@ -96,6 +98,7 @@ type OwnershipAdoptionPlan struct {
 	ManifestSHA         string                          `json:"manifestSha"`
 	OCIRevision         string                          `json:"ociRevision"`
 	AlreadyConverged    bool                            `json:"alreadyConverged,omitempty"`
+	ResumeTakeover      bool                            `json:"resumeTakeover,omitempty"`
 }
 
 type OwnershipAdoptionResourcePlan struct {
@@ -392,7 +395,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		return ExecutionPlan{}, err
 	}
 	if adoption != nil {
-		if !adoption.AlreadyConverged {
+		if !adoption.AlreadyConverged && !adoption.ResumeTakeover {
 			if err := cluster.DryRunOwnershipAdoption(ctx, release, *adoption, rendered.LKG); err != nil {
 				return ExecutionPlan{}, fmt.Errorf("server-side dry-run ownership adoption: %w", err)
 			}
@@ -520,7 +523,8 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 	if !legacyManager && !declarativeManager {
 		return nil, errors.New("ownership adoption live field manager identity is invalid")
 	}
-	adoptionAlreadyConverged := declarativeManager
+	adoptionAlreadyConverged := true
+	resumeTakeover := InitialExplicitBootstrapFailedAtomSuccessor(release)
 	resources := make(map[ResourceIdentity]ResourceObservation, len(prewrite.Resources))
 	for _, resource := range prewrite.Resources {
 		resources[resource.Identity] = resource
@@ -537,9 +541,11 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 			legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
 			declarativeManager = declarativeManager || manager == release.Workload.FieldManager
 		}
-		if (!legacyManager && !declarativeManager) || declarativeManager != adoptionAlreadyConverged {
+		if !legacyManager && !declarativeManager {
 			return nil, fmt.Errorf("ownership adoption resource %s/%s field manager identity is invalid", scope.Identity.Kind, scope.Identity.Name)
 		}
+		adoptionAlreadyConverged = adoptionAlreadyConverged && resource.ReviewedOwnershipExclusive
+		resumeTakeover = resumeTakeover && resource.ReviewedOwnershipApplied
 		scaffolds, err := bindOwnershipValidationScaffolds(lkgManifest, scope)
 		if err != nil {
 			return nil, err
@@ -558,6 +564,7 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 		Resources:           boundResources,
 		ImageRef:            lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA, OCIRevision: lkg.OCIRevision,
 		AlreadyConverged: adoptionAlreadyConverged,
+		ResumeTakeover:   resumeTakeover && !adoptionAlreadyConverged,
 	}
 	return result, nil
 }
@@ -588,8 +595,9 @@ func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptio
 
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
 	initialExplicitBootstrap := InitialExplicitBootstrapAdoption(release)
+	failedInitialBootstrap := InitialExplicitBootstrapFailedAtomSuccessor(release)
 	if !release.ExpectedPreviousPresent || !lkg.Present ||
-		(release.MigrationState == "adopting" && !release.RetrySameLKG && !initialExplicitBootstrap) {
+		(release.MigrationState == "adopting" && !release.RetrySameLKG && !initialExplicitBootstrap && !failedInitialBootstrap) {
 		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
 	}
 	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
@@ -597,7 +605,7 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	}
 	var witness []byte
 	var err error
-	if initialExplicitBootstrap {
+	if initialExplicitBootstrap || failedInitialBootstrap {
 		witness, err = BootstrapPredecessorConvergenceManifest(lkgManifest, release)
 	} else {
 		witness, err = PredecessorConvergenceManifest(lkgManifest)
@@ -753,7 +761,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	if prepared.OwnershipAdoption != nil {
 		adopted := prepared.Prewrite
-		if !prepared.OwnershipAdoption.AlreadyConverged {
+		if !prepared.OwnershipAdoption.AlreadyConverged && !prepared.OwnershipAdoption.ResumeTakeover {
 			var adoptionErr error
 			adopted, adoptionErr = cluster.AdoptOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.LKG, lkgManifest)
 			if adoptionErr != nil || !ownershipAdoptionConverged(prepared.Prewrite, adopted, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
@@ -770,7 +778,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			}
 		}
 		current = adopted
-		if !prepared.OwnershipAdoption.AlreadyConverged {
+		if !prepared.OwnershipAdoption.AlreadyConverged && !prepared.OwnershipAdoption.ResumeTakeover {
 			expanded, expandErr := cluster.ObserveCAS(ctx, release, forwardManifest)
 			if expandErr != nil || !expanded.ExtendsResourceCAS(adopted) {
 				result.Status = "recovery-required"
@@ -1125,9 +1133,10 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	}
 	if plan.DegradedPredecessor {
 		failedAtomSuccessor := release.MigrationState == "independent" && shaPattern.MatchString(release.SupersedesFailedConfigSHA)
+		failedInitialBootstrap := InitialExplicitBootstrapFailedAtomSuccessor(release) && plan.OwnershipAdoption != nil && plan.OwnershipAdoption.ResumeTakeover
 		initialExplicitBootstrap := InitialExplicitBootstrapAdoption(release) && plan.OwnershipAdoption != nil
 		if !release.ExpectedPreviousPresent || plan.AlreadyConverged ||
-			(!release.RetrySameLKG && !failedAtomSuccessor && !initialExplicitBootstrap) {
+			(!release.RetrySameLKG && !failedAtomSuccessor && !initialExplicitBootstrap && !failedInitialBootstrap) {
 			return errors.New("degraded predecessor execution is not authorized")
 		}
 		if err := plan.Prewrite.ValidateDegradedPredecessor(release); err != nil {
@@ -1169,6 +1178,8 @@ func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
 		resources[resource.Identity] = resource
 	}
 	scopes := make([]OwnershipAdoptionScope, 0, len(adoption.Resources))
+	allReviewedApplied := true
+	allReviewedExclusive := true
 	for _, resource := range adoption.Resources {
 		prewrite, exists := resources[resource.Identity]
 		if !exists || resource.UID != prewrite.UID || resource.ResourceVersion != prewrite.ResourceVersion || resource.Generation != prewrite.Generation {
@@ -1177,7 +1188,14 @@ func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
 		if _, err := validateOwnershipValidationScaffolds(resource); err != nil {
 			return errors.New("execution ownership adoption validation scaffold is invalid")
 		}
+		allReviewedApplied = allReviewedApplied && prewrite.ReviewedOwnershipApplied
+		allReviewedExclusive = allReviewedExclusive && prewrite.ReviewedOwnershipExclusive
 		scopes = append(scopes, OwnershipAdoptionScope{Identity: resource.Identity, Fields: resource.Fields})
+	}
+	wantResume := InitialExplicitBootstrapFailedAtomSuccessor(release) && allReviewedApplied && !allReviewedExclusive
+	if adoption.AlreadyConverged != allReviewedExclusive || adoption.ResumeTakeover != wantResume ||
+		adoption.AlreadyConverged && adoption.ResumeTakeover {
+		return errors.New("execution ownership adoption convergence evidence is invalid")
 	}
 	want, err := CanonicalJSON(release.OwnershipAdoption.Resources)
 	if err != nil {
@@ -1319,7 +1337,8 @@ func (observation Observation) SameResourceCAS(other Observation) bool {
 		left, right := observation.Resources[index], other.Resources[index]
 		if left.Identity != right.Identity || left.Present != right.Present || left.UID != right.UID ||
 			left.RetainOnRollback != right.RetainOnRollback || left.ResourceVersion != right.ResourceVersion || left.Generation != right.Generation ||
-			left.ObjectDigest != right.ObjectDigest || !equalStrings(left.FieldManagers, right.FieldManagers) {
+			left.ObjectDigest != right.ObjectDigest || !equalStrings(left.FieldManagers, right.FieldManagers) ||
+			left.ReviewedOwnershipApplied != right.ReviewedOwnershipApplied || left.ReviewedOwnershipExclusive != right.ReviewedOwnershipExclusive {
 			return false
 		}
 	}
@@ -1349,7 +1368,8 @@ func (observation Observation) ExtendsResourceCAS(base Observation) bool {
 		}
 		if current.Present != prior.Present || current.UID != prior.UID || current.ResourceVersion != prior.ResourceVersion ||
 			current.Generation != prior.Generation || current.ObjectDigest != prior.ObjectDigest ||
-			current.RetainOnRollback != prior.RetainOnRollback || !equalStrings(current.FieldManagers, prior.FieldManagers) {
+			current.RetainOnRollback != prior.RetainOnRollback || !equalStrings(current.FieldManagers, prior.FieldManagers) ||
+			current.ReviewedOwnershipApplied != prior.ReviewedOwnershipApplied || current.ReviewedOwnershipExclusive != prior.ReviewedOwnershipExclusive {
 			return false
 		}
 		delete(baseResources, current.Identity)
@@ -1393,7 +1413,7 @@ func (observation Observation) CompletesOwnershipTakeover(base Observation, mana
 	}
 	for _, scope := range plan.Resources {
 		current, exists := currentResources[scope.Identity]
-		if !exists || !receiptContainsString(current.FieldManagers, manager) {
+		if !exists || !receiptContainsString(current.FieldManagers, manager) || !current.ReviewedOwnershipApplied || !current.ReviewedOwnershipExclusive {
 			return false
 		}
 	}
@@ -1424,7 +1444,8 @@ func (observation Observation) SameSpecIdentity(other Observation) bool {
 		left, right := observation.Resources[index], other.Resources[index]
 		if left.Identity != right.Identity || left.Present != right.Present || left.UID != right.UID ||
 			left.RetainOnRollback != right.RetainOnRollback || left.Generation != right.Generation ||
-			left.ObjectDigest != right.ObjectDigest || !equalStrings(left.FieldManagers, right.FieldManagers) {
+			left.ObjectDigest != right.ObjectDigest || !equalStrings(left.FieldManagers, right.FieldManagers) ||
+			left.ReviewedOwnershipApplied != right.ReviewedOwnershipApplied || left.ReviewedOwnershipExclusive != right.ReviewedOwnershipExclusive {
 			return false
 		}
 	}

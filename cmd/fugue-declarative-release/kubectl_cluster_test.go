@@ -767,8 +767,43 @@ func TestAuxiliaryOwnershipTakeoverValidationScaffoldMustBeExclusivelyPreowned(t
 	liveMetadata := live["metadata"].(map[string]any)
 	liveMetadata["managedFields"].([]any)[1].(map[string]any)["fieldsV1"] = imageFields
 	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
-	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "legacy manager") {
-		t.Fatalf("legacy-owned validation scaffold was accepted: %v", err)
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "unreviewed owner helm/Update") {
+		t.Fatalf("non-reviewed legacy-owned validation scaffold was accepted: %v", err)
+	}
+	adoption.Resources[0].Fields = append(adoption.Resources[0].Fields, "/spec/template/spec/containers[name=dns]/image")
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err != nil {
+		t.Fatalf("exact reviewed scaffold with legacy Update ownership was rejected: %v", err)
+	}
+	legacyEntry := liveMetadata["managedFields"].([]any)[1].(map[string]any)
+	legacyEntry["operation"] = "Apply"
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "unreviewed owner helm/Apply") {
+		t.Fatalf("legacy Apply ownership of a reviewed scaffold was accepted: %v", err)
+	}
+	legacyEntry["operation"] = "Update"
+	legacyEntry["manager"] = "unexpected-manager"
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	if err := cluster.verifyOwnershipTakeoverScaffolds(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "unreviewed owner unexpected-manager/Update") {
+		t.Fatalf("unexpected legacy Update owner of a reviewed scaffold was accepted: %v", err)
+	}
+	exclusiveFields := map[string]any{"f:spec": map[string]any{"f:template": map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{
+		`k:{"name":"dns"}`: map[string]any{
+			"f:image": map[string]any{},
+			"f:env":   map[string]any{`k:{"name":"FUGUE_API_URL"}`: map[string]any{"f:value": map[string]any{}}},
+		},
+	}}}}}
+	liveMetadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": exclusiveFields},
+	}
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	if err := cluster.verifyOwnershipTakeover(context.Background(), release, adoption); err != nil {
+		t.Fatalf("exclusive post-takeover declarative ownership was rejected: %v", err)
+	}
+	liveMetadata["managedFields"] = append(liveMetadata["managedFields"].([]any),
+		map[string]any{"manager": "helm", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": imageFields})
+	t.Setenv("LIVE_JSON", string(mustJSON(t, live)))
+	if err := cluster.verifyOwnershipTakeover(context.Background(), release, adoption); err == nil || !strings.Contains(err.Error(), "retained non-declarative reviewed ownership") {
+		t.Fatalf("post-takeover legacy ownership was accepted: %v", err)
 	}
 }
 
@@ -913,6 +948,31 @@ func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
 	grouped := errors.New("command failed: error: Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:\n- .spec.template.spec.containers[name=\"caddy\"].image\n- .spec.template.spec.containers[name=\"edge\"].image")
 	if err := validateAdoptionConflicts(grouped, managers, []string{"/spec/template"}); err != nil {
 		t.Fatalf("reviewed grouped conflicts were rejected: %v", err)
+	}
+}
+
+func TestReviewedTakeoverConflictSetMatchesEveryLiveManagerPointer(t *testing.T) {
+	url := "/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value"
+	image := "/spec/template/spec/containers[name=dns]/image"
+	expected := map[reviewedTakeoverConflict]struct{}{
+		{manager: "helm", pointer: url}:            {},
+		{manager: "helm", pointer: image}:          {},
+		{manager: "kubectl-patch", pointer: image}: {},
+	}
+	allowed := errors.New("Apply failed with 3 conflicts: conflicts with \"helm\" using apps/v1:\n- .spec.template.spec.containers[name=\"dns\"].env[name=\"FUGUE_API_URL\"].value\n- .spec.template.spec.containers[name=\"dns\"].image\nconflict with \"kubectl-patch\" using apps/v1: .spec.template.spec.containers[name=\"dns\"].image")
+	if err := validateExactReviewedTakeoverConflicts(allowed, []string{url, image}, expected); err != nil {
+		t.Fatalf("exact reviewed takeover conflict set was rejected: %v", err)
+	}
+	for name, conflict := range map[string]error{
+		"missing":       errors.New("Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:\n- .spec.template.spec.containers[name=\"dns\"].env[name=\"FUGUE_API_URL\"].value\n- .spec.template.spec.containers[name=\"dns\"].image"),
+		"extra":         errors.New("Apply failed with 4 conflicts: conflicts with \"helm\" using apps/v1:\n- .spec.template.spec.containers[name=\"dns\"].env[name=\"FUGUE_API_URL\"].value\n- .spec.template.spec.containers[name=\"dns\"].image\n- .spec.template.spec.volumes\nconflict with \"kubectl-patch\" using apps/v1: .spec.template.spec.containers[name=\"dns\"].image"),
+		"wrong manager": errors.New("Apply failed with 3 conflicts: conflicts with \"helm\" using apps/v1:\n- .spec.template.spec.containers[name=\"dns\"].env[name=\"FUGUE_API_URL\"].value\n- .spec.template.spec.containers[name=\"dns\"].image\nconflict with \"kubectl-rollout\" using apps/v1: .spec.template.spec.containers[name=\"dns\"].image"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateExactReviewedTakeoverConflicts(conflict, []string{url, image}, expected); err == nil {
+				t.Fatal("inexact reviewed takeover conflict set was accepted")
+			}
+		})
 	}
 }
 

@@ -175,7 +175,8 @@ func runPlan(args []string, output io.Writer) error {
 				return fmt.Errorf("component %q recovered predecessor is not in the trusted base ancestry", release.ComponentID)
 			}
 			recoveredRaw, recoveredErr := exec.Command("git", "rev-list", "-1", intent.ExpectedPreviousConfigSHA, "--", release.IntentPath).CombinedOutput()
-			if recoveredErr != nil || strings.TrimSpace(string(recoveredRaw)) != intent.ExpectedPreviousConfigSHA {
+			if (recoveredErr != nil || strings.TrimSpace(string(recoveredRaw)) != intent.ExpectedPreviousConfigSHA) &&
+				!initialBootstrapFailedAtomRecoversSameLKG(registry, release.ComponentID, intent, prior, priorSHA) {
 				return fmt.Errorf("component %q recovered predecessor is not an exact production intent atom", release.ComponentID)
 			}
 		}
@@ -190,6 +191,40 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
+}
+
+func initialBootstrapFailedAtomRecoversSameLKG(registry declarativerelease.Registry, componentID string, current, prior declarativerelease.Intent, priorSHA string) bool {
+	var component *declarativerelease.Component
+	for index := range registry.Components {
+		if registry.Components[index].ID == componentID {
+			component = &registry.Components[index]
+			break
+		}
+	}
+	if component == nil {
+		return false
+	}
+	candidate := declarativerelease.PlanRelease{
+		ComponentID: component.ID, MigrationState: component.MigrationState, BootstrapLKGPath: component.BootstrapLKGPath,
+		BootstrapRuntime: component.BootstrapRuntime, OwnershipAdoption: component.OwnershipAdoption, Workload: component.Workload,
+	}
+	candidate.IntentGeneration = current.Generation
+	candidate.ExpectedPreviousPresent = current.ExpectedPreviousPresent
+	candidate.ExpectedPreviousConfigSHA = current.ExpectedPreviousConfigSHA
+	candidate.ExpectedPreviousManifestSHA = current.ExpectedPreviousManifestSHA
+	candidate.ExpectedPreviousOCIRevision = current.ExpectedPreviousOCIRevision
+	candidate.ExpectedPreviousImageDigest = current.ExpectedPreviousImageDigest
+	candidate.SupersedesFailedConfigSHA = current.SupersedesFailedConfigSHA
+	if !declarativerelease.InitialExplicitBootstrapFailedAtomSuccessor(candidate) || current.Validate() != nil || prior.Validate() != nil ||
+		priorSHA == "" || current.SupersedesFailedConfigSHA != priorSHA || prior.Component != current.Component || prior.Generation != 1 ||
+		prior.SupersedesFailedConfigSHA != "" || current.Generation != prior.Generation+1 {
+		return false
+	}
+	return current.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
+		current.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
+		current.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
+		current.ExpectedPreviousOCIRevision == prior.ExpectedPreviousOCIRevision &&
+		current.ExpectedPreviousImageDigest == prior.ExpectedPreviousImageDigest && current.Rollback == prior.Rollback
 }
 
 func containsPath(paths []string, want string) bool {

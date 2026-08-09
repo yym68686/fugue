@@ -157,7 +157,11 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	}
 	observation.Resources = resources
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
-		observation, err = cluster.bindReceiptBoundDegradedObservation(ctx, release, workloadRaw, observation, resources)
+		if declarativerelease.InitialExplicitBootstrapFailedAtomSuccessor(release) {
+			observation, err = cluster.bindExplicitBootstrapDegradedObservation(ctx, release, manifest, workloadRaw, observation)
+		} else {
+			observation, err = cluster.bindReceiptBoundDegradedObservation(ctx, release, workloadRaw, observation, resources)
+		}
 		if err != nil {
 			return declarativerelease.Observation{}, err
 		}
@@ -180,6 +184,56 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	if verification.Image != observation.ImageRef || verification.OCIRevision != observation.OCIRevision {
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
+	return observation, nil
+}
+
+func (cluster *kubectlCluster) bindExplicitBootstrapDegradedObservation(ctx context.Context, release declarativerelease.PlanRelease, manifest, workloadRaw []byte, observation declarativerelease.Observation) (declarativerelease.Observation, error) {
+	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+	desired, err := declarativerelease.ResourceSetItem(manifest, primary)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	target, err := targetIdentityFromDeclaredWorkload(desired, release.Workload)
+	if err != nil || target.ImageRef != release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest ||
+		target.ConfigSHA != release.ExpectedPreviousConfigSHA || target.ManifestSHA != release.ExpectedPreviousManifestSHA ||
+		target.OCIRevision != release.ExpectedPreviousOCIRevision || observation.ImageRef != target.ImageRef {
+		return declarativerelease.Observation{}, errors.New("explicit bootstrap degraded observation is not the exact LKG")
+	}
+	for label, value := range map[string]string{"config": observation.ConfigSHA, "manifest": observation.ManifestSHA, "OCI revision": observation.OCIRevision} {
+		want := map[string]string{"config": target.ConfigSHA, "manifest": target.ManifestSHA, "OCI revision": target.OCIRevision}[label]
+		if value != "" && value != want {
+			return declarativerelease.Observation{}, fmt.Errorf("explicit bootstrap degraded observation has conflicting %s identity", label)
+		}
+	}
+	selector, err := selectorFromWorkload(workloadRaw)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, true); err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("verify explicit bootstrap degraded Pod image: %w", err)
+	}
+	bootstrap := adoptingBootstrapRuntime(release, true)
+	if bootstrap == nil {
+		return declarativerelease.Observation{}, errors.New("explicit bootstrap degraded runtime is absent")
+	}
+	bootstrapImage := release.Artifact.Repository + "@" + bootstrap.ImageDigest
+	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier, "--image", bootstrapImage, "--platform", "linux/amd64",
+		"--expected-revision", bootstrap.OCIRevision, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
+		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
+	if err != nil {
+		return declarativerelease.Observation{}, fmt.Errorf("verify explicit bootstrap degraded runtime: %w", err)
+	}
+	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
+	if err != nil || verification.Image != bootstrapImage || verification.OCIRevision != bootstrap.OCIRevision {
+		return declarativerelease.Observation{}, errors.New("explicit bootstrap degraded runtime registry identity mismatch")
+	}
+	observation.ConfigSHA = target.ConfigSHA
+	observation.ManifestSHA = target.ManifestSHA
+	observation.OCIRevision = target.OCIRevision
 	return observation, nil
 }
 
@@ -443,9 +497,17 @@ func (cluster *kubectlCluster) verifyOwnershipTakeoverScaffolds(ctx context.Cont
 			!managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scaffolds) {
 			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not CAS-bound to existing declarative ownership", scope.Identity.Kind, scope.Identity.Name)
 		}
-		for _, manager := range ownershipPlanLegacyManagers(adoption) {
-			if managedFieldsOwnAnyPointer(metadata, manager, scaffolds) {
-				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is still owned by legacy manager %s", scope.Identity.Kind, scope.Identity.Name, manager)
+		legacyManagers := ownershipPlanLegacyManagers(adoption)
+		for _, pointer := range scaffolds {
+			reviewed := exactString(pointer, scope.Fields)
+			for _, owner := range managedFieldsPointerOwners(metadata, pointer) {
+				if owner.manager == release.Workload.FieldManager && owner.operation == "Apply" {
+					continue
+				}
+				if reviewed && exactString(owner.manager, legacyManagers) && owner.operation == "Update" {
+					continue
+				}
+				return fmt.Errorf("ownership takeover validation scaffold for %s/%s has unreviewed owner %s/%s", scope.Identity.Kind, scope.Identity.Name, owner.manager, owner.operation)
 			}
 		}
 	}
@@ -511,17 +573,29 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 		if err != nil {
 			return err
 		}
-		if _, applyErr := cluster.kubectlRun(ctx, encoded, arguments...); applyErr != nil {
-			scope, exists := scopes[identity]
-			if !exists {
-				return fmt.Errorf("adopt %s/%s has no reviewed scope", identity.Kind, identity.Name)
+		scope, exists := scopes[identity]
+		if !exists {
+			return fmt.Errorf("adopt %s/%s has no reviewed scope", identity.Kind, identity.Name)
+		}
+		var expectedTakeoverConflicts map[reviewedTakeoverConflict]struct{}
+		if adoption.AlreadyConverged || adoption.ResumeTakeover {
+			expectedTakeoverConflicts, err = cluster.expectedReviewedTakeoverConflicts(ctx, release, adoption, scope, item)
+			if err != nil {
+				return fmt.Errorf("adopt %s/%s conflict precondition: %w", identity.Kind, identity.Name, err)
 			}
+		}
+		if _, applyErr := cluster.kubectlRun(ctx, encoded, arguments...); applyErr != nil {
 			managers := append([]string(nil), adoption.LegacyFieldManagers...)
 			if adoption.AlreadyConverged {
 				managers = append(managers, release.Workload.FieldManager)
 				sort.Strings(managers)
 			}
-			if err := validateAdoptionConflicts(applyErr, managers, scope.Fields); err != nil {
+			if adoption.AlreadyConverged || adoption.ResumeTakeover {
+				err = validateExactReviewedTakeoverConflicts(applyErr, scope.Fields, expectedTakeoverConflicts)
+			} else {
+				err = validateAdoptionConflicts(applyErr, managers, scope.Fields)
+			}
+			if err != nil {
 				return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
 			}
 			forceArguments, err := adoptionForceApplyArguments(release, dryRun)
@@ -531,7 +605,104 @@ func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, re
 			if _, forceErr := cluster.kubectlRun(ctx, encoded, forceArguments...); forceErr != nil {
 				return fmt.Errorf("adopt %s/%s reviewed force-conflicts: %w", identity.Kind, identity.Name, forceErr)
 			}
+		} else if len(expectedTakeoverConflicts) > 0 {
+			return fmt.Errorf("adopt %s/%s expected reviewed conflicts were absent", identity.Kind, identity.Name)
 		}
+	}
+	return nil
+}
+
+type reviewedTakeoverConflict struct {
+	manager string
+	pointer string
+}
+
+func (cluster *kubectlCluster) expectedReviewedTakeoverConflicts(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, scope declarativerelease.OwnershipAdoptionResourcePlan, desired map[string]any) (map[reviewedTakeoverConflict]struct{}, error) {
+	raw, err := cluster.getResource(ctx, scope.Identity)
+	if err != nil || resourceAbsent(raw) {
+		return nil, fmt.Errorf("read reviewed takeover resource: %w", err)
+	}
+	live, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	metadata := mapField(live, "metadata")
+	if stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) != scope.ResourceVersion ||
+		int64Value(metadata["generation"]) != scope.Generation || !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scope.Fields) {
+		return nil, errors.New("reviewed takeover conflict evidence is not CAS-bound to declarative ownership")
+	}
+	legacyManagers := ownershipPlanLegacyManagers(adoption)
+	expected := make(map[reviewedTakeoverConflict]struct{})
+	for _, pointer := range scope.Fields {
+		legacyOwners := make([]managedFieldPointerOwner, 0)
+		for _, owner := range managedFieldsPointerOwners(metadata, pointer) {
+			if owner.manager == release.Workload.FieldManager && owner.operation == "Apply" {
+				continue
+			}
+			if !exactString(owner.manager, legacyManagers) || owner.operation != "Update" {
+				return nil, fmt.Errorf("reviewed pointer %s has unreviewed owner %s/%s", pointer, owner.manager, owner.operation)
+			}
+			legacyOwners = append(legacyOwners, owner)
+		}
+		if len(legacyOwners) == 0 {
+			continue
+		}
+		liveValue, err := declarativerelease.OwnershipAdoptionPointerValue(live, pointer)
+		if err != nil {
+			return nil, err
+		}
+		desiredValue, err := declarativerelease.OwnershipAdoptionPointerValue(desired, pointer)
+		if err != nil {
+			return nil, err
+		}
+		liveJSON, err := declarativerelease.CanonicalJSON(liveValue)
+		if err != nil {
+			return nil, err
+		}
+		desiredJSON, err := declarativerelease.CanonicalJSON(desiredValue)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(liveJSON, desiredJSON) {
+			return nil, fmt.Errorf("legacy-owned reviewed pointer %s has no takeover value transition", pointer)
+		}
+		for _, owner := range legacyOwners {
+			expected[reviewedTakeoverConflict{manager: owner.manager, pointer: pointer}] = struct{}{}
+		}
+	}
+	return expected, nil
+}
+
+func validateExactReviewedTakeoverConflicts(applyErr error, pointers []string, expected map[reviewedTakeoverConflict]struct{}) error {
+	conflicts, err := parseSSAConflicts(applyErr)
+	if err != nil {
+		return err
+	}
+	seen := make(map[reviewedTakeoverConflict]struct{}, len(conflicts))
+	for _, conflict := range conflicts {
+		pointer := ""
+		for _, candidate := range pointers {
+			if adoptionFieldAllowed(conflict.field, []string{candidate}) {
+				if pointer != "" {
+					return errors.New("reviewed takeover conflict matches multiple pointers")
+				}
+				pointer = candidate
+			}
+		}
+		key := reviewedTakeoverConflict{manager: conflict.manager, pointer: pointer}
+		if pointer == "" {
+			return fmt.Errorf("reviewed takeover conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
+		}
+		if _, ok := expected[key]; !ok {
+			return fmt.Errorf("reviewed takeover conflict %s:%s is outside the exact live conflict set", conflict.manager, conflict.field)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("reviewed takeover conflict is duplicated")
+		}
+		seen[key] = struct{}{}
+	}
+	if len(seen) != len(expected) {
+		return errors.New("reviewed takeover conflict set is incomplete")
 	}
 	return nil
 }
@@ -646,10 +817,8 @@ func (cluster *kubectlCluster) verifyOwnershipTakeover(ctx context.Context, rele
 			return err
 		}
 		metadata := mapField(value, "metadata")
-		for _, manager := range ownershipPlanLegacyManagers(adoption) {
-			if managedFieldsOwnAnyPointer(metadata, manager, scope.Fields) {
-				return fmt.Errorf("ownership takeover %s/%s retained legacy manager %s", scope.Identity.Kind, scope.Identity.Name, manager)
-			}
+		if !managedFieldsPointersExclusivelyOwned(metadata, release.Workload.FieldManager, scope.Fields) {
+			return fmt.Errorf("ownership takeover %s/%s retained non-declarative reviewed ownership", scope.Identity.Kind, scope.Identity.Name)
 		}
 	}
 	return nil
@@ -686,6 +855,49 @@ func managedFieldsOwnAnyPointer(metadata map[string]any, manager string, pointer
 			continue
 		}
 		if managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), pointers, false) {
+			return true
+		}
+	}
+	return false
+}
+
+type managedFieldPointerOwner struct {
+	manager   string
+	operation string
+}
+
+func managedFieldsPointerOwners(metadata map[string]any, pointer string) []managedFieldPointerOwner {
+	owners := make([]managedFieldPointerOwner, 0)
+	for _, rawEntry := range anySlice(metadata["managedFields"]) {
+		entry, _ := rawEntry.(map[string]any)
+		manager := stringValue(entry["manager"])
+		operation := stringValue(entry["operation"])
+		if manager == "" || operation == "" || stringValue(entry["subresource"]) != "" ||
+			!managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), []string{pointer}, true) {
+			continue
+		}
+		owners = append(owners, managedFieldPointerOwner{manager: manager, operation: operation})
+	}
+	return owners
+}
+
+func managedFieldsPointersExclusivelyOwned(metadata map[string]any, manager string, pointers []string) bool {
+	if !managedFieldsOwnPointers(metadata, manager, pointers) {
+		return false
+	}
+	for _, pointer := range pointers {
+		for _, owner := range managedFieldsPointerOwners(metadata, pointer) {
+			if owner.manager != manager || owner.operation != "Apply" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func exactString(value string, values []string) bool {
+	for _, candidate := range values {
+		if value == candidate {
 			return true
 		}
 	}
@@ -2010,6 +2222,12 @@ func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []
 		return nil, err
 	}
 	resources := make([]declarativerelease.ResourceObservation, 0, len(identities))
+	reviewed := make(map[declarativerelease.ResourceIdentity][]string)
+	if release.OwnershipAdoption != nil {
+		for _, scope := range release.OwnershipAdoption.Resources {
+			reviewed[scope.Identity] = scope.Fields
+		}
+	}
 	for _, identity := range identities {
 		raw := workloadRaw
 		if identity.APIVersion != release.Workload.APIVersion || identity.Kind != release.Workload.Kind ||
@@ -2040,6 +2258,11 @@ func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []
 		resource.ResourceVersion = stringValue(metadata["resourceVersion"])
 		resource.Generation = int64Value(metadata["generation"])
 		resource.FieldManagers = managedFieldManagers(metadata)
+		if fields := reviewed[identity]; len(fields) > 0 {
+			resource.ReviewedOwnershipApplied = managedFieldsOwnPointers(metadata, release.Workload.FieldManager, fields)
+			resource.ReviewedOwnershipExclusive = resource.ReviewedOwnershipApplied &&
+				managedFieldsPointersExclusivelyOwned(metadata, release.Workload.FieldManager, fields)
+		}
 		resource.ObjectDigest = digestJSON(sanitizeObservedResource(value))
 		resources = append(resources, resource)
 	}

@@ -270,6 +270,13 @@ func stableObservation(uid, rv, image, revision string) Observation {
 	}
 }
 
+func markReviewedOwnership(observation *Observation, applied, exclusive bool) {
+	for index := range observation.Resources {
+		observation.Resources[index].ReviewedOwnershipApplied = applied
+		observation.Resources[index].ReviewedOwnershipExclusive = exclusive
+	}
+}
+
 func TestExecuteVerifiesForwardAndReconcilesCommitUnknown(t *testing.T) {
 	plan, receipt, rendered, lkg, forward := executionFixture(t)
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
@@ -387,13 +394,16 @@ func TestBindOwnershipAdoptionRecognizesAnExactExistingDeclarativeManager(t *tes
 	prewrite := stableObservation("uid", "10", lkg.ImageRef, lkg.ConfigSHA)
 	prewrite.FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	prewrite.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	markReviewedOwnership(&prewrite, true, true)
 	adoption, err := bindOwnershipAdoption(release, lkg, nil, prewrite)
 	if err != nil || adoption == nil || !adoption.AlreadyConverged {
 		t.Fatalf("exact existing declarative ownership was not resumable: adoption=%+v err=%v", adoption, err)
 	}
 	prewrite.Resources[0].FieldManagers = []string{"helm"}
-	if _, err := bindOwnershipAdoption(release, lkg, nil, prewrite); err == nil {
-		t.Fatal("partially adopted ownership was accepted")
+	markReviewedOwnership(&prewrite, false, false)
+	partial, err := bindOwnershipAdoption(release, lkg, nil, prewrite)
+	if err != nil || partial == nil || partial.AlreadyConverged || partial.ResumeTakeover {
+		t.Fatalf("partial ownership was mistaken for converged takeover evidence: plan=%+v err=%v", partial, err)
 	}
 }
 
@@ -418,6 +428,7 @@ func TestPrepareAlreadyAdoptedOwnershipDryRunsForwardWithoutForce(t *testing.T) 
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
 	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	markReviewedOwnership(&lkg, true, true)
 	fake := &fakeCluster{
 		observations: []Observation{lkg, lkg}, health: []Observation{lkg},
 		cas: []Observation{casOnlyObservation(lkg)},
@@ -450,6 +461,7 @@ func TestExecuteAlreadyAdoptedOwnershipPerformsReviewedTakeoverBeforeForward(t *
 	plan, receipt, rendered, lkg, forward := executionFixtureForPlan(t, plan)
 	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	markReviewedOwnership(&lkg, true, true)
 	fake := &fakeCluster{
 		observations: []Observation{lkg, lkg}, health: []Observation{lkg},
 		cas: []Observation{casOnlyObservation(lkg)},
@@ -493,6 +505,7 @@ func TestExecuteCompensatesAnUnverifiedOwnershipTakeover(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
 	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
 	lkg.Resources[0].FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	markReviewedOwnership(&lkg, true, true)
 	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, cas: []Observation{casOnlyObservation(lkg)}}
 	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
 	if err != nil || prepared.OwnershipAdoption == nil || !prepared.OwnershipAdoption.AlreadyConverged {
@@ -614,6 +627,8 @@ func TestOwnershipTakeoverCASAllowsOnlyUIDPreservingScopedMovement(t *testing.T)
 	current.Resources[0].Generation++
 	current.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	current.Resources[0].FieldManagers = []string{manager, "helm"}
+	current.Resources[0].ReviewedOwnershipApplied = true
+	current.Resources[0].ReviewedOwnershipExclusive = true
 	current.Resources = append(current.Resources, ResourceObservation{Identity: ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "api"}})
 	if !current.CompletesOwnershipTakeover(base, manager, plan) {
 		t.Fatal("UID-preserving reviewed takeover was rejected")
@@ -828,6 +843,73 @@ func TestPrepareInitialExplicitBootstrapAdoptionRecoversTypedDegradedPredecessor
 	}
 }
 
+func TestPrepareAndExecuteFailedInitialBootstrapSuccessorResumesReviewedTakeover(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	release := &plan.Releases[0]
+	release.MigrationState = "adopting"
+	release.IntentGeneration = 2
+	release.SupersedesFailedConfigSHA = strings.Repeat("9", 40)
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", LegacyFieldManagers: []string{"helm"}, Resources: []OwnershipAdoptionScope{{
+		Identity: ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name},
+		Fields:   []string{"/spec/template/spec/containers[name=api]/image"},
+	}}}
+	release.BootstrapRuntime = &BootstrapRuntime{
+		Resource:  release.OwnershipAdoption.Resources[0].Identity,
+		Container: release.Workload.Container, ImageDigest: "sha256:" + strings.Repeat("8", 64), OCIRevision: strings.Repeat("7", 40),
+	}
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, forward := executionFixtureForPlan(t, plan)
+	lkg.FieldManagers = []string{release.Workload.FieldManager, "helm"}
+	lkg.Resources[0].FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	markReviewedOwnership(&lkg, true, false)
+	degradedCAS := casOnlyObservation(lkg)
+	degraded := degradedCAS
+	degraded.ImageRef = lkg.ImageRef
+	degraded.ConfigSHA = lkg.ConfigSHA
+	degraded.ManifestSHA = lkg.ManifestSHA
+	degraded.OCIRevision = lkg.OCIRevision
+	degraded.TemplateDigest = lkg.TemplateDigest
+	degraded.FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	fake := &fakeCluster{
+		observations: []Observation{lkg},
+		healthErrors: []error{fmt.Errorf("%w: auxiliary DNS is not ready", ErrDegradedPredecessorHealth)},
+		cas:          []Observation{degradedCAS, degradedCAS},
+		degraded:     []Observation{degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || !prepared.DegradedPredecessor || prepared.OwnershipAdoption == nil || prepared.OwnershipAdoption.AlreadyConverged ||
+		!prepared.OwnershipAdoption.ResumeTakeover || fake.dryRunAdoptions != 0 || fake.dryRunTakeovers != 1 || fake.dryRuns != 1 {
+		t.Fatalf("failed initial bootstrap successor did not prepare the reviewed takeover: plan=%+v fake=%+v err=%v", prepared.OwnershipAdoption, fake, err)
+	}
+
+	current := degraded
+	takeover := casOnlyObservation(current)
+	takeover.ResourceVersion = "12"
+	takeover.Generation++
+	takeover.FieldManagers = []string{release.Workload.FieldManager}
+	takeover.Resources[0].ResourceVersion = "12"
+	takeover.Resources[0].Generation++
+	takeover.Resources[0].ObjectDigest = "sha256:" + strings.Repeat("c", 64)
+	takeover.Resources[0].FieldManagers = []string{release.Workload.FieldManager}
+	markReviewedOwnership(&takeover, true, true)
+	fake.degraded = []Observation{current}
+	fake.converged = nil
+	fake.takeovers = []Observation{takeover}
+	fake.health = []Observation{forward}
+	fake.dryRuns = 0
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 ||
+		fake.applies != 1 || len(fake.takeovers) != 0 {
+		t.Fatalf("failed initial bootstrap successor did not complete the reviewed takeover: result=%+v fake=%+v", result, fake)
+	}
+}
+
 func TestPrepareFailedAtomSuccessorRejectsUntypedReadyCountMismatch(t *testing.T) {
 	plan, receipt, rendered, lkg, _ := executionFixture(t)
 	fake := &fakeCluster{
@@ -934,6 +1016,7 @@ func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailur
 	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
 	lkg.FieldManagers = []string{"fugue-api-declarative", "helm"}
 	lkg.Resources[0].FieldManagers = append([]string(nil), lkg.FieldManagers...)
+	markReviewedOwnership(&lkg, true, true)
 	degradedCAS := casOnlyObservation(lkg)
 	degraded := degradedCAS
 	degraded.ImageRef = lkg.ImageRef

@@ -226,6 +226,23 @@ func (release PlanRelease) receiptBoundHistoricalLKG() bool {
 		release.AdoptionReceiptPath == expectedReceiptPath && release.BootstrapLKGPath == "" && release.OwnershipAdoption == nil
 }
 
+// InitialExplicitBootstrapFailedAtomSuccessor is the only non-retry adopting
+// successor allowed to resume a failed first production atom. The planner
+// separately proves that SupersedesFailedConfigSHA is the immediately prior
+// component intent and that both intents name this same bootstrap LKG.
+func InitialExplicitBootstrapFailedAtomSuccessor(release PlanRelease) bool {
+	bootstrap := release.BootstrapRuntime
+	return release.MigrationState == "adopting" && release.IntentGeneration == 2 && !release.RetrySameLKG &&
+		shaPattern.MatchString(release.SupersedesFailedConfigSHA) && release.ExpectedPreviousPresent &&
+		shaPattern.MatchString(release.ExpectedPreviousConfigSHA) && release.ExpectedPreviousManifestSHA == release.ExpectedPreviousConfigSHA &&
+		release.ExpectedPreviousOCIRevision == release.ExpectedPreviousConfigSHA && digestPattern.MatchString(release.ExpectedPreviousImageDigest) &&
+		release.BootstrapLKGPath != "" && release.OwnershipAdoption != nil && len(release.OwnershipAdoption.Resources) > 0 &&
+		bootstrap != nil && bootstrap.Resource.APIVersion == release.Workload.APIVersion && bootstrap.Resource.Kind == release.Workload.Kind &&
+		bootstrap.Resource.Namespace == release.Workload.Namespace && bootstrap.Resource.Name == release.Workload.Name &&
+		bootstrap.Container == release.Workload.Container && digestPattern.MatchString(bootstrap.ImageDigest) &&
+		shaPattern.MatchString(bootstrap.OCIRevision)
+}
+
 // DecodeRegistry accepts exactly one strict JSON document.
 func DecodeRegistry(reader io.Reader) (Registry, error) {
 	var registry Registry

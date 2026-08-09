@@ -15,6 +15,53 @@ import (
 	"fugue/internal/declarativerelease"
 )
 
+func TestInitialBootstrapFailedAtomHistoricalRootIsExact(t *testing.T) {
+	const failed = "1111111111111111111111111111111111111111"
+	const lkg = "2222222222222222222222222222222222222222"
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"}
+	component := declarativerelease.Component{
+		ID: "edge-client-test", MigrationState: "adopting", BootstrapLKGPath: "deploy/releases/edge-client-test/lkg.json",
+		Workload:         declarativerelease.Workload{APIVersion: identity.APIVersion, Kind: identity.Kind, Namespace: identity.Namespace, Name: identity.Name, Container: "front"},
+		BootstrapRuntime: &declarativerelease.BootstrapRuntime{Resource: identity, Container: "front", ImageDigest: "sha256:" + strings.Repeat("a", 64), OCIRevision: strings.Repeat("3", 40)},
+		OwnershipAdoption: &declarativerelease.OwnershipAdoption{LegacyFieldManager: "helm", Resources: []declarativerelease.OwnershipAdoptionScope{{
+			Identity: identity, Fields: []string{"/spec/template/spec/containers[name=front]/image"},
+		}}},
+	}
+	registry := declarativerelease.Registry{Components: []declarativerelease.Component{component}}
+	prior := declarativerelease.Intent{APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: component.ID,
+		Generation: 1, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: lkg, ExpectedPreviousManifestSHA: lkg,
+		ExpectedPreviousOCIRevision: lkg, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64), Rollback: "previous-git-lkg"}
+	current := prior
+	current.Generation = 2
+	current.SupersedesFailedConfigSHA = failed
+	if !initialBootstrapFailedAtomRecoversSameLKG(registry, component.ID, current, prior, failed) {
+		t.Fatal("exact failed initial bootstrap successor was rejected")
+	}
+	for name, mutate := range map[string]func(*declarativerelease.Intent, *declarativerelease.Intent, *declarativerelease.Registry){
+		"missing prior": func(_ *declarativerelease.Intent, prior *declarativerelease.Intent, _ *declarativerelease.Registry) {
+			prior.Generation = 0
+		},
+		"changed LKG": func(current *declarativerelease.Intent, _ *declarativerelease.Intent, _ *declarativerelease.Registry) {
+			current.ExpectedPreviousImageDigest = "sha256:" + strings.Repeat("c", 64)
+		},
+		"changed scope": func(_ *declarativerelease.Intent, _ *declarativerelease.Intent, registry *declarativerelease.Registry) {
+			registry.Components[0].OwnershipAdoption = nil
+		},
+		"ordinary successor": func(current *declarativerelease.Intent, _ *declarativerelease.Intent, _ *declarativerelease.Registry) {
+			current.SupersedesFailedConfigSHA = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gotCurrent, gotPrior, gotRegistry := current, prior, registry
+			gotRegistry.Components = append([]declarativerelease.Component(nil), registry.Components...)
+			mutate(&gotCurrent, &gotPrior, &gotRegistry)
+			if initialBootstrapFailedAtomRecoversSameLKG(gotRegistry, component.ID, gotCurrent, gotPrior, failed) {
+				t.Fatal("invalid failed initial bootstrap successor was accepted")
+			}
+		})
+	}
+}
+
 func TestLoadLKGManifestUsesBootstrapOnlyForExplicitAdoption(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()

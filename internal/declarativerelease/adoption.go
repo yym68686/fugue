@@ -25,7 +25,8 @@ func BuildOwnershipAdoptionManifest(lkgManifest []byte, adoption OwnershipAdopti
 // the immutable forward target after an equal-value bootstrap adoption. This
 // is the bounded adopting-only path for transferring legacy leaf ownership.
 func BuildOwnershipTakeoverManifest(targetManifest []byte, adoption OwnershipAdoptionPlan, target TargetIdentity) ([]byte, error) {
-	if !adoption.AlreadyConverged || !target.Present || !digestPattern.MatchString(target.ManifestDigest) ||
+	if (!adoption.AlreadyConverged && !adoption.ResumeTakeover) || adoption.AlreadyConverged && adoption.ResumeTakeover ||
+		!target.Present || !digestPattern.MatchString(target.ManifestDigest) ||
 		target.ManifestDigest != digestOf(targetManifest) || !shaPattern.MatchString(target.ConfigSHA) ||
 		target.ManifestSHA != target.ConfigSHA || target.OCIRevision != target.ConfigSHA ||
 		!strings.Contains(target.ImageRef, "@sha256:") || len(adoption.Resources) == 0 {
@@ -71,6 +72,12 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 				return nil, err
 			}
 			for _, scaffold := range scaffolds {
+				if adoptionScopeContainsPointer(scope.Fields, scaffold.Pointer) {
+					// A reviewed field already carries its immutable forward
+					// value. Its scaffold is prewrite validation metadata only;
+					// replacing the field here would erase the takeover.
+					continue
+				}
 				if err := setAdoptionPointer(item, scaffold.Pointer, scaffold.Value); err != nil {
 					return nil, err
 				}
@@ -83,6 +90,15 @@ func buildOwnershipScopedManifest(sourceManifest []byte, adoption OwnershipAdopt
 		return nil, errors.New("ownership adoption resource set expanded unexpectedly")
 	}
 	return CanonicalJSON(result)
+}
+
+func adoptionScopeContainsPointer(fields []string, pointer string) bool {
+	for _, field := range fields {
+		if field == pointer {
+			return true
+		}
+	}
+	return false
 }
 
 func validateOwnershipValidationScaffolds(scope OwnershipAdoptionResourcePlan) ([]OwnershipValidationScaffold, error) {
@@ -106,9 +122,10 @@ func validateOwnershipValidationScaffolds(scope OwnershipAdoptionResourcePlan) (
 
 // OwnershipTakeoverValidationScaffolds returns fields required only to make a
 // reviewed leaf-level Pod container apply structurally valid. They are not
-// takeover fields: the Kubernetes adapter must prove that the declarative
-// manager already owns each scaffold and that no legacy manager owns it before
-// executing the reviewed force-conflicts apply.
+// takeover fields unless the exact pointer is itself reviewed. The Kubernetes
+// adapter proves the live scaffold value and declarative ownership; a reviewed
+// scaffold may retain only an explicitly bound legacy Update owner until the
+// typed takeover conflict is forced.
 func OwnershipTakeoverValidationScaffolds(fields []string) ([]string, error) {
 	set := map[string]struct{}{}
 	for _, pointer := range fields {
@@ -130,6 +147,13 @@ func OwnershipTakeoverValidationScaffolds(fields []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+// OwnershipAdoptionPointerValue resolves one validated reviewed pointer from a
+// Kubernetes object. It is exposed for the adapter's exact live conflict-set
+// proof; callers still cannot construct or widen an adoption scope here.
+func OwnershipAdoptionPointerValue(resource map[string]any, pointer string) (any, error) {
+	return adoptionPointerValue(resource, pointer)
 }
 
 func adoptionPointerValue(value map[string]any, pointer string) (any, error) {
