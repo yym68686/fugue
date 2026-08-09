@@ -524,7 +524,7 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 		return nil, errors.New("ownership adoption live field manager identity is invalid")
 	}
 	adoptionAlreadyConverged := true
-	resumeTakeover := InitialExplicitBootstrapFailedAtomSuccessor(release) || exactEdgeWorkerImageOwnershipRepair(release)
+	resumeTakeover := ownershipAdoptionCanResume(release)
 	resources := make(map[ResourceIdentity]ResourceObservation, len(prewrite.Resources))
 	for _, resource := range prewrite.Resources {
 		resources[resource.Identity] = resource
@@ -579,6 +579,10 @@ func exactEdgeWorkerImageOwnershipRepair(release PlanRelease) bool {
 		ArtifactTargets: release.ArtifactTargets, Transition: release.Transition,
 		OwnershipAdoption: release.OwnershipAdoption,
 	}) == nil
+}
+
+func ownershipAdoptionCanResume(release PlanRelease) bool {
+	return InitialExplicitBootstrapFailedAtomSuccessor(release) || exactEdgeWorkerImageOwnershipRepair(release)
 }
 
 func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptionScope) ([]OwnershipValidationScaffold, error) {
@@ -1208,7 +1212,7 @@ func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
 		allReviewedExclusive = allReviewedExclusive && prewrite.ReviewedOwnershipExclusive
 		scopes = append(scopes, OwnershipAdoptionScope{Identity: resource.Identity, Fields: resource.Fields})
 	}
-	wantResume := InitialExplicitBootstrapFailedAtomSuccessor(release) && allReviewedApplied && !allReviewedExclusive
+	wantResume := ownershipAdoptionCanResume(release) && allReviewedApplied && !allReviewedExclusive
 	if adoption.AlreadyConverged != allReviewedExclusive || adoption.ResumeTakeover != wantResume ||
 		adoption.AlreadyConverged && adoption.ResumeTakeover {
 		return errors.New("execution ownership adoption convergence evidence is invalid")

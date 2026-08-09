@@ -326,11 +326,11 @@ func TestEdgeGroupRegistryAllowsOnlyExactImageOwnershipRepair(t *testing.T) {
 		BootstrapLKGPath: worker.BootstrapLKGPath, ArtifactTargets: worker.ArtifactTargets,
 		Transition: worker.Transition, OwnershipAdoption: worker.OwnershipAdoption,
 	}
-	if !exactEdgeWorkerImageOwnershipRepair(release) {
+	if !exactEdgeWorkerImageOwnershipRepair(release) || !ownershipAdoptionCanResume(release) {
 		t.Fatal("exact edge worker image repair did not explicitly authorize takeover")
 	}
 	release.RetrySameLKG = false
-	if exactEdgeWorkerImageOwnershipRepair(release) {
+	if exactEdgeWorkerImageOwnershipRepair(release) || ownershipAdoptionCanResume(release) {
 		t.Fatal("non-retry edge worker atom implicitly authorized ownership takeover")
 	}
 
