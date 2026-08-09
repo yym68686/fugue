@@ -409,6 +409,40 @@ func TestBindOwnershipAdoptionRecognizesAnExactExistingDeclarativeManager(t *tes
 	}
 }
 
+func TestExactAPIImageOwnershipRepairAllowsOnlyTheTwoReviewedPointers(t *testing.T) {
+	release := PlanRelease{
+		ComponentID: "api", MigrationState: "adopting", RetrySameLKG: true, ExpectedPreviousPresent: true,
+		BootstrapLKGPath: "deploy/releases/api/lkg.json",
+		Artifact:         Artifact{Repository: "ghcr.io/yym68686/fugue-api"},
+		Workload: Workload{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+			Container: "api", FieldManager: "fugue-api-declarative", RolloutMode: "rolling", Replicas: 2,
+		},
+		OwnershipAdoption: &OwnershipAdoption{
+			LegacyFieldManager: "kubectl-patch",
+			Resources: []OwnershipAdoptionScope{{
+				Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+				Fields: []string{
+					"/spec/template/metadata/annotations/fugue.pro~1source-commit",
+					"/spec/template/spec/containers[name=api]/image",
+				},
+			}},
+		},
+	}
+	if !exactAPIImageOwnershipRepair(release) || !ownershipAdoptionCanResume(release) {
+		t.Fatal("exact API image/source ownership repair was not authorized")
+	}
+	release.RetrySameLKG = false
+	if exactAPIImageOwnershipRepair(release) || ownershipAdoptionCanResume(release) {
+		t.Fatal("ordinary API successor borrowed ownership takeover authorization")
+	}
+	release.RetrySameLKG = true
+	release.OwnershipAdoption.Resources[0].Fields[1] = "/spec/template/spec/containers"
+	if exactAPIImageOwnershipRepair(release) || ownershipAdoptionCanResume(release) {
+		t.Fatal("broad API container ownership was authorized")
+	}
+}
+
 func TestPrepareAlreadyAdoptedOwnershipDryRunsForwardWithoutForce(t *testing.T) {
 	plan := boundAPIPlan(t)
 	plan.PlanDigest = ""

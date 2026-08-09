@@ -590,7 +590,28 @@ func exactEdgeWorkerImageOwnershipRepair(release PlanRelease) bool {
 }
 
 func ownershipAdoptionCanResume(release PlanRelease) bool {
-	return InitialExplicitBootstrapFailedAtomSuccessor(release) || exactEdgeWorkerImageOwnershipRepair(release)
+	return InitialExplicitBootstrapFailedAtomSuccessor(release) || exactEdgeWorkerImageOwnershipRepair(release) || exactAPIImageOwnershipRepair(release)
+}
+
+func exactAPIImageOwnershipRepair(release PlanRelease) bool {
+	if release.ComponentID != "api" || release.MigrationState != "adopting" || !release.RetrySameLKG ||
+		!release.ExpectedPreviousPresent || release.BootstrapLKGPath != "deploy/releases/api/lkg.json" ||
+		release.BootstrapRuntime != nil || len(release.ArtifactTargets) != 0 || release.Transition != nil ||
+		release.Artifact.Repository != "ghcr.io/yym68686/fugue-api" || release.OwnershipAdoption == nil {
+		return false
+	}
+	adoption := release.OwnershipAdoption
+	if adoption.LegacyFieldManager != "kubectl-patch" ||
+		!equalStrings(adoption.legacyManagers(), []string{"kubectl-patch"}) || len(adoption.Resources) != 1 {
+		return false
+	}
+	scope := adoption.Resources[0]
+	return scope.Identity == (ResourceIdentity{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+	}) && equalStrings(scope.Fields, []string{
+		"/spec/template/metadata/annotations/fugue.pro~1source-commit",
+		"/spec/template/spec/containers[name=api]/image",
+	})
 }
 
 func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptionScope) ([]OwnershipValidationScaffold, error) {
