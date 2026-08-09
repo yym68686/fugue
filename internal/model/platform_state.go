@@ -16,7 +16,6 @@ const (
 	PlatformArtifactKindRuntimeContinuityPlan     = "runtime_continuity_plan"
 	PlatformArtifactKindNodeGuardianPolicy        = "node_guardian_policy"
 	PlatformArtifactKindReleaseGuardPolicy        = "release_guard_policy"
-	PlatformArtifactKindComponentReleasePlan      = "component_release_plan"
 	PlatformArtifactKindEdgeRankingPolicy         = "edge_ranking_policy"
 	PlatformArtifactKindTrafficSafetyPolicy       = "traffic_safety_policy"
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"
@@ -25,9 +24,7 @@ const (
 	// PlatformArtifactKindEdgeRouteIntent is a read-only component identity
 	// capability. It is intentionally not accepted by the platform artifact
 	// store: RouteIntent publication gets its own outbox and ledger boundary.
-	PlatformArtifactKindEdgeRouteIntent    = "edge_route_intent"
-	PlatformComponentPlanObserveScope      = "component_plan.observe"
-	PlatformComponentPlanObservationReason = "release-control component plan shadow observation"
+	PlatformArtifactKindEdgeRouteIntent = "edge_route_intent"
 
 	PlatformArtifactStatusDraft     = "draft"
 	PlatformArtifactStatusValidated = "validated"

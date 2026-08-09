@@ -173,7 +173,6 @@ func TestConsumerAndLKGInventoriesCoverPlatformArtifactKinds(t *testing.T) {
 		model.PlatformArtifactKindRuntimeContinuityPlan,
 		model.PlatformArtifactKindNodeGuardianPolicy,
 		model.PlatformArtifactKindReleaseGuardPolicy,
-		model.PlatformArtifactKindComponentReleasePlan,
 		model.PlatformArtifactKindEdgeRankingPolicy,
 		model.PlatformArtifactKindTrafficSafetyPolicy,
 		model.PlatformArtifactKindSubsystemFailureContracts,

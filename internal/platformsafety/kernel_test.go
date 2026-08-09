@@ -1,14 +1,11 @@
 package platformsafety
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/bundleauth"
-	"fugue/internal/componentmanifest"
 	"fugue/internal/model"
 )
 
@@ -67,113 +64,6 @@ func TestFullReleaseRequiresValidatedArtifactHashAndPinnedRollback(t *testing.T)
 	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelShadow, "", "", 0, testPlatformSafetyKeyring()); decision.Pass {
 		t.Fatalf("tampered content must not pass with a stale content hash: %+v", decision)
 	}
-}
-
-func TestComponentReleasePlanIsGitBoundAndPermanentlyShadowOnly(t *testing.T) {
-	artifact := testSignedComponentReleasePlanArtifact(t)
-	if decision := EvaluateArtifactRelease(
-		artifact,
-		model.PlatformArtifactReleaseChannelShadow,
-		"",
-		"",
-		0,
-		testPlatformSafetyKeyring(),
-	); !decision.Pass {
-		t.Fatalf("valid component release plan did not pass shadow publication: %+v", decision)
-	}
-
-	for _, test := range []struct {
-		channel       string
-		rollback      string
-		canaryRuleRef string
-	}{
-		{channel: model.PlatformArtifactReleaseChannelGray, canaryRuleRef: "node:test-node"},
-		{channel: model.PlatformArtifactReleaseChannelFull, rollback: "git-stable"},
-	} {
-		decision := EvaluateArtifactReleaseWithOverride(
-			artifact,
-			test.channel,
-			test.rollback,
-			test.canaryRuleRef,
-			0,
-			model.PlatformArtifactOverrideModeKernelBreakGlass,
-			testPlatformSafetyKeyring(),
-		)
-		if decision.Pass ||
-			!decisionHasInvariant(decision, InvariantShadowNoProductionImpact) ||
-			decisionHasBypassedInvariant(decision, InvariantShadowNoProductionImpact) {
-			t.Fatalf("component release plan escaped shadow through %s: %+v", test.channel, decision)
-		}
-	}
-
-	artifact.Generation = "git-3333333333333333333333333333333333333333"
-	resigned, err := SignPlatformArtifact(artifact, testPlatformSafetyKeyring())
-	if err != nil {
-		t.Fatalf("re-sign malformed artifact: %v", err)
-	}
-	decision := EvaluateArtifactIntegrity(resigned, testPlatformSafetyKeyring())
-	if decision.Pass || !decisionHasInvariant(decision, InvariantArtifactSchema) {
-		t.Fatalf("re-signed artifact with a false Git generation passed integrity: %+v", decision)
-	}
-}
-
-func testSignedComponentReleasePlanArtifact(t *testing.T) model.PlatformArtifact {
-	t.Helper()
-	manifestFile, err := os.Open(filepath.Join("..", "..", "docs", "architecture", "component-ownership-v1.yaml"))
-	if err != nil {
-		t.Fatalf("open component ownership manifest: %v", err)
-	}
-	defer manifestFile.Close()
-	manifest, err := componentmanifest.Load(manifestFile)
-	if err != nil {
-		t.Fatalf("load component ownership manifest: %v", err)
-	}
-	changePlan, err := componentmanifest.PlanChanges(manifest, []string{"cmd/fugue-image-cache/main.go"})
-	if err != nil {
-		t.Fatalf("plan component change: %v", err)
-	}
-	coordinationPlan, err := componentmanifest.BuildShadowCoordinationPlan(changePlan)
-	if err != nil {
-		t.Fatalf("build component coordination plan: %v", err)
-	}
-	envelope, err := componentmanifest.BuildShadowArtifactEnvelope(
-		manifest,
-		changePlan,
-		coordinationPlan,
-		"1111111111111111111111111111111111111111",
-		"2222222222222222222222222222222222222222",
-	)
-	if err != nil {
-		t.Fatalf("build component release plan envelope: %v", err)
-	}
-	identity, err := envelope.ArtifactIdentity()
-	if err != nil {
-		t.Fatalf("derive component release plan identity: %v", err)
-	}
-	content, err := envelope.Content()
-	if err != nil {
-		t.Fatalf("encode component release plan content: %v", err)
-	}
-	artifact := model.PlatformArtifact{
-		ID:                 "artifact-component-release-plan",
-		ArtifactKind:       model.PlatformArtifactKindComponentReleasePlan,
-		Scope:              model.PlatformArtifactScope{ScopeType: identity.ScopeType, Key: identity.ScopeKey},
-		ScopeKey:           identity.ScopeKey,
-		SchemaVersion:      model.PlatformArtifactSchemaVersionV1,
-		Generation:         identity.Generation,
-		GenerationSequence: 1,
-		Status:             model.PlatformArtifactStatusValidated,
-		Content:            content,
-		Metadata:           map[string]string{},
-		CreatedAt:          time.Date(2026, 7, 10, 1, 0, 0, 0, time.UTC),
-		UpdatedAt:          time.Date(2026, 7, 10, 1, 0, 0, 0, time.UTC),
-	}
-	artifact.ContentHash = artifactContentHash(artifact.Content)
-	signed, err := SignPlatformArtifact(artifact, testPlatformSafetyKeyring())
-	if err != nil {
-		t.Fatalf("sign component release plan artifact: %v", err)
-	}
-	return signed
 }
 
 func TestGrayReleaseRequiresBoundedCanaryScope(t *testing.T) {

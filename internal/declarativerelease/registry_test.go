@@ -32,6 +32,12 @@ func TestRetiredReleaseModesHaveZeroRepositoryHits(t *testing.T) {
 		"release" + "contract",
 		"composite" + "-release-transactions",
 		"Composite" + "Release",
+		"component" + "manifest",
+		"component" + "-release-plan",
+		"component" + "_release_plan",
+		"component" + "_plan.observe",
+		"fugue-" + "component-plan",
+		"Component" + "ReleasePlan",
 	}
 	command := exec.Command("git", "ls-files", "-z")
 	command.Dir = "../.."

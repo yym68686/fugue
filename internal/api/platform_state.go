@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"fugue/internal/auth"
-	"fugue/internal/componentmanifest"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
@@ -152,19 +151,8 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !principal.IsPlatformAdmin() {
-		if !componentPlanObservationPrincipalAuthorized(principal) {
-			httpx.WriteError(w, http.StatusForbidden, "exact component plan observation authorization required")
-			return
-		}
-		artifact, err := s.store.GetPlatformArtifact(r.PathValue("artifact_id"))
-		if err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
-		if !componentPlanObservationAuthorized(principal, artifact, req) {
-			httpx.WriteError(w, http.StatusForbidden, "exact component plan observation authorization required")
-			return
-		}
+		httpx.WriteError(w, http.StatusForbidden, "platform administrator required")
+		return
 	}
 	if req.ForcePublish {
 		req.SoftOverride = true
@@ -231,31 +219,6 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 		Message:  message,
 		LKG:      lkg,
 	})
-}
-
-func componentPlanObservationAuthorized(
-	principal model.Principal,
-	artifact model.PlatformArtifact,
-	req model.PlatformArtifactReleaseRequest,
-) bool {
-	if !componentPlanObservationPrincipalAuthorized(principal) ||
-		artifact.ArtifactKind != model.PlatformArtifactKindComponentReleasePlan ||
-		artifact.Status != model.PlatformArtifactStatusValidated ||
-		req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
-		req.CanaryRuleRef != "" || req.SoftOverride || req.ForcePublish || req.KernelBreakGlass != nil ||
-		req.Reason != model.PlatformComponentPlanObservationReason {
-		return false
-	}
-	envelope, err := componentmanifest.DecodeShadowArtifactContent(artifact.Content)
-	return err == nil && req.IdempotencyKey == envelope.CoordinationPlan.IdempotencyKey
-}
-
-func componentPlanObservationPrincipalAuthorized(principal model.Principal) bool {
-	return principal.ActorType == model.ActorTypeAPIKey &&
-		len(principal.Scopes) == 3 &&
-		principal.HasExplicitScope(model.PlatformComponentPlanObserveScope) &&
-		principal.HasExplicitScope("artifact.read") &&
-		principal.HasExplicitScope("artifact.release_shadow")
 }
 
 func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.Request) {
@@ -714,19 +677,6 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 		return releaseSignalPolicyValidationResult(artifact)
 	case model.PlatformArtifactKindGatePolicyRegistry:
 		return gatePolicyValidationResult(artifact)
-	case model.PlatformArtifactKindComponentReleasePlan:
-		err := componentmanifest.ValidateArtifactBinding(
-			artifact.Content,
-			artifact.Scope.ScopeType,
-			artifact.Scope.Key,
-			artifact.ScopeKey,
-			artifact.Generation,
-		)
-		pass = err == nil
-		message = "component release plan envelope, scope, and generation must match exact Git evidence"
-		if err != nil {
-			message = err.Error()
-		}
 	}
 	return model.PlatformArtifactValidationResult{
 		Name:     "invariant." + artifact.ArtifactKind,
