@@ -105,6 +105,19 @@ func (receipt OwnershipAdoptionReceipt) Validate(component Component, groupID st
 			return fmt.Errorf("ownership adoption receipt resource %s/%s is unverified", resource.Identity.Kind, resource.Identity.Name)
 		}
 	}
+	if component.Transition != nil && component.Transition.Type == "edge-group-ab" && component.Transition.EdgeGroupAB != nil {
+		resources := make(map[ResourceIdentity]ResourceObservation, len(final.Resources))
+		for _, resource := range final.Resources {
+			resources[resource.Identity] = resource
+		}
+		for _, target := range component.ArtifactTargets {
+			identity := ResourceIdentity{APIVersion: target.APIVersion, Kind: target.Kind, Namespace: target.Namespace, Name: target.Name}
+			resource, exists := resources[identity]
+			if !exists || !resource.ReviewedOwnershipApplied || !resource.ReviewedOwnershipExclusive {
+				return fmt.Errorf("ownership adoption receipt resource %s/%s is not pointer-exclusive", identity.Kind, identity.Name)
+			}
+		}
+	}
 	if len(receipt.Ownership) > 0 {
 		adoption := OwnershipAdoption{LegacyFieldManager: "receipt-proof", Resources: receipt.Ownership}
 		if err := adoption.validate(component); err != nil {

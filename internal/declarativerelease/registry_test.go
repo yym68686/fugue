@@ -177,6 +177,31 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		if byID[componentID].BootstrapLKGPath != "" && validateEdgeWorkerOwnershipRepair(byID[componentID]) != nil {
 			t.Fatalf("%s retains a bootstrap LKG outside an exact image ownership repair", componentID)
 		}
+		if receiptPath := byID[componentID].AdoptionReceiptPath; receiptPath != "" {
+			file, err := os.Open(filepath.Join("../..", receiptPath))
+			if err != nil {
+				t.Fatalf("open %s adoption receipt: %v", componentID, err)
+			}
+			receipt, decodeErr := DecodeOwnershipAdoptionReceipt(file)
+			_ = file.Close()
+			if decodeErr != nil {
+				t.Fatalf("decode %s adoption receipt: %v", componentID, decodeErr)
+			}
+			if err := receipt.Validate(byID[componentID], group.GroupID); err != nil {
+				t.Fatalf("validate %s adoption receipt: %v", componentID, err)
+			}
+			invalid := receipt
+			invalid.Final.Resources = append([]ResourceObservation(nil), receipt.Final.Resources...)
+			for index := range invalid.Final.Resources {
+				if invalid.Final.Resources[index].Identity.Kind == "DaemonSet" {
+					invalid.Final.Resources[index].ReviewedOwnershipExclusive = false
+					break
+				}
+			}
+			if err := invalid.Validate(byID[componentID], group.GroupID); err == nil || !strings.Contains(err.Error(), "pointer-exclusive") {
+				t.Fatalf("%s receipt lost pointer-exclusive fail-closed validation: %v", componentID, err)
+			}
+		}
 	}
 	baseFile, err := os.Open(filename)
 	if err != nil {
