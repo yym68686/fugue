@@ -3,7 +3,7 @@
   "kind": "HelmLedgerRetirementIntent",
   "release": "fugue",
   "namespace": "fugue-system",
-  "expectedSourceParent": "fe531f35d94543f4259fe4ce707f1699c5c6a729",
+  "expectedSourceParent": "289a2be1cac736a1581d9d9fff7206afbd6067c8",
   "expectedHelmRevision": 828,
   "expectedHelmStatus": "deployed",
   "expectedManifestDigest": "sha256:d6e28473e5bf5deb64e53d76cfca2dea67501b88476762b8bd61b21f8e828baa",

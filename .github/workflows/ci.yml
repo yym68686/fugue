@@ -62,7 +62,7 @@ jobs:
           "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
           "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
           if [[ -f deploy/releases/helm-ledger-retirement/intent.json ]] &&
-             git diff --diff-filter=A --name-only "${base}...HEAD" -- | grep -Fxq 'deploy/releases/helm-ledger-retirement/intent.json'; then
+             grep -Fxq 'deploy/releases/helm-ledger-retirement/intent.json' "${CHANGED}"; then
             echo 'helm_ledger_retirement=true' >>"${GITHUB_OUTPUT}"
           else
             echo 'helm_ledger_retirement=false' >>"${GITHUB_OUTPUT}"
@@ -288,7 +288,7 @@ jobs:
         run: scripts/retire_helm_edge_ledger.sh
       - name: Upload the terminal Helm ledger receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fugue-helm-ledger-retirement-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/fugue-helm-ledger-retirement-result.json
