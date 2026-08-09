@@ -658,19 +658,49 @@ func TestPrepareRecoversTheDeclaredLKGAfterATransientUnreadyObservation(t *testi
 	}
 }
 
-func TestPrepareIndependentReleaseAdvancesFromExactRestartedLKG(t *testing.T) {
-	plan, receipt, rendered, lkg, _ := executionFixture(t)
+func TestPrepareFailedAtomSuccessorAdvancesFromTypedReadyCountMismatch(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.PlanDigest = ""
+	plan.Releases[0].SupersedesFailedConfigSHA = strings.Repeat("f", 40)
+	unsigned, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(unsigned)
+	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	if plan.Releases[0].RetrySameLKG || plan.Releases[0].SupersedesFailedConfigSHA == "" {
+		t.Fatalf("fixture is not a failed-atom successor: %+v", plan.Releases[0])
+	}
 	degraded := casOnlyObservation(lkg)
 	fake := &fakeCluster{
-		observationErrors: []error{fmt.Errorf("%w: ready workload pod restarted", ErrDegradedPredecessorHealth)},
-		cas:               []Observation{degraded, degraded},
+		observations: []Observation{lkg},
+		healthErrors: []error{
+			fmt.Errorf("%w: ready workload pod count mismatch: got=0 want=1", ErrDegradedPredecessorHealth),
+		},
+		cas: []Observation{degraded, degraded},
 	}
 	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
-	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || len(fake.verifiedTargets) != 1 || len(fake.healthTargets) != 0 {
+	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || len(fake.verifiedTargets) != 1 || len(fake.healthTargets) != 1 {
 		t.Fatalf("independent degraded predecessor: plan=%+v verified=%d health_waits=%d err=%v", prepared, len(fake.verifiedTargets), len(fake.healthTargets), err)
 	}
-	if fake.verifiedTargets[0] != prepared.LKG || len(fake.converged) != 1 || fake.dryRuns != 2 {
-		t.Fatalf("independent degraded predecessor was not exact-CAS verified: verified=%+v converged=%d dryRuns=%d", fake.verifiedTargets, len(fake.converged), fake.dryRuns)
+	if fake.healthTargets[0] != prepared.LKG || fake.verifiedTargets[0] != prepared.LKG || len(fake.casManifests) != 2 || len(fake.converged) != 1 || fake.dryRuns != 2 {
+		t.Fatalf("independent degraded predecessor was not exact-CAS verified: health=%+v verified=%+v cas=%d converged=%d dryRuns=%d", fake.healthTargets, fake.verifiedTargets, len(fake.casManifests), len(fake.converged), fake.dryRuns)
+	}
+}
+
+func TestPrepareFailedAtomSuccessorRejectsUntypedReadyCountMismatch(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	fake := &fakeCluster{
+		observations: []Observation{lkg},
+		healthErrors: []error{
+			errors.New("ready workload pod count mismatch: got=0 want=1"),
+		},
+	}
+	if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || !strings.Contains(err.Error(), "ready workload pod count mismatch") {
+		t.Fatalf("untyped predecessor error was accepted: %v", err)
+	}
+	if len(fake.verifiedTargets) != 0 || len(fake.casManifests) != 0 || fake.dryRuns != 0 {
+		t.Fatalf("untyped predecessor error entered degraded recovery: verified=%d cas=%d dryRuns=%d", len(fake.verifiedTargets), len(fake.casManifests), fake.dryRuns)
 	}
 }
 

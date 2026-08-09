@@ -294,8 +294,12 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 			if release.ExpectedPreviousPresent {
 				if !lkgHealthVerified {
 					_, err = cluster.WaitHealthy(ctx, release, lkg, rendered.LKG)
+					if errors.Is(err, ErrDegradedPredecessorHealth) {
+						prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
+						degradedPredecessor = err == nil
+					}
 				}
-				if err == nil {
+				if err == nil && !degradedPredecessor {
 					var predecessorWitness []byte
 					if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
 						predecessorWitness, err = BootstrapPredecessorConvergenceManifest(rendered.LKG, release)

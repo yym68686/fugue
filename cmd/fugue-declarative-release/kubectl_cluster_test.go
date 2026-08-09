@@ -149,8 +149,12 @@ func TestParseObservationRequiresOneStableImmutableCohort(t *testing.T) {
 		t.Fatalf("unexpected observation: %+v", observation)
 	}
 	pods["items"].([]any)[1] = podFixture("api-2", "uid-2", strings.Repeat("1", 40), strings.Repeat("c", 64))
-	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false, false); err == nil || !strings.Contains(err.Error(), "mixed image IDs") {
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false, false); err == nil || !strings.Contains(err.Error(), "mixed image IDs") || errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth) {
 		t.Fatalf("mixed cohort was accepted: %v", err)
+	}
+	pods["items"] = pods["items"].([]any)[:1]
+	if _, err := parseObservation(mustJSON(t, workload), mustJSON(t, pods), release, false, false); err == nil || !strings.Contains(err.Error(), "ready workload pod count mismatch: got=1 want=2") || !errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth) {
+		t.Fatalf("insufficient ready cohort was not classified as degraded predecessor health: %v", err)
 	}
 }
 

@@ -2286,7 +2286,7 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 		evidence = append(evidence, stringValue(metadata["name"])+":"+stringValue(metadata["uid"])+":"+imageID+":"+strconv.FormatInt(restartCount, 10))
 	}
 	if readyCount != desired || desired < 1 || imageID == "" {
-		return "", "", fmt.Errorf("ready workload pod count mismatch: got=%d want=%d", readyCount, desired)
+		return "", "", fmt.Errorf("%w: ready workload pod count mismatch: got=%d want=%d", declarativerelease.ErrDegradedPredecessorHealth, readyCount, desired)
 	}
 	sort.Strings(evidence)
 	return imageID, digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
