@@ -91,31 +91,6 @@ func TestDeclarativeAPIManifestOwnsTrustedRouteIntentTLS(t *testing.T) {
 	}
 }
 
-func TestDeclarativeAPILKGPreservesLegacyOwnershipUntilFirstHandoff(t *testing.T) {
-	raw, err := os.ReadFile("../../deploy/releases/api/lkg.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	set, err := DecodeResourceSet(bytes.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	deployment, err := ResourceSetItem(mustCanonical(set), ResourceIdentity{
-		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	metadata := apiTLSObject(t, deployment, "metadata")
-	annotations := ensureReadStringMap(metadata, "annotations")
-	if _, exists := annotations["fugue.pro/api-ownership"]; exists {
-		t.Fatal("legacy API LKG prematurely claims declarative ownership")
-	}
-	if annotations["meta.helm.sh/release-name"] != "fugue" || annotations["meta.helm.sh/release-namespace"] != "fugue-system" {
-		t.Fatalf("legacy Helm ownership witness drifted: %#v", annotations)
-	}
-}
-
 func apiTLSObject(t *testing.T, value map[string]any, key string) map[string]any {
 	t.Helper()
 	result, ok := value[key].(map[string]any)

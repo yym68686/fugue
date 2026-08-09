@@ -79,8 +79,12 @@ func DecodeOwnershipAdoptionReceipt(reader io.Reader) (OwnershipAdoptionReceipt,
 }
 
 func (receipt OwnershipAdoptionReceipt) Validate(component Component, groupID string) error {
+	validScope := edgeGroupIDPattern.MatchString(groupID)
+	if component.ID == "api" {
+		validScope = groupID == component.ID
+	}
 	if receipt.APIVersion != OwnershipAdoptionReceiptAPIVersion || receipt.Kind != OwnershipAdoptionReceiptKind ||
-		receipt.Component != component.ID || receipt.GroupID != groupID || !edgeGroupIDPattern.MatchString(groupID) ||
+		receipt.Component != component.ID || receipt.GroupID != groupID || !validScope ||
 		receipt.RunID <= 0 || receipt.RunAttempt != 1 || !digestPattern.MatchString(receipt.TerminalReceiptDigest) ||
 		!digestPattern.MatchString(receipt.ReceiptDigest) {
 		return errors.New("ownership adoption receipt identity is invalid")
@@ -103,6 +107,18 @@ func (receipt OwnershipAdoptionReceipt) Validate(component Component, groupID st
 		if !resource.Present || resource.UID == "" || resource.ResourceVersion == "" || !digestPattern.MatchString(resource.ObjectDigest) ||
 			!receiptContainsString(resource.FieldManagers, component.Workload.FieldManager) {
 			return fmt.Errorf("ownership adoption receipt resource %s/%s is unverified", resource.Identity.Kind, resource.Identity.Name)
+		}
+	}
+	if component.ID == "api" {
+		pointerExclusive := false
+		for _, resource := range final.Resources {
+			if resource.Identity == wantPrimary && resource.ReviewedOwnershipApplied && resource.ReviewedOwnershipExclusive {
+				pointerExclusive = true
+				break
+			}
+		}
+		if !pointerExclusive {
+			return errors.New("API ownership adoption receipt is not pointer-exclusive")
 		}
 	}
 	if component.Transition != nil && component.Transition.Type == "edge-group-ab" && component.Transition.EdgeGroupAB != nil {

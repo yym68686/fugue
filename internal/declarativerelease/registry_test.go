@@ -203,6 +203,23 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 			}
 		}
 	}
+	for _, component := range registry.Components {
+		if component.Family == "edge" || component.AdoptionReceiptPath == "" {
+			continue
+		}
+		file, err := os.Open(filepath.Join("../..", component.AdoptionReceiptPath))
+		if err != nil {
+			t.Fatalf("open %s adoption receipt: %v", component.ID, err)
+		}
+		receipt, decodeErr := DecodeOwnershipAdoptionReceipt(file)
+		_ = file.Close()
+		if decodeErr != nil {
+			t.Fatalf("decode %s adoption receipt: %v", component.ID, decodeErr)
+		}
+		if err := receipt.Validate(component, receipt.GroupID); err != nil {
+			t.Fatalf("validate %s adoption receipt: %v", component.ID, err)
+		}
+	}
 	baseFile, err := os.Open(filename)
 	if err != nil {
 		t.Fatal(err)

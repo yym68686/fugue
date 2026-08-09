@@ -24,6 +24,37 @@ func TestOwnershipAdoptionReceiptBindsHealthyIndependentOwnership(t *testing.T) 
 	}
 }
 
+func TestAPIOwnershipReceiptUsesComponentScopeAndRequiresExclusivePointers(t *testing.T) {
+	component := Component{
+		ID: "api", Family: "control-plane", Artifact: Artifact{Repository: "ghcr.io/yym68686/fugue-api"},
+		Workload: Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", FieldManager: "fugue-api-declarative", Replicas: 2},
+	}
+	receipt := adoptionReceiptFixture(t, component, "api")
+	receipt.Final.Desired = 2
+	receipt.Final.Updated = 2
+	receipt.Final.Ready = 2
+	receipt.Final.Available = 2
+	receipt.Final.Primary.Name = "fugue-fugue-api"
+	receipt.Final.Resources[0].Identity = receipt.Final.Primary
+	receipt.Final.Resources[0].ReviewedOwnershipApplied = true
+	receipt.Final.Resources[0].ReviewedOwnershipExclusive = true
+	var err error
+	receipt.ReceiptDigest, err = receipt.digest()
+	if err != nil || receipt.Validate(component, "api") != nil {
+		t.Fatalf("valid API ownership receipt: digest=%v validate=%v", err, receipt.Validate(component, "api"))
+	}
+	tampered := receipt
+	tampered.Final.Resources = append([]ResourceObservation(nil), receipt.Final.Resources...)
+	tampered.Final.Resources[0].ReviewedOwnershipExclusive = false
+	tampered.ReceiptDigest, _ = tampered.digest()
+	if err := tampered.Validate(component, "api"); err == nil || !strings.Contains(err.Error(), "pointer-exclusive") {
+		t.Fatalf("non-exclusive API receipt was accepted: %v", err)
+	}
+	if err := receipt.Validate(component, "edge-group-control-plane-api"); err == nil {
+		t.Fatal("API receipt borrowed an Edge group scope")
+	}
+}
+
 func TestOwnershipTerminalHandoffAuthorizationIsDigestBound(t *testing.T) {
 	component := edgeGroupFixture("alpha", "edge-group-metro-alpha").Control
 	receipt := adoptionReceiptFixture(t, component, "edge-group-metro-alpha")
