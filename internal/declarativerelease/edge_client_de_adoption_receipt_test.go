@@ -61,20 +61,20 @@ func TestEdgeClientDEIndependentTransitionReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if intent.Generation != 11 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
-		intent.ExpectedPreviousConfigSHA != "4743c1e20f0b048ec581f435ba46685a309b6cf4" ||
+	if intent.Generation != 12 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
+		intent.ExpectedPreviousConfigSHA != "a1de385381254562e531afc98ff530dc73caeb3d" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA ||
 		intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:90d2682f2510bd1768fb3759bbb2c731471c97ffff0fe68bd80931f22017b5d2" {
+		intent.ExpectedPreviousImageDigest != "sha256:73d128be4169567322555051e8af97126e7d4d242aef5be5f4bc71b68aaff8e5" {
 		t.Fatalf("edge-client-de successor is not bound to the verified independent LKG: %+v", intent)
 	}
 	previous := intent
-	previous.Generation = 10
-	previous.ExpectedPreviousConfigSHA = "d4c759a344baa8f5a479116112aa973a0a7b5de0"
+	previous.Generation = 11
+	previous.ExpectedPreviousConfigSHA = "4743c1e20f0b048ec581f435ba46685a309b6cf4"
 	previous.ExpectedPreviousManifestSHA = previous.ExpectedPreviousConfigSHA
 	previous.ExpectedPreviousOCIRevision = previous.ExpectedPreviousConfigSHA
-	previous.ExpectedPreviousImageDigest = "sha256:282d9e6a7fcaffac63ae78a12769467528e2c7d0141502c6be5560cfcd136235"
-	previous.SupersedesFailedConfigSHA = "6145b4ef69da0c2ea133cf8c3a9e4b58c1566e73"
+	previous.ExpectedPreviousImageDigest = "sha256:90d2682f2510bd1768fb3759bbb2c731471c97ffff0fe68bd80931f22017b5d2"
+	previous.SupersedesFailedConfigSHA = ""
 	plan, err := BuildPlan(registry,
 		"1111111111111111111111111111111111111111",
 		"2222222222222222222222222222222222222222",
@@ -86,7 +86,7 @@ func TestEdgeClientDEIndependentTransitionReceipt(t *testing.T) {
 	bound, err := BindIntents(registry, plan,
 		map[string]Intent{component.ID: intent},
 		map[string]Intent{component.ID: previous},
-		map[string]string{component.ID: "4743c1e20f0b048ec581f435ba46685a309b6cf4"},
+		map[string]string{component.ID: "a1de385381254562e531afc98ff530dc73caeb3d"},
 	)
 	if err != nil {
 		t.Fatal(err)

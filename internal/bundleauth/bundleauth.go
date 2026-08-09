@@ -265,34 +265,6 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		payload := cloneBundleForSigning(out, validUntil, keyID)
 		return signPayload(payload, key)
 	}
-	appendPreDecisionIDEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
-		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
-			return ""
-		}
-		payload := cloneEdgeRouteBundleBeforeDecisionIDsForSigning(bundle, validUntil, keyID)
-		return signPayload(payload, key)
-	}
-	appendPreRequestBodyPolicyEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
-		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
-			return ""
-		}
-		payload := cloneEdgeRouteBundleBeforeRequestBodyPoliciesForSigning(bundle, validUntil, keyID)
-		return signPayload(payload, key)
-	}
-	appendLegacyEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
-		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
-			return ""
-		}
-		payload := cloneEdgeRouteBundleForLegacySigning(bundle, validUntil, keyID)
-		return signPayload(payload, key)
-	}
-	appendLegacyEdgeDNSSignature := func(bundle model.EdgeDNSBundle, key, keyID string) string {
-		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
-			return ""
-		}
-		payload := cloneEdgeDNSBundleForLegacySigning(bundle, validUntil, keyID)
-		return signPayload(payload, key)
-	}
 	signature := appendSignature(primaryKey, primaryKeyID)
 	previousSignature := appendSignature(keyring.previousKey(), keyring.previousKeyID())
 	switch typed := any(&out).(type) {
@@ -318,30 +290,6 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		if previousSignature != "" {
 			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), previousSignature, typed.GeneratedAt, validUntil))
 		}
-		preDecisionIDSignature := appendPreDecisionIDEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
-		if preDecisionIDSignature != "" && preDecisionIDSignature != signature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, preDecisionIDSignature, typed.GeneratedAt, validUntil))
-		}
-		preDecisionIDPreviousSignature := appendPreDecisionIDEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
-		if preDecisionIDPreviousSignature != "" && preDecisionIDPreviousSignature != previousSignature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), preDecisionIDPreviousSignature, typed.GeneratedAt, validUntil))
-		}
-		preRequestBodyPolicySignature := appendPreRequestBodyPolicyEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
-		if preRequestBodyPolicySignature != "" && preRequestBodyPolicySignature != signature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, preRequestBodyPolicySignature, typed.GeneratedAt, validUntil))
-		}
-		preRequestBodyPolicyPreviousSignature := appendPreRequestBodyPolicyEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
-		if preRequestBodyPolicyPreviousSignature != "" && preRequestBodyPolicyPreviousSignature != previousSignature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), preRequestBodyPolicyPreviousSignature, typed.GeneratedAt, validUntil))
-		}
-		legacySignature := appendLegacyEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
-		if legacySignature != "" && legacySignature != signature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, legacySignature, typed.GeneratedAt, validUntil))
-		}
-		legacyPreviousSignature := appendLegacyEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
-		if legacyPreviousSignature != "" && legacyPreviousSignature != previousSignature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), legacyPreviousSignature, typed.GeneratedAt, validUntil))
-		}
 		typed.Signatures = signatures
 	case *model.EdgeSSHRouteBundle:
 		typed.ValidUntil = validUntil
@@ -366,110 +314,7 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		if previousSignature != "" {
 			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), previousSignature, typed.GeneratedAt, validUntil))
 		}
-		legacySignature := appendLegacyEdgeDNSSignature(*typed, primaryKey, primaryKeyID)
-		if legacySignature != "" && legacySignature != signature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, legacySignature, typed.GeneratedAt, validUntil))
-		}
-		legacyPreviousSignature := appendLegacyEdgeDNSSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
-		if legacyPreviousSignature != "" && legacyPreviousSignature != previousSignature {
-			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), legacyPreviousSignature, typed.GeneratedAt, validUntil))
-		}
 		typed.Signatures = signatures
-	}
-	return out
-}
-
-func cloneEdgeRouteBundleBeforeDecisionIDsForSigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
-	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
-	for idx := range routes {
-		routes[idx].DecisionID = ""
-	}
-	return cloneEdgeRouteBundleWithRoutesForSigning(bundle, routes, validUntil, keyID)
-}
-
-func cloneEdgeRouteBundleBeforeRequestBodyPoliciesForSigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
-	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
-	for idx := range routes {
-		routes[idx].DecisionID = ""
-		routes[idx].RequestBodyPolicies = nil
-	}
-	return cloneEdgeRouteBundleWithRoutesForSigning(bundle, routes, validUntil, keyID)
-}
-
-func cloneEdgeRouteBundleForLegacySigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
-	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
-	for idx := range routes {
-		routes[idx].DecisionID = ""
-		routes[idx].Upstreams = nil
-		routes[idx].RequestBodyPolicies = nil
-		routes[idx].ExcludedEdgeIDs = nil
-		routes[idx].ExcludedEdgeGroupIDs = nil
-		routes[idx].ExclusionReason = ""
-		routes[idx].ExclusionExpiresAt = nil
-	}
-	return cloneEdgeRouteBundleWithRoutesForSigning(bundle, routes, validUntil, keyID)
-}
-
-func cloneEdgeRouteBundleWithRoutesForSigning(bundle model.EdgeRouteBundle, routes []model.EdgeRouteBinding, validUntil time.Time, keyID string) bundleSigningPayload {
-	return bundleSigningPayload{
-		SchemaVersion:      bundle.SchemaVersion,
-		Version:            bundle.Version,
-		Generation:         bundle.Generation,
-		PreviousGeneration: bundle.PreviousGeneration,
-		GeneratedAt:        bundle.GeneratedAt,
-		ValidUntil:         validUntil,
-		Issuer:             bundle.Issuer,
-		KeyID:              keyID,
-		EdgeID:             bundle.EdgeID,
-		EdgeGroupID:        bundle.EdgeGroupID,
-		Routes:             routes,
-		TLSAllowlist:       bundle.TLSAllowlist,
-	}
-}
-
-func cloneEdgeDNSBundleForLegacySigning(bundle model.EdgeDNSBundle, validUntil time.Time, keyID string) bundleSigningPayload {
-	records := append([]model.EdgeDNSRecord(nil), bundle.Records...)
-	for idx := range records {
-		records[idx].Candidates = cloneLegacyEdgeDNSAnswerCandidates(records[idx].Candidates)
-		records[idx].ScopedCandidates = cloneLegacyEdgeDNSScopedAnswerCandidates(records[idx].ScopedCandidates)
-	}
-	return bundleSigningPayload{
-		SchemaVersion:      bundle.SchemaVersion,
-		Version:            bundle.Version,
-		Generation:         bundle.Generation,
-		PreviousGeneration: bundle.PreviousGeneration,
-		GeneratedAt:        bundle.GeneratedAt,
-		ValidUntil:         validUntil,
-		Issuer:             bundle.Issuer,
-		KeyID:              keyID,
-		EdgeID:             bundle.DNSNodeID,
-		EdgeGroupID:        bundle.EdgeGroupID,
-		Records:            records,
-	}
-}
-
-func cloneLegacyEdgeDNSScopedAnswerCandidates(scoped []model.EdgeDNSScopedAnswerCandidates) []model.EdgeDNSScopedAnswerCandidates {
-	if len(scoped) == 0 {
-		return nil
-	}
-	out := append([]model.EdgeDNSScopedAnswerCandidates(nil), scoped...)
-	for idx := range out {
-		out[idx].Candidates = cloneLegacyEdgeDNSAnswerCandidates(out[idx].Candidates)
-	}
-	return out
-}
-
-func cloneLegacyEdgeDNSAnswerCandidates(candidates []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswerCandidate {
-	if len(candidates) == 0 {
-		return nil
-	}
-	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
-	for idx := range out {
-		out[idx].WorkloadMode = ""
-		out[idx].CanaryState = ""
-		out[idx].CanaryWeight = 0
-		out[idx].PublicProbeStatus = ""
-		out[idx].DNSEligible = false
 	}
 	return out
 }

@@ -8,230 +8,113 @@ import (
 	"fugue/internal/model"
 )
 
-func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
+func TestEdgeRouteBundleSignsOnlyCurrentKeyringPayloads(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 6, 18, 2, 45, 0, 0, time.UTC)
-	keyring := NewKeyring("route-signing-key", "control-plane", "", "", nil)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	keyring := NewKeyring("current-route-key", "route-current", "previous-route-key", "route-previous", nil)
 	bundle := model.EdgeRouteBundle{
-		Version:     "routegen_test",
-		Generation:  "routegen_test",
-		GeneratedAt: now,
-		EdgeID:      "edge-us-1",
-		EdgeGroupID: "edge-group-country-us",
-		Routes: []model.EdgeRouteBinding{
-			{
-				Hostname:    "app.example.com",
-				RouteKind:   model.EdgeRouteKindPlatform,
-				AppID:       "app_1",
-				TenantID:    "tenant_1",
-				RuntimeID:   "runtime_1",
-				EdgeGroupID: "edge-group-country-us",
-				DecisionID:  "decision_test",
-				ExcludedEdgeIDs: []string{
-					"edge-de-1",
-				},
-				ExcludedEdgeGroupIDs: []string{
-					"edge-group-country-de",
-				},
-				ExclusionReason: "slow-upload",
-				RoutePolicy:     model.EdgeRoutePolicyEnabled,
-				UpstreamKind:    model.EdgeRouteUpstreamKindKubernetesService,
-				UpstreamScope:   model.EdgeRouteUpstreamScopeCluster,
-				UpstreamURL:     "http://stable.example.svc.cluster.local:80",
-				Upstreams: []model.EdgeRouteUpstream{
-					{
-						Role:         model.AppReleaseRoleStable,
-						ReleaseID:    "release_stable",
-						Weight:       90,
-						UpstreamURL:  "http://stable.example.svc.cluster.local:80",
-						RuntimeID:    "runtime_1",
-						ServicePort:  80,
-						UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService,
-					},
-					{
-						Role:         model.AppReleaseRoleCandidate,
-						ReleaseID:    "release_candidate",
-						Weight:       10,
-						UpstreamURL:  "http://candidate.example.svc.cluster.local:80",
-						RuntimeID:    "runtime_1",
-						ServicePort:  80,
-						UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService,
-					},
-				},
-				ServicePort: 80,
-				TLSPolicy:   model.EdgeRouteTLSPolicyPlatform,
-				RequestBodyPolicies: []model.EdgeRequestBodyPolicy{
-					{
-						Name:           "upload",
-						Methods:        []string{"POST"},
-						Paths:          []string{"/upload"},
-						MaxBytes:       1 << 20,
-						TimeoutSeconds: 30,
-						MaxConcurrent:  2,
-					},
-				},
-				Streaming:       true,
-				Status:          model.EdgeRouteStatusActive,
-				RouteGeneration: "route_binding_test",
-				CreatedAt:       now,
-				UpdatedAt:       now,
-			},
-		},
+		SchemaVersion: model.BundleSchemaVersionV1,
+		Version:       "routegen_current",
+		Generation:    "routegen_current",
+		GeneratedAt:   now,
+		Issuer:        "fugue-edge-control",
+		EdgeGroupID:   "edge-group-test",
+		Routes: []model.EdgeRouteBinding{{
+			Hostname:        "api.example.test",
+			RouteKind:       model.EdgeRouteKindPlatform,
+			AppID:           "app_1",
+			TenantID:        "tenant_1",
+			RuntimeID:       "runtime_1",
+			EdgeGroupID:     "edge-group-test",
+			RoutePolicy:     model.EdgeRoutePolicyEnabled,
+			UpstreamKind:    model.EdgeRouteUpstreamKindKubernetesService,
+			UpstreamURL:     "http://api.default.svc.cluster.local:80",
+			ServicePort:     80,
+			TLSPolicy:       model.EdgeRouteTLSPolicyPlatform,
+			Status:          model.EdgeRouteStatusActive,
+			DecisionID:      "decision_current",
+			RouteGeneration: "route_binding_current",
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}},
 	}
 
 	signed := SignEdgeRouteBundleWithKeyring(bundle, keyring, time.Hour)
-	if len(signed.Signatures) < 4 {
-		t.Fatalf("expected current, pre-decision-id, pre-request-policy, and legacy route signatures, got %+v", signed.Signatures)
+	if len(signed.Signatures) != 2 {
+		t.Fatalf("route signature count = %d, want one current payload per active key: %+v", len(signed.Signatures), signed.Signatures)
+	}
+	if signed.Signatures[0].KeyID != "route-current" || signed.Signatures[0].Signature != signed.Signature ||
+		signed.Signatures[1].KeyID != "route-previous" {
+		t.Fatalf("route keyring signatures are not canonical: %+v", signed.Signatures)
 	}
 	if err := VerifyEdgeRouteBundleWithKeyring(signed, keyring, now); err != nil {
-		t.Fatalf("verify signed bundle with current route model: %v", err)
+		t.Fatalf("verify current route bundle: %v", err)
 	}
 
-	preDecisionIDDecoded := signed
-	preDecisionIDDecoded.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
-	for idx := range preDecisionIDDecoded.Routes {
-		preDecisionIDDecoded.Routes[idx].DecisionID = ""
-	}
-	if err := VerifyEdgeRouteBundleWithKeyring(preDecisionIDDecoded, keyring, now); err != nil {
-		t.Fatalf("verify signed bundle after pre-decision-id edge drops unknown decision IDs: %v", err)
-	}
-
-	preRequestPolicyDecoded := preDecisionIDDecoded
-	preRequestPolicyDecoded.Routes = append([]model.EdgeRouteBinding(nil), preDecisionIDDecoded.Routes...)
-	for idx := range preRequestPolicyDecoded.Routes {
-		preRequestPolicyDecoded.Routes[idx].RequestBodyPolicies = nil
-	}
-	if err := VerifyEdgeRouteBundleWithKeyring(preRequestPolicyDecoded, keyring, now); err != nil {
-		t.Fatalf("verify signed bundle after pre-request-policy edge drops unknown policies: %v", err)
-	}
-
-	legacyDecoded := preRequestPolicyDecoded
-	legacyDecoded.Routes = append([]model.EdgeRouteBinding(nil), preRequestPolicyDecoded.Routes...)
-	for idx := range legacyDecoded.Routes {
-		legacyDecoded.Routes[idx].Upstreams = nil
-		legacyDecoded.Routes[idx].ExcludedEdgeIDs = nil
-		legacyDecoded.Routes[idx].ExcludedEdgeGroupIDs = nil
-		legacyDecoded.Routes[idx].ExclusionReason = ""
-		legacyDecoded.Routes[idx].ExclusionExpiresAt = nil
-	}
-	if err := VerifyEdgeRouteBundleWithKeyring(legacyDecoded, keyring, now); err != nil {
-		t.Fatalf("verify signed bundle after old edge drops unknown upstreams: %v", err)
-	}
-
-	tampered := signed
-	tampered.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
-	tampered.Routes[0].Upstreams = append([]model.EdgeRouteUpstream(nil), signed.Routes[0].Upstreams...)
-	tampered.Routes[0].Upstreams[1].UpstreamURL = "http://attacker.invalid:80"
-	if err := VerifyEdgeRouteBundleWithKeyring(tampered, keyring, now); !errors.Is(err, ErrInvalidSignature) {
-		t.Fatalf("expected current verifier to reject tampered upstreams, got %v", err)
+	droppedCurrentField := signed
+	droppedCurrentField.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
+	droppedCurrentField.Routes[0].DecisionID = ""
+	if err := VerifyEdgeRouteBundleWithKeyring(droppedCurrentField, keyring, now); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("route verifier accepted a projection that dropped a current field: %v", err)
 	}
 }
 
-func TestEdgeDNSBundleSignsLegacyCandidateProjectionForOldDNSNodes(t *testing.T) {
+func TestEdgeDNSBundleSignsOnlyCurrentKeyringPayloads(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
-	keyring := NewKeyring("dns-signing-key", "control-plane", "", "", nil)
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	keyring := NewKeyring("current-dns-key", "dns-current", "previous-dns-key", "dns-previous", nil)
 	bundle := model.EdgeDNSBundle{
-		Version:       "dnsgen_test",
-		Generation:    "dnsgen_test",
-		GeneratedAt:   now,
-		DNSNodeID:     "dns-us-1",
-		EdgeGroupID:   "edge-group-country-us",
-		Zone:          "fugue.pro",
 		SchemaVersion: model.BundleSchemaVersionV1,
-		Records: []model.EdgeDNSRecord{
-			{
-				Name:             "api.example.com.",
-				Type:             "A",
-				Values:           []string{"203.0.113.10"},
-				TTL:              30,
-				RecordKind:       "platform",
-				AppID:            "app_1",
-				TenantID:         "tenant_1",
-				EdgeGroupID:      "edge-group-country-us",
-				Status:           "active",
-				RecordGeneration: "record_test",
-				Candidates: []model.EdgeDNSAnswerCandidate{
-					{
-						IP:                "203.0.113.10",
-						EdgeID:            "edge-us-1",
-						EdgeGroupID:       "edge-group-country-us",
-						Region:            "us-west",
-						Country:           "US",
-						WorkloadMode:      "dynamic",
-						CanaryState:       "canary",
-						CanaryWeight:      1,
-						PublicProbeStatus: "pass",
-						DNSEligible:       true,
-						Priority:          10,
-						Weight:            100,
-						Reason:            "dynamic_canary",
-						TrafficClass:      "default",
-						Score:             0.95,
-						ScoreBreakdown: map[string]float64{
-							"ttfb": 0.8,
-						},
-						Healthy:    true,
-						RouteReady: true,
-						TLSReady:   true,
-					},
-				},
-				ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{
-					{
-						ScopeKey:            "country:CN",
-						Country:             "CN",
-						PolicyKind:          "quality",
-						Reason:              "best_quality",
-						SelectedEdgeGroupID: "edge-group-country-us",
-						Candidates: []model.EdgeDNSAnswerCandidate{
-							{
-								IP:                "203.0.113.10",
-								EdgeID:            "edge-us-1",
-								EdgeGroupID:       "edge-group-country-us",
-								WorkloadMode:      "dynamic",
-								CanaryState:       "canary",
-								CanaryWeight:      1,
-								PublicProbeStatus: "pass",
-								DNSEligible:       true,
-								Priority:          1,
-								Weight:            100,
-								Reason:            "scoped_dynamic_canary",
-								Healthy:           true,
-								RouteReady:        true,
-								TLSReady:          true,
-							},
-						},
-					},
-				},
-			},
-		},
+		Version:       "dnsgen_current",
+		Generation:    "dnsgen_current",
+		GeneratedAt:   now,
+		Issuer:        "fugue-edge-control",
+		DNSNodeID:     "dns-test-1",
+		EdgeGroupID:   "edge-group-test",
+		Zone:          "example.test",
+		Records: []model.EdgeDNSRecord{{
+			Name:             "api.example.test.",
+			Type:             "A",
+			Values:           []string{"203.0.113.10"},
+			TTL:              30,
+			RecordKind:       "platform",
+			EdgeGroupID:      "edge-group-test",
+			Status:           "active",
+			RecordGeneration: "record_current",
+			Candidates: []model.EdgeDNSAnswerCandidate{{
+				IP:                "203.0.113.10",
+				EdgeID:            "edge-test-1",
+				EdgeGroupID:       "edge-group-test",
+				WorkloadMode:      "dynamic",
+				CanaryState:       "active",
+				PublicProbeStatus: "pass",
+				DNSEligible:       true,
+				Healthy:           true,
+				RouteReady:        true,
+				TLSReady:          true,
+			}},
+		}},
 	}
 
 	signed := SignEdgeDNSBundleWithKeyring(bundle, keyring, time.Hour)
-	if len(signed.Signatures) < 2 {
-		t.Fatalf("expected current and legacy DNS signatures, got %+v", signed.Signatures)
+	if len(signed.Signatures) != 2 {
+		t.Fatalf("DNS signature count = %d, want one current payload per active key: %+v", len(signed.Signatures), signed.Signatures)
+	}
+	if signed.Signatures[0].KeyID != "dns-current" || signed.Signatures[0].Signature != signed.Signature ||
+		signed.Signatures[1].KeyID != "dns-previous" {
+		t.Fatalf("DNS keyring signatures are not canonical: %+v", signed.Signatures)
 	}
 	if err := VerifyEdgeDNSBundleWithKeyring(signed, keyring, now); err != nil {
-		t.Fatalf("verify signed bundle with current DNS model: %v", err)
+		t.Fatalf("verify current DNS bundle: %v", err)
 	}
 
-	legacyDecoded := signed
-	legacyDecoded.Records = append([]model.EdgeDNSRecord(nil), signed.Records...)
-	for recordIdx := range legacyDecoded.Records {
-		legacyDecoded.Records[recordIdx].Candidates = cloneLegacyEdgeDNSAnswerCandidates(signed.Records[recordIdx].Candidates)
-		legacyDecoded.Records[recordIdx].ScopedCandidates = cloneLegacyEdgeDNSScopedAnswerCandidates(signed.Records[recordIdx].ScopedCandidates)
-	}
-	if err := VerifyEdgeDNSBundleWithKeyring(legacyDecoded, keyring, now); err != nil {
-		t.Fatalf("verify signed bundle after old DNS drops unknown candidate fields: %v", err)
-	}
-
-	tampered := signed
-	tampered.Records = append([]model.EdgeDNSRecord(nil), signed.Records...)
-	tampered.Records[0].Candidates = append([]model.EdgeDNSAnswerCandidate(nil), signed.Records[0].Candidates...)
-	tampered.Records[0].Candidates[0].PublicProbeStatus = "fail"
-	if err := VerifyEdgeDNSBundleWithKeyring(tampered, keyring, now); !errors.Is(err, ErrInvalidSignature) {
-		t.Fatalf("expected current verifier to reject tampered dynamic DNS candidate fields, got %v", err)
+	droppedCurrentField := signed
+	droppedCurrentField.Records = append([]model.EdgeDNSRecord(nil), signed.Records...)
+	droppedCurrentField.Records[0].Candidates = append([]model.EdgeDNSAnswerCandidate(nil), signed.Records[0].Candidates...)
+	droppedCurrentField.Records[0].Candidates[0].PublicProbeStatus = ""
+	if err := VerifyEdgeDNSBundleWithKeyring(droppedCurrentField, keyring, now); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("DNS verifier accepted a projection that dropped a current field: %v", err)
 	}
 }
