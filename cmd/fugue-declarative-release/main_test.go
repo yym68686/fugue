@@ -97,6 +97,61 @@ func TestLoadLKGManifestUsesTheHistoricalRegistryManifestPath(t *testing.T) {
 	}
 }
 
+func TestHistoricalEdgeGroupReaderProjectsExactLegacyManifestPath(t *testing.T) {
+	const revision = "4d9db8b777ce4644df2d064aeca3df2718c46602"
+	raw, err := exec.Command("git", "show", revision+":deploy/releases/edge-groups.json").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(raw)); err == nil {
+		t.Fatal("current Edge group decoder accepted historical adoption metadata")
+	}
+	paths, err := decodeHistoricalEdgeGroupManifestPaths(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths["edge-control-de"]; got != "internal/edgecontrol/component/resources.authority.group.json" {
+		t.Fatalf("historical DE Edge Control manifest path=%q", got)
+	}
+	if got, err := historicalComponentManifestPath(revision, "edge-control-de"); err != nil || got != paths["edge-control-de"] {
+		t.Fatalf("historical component manifest path=%q err=%v", got, err)
+	}
+
+	mutations := map[string]func(map[string]any){
+		"unknown field": func(root map[string]any) { root["unknown"] = true },
+		"duplicate group": func(root map[string]any) {
+			groups := root["groups"].([]any)
+			root["groups"] = append(groups, groups[0])
+		},
+		"wrong component ID": func(root map[string]any) {
+			groups := root["groups"].([]any)
+			group := groups[0].(map[string]any)
+			group["control"].(map[string]any)["id"] = "edge-control-wrong"
+		},
+		"empty manifest path": func(root map[string]any) {
+			groups := root["groups"].([]any)
+			group := groups[0].(map[string]any)
+			group["control"].(map[string]any)["manifestPath"] = ""
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			var value map[string]any
+			if err := json.Unmarshal(raw, &value); err != nil {
+				t.Fatal(err)
+			}
+			mutate(value)
+			candidate, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeHistoricalEdgeGroupManifestPaths(bytes.NewReader(candidate)); err == nil {
+				t.Fatal("invalid historical Edge group registry was accepted")
+			}
+		})
+	}
+}
+
 func TestPlanCommandBindsFirstProductionAtom(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -547,26 +548,98 @@ func historicalComponentManifestPath(revision, componentID string) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("decode previous production registry: %w", err)
 	}
+	manifestPaths := make(map[string]string, len(registry.Components))
+	for _, component := range registry.Components {
+		if _, exists := manifestPaths[component.ID]; exists {
+			return "", fmt.Errorf("previous production registry repeats component %q", component.ID)
+		}
+		manifestPaths[component.ID] = component.ManifestPath
+	}
 	if registry.EdgeGroupRegistryPath != "" {
 		edgeRaw, readErr := exec.Command("git", "show", revision+":"+registry.EdgeGroupRegistryPath).Output()
 		if readErr != nil {
 			return "", fmt.Errorf("read previous edge group registry: %w", readErr)
 		}
-		edge, decodeErr := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(edgeRaw))
+		historical, decodeErr := decodeHistoricalEdgeGroupManifestPaths(bytes.NewReader(edgeRaw))
 		if decodeErr != nil {
 			return "", fmt.Errorf("decode previous edge group registry: %w", decodeErr)
 		}
-		registry, err = declarativerelease.MergeEdgeGroupRegistry(registry, edge)
-		if err != nil {
-			return "", fmt.Errorf("merge previous edge group registry: %w", err)
+		for id, path := range historical {
+			if _, exists := manifestPaths[id]; exists {
+				return "", fmt.Errorf("previous production registry repeats component %q", id)
+			}
+			manifestPaths[id] = path
 		}
 	}
-	for _, component := range registry.Components {
-		if component.ID == componentID {
-			return component.ManifestPath, nil
-		}
+	manifestPath := manifestPaths[componentID]
+	if manifestPath != "" {
+		return manifestPath, nil
 	}
 	return "", fmt.Errorf("previous production registry does not contain component %q", componentID)
+}
+
+type historicalEdgeGroupRegistry struct {
+	APIVersion string                `json:"apiVersion"`
+	Kind       string                `json:"kind"`
+	Groups     []historicalEdgeGroup `json:"groups"`
+}
+
+type historicalEdgeGroup struct {
+	ID      string                       `json:"id"`
+	GroupID string                       `json:"groupId"`
+	Control declarativerelease.Component `json:"control"`
+	Worker  declarativerelease.Component `json:"worker"`
+}
+
+// decodeHistoricalEdgeGroupManifestPaths is deliberately a read-only projection.
+// It accepts adoption metadata that was valid in an immutable historical tree,
+// validates every component with the current Component contract, and returns
+// only component IDs and manifest paths. It never feeds historical migration metadata into the current registry,
+// release plan, ownership adapter, or executor.
+func decodeHistoricalEdgeGroupManifestPaths(reader io.Reader) (map[string]string, error) {
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	var registry historicalEdgeGroupRegistry
+	if err := decoder.Decode(&registry); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("historical edge group registry contains multiple JSON values")
+		}
+		return nil, err
+	}
+	if registry.APIVersion != declarativerelease.EdgeGroupRegistryAPIVersion || registry.Kind != declarativerelease.EdgeGroupRegistryKind ||
+		len(registry.Groups) == 0 || len(registry.Groups) > 100 {
+		return nil, errors.New("historical edge group registry identity is invalid")
+	}
+	seenGroupIDs := make(map[string]struct{}, len(registry.Groups))
+	seenComponents := make(map[string]struct{}, len(registry.Groups)*2)
+	manifestPaths := make(map[string]string, len(registry.Groups)*2)
+	for index, group := range registry.Groups {
+		if strings.TrimSpace(group.ID) == "" || strings.TrimSpace(group.GroupID) == "" ||
+			(index > 0 && registry.Groups[index-1].ID >= group.ID) {
+			return nil, errors.New("historical edge groups are not strictly ordered")
+		}
+		if _, exists := seenGroupIDs[group.GroupID]; exists {
+			return nil, fmt.Errorf("historical edge group id %q is repeated", group.GroupID)
+		}
+		seenGroupIDs[group.GroupID] = struct{}{}
+		if group.Control.ID != "edge-control-"+group.ID || group.Worker.ID != "edge-worker-"+group.ID {
+			return nil, fmt.Errorf("historical edge group %q component identity is invalid", group.ID)
+		}
+		for _, component := range []declarativerelease.Component{group.Control, group.Worker} {
+			if err := component.Validate(); err != nil {
+				return nil, fmt.Errorf("historical component %q: %w", component.ID, err)
+			}
+			if _, exists := seenComponents[component.ID]; exists {
+				return nil, fmt.Errorf("historical component %q is repeated", component.ID)
+			}
+			seenComponents[component.ID] = struct{}{}
+			manifestPaths[component.ID] = component.ManifestPath
+		}
+	}
+	return manifestPaths, nil
 }
 
 func runExecute(args []string, output io.Writer) error {
