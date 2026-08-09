@@ -133,6 +133,15 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 			if stringField(container, "image") != wantImage {
 				t.Fatalf("bootstrap LKG image is not the declared immutable predecessor: %q", stringField(container, "image"))
 			}
+			templateMetadata, err := objectField(template, "metadata")
+			if err != nil {
+				t.Fatal(err)
+			}
+			annotations := ensureReadStringMap(templateMetadata, "annotations")
+			wantSource := "e8f3781e3c9282e9daf24842c10cef3eab9f5497"
+			if annotations["fugue.pro/source-commit"] != wantSource || annotations["fugue.pro/oci-revision"] != wantSource {
+				t.Fatalf("bootstrap LKG source identity is not the declared predecessor: %+v", annotations)
+			}
 			for _, field := range []string{"livenessProbe", "readinessProbe", "startupProbe"} {
 				if _, present := container[field]; present {
 					t.Fatalf("bootstrap LKG invented %s absent from the live predecessor", field)
