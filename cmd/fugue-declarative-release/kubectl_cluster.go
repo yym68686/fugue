@@ -35,6 +35,20 @@ var (
 	adoptionConflictGroupPattern = regexp.MustCompile(`conflicts with "([^"]+)" using [^:]+:`)
 )
 
+type ssaConflict struct {
+	manager string
+	field   string
+}
+
+var imageCacheTerminalHandoffConflicts = []struct {
+	pointer string
+	manager string
+	field   string
+}{
+	{pointer: "/metadata/labels/app.kubernetes.io~1managed-by", manager: "helm", field: ".metadata.labels.app.kubernetes.io/managed-by"},
+	{pointer: "/spec/updateStrategy/type", manager: "kubectl-patch", field: ".spec.updateStrategy.type"},
+}
+
 type kubectlCluster struct {
 	kubectl  string
 	verifier string
@@ -316,7 +330,11 @@ func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarat
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
 	}
-	return cluster.applyResourceSet(ctx, release, manifest, true)
+	applyErr := cluster.applyResourceSet(ctx, release, manifest, true)
+	if applyErr == nil {
+		return nil
+	}
+	return cluster.dryRunReceiptBoundImageCacheHandoff(ctx, release, manifest, applyErr)
 }
 
 func (cluster *kubectlCluster) DryRunOwnershipAdoption(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkgManifest []byte) error {
@@ -522,14 +540,29 @@ func validateAdoptionConflicts(applyErr error, managers, fields []string) error 
 	if applyErr == nil || len(managers) == 0 || len(fields) == 0 {
 		return errors.New("ownership adoption conflict evidence is incomplete")
 	}
+	conflicts, err := parseSSAConflicts(applyErr)
+	if err != nil {
+		return err
+	}
+	for _, conflict := range conflicts {
+		if !stringInSortedSet(conflict.manager, managers) || !adoptionFieldAllowed(conflict.field, fields) {
+			return fmt.Errorf("ownership adoption conflict %s:%s is outside the reviewed allowlist", conflict.manager, conflict.field)
+		}
+	}
+	return nil
+}
+
+func parseSSAConflicts(applyErr error) ([]ssaConflict, error) {
+	if applyErr == nil {
+		return nil, errors.New("ownership adoption conflict evidence is incomplete")
+	}
 	raw := applyErr.Error()
 	countMatch := adoptionConflictCountPattern.FindStringSubmatch(raw)
-	type conflict struct{ manager, field string }
-	conflicts := make([]conflict, 0)
+	conflicts := make([]ssaConflict, 0)
 	groupManager := ""
 	for _, line := range strings.Split(raw, "\n") {
 		if match := adoptionConflictPattern.FindStringSubmatch(line); len(match) == 3 {
-			conflicts = append(conflicts, conflict{manager: match[1], field: match[2]})
+			conflicts = append(conflicts, ssaConflict{manager: match[1], field: match[2]})
 			groupManager = ""
 			continue
 		}
@@ -539,7 +572,7 @@ func validateAdoptionConflicts(applyErr error, managers, fields []string) error 
 		}
 		trimmed := strings.TrimSpace(line)
 		if groupManager != "" && strings.HasPrefix(trimmed, "- .") {
-			conflicts = append(conflicts, conflict{manager: groupManager, field: strings.TrimPrefix(trimmed, "- ")})
+			conflicts = append(conflicts, ssaConflict{manager: groupManager, field: strings.TrimPrefix(trimmed, "- ")})
 			continue
 		}
 		if groupManager != "" && trimmed != "" {
@@ -547,18 +580,13 @@ func validateAdoptionConflicts(applyErr error, managers, fields []string) error 
 		}
 	}
 	if len(countMatch) != 2 || len(conflicts) == 0 {
-		return errors.New("ownership adoption failure is not a typed SSA conflict")
+		return nil, errors.New("ownership adoption failure is not a typed SSA conflict")
 	}
 	count, err := strconv.Atoi(countMatch[1])
 	if err != nil || count != len(conflicts) {
-		return errors.New("ownership adoption conflict count is inconsistent")
+		return nil, errors.New("ownership adoption conflict count is inconsistent")
 	}
-	for _, conflict := range conflicts {
-		if !stringInSortedSet(conflict.manager, managers) || !adoptionFieldAllowed(conflict.field, fields) {
-			return fmt.Errorf("ownership adoption conflict %s:%s is outside the reviewed allowlist", conflict.manager, conflict.field)
-		}
-	}
-	return nil
+	return conflicts, nil
 }
 
 func stringInSortedSet(value string, allowed []string) bool {
@@ -705,12 +733,378 @@ func managedFieldsEntryOwnsPointers(fields map[string]any, pointers []string, re
 	return requireAll && matched == len(pointers)
 }
 
+type imageCacheTerminalHandoff struct {
+	receipt  declarativerelease.OwnershipAdoptionReceipt
+	plan     declarativerelease.OwnershipAdoptionPlan
+	target   declarativerelease.TargetIdentity
+	manifest []byte
+	preUID   string
+	preRV    string
+	preGen   int64
+}
+
+func (cluster *kubectlCluster) dryRunReceiptBoundImageCacheHandoff(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, applyErr error) error {
+	_, err := cluster.prepareReceiptBoundImageCacheHandoff(ctx, release, manifest, applyErr, true)
+	return err
+}
+
+func (cluster *kubectlCluster) prepareReceiptBoundImageCacheHandoff(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, applyErr error, dryRunForce bool) (imageCacheTerminalHandoff, error) {
+	receipt, err := authorizeImageCacheTerminalHandoff(release)
+	if err != nil {
+		return imageCacheTerminalHandoff{}, errors.Join(applyErr, err)
+	}
+	if err := validateExactImageCacheTerminalHandoffConflicts(applyErr, receipt); err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	observation, err := cluster.ObserveDegraded(ctx, release, manifest)
+	if err != nil || observation.ImageRef != receipt.Final.ImageRef || observation.ImageID != receipt.Final.ImageID ||
+		observation.UID != receipt.Final.UID || observation.ResourceVersion != receipt.Final.ResourceVersion || observation.Generation != receipt.Final.Generation {
+		if err == nil {
+			err = errors.New("receipt-bound Image-cache LKG observation drifted")
+		}
+		return imageCacheTerminalHandoff{}, err
+	}
+	identity := receipt.Final.Primary
+	raw, err := cluster.getResource(ctx, identity)
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		return imageCacheTerminalHandoff{}, fmt.Errorf("read Image-cache terminal handoff workload: %w", err)
+	}
+	value, err := decodeJSONObject(raw)
+	if err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	if err := verifyImageCacheTerminalHandoffPreconditions(value, release, receipt, manifest); err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	metadata := mapField(value, "metadata")
+	targetResource, err := declarativerelease.ResourceSetItem(manifest, identity)
+	if err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	target, err := targetIdentityFromDeclaredWorkload(targetResource, release.Workload)
+	if err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	target.ManifestDigest = digestBytesLocal(manifest)
+	fields := make([]string, 0, len(imageCacheTerminalHandoffConflicts))
+	for _, reviewed := range imageCacheTerminalHandoffConflicts {
+		fields = append(fields, reviewed.pointer)
+	}
+	plan := declarativerelease.OwnershipAdoptionPlan{
+		Component: release.ComponentID, AlreadyConverged: true,
+		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{
+			Identity: identity, Fields: fields, UID: stringValue(metadata["uid"]),
+			ResourceVersion: stringValue(metadata["resourceVersion"]), Generation: int64Value(metadata["generation"]),
+		}},
+	}
+	takeoverManifest, err := declarativerelease.BuildOwnershipTakeoverManifest(manifest, plan, target)
+	if err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	takeoverManifest, err = addImageCacheTerminalHandoffScaffold(takeoverManifest, identity, release.Workload.Container, receipt.Final.ImageRef)
+	if err != nil {
+		return imageCacheTerminalHandoff{}, err
+	}
+	if dryRunForce {
+		if err := cluster.applyImageCacheTerminalHandoffSet(ctx, release, takeoverManifest, true); err != nil {
+			return imageCacheTerminalHandoff{}, fmt.Errorf("server-side dry-run reviewed Image-cache ownership terminal handoff: %w", err)
+		}
+	}
+	return imageCacheTerminalHandoff{
+		receipt: receipt, plan: plan, target: target, manifest: takeoverManifest,
+		preUID: plan.Resources[0].UID, preRV: plan.Resources[0].ResourceVersion, preGen: plan.Resources[0].Generation,
+	}, nil
+}
+
+func addImageCacheTerminalHandoffScaffold(manifest []byte, identity declarativerelease.ResourceIdentity, container, image string) ([]byte, error) {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil || len(identities) != 1 || identities[0] != identity || container != "image-cache" || !strings.Contains(image, "@sha256:") {
+		if err == nil {
+			err = errors.New("Image-cache terminal handoff scaffold identity is invalid")
+		}
+		return nil, err
+	}
+	item, err := declarativerelease.ResourceSetItem(manifest, identity)
+	if err != nil {
+		return nil, err
+	}
+	spec := mapField(item, "spec")
+	if len(spec) != 1 || mapField(spec, "updateStrategy")["type"] == nil {
+		return nil, errors.New("Image-cache terminal handoff force scope expanded before scaffolding")
+	}
+	spec["template"] = map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": container, "image": image}}}}
+	return declarativerelease.CanonicalJSON(declarativerelease.ResourceSet{
+		APIVersion: declarativerelease.ResourceSetAPIVersion, Kind: declarativerelease.ResourceSetKind, Items: []map[string]any{item},
+	})
+}
+
+func authorizeImageCacheTerminalHandoff(release declarativerelease.PlanRelease) (declarativerelease.OwnershipAdoptionReceipt, error) {
+	if release.ComponentID != "image-cache" || release.MigrationState != "independent" || !release.RetrySameLKG ||
+		release.AdoptionReceiptPath != "deploy/releases/image-cache/adoption-receipt.json" || release.OwnershipAdoption != nil || release.BootstrapLKGPath != "" {
+		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache ownership terminal handoff is not exactly receipt-bound")
+	}
+	component, receipt, err := loadValidatedReceiptBoundRelease(release)
+	if err != nil {
+		return declarativerelease.OwnershipAdoptionReceipt{}, err
+	}
+	if component.ID != release.ComponentID || receipt.TerminalHandoff == nil || len(receipt.Ownership) != 1 ||
+		receipt.Ownership[0].Identity != receipt.Final.Primary {
+		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache terminal handoff receipt scope is invalid")
+	}
+	wantOwnership := []string{
+		"/metadata/labels/app.kubernetes.io~1managed-by",
+		"/spec/template/spec/containers[name=image-cache]/image",
+		"/spec/updateStrategy",
+	}
+	if !equalSortedStrings(receipt.Ownership[0].Fields, wantOwnership) {
+		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache terminal handoff receipt expanded its adopted ownership scope")
+	}
+	if !equalSortedStrings(receipt.TerminalHandoff.Scaffolds, []string{"/spec/template/spec/containers[name=image-cache]/image"}) {
+		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache terminal handoff scaffold is not the exact preowned image leaf")
+	}
+	return receipt, nil
+}
+
+func equalSortedStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	a := append([]string(nil), left...)
+	b := append([]string(nil), right...)
+	sort.Strings(a)
+	sort.Strings(b)
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateExactImageCacheTerminalHandoffConflicts(applyErr error, receipt declarativerelease.OwnershipAdoptionReceipt) error {
+	conflicts, err := parseSSAConflicts(applyErr)
+	if err != nil {
+		return err
+	}
+	if receipt.TerminalHandoff == nil || len(conflicts) != len(imageCacheTerminalHandoffConflicts) ||
+		len(receipt.TerminalHandoff.Conflicts) != len(imageCacheTerminalHandoffConflicts) {
+		return errors.New("Image-cache ownership terminal handoff conflict count is not exact")
+	}
+	want := make(map[string]string, len(imageCacheTerminalHandoffConflicts))
+	for _, reviewed := range imageCacheTerminalHandoffConflicts {
+		want[reviewed.field] = reviewed.manager
+	}
+	for _, authorized := range receipt.TerminalHandoff.Conflicts {
+		matched := false
+		for _, reviewed := range imageCacheTerminalHandoffConflicts {
+			if authorized.Pointer == reviewed.pointer && authorized.LegacyManager == reviewed.manager {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return errors.New("Image-cache ownership terminal handoff receipt contains an unreviewed conflict")
+		}
+	}
+	seen := make(map[string]struct{}, len(conflicts))
+	for _, conflict := range conflicts {
+		if want[conflict.field] != conflict.manager {
+			return fmt.Errorf("Image-cache ownership terminal handoff conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
+		}
+		key := conflict.manager + "\x00" + conflict.field
+		if _, exists := seen[key]; exists {
+			return errors.New("Image-cache ownership terminal handoff conflict is duplicated")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func verifyImageCacheTerminalHandoffPreconditions(value map[string]any, release declarativerelease.PlanRelease, receipt declarativerelease.OwnershipAdoptionReceipt, manifest []byte) error {
+	metadata := mapField(value, "metadata")
+	if stringValue(metadata["uid"]) != receipt.Final.UID || stringValue(metadata["resourceVersion"]) != receipt.Final.ResourceVersion ||
+		int64Value(metadata["generation"]) != receipt.Final.Generation {
+		return errors.New("Image-cache terminal handoff CAS drifted")
+	}
+	labelPointer := imageCacheTerminalHandoffConflicts[0].pointer
+	strategyPointer := imageCacheTerminalHandoffConflicts[1].pointer
+	imagePointer := "/spec/template/spec/containers[name=image-cache]/image"
+	if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, []string{labelPointer, strategyPointer, imagePointer}) ||
+		!managedFieldsOwnPointers(metadata, "helm", []string{labelPointer}) || managedFieldsOwnAnyPointer(metadata, "helm", []string{strategyPointer, imagePointer}) ||
+		!managedFieldsOwnPointers(metadata, "kubectl-patch", []string{strategyPointer}) || managedFieldsOwnAnyPointer(metadata, "kubectl-patch", []string{labelPointer, imagePointer}) {
+		return errors.New("Image-cache terminal handoff managedFields witness is not exact")
+	}
+	for _, manager := range managedFieldManagers(metadata) {
+		if manager != release.Workload.FieldManager && manager != "helm" && manager != "kubectl-patch" &&
+			managedFieldsOwnAnyPointer(metadata, manager, []string{labelPointer, strategyPointer}) {
+			return fmt.Errorf("Image-cache terminal handoff leaf is unexpectedly owned by %s", manager)
+		}
+	}
+	if stringValue(mapField(mapField(value, "spec"), "updateStrategy")["type"]) != "OnDelete" {
+		return errors.New("Image-cache terminal handoff predecessor is not exact OnDelete")
+	}
+	desired, err := declarativerelease.ResourceSetItem(manifest, receipt.Final.Primary)
+	if err != nil {
+		return err
+	}
+	desiredMetadata := mapField(desired, "metadata")
+	if mapStringField(desiredMetadata, "labels")["app.kubernetes.io/managed-by"] != release.Workload.FieldManager {
+		return errors.New("Image-cache terminal handoff forward managed-by is invalid")
+	}
+	strategy := mapField(mapField(desired, "spec"), "updateStrategy")
+	rolling := mapField(strategy, "rollingUpdate")
+	if stringValue(strategy["type"]) != "RollingUpdate" || int64Value(rolling["maxUnavailable"]) != 2 || int64Value(rolling["maxSurge"]) != 0 {
+		return errors.New("Image-cache terminal handoff forward rolling policy is invalid")
+	}
+	image, err := declaredContainerImage(desired, release.Workload.Container, "container")
+	if err != nil || !strings.HasPrefix(image, release.Artifact.Repository+"@sha256:") {
+		return errors.New("Image-cache terminal handoff forward image is not immutable")
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) applyImageCacheTerminalHandoffSet(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, dryRun bool) error {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil || len(identities) != 1 {
+		if err == nil {
+			err = errors.New("Image-cache terminal handoff must contain exactly one resource")
+		}
+		return err
+	}
+	item, err := declarativerelease.ResourceSetItem(manifest, identities[0])
+	if err != nil {
+		return err
+	}
+	encoded, err := declarativerelease.CanonicalJSON(item)
+	if err != nil {
+		return err
+	}
+	arguments := applyArguments(release, dryRun)
+	for index, argument := range arguments {
+		if argument == "--filename" {
+			arguments = append(append(append([]string(nil), arguments[:index]...), "--force-conflicts"), arguments[index:]...)
+			_, err = cluster.kubectlRun(ctx, encoded, arguments...)
+			return err
+		}
+	}
+	return errors.New("Image-cache terminal handoff force arguments are invalid")
+}
+
+func (cluster *kubectlCluster) verifyImageCacheTerminalHandoffComplete(ctx context.Context, release declarativerelease.PlanRelease, handoff imageCacheTerminalHandoff) (map[string]any, error) {
+	raw, err := cluster.getResource(ctx, handoff.receipt.Final.Primary)
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		return nil, fmt.Errorf("read completed Image-cache terminal handoff: %w", err)
+	}
+	value, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	metadata := mapField(value, "metadata")
+	pointers := []string{imageCacheTerminalHandoffConflicts[0].pointer, imageCacheTerminalHandoffConflicts[1].pointer, "/spec/template/spec/containers[name=image-cache]/image"}
+	if stringValue(metadata["uid"]) != handoff.preUID || stringValue(metadata["resourceVersion"]) == handoff.preRV ||
+		int64Value(metadata["generation"]) <= handoff.preGen || !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, pointers) ||
+		managedFieldsOwnAnyPointer(metadata, "helm", pointers) || managedFieldsOwnAnyPointer(metadata, "kubectl-patch", pointers) {
+		return nil, errors.New("Image-cache ownership terminal handoff did not become exclusive")
+	}
+	return value, nil
+}
+
+func (cluster *kubectlCluster) waitImageCacheTerminalHandoffComplete(ctx context.Context, release declarativerelease.PlanRelease, handoff imageCacheTerminalHandoff) (map[string]any, error) {
+	deadline := time.Now().Add(cluster.timeout)
+	var lastErr error
+	for {
+		value, err := cluster.verifyImageCacheTerminalHandoffComplete(ctx, release, handoff)
+		if err == nil {
+			metadata := mapField(value, "metadata")
+			status := mapField(value, "status")
+			image, imageErr := declaredContainerImage(value, release.Workload.Container, "container")
+			if imageErr == nil && image == handoff.receipt.Final.ImageRef &&
+				int64Value(status["observedGeneration"]) == int64Value(metadata["generation"]) &&
+				int32(int64Value(status["desiredNumberScheduled"])) == handoff.receipt.Final.Desired &&
+				int32(int64Value(status["numberReady"])) == handoff.receipt.Final.Ready &&
+				int32(int64Value(status["numberAvailable"])) == handoff.receipt.Final.Available &&
+				int32(int64Value(status["numberUnavailable"])) == handoff.receipt.Final.Unavailable {
+				return value, nil
+			}
+			lastErr = errors.New("Image-cache terminal handoff LKG cohort has not settled")
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func emitImageCacheTerminalHandoffReceipt(release declarativerelease.PlanRelease, handoff imageCacheTerminalHandoff, value map[string]any) error {
+	metadata := mapField(value, "metadata")
+	receipt := map[string]any{
+		"apiVersion": "release.fugue.dev/v2", "kind": "OwnershipTerminalHandoffReceipt", "component": release.ComponentID,
+		"sourceReceiptDigest": handoff.receipt.ReceiptDigest, "authorizationRunId": handoff.receipt.TerminalHandoff.RunID,
+		"authorizationRunAttempt": handoff.receipt.TerminalHandoff.RunAttempt, "failedConfigSha": handoff.receipt.TerminalHandoff.FailedConfigSHA,
+		"failedForwardImageRef": handoff.receipt.TerminalHandoff.ForwardImageRef, "artifactReceiptDigest": handoff.receipt.TerminalHandoff.ArtifactReceiptDigest,
+		"targetConfigSha": handoff.target.ConfigSHA, "targetImageRef": handoff.target.ImageRef,
+		"pre":          map[string]any{"uid": handoff.preUID, "resourceVersion": handoff.preRV, "generation": handoff.preGen},
+		"post":         map[string]any{"uid": stringValue(metadata["uid"]), "resourceVersion": stringValue(metadata["resourceVersion"]), "generation": int64Value(metadata["generation"])},
+		"fieldManager": release.Workload.FieldManager, "conflicts": handoff.receipt.TerminalHandoff.Conflicts,
+		"scaffolds": handoff.receipt.TerminalHandoff.Scaffolds,
+	}
+	unsigned, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return err
+	}
+	receipt["receiptDigest"] = digestBytesLocal(unsigned)
+	encoded, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "ownership-terminal-handoff-receipt=%s\n", encoded)
+	return nil
+}
+
 func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) error {
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
 	}
 	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
 		return cluster.applyEdgeGroupAB(ctx, release, target, manifest)
+	}
+	if dryRunErr := cluster.applyResourceSet(ctx, release, manifest, true); dryRunErr != nil {
+		handoff, err := cluster.prepareReceiptBoundImageCacheHandoff(ctx, release, manifest, dryRunErr, true)
+		if err != nil {
+			return err
+		}
+		if err := cluster.applyImageCacheTerminalHandoffSet(ctx, release, handoff.manifest, false); err != nil {
+			return fmt.Errorf("apply reviewed Image-cache ownership terminal handoff: %w", err)
+		}
+		post, err := cluster.waitImageCacheTerminalHandoffComplete(ctx, release, handoff)
+		if err != nil {
+			return err
+		}
+		if err := emitImageCacheTerminalHandoffReceipt(release, handoff, post); err != nil {
+			return err
+		}
+		fresh, err := cluster.ObserveCAS(ctx, release, manifest)
+		if err != nil || fresh.UID != handoff.preUID || fresh.ResourceVersion == handoff.preRV || fresh.Generation <= handoff.preGen {
+			if err == nil {
+				err = errors.New("Image-cache terminal handoff forward CAS did not advance")
+			}
+			return err
+		}
+		manifest, err = declarativerelease.BindManifestCAS(manifest, fresh)
+		if err != nil {
+			return err
+		}
+		if err := cluster.applyResourceSet(ctx, release, manifest, false); err != nil {
+			return err
+		}
+		_, err = cluster.verifyImageCacheTerminalHandoffComplete(ctx, release, handoff)
+		return err
 	}
 	return cluster.applyResourceSet(ctx, release, manifest, false)
 }

@@ -24,6 +24,30 @@ func TestOwnershipAdoptionReceiptBindsHealthyIndependentOwnership(t *testing.T) 
 	}
 }
 
+func TestOwnershipTerminalHandoffAuthorizationIsDigestBound(t *testing.T) {
+	component := edgeGroupFixture("alpha", "edge-group-metro-alpha").Control
+	receipt := adoptionReceiptFixture(t, component, "edge-group-metro-alpha")
+	receipt.TerminalHandoff = &OwnershipTerminalHandoff{
+		RunID: 456, RunAttempt: 1, FailedConfigSHA: strings.Repeat("b", 40),
+		ForwardImageRef:       component.Artifact.Repository + "@sha256:" + strings.Repeat("c", 64),
+		ArtifactReceiptDigest: "sha256:" + strings.Repeat("d", 64),
+		Conflicts:             []OwnershipTerminalHandoffConflict{{Pointer: "/metadata/labels/app.kubernetes.io~1managed-by", LegacyManager: "helm"}},
+	}
+	var err error
+	receipt.ReceiptDigest, err = receipt.digest()
+	if err != nil || receipt.Validate(component, receipt.GroupID) != nil {
+		t.Fatalf("valid terminal handoff authorization: digest=%v validate=%v", err, receipt.Validate(component, receipt.GroupID))
+	}
+	tampered := receipt
+	copyHandoff := *receipt.TerminalHandoff
+	copyHandoff.Conflicts = append([]OwnershipTerminalHandoffConflict(nil), receipt.TerminalHandoff.Conflicts...)
+	copyHandoff.Conflicts[0].Pointer = "/spec/template"
+	tampered.TerminalHandoff = &copyHandoff
+	if err := tampered.Validate(component, tampered.GroupID); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("undigested handoff mutation was accepted: %v", err)
+	}
+}
+
 func adoptionReceiptFixture(t *testing.T, component Component, groupID string) OwnershipAdoptionReceipt {
 	t.Helper()
 	manager := component.Workload.FieldManager

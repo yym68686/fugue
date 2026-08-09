@@ -878,6 +878,69 @@ func TestAdoptionConflictProofRequiresExactManagerAndFieldScope(t *testing.T) {
 	}
 }
 
+func TestImageCacheTerminalHandoffConflictSetIsExact(t *testing.T) {
+	file, err := os.Open("../../deploy/releases/image-cache/adoption-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := declarativerelease.DecodeOwnershipAdoptionReceipt(file)
+	closeErr := file.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("decode receipt: %v close: %v", err, closeErr)
+	}
+	allowed := errors.New("Apply failed with 2 conflicts: conflicts with \"helm\" using apps/v1:\n- .metadata.labels.app.kubernetes.io/managed-by\nconflicts with \"kubectl-patch\" using apps/v1:\n- .spec.updateStrategy.type")
+	if err := validateExactImageCacheTerminalHandoffConflicts(allowed, receipt); err != nil {
+		t.Fatalf("exact Image-cache terminal handoff was rejected: %v", err)
+	}
+	for name, conflict := range map[string]error{
+		"missing":       errors.New("Apply failed with 1 conflict: conflict with \"helm\" using apps/v1: .metadata.labels.app.kubernetes.io/managed-by"),
+		"cross-manager": errors.New("Apply failed with 2 conflicts: conflicts with \"kubectl-patch\" using apps/v1:\n- .metadata.labels.app.kubernetes.io/managed-by\n- .spec.updateStrategy.type"),
+		"extra-field":   errors.New("Apply failed with 3 conflicts: conflicts with \"helm\" using apps/v1:\n- .metadata.labels.app.kubernetes.io/managed-by\n- .spec.template.spec.containers[name=\"image-cache\"].image\nconflict with \"kubectl-patch\" using apps/v1: .spec.updateStrategy.type"),
+	} {
+		if err := validateExactImageCacheTerminalHandoffConflicts(conflict, receipt); err == nil {
+			t.Fatalf("%s conflict set was accepted", name)
+		}
+	}
+	tampered := receipt
+	copyHandoff := *receipt.TerminalHandoff
+	copyHandoff.Conflicts = append([]declarativerelease.OwnershipTerminalHandoffConflict(nil), receipt.TerminalHandoff.Conflicts...)
+	copyHandoff.Conflicts[0].LegacyManager = "kubectl-patch"
+	tampered.TerminalHandoff = &copyHandoff
+	if err := validateExactImageCacheTerminalHandoffConflicts(allowed, tampered); err == nil {
+		t.Fatal("tampered terminal handoff authorization was accepted")
+	}
+}
+
+func TestImageCacheTerminalHandoffScaffoldContainsOnlyNameAndLKGImage(t *testing.T) {
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-image-cache"}
+	item := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": identity.Name, "namespace": identity.Namespace, "uid": "uid-1", "resourceVersion": "22", "labels": map[string]any{"app.kubernetes.io/managed-by": "fugue-image-cache-declarative"}},
+		"spec":     map[string]any{"updateStrategy": map[string]any{"type": "RollingUpdate"}},
+	}
+	manifest := mustJSON(t, declarativerelease.ResourceSet{APIVersion: declarativerelease.ResourceSetAPIVersion, Kind: declarativerelease.ResourceSetKind, Items: []map[string]any{item}})
+	image := "ghcr.io/example/fugue-image-cache@sha256:" + strings.Repeat("a", 64)
+	scoped, err := addImageCacheTerminalHandoffScaffold(manifest, identity, "image-cache", image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := declarativerelease.ResourceSetItem(scoped, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containers := anySlice(mapField(mapField(mapField(got, "spec"), "template"), "spec")["containers"])
+	if len(containers) != 1 {
+		t.Fatalf("scaffold containers=%v", containers)
+	}
+	container := mapField(map[string]any{"container": containers[0]}, "container")
+	if len(container) != 2 || stringValue(container["name"]) != "image-cache" || stringValue(container["image"]) != image {
+		t.Fatalf("scaffold expanded beyond name+image: %v", container)
+	}
+	if _, exists := container["env"]; exists {
+		t.Fatal("scaffold copied container runtime fields")
+	}
+}
+
 func TestAPIContainerAdoptionConflictProofAcceptsOnlyLegacyImageLeaf(t *testing.T) {
 	allowed := errors.New("Apply failed with 1 conflict: conflict with \"kubectl-patch\" using apps/v1: .spec.template.spec.containers[name=\"api\"].image")
 	fields := []string{"/spec/template/spec/containers"}

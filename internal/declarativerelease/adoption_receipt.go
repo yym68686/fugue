@@ -17,16 +17,36 @@ const (
 // OwnershipAdoptionReceipt is the durable boundary between the one-time
 // adopting adapter and the ordinary independent component lane.
 type OwnershipAdoptionReceipt struct {
-	APIVersion            string                   `json:"apiVersion"`
-	Kind                  string                   `json:"kind"`
-	Component             string                   `json:"component"`
-	GroupID               string                   `json:"groupId"`
-	RunID                 int64                    `json:"runId"`
-	RunAttempt            int                      `json:"runAttempt"`
-	TerminalReceiptDigest string                   `json:"terminalReceiptDigest"`
-	Final                 Observation              `json:"final"`
-	Ownership             []OwnershipAdoptionScope `json:"ownership,omitempty"`
-	ReceiptDigest         string                   `json:"receiptDigest"`
+	APIVersion            string                    `json:"apiVersion"`
+	Kind                  string                    `json:"kind"`
+	Component             string                    `json:"component"`
+	GroupID               string                    `json:"groupId"`
+	RunID                 int64                     `json:"runId"`
+	RunAttempt            int                       `json:"runAttempt"`
+	TerminalReceiptDigest string                    `json:"terminalReceiptDigest"`
+	Final                 Observation               `json:"final"`
+	Ownership             []OwnershipAdoptionScope  `json:"ownership,omitempty"`
+	TerminalHandoff       *OwnershipTerminalHandoff `json:"terminalHandoff,omitempty"`
+	ReceiptDigest         string                    `json:"receiptDigest"`
+}
+
+// OwnershipTerminalHandoff binds one reviewed, failed-no-write independent
+// forward to the exact legacy leaves that may be removed before retrying it.
+// It is an authorization witness only; the Kubernetes adapter must still
+// prove the live typed conflict set and exclusive post-takeover ownership.
+type OwnershipTerminalHandoff struct {
+	RunID                 int64                              `json:"runId"`
+	RunAttempt            int                                `json:"runAttempt"`
+	FailedConfigSHA       string                             `json:"failedConfigSha"`
+	ForwardImageRef       string                             `json:"forwardImageRef"`
+	ArtifactReceiptDigest string                             `json:"artifactReceiptDigest"`
+	Conflicts             []OwnershipTerminalHandoffConflict `json:"conflicts"`
+	Scaffolds             []string                           `json:"scaffolds,omitempty"`
+}
+
+type OwnershipTerminalHandoffConflict struct {
+	Pointer       string `json:"pointer"`
+	LegacyManager string `json:"legacyManager"`
 }
 
 func BuildOwnershipAdoptionReceipt(result ExecutionResult, component Component, groupID string, runID int64, runAttempt int) (OwnershipAdoptionReceipt, error) {
@@ -100,9 +120,42 @@ func (receipt OwnershipAdoptionReceipt) Validate(component Component, groupID st
 			}
 		}
 	}
+	if receipt.TerminalHandoff != nil {
+		handoff := receipt.TerminalHandoff
+		if handoff.RunID <= 0 || handoff.RunAttempt != 1 || !shaPattern.MatchString(handoff.FailedConfigSHA) ||
+			!strings.HasPrefix(handoff.ForwardImageRef, component.Artifact.Repository+"@sha256:") ||
+			!digestPattern.MatchString(strings.TrimPrefix(handoff.ForwardImageRef, component.Artifact.Repository+"@")) ||
+			!digestPattern.MatchString(handoff.ArtifactReceiptDigest) || len(handoff.Conflicts) == 0 {
+			return errors.New("ownership terminal handoff identity is invalid")
+		}
+		seen := make(map[string]struct{}, len(handoff.Conflicts))
+		for _, conflict := range handoff.Conflicts {
+			if conflict.LegacyManager == "" {
+				return errors.New("ownership terminal handoff legacy manager is empty")
+			}
+			if _, err := parseAdoptionPointer(conflict.Pointer); err != nil {
+				return fmt.Errorf("ownership terminal handoff pointer: %w", err)
+			}
+			key := conflict.LegacyManager + "\x00" + conflict.Pointer
+			if _, exists := seen[key]; exists {
+				return errors.New("ownership terminal handoff conflict is duplicated")
+			}
+			seen[key] = struct{}{}
+		}
+		for _, pointer := range handoff.Scaffolds {
+			if _, err := parseAdoptionPointer(pointer); err != nil {
+				return fmt.Errorf("ownership terminal handoff scaffold: %w", err)
+			}
+			key := "scaffold\x00" + pointer
+			if _, exists := seen[key]; exists {
+				return errors.New("ownership terminal handoff scaffold is duplicated")
+			}
+			seen[key] = struct{}{}
+		}
+	}
 	wantDigest, err := receipt.digest()
 	if err != nil || receipt.ReceiptDigest != wantDigest {
-		return errors.New("ownership adoption receipt digest is invalid")
+		return fmt.Errorf("ownership adoption receipt digest is invalid: got %s want %s", receipt.ReceiptDigest, wantDigest)
 	}
 	return nil
 }
