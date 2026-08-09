@@ -65,6 +65,9 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 			return RenderedManifests{}, fmt.Errorf("decode LKG resource set: %w", err)
 		}
 		lkgWorkload := bootstrapLKGWorkload(*release)
+		if receiptWorkload, required := receiptBoundHistoricalLKGWorkload(*release); required {
+			lkgWorkload = receiptWorkload
+		}
 		if _, err := lkg.Primary(lkgWorkload); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG primary workload: %w", err)
 		}
@@ -77,7 +80,9 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 				return RenderedManifests{}, err
 			}
 		} else {
-			if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
+			lkgRelease := *release
+			lkgRelease.Workload = lkgWorkload
+			if err := patchResourceSet(&lkg, lkgRelease, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
 				return RenderedManifests{}, err
 			}
 		}
@@ -100,6 +105,18 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		ForwardDigest: fmt.Sprintf("sha256:%x", forwardDigest),
 		LKGDigest:     fmt.Sprintf("sha256:%x", lkgDigest),
 	}, nil
+}
+
+func receiptBoundHistoricalLKGWorkload(release PlanRelease) (Workload, bool) {
+	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
+	if release.MigrationState != "independent" || !release.RetrySameLKG || !release.ExpectedPreviousPresent ||
+		release.AdoptionReceiptPath != expectedReceiptPath || release.BootstrapLKGPath != "" || release.OwnershipAdoption != nil ||
+		release.Workload.Kind != "DaemonSet" || release.Workload.RolloutMode != "rolling" {
+		return Workload{}, false
+	}
+	workload := release.Workload
+	workload.RolloutMode = "on-delete"
+	return workload, true
 }
 
 func bootstrapLKGWorkload(release PlanRelease) Workload {

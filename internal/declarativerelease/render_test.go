@@ -213,3 +213,30 @@ func TestBootstrapLKGAllowsOnlyExplicitOnDeleteToRollingAdoption(t *testing.T) {
 		t.Fatalf("independent release retained bootstrap strategy compatibility: %+v", got)
 	}
 }
+
+func TestReceiptBoundLKGAllowsOnlyIndependentSameLKGOnDeletePredecessor(t *testing.T) {
+	workload := Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "image-cache", Container: "image-cache", FieldManager: "image-cache-declarative", RolloutMode: "rolling"}
+	release := PlanRelease{
+		ComponentID: "image-cache", MigrationState: "independent", RetrySameLKG: true, ExpectedPreviousPresent: true,
+		AdoptionReceiptPath: "deploy/releases/image-cache/adoption-receipt.json", Workload: workload,
+	}
+	if got, allowed := receiptBoundHistoricalLKGWorkload(release); !allowed || got.RolloutMode != "on-delete" {
+		t.Fatalf("receipt-bound independent retry did not preserve its OnDelete LKG: allowed=%v workload=%+v", allowed, got)
+	}
+
+	for name, mutate := range map[string]func(*PlanRelease){
+		"ordinary successor": func(item *PlanRelease) { item.RetrySameLKG = false },
+		"missing receipt":    func(item *PlanRelease) { item.AdoptionReceiptPath = "" },
+		"adopting":           func(item *PlanRelease) { item.MigrationState = "adopting" },
+		"wrong path":         func(item *PlanRelease) { item.AdoptionReceiptPath = "deploy/releases/other/adoption-receipt.json" },
+		"bootstrap retained": func(item *PlanRelease) { item.BootstrapLKGPath = "deploy/releases/image-cache/lkg.json" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := release
+			mutate(&candidate)
+			if _, allowed := receiptBoundHistoricalLKGWorkload(candidate); allowed {
+				t.Fatal("unbound LKG strategy compatibility was accepted")
+			}
+		})
+	}
+}
