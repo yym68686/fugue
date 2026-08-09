@@ -1060,6 +1060,23 @@ func TestBootstrapAuxiliaryIdentityAndEveryArtifactImageAreExact(t *testing.T) {
 	if err := verifyDeclaredArtifactImageIDs(pods, manifest, release, false); err != nil {
 		t.Fatal(err)
 	}
+	terminating := map[string]any{
+		"metadata": map[string]any{"deletionTimestamp": "2026-07-13T13:40:51Z"},
+		"status": map[string]any{"containerStatuses": []any{
+			map[string]any{"name": "edge", "imageID": "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("d", 64)},
+			map[string]any{"name": "caddy", "imageID": "docker.io/library/caddy@sha256:" + strings.Repeat("e", 64)},
+		}},
+	}
+	podsWithTerminating := mustJSON(t, map[string]any{"items": []any{
+		map[string]any{"status": map[string]any{"containerStatuses": []any{
+			map[string]any{"name": "edge", "imageID": "ghcr.io/example/fugue-edge@sha256:" + edgeDigest},
+			map[string]any{"name": "caddy", "imageID": "docker.io/library/caddy@sha256:" + caddyDigest},
+		}}},
+		terminating,
+	}})
+	if err := verifyDeclaredArtifactImageIDs(podsWithTerminating, manifest, release, false); err != nil {
+		t.Fatalf("terminating preserved Pod was treated as an active artifact: %v", err)
+	}
 	tampered := bytes.Replace(pods, []byte(caddyDigest), []byte(strings.Repeat("d", 64)), 1)
 	if err := verifyDeclaredArtifactImageIDs(tampered, manifest, release, false); err == nil {
 		t.Fatal("cross-container LKG image drift was accepted")

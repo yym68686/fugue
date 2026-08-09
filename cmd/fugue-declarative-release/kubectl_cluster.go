@@ -1696,6 +1696,9 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		if !ok {
 			return errors.New("artifact workload Pod is invalid")
 		}
+		if mapField(pod, "metadata")["deletionTimestamp"] != nil {
+			continue
+		}
 		status := mapField(pod, "status")
 		for key, image := range expected {
 			parts := strings.SplitN(key, "\x00", 2)
