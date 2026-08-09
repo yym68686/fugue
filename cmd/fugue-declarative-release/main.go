@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +30,7 @@ func main() {
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|adoption-receipt|prepare|execute|reconcile> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|prepare|execute|reconcile> ...")
 	}
 	switch args[0] {
 	case "plan":
@@ -42,8 +41,6 @@ func run(args []string, output io.Writer) error {
 		return runBuild(args, output)
 	case "receipt":
 		return runReceipt(args, output)
-	case "adoption-receipt":
-		return runAdoptionReceipt(args, output)
 	case "prepare":
 		return runPrepare(args, output)
 	case "execute":
@@ -51,58 +48,8 @@ func run(args []string, output io.Writer) error {
 	case "reconcile":
 		return runReconcile(args, output)
 	default:
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|adoption-receipt|prepare|execute|reconcile> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|prepare|execute|reconcile> ...")
 	}
-}
-
-func runAdoptionReceipt(args []string, output io.Writer) error {
-	if len(args) != 7 {
-		return errors.New("usage: fugue-declarative-release adoption-receipt REGISTRY COMPONENT GROUP RUN_ID RUN_ATTEMPT RESULT")
-	}
-	registry, err := loadProductionRegistry(args[1])
-	if err != nil {
-		return err
-	}
-	var component *declarativerelease.Component
-	for index := range registry.Components {
-		if registry.Components[index].ID == args[2] {
-			component = &registry.Components[index]
-			break
-		}
-	}
-	if component == nil {
-		return errors.New("adoption receipt component is not registered")
-	}
-	runID, err := strconv.ParseInt(args[4], 10, 64)
-	if err != nil {
-		return errors.New("adoption receipt run ID is invalid")
-	}
-	runAttempt, err := strconv.Atoi(args[5])
-	if err != nil {
-		return errors.New("adoption receipt run attempt is invalid")
-	}
-	file, err := os.Open(args[6])
-	if err != nil {
-		return err
-	}
-	result, decodeErr := declarativerelease.DecodeExecutionResult(file)
-	closeErr := file.Close()
-	if decodeErr != nil {
-		return decodeErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	receipt, err := declarativerelease.BuildOwnershipAdoptionReceipt(result, *component, args[3], runID, runAttempt)
-	if err != nil {
-		return err
-	}
-	raw, err := declarativerelease.CanonicalJSON(receipt)
-	if err != nil {
-		return err
-	}
-	_, err = output.Write(append(raw, '\n'))
-	return err
 }
 
 func runPlan(args []string, output io.Writer) error {
@@ -175,8 +122,7 @@ func runPlan(args []string, output io.Writer) error {
 				return fmt.Errorf("component %q recovered predecessor is not in the trusted base ancestry", release.ComponentID)
 			}
 			recoveredRaw, recoveredErr := exec.Command("git", "rev-list", "-1", intent.ExpectedPreviousConfigSHA, "--", release.IntentPath).CombinedOutput()
-			if (recoveredErr != nil || strings.TrimSpace(string(recoveredRaw)) != intent.ExpectedPreviousConfigSHA) &&
-				!initialBootstrapFailedAtomRecoversSameLKG(registry, release.ComponentID, intent, prior, priorSHA) {
+			if recoveredErr != nil || strings.TrimSpace(string(recoveredRaw)) != intent.ExpectedPreviousConfigSHA {
 				return fmt.Errorf("component %q recovered predecessor is not an exact production intent atom", release.ComponentID)
 			}
 		}
@@ -191,40 +137,6 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
-}
-
-func initialBootstrapFailedAtomRecoversSameLKG(registry declarativerelease.Registry, componentID string, current, prior declarativerelease.Intent, priorSHA string) bool {
-	var component *declarativerelease.Component
-	for index := range registry.Components {
-		if registry.Components[index].ID == componentID {
-			component = &registry.Components[index]
-			break
-		}
-	}
-	if component == nil {
-		return false
-	}
-	candidate := declarativerelease.PlanRelease{
-		ComponentID: component.ID, MigrationState: component.MigrationState, BootstrapLKGPath: component.BootstrapLKGPath,
-		BootstrapRuntime: component.BootstrapRuntime, OwnershipAdoption: component.OwnershipAdoption, Workload: component.Workload,
-	}
-	candidate.IntentGeneration = current.Generation
-	candidate.ExpectedPreviousPresent = current.ExpectedPreviousPresent
-	candidate.ExpectedPreviousConfigSHA = current.ExpectedPreviousConfigSHA
-	candidate.ExpectedPreviousManifestSHA = current.ExpectedPreviousManifestSHA
-	candidate.ExpectedPreviousOCIRevision = current.ExpectedPreviousOCIRevision
-	candidate.ExpectedPreviousImageDigest = current.ExpectedPreviousImageDigest
-	candidate.SupersedesFailedConfigSHA = current.SupersedesFailedConfigSHA
-	if !declarativerelease.InitialExplicitBootstrapFailedAtomSuccessor(candidate) || current.Validate() != nil || prior.Validate() != nil ||
-		priorSHA == "" || current.SupersedesFailedConfigSHA != priorSHA || prior.Component != current.Component || prior.Generation != 1 ||
-		prior.SupersedesFailedConfigSHA != "" || current.Generation != prior.Generation+1 {
-		return false
-	}
-	return current.ExpectedPreviousPresent == prior.ExpectedPreviousPresent &&
-		current.ExpectedPreviousConfigSHA == prior.ExpectedPreviousConfigSHA &&
-		current.ExpectedPreviousManifestSHA == prior.ExpectedPreviousManifestSHA &&
-		current.ExpectedPreviousOCIRevision == prior.ExpectedPreviousOCIRevision &&
-		current.ExpectedPreviousImageDigest == prior.ExpectedPreviousImageDigest && current.Rollback == prior.Rollback
 }
 
 func containsPath(paths []string, want string) bool {
@@ -257,9 +169,12 @@ func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativereleas
 	if err != nil {
 		return nil, fmt.Errorf("read previous production registry: %w", err)
 	}
-	base, err := declarativerelease.DecodeRegistry(bytes.NewReader(raw))
-	if err != nil {
+	var base declarativerelease.Registry
+	if err := decodePriorReleaseData(raw, &base); err != nil {
 		return nil, fmt.Errorf("decode previous production registry: %w", err)
+	}
+	if err := base.Validate(); err != nil {
+		return nil, fmt.Errorf("validate previous production registry: %w", err)
 	}
 	if base.EdgeGroupRegistryPath == "" {
 		return nil, nil
@@ -268,11 +183,34 @@ func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativereleas
 	if err != nil {
 		return nil, fmt.Errorf("read previous edge group registry: %w", err)
 	}
-	edge, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(raw))
-	if err != nil {
+	var edge declarativerelease.EdgeGroupRegistry
+	if err := decodePriorReleaseData(raw, &edge); err != nil {
 		return nil, fmt.Errorf("decode previous edge group registry: %w", err)
 	}
+	if err := edge.Validate(); err != nil {
+		return nil, fmt.Errorf("validate previous edge group registry: %w", err)
+	}
 	return &edge, nil
+}
+
+// decodePriorReleaseData is a one-atom read-only bridge for deleting fields
+// from repository data. It ignores fields unknown to the current schema but
+// still requires exactly one JSON value and runs the current typed validator
+// before the data can influence the plan. It is removed in the next cleanup
+// atom after the repository parent uses the current schema.
+func decodePriorReleaseData(raw []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("previous release data contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func loadProductionRegistry(registryPath string) (declarativerelease.Registry, error) {
@@ -317,9 +255,6 @@ func expandComponentDependencyRoots(registry declarativerelease.Registry) (decla
 	}
 	for index := range registry.Components {
 		component := &registry.Components[index]
-		if component.MigrationState != "independent" {
-			continue
-		}
 		raw, listErr := boundedExternalInDirectory(context.Background(), root, nil, 4<<20, "go", "list", "-deps", "-f", "{{if and .Module .Dir}}{{.Dir}}{{end}}", component.Artifact.BuildPackage)
 		if listErr != nil {
 			return declarativerelease.Registry{}, fmt.Errorf("resolve %s dependency graph: %w", component.ID, listErr)
@@ -508,7 +443,7 @@ func runPrepare(args []string, output io.Writer) error {
 	if lkgErr != nil {
 		return lkgErr
 	}
-	if lkgManifest != nil && release.MigrationState != "adopting" {
+	if lkgManifest != nil {
 		lkgManifest, err = declarativerelease.MaterializePredecessorManifestTemplate(lkgManifest, release.ManifestVariables)
 		if err != nil {
 			return err
@@ -551,26 +486,9 @@ func loadLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
 	if !release.ExpectedPreviousPresent {
 		return nil, nil
 	}
-	if release.MigrationState == "adopting" {
-		if release.BootstrapLKGPath == "" {
-			return nil, errors.New("adopting declarative release with a predecessor requires bootstrapLkgPath")
-		}
-		content, err := os.ReadFile(release.BootstrapLKGPath)
-		if err != nil {
-			return nil, fmt.Errorf("read bootstrap LKG manifest: %w", err)
-		}
-		return content, nil
-	}
 	manifestPath, err := historicalComponentManifestPath(release.ExpectedPreviousConfigSHA, release.ComponentID)
 	if err != nil {
-		if !errors.Is(err, errHistoricalProductionRegistryAbsent) {
-			return nil, err
-		}
-		content, receiptErr := loadReceiptBoundLKGManifest(release)
-		if receiptErr != nil {
-			return nil, fmt.Errorf("%w; receipt-bound LKG fallback: %v", err, receiptErr)
-		}
-		return content, nil
+		return nil, err
 	}
 	object := release.ExpectedPreviousConfigSHA + ":" + manifestPath
 	content, err := exec.Command("git", "show", object).CombinedOutput()
@@ -580,259 +498,22 @@ func loadLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
 	return content, nil
 }
 
-func loadReceiptBoundLKGManifest(release declarativerelease.PlanRelease) ([]byte, error) {
-	component, receipt, err := loadValidatedReceiptBoundRelease(release)
-	if err != nil {
-		return nil, err
-	}
-	lkgPath := filepath.Join(filepath.Dir(release.AdoptionReceiptPath), "lkg.json")
-	if filepath.ToSlash(lkgPath) != "deploy/releases/"+release.ComponentID+"/lkg.json" {
-		return nil, errors.New("receipt-bound LKG path escapes the component release directory")
-	}
-	content, err := os.ReadFile(lkgPath)
-	if err != nil {
-		return nil, fmt.Errorf("read receipt-bound LKG manifest: %w", err)
-	}
-	if err := validateReceiptBoundLKGManifest(content, release, component, receipt); err != nil {
-		return nil, err
-	}
-	return content, nil
-}
-
-func loadValidatedReceiptBoundRelease(release declarativerelease.PlanRelease) (declarativerelease.Component, declarativerelease.OwnershipAdoptionReceipt, error) {
-	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
-	if release.MigrationState != "independent" || release.AdoptionReceiptPath != expectedReceiptPath ||
-		filepath.ToSlash(filepath.Clean(release.AdoptionReceiptPath)) != release.AdoptionReceiptPath {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, errors.New("release plan has no exact independent adoption receipt path")
-	}
+func historicalComponentManifestPath(revision, componentID string) (string, error) {
 	registry, err := loadProductionRegistry("deploy/releases/components.json")
 	if err != nil {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, fmt.Errorf("load current production registry: %w", err)
+		return "", err
 	}
-	var component *declarativerelease.Component
-	for index := range registry.Components {
-		if registry.Components[index].ID == release.ComponentID {
-			component = &registry.Components[index]
-			break
-		}
-	}
-	if component == nil || component.AdoptionReceiptPath != release.AdoptionReceiptPath {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, errors.New("component adoption receipt path does not match the release plan")
-	}
-	receiptFile, err := os.Open(release.AdoptionReceiptPath)
-	if err != nil {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, fmt.Errorf("open ownership adoption receipt: %w", err)
-	}
-	receipt, decodeErr := declarativerelease.DecodeOwnershipAdoptionReceipt(receiptFile)
-	closeErr := receiptFile.Close()
-	if decodeErr != nil {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, decodeErr
-	}
-	if closeErr != nil {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, closeErr
-	}
-	if err := receipt.Validate(*component, receipt.GroupID); err != nil {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, err
-	}
-	wantImage := component.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
-	if receipt.Final.ConfigSHA != release.ExpectedPreviousConfigSHA ||
-		receipt.Final.ManifestSHA != release.ExpectedPreviousManifestSHA ||
-		receipt.Final.OCIRevision != release.ExpectedPreviousOCIRevision || receipt.Final.ImageRef != wantImage {
-		return declarativerelease.Component{}, declarativerelease.OwnershipAdoptionReceipt{}, errors.New("ownership adoption receipt does not bind the declared LKG")
-	}
-	return *component, receipt, nil
-}
-
-func validateReceiptBoundLKGManifest(content []byte, release declarativerelease.PlanRelease, component declarativerelease.Component, receipt declarativerelease.OwnershipAdoptionReceipt) error {
-	identities, err := declarativerelease.ResourceSetIdentities(content)
-	if err != nil {
-		return fmt.Errorf("decode receipt-bound LKG resource identities: %w", err)
-	}
-	wantPrimary := declarativerelease.ResourceIdentity{
-		APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
-		Namespace: release.Workload.Namespace, Name: release.Workload.Name,
-	}
-	resources := make(map[declarativerelease.ResourceIdentity]struct{}, len(receipt.Final.Resources))
-	for _, resource := range receipt.Final.Resources {
-		resources[resource.Identity] = struct{}{}
-	}
-	if len(identities) != len(resources) {
-		return errors.New("receipt-bound LKG resource witness count drifted")
-	}
-	for _, identity := range identities {
-		if _, exists := resources[identity]; !exists {
-			return fmt.Errorf("receipt-bound LKG resource %s/%s is absent from the adoption witness", identity.Kind, identity.Name)
-		}
-	}
-	primary, err := declarativerelease.ResourceSetItem(content, wantPrimary)
-	if err != nil {
-		return fmt.Errorf("receipt-bound LKG primary workload: %w", err)
-	}
-	spec, ok := primary["spec"].(map[string]any)
-	if !ok {
-		return errors.New("receipt-bound LKG workload spec is invalid")
-	}
-	template, ok := spec["template"].(map[string]any)
-	if !ok {
-		return errors.New("receipt-bound LKG workload template is invalid")
-	}
-	templateMetadata, ok := template["metadata"].(map[string]any)
-	if !ok {
-		return errors.New("receipt-bound LKG template metadata is invalid")
-	}
-	annotations, ok := templateMetadata["annotations"].(map[string]any)
-	if !ok || annotations["fugue.pro/source-commit"] != release.ExpectedPreviousManifestSHA ||
-		annotations["fugue.pro/oci-revision"] != release.ExpectedPreviousOCIRevision {
-		return errors.New("receipt-bound LKG template source identity drifted")
-	}
-	templateSpec, ok := template["spec"].(map[string]any)
-	if !ok {
-		return errors.New("receipt-bound LKG pod spec is invalid")
-	}
-	containers, ok := templateSpec["containers"].([]any)
-	if !ok {
-		return errors.New("receipt-bound LKG containers are invalid")
-	}
-	wantImage := component.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
-	matched := 0
-	for _, rawContainer := range containers {
-		container, ok := rawContainer.(map[string]any)
-		if ok && container["name"] == release.Workload.Container {
-			matched++
-			if container["image"] != wantImage {
-				return errors.New("receipt-bound LKG workload image drifted")
-			}
-		}
-	}
-	if matched != 1 {
-		return errors.New("receipt-bound LKG workload container is not unique")
-	}
-	if _, err := declarativerelease.PredecessorConvergenceManifest(content); err != nil {
-		return fmt.Errorf("build receipt-bound LKG resource witness: %w", err)
-	}
-	return nil
-}
-
-func historicalComponentManifestPath(revision, componentID string) (string, error) {
-	const registryPath = "deploy/releases/components.json"
-	raw, err := exec.Command("git", "show", revision+":"+registryPath).Output()
-	if err != nil {
-		if historicalGitPathAbsent(err, registryPath) {
-			return "", fmt.Errorf("historical production registry is absent: %w", errHistoricalProductionRegistryAbsent)
-		}
-		return "", fmt.Errorf("read previous production registry: %w", err)
-	}
-	registry, err := declarativerelease.DecodeRegistry(bytes.NewReader(raw))
-	if err != nil {
-		return "", fmt.Errorf("decode previous production registry: %w", err)
-	}
-	manifestPaths := make(map[string]string, len(registry.Components))
 	for _, component := range registry.Components {
-		if _, exists := manifestPaths[component.ID]; exists {
-			return "", fmt.Errorf("previous production registry repeats component %q", component.ID)
+		if component.ID != componentID {
+			continue
 		}
-		manifestPaths[component.ID] = component.ManifestPath
-	}
-	if registry.EdgeGroupRegistryPath != "" {
-		edgeRaw, readErr := exec.Command("git", "show", revision+":"+registry.EdgeGroupRegistryPath).Output()
-		if readErr != nil {
-			return "", fmt.Errorf("read previous edge group registry: %w", readErr)
+		if err := exec.Command("git", "cat-file", "-e", revision+":"+component.ManifestPath).Run(); err != nil {
+			return "", fmt.Errorf("previous component manifest %q is absent: %w", component.ManifestPath, err)
 		}
-		historical, decodeErr := decodeHistoricalEdgeGroupManifestPaths(bytes.NewReader(edgeRaw))
-		if decodeErr != nil {
-			return "", fmt.Errorf("decode previous edge group registry: %w", decodeErr)
-		}
-		for id, path := range historical {
-			if _, exists := manifestPaths[id]; exists {
-				return "", fmt.Errorf("previous production registry repeats component %q", id)
-			}
-			manifestPaths[id] = path
-		}
-	}
-	manifestPath := manifestPaths[componentID]
-	if manifestPath != "" {
-		return manifestPath, nil
+		return component.ManifestPath, nil
 	}
 	return "", fmt.Errorf("previous production registry does not contain component %q", componentID)
 }
-
-var errHistoricalProductionRegistryAbsent = errors.New("historical production registry path is absent")
-
-func historicalGitPathAbsent(err error, repositoryPath string) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 128 {
-		return false
-	}
-	stderr := string(exitErr.Stderr)
-	quoted := "path '" + repositoryPath + "'"
-	return strings.Contains(stderr, quoted+" does not exist in") ||
-		(strings.Contains(stderr, quoted+" exists on disk, but not in") && strings.Contains(stderr, "fatal:"))
-}
-
-type historicalEdgeGroupRegistry struct {
-	APIVersion string                `json:"apiVersion"`
-	Kind       string                `json:"kind"`
-	Groups     []historicalEdgeGroup `json:"groups"`
-}
-
-type historicalEdgeGroup struct {
-	ID      string                       `json:"id"`
-	GroupID string                       `json:"groupId"`
-	Control declarativerelease.Component `json:"control"`
-	Worker  declarativerelease.Component `json:"worker"`
-}
-
-// decodeHistoricalEdgeGroupManifestPaths is deliberately a read-only projection.
-// It accepts adoption metadata that was valid in an immutable historical tree,
-// validates every component with the current Component contract, and returns
-// only component IDs and manifest paths. It never feeds historical migration metadata into the current registry,
-// release plan, ownership adapter, or executor.
-func decodeHistoricalEdgeGroupManifestPaths(reader io.Reader) (map[string]string, error) {
-	decoder := json.NewDecoder(reader)
-	decoder.DisallowUnknownFields()
-	var registry historicalEdgeGroupRegistry
-	if err := decoder.Decode(&registry); err != nil {
-		return nil, err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return nil, errors.New("historical edge group registry contains multiple JSON values")
-		}
-		return nil, err
-	}
-	if registry.APIVersion != declarativerelease.EdgeGroupRegistryAPIVersion || registry.Kind != declarativerelease.EdgeGroupRegistryKind ||
-		len(registry.Groups) == 0 || len(registry.Groups) > 100 {
-		return nil, errors.New("historical edge group registry identity is invalid")
-	}
-	seenGroupIDs := make(map[string]struct{}, len(registry.Groups))
-	seenComponents := make(map[string]struct{}, len(registry.Groups)*2)
-	manifestPaths := make(map[string]string, len(registry.Groups)*2)
-	for index, group := range registry.Groups {
-		if strings.TrimSpace(group.ID) == "" || strings.TrimSpace(group.GroupID) == "" ||
-			(index > 0 && registry.Groups[index-1].ID >= group.ID) {
-			return nil, errors.New("historical edge groups are not strictly ordered")
-		}
-		if _, exists := seenGroupIDs[group.GroupID]; exists {
-			return nil, fmt.Errorf("historical edge group id %q is repeated", group.GroupID)
-		}
-		seenGroupIDs[group.GroupID] = struct{}{}
-		if group.Control.ID != "edge-control-"+group.ID || group.Worker.ID != "edge-worker-"+group.ID {
-			return nil, fmt.Errorf("historical edge group %q component identity is invalid", group.ID)
-		}
-		for _, component := range []declarativerelease.Component{group.Control, group.Worker} {
-			if err := component.Validate(); err != nil {
-				return nil, fmt.Errorf("historical component %q: %w", component.ID, err)
-			}
-			if _, exists := seenComponents[component.ID]; exists {
-				return nil, fmt.Errorf("historical component %q is repeated", component.ID)
-			}
-			seenComponents[component.ID] = struct{}{}
-			manifestPaths[component.ID] = component.ManifestPath
-		}
-	}
-	return manifestPaths, nil
-}
-
 func runExecute(args []string, output io.Writer) error {
 	if len(args) != 2 {
 		return errors.New("usage: fugue-declarative-release execute PLAN_DIR")

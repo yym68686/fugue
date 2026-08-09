@@ -3,12 +3,53 @@ package declarativerelease
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestRetiredReleaseModesHaveZeroRepositoryHits(t *testing.T) {
+	t.Helper()
+	banned := []string{
+		"Ownership" + "Adoption",
+		"ownership" + "Adoption",
+		"adoption" + "Receipt",
+		"adoption" + "-receipt",
+		"Bootstrap" + "Runtime",
+		"bootstrap" + "Runtime",
+		"Bootstrap" + "LKG",
+		"bootstrap" + "Lkg",
+		"force" + "-conflicts",
+		"InitialExplicit" + "Bootstrap",
+		"receiptBound" + "Historical",
+		"allowsHistorical" + "Restarts",
+		"legacy" + "SourceTag",
+		"adopt" + "ing",
+	}
+	command := exec.Command("git", "ls-files", "-z")
+	command.Dir = "../.."
+	raw, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range bytes.Split(raw, []byte{0}) {
+		if len(name) == 0 {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join("../..", string(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, token := range banned {
+			if bytes.Contains(content, []byte(token)) {
+				t.Fatalf("retired release token %q remains in %s", token, name)
+			}
+		}
+	}
+}
 
 func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	filename := "../../deploy/releases/components.json"
@@ -60,9 +101,7 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		t.Fatalf("schema lane is not a repeatable declarative Deployment: %+v", schema)
 	}
 	imageCache := byID["image-cache"]
-	if imageCache.MigrationState != "independent" || imageCache.Workload.PreservedUnavailable != 1 ||
-		imageCache.AdoptionReceiptPath != "deploy/releases/image-cache/adoption-receipt.json" || imageCache.OwnershipAdoption != nil ||
-		imageCache.BootstrapLKGPath != "" {
+	if imageCache.Workload.PreservedUnavailable != 1 {
 		t.Fatalf("image-cache lane did not retire adoption while preserving its single offline node: %+v", imageCache)
 	}
 	for filename, contract := range map[string]struct {
@@ -174,51 +213,6 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		if caddyTargets != 0 {
 			t.Fatalf("%s incorrectly binds external Caddy containers to its Edge artifact", componentID)
 		}
-		if byID[componentID].BootstrapLKGPath != "" && validateEdgeWorkerOwnershipRepair(byID[componentID]) != nil {
-			t.Fatalf("%s retains a bootstrap LKG outside an exact image ownership repair", componentID)
-		}
-		if receiptPath := byID[componentID].AdoptionReceiptPath; receiptPath != "" {
-			file, err := os.Open(filepath.Join("../..", receiptPath))
-			if err != nil {
-				t.Fatalf("open %s adoption receipt: %v", componentID, err)
-			}
-			receipt, decodeErr := DecodeOwnershipAdoptionReceipt(file)
-			_ = file.Close()
-			if decodeErr != nil {
-				t.Fatalf("decode %s adoption receipt: %v", componentID, decodeErr)
-			}
-			if err := receipt.Validate(byID[componentID], group.GroupID); err != nil {
-				t.Fatalf("validate %s adoption receipt: %v", componentID, err)
-			}
-			invalid := receipt
-			invalid.Final.Resources = append([]ResourceObservation(nil), receipt.Final.Resources...)
-			for index := range invalid.Final.Resources {
-				if invalid.Final.Resources[index].Identity.Kind == "DaemonSet" {
-					invalid.Final.Resources[index].ReviewedOwnershipExclusive = false
-					break
-				}
-			}
-			if err := invalid.Validate(byID[componentID], group.GroupID); err == nil || !strings.Contains(err.Error(), "pointer-exclusive") {
-				t.Fatalf("%s receipt lost pointer-exclusive fail-closed validation: %v", componentID, err)
-			}
-		}
-	}
-	for _, component := range registry.Components {
-		if component.Family == "edge" || component.AdoptionReceiptPath == "" {
-			continue
-		}
-		file, err := os.Open(filepath.Join("../..", component.AdoptionReceiptPath))
-		if err != nil {
-			t.Fatalf("open %s adoption receipt: %v", component.ID, err)
-		}
-		receipt, decodeErr := DecodeOwnershipAdoptionReceipt(file)
-		_ = file.Close()
-		if decodeErr != nil {
-			t.Fatalf("decode %s adoption receipt: %v", component.ID, decodeErr)
-		}
-		if err := receipt.Validate(component, receipt.GroupID); err != nil {
-			t.Fatalf("validate %s adoption receipt: %v", component.ID, err)
-		}
 	}
 	baseFile, err := os.Open(filename)
 	if err != nil {
@@ -250,23 +244,6 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		t.Fatalf("registry activated a tooling-only migration commit: plan=%+v err=%v", toolingPlan, err)
 	}
 	for _, component := range registry.Components {
-		if component.MigrationState != "pending" {
-			continue
-		}
-		_, err := BuildPlan(
-			registry,
-			"1111111111111111111111111111111111111111",
-			"2222222222222222222222222222222222222222",
-			[]string{component.IntentPath},
-		)
-		if err == nil || !strings.Contains(err.Error(), "is not migrated to the declarative release entrypoint") {
-			t.Fatalf("pending %s intent was not fail-closed: %v", component.ID, err)
-		}
-	}
-	for _, component := range registry.Components {
-		if component.MigrationState != "independent" {
-			continue
-		}
 		manifestRaw, err := os.ReadFile(filepath.Join("../..", component.ManifestPath))
 		if err != nil {
 			t.Fatalf("read %s manifest: %v", component.ID, err)

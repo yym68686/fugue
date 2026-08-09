@@ -156,7 +156,6 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	}
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousConfigSHA: old.ConfigSHA,
-		MigrationState:            "independent",
 		Transition:                &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition},
 	}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
@@ -191,7 +190,7 @@ func TestExecuteEdgeGroupABContinuesFromExistingGroupBoundActivation(t *testing.
 		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
 		activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID, Generation: 3, ActiveSlot: "a", Authority: edgeActivationAuthority},
 	}
-	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, MigrationState: "independent", Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
+	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}

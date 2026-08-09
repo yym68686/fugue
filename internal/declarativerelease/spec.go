@@ -53,41 +53,18 @@ type Registry struct {
 // Component contains only static release mechanics. Runtime version choices
 // belong to Intent and immutable build receipts.
 type Component struct {
-	ID                  string             `json:"id"`
-	Family              string             `json:"family"`
-	IntentPath          string             `json:"intentPath"`
-	ManifestPath        string             `json:"manifestPath"`
-	ManifestVariables   map[string]string  `json:"manifestVariables,omitempty"`
-	BootstrapLKGPath    string             `json:"bootstrapLkgPath,omitempty"`
-	BootstrapRuntime    *BootstrapRuntime  `json:"bootstrapRuntime,omitempty"`
-	SourceRoots         []string           `json:"sourceRoots"`
-	Artifact            Artifact           `json:"artifact"`
-	ArtifactTargets     []ArtifactTarget   `json:"artifactTargets,omitempty"`
-	Workload            Workload           `json:"workload"`
-	Transition          *Transition        `json:"transition,omitempty"`
-	Health              []HealthProbe      `json:"health"`
-	Concurrency         string             `json:"concurrency"`
-	MigrationState      string             `json:"migrationState"`
-	OwnershipAdoption   *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
-	AdoptionReceiptPath string             `json:"adoptionReceiptPath,omitempty"`
-}
-
-// OwnershipAdoption is the reviewed, one-time compatibility boundary for a
-// workload that is still owned by a legacy Kubernetes field manager. It is
-// copied into the immutable release plan; independent components must not
-// carry it.
-type OwnershipAdoption struct {
-	LegacyFieldManager  string                   `json:"legacyFieldManager"`
-	LegacyFieldManagers []string                 `json:"legacyFieldManagers,omitempty"`
-	Resources           []OwnershipAdoptionScope `json:"resources"`
-}
-
-// OwnershipAdoptionScope limits force-conflicts to named resources and
-// explicit JSON-pointer subtrees. The adoption adapter materializes a
-// separate minimal SSA document from this allowlist.
-type OwnershipAdoptionScope struct {
-	Identity ResourceIdentity `json:"identity"`
-	Fields   []string         `json:"fields"`
+	ID                string            `json:"id"`
+	Family            string            `json:"family"`
+	IntentPath        string            `json:"intentPath"`
+	ManifestPath      string            `json:"manifestPath"`
+	ManifestVariables map[string]string `json:"manifestVariables,omitempty"`
+	SourceRoots       []string          `json:"sourceRoots"`
+	Artifact          Artifact          `json:"artifact"`
+	ArtifactTargets   []ArtifactTarget  `json:"artifactTargets,omitempty"`
+	Workload          Workload          `json:"workload"`
+	Transition        *Transition       `json:"transition,omitempty"`
+	Health            []HealthProbe     `json:"health"`
+	Concurrency       string            `json:"concurrency"`
 }
 
 // ArtifactTarget identifies every container in the component resource set
@@ -108,16 +85,6 @@ type Artifact struct {
 	Dockerfile   string `json:"dockerfile"`
 	Context      string `json:"context"`
 	BuildPackage string `json:"buildPackage"`
-}
-
-// BootstrapRuntime binds a healthy legacy OnDelete Pod cohort whose running
-// image differs from the workload's desired LKG template. It exists only for
-// the explicit adopting phase and is removed once ownership converges.
-type BootstrapRuntime struct {
-	Resource    ResourceIdentity `json:"resource"`
-	Container   string           `json:"container"`
-	ImageDigest string           `json:"imageDigest"`
-	OCIRevision string           `json:"ociRevision"`
 }
 
 type Workload struct {
@@ -193,54 +160,26 @@ type Plan struct {
 }
 
 type PlanRelease struct {
-	ComponentID                 string             `json:"component"`
-	ChangedPaths                []string           `json:"changedPaths"`
-	IntentPath                  string             `json:"intentPath"`
-	IntentDigest                string             `json:"intentDigest"`
-	IntentGeneration            int                `json:"intentGeneration"`
-	ExpectedPreviousPresent     bool               `json:"expectedPreviousPresent"`
-	ExpectedPreviousConfigSHA   string             `json:"expectedPreviousConfigSha"`
-	ExpectedPreviousManifestSHA string             `json:"expectedPreviousManifestSha"`
-	ExpectedPreviousOCIRevision string             `json:"expectedPreviousOciRevision"`
-	ExpectedPreviousImageDigest string             `json:"expectedPreviousImageDigest"`
-	SupersedesFailedConfigSHA   string             `json:"supersedesFailedConfigSha,omitempty"`
-	ManifestPath                string             `json:"manifestPath"`
-	ManifestVariables           map[string]string  `json:"manifestVariables,omitempty"`
-	AdoptionReceiptPath         string             `json:"adoptionReceiptPath,omitempty"`
-	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
-	BootstrapRuntime            *BootstrapRuntime  `json:"bootstrapRuntime,omitempty"`
-	RetrySameLKG                bool               `json:"retrySameLkg,omitempty"`
-	Artifact                    Artifact           `json:"artifact"`
-	ArtifactTargets             []ArtifactTarget   `json:"artifactTargets,omitempty"`
-	Workload                    Workload           `json:"workload"`
-	Transition                  *Transition        `json:"transition,omitempty"`
-	Health                      []HealthProbe      `json:"health"`
-	Concurrency                 string             `json:"concurrency"`
-	MigrationState              string             `json:"migrationState"`
-	OwnershipAdoption           *OwnershipAdoption `json:"ownershipAdoption,omitempty"`
-}
-
-func (release PlanRelease) receiptBoundHistoricalLKG() bool {
-	expectedReceiptPath := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
-	return release.MigrationState == "independent" && release.RetrySameLKG && release.ExpectedPreviousPresent &&
-		release.AdoptionReceiptPath == expectedReceiptPath && release.BootstrapLKGPath == "" && release.OwnershipAdoption == nil
-}
-
-// InitialExplicitBootstrapFailedAtomSuccessor is the only non-retry adopting
-// successor allowed to resume a failed first production atom. The planner
-// separately proves that SupersedesFailedConfigSHA is the immediately prior
-// component intent and that both intents name this same bootstrap LKG.
-func InitialExplicitBootstrapFailedAtomSuccessor(release PlanRelease) bool {
-	bootstrap := release.BootstrapRuntime
-	return release.MigrationState == "adopting" && release.IntentGeneration == 2 && !release.RetrySameLKG &&
-		shaPattern.MatchString(release.SupersedesFailedConfigSHA) && release.ExpectedPreviousPresent &&
-		shaPattern.MatchString(release.ExpectedPreviousConfigSHA) && release.ExpectedPreviousManifestSHA == release.ExpectedPreviousConfigSHA &&
-		release.ExpectedPreviousOCIRevision == release.ExpectedPreviousConfigSHA && digestPattern.MatchString(release.ExpectedPreviousImageDigest) &&
-		release.BootstrapLKGPath != "" && release.OwnershipAdoption != nil && len(release.OwnershipAdoption.Resources) > 0 &&
-		bootstrap != nil && bootstrap.Resource.APIVersion == release.Workload.APIVersion && bootstrap.Resource.Kind == release.Workload.Kind &&
-		bootstrap.Resource.Namespace == release.Workload.Namespace && bootstrap.Resource.Name == release.Workload.Name &&
-		bootstrap.Container == release.Workload.Container && digestPattern.MatchString(bootstrap.ImageDigest) &&
-		shaPattern.MatchString(bootstrap.OCIRevision)
+	ComponentID                 string            `json:"component"`
+	ChangedPaths                []string          `json:"changedPaths"`
+	IntentPath                  string            `json:"intentPath"`
+	IntentDigest                string            `json:"intentDigest"`
+	IntentGeneration            int               `json:"intentGeneration"`
+	ExpectedPreviousPresent     bool              `json:"expectedPreviousPresent"`
+	ExpectedPreviousConfigSHA   string            `json:"expectedPreviousConfigSha"`
+	ExpectedPreviousManifestSHA string            `json:"expectedPreviousManifestSha"`
+	ExpectedPreviousOCIRevision string            `json:"expectedPreviousOciRevision"`
+	ExpectedPreviousImageDigest string            `json:"expectedPreviousImageDigest"`
+	SupersedesFailedConfigSHA   string            `json:"supersedesFailedConfigSha,omitempty"`
+	ManifestPath                string            `json:"manifestPath"`
+	ManifestVariables           map[string]string `json:"manifestVariables,omitempty"`
+	RetrySameLKG                bool              `json:"retrySameLkg,omitempty"`
+	Artifact                    Artifact          `json:"artifact"`
+	ArtifactTargets             []ArtifactTarget  `json:"artifactTargets,omitempty"`
+	Workload                    Workload          `json:"workload"`
+	Transition                  *Transition       `json:"transition,omitempty"`
+	Health                      []HealthProbe     `json:"health"`
+	Concurrency                 string            `json:"concurrency"`
 }
 
 // DecodeRegistry accepts exactly one strict JSON document.
@@ -351,11 +290,6 @@ func (component Component) Validate() error {
 			return fmt.Errorf("component %q %s: %w", component.ID, label, err)
 		}
 	}
-	if component.BootstrapLKGPath != "" {
-		if normalized, err := normalizeRepositoryPath(component.BootstrapLKGPath); err != nil || normalized != component.BootstrapLKGPath {
-			return fmt.Errorf("component %q bootstrapLkgPath is invalid", component.ID)
-		}
-	}
 	for key, value := range component.ManifestVariables {
 		if !manifestVariableNamePattern.MatchString(key) || !manifestVariableValuePattern.MatchString(value) {
 			return fmt.Errorf("component %q manifest variable %q is invalid", component.ID, key)
@@ -387,33 +321,6 @@ func (component Component) Validate() error {
 	if component.Concurrency != "fugue-production-"+component.ID {
 		return fmt.Errorf("component %q concurrency must be component-scoped", component.ID)
 	}
-	if component.MigrationState != "pending" && component.MigrationState != "adopting" && component.MigrationState != "independent" {
-		return fmt.Errorf("component %q migrationState must be pending, adopting, or independent", component.ID)
-	}
-	if component.MigrationState == "independent" && component.OwnershipAdoption != nil {
-		return fmt.Errorf("component %q independent lane retains ownership adoption", component.ID)
-	}
-	if component.BootstrapRuntime != nil {
-		bootstrap := component.BootstrapRuntime
-		if component.MigrationState != "adopting" || component.OwnershipAdoption == nil || component.BootstrapLKGPath == "" ||
-			bootstrap.Resource.APIVersion != component.Workload.APIVersion || bootstrap.Resource.Kind != component.Workload.Kind ||
-			bootstrap.Resource.Namespace != component.Workload.Namespace || bootstrap.Resource.Name != component.Workload.Name ||
-			bootstrap.Container != component.Workload.Container || !digestPattern.MatchString(bootstrap.ImageDigest) ||
-			!shaPattern.MatchString(bootstrap.OCIRevision) {
-			return fmt.Errorf("component %q bootstrap runtime identity is invalid", component.ID)
-		}
-	}
-	if component.AdoptionReceiptPath != "" {
-		expected := "deploy/releases/" + component.ID + "/adoption-receipt.json"
-		if component.MigrationState != "independent" || component.AdoptionReceiptPath != expected {
-			return fmt.Errorf("component %q adoption receipt path is invalid", component.ID)
-		}
-	}
-	if component.OwnershipAdoption != nil {
-		if err := component.OwnershipAdoption.validate(component); err != nil {
-			return err
-		}
-	}
 	if err := component.Workload.validate(component.ID); err != nil {
 		return err
 	}
@@ -432,66 +339,6 @@ func (component Component) Validate() error {
 		}
 	}
 	return nil
-}
-
-func (adoption OwnershipAdoption) validate(component Component) error {
-	if !fieldManagerPattern.MatchString(adoption.LegacyFieldManager) || adoption.LegacyFieldManager == component.Workload.FieldManager {
-		return fmt.Errorf("component %q ownership adoption legacy manager is invalid", component.ID)
-	}
-	if len(adoption.Resources) == 0 || len(adoption.Resources) > 16 {
-		return fmt.Errorf("component %q ownership adoption resource count is invalid", component.ID)
-	}
-	managers := adoption.legacyManagers()
-	if len(managers) == 0 || len(managers) > 8 {
-		return fmt.Errorf("component %q ownership adoption legacy manager count is invalid", component.ID)
-	}
-	for index, manager := range managers {
-		if !fieldManagerPattern.MatchString(manager) || manager == component.Workload.FieldManager ||
-			(index > 0 && managers[index-1] >= manager) {
-			return fmt.Errorf("component %q ownership adoption legacy managers are invalid or unordered", component.ID)
-		}
-	}
-	if !stringSliceContains(managers, adoption.LegacyFieldManager) {
-		return fmt.Errorf("component %q ownership adoption primary legacy manager is absent", component.ID)
-	}
-	previous := ""
-	for index, scope := range adoption.Resources {
-		key := scope.Identity.key()
-		if !componentIDPattern.MatchString(scope.Identity.Namespace) || !componentIDPattern.MatchString(scope.Identity.Name) ||
-			scope.Identity.APIVersion == "" || scope.Identity.Kind == "" || (previous != "" && previous >= key) {
-			return fmt.Errorf("component %q ownership adoption resource %d is invalid or unordered", component.ID, index)
-		}
-		if len(scope.Fields) == 0 || len(scope.Fields) > 128 {
-			return fmt.Errorf("component %q ownership adoption resource %d field count is invalid", component.ID, index)
-		}
-		for fieldIndex, field := range scope.Fields {
-			if !strings.HasPrefix(field, "/") || strings.Contains(field, "//") ||
-				(fieldIndex > 0 && scope.Fields[fieldIndex-1] >= field) {
-				return fmt.Errorf("component %q ownership adoption fields must be strict ordered JSON pointers", component.ID)
-			}
-			if _, err := parseAdoptionPointer(field); err != nil {
-				return fmt.Errorf("component %q ownership adoption field %q: %w", component.ID, field, err)
-			}
-		}
-		previous = key
-	}
-	return nil
-}
-
-func (adoption OwnershipAdoption) legacyManagers() []string {
-	if len(adoption.LegacyFieldManagers) == 0 {
-		return []string{adoption.LegacyFieldManager}
-	}
-	return adoption.LegacyFieldManagers
-}
-
-func stringSliceContains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func (transition *Transition) validate(component Component) error {
@@ -720,12 +567,6 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 				continue
 			}
 			if changedPath == component.ManifestPath {
-				// Pending components have no production writer yet. Their shared
-				// manifest template is configuration-only until the same atom
-				// advances the component to adopting and changes its intent.
-				if component.MigrationState == "pending" {
-					continue
-				}
 				selectedPaths = append(selectedPaths, changedPath)
 				continue
 			}
@@ -763,9 +604,6 @@ func BuildPlan(registry Registry, baseSHA, headSHA string, changedPaths []string
 		return Plan{}, errors.New("runtime commit contains multiple production intents; split it into independent production atoms")
 	}
 	selected := candidates[selectedIndex]
-	if selected.component.MigrationState != "adopting" && selected.component.MigrationState != "independent" {
-		return Plan{}, fmt.Errorf("component %q is not migrated to the declarative release entrypoint", selected.component.ID)
-	}
 	selectedPathSet := make(map[string]struct{}, len(selected.selectedPaths))
 	for _, changedPath := range selected.selectedPaths {
 		selectedPathSet[changedPath] = struct{}{}
@@ -859,19 +697,10 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.ExpectedPreviousOCIRevision = intent.ExpectedPreviousOCIRevision
 		release.ExpectedPreviousImageDigest = intent.ExpectedPreviousImageDigest
 		release.SupersedesFailedConfigSHA = intent.SupersedesFailedConfigSHA
-		if component.MigrationState == "adopting" && intent.ExpectedPreviousPresent && component.OwnershipAdoption == nil {
-			return Plan{}, fmt.Errorf("component %q adopting predecessor has no explicit ownership adoption", component.ID)
-		}
 		release.ManifestPath = component.ManifestPath
-		release.AdoptionReceiptPath = component.AdoptionReceiptPath
 		release.ManifestVariables = make(map[string]string, len(component.ManifestVariables))
 		for key, value := range component.ManifestVariables {
 			release.ManifestVariables[key] = value
-		}
-		release.BootstrapLKGPath = component.BootstrapLKGPath
-		if component.BootstrapRuntime != nil {
-			copyBootstrap := *component.BootstrapRuntime
-			release.BootstrapRuntime = &copyBootstrap
 		}
 		release.RetrySameLKG = retrySameLKG
 		release.Artifact = component.Artifact
@@ -887,16 +716,6 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.Workload = component.Workload
 		release.Health = append([]HealthProbe(nil), component.Health...)
 		release.Concurrency = component.Concurrency
-		release.MigrationState = component.MigrationState
-		if component.OwnershipAdoption != nil {
-			copyAdoption := *component.OwnershipAdoption
-			copyAdoption.LegacyFieldManagers = append([]string(nil), component.OwnershipAdoption.LegacyFieldManagers...)
-			copyAdoption.Resources = append([]OwnershipAdoptionScope(nil), component.OwnershipAdoption.Resources...)
-			for index := range copyAdoption.Resources {
-				copyAdoption.Resources[index].Fields = append([]string(nil), component.OwnershipAdoption.Resources[index].Fields...)
-			}
-			release.OwnershipAdoption = &copyAdoption
-		}
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {

@@ -23,7 +23,7 @@ func testRegistry() Registry {
 				Artifact:     Artifact{Repository: "ghcr.io/example/fugue-api", Dockerfile: "Dockerfile.api", Context: ".", BuildPackage: "./cmd/fugue-api"},
 				Workload:     Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", FieldManager: "fugue-api-declarative", Replicas: 2, RolloutMode: "rolling"},
 				Health:       []HealthProbe{{Type: "deployment", Name: "fugue-fugue-api"}, {Type: "service-http", Name: "fugue-fugue", Port: "http", Path: "/healthz", Expected: "ok"}},
-				Concurrency:  "fugue-production-api", MigrationState: "independent",
+				Concurrency:  "fugue-production-api",
 			},
 			{
 				ID: "telemetry", Family: "observability",
@@ -33,7 +33,7 @@ func testRegistry() Registry {
 				Artifact:     Artifact{Repository: "ghcr.io/example/fugue-telemetry-agent", Dockerfile: "Dockerfile.telemetry-agent", Context: ".", BuildPackage: "./cmd/fugue-telemetry-agent"},
 				Workload:     Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-telemetry-agent", Container: "telemetry-agent", FieldManager: "fugue-telemetry-declarative", Replicas: 1, RolloutMode: "rolling"},
 				Health:       []HealthProbe{{Type: "deployment", Name: "fugue-fugue-telemetry-agent"}},
-				Concurrency:  "fugue-production-telemetry", MigrationState: "independent",
+				Concurrency:  "fugue-production-telemetry",
 			},
 		},
 	}
@@ -57,59 +57,6 @@ func TestRegistryAndIntentAreStrict(t *testing.T) {
 	registry.Components[1].Concurrency = registry.Components[0].Concurrency
 	if err := registry.Validate(); err == nil {
 		t.Fatal("non-component-scoped concurrency was accepted")
-	}
-}
-
-func TestBootstrapRuntimeIsRestrictedToExactAdoptionPrimary(t *testing.T) {
-	registry := testRegistry()
-	component := &registry.Components[0]
-	component.MigrationState = "adopting"
-	component.BootstrapLKGPath = "deploy/releases/api/lkg.json"
-	component.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
-		Identity: ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name},
-		Fields:   []string{"/spec/template"},
-	}}}
-	component.BootstrapRuntime = &BootstrapRuntime{
-		Resource:  ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name},
-		Container: component.Workload.Container, ImageDigest: testDigest, OCIRevision: testSHA1,
-	}
-	if err := registry.Validate(); err != nil {
-		t.Fatalf("exact adoption bootstrap runtime was rejected: %v", err)
-	}
-	component.MigrationState = "independent"
-	component.OwnershipAdoption = nil
-	if err := registry.Validate(); err == nil {
-		t.Fatal("independent component retained bootstrap runtime compatibility")
-	}
-	component.MigrationState = "adopting"
-	component.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{Identity: component.BootstrapRuntime.Resource, Fields: []string{"/spec/template"}}}}
-	component.BootstrapRuntime.Resource.Name = "other"
-	if err := registry.Validate(); err == nil {
-		t.Fatal("bootstrap runtime for another resource was accepted")
-	}
-}
-
-func TestOwnershipAdoptionAssociativePointersAreValidated(t *testing.T) {
-	registry := testRegistry()
-	component := &registry.Components[0]
-	component.MigrationState = "adopting"
-	component.OwnershipAdoption = &OwnershipAdoption{LegacyFieldManager: "helm", Resources: []OwnershipAdoptionScope{{
-		Identity: ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name},
-		Fields:   []string{"/spec/template/spec/containers[name=api]/env[name=FUGUE_API_URL]/value"},
-	}}}
-	if err := registry.Validate(); err != nil {
-		t.Fatalf("valid associative ownership pointer was rejected: %v", err)
-	}
-	for _, invalid := range []string{
-		"/spec/template/spec/containers[name=]/image",
-		"/spec/template/spec/containers[name=api/image",
-		"/spec/template/spec/containers[name=api~1sidecar]/image",
-		"/spec/template/spec/containers[other=api]/image",
-	} {
-		component.OwnershipAdoption.Resources[0].Fields = []string{invalid}
-		if err := registry.Validate(); err == nil {
-			t.Fatalf("invalid ownership pointer %q was accepted", invalid)
-		}
 	}
 }
 
@@ -150,7 +97,7 @@ func TestEdgeGroupABTransitionIsStrictAndArtifactBound(t *testing.T) {
 		},
 		Workload:   Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-edge-country-us-front", Container: "edge-front", FieldManager: "fugue-edge-worker-us-declarative", RolloutMode: "on-delete"},
 		Transition: &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: "edge-group-country-us", FrontName: "fugue-fugue-edge-country-us-front", WorkerAName: "fugue-fugue-edge-country-us-worker-a", WorkerBName: "fugue-fugue-edge-country-us-worker-b", WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
-		Health:     []HealthProbe{{Type: "daemonset", Name: "fugue-fugue-edge-country-us-front"}}, Concurrency: "fugue-production-edge-worker-us", MigrationState: "independent",
+		Health:     []HealthProbe{{Type: "daemonset", Name: "fugue-fugue-edge-country-us-front"}}, Concurrency: "fugue-production-edge-worker-us",
 	}
 	registry := Registry{APIVersion: RegistryAPIVersion, Kind: RegistryKind, Components: []Component{component}}
 	if err := registry.Validate(); err != nil {
@@ -257,18 +204,6 @@ func TestBuildPlanSerializesSharedCodeAcrossDistinctArtifacts(t *testing.T) {
 	}
 }
 
-func TestPendingComponentCannotEnterProductionPlan(t *testing.T) {
-	registry := testRegistry()
-	registry.Components[0].MigrationState = "pending"
-	_, err := BuildPlan(registry, testSHA1, testSHA2, []string{
-		"cmd/fugue-api/main.go",
-		"deploy/releases/api/intent.json",
-	})
-	if err == nil || !strings.Contains(err.Error(), "not migrated") {
-		t.Fatalf("pending component entered release plan: %v", err)
-	}
-}
-
 func TestManifestChangeAlsoRequiresSameCommitIntent(t *testing.T) {
 	registry := testRegistry()
 	if _, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/deployment.json"}); err == nil || !strings.Contains(err.Error(), "same-commit production intent") {
@@ -368,9 +303,8 @@ func TestBindIntentsAllowsExplicitFailedAtomSupersession(t *testing.T) {
 	}
 }
 
-func TestBindIntentsAllowsAbsentLKGRetryWithoutOwnershipAdoption(t *testing.T) {
+func TestBindIntentsAllowsAbsentLKGRetry(t *testing.T) {
 	registry := testRegistry()
-	registry.Components[0].MigrationState = "adopting"
 	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/api/intent.json"})
 	if err != nil {
 		t.Fatal(err)
@@ -382,8 +316,8 @@ func TestBindIntentsAllowsAbsentLKGRetryWithoutOwnershipAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("absent-LKG retry was rejected: %v", err)
 	}
-	if len(bound.Releases) != 1 || !bound.Releases[0].RetrySameLKG || bound.Releases[0].OwnershipAdoption != nil || bound.Releases[0].ExpectedPreviousPresent {
-		t.Fatalf("absent-LKG retry gained ownership adoption: %+v", bound.Releases)
+	if len(bound.Releases) != 1 || !bound.Releases[0].RetrySameLKG || bound.Releases[0].ExpectedPreviousPresent {
+		t.Fatalf("absent-LKG retry was not preserved: %+v", bound.Releases)
 	}
 	current.ExpectedPreviousConfigSHA = testSHA1
 	if _, err := BindIntents(registry, plan, map[string]Intent{"api": current}, map[string]Intent{"api": previous}, map[string]string{"api": testSHA1}); err == nil {

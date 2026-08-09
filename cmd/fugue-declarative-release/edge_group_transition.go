@@ -567,31 +567,6 @@ func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes
 	return pods, nil
 }
 
-func workloadLegacySource(raw []byte, containerName string) (string, error) {
-	workload, err := decodeJSONObject(raw)
-	if err != nil {
-		return "", err
-	}
-	spec := mapField(mapField(mapField(workload, "spec"), "template"), "spec")
-	for _, rawContainer := range anySlice(spec["containers"]) {
-		container, _ := rawContainer.(map[string]any)
-		if stringValue(container["name"]) != containerName {
-			continue
-		}
-		source := legacySourceTag(stringValue(container["image"]))
-		if source != "" {
-			return source, nil
-		}
-		annotations := mapStringField(mapField(mapField(mapField(workload, "spec"), "template"), "metadata"), "annotations")
-		source = annotations["fugue.pro/source-commit"]
-		if len(source) != 40 || strings.Trim(source, "0123456789abcdef") != "" {
-			return "", errors.New("legacy edge workload source identity is invalid")
-		}
-		return source, nil
-	}
-	return "", errors.New("legacy edge workload container is absent")
-}
-
 func (cluster *kubectlCluster) readEdgeWorkerHealth(ctx context.Context, pod edgeGroupPod, groupID string) (edgeWorkerHealth, error) {
 	body, err := readPodHTTP(ctx, podHTTPEndpoint{Name: pod.Name, IP: pod.PodIP, Port: pod.HealthPort}, "/healthz")
 	if err != nil {

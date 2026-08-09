@@ -189,9 +189,6 @@ func TestInventoryReceiverCandidateSelectsOneControlArtifactAndPhysicallyIsolate
 	for _, group := range registry.Groups {
 		raw, err := os.ReadFile(filepath.Join("../..", group.Control.ManifestPath))
 		if err != nil {
-			if os.IsNotExist(err) && group.Control.MigrationState == "pending" {
-				continue
-			}
 			t.Fatal(err)
 		}
 		raw, err = declarativerelease.MaterializeManifestTemplate(raw, group.Control.ManifestVariables)

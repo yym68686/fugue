@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,26 +27,6 @@ import (
 )
 
 const maxKubernetesOutputBytes = 4 << 20
-
-var (
-	adoptionConflictCountPattern = regexp.MustCompile(`Apply failed with ([1-9][0-9]*) conflicts?`)
-	adoptionConflictPattern      = regexp.MustCompile(`conflict with "([^"]+)" using [^:]+: (\.[^[:space:]]+)`)
-	adoptionConflictGroupPattern = regexp.MustCompile(`conflicts with "([^"]+)" using [^:]+:`)
-)
-
-type ssaConflict struct {
-	manager string
-	field   string
-}
-
-var imageCacheTerminalHandoffConflicts = []struct {
-	pointer string
-	manager string
-	field   string
-}{
-	{pointer: "/metadata/labels/app.kubernetes.io~1managed-by", manager: "helm", field: ".metadata.labels.app.kubernetes.io/managed-by"},
-	{pointer: "/spec/updateStrategy/type", manager: "kubectl-patch", field: ".spec.updateStrategy.type"},
-}
 
 type kubectlCluster struct {
 	kubectl  string
@@ -102,15 +81,7 @@ func newKubectlCluster() (*kubectlCluster, error) {
 }
 
 func (cluster *kubectlCluster) Observe(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
-	return cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowsHistoricalRestarts(release, target))
-}
-
-func allowsHistoricalRestarts(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) bool {
-	return release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-		release.ExpectedPreviousPresent && target.Present &&
-		target.ConfigSHA == release.ExpectedPreviousConfigSHA &&
-		target.ManifestSHA == release.ExpectedPreviousManifestSHA &&
-		target.OCIRevision == release.ExpectedPreviousOCIRevision
+	return cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
 }
 
 func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) (declarativerelease.Observation, error) {
@@ -157,17 +128,7 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	}
 	observation.Resources = resources
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
-		if explicitBootstrapDegradedObservation(release) {
-			observation, err = cluster.bindExplicitBootstrapDegradedObservation(ctx, release, manifest, workloadRaw, observation)
-		} else {
-			observation, err = cluster.bindReceiptBoundDegradedObservation(ctx, release, workloadRaw, observation, resources)
-		}
-		if err != nil {
-			return declarativerelease.Observation{}, err
-		}
-		if err := observation.ValidateDegradedPredecessor(release); err != nil {
-			return declarativerelease.Observation{}, err
-		}
+		return declarativerelease.Observation{}, err
 	}
 	verificationArgs := []string{"--image", observation.ImageRef, "--platform", "linux/amd64", "--expected-revision", observation.OCIRevision}
 	verificationArgs = append(verificationArgs, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
@@ -185,176 +146,6 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
-}
-
-func explicitBootstrapDegradedObservation(release declarativerelease.PlanRelease) bool {
-	return declarativerelease.InitialExplicitBootstrapFailedAtomSuccessor(release) ||
-		(release.MigrationState == "adopting" && release.RetrySameLKG && release.ExpectedPreviousPresent &&
-			release.BootstrapLKGPath != "" && release.BootstrapRuntime != nil && release.OwnershipAdoption != nil)
-}
-
-func (cluster *kubectlCluster) bindExplicitBootstrapDegradedObservation(ctx context.Context, release declarativerelease.PlanRelease, manifest, workloadRaw []byte, observation declarativerelease.Observation) (declarativerelease.Observation, error) {
-	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
-	desired, err := declarativerelease.ResourceSetItem(manifest, primary)
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	target, err := targetIdentityFromDeclaredWorkload(desired, release.Workload)
-	if err != nil || target.ImageRef != release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest ||
-		target.ConfigSHA != release.ExpectedPreviousConfigSHA || target.ManifestSHA != release.ExpectedPreviousManifestSHA ||
-		target.OCIRevision != release.ExpectedPreviousOCIRevision || observation.ImageRef != target.ImageRef {
-		return declarativerelease.Observation{}, errors.New("explicit bootstrap degraded observation is not the exact LKG")
-	}
-	for label, value := range map[string]string{"config": observation.ConfigSHA, "manifest": observation.ManifestSHA, "OCI revision": observation.OCIRevision} {
-		want := map[string]string{"config": target.ConfigSHA, "manifest": target.ManifestSHA, "OCI revision": target.OCIRevision}[label]
-		if value != "" && value != want {
-			return declarativerelease.Observation{}, fmt.Errorf("explicit bootstrap degraded observation has conflicting %s identity", label)
-		}
-	}
-	selector, err := selectorFromWorkload(workloadRaw)
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, true); err != nil {
-		return declarativerelease.Observation{}, fmt.Errorf("verify explicit bootstrap degraded Pod image: %w", err)
-	}
-	bootstrap := adoptingBootstrapRuntime(release, true)
-	if bootstrap == nil {
-		return declarativerelease.Observation{}, errors.New("explicit bootstrap degraded runtime is absent")
-	}
-	bootstrapImage := release.Artifact.Repository + "@" + bootstrap.ImageDigest
-	verificationRaw, err := cluster.run(ctx, nil, "python3", cluster.verifier, "--image", bootstrapImage, "--platform", "linux/amd64",
-		"--expected-revision", bootstrap.OCIRevision, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5",
-		"--max-attempts", "2", "--retry-delay-seconds", "0.1")
-	if err != nil {
-		return declarativerelease.Observation{}, fmt.Errorf("verify explicit bootstrap degraded runtime: %w", err)
-	}
-	verification, err := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
-	if err != nil || verification.Image != bootstrapImage || verification.OCIRevision != bootstrap.OCIRevision {
-		return declarativerelease.Observation{}, errors.New("explicit bootstrap degraded runtime registry identity mismatch")
-	}
-	observation.ConfigSHA = target.ConfigSHA
-	observation.ManifestSHA = target.ManifestSHA
-	observation.OCIRevision = target.OCIRevision
-	return observation, nil
-}
-
-func (cluster *kubectlCluster) bindReceiptBoundDegradedObservation(ctx context.Context, release declarativerelease.PlanRelease, workloadRaw []byte, observation declarativerelease.Observation, resources []declarativerelease.ResourceObservation) (declarativerelease.Observation, error) {
-	_, receipt, err := loadValidatedReceiptBoundRelease(release)
-	if err != nil || len(receipt.Ownership) == 0 {
-		if err == nil {
-			err = errors.New("ownership adoption receipt has no exact field scopes")
-		}
-		return declarativerelease.Observation{}, fmt.Errorf("bind receipt-bound degraded observation: %w", err)
-	}
-	final := receipt.Final
-	if observation.UID != final.UID || observation.ResourceVersion != final.ResourceVersion || observation.Generation != final.Generation ||
-		observation.TemplateDigest != final.TemplateDigest || observation.ImageRef != final.ImageRef {
-		return declarativerelease.Observation{}, errors.New("receipt-bound degraded workload CAS or template identity drifted")
-	}
-	for label, value := range map[string]string{
-		"config": observation.ConfigSHA, "manifest": observation.ManifestSHA, "OCI revision": observation.OCIRevision,
-	} {
-		if value != "" {
-			return declarativerelease.Observation{}, fmt.Errorf("receipt-bound degraded workload already has conflicting %s identity", label)
-		}
-	}
-	byIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(resources))
-	for _, resource := range resources {
-		byIdentity[resource.Identity] = resource
-	}
-	finalResources := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(final.Resources))
-	for _, resource := range final.Resources {
-		finalResources[resource.Identity] = resource
-	}
-	if len(byIdentity) != len(finalResources) {
-		return declarativerelease.Observation{}, errors.New("receipt-bound degraded resource witness count drifted")
-	}
-	adoption := declarativerelease.OwnershipAdoptionPlan{Component: release.ComponentID}
-	for _, scope := range receipt.Ownership {
-		current, exists := byIdentity[scope.Identity]
-		prior, witnessed := finalResources[scope.Identity]
-		if !exists || !witnessed || current.UID != prior.UID || current.ResourceVersion != prior.ResourceVersion ||
-			current.Generation != prior.Generation || current.ObjectDigest != prior.ObjectDigest {
-			return declarativerelease.Observation{}, fmt.Errorf("receipt-bound degraded resource %s/%s drifted", scope.Identity.Kind, scope.Identity.Name)
-		}
-		adoption.Resources = append(adoption.Resources, declarativerelease.OwnershipAdoptionResourcePlan{
-			Identity: scope.Identity, Fields: append([]string(nil), scope.Fields...),
-			UID: prior.UID, ResourceVersion: prior.ResourceVersion, Generation: prior.Generation,
-		})
-	}
-	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
-		return declarativerelease.Observation{}, fmt.Errorf("verify receipt-bound degraded ownership: %w", err)
-	}
-	selector, err := selectorFromWorkload(workloadRaw)
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace,
-		"--selector", selector, "--output", "json")
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	if err := verifyReceiptBoundPodCohort(podsRaw, release, receipt); err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	observation.ConfigSHA = final.ConfigSHA
-	observation.ManifestSHA = final.ManifestSHA
-	observation.OCIRevision = final.OCIRevision
-	observation.ImageID = final.ImageID
-	observation.FieldManagers = append([]string(nil), final.FieldManagers...)
-	observation.Resources = resources
-	return observation, nil
-}
-
-func verifyReceiptBoundPodCohort(raw []byte, release declarativerelease.PlanRelease, receipt declarativerelease.OwnershipAdoptionReceipt) error {
-	value, err := decodeJSONObject(raw)
-	if err != nil {
-		return err
-	}
-	items, ok := value["items"].([]any)
-	if !ok {
-		return errors.New("receipt-bound pod list is invalid")
-	}
-	ready := int32(0)
-	for _, rawItem := range items {
-		pod, ok := rawItem.(map[string]any)
-		if !ok {
-			return errors.New("receipt-bound pod item is invalid")
-		}
-		metadata := mapField(pod, "metadata")
-		if metadata["deletionTimestamp"] != nil {
-			continue
-		}
-		status := mapField(pod, "status")
-		if !podReady(status) {
-			continue
-		}
-		matched := false
-		for _, rawStatus := range anySlice(status["containerStatuses"]) {
-			containerStatus, _ := rawStatus.(map[string]any)
-			if stringValue(containerStatus["name"]) != release.Workload.Container {
-				continue
-			}
-			digest, err := imageIDDigest(stringValue(containerStatus["imageID"]))
-			if err != nil || digest != receipt.Final.ImageID || int64Value(containerStatus["restartCount"]) != 0 {
-				return errors.New("receipt-bound pod image or restart witness drifted")
-			}
-			matched = true
-		}
-		if !matched {
-			return errors.New("receipt-bound pod container witness is absent")
-		}
-		ready++
-	}
-	if ready != receipt.Final.Ready || ready != receipt.Final.Desired-int32(release.Workload.PreservedUnavailable) {
-		return errors.New("receipt-bound ready pod cohort drifted")
-	}
-	return nil
 }
 
 func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarativerelease.TargetIdentity) error {
@@ -378,951 +169,11 @@ func (cluster *kubectlCluster) VerifyTarget(ctx context.Context, target declarat
 	return nil
 }
 
-func immutableRefDigestLocal(ref string) string {
-	parts := strings.Split(ref, "@")
-	if len(parts) != 2 {
-		return ""
-	}
-	return parts[1]
-}
-
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
 	}
-	applyErr := cluster.applyResourceSet(ctx, release, manifest, true)
-	if applyErr == nil {
-		return nil
-	}
-	return cluster.dryRunReceiptBoundImageCacheHandoff(ctx, release, manifest, applyErr)
-}
-
-func (cluster *kubectlCluster) DryRunOwnershipAdoption(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkgManifest []byte) error {
-	manifest, err := declarativerelease.BuildOwnershipAdoptionManifest(lkgManifest, adoption)
-	if err != nil {
-		return err
-	}
-	return cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, true)
-}
-
-func (cluster *kubectlCluster) DryRunOwnershipTakeover(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, target declarativerelease.TargetIdentity, targetManifest []byte) error {
-	if err := cluster.verifyOwnershipTakeoverScaffolds(ctx, release, adoption); err != nil {
-		return err
-	}
-	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
-	if err != nil {
-		return err
-	}
-	return cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, true)
-}
-
-func (cluster *kubectlCluster) AdoptOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, lkg declarativerelease.TargetIdentity, lkgManifest []byte) (declarativerelease.Observation, error) {
-	manifest, err := declarativerelease.BuildOwnershipAdoptionManifest(lkgManifest, adoption)
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
-	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
-		if applyErr != nil {
-			return declarativerelease.Observation{}, fmt.Errorf("apply ownership adoption: %v; verify ownership adoption: %w", applyErr, err)
-		}
-		return declarativerelease.Observation{}, err
-	}
-	if err := cluster.Converged(ctx, release, lkgManifest); err != nil {
-		return declarativerelease.Observation{}, fmt.Errorf("verify adopted bootstrap LKG convergence: %w", err)
-	}
-	observation, observeErr := cluster.observeExpected(ctx, release, lkg.OCIRevision, lkgManifest, true)
-	if observeErr != nil {
-		return declarativerelease.Observation{}, observeErr
-	}
-	return observation, nil
-}
-
-func (cluster *kubectlCluster) TakeoverOwnership(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, target declarativerelease.TargetIdentity, targetManifest []byte) (declarativerelease.Observation, error) {
-	current, err := cluster.ObserveCAS(ctx, release, targetManifest)
-	if err != nil {
-		return current, fmt.Errorf("refresh ownership takeover CAS: %w", err)
-	}
-	if err := refreshOwnershipTakeoverCAS(&adoption, current); err != nil {
-		return current, err
-	}
-	if err := cluster.verifyOwnershipTakeoverScaffolds(ctx, release, adoption); err != nil {
-		return current, err
-	}
-	manifest, err := declarativerelease.BuildOwnershipTakeoverManifest(targetManifest, adoption, target)
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	applyErr := cluster.applyOwnershipAdoptionSet(ctx, release, adoption, manifest, false)
-	verifyErr := cluster.verifyOwnershipTakeover(ctx, release, adoption)
-	convergedErr := cluster.Converged(ctx, release, manifest)
-	observation, observeErr := cluster.ObserveCAS(ctx, release, targetManifest)
-	if err := errors.Join(applyErr, verifyErr, convergedErr, observeErr); err != nil {
-		return observation, fmt.Errorf("verify ownership takeover: %w", err)
-	}
-	return observation, nil
-}
-
-func (cluster *kubectlCluster) verifyOwnershipTakeoverScaffolds(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
-	for _, scope := range adoption.Resources {
-		scaffolds, err := declarativerelease.OwnershipTakeoverValidationScaffolds(scope.Fields)
-		if err != nil {
-			return err
-		}
-		if len(scaffolds) == 0 {
-			continue
-		}
-		expected := make(map[string]string, len(scope.ValidationScaffolds))
-		for _, scaffold := range scope.ValidationScaffolds {
-			if _, exists := expected[scaffold.Pointer]; exists {
-				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is duplicated", scope.Identity.Kind, scope.Identity.Name)
-			}
-			expected[scaffold.Pointer] = scaffold.Value
-		}
-		if len(expected) != len(scaffolds) {
-			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is incomplete", scope.Identity.Kind, scope.Identity.Name)
-		}
-		raw, err := cluster.getResource(ctx, scope.Identity)
-		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-			return fmt.Errorf("read ownership takeover scaffold %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, err)
-		}
-		value, err := decodeJSONObject(raw)
-		if err != nil {
-			return err
-		}
-		for _, pointer := range scaffolds {
-			container, ok := ownershipScaffoldContainer(pointer)
-			image, found, imageErr := declaredContainerImageOptional(value, container, "container")
-			if !ok || imageErr != nil || !found || image != expected[pointer] {
-				return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not the exact live bootstrap image", scope.Identity.Kind, scope.Identity.Name)
-			}
-		}
-		metadata := mapField(value, "metadata")
-		if stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) != scope.ResourceVersion ||
-			int64Value(metadata["generation"]) != scope.Generation ||
-			!managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scaffolds) {
-			return fmt.Errorf("ownership takeover validation scaffold for %s/%s is not CAS-bound to existing declarative ownership", scope.Identity.Kind, scope.Identity.Name)
-		}
-		legacyManagers := ownershipPlanLegacyManagers(adoption)
-		for _, pointer := range scaffolds {
-			reviewed := exactString(pointer, scope.Fields)
-			for _, owner := range managedFieldsPointerOwners(metadata, pointer) {
-				if owner.manager == release.Workload.FieldManager && owner.operation == "Apply" {
-					continue
-				}
-				if reviewed && exactString(owner.manager, legacyManagers) && owner.operation == "Update" {
-					continue
-				}
-				return fmt.Errorf("ownership takeover validation scaffold for %s/%s has unreviewed owner %s/%s", scope.Identity.Kind, scope.Identity.Name, owner.manager, owner.operation)
-			}
-		}
-	}
-	return nil
-}
-
-func ownershipScaffoldContainer(pointer string) (string, bool) {
-	const prefix = "/spec/template/spec/containers[name="
-	const suffix = "]/image"
-	if !strings.HasPrefix(pointer, prefix) || !strings.HasSuffix(pointer, suffix) {
-		return "", false
-	}
-	name := strings.TrimSuffix(strings.TrimPrefix(pointer, prefix), suffix)
-	return name, name != ""
-}
-
-// refreshOwnershipTakeoverCAS rebinds only the mutable RV portion of the
-// reviewed adoption scope immediately before the first takeover write. UID and
-// generation remain exact CAS witnesses; a changed generation is a spec drift
-// and therefore fails closed rather than being silently refreshed.
-func refreshOwnershipTakeoverCAS(adoption *declarativerelease.OwnershipAdoptionPlan, current declarativerelease.Observation) error {
-	if adoption == nil || !current.Present || current.UID == "" || current.ResourceVersion == "" {
-		return errors.New("ownership takeover CAS refresh is incomplete")
-	}
-	if current.UID != adoption.UID || current.Generation != adoption.Generation {
-		return errors.New("ownership takeover CAS refresh detected UID or generation drift")
-	}
-	byIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(current.Resources))
-	for _, resource := range current.Resources {
-		byIdentity[resource.Identity] = resource
-	}
-	for index := range adoption.Resources {
-		scope := &adoption.Resources[index]
-		resource, ok := byIdentity[scope.Identity]
-		if !ok || !resource.Present || resource.UID != scope.UID || resource.Generation != scope.Generation || resource.ResourceVersion == "" {
-			return fmt.Errorf("ownership takeover CAS refresh detected drift for %s/%s", scope.Identity.Kind, scope.Identity.Name)
-		}
-		scope.ResourceVersion = resource.ResourceVersion
-	}
-	adoption.ResourceVersion = current.ResourceVersion
-	return nil
-}
-
-func (cluster *kubectlCluster) applyOwnershipAdoptionSet(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, manifest []byte, dryRun bool) error {
-	identities, err := declarativerelease.ResourceSetIdentities(manifest)
-	if err != nil {
-		return err
-	}
-	arguments, err := adoptionApplyArguments(release, dryRun)
-	if err != nil {
-		return err
-	}
-	scopes := make(map[declarativerelease.ResourceIdentity]declarativerelease.OwnershipAdoptionResourcePlan, len(adoption.Resources))
-	for _, scope := range adoption.Resources {
-		scopes[scope.Identity] = scope
-	}
-	for _, identity := range identities {
-		item, err := declarativerelease.ResourceSetItem(manifest, identity)
-		if err != nil {
-			return err
-		}
-		encoded, err := declarativerelease.CanonicalJSON(item)
-		if err != nil {
-			return err
-		}
-		scope, exists := scopes[identity]
-		if !exists {
-			return fmt.Errorf("adopt %s/%s has no reviewed scope", identity.Kind, identity.Name)
-		}
-		var expectedTakeoverConflicts map[reviewedTakeoverConflict]struct{}
-		if adoption.AlreadyConverged || adoption.ResumeTakeover {
-			expectedTakeoverConflicts, err = cluster.expectedReviewedTakeoverConflicts(ctx, release, adoption, scope, item)
-			if err != nil {
-				return fmt.Errorf("adopt %s/%s conflict precondition: %w", identity.Kind, identity.Name, err)
-			}
-		}
-		if _, applyErr := cluster.kubectlRun(ctx, encoded, arguments...); applyErr != nil {
-			managers := append([]string(nil), adoption.LegacyFieldManagers...)
-			if adoption.AlreadyConverged {
-				managers = append(managers, release.Workload.FieldManager)
-				sort.Strings(managers)
-			}
-			if adoption.AlreadyConverged || adoption.ResumeTakeover {
-				err = validateExactReviewedTakeoverConflicts(applyErr, scope.Fields, expectedTakeoverConflicts)
-			} else {
-				err = validateAdoptionConflicts(applyErr, managers, scope.Fields)
-			}
-			if err != nil {
-				return fmt.Errorf("adopt %s/%s: %w", identity.Kind, identity.Name, err)
-			}
-			forceArguments, err := adoptionForceApplyArguments(release, dryRun)
-			if err != nil {
-				return err
-			}
-			if _, forceErr := cluster.kubectlRun(ctx, encoded, forceArguments...); forceErr != nil {
-				return fmt.Errorf("adopt %s/%s reviewed force-conflicts: %w", identity.Kind, identity.Name, forceErr)
-			}
-		} else if len(expectedTakeoverConflicts) > 0 {
-			return fmt.Errorf("adopt %s/%s expected reviewed conflicts were absent", identity.Kind, identity.Name)
-		}
-	}
-	return nil
-}
-
-type reviewedTakeoverConflict struct {
-	manager string
-	pointer string
-}
-
-func (cluster *kubectlCluster) expectedReviewedTakeoverConflicts(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan, scope declarativerelease.OwnershipAdoptionResourcePlan, desired map[string]any) (map[reviewedTakeoverConflict]struct{}, error) {
-	raw, err := cluster.getResource(ctx, scope.Identity)
-	if err != nil || resourceAbsent(raw) {
-		return nil, fmt.Errorf("read reviewed takeover resource: %w", err)
-	}
-	live, err := decodeJSONObject(raw)
-	if err != nil {
-		return nil, err
-	}
-	metadata := mapField(live, "metadata")
-	if stringValue(metadata["uid"]) != scope.UID || stringValue(metadata["resourceVersion"]) != scope.ResourceVersion ||
-		int64Value(metadata["generation"]) != scope.Generation || !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scope.Fields) {
-		return nil, errors.New("reviewed takeover conflict evidence is not CAS-bound to declarative ownership")
-	}
-	legacyManagers := ownershipPlanLegacyManagers(adoption)
-	expected := make(map[reviewedTakeoverConflict]struct{})
-	for _, pointer := range scope.Fields {
-		legacyOwners := make([]managedFieldPointerOwner, 0)
-		for _, owner := range managedFieldsPointerOwners(metadata, pointer) {
-			if owner.manager == release.Workload.FieldManager && owner.operation == "Apply" {
-				continue
-			}
-			if !exactString(owner.manager, legacyManagers) || owner.operation != "Update" {
-				return nil, fmt.Errorf("reviewed pointer %s has unreviewed owner %s/%s", pointer, owner.manager, owner.operation)
-			}
-			legacyOwners = append(legacyOwners, owner)
-		}
-		if len(legacyOwners) == 0 {
-			continue
-		}
-		liveValue, err := declarativerelease.OwnershipAdoptionPointerValue(live, pointer)
-		if err != nil {
-			return nil, err
-		}
-		desiredValue, err := declarativerelease.OwnershipAdoptionPointerValue(desired, pointer)
-		if err != nil {
-			return nil, err
-		}
-		liveJSON, err := declarativerelease.CanonicalJSON(liveValue)
-		if err != nil {
-			return nil, err
-		}
-		desiredJSON, err := declarativerelease.CanonicalJSON(desiredValue)
-		if err != nil {
-			return nil, err
-		}
-		if bytes.Equal(liveJSON, desiredJSON) {
-			return nil, fmt.Errorf("legacy-owned reviewed pointer %s has no takeover value transition", pointer)
-		}
-		for _, owner := range legacyOwners {
-			expected[reviewedTakeoverConflict{manager: owner.manager, pointer: pointer}] = struct{}{}
-		}
-	}
-	return expected, nil
-}
-
-func validateExactReviewedTakeoverConflicts(applyErr error, pointers []string, expected map[reviewedTakeoverConflict]struct{}) error {
-	conflicts, err := parseSSAConflicts(applyErr)
-	if err != nil {
-		return err
-	}
-	seen := make(map[reviewedTakeoverConflict]struct{}, len(conflicts))
-	for _, conflict := range conflicts {
-		pointer := ""
-		for _, candidate := range pointers {
-			if adoptionFieldAllowed(conflict.field, []string{candidate}) {
-				if pointer != "" {
-					return errors.New("reviewed takeover conflict matches multiple pointers")
-				}
-				pointer = candidate
-			}
-		}
-		key := reviewedTakeoverConflict{manager: conflict.manager, pointer: pointer}
-		if pointer == "" {
-			return fmt.Errorf("reviewed takeover conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
-		}
-		if _, ok := expected[key]; !ok {
-			return fmt.Errorf("reviewed takeover conflict %s:%s is outside the exact live conflict set", conflict.manager, conflict.field)
-		}
-		if _, duplicate := seen[key]; duplicate {
-			return errors.New("reviewed takeover conflict is duplicated")
-		}
-		seen[key] = struct{}{}
-	}
-	if len(seen) != len(expected) {
-		return errors.New("reviewed takeover conflict set is incomplete")
-	}
-	return nil
-}
-
-func validateAdoptionConflicts(applyErr error, managers, fields []string) error {
-	if applyErr == nil || len(managers) == 0 || len(fields) == 0 {
-		return errors.New("ownership adoption conflict evidence is incomplete")
-	}
-	conflicts, err := parseSSAConflicts(applyErr)
-	if err != nil {
-		return err
-	}
-	for _, conflict := range conflicts {
-		if !stringInSortedSet(conflict.manager, managers) || !adoptionFieldAllowed(conflict.field, fields) {
-			return fmt.Errorf("ownership adoption conflict %s:%s is outside the reviewed allowlist", conflict.manager, conflict.field)
-		}
-	}
-	return nil
-}
-
-func parseSSAConflicts(applyErr error) ([]ssaConflict, error) {
-	if applyErr == nil {
-		return nil, errors.New("ownership adoption conflict evidence is incomplete")
-	}
-	raw := applyErr.Error()
-	countMatch := adoptionConflictCountPattern.FindStringSubmatch(raw)
-	conflicts := make([]ssaConflict, 0)
-	groupManager := ""
-	for _, line := range strings.Split(raw, "\n") {
-		if match := adoptionConflictPattern.FindStringSubmatch(line); len(match) == 3 {
-			conflicts = append(conflicts, ssaConflict{manager: match[1], field: match[2]})
-			groupManager = ""
-			continue
-		}
-		if match := adoptionConflictGroupPattern.FindStringSubmatch(line); len(match) == 2 {
-			groupManager = match[1]
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if groupManager != "" && strings.HasPrefix(trimmed, "- .") {
-			conflicts = append(conflicts, ssaConflict{manager: groupManager, field: strings.TrimPrefix(trimmed, "- ")})
-			continue
-		}
-		if groupManager != "" && trimmed != "" {
-			groupManager = ""
-		}
-	}
-	if len(countMatch) != 2 || len(conflicts) == 0 {
-		return nil, errors.New("ownership adoption failure is not a typed SSA conflict")
-	}
-	count, err := strconv.Atoi(countMatch[1])
-	if err != nil || count != len(conflicts) {
-		return nil, errors.New("ownership adoption conflict count is inconsistent")
-	}
-	return conflicts, nil
-}
-
-func stringInSortedSet(value string, allowed []string) bool {
-	index := sort.SearchStrings(allowed, value)
-	return index < len(allowed) && allowed[index] == value
-}
-
-func adoptionFieldAllowed(field string, pointers []string) bool {
-	for _, pointer := range pointers {
-		parts := strings.Split(strings.TrimPrefix(pointer, "/"), "/")
-		for index, part := range parts {
-			part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
-			if open := strings.Index(part, "[name="); open > 0 && strings.HasSuffix(part, "]") {
-				name := part[open+len("[name=") : len(part)-1]
-				part = part[:open] + `[name="` + name + `"]`
-			}
-			parts[index] = part
-		}
-		prefix := "." + strings.Join(parts, ".")
-		if field == prefix || strings.HasPrefix(field, prefix+".") || strings.HasPrefix(field, prefix+"[") {
-			return true
-		}
-	}
-	return false
-}
-
-func (cluster *kubectlCluster) verifyOwnershipAdoption(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
-	for _, scope := range adoption.Resources {
-		raw, err := cluster.getResource(ctx, scope.Identity)
-		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-			return fmt.Errorf("read adopted %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, err)
-		}
-		value, err := decodeJSONObject(raw)
-		if err != nil {
-			return err
-		}
-		metadata := mapField(value, "metadata")
-		if stringValue(metadata["uid"]) != scope.UID || int64Value(metadata["generation"]) < scope.Generation ||
-			!managedFieldsOwnPointers(metadata, release.Workload.FieldManager, scope.Fields) {
-			return fmt.Errorf("adopted %s/%s ownership is incomplete", scope.Identity.Kind, scope.Identity.Name)
-		}
-	}
-	return nil
-}
-
-func (cluster *kubectlCluster) verifyOwnershipTakeover(ctx context.Context, release declarativerelease.PlanRelease, adoption declarativerelease.OwnershipAdoptionPlan) error {
-	if err := cluster.verifyOwnershipAdoption(ctx, release, adoption); err != nil {
-		return err
-	}
-	for _, scope := range adoption.Resources {
-		raw, err := cluster.getResource(ctx, scope.Identity)
-		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-			return fmt.Errorf("read ownership takeover %s/%s: %w", scope.Identity.Kind, scope.Identity.Name, err)
-		}
-		value, err := decodeJSONObject(raw)
-		if err != nil {
-			return err
-		}
-		metadata := mapField(value, "metadata")
-		if !managedFieldsPointersExclusivelyOwned(metadata, release.Workload.FieldManager, scope.Fields) {
-			return fmt.Errorf("ownership takeover %s/%s retained non-declarative reviewed ownership", scope.Identity.Kind, scope.Identity.Name)
-		}
-	}
-	return nil
-}
-
-func ownershipPlanLegacyManagers(adoption declarativerelease.OwnershipAdoptionPlan) []string {
-	if len(adoption.LegacyFieldManagers) > 0 {
-		return adoption.LegacyFieldManagers
-	}
-	if adoption.LegacyFieldManager != "" {
-		return []string{adoption.LegacyFieldManager}
-	}
-	return nil
-}
-
-func managedFieldsOwnPointers(metadata map[string]any, manager string, pointers []string) bool {
-	for _, rawEntry := range anySlice(metadata["managedFields"]) {
-		entry, _ := rawEntry.(map[string]any)
-		if stringValue(entry["manager"]) != manager || stringValue(entry["operation"]) != "Apply" || stringValue(entry["subresource"]) != "" {
-			continue
-		}
-		fields := mapField(entry, "fieldsV1")
-		if managedFieldsEntryOwnsPointers(fields, pointers, true) {
-			return true
-		}
-	}
-	return false
-}
-
-func managedFieldsOwnAnyPointer(metadata map[string]any, manager string, pointers []string) bool {
-	for _, rawEntry := range anySlice(metadata["managedFields"]) {
-		entry, _ := rawEntry.(map[string]any)
-		if stringValue(entry["manager"]) != manager || stringValue(entry["subresource"]) != "" {
-			continue
-		}
-		if managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), pointers, false) {
-			return true
-		}
-	}
-	return false
-}
-
-type managedFieldPointerOwner struct {
-	manager   string
-	operation string
-}
-
-func managedFieldsPointerOwners(metadata map[string]any, pointer string) []managedFieldPointerOwner {
-	owners := make([]managedFieldPointerOwner, 0)
-	for _, rawEntry := range anySlice(metadata["managedFields"]) {
-		entry, _ := rawEntry.(map[string]any)
-		manager := stringValue(entry["manager"])
-		operation := stringValue(entry["operation"])
-		if manager == "" || operation == "" || stringValue(entry["subresource"]) != "" ||
-			!managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), []string{pointer}, true) {
-			continue
-		}
-		owners = append(owners, managedFieldPointerOwner{manager: manager, operation: operation})
-	}
-	return owners
-}
-
-func managedFieldsPointersExclusivelyOwned(metadata map[string]any, manager string, pointers []string) bool {
-	if !managedFieldsOwnPointers(metadata, manager, pointers) {
-		return false
-	}
-	for _, pointer := range pointers {
-		for _, owner := range managedFieldsPointerOwners(metadata, pointer) {
-			if owner.manager != manager || owner.operation != "Apply" {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func exactString(value string, values []string) bool {
-	for _, candidate := range values {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
-}
-
-func managedFieldsEntryOwnsPointers(fields map[string]any, pointers []string, requireAll bool) bool {
-	matched := 0
-	for _, pointer := range pointers {
-		current := fields
-		owned := true
-		for _, encoded := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
-			token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
-			field := token
-			selector := ""
-			if open := strings.Index(token, "[name="); open > 0 && strings.HasSuffix(token, "]") {
-				field = token[:open]
-				selector = token[open+len("[name=") : len(token)-1]
-			}
-			next, ok := current["f:"+field].(map[string]any)
-			if !ok {
-				owned = false
-				break
-			}
-			current = next
-			if selector != "" {
-				keyRaw, _ := json.Marshal(selector)
-				next, ok = current[`k:{"name":`+string(keyRaw)+`}`].(map[string]any)
-				if !ok {
-					owned = false
-					break
-				}
-				current = next
-			}
-		}
-		if owned {
-			matched++
-			if !requireAll {
-				return true
-			}
-		} else if requireAll {
-			return false
-		}
-	}
-	return requireAll && matched == len(pointers)
-}
-
-type imageCacheTerminalHandoff struct {
-	receipt  declarativerelease.OwnershipAdoptionReceipt
-	plan     declarativerelease.OwnershipAdoptionPlan
-	target   declarativerelease.TargetIdentity
-	manifest []byte
-	preUID   string
-	preRV    string
-	preGen   int64
-}
-
-func (cluster *kubectlCluster) dryRunReceiptBoundImageCacheHandoff(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, applyErr error) error {
-	_, err := cluster.prepareReceiptBoundImageCacheHandoff(ctx, release, manifest, applyErr, true)
-	return err
-}
-
-func (cluster *kubectlCluster) prepareReceiptBoundImageCacheHandoff(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, applyErr error, dryRunForce bool) (imageCacheTerminalHandoff, error) {
-	receipt, err := authorizeImageCacheTerminalHandoff(release)
-	if err != nil {
-		return imageCacheTerminalHandoff{}, errors.Join(applyErr, err)
-	}
-	if err := validateExactImageCacheTerminalHandoffConflicts(applyErr, receipt); err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	identity := receipt.Final.Primary
-	raw, err := cluster.getResource(ctx, identity)
-	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-		return imageCacheTerminalHandoff{}, fmt.Errorf("read Image-cache terminal handoff workload: %w", err)
-	}
-	value, err := decodeJSONObject(raw)
-	if err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	if err := cluster.verifyImageCacheTerminalHandoffLKG(ctx, release, receipt, manifest, raw); err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	if err := verifyImageCacheTerminalHandoffPreconditions(value, release, receipt, manifest); err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	metadata := mapField(value, "metadata")
-	targetResource, err := declarativerelease.ResourceSetItem(manifest, identity)
-	if err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	target, err := targetIdentityFromDeclaredWorkload(targetResource, release.Workload)
-	if err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	target.ManifestDigest = digestBytesLocal(manifest)
-	fields := make([]string, 0, len(imageCacheTerminalHandoffConflicts))
-	for _, reviewed := range imageCacheTerminalHandoffConflicts {
-		fields = append(fields, reviewed.pointer)
-	}
-	plan := declarativerelease.OwnershipAdoptionPlan{
-		Component: release.ComponentID, AlreadyConverged: true,
-		Resources: []declarativerelease.OwnershipAdoptionResourcePlan{{
-			Identity: identity, Fields: fields, UID: stringValue(metadata["uid"]),
-			ResourceVersion: stringValue(metadata["resourceVersion"]), Generation: int64Value(metadata["generation"]),
-		}},
-	}
-	takeoverManifest, err := declarativerelease.BuildOwnershipTakeoverManifest(manifest, plan, target)
-	if err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	takeoverManifest, err = addImageCacheTerminalHandoffScaffold(takeoverManifest, identity, release.Workload.Container, receipt.Final.ImageRef)
-	if err != nil {
-		return imageCacheTerminalHandoff{}, err
-	}
-	if dryRunForce {
-		if err := cluster.applyImageCacheTerminalHandoffSet(ctx, release, takeoverManifest, true); err != nil {
-			return imageCacheTerminalHandoff{}, fmt.Errorf("server-side dry-run reviewed Image-cache ownership terminal handoff: %w", err)
-		}
-	}
-	return imageCacheTerminalHandoff{
-		receipt: receipt, plan: plan, target: target, manifest: takeoverManifest,
-		preUID: plan.Resources[0].UID, preRV: plan.Resources[0].ResourceVersion, preGen: plan.Resources[0].Generation,
-	}, nil
-}
-
-func (cluster *kubectlCluster) verifyImageCacheTerminalHandoffLKG(ctx context.Context, release declarativerelease.PlanRelease, receipt declarativerelease.OwnershipAdoptionReceipt, manifest, workloadRaw []byte) error {
-	observation, err := parseDegradedObservation(workloadRaw, release)
-	if err != nil {
-		return err
-	}
-	if observation.UID != receipt.Final.UID || observation.ResourceVersion != receipt.Final.ResourceVersion || observation.Generation != receipt.Final.Generation ||
-		observation.TemplateDigest != receipt.Final.TemplateDigest || observation.ImageRef != receipt.Final.ImageRef ||
-		observation.ConfigSHA != "" || observation.ManifestSHA != "" || observation.OCIRevision != "" {
-		return errors.New("receipt-bound Image-cache LKG workload identity drifted")
-	}
-	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
-	if err != nil || len(resources) != len(receipt.Final.Resources) {
-		if err == nil {
-			err = errors.New("receipt-bound Image-cache LKG resource count drifted")
-		}
-		return err
-	}
-	prior := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(receipt.Final.Resources))
-	for _, resource := range receipt.Final.Resources {
-		prior[resource.Identity] = resource
-	}
-	for _, resource := range resources {
-		witness, exists := prior[resource.Identity]
-		if !exists || resource.UID != witness.UID || resource.ResourceVersion != witness.ResourceVersion ||
-			resource.Generation != witness.Generation || resource.ObjectDigest != witness.ObjectDigest {
-			return fmt.Errorf("receipt-bound Image-cache LKG resource %s/%s drifted", resource.Identity.Kind, resource.Identity.Name)
-		}
-	}
-	selector, err := selectorFromWorkload(workloadRaw)
-	if err != nil {
-		return err
-	}
-	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
-	if err != nil {
-		return err
-	}
-	if err := verifyReceiptBoundPodCohort(podsRaw, release, receipt); err != nil {
-		return err
-	}
-	return cluster.VerifyTarget(ctx, declarativerelease.TargetIdentity{
-		Present: true, ImageRef: receipt.Final.ImageRef, ConfigSHA: receipt.Final.ConfigSHA,
-		ManifestSHA: receipt.Final.ManifestSHA, OCIRevision: receipt.Final.OCIRevision,
-	})
-}
-
-func addImageCacheTerminalHandoffScaffold(manifest []byte, identity declarativerelease.ResourceIdentity, container, image string) ([]byte, error) {
-	identities, err := declarativerelease.ResourceSetIdentities(manifest)
-	if err != nil || len(identities) != 1 || identities[0] != identity || container != "image-cache" || !strings.Contains(image, "@sha256:") {
-		if err == nil {
-			err = errors.New("Image-cache terminal handoff scaffold identity is invalid")
-		}
-		return nil, err
-	}
-	item, err := declarativerelease.ResourceSetItem(manifest, identity)
-	if err != nil {
-		return nil, err
-	}
-	spec := mapField(item, "spec")
-	if len(spec) != 1 || mapField(spec, "updateStrategy")["type"] == nil {
-		return nil, errors.New("Image-cache terminal handoff force scope expanded before scaffolding")
-	}
-	spec["template"] = map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": container, "image": image}}}}
-	return declarativerelease.CanonicalJSON(declarativerelease.ResourceSet{
-		APIVersion: declarativerelease.ResourceSetAPIVersion, Kind: declarativerelease.ResourceSetKind, Items: []map[string]any{item},
-	})
-}
-
-func authorizeImageCacheTerminalHandoff(release declarativerelease.PlanRelease) (declarativerelease.OwnershipAdoptionReceipt, error) {
-	if release.ComponentID != "image-cache" || release.MigrationState != "independent" || !release.RetrySameLKG ||
-		release.AdoptionReceiptPath != "deploy/releases/image-cache/adoption-receipt.json" || release.OwnershipAdoption != nil || release.BootstrapLKGPath != "" {
-		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache ownership terminal handoff is not exactly receipt-bound")
-	}
-	component, receipt, err := loadValidatedReceiptBoundRelease(release)
-	if err != nil {
-		return declarativerelease.OwnershipAdoptionReceipt{}, err
-	}
-	if component.ID != release.ComponentID || receipt.TerminalHandoff == nil || len(receipt.Ownership) != 1 ||
-		receipt.Ownership[0].Identity != receipt.Final.Primary {
-		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache terminal handoff receipt scope is invalid")
-	}
-	wantOwnership := []string{
-		"/metadata/labels/app.kubernetes.io~1managed-by",
-		"/spec/template/spec/containers[name=image-cache]/image",
-		"/spec/updateStrategy",
-	}
-	if !equalSortedStrings(receipt.Ownership[0].Fields, wantOwnership) {
-		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache terminal handoff receipt expanded its adopted ownership scope")
-	}
-	if !equalSortedStrings(receipt.TerminalHandoff.Scaffolds, []string{"/spec/template/spec/containers[name=image-cache]/image"}) {
-		return declarativerelease.OwnershipAdoptionReceipt{}, errors.New("Image-cache terminal handoff scaffold is not the exact preowned image leaf")
-	}
-	return receipt, nil
-}
-
-func equalSortedStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	a := append([]string(nil), left...)
-	b := append([]string(nil), right...)
-	sort.Strings(a)
-	sort.Strings(b)
-	for index := range a {
-		if a[index] != b[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func validateExactImageCacheTerminalHandoffConflicts(applyErr error, receipt declarativerelease.OwnershipAdoptionReceipt) error {
-	conflicts, err := parseSSAConflicts(applyErr)
-	if err != nil {
-		return err
-	}
-	if receipt.TerminalHandoff == nil || len(conflicts) != len(imageCacheTerminalHandoffConflicts) ||
-		len(receipt.TerminalHandoff.Conflicts) != len(imageCacheTerminalHandoffConflicts) {
-		return errors.New("Image-cache ownership terminal handoff conflict count is not exact")
-	}
-	want := make(map[string]string, len(imageCacheTerminalHandoffConflicts))
-	for _, reviewed := range imageCacheTerminalHandoffConflicts {
-		want[reviewed.field] = reviewed.manager
-	}
-	for _, authorized := range receipt.TerminalHandoff.Conflicts {
-		matched := false
-		for _, reviewed := range imageCacheTerminalHandoffConflicts {
-			if authorized.Pointer == reviewed.pointer && authorized.LegacyManager == reviewed.manager {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return errors.New("Image-cache ownership terminal handoff receipt contains an unreviewed conflict")
-		}
-	}
-	seen := make(map[string]struct{}, len(conflicts))
-	for _, conflict := range conflicts {
-		if want[conflict.field] != conflict.manager {
-			return fmt.Errorf("Image-cache ownership terminal handoff conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
-		}
-		key := conflict.manager + "\x00" + conflict.field
-		if _, exists := seen[key]; exists {
-			return errors.New("Image-cache ownership terminal handoff conflict is duplicated")
-		}
-		seen[key] = struct{}{}
-	}
-	return nil
-}
-
-func verifyImageCacheTerminalHandoffPreconditions(value map[string]any, release declarativerelease.PlanRelease, receipt declarativerelease.OwnershipAdoptionReceipt, manifest []byte) error {
-	metadata := mapField(value, "metadata")
-	if stringValue(metadata["uid"]) != receipt.Final.UID || stringValue(metadata["resourceVersion"]) != receipt.Final.ResourceVersion ||
-		int64Value(metadata["generation"]) != receipt.Final.Generation {
-		return errors.New("Image-cache terminal handoff CAS drifted")
-	}
-	labelPointer := imageCacheTerminalHandoffConflicts[0].pointer
-	strategyPointer := imageCacheTerminalHandoffConflicts[1].pointer
-	imagePointer := "/spec/template/spec/containers[name=image-cache]/image"
-	if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, []string{labelPointer, strategyPointer, imagePointer}) ||
-		!managedFieldsOwnAnyPointer(metadata, "helm", []string{labelPointer}) || managedFieldsOwnAnyPointer(metadata, "helm", []string{strategyPointer, imagePointer}) ||
-		!managedFieldsOwnAnyPointer(metadata, "kubectl-patch", []string{strategyPointer}) || managedFieldsOwnAnyPointer(metadata, "kubectl-patch", []string{labelPointer, imagePointer}) {
-		return errors.New("Image-cache terminal handoff managedFields witness is not exact")
-	}
-	for _, manager := range managedFieldManagers(metadata) {
-		if manager != release.Workload.FieldManager && manager != "helm" && manager != "kubectl-patch" &&
-			managedFieldsOwnAnyPointer(metadata, manager, []string{labelPointer, strategyPointer}) {
-			return fmt.Errorf("Image-cache terminal handoff leaf is unexpectedly owned by %s", manager)
-		}
-	}
-	if stringValue(mapField(mapField(value, "spec"), "updateStrategy")["type"]) != "OnDelete" {
-		return errors.New("Image-cache terminal handoff predecessor is not exact OnDelete")
-	}
-	desired, err := declarativerelease.ResourceSetItem(manifest, receipt.Final.Primary)
-	if err != nil {
-		return err
-	}
-	desiredMetadata := mapField(desired, "metadata")
-	if mapStringField(desiredMetadata, "labels")["app.kubernetes.io/managed-by"] != release.Workload.FieldManager {
-		return errors.New("Image-cache terminal handoff forward managed-by is invalid")
-	}
-	strategy := mapField(mapField(desired, "spec"), "updateStrategy")
-	rolling := mapField(strategy, "rollingUpdate")
-	if stringValue(strategy["type"]) != "RollingUpdate" || int64Value(rolling["maxUnavailable"]) != 2 || int64Value(rolling["maxSurge"]) != 0 {
-		return errors.New("Image-cache terminal handoff forward rolling policy is invalid")
-	}
-	image, err := declaredContainerImage(desired, release.Workload.Container, "container")
-	if err != nil || !strings.HasPrefix(image, release.Artifact.Repository+"@sha256:") {
-		return errors.New("Image-cache terminal handoff forward image is not immutable")
-	}
-	return nil
-}
-
-func (cluster *kubectlCluster) applyImageCacheTerminalHandoffSet(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, dryRun bool) error {
-	identities, err := declarativerelease.ResourceSetIdentities(manifest)
-	if err != nil || len(identities) != 1 {
-		if err == nil {
-			err = errors.New("Image-cache terminal handoff must contain exactly one resource")
-		}
-		return err
-	}
-	item, err := declarativerelease.ResourceSetItem(manifest, identities[0])
-	if err != nil {
-		return err
-	}
-	encoded, err := declarativerelease.CanonicalJSON(item)
-	if err != nil {
-		return err
-	}
-	arguments := applyArguments(release, dryRun)
-	for index, argument := range arguments {
-		if argument == "--filename" {
-			arguments = append(append(append([]string(nil), arguments[:index]...), "--force-conflicts"), arguments[index:]...)
-			_, err = cluster.kubectlRun(ctx, encoded, arguments...)
-			return err
-		}
-	}
-	return errors.New("Image-cache terminal handoff force arguments are invalid")
-}
-
-func (cluster *kubectlCluster) verifyImageCacheTerminalHandoffComplete(ctx context.Context, release declarativerelease.PlanRelease, handoff imageCacheTerminalHandoff) (map[string]any, error) {
-	raw, err := cluster.getResource(ctx, handoff.receipt.Final.Primary)
-	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-		return nil, fmt.Errorf("read completed Image-cache terminal handoff: %w", err)
-	}
-	value, err := decodeJSONObject(raw)
-	if err != nil {
-		return nil, err
-	}
-	metadata := mapField(value, "metadata")
-	pointers := []string{imageCacheTerminalHandoffConflicts[0].pointer, imageCacheTerminalHandoffConflicts[1].pointer, "/spec/template/spec/containers[name=image-cache]/image"}
-	if stringValue(metadata["uid"]) != handoff.preUID || stringValue(metadata["resourceVersion"]) == handoff.preRV ||
-		int64Value(metadata["generation"]) <= handoff.preGen || !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, pointers) ||
-		managedFieldsOwnAnyPointer(metadata, "helm", pointers) || managedFieldsOwnAnyPointer(metadata, "kubectl-patch", pointers) {
-		return nil, errors.New("Image-cache ownership terminal handoff did not become exclusive")
-	}
-	return value, nil
-}
-
-func (cluster *kubectlCluster) waitImageCacheTerminalHandoffComplete(ctx context.Context, release declarativerelease.PlanRelease, handoff imageCacheTerminalHandoff) (map[string]any, error) {
-	deadline := time.Now().Add(cluster.timeout)
-	var lastErr error
-	for {
-		value, err := cluster.verifyImageCacheTerminalHandoffComplete(ctx, release, handoff)
-		if err == nil {
-			metadata := mapField(value, "metadata")
-			status := mapField(value, "status")
-			image, imageErr := declaredContainerImage(value, release.Workload.Container, "container")
-			if imageErr == nil && image == handoff.receipt.Final.ImageRef &&
-				int64Value(status["observedGeneration"]) == int64Value(metadata["generation"]) &&
-				int32(int64Value(status["desiredNumberScheduled"])) == handoff.receipt.Final.Desired &&
-				int32(int64Value(status["numberReady"])) == handoff.receipt.Final.Ready &&
-				int32(int64Value(status["numberAvailable"])) == handoff.receipt.Final.Available &&
-				int32(int64Value(status["numberUnavailable"])) == handoff.receipt.Final.Unavailable {
-				return value, nil
-			}
-			lastErr = errors.New("Image-cache terminal handoff LKG cohort has not settled")
-		} else {
-			lastErr = err
-		}
-		if time.Now().After(deadline) {
-			return nil, lastErr
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-}
-
-func emitImageCacheTerminalHandoffReceipt(release declarativerelease.PlanRelease, handoff imageCacheTerminalHandoff, value map[string]any) error {
-	metadata := mapField(value, "metadata")
-	receipt := map[string]any{
-		"apiVersion": "release.fugue.dev/v2", "kind": "OwnershipTerminalHandoffReceipt", "component": release.ComponentID,
-		"sourceReceiptDigest": handoff.receipt.ReceiptDigest, "authorizationRunId": handoff.receipt.TerminalHandoff.RunID,
-		"authorizationRunAttempt": handoff.receipt.TerminalHandoff.RunAttempt, "failedConfigSha": handoff.receipt.TerminalHandoff.FailedConfigSHA,
-		"failedForwardImageRef": handoff.receipt.TerminalHandoff.ForwardImageRef, "artifactReceiptDigest": handoff.receipt.TerminalHandoff.ArtifactReceiptDigest,
-		"targetConfigSha": handoff.target.ConfigSHA, "targetImageRef": handoff.target.ImageRef,
-		"pre":          map[string]any{"uid": handoff.preUID, "resourceVersion": handoff.preRV, "generation": handoff.preGen},
-		"post":         map[string]any{"uid": stringValue(metadata["uid"]), "resourceVersion": stringValue(metadata["resourceVersion"]), "generation": int64Value(metadata["generation"])},
-		"fieldManager": release.Workload.FieldManager, "conflicts": handoff.receipt.TerminalHandoff.Conflicts,
-		"scaffolds": handoff.receipt.TerminalHandoff.Scaffolds,
-	}
-	unsigned, err := declarativerelease.CanonicalJSON(receipt)
-	if err != nil {
-		return err
-	}
-	receipt["receiptDigest"] = digestBytesLocal(unsigned)
-	encoded, err := declarativerelease.CanonicalJSON(receipt)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "ownership-terminal-handoff-receipt=%s\n", encoded)
-	return nil
+	return cluster.applyResourceSet(ctx, release, manifest, true)
 }
 
 func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) error {
@@ -1331,38 +182,6 @@ func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerel
 	}
 	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
 		return cluster.applyEdgeGroupAB(ctx, release, target, manifest)
-	}
-	if dryRunErr := cluster.applyResourceSet(ctx, release, manifest, true); dryRunErr != nil {
-		handoff, err := cluster.prepareReceiptBoundImageCacheHandoff(ctx, release, manifest, dryRunErr, true)
-		if err != nil {
-			return err
-		}
-		if err := cluster.applyImageCacheTerminalHandoffSet(ctx, release, handoff.manifest, false); err != nil {
-			return fmt.Errorf("apply reviewed Image-cache ownership terminal handoff: %w", err)
-		}
-		post, err := cluster.waitImageCacheTerminalHandoffComplete(ctx, release, handoff)
-		if err != nil {
-			return err
-		}
-		if err := emitImageCacheTerminalHandoffReceipt(release, handoff, post); err != nil {
-			return err
-		}
-		fresh, err := cluster.ObserveCAS(ctx, release, manifest)
-		if err != nil || fresh.UID != handoff.preUID || fresh.ResourceVersion == handoff.preRV || fresh.Generation <= handoff.preGen {
-			if err == nil {
-				err = errors.New("Image-cache terminal handoff forward CAS did not advance")
-			}
-			return err
-		}
-		manifest, err = declarativerelease.BindManifestCAS(manifest, fresh)
-		if err != nil {
-			return err
-		}
-		if err := cluster.applyResourceSet(ctx, release, manifest, false); err != nil {
-			return err
-		}
-		_, err = cluster.verifyImageCacheTerminalHandoffComplete(ctx, release, handoff)
-		return err
 	}
 	return cluster.applyResourceSet(ctx, release, manifest, false)
 }
@@ -1474,24 +293,6 @@ func (cluster *kubectlCluster) DeleteCreated(ctx context.Context, _ declarativer
 	return cluster.deleteCreated(ctx, forwardManifest, nil, before, after)
 }
 
-// DeleteCreatedForOwnershipTakeover preserves forward ServiceAccount
-// dependencies during migration compensation. A historical LKG can omit the
-// account even while the live workload references it; deleting the newly
-// materialized account would make a restarted DaemonSet unschedulable.
-func (cluster *kubectlCluster) DeleteCreatedForOwnershipTakeover(ctx context.Context, _ declarativerelease.PlanRelease, forwardManifest, _ []byte, before, after declarativerelease.Observation) error {
-	identities, err := declarativerelease.ResourceSetIdentities(forwardManifest)
-	if err != nil {
-		return err
-	}
-	preserve := make(map[declarativerelease.ResourceIdentity]struct{})
-	for _, identity := range identities {
-		if identity.APIVersion == "v1" && identity.Kind == "ServiceAccount" {
-			preserve[identity] = struct{}{}
-		}
-	}
-	return cluster.deleteCreated(ctx, forwardManifest, preserve, before, after)
-}
-
 func (cluster *kubectlCluster) deleteCreated(ctx context.Context, forwardManifest []byte, preserve map[declarativerelease.ResourceIdentity]struct{}, before, after declarativerelease.Observation) error {
 	identities, err := declarativerelease.ResourceSetIdentities(forwardManifest)
 	if err != nil {
@@ -1560,143 +361,6 @@ func (cluster *kubectlCluster) deleteCreated(ctx context.Context, forwardManifes
 		}
 	}
 	return nil
-}
-
-// ClearOwnershipTakeoverForwardOnlyFields removes only fields that the
-// reviewed forward manifest introduces and the LKG intentionally omits. This
-// is a migration-only CAS patch: it never broadens the rollback manifest and
-// never reads Secret values.
-func (cluster *kubectlCluster) ClearOwnershipTakeoverForwardOnlyFields(ctx context.Context, release declarativerelease.PlanRelease, forwardManifest, lkgManifest []byte, observed declarativerelease.Observation) error {
-	forwardIDs, err := declarativerelease.ResourceSetIdentities(forwardManifest)
-	if err != nil {
-		return err
-	}
-	clientConfig, err := loadComponentLeaseClientConfig()
-	if err != nil {
-		return fmt.Errorf("load Kubernetes client config: %w", err)
-	}
-	client, err := dynamic.NewForConfig(clientConfig)
-	if err != nil {
-		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
-	}
-	observedByIdentity := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(observed.Resources))
-	for _, resource := range observed.Resources {
-		observedByIdentity[resource.Identity] = resource
-	}
-	for _, identity := range forwardIDs {
-		forwardItem, err := declarativerelease.ResourceSetItem(forwardManifest, identity)
-		if err != nil {
-			return err
-		}
-		lkgItem, err := declarativerelease.ResourceSetItem(lkgManifest, identity)
-		if err != nil {
-			// A historical LKG may omit the forward-only component
-			// ServiceAccount. It is intentionally retained during
-			// compensation, so there are no LKG-owned fields to clear.
-			if canOmitLKGCompensationResource(identity) {
-				continue
-			}
-			return err
-		}
-		paths, err := ownershipTakeoverForwardOnlyPaths(forwardItem, lkgItem)
-		if err != nil {
-			return fmt.Errorf("derive compensation fields for %s/%s: %w", identity.Kind, identity.Name, err)
-		}
-		if len(paths) == 0 {
-			continue
-		}
-		prior, ok := observedByIdentity[identity]
-		if !ok || !prior.Present || prior.UID == "" {
-			return fmt.Errorf("compensation observation is incomplete for %s/%s", identity.Kind, identity.Name)
-		}
-		gvr, err := resourceGVR(identity)
-		if err != nil {
-			return err
-		}
-		resource := client.Resource(gvr).Namespace(identity.Namespace)
-		live, err := resource.Get(ctx, identity.Name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("read compensation target %s/%s: %w", identity.Kind, identity.Name, err)
-		}
-		if string(live.GetUID()) != prior.UID || live.GetResourceVersion() == "" || (prior.Generation > 0 && live.GetGeneration() < prior.Generation) {
-			return fmt.Errorf("compensation target %s/%s identity drifted", identity.Kind, identity.Name)
-		}
-		patch := []map[string]any{
-			{"op": "test", "path": "/metadata/uid", "value": string(live.GetUID())},
-			{"op": "test", "path": "/metadata/resourceVersion", "value": live.GetResourceVersion()},
-		}
-		for _, path := range paths {
-			if _, present := ownershipJSONPointer(live.Object, path); present {
-				patch = append(patch, map[string]any{"op": "remove", "path": path})
-			}
-		}
-		if len(patch) == 2 {
-			continue
-		}
-		payload, err := json.Marshal(patch)
-		if err != nil {
-			return err
-		}
-		if _, err := resource.Patch(ctx, identity.Name, types.JSONPatchType, payload, metav1.PatchOptions{}); err != nil {
-			return fmt.Errorf("clear compensation fields for %s/%s: %w", identity.Kind, identity.Name, err)
-		}
-		verified, err := resource.Get(ctx, identity.Name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("verify compensation fields for %s/%s: %w", identity.Kind, identity.Name, err)
-		}
-		for _, path := range paths {
-			if _, present := ownershipJSONPointer(verified.Object, path); present {
-				return fmt.Errorf("compensation field %s remains on %s/%s", path, identity.Kind, identity.Name)
-			}
-		}
-	}
-	return nil
-}
-
-func canOmitLKGCompensationResource(identity declarativerelease.ResourceIdentity) bool {
-	return identity.APIVersion == "v1" && identity.Kind == "ServiceAccount"
-}
-
-func ownershipTakeoverForwardOnlyPaths(forward, lkg map[string]any) ([]string, error) {
-	allowed := []string{"/spec/template/spec/serviceAccount", "/spec/template/spec/serviceAccountName", "/spec/template/spec/initContainers"}
-	paths := make([]string, 0, len(allowed))
-	forwardServiceAccountName, forwardServiceAccountNamePresent := ownershipJSONPointer(forward, "/spec/template/spec/serviceAccountName")
-	_, lkgServiceAccountNamePresent := ownershipJSONPointer(lkg, "/spec/template/spec/serviceAccountName")
-	_, lkgLegacyServiceAccountPresent := ownershipJSONPointer(lkg, "/spec/template/spec/serviceAccount")
-	for _, path := range allowed {
-		forwardValue, forwardPresent := ownershipJSONPointer(forward, path)
-		_, lkgPresent := ownershipJSONPointer(lkg, path)
-		// Kubernetes may materialize the deprecated serviceAccount alias
-		// when a forward-only serviceAccountName is applied. Treat that
-		// alias as part of the same reviewed compensation scope so the
-		// historical LKG can actually be restored.
-		if path == "/spec/template/spec/serviceAccount" && forwardServiceAccountNamePresent && !lkgServiceAccountNamePresent && !lkgLegacyServiceAccountPresent {
-			forwardValue, forwardPresent = forwardServiceAccountName, true
-		}
-		if forwardPresent && !lkgPresent {
-			if forwardValue == nil {
-				return nil, fmt.Errorf("forward-only field %s is null", path)
-			}
-			paths = append(paths, path)
-		}
-	}
-	return paths, nil
-}
-
-func ownershipJSONPointer(value map[string]any, pointer string) (any, bool) {
-	current := any(value)
-	for _, token := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
-		object, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
-		current, ok = object[token]
-		if !ok {
-			return nil, false
-		}
-	}
-	return current, true
 }
 
 func freshDeletionPreconditions(ctx context.Context, resource dynamic.ResourceInterface, expected declarativerelease.ResourceObservation) (types.UID, string, bool, error) {
@@ -1877,44 +541,18 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 	return append(arguments, "--filename", "-", "--output", "json")
 }
 
-func adoptionApplyArguments(release declarativerelease.PlanRelease, dryRun bool) ([]string, error) {
-	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil {
-		return nil, errors.New("ownership adoption is not explicitly authorized")
-	}
-	arguments := []string{"apply", "--server-side", "--field-manager", release.Workload.FieldManager}
-	if dryRun {
-		arguments = append(arguments, "--dry-run=server")
-	}
-	return append(arguments, "--filename", "-", "--output", "json"), nil
-}
-
-func adoptionForceApplyArguments(release declarativerelease.PlanRelease, dryRun bool) ([]string, error) {
-	arguments, err := adoptionApplyArguments(release, dryRun)
-	if err != nil {
-		return nil, err
-	}
-	for index, argument := range arguments {
-		if argument == "--filename" {
-			return append(append(append([]string(nil), arguments[:index]...), "--force-conflicts"), arguments[index:]...), nil
-		}
-	}
-	return nil, errors.New("ownership adoption apply arguments are invalid")
-}
-
 func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
 	if !target.Present {
 		return declarativerelease.Observation{}, errors.New("cannot wait healthy for an absent target")
 	}
-	allowHistoricalRestarts := allowsHistoricalRestarts(release, target)
-	soak := healthSoakDuration(release, allowHistoricalRestarts)
+	soak := healthSoakDuration(release)
 	deadline := time.Now().Add(cluster.timeout + soak)
 	var lastErr error
 	var lastFailure error
 	tracker := healthSoakTracker{required: soak}
-	allowLegacyManager := allowHistoricalRestarts
 	for {
-		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest, allowHistoricalRestarts)
-		if err == nil && observation.Matches(target, release, allowLegacyManager) {
+		observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
+		if err == nil && observation.Matches(target, release, false) {
 			probeDigest, probeErr := cluster.verifyProbes(ctx, release, target, manifest, observation)
 			if probeErr == nil {
 				observation.HealthDigest = digestJoin(observation.HealthDigest, probeDigest)
@@ -1962,8 +600,8 @@ func shouldReturnTypedPrewritePredecessorHealth(ctx context.Context, release dec
 		errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth)
 }
 
-func healthSoakDuration(release declarativerelease.PlanRelease, bootstrap bool) time.Duration {
-	if bootstrap || release.Transition == nil || release.Transition.EdgeGroupAB == nil {
+func healthSoakDuration(release declarativerelease.PlanRelease) time.Duration {
+	if release.Transition == nil || release.Transition.EdgeGroupAB == nil {
 		return 0
 	}
 	return time.Duration(release.Transition.EdgeGroupAB.SoakSeconds) * time.Second
@@ -1991,67 +629,13 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 			return decodeErr
 		}
 		if !declarativerelease.ResourceDesiredSubset(desired, live) {
-			converged, receiptErr := cluster.receiptBoundHistoricalResourceConverged(ctx, release, manifest, identity, desired, live, liveRaw)
-			if receiptErr != nil {
-				return receiptErr
-			}
-			if !converged {
-				return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
-			}
+			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
 		}
 	}
 	return nil
 }
 
-func (cluster *kubectlCluster) receiptBoundHistoricalResourceConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, identity declarativerelease.ResourceIdentity, desired, live map[string]any, liveRaw []byte) (bool, error) {
-	primary := declarativerelease.ResourceIdentity{
-		APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
-		Namespace: release.Workload.Namespace, Name: release.Workload.Name,
-	}
-	if release.MigrationState != "independent" || !release.RetrySameLKG || !release.ExpectedPreviousPresent ||
-		release.AdoptionReceiptPath != "deploy/releases/"+release.ComponentID+"/adoption-receipt.json" || identity != primary {
-		return false, nil
-	}
-	spec := mapField(desired, "spec")
-	strategy := mapField(spec, "updateStrategy")
-	if release.Workload.Kind != "DaemonSet" || stringValue(strategy["type"]) != "OnDelete" {
-		return false, nil
-	}
-	liveTemplate := mapField(mapField(live, "spec"), "template")
-	liveAnnotations := mapStringField(mapField(liveTemplate, "metadata"), "annotations")
-	if liveAnnotations["fugue.pro/source-commit"] != "" || liveAnnotations["fugue.pro/oci-revision"] != "" {
-		return false, errors.New("receipt-bound historical workload has conflicting live source identity")
-	}
-	resources, err := cluster.observeResources(ctx, manifest, release, liveRaw)
-	if err != nil {
-		return false, err
-	}
-	observation, err := parseDegradedObservation(liveRaw, release)
-	if err != nil {
-		return false, err
-	}
-	observation.Resources = resources
-	if _, err := cluster.bindReceiptBoundDegradedObservation(ctx, release, liveRaw, observation, resources); err != nil {
-		return false, err
-	}
-	copyRaw, err := json.Marshal(desired)
-	if err != nil {
-		return false, err
-	}
-	reviewed, err := decodeJSONObject(copyRaw)
-	if err != nil {
-		return false, err
-	}
-	template := mapField(mapField(reviewed, "spec"), "template")
-	templateMetadata := mapField(template, "metadata")
-	if annotations, ok := templateMetadata["annotations"].(map[string]any); ok {
-		delete(annotations, "fugue.pro/source-commit")
-		delete(annotations, "fugue.pro/oci-revision")
-	}
-	return declarativerelease.ResourceDesiredSubset(reviewed, live), nil
-}
-
-func (cluster *kubectlCluster) observeExpected(ctx context.Context, release declarativerelease.PlanRelease, expectedOCI string, manifest []byte, allowHistoricalRestarts bool) (declarativerelease.Observation, error) {
+func (cluster *kubectlCluster) observeExpected(ctx context.Context, release declarativerelease.PlanRelease, expectedOCI string, manifest []byte) (declarativerelease.Observation, error) {
 	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	workloadRaw, err := cluster.getResource(ctx, primary)
 	if err != nil {
@@ -2093,43 +677,15 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, allowHistoricalRestarts); err != nil {
+	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	bootstrapRuntime := adoptingBootstrapRuntime(release, allowHistoricalRestarts)
-	if bootstrapRuntime != nil {
-		image := release.Artifact.Repository + "@" + bootstrapRuntime.ImageDigest
-		arguments := []string{"python3", cluster.verifier, "--image", image, "--platform", "linux/amd64", "--expected-revision", bootstrapRuntime.OCIRevision,
-			"--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1"}
-		verificationRaw, verifyErr := cluster.run(ctx, nil, arguments[0], arguments[1:]...)
-		if verifyErr != nil {
-			return declarativerelease.Observation{}, fmt.Errorf("verify adoption bootstrap runtime: %w", verifyErr)
-		}
-		verification, decodeErr := declarativerelease.DecodeRegistryVerification(bytes.NewReader(verificationRaw))
-		if decodeErr != nil || verification.Image != image || verification.OCIRevision != bootstrapRuntime.OCIRevision {
-			return declarativerelease.Observation{}, errors.New("adoption bootstrap runtime registry identity mismatch")
-		}
-	}
-	observationWorkloadRaw := workloadRaw
-	if allowHistoricalRestarts && release.MigrationState == "adopting" && release.OwnershipAdoption != nil &&
-		(release.RetrySameLKG || declarativerelease.InitialExplicitBootstrapAdoption(release)) && release.BootstrapLKGPath != "" {
-		observationWorkloadRaw, err = bootstrapObservationWorkload(workloadRaw, manifest, primary)
-		if err != nil {
-			return declarativerelease.Observation{}, err
-		}
-	}
-	partial, err := parseObservation(observationWorkloadRaw, podsRaw, release, allowHistoricalRestarts, true)
+	partial, err := parseObservation(workloadRaw, podsRaw, release)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	verificationImage, err := observedVerificationImage(partial.ImageRef, partial.ImageID, partial.ManifestSHA, allowHistoricalRestarts)
-	if err != nil {
-		return declarativerelease.Observation{}, err
-	}
-	arguments := []string{"python3", cluster.verifier, "--image", verificationImage, "--platform", "linux/amd64"}
-	if !allowHistoricalRestarts {
-		arguments = append(arguments, "--expected-revision", expectedOCI)
-	}
+	verificationImage := partial.ImageRef
+	arguments := []string{"python3", cluster.verifier, "--image", verificationImage, "--platform", "linux/amd64", "--expected-revision", expectedOCI}
 	arguments = append(arguments, "--metadata-only", "--timeout-seconds", "18", "--request-timeout-seconds", "5", "--max-attempts", "2", "--retry-delay-seconds", "0.1")
 	verificationRaw, err := cluster.run(ctx, nil, arguments[0], arguments[1:]...)
 	if err != nil {
@@ -2139,11 +695,8 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if !observedRegistryIdentityMatches(verification, verificationImage, expectedOCI, allowHistoricalRestarts) {
+	if verification.Image != verificationImage || verification.OCIRevision != expectedOCI {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
-	}
-	if err := bindAdoptingImmutableSource(&partial, verification, expectedOCI, allowHistoricalRestarts); err != nil {
-		return declarativerelease.Observation{}, err
 	}
 	partial.OCIRevision = expectedOCI
 	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
@@ -2154,86 +707,12 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	return partial, nil
 }
 
-// bindAdoptingImmutableSource is the one-time bridge for a legacy workload
-// that already runs an immutable image but predates source annotations. The
-// registry revision is accepted only inside an explicit adoption observation
-// and only when it is the exact expected bootstrap revision. Independent
-// components never enter this path.
-func bindAdoptingImmutableSource(observation *declarativerelease.Observation, verification declarativerelease.RegistryVerification, expectedOCI string, allowHistorical bool) error {
-	if observation.ConfigSHA != "" || observation.ManifestSHA != "" || !allowHistorical {
-		return nil
-	}
-	if !strings.Contains(observation.ImageRef, "@sha256:") || verification.Image != observation.ImageRef || verification.OCIRevision != expectedOCI {
-		return errors.New("immutable adoption bootstrap source is not registry-bound")
-	}
-	observation.ConfigSHA = expectedOCI
-	observation.ManifestSHA = expectedOCI
-	return nil
-}
-
-// bootstrapObservationWorkload binds the running bootstrap Pod cohort to the
-// exact Git LKG while retaining live Kubernetes CAS, ownership and status.
-// During an adoption retry the desired DaemonSet template may already be the
-// reviewed forward target even though OnDelete Pods still run the heterogeneous
-// bootstrap LKG. This path is explicitly limited to adopting bootstrap calls;
-// convergence independently proves the live desired resource set.
-func bootstrapObservationWorkload(liveRaw, manifest []byte, identity declarativerelease.ResourceIdentity) ([]byte, error) {
-	live, err := decodeJSONObject(liveRaw)
-	if err != nil {
-		return nil, err
-	}
-	expected, err := declarativerelease.ResourceSetItem(manifest, identity)
-	if err != nil {
-		return nil, err
-	}
-	liveMetadata := mapField(live, "metadata")
-	expectedMetadata := mapField(expected, "metadata")
-	for _, field := range []string{"uid", "resourceVersion", "generation", "managedFields"} {
-		value, exists := liveMetadata[field]
-		if !exists {
-			return nil, fmt.Errorf("bootstrap observation live metadata %s is absent", field)
-		}
-		expectedMetadata[field] = value
-	}
-	status, exists := live["status"]
-	if !exists {
-		return nil, errors.New("bootstrap observation live status is absent")
-	}
-	expected["status"] = status
-	return declarativerelease.CanonicalJSON(expected)
-}
-
-func observedVerificationImage(imageRef, imageID, expectedSource string, allowHistorical bool) (string, error) {
-	if strings.Contains(imageRef, "@sha256:") {
-		return imageRef, nil
-	}
-	if !allowHistorical || legacySourceTag(imageRef) != expectedSource {
-		return "", errors.New("legacy workload image is not exact adoption bootstrap source")
-	}
-	separator := strings.LastIndex(imageRef, ":")
-	if separator <= strings.LastIndex(imageRef, "/") || separator < 1 || !strings.HasPrefix(imageID, "sha256:") {
-		return "", errors.New("legacy workload image cannot be bound to immutable pod identity")
-	}
-	return imageRef[:separator] + "@" + imageID, nil
-}
-
-func observedRegistryIdentityMatches(verification declarativerelease.RegistryVerification, image, expectedOCI string, allowHistorical bool) bool {
-	return verification.Image == image && ((!allowHistorical && verification.OCIRevision == expectedOCI) ||
-		(allowHistorical && (verification.OCIRevision == "" || verification.OCIRevision == expectedOCI)))
-}
-
 func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []byte, release declarativerelease.PlanRelease, workloadRaw []byte) ([]declarativerelease.ResourceObservation, error) {
 	identities, err := declarativerelease.ResourceSetIdentities(manifest)
 	if err != nil {
 		return nil, err
 	}
 	resources := make([]declarativerelease.ResourceObservation, 0, len(identities))
-	reviewed := make(map[declarativerelease.ResourceIdentity][]string)
-	if release.OwnershipAdoption != nil {
-		for _, scope := range release.OwnershipAdoption.Resources {
-			reviewed[scope.Identity] = scope.Fields
-		}
-	}
 	for _, identity := range identities {
 		raw := workloadRaw
 		if identity.APIVersion != release.Workload.APIVersion || identity.Kind != release.Workload.Kind ||
@@ -2264,11 +743,6 @@ func (cluster *kubectlCluster) observeResources(ctx context.Context, manifest []
 		resource.ResourceVersion = stringValue(metadata["resourceVersion"])
 		resource.Generation = int64Value(metadata["generation"])
 		resource.FieldManagers = managedFieldManagers(metadata)
-		if fields := reviewed[identity]; len(fields) > 0 {
-			resource.ReviewedOwnershipApplied = managedFieldsOwnPointers(metadata, release.Workload.FieldManager, fields)
-			resource.ReviewedOwnershipExclusive = resource.ReviewedOwnershipApplied &&
-				managedFieldsPointersExclusivelyOwned(metadata, release.Workload.FieldManager, fields)
-		}
 		resource.ObjectDigest = digestJSON(sanitizeObservedResource(value))
 		resources = append(resources, resource)
 	}
@@ -2304,7 +778,6 @@ func sanitizeObservedResource(value map[string]any) map[string]any {
 
 func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, observation declarativerelease.Observation) (string, error) {
 	evidence := make([]string, 0, len(release.Health))
-	bootstrap := allowsHistoricalRestarts(release, target)
 	for _, probe := range release.Health {
 		switch probe.Type {
 		case "deployment", "daemonset", "job":
@@ -2335,8 +808,7 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			}
 			for _, pod := range pods {
 				body, err := readPodHTTP(ctx, pod, probe.Path)
-				expected := probeExpectedBody(probe, bootstrap)
-				if err != nil || (expected != "" && !bytes.Contains(body, []byte(expected))) {
+				if err != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
 					return "", fmt.Errorf("pod health probe %q failed", pod.Name)
 				}
 				evidence = append(evidence, probe.Type+":"+pod.Name+":"+digestBytesLocal(body))
@@ -2361,12 +833,10 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			if err != nil {
 				return "", err
 			}
-			if !bootstrap {
-				if err := validateEdgeGroupAuthority(state, transition); err != nil {
-					return "", err
-				}
+			if err := validateEdgeGroupAuthority(state, transition); err != nil {
+				return "", err
 			}
-			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot, "bootstrap=" + strconv.FormatBool(bootstrap)}
+			items := []string{"group=" + transition.GroupID, "active_slot=" + state.ActiveSlot}
 			for _, slot := range []struct {
 				name string
 				pods map[string]edgeGroupPod
@@ -2383,13 +853,6 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 	}
 	sort.Strings(evidence)
 	return digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
-}
-
-func probeExpectedBody(probe declarativerelease.HealthProbe, bootstrap bool) string {
-	if bootstrap && probe.Type == "pod-http" {
-		return ""
-	}
-	return probe.Expected
 }
 
 func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, kind, name string) (declarativerelease.Observation, error) {
@@ -2412,20 +875,11 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 	}
 	auxiliaryRelease := release
 	auxiliaryRelease.Workload = workload
-	expected := target
-	allowLegacy := release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" &&
-		target.ConfigSHA == release.ExpectedPreviousConfigSHA && target.OCIRevision == release.ExpectedPreviousOCIRevision
-	if allowLegacy {
-		expected, err = targetIdentityFromDeclaredWorkload(desired, workload)
-		if err != nil {
-			return declarativerelease.Observation{}, err
-		}
-	}
-	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, expected.OCIRevision, manifest, allowLegacy)
+	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, target.OCIRevision, manifest)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("observe health workload %s/%s: %w", kind, name, err)
 	}
-	if !auxiliary.Matches(expected, auxiliaryRelease, allowLegacy) {
+	if !auxiliary.Matches(target, auxiliaryRelease, false) {
 		return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s has not converged to the immutable target", kind, name)
 	}
 	return auxiliary, nil
@@ -2502,7 +956,7 @@ func targetIdentityFromDeclaredWorkload(desired map[string]any, workload declara
 	return declarativerelease.TargetIdentity{Present: true, ImageRef: image, ConfigSHA: configSHA, ManifestSHA: manifestSHA, OCIRevision: ociRevision}, nil
 }
 
-func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease, allowHistorical bool) error {
+func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease) error {
 	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	desired, err := declarativerelease.ResourceSetItem(manifest, identity)
 	if err != nil {
@@ -2528,9 +982,6 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 			return imageErr
 		}
 		expected["container\x00"+release.Workload.Container] = image
-	}
-	if bootstrap := adoptingBootstrapRuntime(release, allowHistorical); bootstrap != nil {
-		expected["container\x00"+bootstrap.Container] = release.Artifact.Repository + "@" + bootstrap.ImageDigest
 	}
 	list, err := decodeJSONObject(podsRaw)
 	if err != nil {
@@ -2578,17 +1029,6 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		}
 	}
 	return nil
-}
-
-func adoptingBootstrapRuntime(release declarativerelease.PlanRelease, allowHistorical bool) *declarativerelease.BootstrapRuntime {
-	bootstrap := release.BootstrapRuntime
-	if !allowHistorical || release.MigrationState != "adopting" || release.OwnershipAdoption == nil || bootstrap == nil ||
-		bootstrap.Resource.APIVersion != release.Workload.APIVersion || bootstrap.Resource.Kind != release.Workload.Kind ||
-		bootstrap.Resource.Namespace != release.Workload.Namespace || bootstrap.Resource.Name != release.Workload.Name ||
-		bootstrap.Container != release.Workload.Container {
-		return nil
-	}
-	return bootstrap
 }
 
 func declaredContainerImage(desired map[string]any, name, containerType string) (string, error) {
@@ -2837,7 +1277,7 @@ func selectorFromWorkload(raw []byte) (string, error) {
 	return strings.Join(parts, ","), nil
 }
 
-func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease, allowHistoricalRestarts, declaredArtifactsVerified bool) (declarativerelease.Observation, error) {
+func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.PlanRelease) (declarativerelease.Observation, error) {
 	workload, err := decodeJSONObject(workloadRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -2866,21 +1306,12 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 			image = stringValue(container["image"])
 		}
 	}
-	if image == "" || (!strings.Contains(image, "@sha256:") && !allowHistoricalRestarts) {
+	if image == "" || !strings.Contains(image, "@sha256:") {
 		return declarativerelease.Observation{}, errors.New("workload image is not immutable")
 	}
 	manifestSHA := templateAnnotations["fugue.pro/source-commit"]
-	if manifestSHA == "" && allowHistoricalRestarts {
-		manifestSHA = legacySourceTag(image)
-	}
 	workloadAnnotations := mapStringField(metadata, "annotations")
 	configSHA := workloadAnnotations["fugue.pro/production-config-sha"]
-	if configSHA == "" && allowHistoricalRestarts {
-		configSHA = workloadAnnotations["fugue.pro/"+release.ComponentID+"-manifest-revision"]
-	}
-	if configSHA == "" && allowHistoricalRestarts {
-		configSHA = manifestSHA
-	}
 	observation := declarativerelease.Observation{
 		Present: true,
 		Primary: declarativerelease.ResourceIdentity{
@@ -2922,16 +1353,10 @@ func parseObservation(workloadRaw, podsRaw []byte, release declarativerelease.Pl
 	if release.Workload.Kind == "Job" {
 		imageID, healthDigest, err = parseSucceededJobPod(podsRaw, release, manifestSHA)
 	} else {
-		imageID, healthDigest, err = parseReadyPods(podsRaw, release, observation.Desired-int32(release.Workload.PreservedUnavailable), manifestSHA, allowHistoricalRestarts, declaredArtifactsVerified)
+		imageID, healthDigest, err = parseReadyPods(podsRaw, release, observation.Desired-int32(release.Workload.PreservedUnavailable), manifestSHA)
 	}
 	if err != nil {
 		return declarativerelease.Observation{}, err
-	}
-	if allowHistoricalRestarts && release.Workload.Kind == "DaemonSet" && observation.Updated == 0 &&
-		int32(int64Value(status["currentNumberScheduled"])) == observation.Desired &&
-		int32(int64Value(status["numberMisscheduled"])) == 0 && observation.Ready == observation.Desired &&
-		observation.Available == observation.Desired && observation.Unavailable == 0 {
-		observation.Updated = observation.Desired
 	}
 	observation.ImageID = imageID
 	observation.HealthDigest = healthDigest
@@ -3039,24 +1464,7 @@ func parseSucceededJobPod(raw []byte, release declarativerelease.PlanRelease, ma
 	return imageID, digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
 }
 
-func legacySourceTag(image string) string {
-	separator := strings.LastIndex(image, ":")
-	if separator < strings.LastIndex(image, "/") || separator < 0 {
-		return ""
-	}
-	value := image[separator+1:]
-	if len(value) != 40 {
-		return ""
-	}
-	for _, character := range value {
-		if !strings.ContainsRune("0123456789abcdef", character) {
-			return ""
-		}
-	}
-	return value
-}
-
-func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired int32, manifestSHA string, allowHistoricalRestarts, declaredArtifactsVerified bool) (string, string, error) {
+func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired int32, manifestSHA string) (string, string, error) {
 	value, err := decodeJSONObject(raw)
 	if err != nil {
 		return "", "", err
@@ -3066,10 +1474,6 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 		return "", "", errors.New("pod list is invalid")
 	}
 	evidence := make([]string, 0, len(items))
-	podManifestSHA := manifestSHA
-	if bootstrap := adoptingBootstrapRuntime(release, allowHistoricalRestarts); bootstrap != nil {
-		podManifestSHA = bootstrap.OCIRevision
-	}
 	imageID := ""
 	readyCount := int32(0)
 	for _, rawItem := range items {
@@ -3083,20 +1487,7 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 		}
 		annotations := mapStringField(metadata, "annotations")
 		podSource := annotations["fugue.pro/source-commit"]
-		if podSource == "" && allowHistoricalRestarts {
-			for _, rawContainer := range anySlice(mapField(pod, "spec")["containers"]) {
-				container, _ := rawContainer.(map[string]any)
-				if stringValue(container["name"]) == release.Workload.Container {
-					image := stringValue(container["image"])
-					podSource = legacySourceTag(image)
-					if podSource == "" && declaredArtifactsVerified && strings.Contains(image, "@sha256:") {
-						podSource = manifestSHA
-					}
-					break
-				}
-			}
-		}
-		if podSource != podManifestSHA {
+		if podSource != manifestSHA {
 			continue
 		}
 		status := mapField(pod, "status")
@@ -3115,7 +1506,7 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 				continue
 			}
 			restartCount = int64Value(containerStatus["restartCount"])
-			if restartCount != 0 && !allowHistoricalRestarts {
+			if restartCount != 0 {
 				return "", "", fmt.Errorf("%w: ready workload pod restarted", declarativerelease.ErrDegradedPredecessorHealth)
 			}
 			digest, err := imageIDDigest(stringValue(containerStatus["imageID"]))

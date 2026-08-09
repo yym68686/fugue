@@ -67,52 +67,20 @@ type TargetIdentity struct {
 }
 
 type ExecutionPlan struct {
-	APIVersion          string                 `json:"apiVersion"`
-	Kind                string                 `json:"kind"`
-	Component           string                 `json:"component"`
-	ConfigSHA           string                 `json:"configSha"`
-	ReleasePlanDigest   string                 `json:"releasePlanDigest"`
-	IntentDigest        string                 `json:"intentDigest"`
-	ArtifactDigest      string                 `json:"artifactDigest"`
-	Forward             TargetIdentity         `json:"forward"`
-	LKG                 TargetIdentity         `json:"lkg"`
-	Prewrite            Observation            `json:"prewrite"`
-	AlreadyConverged    bool                   `json:"alreadyConverged"`
-	DegradedPredecessor bool                   `json:"degradedPredecessor,omitempty"`
-	OwnershipAdoption   *OwnershipAdoptionPlan `json:"ownershipAdoption,omitempty"`
-	PreparedAt          string                 `json:"preparedAt"`
-	PlanDigest          string                 `json:"planDigest"`
-}
-
-type OwnershipAdoptionPlan struct {
-	Component           string                          `json:"component"`
-	BootstrapLKGDigest  string                          `json:"bootstrapLkgDigest"`
-	UID                 string                          `json:"uid"`
-	ResourceVersion     string                          `json:"resourceVersion"`
-	Generation          int64                           `json:"generation"`
-	LegacyFieldManager  string                          `json:"legacyFieldManager"`
-	LegacyFieldManagers []string                        `json:"legacyFieldManagers"`
-	Resources           []OwnershipAdoptionResourcePlan `json:"resources"`
-	ImageRef            string                          `json:"imageRef"`
-	ConfigSHA           string                          `json:"configSha"`
-	ManifestSHA         string                          `json:"manifestSha"`
-	OCIRevision         string                          `json:"ociRevision"`
-	AlreadyConverged    bool                            `json:"alreadyConverged,omitempty"`
-	ResumeTakeover      bool                            `json:"resumeTakeover,omitempty"`
-}
-
-type OwnershipAdoptionResourcePlan struct {
-	Identity            ResourceIdentity              `json:"identity"`
-	Fields              []string                      `json:"fields"`
-	ValidationScaffolds []OwnershipValidationScaffold `json:"validationScaffolds,omitempty"`
-	UID                 string                        `json:"uid"`
-	ResourceVersion     string                        `json:"resourceVersion"`
-	Generation          int64                         `json:"generation"`
-}
-
-type OwnershipValidationScaffold struct {
-	Pointer string `json:"pointer"`
-	Value   string `json:"value"`
+	APIVersion          string         `json:"apiVersion"`
+	Kind                string         `json:"kind"`
+	Component           string         `json:"component"`
+	ConfigSHA           string         `json:"configSha"`
+	ReleasePlanDigest   string         `json:"releasePlanDigest"`
+	IntentDigest        string         `json:"intentDigest"`
+	ArtifactDigest      string         `json:"artifactDigest"`
+	Forward             TargetIdentity `json:"forward"`
+	LKG                 TargetIdentity `json:"lkg"`
+	Prewrite            Observation    `json:"prewrite"`
+	AlreadyConverged    bool           `json:"alreadyConverged"`
+	DegradedPredecessor bool           `json:"degradedPredecessor,omitempty"`
+	PreparedAt          string         `json:"preparedAt"`
+	PlanDigest          string         `json:"planDigest"`
 }
 
 type ExecutionResult struct {
@@ -137,10 +105,6 @@ type Cluster interface {
 	ObserveDegraded(context.Context, PlanRelease, []byte) (Observation, error)
 	VerifyTarget(context.Context, TargetIdentity) error
 	DryRunApply(context.Context, PlanRelease, []byte) error
-	DryRunOwnershipAdoption(context.Context, PlanRelease, OwnershipAdoptionPlan, []byte) error
-	DryRunOwnershipTakeover(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) error
-	AdoptOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error)
-	TakeoverOwnership(context.Context, PlanRelease, OwnershipAdoptionPlan, TargetIdentity, []byte) (Observation, error)
 	Apply(context.Context, PlanRelease, TargetIdentity, []byte) error
 	Delete(context.Context, PlanRelease, []byte, Observation) error
 	DeleteCreated(context.Context, PlanRelease, []byte, Observation, Observation) error
@@ -164,39 +128,6 @@ func WithPrewritePredecessorHealthWait(ctx context.Context) context.Context {
 func IsPrewritePredecessorHealthWait(ctx context.Context) bool {
 	marked, _ := ctx.Value(prewritePredecessorHealthWaitKey{}).(bool)
 	return marked
-}
-
-// InitialExplicitBootstrapAdoption is the only first-generation adoption that
-// may recover a typed unhealthy predecessor. The explicit runtime binds the
-// live legacy Pod while the expected predecessor remains bound to the
-// canonical immutable bootstrap LKG.
-func InitialExplicitBootstrapAdoption(release PlanRelease) bool {
-	if release.MigrationState != "adopting" || release.IntentGeneration != 1 || release.RetrySameLKG ||
-		release.SupersedesFailedConfigSHA != "" || !release.ExpectedPreviousPresent || release.BootstrapRuntime == nil ||
-		release.BootstrapLKGPath == "" || release.OwnershipAdoption == nil || len(release.OwnershipAdoption.Resources) == 0 {
-		return false
-	}
-	bootstrap := release.BootstrapRuntime
-	return bootstrap.Resource == (ResourceIdentity{
-		APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
-		Namespace: release.Workload.Namespace, Name: release.Workload.Name,
-	}) && bootstrap.Container == release.Workload.Container && digestPattern.MatchString(bootstrap.ImageDigest) &&
-		shaPattern.MatchString(bootstrap.OCIRevision)
-}
-
-// ownershipTakeoverCompensator is intentionally narrower than Cluster. Only
-// the Kubernetes adapter implements it; test/fake clusters must opt in so a
-// migration rollback cannot silently skip forward-only field cleanup.
-type ownershipTakeoverCompensator interface {
-	ClearOwnershipTakeoverForwardOnlyFields(context.Context, PlanRelease, []byte, []byte, Observation) error
-}
-
-// ownershipTakeoverCreatedResourceCompensator preserves explicit workload
-// dependencies that are introduced by the forward resource set. A bootstrap
-// LKG may predate such a dependency even though the live workload already
-// references it; deleting it during compensation can strand a recreated pod.
-type ownershipTakeoverCreatedResourceCompensator interface {
-	DeleteCreatedForOwnershipTakeover(context.Context, PlanRelease, []byte, []byte, Observation, Observation) error
 }
 
 func DecodeExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lkgManifest []byte) (ExecutionPlan, error) {
@@ -290,12 +221,6 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 				err = cluster.Converged(ctx, release, rendered.Forward)
 				alreadyConverged = err == nil
 			}
-		} else if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
-			prewrite, err = prepareAdoptingRetryPredecessor(ctx, cluster, release, lkg, rendered.LKG)
-			if errors.Is(err, ErrDegradedPredecessorHealth) {
-				prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
-				degradedPredecessor = err == nil
-			}
 		} else {
 			prewrite, err = prepareDegradedPredecessor(ctx, cluster, release, lkg, rendered.Forward, rendered.LKG)
 			degradedPredecessor = err == nil && !prewrite.Matches(lkg, release, true)
@@ -340,12 +265,8 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 					}
 				}
 				if err == nil && !degradedPredecessor {
-					var predecessorWitness []byte
-					if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != "" {
-						predecessorWitness, err = BootstrapPredecessorConvergenceManifest(rendered.LKG, release)
-					} else {
-						predecessorWitness, err = PredecessorConvergenceManifest(rendered.LKG)
-					}
+					predecessorWitness, witnessErr := PredecessorConvergenceManifest(rendered.LKG)
+					err = witnessErr
 					if err == nil {
 						err = cluster.Converged(ctx, release, predecessorWitness)
 					}
@@ -390,47 +311,20 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if !alreadyConverged && !degradedPredecessor && !prewrite.Matches(lkg, release, true) {
 		return ExecutionPlan{}, errors.New("live workload matches neither declared LKG nor immutable target")
 	}
-	adoption, err := bindOwnershipAdoption(release, lkg, rendered.LKG, prewrite, degradedPredecessor)
-	if err != nil {
-		return ExecutionPlan{}, err
+	forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, prewrite)
+	if bindErr != nil {
+		return ExecutionPlan{}, bindErr
 	}
-	if adoption != nil {
-		if !adoption.AlreadyConverged && !adoption.ResumeTakeover {
-			if err := cluster.DryRunOwnershipAdoption(ctx, release, *adoption, rendered.LKG); err != nil {
-				return ExecutionPlan{}, fmt.Errorf("server-side dry-run ownership adoption: %w", err)
-			}
-		} else {
-			expanded, err := cluster.ObserveCAS(ctx, release, rendered.Forward)
-			if err != nil || !expanded.ExtendsResourceCAS(prewrite) {
-				return ExecutionPlan{}, errors.New("already-adopted forward resource CAS is invalid")
-			}
-			if err := cluster.DryRunOwnershipTakeover(ctx, release, *adoption, forward, rendered.Forward); err != nil {
-				return ExecutionPlan{}, fmt.Errorf("server-side dry-run reviewed ownership takeover: %w", err)
-			}
-			lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, expanded)
-			if bindErr != nil {
-				return ExecutionPlan{}, bindErr
-			}
-			if err := cluster.DryRunApply(ctx, release, lkgDryRun); err != nil {
-				return ExecutionPlan{}, fmt.Errorf("server-side dry-run already-adopted LKG: %w", err)
-			}
-		}
-	} else {
-		forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, prewrite)
+	if err := cluster.DryRunApply(ctx, release, forwardDryRun); err != nil {
+		return ExecutionPlan{}, fmt.Errorf("server-side dry-run forward: %w", err)
+	}
+	if release.ExpectedPreviousPresent {
+		lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, prewrite)
 		if bindErr != nil {
 			return ExecutionPlan{}, bindErr
 		}
-		if err := cluster.DryRunApply(ctx, release, forwardDryRun); err != nil {
-			return ExecutionPlan{}, fmt.Errorf("server-side dry-run forward: %w", err)
-		}
-		if release.ExpectedPreviousPresent {
-			lkgDryRun, bindErr := BindManifestCAS(rendered.LKG, prewrite)
-			if bindErr != nil {
-				return ExecutionPlan{}, bindErr
-			}
-			if err := cluster.DryRunApply(ctx, release, lkgDryRun); err != nil {
-				return ExecutionPlan{}, fmt.Errorf("server-side dry-run LKG: %w", err)
-			}
+		if err := cluster.DryRunApply(ctx, release, lkgDryRun); err != nil {
+			return ExecutionPlan{}, fmt.Errorf("server-side dry-run LKG: %w", err)
 		}
 	}
 	plan := ExecutionPlan{
@@ -439,8 +333,7 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 		ReleasePlanDigest: releasePlan.PlanDigest, IntentDigest: release.IntentDigest,
 		ArtifactDigest: artifact.ReceiptDigest, Forward: forward, LKG: lkg,
 		Prewrite: prewrite, AlreadyConverged: alreadyConverged, DegradedPredecessor: degradedPredecessor,
-		OwnershipAdoption: adoption,
-		PreparedAt:        now.UTC().Format(time.RFC3339Nano),
+		PreparedAt: now.UTC().Format(time.RFC3339Nano),
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {
@@ -450,220 +343,14 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	return plan, nil
 }
 
-func prepareAdoptingRetryPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, lkgManifest []byte) (Observation, error) {
-	first, err := cluster.Observe(ctx, release, lkg, lkgManifest)
-	if err != nil || !first.Matches(lkg, release, true) {
-		if err == nil {
-			err = errors.New("adopting retry does not match the bootstrap LKG")
-		}
-		return Observation{}, err
-	}
-	if healthy, healthErr := cluster.WaitHealthy(WithPrewritePredecessorHealthWait(ctx), release, lkg, lkgManifest); healthErr != nil || !healthy.Matches(lkg, release, true) {
-		if healthErr != nil {
-			return Observation{}, fmt.Errorf("wait for adopting retry bootstrap LKG: %w", healthErr)
-		}
-		return Observation{}, fmt.Errorf("%w: adopting retry bootstrap LKG is unhealthy", ErrDegradedPredecessorHealth)
-	}
-	witness, err := BootstrapPredecessorConvergenceManifest(lkgManifest, release)
-	if err != nil {
-		return Observation{}, err
-	}
-	if err := cluster.Converged(ctx, release, witness); err != nil {
-		// An exact API two-pointer repair may be resuming after the first
-		// equal-value SSA adoption omitted fields previously held by the same
-		// declarative manager. The immutable LKG identity, 2/2 health, and CAS
-		// above are still required; the subsequent full-forward server dry-run
-		// proves that force-conflicts is limited to the two reviewed pointers
-		// while restoring the declarative siblings. No other adoption may pass a
-		// structural predecessor drift here.
-		if !exactAPIImageOwnershipRepair(release) {
-			return Observation{}, fmt.Errorf("adopting retry bootstrap LKG drift: %w", err)
-		}
-	}
-	second, err := cluster.Observe(ctx, release, lkg, lkgManifest)
-	if err != nil || !second.Matches(lkg, release, true) {
-		if err == nil {
-			err = errors.New("adopting retry bootstrap LKG changed")
-		}
-		return Observation{}, err
-	}
-	if second.HealthDigest != first.HealthDigest {
-		return Observation{}, errors.New("adopting retry bootstrap LKG health changed")
-	}
-	return second, nil
-}
-
-func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest []byte, prewrite Observation, degraded ...bool) (*OwnershipAdoptionPlan, error) {
-	if release.MigrationState != "adopting" || !release.ExpectedPreviousPresent {
-		if release.OwnershipAdoption != nil {
-			return nil, errors.New("ownership adoption is present outside an adopting predecessor")
-		}
-		return nil, nil
-	}
-	degradedPredecessor := len(degraded) > 0 && degraded[0]
-	lkgIdentityBound := prewrite.Matches(lkg, release, true)
-	initialExplicitBootstrap := degradedPredecessor && InitialExplicitBootstrapAdoption(release) &&
-		prewrite.ImageRef == "" && prewrite.ConfigSHA == "" && prewrite.ManifestSHA == "" && prewrite.OCIRevision == "" &&
-		prewrite.TemplateDigest == "" && prewrite.ValidateDegradedPredecessor(release) == nil
-	if degradedPredecessor {
-		lkgIdentityBound = initialExplicitBootstrap || (prewrite.Present && prewrite.ImageRef == lkg.ImageRef && prewrite.ConfigSHA == lkg.ConfigSHA &&
-			prewrite.ManifestSHA == lkg.ManifestSHA && prewrite.OCIRevision == lkg.OCIRevision && prewrite.TemplateDigest != "")
-	}
-	if release.OwnershipAdoption == nil || !lkg.Present || !lkgIdentityBound {
-		return nil, errors.New("ownership adoption is not bound to the exact bootstrap LKG")
-	}
-	legacyManager := false
-	declarativeManager := false
-	for _, manager := range prewrite.FieldManagers {
-		legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
-		declarativeManager = declarativeManager || manager == release.Workload.FieldManager
-	}
-	if initialExplicitBootstrap && !legacyManager && !declarativeManager {
-		for _, resource := range prewrite.Resources {
-			if resource.Identity != prewrite.Primary {
-				continue
-			}
-			for _, manager := range resource.FieldManagers {
-				legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
-				declarativeManager = declarativeManager || manager == release.Workload.FieldManager
-			}
-		}
-	}
-	if !legacyManager && !declarativeManager {
-		return nil, errors.New("ownership adoption live field manager identity is invalid")
-	}
-	adoptionAlreadyConverged := true
-	resumeTakeover := ownershipAdoptionCanResume(release)
-	resources := make(map[ResourceIdentity]ResourceObservation, len(prewrite.Resources))
-	for _, resource := range prewrite.Resources {
-		resources[resource.Identity] = resource
-	}
-	boundResources := make([]OwnershipAdoptionResourcePlan, 0, len(release.OwnershipAdoption.Resources))
-	for _, scope := range release.OwnershipAdoption.Resources {
-		resource, exists := resources[scope.Identity]
-		if !exists || !resource.Present || resource.UID == "" || !resourceVersionPattern.MatchString(resource.ResourceVersion) {
-			return nil, fmt.Errorf("ownership adoption resource %s/%s is not CAS-bound", scope.Identity.Kind, scope.Identity.Name)
-		}
-		legacyManager := false
-		declarativeManager := false
-		for _, manager := range resource.FieldManagers {
-			legacyManager = legacyManager || manager == release.OwnershipAdoption.LegacyFieldManager
-			declarativeManager = declarativeManager || manager == release.Workload.FieldManager
-		}
-		if !legacyManager && !declarativeManager {
-			return nil, fmt.Errorf("ownership adoption resource %s/%s field manager identity is invalid", scope.Identity.Kind, scope.Identity.Name)
-		}
-		adoptionAlreadyConverged = adoptionAlreadyConverged && resource.ReviewedOwnershipExclusive
-		resumeTakeover = resumeTakeover && resource.ReviewedOwnershipApplied
-		scaffolds, err := bindOwnershipValidationScaffolds(lkgManifest, scope)
-		if err != nil {
-			return nil, err
-		}
-		boundResources = append(boundResources, OwnershipAdoptionResourcePlan{
-			Identity: scope.Identity, Fields: append([]string(nil), scope.Fields...),
-			ValidationScaffolds: scaffolds,
-			UID:                 resource.UID, ResourceVersion: resource.ResourceVersion, Generation: resource.Generation,
-		})
-	}
-	result := &OwnershipAdoptionPlan{
-		Component: release.ComponentID, BootstrapLKGDigest: lkg.ManifestDigest,
-		UID: prewrite.UID, ResourceVersion: prewrite.ResourceVersion, Generation: prewrite.Generation,
-		LegacyFieldManager:  release.OwnershipAdoption.LegacyFieldManager,
-		LegacyFieldManagers: append([]string(nil), release.OwnershipAdoption.legacyManagers()...),
-		Resources:           boundResources,
-		ImageRef:            lkg.ImageRef, ConfigSHA: lkg.ConfigSHA, ManifestSHA: lkg.ManifestSHA, OCIRevision: lkg.OCIRevision,
-		AlreadyConverged: adoptionAlreadyConverged,
-		ResumeTakeover:   resumeTakeover && !adoptionAlreadyConverged,
-	}
-	return result, nil
-}
-
-func exactEdgeWorkerImageOwnershipRepair(release PlanRelease) bool {
-	// A worker can reach this repair in either of the two production-safe
-	// shapes accepted by BindIntents: a retry of the same LKG, or the next
-	// normal production atom whose predecessor is present.  The latter is
-	// needed when the legacy co-owner is discovered before the new atom gets a
-	// chance to write.  Generation one and failed-atom successors retain their
-	// dedicated adoption paths; neither is allowed to borrow this permission.
-	normalSuccessor := !release.RetrySameLKG && release.IntentGeneration > 1 &&
-		release.ExpectedPreviousPresent && release.SupersedesFailedConfigSHA == ""
-	if !release.RetrySameLKG && !normalSuccessor {
-		return false
-	}
-	return validateEdgeWorkerOwnershipRepair(Component{
-		ID: release.ComponentID, MigrationState: release.MigrationState,
-		BootstrapLKGPath: release.BootstrapLKGPath, BootstrapRuntime: release.BootstrapRuntime,
-		ArtifactTargets: release.ArtifactTargets, Transition: release.Transition,
-		OwnershipAdoption: release.OwnershipAdoption,
-	}) == nil
-}
-
-func ownershipAdoptionCanResume(release PlanRelease) bool {
-	return InitialExplicitBootstrapFailedAtomSuccessor(release) || exactEdgeWorkerImageOwnershipRepair(release) || exactAPIImageOwnershipRepair(release)
-}
-
-func exactAPIImageOwnershipRepair(release PlanRelease) bool {
-	if release.ComponentID != "api" || release.MigrationState != "adopting" || !release.RetrySameLKG ||
-		!release.ExpectedPreviousPresent || release.BootstrapLKGPath != "deploy/releases/api/lkg.json" ||
-		release.BootstrapRuntime != nil || len(release.ArtifactTargets) != 0 || release.Transition != nil ||
-		release.Artifact.Repository != "ghcr.io/yym68686/fugue-api" || release.OwnershipAdoption == nil {
-		return false
-	}
-	adoption := release.OwnershipAdoption
-	if adoption.LegacyFieldManager != "kubectl-patch" ||
-		!equalStrings(adoption.legacyManagers(), []string{"kubectl-patch"}) || len(adoption.Resources) != 1 {
-		return false
-	}
-	scope := adoption.Resources[0]
-	return scope.Identity == (ResourceIdentity{
-		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
-	}) && equalStrings(scope.Fields, []string{
-		"/spec/template/metadata/annotations/fugue.pro~1source-commit",
-		"/spec/template/spec/containers[name=api]/image",
-	})
-}
-
-func bindOwnershipValidationScaffolds(lkgManifest []byte, scope OwnershipAdoptionScope) ([]OwnershipValidationScaffold, error) {
-	pointers, err := OwnershipTakeoverValidationScaffolds(scope.Fields)
-	if err != nil || len(pointers) == 0 {
-		return nil, err
-	}
-	resource, err := ResourceSetItem(lkgManifest, scope.Identity)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]OwnershipValidationScaffold, 0, len(pointers))
-	for _, pointer := range pointers {
-		value, err := adoptionPointerValue(resource, pointer)
-		if err != nil {
-			return nil, fmt.Errorf("ownership validation scaffold %s: %w", pointer, err)
-		}
-		image, ok := value.(string)
-		if !ok || !strings.Contains(image, "@sha256:") {
-			return nil, fmt.Errorf("ownership validation scaffold %s is not an immutable image", pointer)
-		}
-		result = append(result, OwnershipValidationScaffold{Pointer: pointer, Value: image})
-	}
-	return result, nil
-}
-
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {
-	initialExplicitBootstrap := InitialExplicitBootstrapAdoption(release)
-	failedInitialBootstrap := InitialExplicitBootstrapFailedAtomSuccessor(release)
-	if !release.ExpectedPreviousPresent || !lkg.Present ||
-		(release.MigrationState == "adopting" && !release.RetrySameLKG && !initialExplicitBootstrap && !failedInitialBootstrap) {
+	if !release.ExpectedPreviousPresent || !lkg.Present {
 		return Observation{}, errors.New("degraded predecessor recovery is not authorized")
 	}
 	if verifyErr := cluster.VerifyTarget(ctx, lkg); verifyErr != nil {
 		return Observation{}, fmt.Errorf("verify degraded predecessor artifact: %w", verifyErr)
 	}
-	var witness []byte
-	var err error
-	if initialExplicitBootstrap || failedInitialBootstrap {
-		witness, err = BootstrapPredecessorConvergenceManifest(lkgManifest, release)
-	} else {
-		witness, err = PredecessorConvergenceManifest(lkgManifest)
-	}
+	witness, err := PredecessorConvergenceManifest(lkgManifest)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -677,9 +364,6 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 	if err := cluster.Converged(ctx, release, witness); err != nil {
 		return prepareOwnedDegradedPredecessor(ctx, cluster, release, forwardManifest, err)
 	}
-	if release.MigrationState == "adopting" && release.OwnershipAdoption != nil && !initialExplicitBootstrap {
-		return prepareAdoptingDegradedLKG(ctx, cluster, release, lkg, lkgManifest, witness)
-	}
 	second, err := cluster.ObserveCAS(ctx, release, forwardManifest)
 	if err != nil {
 		return Observation{}, err
@@ -691,45 +375,6 @@ func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release Pl
 		return Observation{}, errors.New("degraded predecessor identity changed during validation")
 	}
 	return second, nil
-}
-
-// prepareAdoptingDegradedLKG replaces the deliberately CAS-only degraded
-// observation with the registry-bound immutable identity required by the
-// ownership adapter. It is reached only after the exact LKG artifact and
-// desired object bytes have already been verified. Two observations around a
-// second LKG convergence witness prevent status movement from being confused
-// with source, image, spec, or manager drift.
-func prepareAdoptingDegradedLKG(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, lkgManifest, witness []byte) (Observation, error) {
-	first, err := cluster.ObserveDegraded(ctx, release, lkgManifest)
-	if err != nil {
-		return Observation{}, fmt.Errorf("observe adopting degraded LKG: %w", err)
-	}
-	if err := first.ValidateDegradedPredecessor(release); err != nil {
-		return Observation{}, err
-	}
-	if !degradedObservationMatchesTarget(first, lkg) {
-		return Observation{}, errors.New("adopting degraded predecessor is not the exact LKG")
-	}
-	if err := cluster.Converged(ctx, release, witness); err != nil {
-		return Observation{}, fmt.Errorf("adopting degraded LKG drift: %w", err)
-	}
-	second, err := cluster.ObserveDegraded(ctx, release, lkgManifest)
-	if err != nil {
-		return Observation{}, fmt.Errorf("reobserve adopting degraded LKG: %w", err)
-	}
-	if err := second.ValidateDegradedPredecessor(release); err != nil {
-		return Observation{}, err
-	}
-	if !degradedObservationMatchesTarget(second, lkg) || !second.SameSpecIdentity(first) {
-		return Observation{}, errors.New("adopting degraded LKG identity changed during validation")
-	}
-	return second, nil
-}
-
-func degradedObservationMatchesTarget(observation Observation, target TargetIdentity) bool {
-	return observation.Present == target.Present && observation.ImageRef == target.ImageRef &&
-		observation.ConfigSHA == target.ConfigSHA && observation.ManifestSHA == target.ManifestSHA &&
-		observation.OCIRevision == target.OCIRevision && observation.TemplateDigest != ""
 }
 
 func prepareOwnedDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, forwardManifest []byte, lkgDrift error) (Observation, error) {
@@ -776,9 +421,6 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	observationManifest := forwardManifest
-	if prepared.OwnershipAdoption != nil {
-		observationManifest = lkgManifest
-	}
 	var current Observation
 	if prepared.DegradedPredecessor {
 		if prepared.Prewrite.ImageRef == "" {
@@ -791,9 +433,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		}
 		if err == nil {
 			var witness []byte
-			if prepared.OwnershipAdoption != nil {
-				witness, err = BootstrapPredecessorConvergenceManifest(lkgManifest, release)
-			} else if prepared.Prewrite.ImageRef == "" {
+			if prepared.Prewrite.ImageRef == "" {
 				witness, err = PredecessorConvergenceManifest(lkgManifest)
 			} else {
 				witness, err = RetryPredecessorConvergenceManifest(forwardManifest, release)
@@ -813,40 +453,6 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		result.Reason = "prewrite-cas-drift"
 		return sealResult(result)
 	}
-	if prepared.OwnershipAdoption != nil {
-		adopted := prepared.Prewrite
-		if prepared.OwnershipAdoption.AlreadyConverged {
-			// Prepare proved every reviewed pointer is already held exclusively by
-			// the declarative manager. Preserve that prewrite witness; there is no
-			// legacy ownership left to take over.
-		} else if prepared.OwnershipAdoption.ResumeTakeover {
-			var takeoverErr error
-			adopted, takeoverErr = cluster.TakeoverOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.Forward, forwardManifest)
-			if takeoverErr != nil || !adopted.CompletesOwnershipTakeover(prepared.Prewrite, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
-				return compensateOwnershipTakeover(ctx, cluster, release, prepared, forwardManifest, lkgManifest, result, adopted)
-			}
-		} else {
-			var adoptionErr error
-			adopted, adoptionErr = cluster.AdoptOwnership(ctx, release, *prepared.OwnershipAdoption, prepared.LKG, lkgManifest)
-			if adoptionErr != nil || !ownershipAdoptionConverged(prepared.Prewrite, adopted, release.Workload.FieldManager, *prepared.OwnershipAdoption) {
-				result.Status = "recovery-required"
-				result.Reason = "ownership-adoption-unknown"
-				result.Final = adopted
-				return sealResult(result)
-			}
-		}
-		current = adopted
-		if !prepared.OwnershipAdoption.AlreadyConverged && !prepared.OwnershipAdoption.ResumeTakeover {
-			expanded, expandErr := cluster.ObserveCAS(ctx, release, forwardManifest)
-			if expandErr != nil || !expanded.ExtendsResourceCAS(adopted) {
-				result.Status = "recovery-required"
-				result.Reason = "post-adoption-forward-cas-drift"
-				result.Final = adopted
-				return sealResult(result)
-			}
-			current = expanded
-		}
-	}
 	if prepared.AlreadyConverged {
 		forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
 		convergedErr := cluster.Converged(ctx, release, forwardManifest)
@@ -863,14 +469,6 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	if err != nil {
 		result.Reason = "forward-cas-manifest-invalid"
 		return sealResult(result)
-	}
-	if prepared.OwnershipAdoption != nil {
-		if err := cluster.DryRunApply(ctx, release, forwardCAS); err != nil {
-			result.Status = "recovery-required"
-			result.Reason = "post-adoption-forward-dry-run-rejected"
-			result.Final = current
-			return sealResult(result)
-		}
 	}
 	result.ForwardApplyCount = 1
 	applyErr := cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
@@ -897,7 +495,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 				observed, observeErr = cluster.ObserveDegraded(ctx, release, observationManifest)
 			}
 			unchanged = observeErr == nil && observed.SameSpecIdentity(prepared.Prewrite)
-		} else if prepared.OwnershipAdoption == nil {
+		} else {
 			observed, observeErr = cluster.Observe(ctx, release, prepared.LKG, observationManifest)
 			unchanged = observeErr == nil && observed.SameCAS(prepared.Prewrite)
 		}
@@ -989,100 +587,7 @@ func forwardFailureClass(applyErr, healthErr, convergedErr error, observed Obser
 	}
 }
 
-func compensateOwnershipTakeover(ctx context.Context, cluster Cluster, release PlanRelease, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, result ExecutionResult, observed Observation) ExecutionResult {
-	if !observed.Present || observed.UID == "" || !resourceVersionPattern.MatchString(observed.ResourceVersion) {
-		var observeErr error
-		observed, observeErr = cluster.ObserveCAS(ctx, release, forwardManifest)
-		if observeErr != nil {
-			result.Status = "recovery-required"
-			result.Reason = "ownership-takeover-observation-failed"
-			return sealResult(result)
-		}
-	}
-	if observed.SameResourceCAS(prepared.Prewrite) {
-		result.Status = "failed-no-write"
-		result.Reason = "ownership-takeover-rejected-before-commit"
-		result.Final = observed
-		return sealResult(result)
-	}
-	lkgCAS, err := BindManifestCAS(lkgManifest, observed)
-	if err != nil {
-		result.Status = "recovery-required"
-		result.Reason = "ownership-takeover-lkg-cas-invalid"
-		result.Final = observed
-		return sealResult(result)
-	}
-	result.LKGApplyCount = 1
-	applyErr := cluster.Apply(ctx, release, prepared.LKG, lkgCAS)
-	clearErr := error(nil)
-	if compensator, ok := cluster.(ownershipTakeoverCompensator); ok {
-		clearErr = compensator.ClearOwnershipTakeoverForwardOnlyFields(ctx, release, forwardManifest, lkgManifest, observed)
-	} else {
-		clearErr = errors.New("ownership takeover compensation adapter is unavailable")
-	}
-	deleteErr := error(nil)
-	if compensator, ok := cluster.(ownershipTakeoverCreatedResourceCompensator); ok {
-		deleteErr = compensator.DeleteCreatedForOwnershipTakeover(ctx, release, forwardManifest, lkgManifest, prepared.Prewrite, observed)
-	} else {
-		deleteErr = cluster.DeleteCreated(ctx, release, forwardManifest, prepared.Prewrite, observed)
-	}
-	lkgObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.LKG, lkgManifest)
-	convergedErr := cluster.Converged(ctx, release, lkgManifest)
-	if healthErr == nil && convergedErr == nil && clearErr == nil && lkgObservation.Matches(prepared.LKG, release, true) {
-		result.Status = "compensated"
-		if applyErr != nil || deleteErr != nil {
-			result.Reason = "ownership-takeover-lkg-commit-unknown-reconciled"
-		} else {
-			result.Reason = "ownership-takeover-lkg-restored"
-		}
-		result.Final = lkgObservation
-		return sealResult(result)
-	}
-	result.Status = "recovery-required"
-	result.Reason = "ownership-takeover-lkg-unproven"
-	if clearErr != nil {
-		result.Reason = "ownership-takeover-lkg-fields-unproven"
-	}
-	result.Final = lkgObservation
-	return sealResult(result)
-}
-
-func ownershipAdoptionConverged(before, after Observation, manager string, plan OwnershipAdoptionPlan) bool {
-	if before.Present != after.Present || before.Primary != after.Primary || before.UID != after.UID || after.Generation < before.Generation ||
-		after.ImageRef != plan.ImageRef || after.ConfigSHA != plan.ConfigSHA || after.ManifestSHA != plan.ManifestSHA ||
-		after.OCIRevision != plan.OCIRevision || !receiptContainsString(after.FieldManagers, manager) ||
-		len(after.Resources) < len(before.Resources) {
-		return false
-	}
-	beforeResources := make(map[ResourceIdentity]ResourceObservation, len(before.Resources))
-	afterResources := make(map[ResourceIdentity]ResourceObservation, len(after.Resources))
-	for _, resource := range before.Resources {
-		beforeResources[resource.Identity] = resource
-	}
-	for _, resource := range after.Resources {
-		afterResources[resource.Identity] = resource
-	}
-	for identity, resource := range afterResources {
-		if _, exists := beforeResources[identity]; !exists && (!isForwardDependencyResource(identity) || !resource.Present) {
-			return false
-		}
-	}
-	for identity, prior := range beforeResources {
-		current, exists := afterResources[identity]
-		if !exists || prior.Present != current.Present || prior.UID != current.UID || current.Generation < prior.Generation ||
-			prior.RetainOnRollback != current.RetainOnRollback {
-			return false
-		}
-	}
-	for _, scope := range plan.Resources {
-		if !receiptContainsString(afterResources[scope.Identity].FieldManagers, manager) {
-			return false
-		}
-	}
-	return true
-}
-
-// ReconcileExecution is the read-only terminal path used when the executor
+// ReconcileExecution// ReconcileExecution is the read-only terminal path used when the executor
 // process itself fails. It never invokes Apply/Delete and can only verify the
 // immutable forward target or report that LKG/partial state still requires a
 // failed terminal result.
@@ -1186,15 +691,10 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	} else if plan.LKG.ImageRef != "" || plan.LKG.ConfigSHA != "" || plan.LKG.ManifestSHA != "" || plan.LKG.OCIRevision != "" {
 		return errors.New("absent execution LKG carries runtime identity")
 	}
-	if err := plan.validateOwnershipAdoption(release); err != nil {
-		return err
-	}
 	if plan.DegradedPredecessor {
-		failedAtomSuccessor := release.MigrationState == "independent" && shaPattern.MatchString(release.SupersedesFailedConfigSHA)
-		failedInitialBootstrap := InitialExplicitBootstrapFailedAtomSuccessor(release) && plan.OwnershipAdoption != nil && plan.OwnershipAdoption.ResumeTakeover
-		initialExplicitBootstrap := InitialExplicitBootstrapAdoption(release) && plan.OwnershipAdoption != nil
+		failedAtomSuccessor := shaPattern.MatchString(release.SupersedesFailedConfigSHA)
 		if !release.ExpectedPreviousPresent || plan.AlreadyConverged ||
-			(!release.RetrySameLKG && !failedAtomSuccessor && !initialExplicitBootstrap && !failedInitialBootstrap) {
+			(!release.RetrySameLKG && !failedAtomSuccessor) {
 			return errors.New("degraded predecessor execution is not authorized")
 		}
 		if err := plan.Prewrite.ValidateDegradedPredecessor(release); err != nil {
@@ -1209,59 +709,6 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 		}
 	} else if !plan.DegradedPredecessor && !plan.Prewrite.Matches(plan.LKG, release, true) {
 		return errors.New("execution plan prewrite is not bound to the LKG")
-	}
-	return nil
-}
-
-func (plan ExecutionPlan) validateOwnershipAdoption(release PlanRelease) error {
-	required := release.MigrationState == "adopting" && release.ExpectedPreviousPresent
-	if !required {
-		if plan.OwnershipAdoption != nil || release.OwnershipAdoption != nil {
-			return errors.New("execution retained ownership adoption outside an adopting predecessor")
-		}
-		return nil
-	}
-	adoption := plan.OwnershipAdoption
-	if adoption == nil || release.OwnershipAdoption == nil || adoption.Component != release.ComponentID ||
-		adoption.BootstrapLKGDigest != plan.LKG.ManifestDigest || adoption.UID != plan.Prewrite.UID ||
-		adoption.ResourceVersion != plan.Prewrite.ResourceVersion || adoption.Generation != plan.Prewrite.Generation ||
-		adoption.LegacyFieldManager != release.OwnershipAdoption.LegacyFieldManager ||
-		!equalStrings(adoption.LegacyFieldManagers, release.OwnershipAdoption.legacyManagers()) ||
-		adoption.ImageRef != plan.LKG.ImageRef || adoption.ConfigSHA != plan.LKG.ConfigSHA ||
-		adoption.ManifestSHA != plan.LKG.ManifestSHA || adoption.OCIRevision != plan.LKG.OCIRevision {
-		return errors.New("execution ownership adoption identity is invalid")
-	}
-	resources := make(map[ResourceIdentity]ResourceObservation, len(plan.Prewrite.Resources))
-	for _, resource := range plan.Prewrite.Resources {
-		resources[resource.Identity] = resource
-	}
-	scopes := make([]OwnershipAdoptionScope, 0, len(adoption.Resources))
-	allReviewedApplied := true
-	allReviewedExclusive := true
-	for _, resource := range adoption.Resources {
-		prewrite, exists := resources[resource.Identity]
-		if !exists || resource.UID != prewrite.UID || resource.ResourceVersion != prewrite.ResourceVersion || resource.Generation != prewrite.Generation {
-			return errors.New("execution ownership adoption resource CAS is invalid")
-		}
-		if _, err := validateOwnershipValidationScaffolds(resource); err != nil {
-			return errors.New("execution ownership adoption validation scaffold is invalid")
-		}
-		allReviewedApplied = allReviewedApplied && prewrite.ReviewedOwnershipApplied
-		allReviewedExclusive = allReviewedExclusive && prewrite.ReviewedOwnershipExclusive
-		scopes = append(scopes, OwnershipAdoptionScope{Identity: resource.Identity, Fields: resource.Fields})
-	}
-	wantResume := ownershipAdoptionCanResume(release) && allReviewedApplied && !allReviewedExclusive
-	if adoption.AlreadyConverged != allReviewedExclusive || adoption.ResumeTakeover != wantResume ||
-		adoption.AlreadyConverged && adoption.ResumeTakeover {
-		return errors.New("execution ownership adoption convergence evidence is invalid")
-	}
-	want, err := CanonicalJSON(release.OwnershipAdoption.Resources)
-	if err != nil {
-		return err
-	}
-	got, err := CanonicalJSON(scopes)
-	if err != nil || !bytes.Equal(got, want) {
-		return errors.New("execution ownership adoption scope is invalid")
 	}
 	return nil
 }
@@ -1403,90 +850,7 @@ func (observation Observation) SameResourceCAS(other Observation) bool {
 	return true
 }
 
-// ExtendsResourceCAS permits a forward manifest to add only resources that are
-// still absent after ownership adoption. Every bootstrap resource must retain
-// its exact post-adoption UID/RV/generation/object/manager identity.
-func (observation Observation) ExtendsResourceCAS(base Observation) bool {
-	if observation.Present != base.Present || observation.Primary != base.Primary ||
-		observation.UID != base.UID || observation.ResourceVersion != base.ResourceVersion ||
-		observation.Generation != base.Generation || len(observation.Resources) < len(base.Resources) {
-		return false
-	}
-	baseResources := make(map[ResourceIdentity]ResourceObservation, len(base.Resources))
-	for _, resource := range base.Resources {
-		baseResources[resource.Identity] = resource
-	}
-	for _, current := range observation.Resources {
-		prior, exists := baseResources[current.Identity]
-		if !exists {
-			if current.Present && !isForwardDependencyResource(current.Identity) {
-				return false
-			}
-			continue
-		}
-		if current.Present != prior.Present || current.UID != prior.UID || current.ResourceVersion != prior.ResourceVersion ||
-			current.Generation != prior.Generation || current.ObjectDigest != prior.ObjectDigest ||
-			current.RetainOnRollback != prior.RetainOnRollback || !equalStrings(current.FieldManagers, prior.FieldManagers) ||
-			current.ReviewedOwnershipApplied != prior.ReviewedOwnershipApplied || current.ReviewedOwnershipExclusive != prior.ReviewedOwnershipExclusive {
-			return false
-		}
-		delete(baseResources, current.Identity)
-	}
-	return len(baseResources) == 0
-}
-
-// CompletesOwnershipTakeover accepts the exact UID-preserving CAS movement
-// caused by applying reviewed forward fields with the declarative manager.
-// The adapter separately proves those desired bytes match the immutable
-// target; this predicate only permits generation/RV movement on scoped
-// resources and absent forward-only resources.
-func (observation Observation) CompletesOwnershipTakeover(base Observation, manager string, plan OwnershipAdoptionPlan) bool {
-	if !observation.Present || observation.Primary != base.Primary || observation.UID != base.UID ||
-		observation.Generation < base.Generation || !resourceVersionPattern.MatchString(observation.ResourceVersion) ||
-		len(observation.Resources) < len(base.Resources) || manager == "" {
-		return false
-	}
-	baseResources := make(map[ResourceIdentity]ResourceObservation, len(base.Resources))
-	for _, resource := range base.Resources {
-		baseResources[resource.Identity] = resource
-	}
-	currentResources := make(map[ResourceIdentity]ResourceObservation, len(observation.Resources))
-	for _, current := range observation.Resources {
-		currentResources[current.Identity] = current
-		prior, exists := baseResources[current.Identity]
-		if !exists {
-			if current.Present && !isForwardDependencyResource(current.Identity) {
-				return false
-			}
-			continue
-		}
-		if current.Present != prior.Present || current.UID != prior.UID || current.Generation < prior.Generation ||
-			current.RetainOnRollback != prior.RetainOnRollback || !resourceVersionPattern.MatchString(current.ResourceVersion) {
-			return false
-		}
-		delete(baseResources, current.Identity)
-	}
-	if len(baseResources) != 0 {
-		return false
-	}
-	for _, scope := range plan.Resources {
-		current, exists := currentResources[scope.Identity]
-		if !exists || !receiptContainsString(current.FieldManagers, manager) || !current.ReviewedOwnershipApplied || !current.ReviewedOwnershipExclusive {
-			return false
-		}
-	}
-	return true
-}
-
-// isForwardDependencyResource is intentionally narrow: an adopting workload
-// may materialize its explicit ServiceAccount even when a historical LKG
-// predates that dependency. No other new live resource is accepted by the
-// ownership CAS predicates.
-func isForwardDependencyResource(identity ResourceIdentity) bool {
-	return identity.APIVersion == "v1" && identity.Kind == "ServiceAccount"
-}
-
-// SameSpecIdentity permits status-only resourceVersion movement while binding
+// SameSpecIdentity// SameSpecIdentity permits status-only resourceVersion movement while binding
 // an unhealthy predecessor to the same UID, generation, desired object bytes,
 // and managed-field ownership. The caller still uses the newest RV as the
 // immediate server-side-apply CAS precondition.

@@ -64,27 +64,14 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if err != nil {
 			return RenderedManifests{}, fmt.Errorf("decode LKG resource set: %w", err)
 		}
-		lkgWorkload := bootstrapLKGWorkload(*release)
-		if receiptWorkload, required := receiptBoundHistoricalLKGWorkload(*release); required {
-			lkgWorkload = receiptWorkload
-		}
-		if _, err := lkg.Primary(lkgWorkload); err != nil {
+		if _, err := lkg.Primary(release.Workload); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG primary workload: %w", err)
 		}
 		if !lkgResourceIdentitiesSubset(forward, lkg) {
 			return RenderedManifests{}, errors.New("LKG resource identities are not a subset of forward")
 		}
-		bootstrap := release.MigrationState == "adopting" && release.OwnershipAdoption != nil && release.BootstrapLKGPath != ""
-		if bootstrap {
-			if err := validateBootstrapLKGIdentity(lkg, *release, lkgWorkload); err != nil {
-				return RenderedManifests{}, err
-			}
-		} else {
-			lkgRelease := *release
-			lkgRelease.Workload = lkgWorkload
-			if err := patchResourceSet(&lkg, lkgRelease, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
-				return RenderedManifests{}, err
-			}
+		if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
+			return RenderedManifests{}, err
 		}
 		if err := validateImmutableResourceSetImages(lkg); err != nil {
 			return RenderedManifests{}, fmt.Errorf("validate LKG images: %w", err)
@@ -105,73 +92,6 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		ForwardDigest: fmt.Sprintf("sha256:%x", forwardDigest),
 		LKGDigest:     fmt.Sprintf("sha256:%x", lkgDigest),
 	}, nil
-}
-
-func receiptBoundHistoricalLKGWorkload(release PlanRelease) (Workload, bool) {
-	if !release.receiptBoundHistoricalLKG() || release.Workload.Kind != "DaemonSet" || release.Workload.RolloutMode != "rolling" {
-		return Workload{}, false
-	}
-	workload := release.Workload
-	workload.RolloutMode = "on-delete"
-	return workload, true
-}
-
-func bootstrapLKGWorkload(release PlanRelease) Workload {
-	workload := release.Workload
-	if release.MigrationState != "adopting" || release.OwnershipAdoption == nil ||
-		workload.Kind != "DaemonSet" || workload.RolloutMode != "rolling" {
-		return workload
-	}
-	for _, scope := range release.OwnershipAdoption.Resources {
-		if scope.Identity.APIVersion != workload.APIVersion || scope.Identity.Kind != workload.Kind ||
-			scope.Identity.Namespace != workload.Namespace || scope.Identity.Name != workload.Name {
-			continue
-		}
-		for _, field := range scope.Fields {
-			if field == "/spec/updateStrategy" {
-				workload.RolloutMode = "on-delete"
-				return workload
-			}
-		}
-	}
-	return workload
-}
-
-// validateBootstrapLKGIdentity permits a first ownership handoff from a
-// heterogeneous legacy resource set. Each reviewed LKG container must already
-// be immutable; the primary workload remains bound to the intent's exact
-// source and digest while auxiliary front/slot/sidecar images retain their own
-// reviewed LKG identities.
-func validateBootstrapLKGIdentity(lkg ResourceSet, release PlanRelease, lkgWorkload Workload) error {
-	primary, err := lkg.Primary(lkgWorkload)
-	if err != nil {
-		return err
-	}
-	image, err := workloadContainerImage(primary, release.Workload.Container, "container")
-	if err != nil {
-		return err
-	}
-	if image != release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest {
-		return errors.New("bootstrap LKG primary image does not match the declared predecessor")
-	}
-	spec, err := objectField(primary, "spec")
-	if err != nil {
-		return err
-	}
-	template, err := objectField(spec, "template")
-	if err != nil {
-		return err
-	}
-	metadata, err := objectField(template, "metadata")
-	if err != nil {
-		return err
-	}
-	annotations := ensureReadStringMap(metadata, "annotations")
-	if annotations["fugue.pro/source-commit"] != release.ExpectedPreviousManifestSHA ||
-		annotations["fugue.pro/oci-revision"] != release.ExpectedPreviousOCIRevision {
-		return errors.New("bootstrap LKG primary source identity does not match the declared predecessor")
-	}
-	return nil
 }
 
 func workloadContainerImage(workload map[string]any, name, containerType string) (string, error) {
