@@ -61,8 +61,19 @@ func TestEdgeClientDEIndependentTransitionReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if intent.Generation != 11 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
+		intent.ExpectedPreviousConfigSHA != "4743c1e20f0b048ec581f435ba46685a309b6cf4" ||
+		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA ||
+		intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
+		intent.ExpectedPreviousImageDigest != "sha256:90d2682f2510bd1768fb3759bbb2c731471c97ffff0fe68bd80931f22017b5d2" {
+		t.Fatalf("edge-client-de successor is not bound to the verified independent LKG: %+v", intent)
+	}
 	previous := intent
-	previous.Generation--
+	previous.Generation = 10
+	previous.ExpectedPreviousConfigSHA = "d4c759a344baa8f5a479116112aa973a0a7b5de0"
+	previous.ExpectedPreviousManifestSHA = previous.ExpectedPreviousConfigSHA
+	previous.ExpectedPreviousOCIRevision = previous.ExpectedPreviousConfigSHA
+	previous.ExpectedPreviousImageDigest = "sha256:282d9e6a7fcaffac63ae78a12769467528e2c7d0141502c6be5560cfcd136235"
 	previous.SupersedesFailedConfigSHA = "6145b4ef69da0c2ea133cf8c3a9e4b58c1566e73"
 	plan, err := BuildPlan(registry,
 		"1111111111111111111111111111111111111111",
@@ -75,15 +86,34 @@ func TestEdgeClientDEIndependentTransitionReceipt(t *testing.T) {
 	bound, err := BindIntents(registry, plan,
 		map[string]Intent{component.ID: intent},
 		map[string]Intent{component.ID: previous},
-		map[string]string{component.ID: "4d125e8a49675ee3d4b51e82750892e114fb9196"},
+		map[string]string{component.ID: "4743c1e20f0b048ec581f435ba46685a309b6cf4"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bound.Releases) != 1 || bound.Releases[0].ComponentID != component.ID || bound.Releases[0].RetrySameLKG ||
-		bound.Releases[0].SupersedesFailedConfigSHA != "4d125e8a49675ee3d4b51e82750892e114fb9196" ||
+		bound.Releases[0].SupersedesFailedConfigSHA != "" ||
 		bound.Releases[0].MigrationState != "independent" || bound.Releases[0].OwnershipAdoption != nil ||
 		bound.Releases[0].BootstrapRuntime != nil || bound.Releases[0].BootstrapLKGPath != "" {
-		t.Fatalf("edge-client-de failed-atom successor retained a force/bootstrap path: %+v", bound.Releases)
+		t.Fatalf("edge-client-de successor retained a force/bootstrap path: %+v", bound.Releases)
+	}
+
+	manifest, err := os.ReadFile("../../" + component.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"fugue-fugue-dns-country-de", "fugue-fugue-edge-country-de-ssh-front"} {
+		item, err := ResourceSetItem(manifest, ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata, err := objectField(item, "metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		annotations, _ := metadata["annotations"].(map[string]any)
+		if annotations["helm.sh/resource-policy"] != "keep" {
+			t.Fatalf("%s is not protected from the final Helm ledger retirement: %#v", name, annotations)
+		}
 	}
 }
