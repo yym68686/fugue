@@ -323,6 +323,7 @@ func TestEdgeGroupRegistryAllowsOnlyExactImageOwnershipRepair(t *testing.T) {
 	}
 	release := PlanRelease{
 		ComponentID: worker.ID, MigrationState: worker.MigrationState, RetrySameLKG: true,
+		IntentGeneration: 2, ExpectedPreviousPresent: true,
 		BootstrapLKGPath: worker.BootstrapLKGPath, ArtifactTargets: worker.ArtifactTargets,
 		Transition: worker.Transition, OwnershipAdoption: worker.OwnershipAdoption,
 	}
@@ -330,8 +331,22 @@ func TestEdgeGroupRegistryAllowsOnlyExactImageOwnershipRepair(t *testing.T) {
 		t.Fatal("exact edge worker image repair did not explicitly authorize takeover")
 	}
 	release.RetrySameLKG = false
+	if !exactEdgeWorkerImageOwnershipRepair(release) || !ownershipAdoptionCanResume(release) {
+		t.Fatal("exact normal successor did not authorize the bounded ownership repair")
+	}
+	release.ExpectedPreviousPresent = false
 	if exactEdgeWorkerImageOwnershipRepair(release) || ownershipAdoptionCanResume(release) {
-		t.Fatal("non-retry edge worker atom implicitly authorized ownership takeover")
+		t.Fatal("absent predecessor implicitly authorized ownership takeover")
+	}
+	release.ExpectedPreviousPresent = true
+	release.IntentGeneration = 1
+	if exactEdgeWorkerImageOwnershipRepair(release) || ownershipAdoptionCanResume(release) {
+		t.Fatal("generation one implicitly authorized ownership takeover")
+	}
+	release.IntentGeneration = 2
+	release.SupersedesFailedConfigSHA = "1111111111111111111111111111111111111111"
+	if exactEdgeWorkerImageOwnershipRepair(release) || ownershipAdoptionCanResume(release) {
+		t.Fatal("failed-atom successor borrowed normal ownership repair authorization")
 	}
 
 	bad := current

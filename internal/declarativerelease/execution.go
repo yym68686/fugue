@@ -570,7 +570,15 @@ func bindOwnershipAdoption(release PlanRelease, lkg TargetIdentity, lkgManifest 
 }
 
 func exactEdgeWorkerImageOwnershipRepair(release PlanRelease) bool {
-	if !release.RetrySameLKG {
+	// A worker can reach this repair in either of the two production-safe
+	// shapes accepted by BindIntents: a retry of the same LKG, or the next
+	// normal production atom whose predecessor is present.  The latter is
+	// needed when the legacy co-owner is discovered before the new atom gets a
+	// chance to write.  Generation one and failed-atom successors retain their
+	// dedicated adoption paths; neither is allowed to borrow this permission.
+	normalSuccessor := !release.RetrySameLKG && release.IntentGeneration > 1 &&
+		release.ExpectedPreviousPresent && release.SupersedesFailedConfigSHA == ""
+	if !release.RetrySameLKG && !normalSuccessor {
 		return false
 	}
 	return validateEdgeWorkerOwnershipRepair(Component{
