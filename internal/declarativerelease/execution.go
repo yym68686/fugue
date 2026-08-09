@@ -469,7 +469,16 @@ func prepareAdoptingRetryPredecessor(ctx context.Context, cluster Cluster, relea
 		return Observation{}, err
 	}
 	if err := cluster.Converged(ctx, release, witness); err != nil {
-		return Observation{}, fmt.Errorf("adopting retry bootstrap LKG drift: %w", err)
+		// An exact API two-pointer repair may be resuming after the first
+		// equal-value SSA adoption omitted fields previously held by the same
+		// declarative manager. The immutable LKG identity, 2/2 health, and CAS
+		// above are still required; the subsequent full-forward server dry-run
+		// proves that force-conflicts is limited to the two reviewed pointers
+		// while restoring the declarative siblings. No other adoption may pass a
+		// structural predecessor drift here.
+		if !exactAPIImageOwnershipRepair(release) {
+			return Observation{}, fmt.Errorf("adopting retry bootstrap LKG drift: %w", err)
+		}
 	}
 	second, err := cluster.Observe(ctx, release, lkg, lkgManifest)
 	if err != nil || !second.Matches(lkg, release, true) {

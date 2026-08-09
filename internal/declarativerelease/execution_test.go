@@ -1025,6 +1025,24 @@ func TestPrepareAdoptingRetryRevalidatesUnchangedBootstrapLKG(t *testing.T) {
 	if _, err := prepareAdoptingRetryPredecessor(context.Background(), fake, release, target, rendered.LKG); err == nil || !strings.Contains(err.Error(), "bootstrap LKG drift") {
 		t.Fatalf("adopting retry accepted bootstrap drift: %v", err)
 	}
+
+	release.BootstrapLKGPath = "deploy/releases/api/lkg.json"
+	release.Artifact.Repository = "ghcr.io/yym68686/fugue-api"
+	release.OwnershipAdoption = &OwnershipAdoption{
+		LegacyFieldManager: "kubectl-patch",
+		Resources: []OwnershipAdoptionScope{{
+			Identity: ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"},
+			Fields: []string{
+				"/spec/template/metadata/annotations/fugue.pro~1source-commit",
+				"/spec/template/spec/containers[name=api]/image",
+			},
+		}},
+	}
+	fake = &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, convergedErrors: []error{errors.New("same-manager omission drift")}}
+	observed, err = prepareAdoptingRetryPredecessor(context.Background(), fake, release, target, rendered.LKG)
+	if err != nil || !observed.Matches(target, release, true) || len(fake.converged) != 1 {
+		t.Fatalf("exact API ownership repair did not retain the CAS-bound drift recovery: observation=%+v converged=%d err=%v", observed, len(fake.converged), err)
+	}
 }
 
 func TestPrepareAdoptingRetryUsesExactDegradedRecoveryOnlyAfterTypedHealthFailure(t *testing.T) {
