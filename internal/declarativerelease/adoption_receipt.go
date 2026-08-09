@@ -66,9 +66,10 @@ func (receipt OwnershipAdoptionReceipt) Validate(component Component, groupID st
 	}
 	final := receipt.Final
 	wantPrimary := ResourceIdentity{APIVersion: component.Workload.APIVersion, Kind: component.Workload.Kind, Namespace: component.Workload.Namespace, Name: component.Workload.Name}
+	activeDesired := final.Desired - int32(component.Workload.PreservedUnavailable)
 	if !final.Present || final.Primary != wantPrimary || final.UID == "" || final.ResourceVersion == "" || final.Generation <= 0 ||
-		final.ObservedGeneration != final.Generation || final.Desired <= 0 || final.Updated != final.Desired || final.Ready != final.Desired ||
-		final.Available != final.Desired || final.Unavailable != 0 || !shaPattern.MatchString(final.ConfigSHA) || final.ManifestSHA != final.ConfigSHA ||
+		final.ObservedGeneration != final.Generation || activeDesired <= 0 || final.Updated != activeDesired || final.Ready != activeDesired ||
+		final.Available != activeDesired || final.Unavailable != int32(component.Workload.PreservedUnavailable) || !shaPattern.MatchString(final.ConfigSHA) || final.ManifestSHA != final.ConfigSHA ||
 		final.OCIRevision != final.ConfigSHA || !strings.HasPrefix(final.ImageRef, component.Artifact.Repository+"@sha256:") ||
 		!digestPattern.MatchString(final.ImageID) || !strings.HasSuffix(final.ImageRef, final.ImageID) || !digestPattern.MatchString(final.HealthDigest) ||
 		!receiptContainsString(final.FieldManagers, component.Workload.FieldManager) {

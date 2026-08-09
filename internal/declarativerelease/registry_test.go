@@ -60,20 +60,10 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		t.Fatalf("schema lane is not a repeatable declarative Deployment: %+v", schema)
 	}
 	imageCache := byID["image-cache"]
-	if imageCache.MigrationState != "adopting" || imageCache.Workload.PreservedUnavailable != 1 || imageCache.OwnershipAdoption == nil {
-		t.Fatalf("image-cache lane does not preserve its single offline node during adoption: %+v", imageCache)
-	}
-	wantLegacyManagers := []string{"helm", "kubectl-patch"}
-	wantOwnershipFields := []string{
-		"/metadata/labels/app.kubernetes.io~1managed-by",
-		"/spec/template/spec/containers[name=image-cache]/image",
-		"/spec/updateStrategy",
-	}
-	if imageCache.OwnershipAdoption.LegacyFieldManager != "helm" ||
-		!reflect.DeepEqual(imageCache.OwnershipAdoption.LegacyFieldManagers, wantLegacyManagers) ||
-		len(imageCache.OwnershipAdoption.Resources) != 1 ||
-		!reflect.DeepEqual(imageCache.OwnershipAdoption.Resources[0].Fields, wantOwnershipFields) {
-		t.Fatalf("image-cache ownership adoption is not bound to the reviewed live conflicts: %+v", imageCache.OwnershipAdoption)
+	if imageCache.MigrationState != "independent" || imageCache.Workload.PreservedUnavailable != 1 ||
+		imageCache.AdoptionReceiptPath != "deploy/releases/image-cache/adoption-receipt.json" || imageCache.OwnershipAdoption != nil ||
+		imageCache.BootstrapLKGPath != "" {
+		t.Fatalf("image-cache lane did not retire adoption while preserving its single offline node: %+v", imageCache)
 	}
 	for filename, contract := range map[string]struct {
 		strategy    string
