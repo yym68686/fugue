@@ -61,13 +61,21 @@ verify_target_api() {
       (.status.unavailableReplicas // 0) == 0
     ' "$1" >/dev/null
   pods="${work}/api-pods.json"
-  kubectl -n fugue-system get pods -l app.kubernetes.io/component=api,app.kubernetes.io/instance=fugue -o json >"${pods}"
-  jq -e --arg image "${target_image}" '
-    (.items | length) == 2 and all(.items[];
-      .status.phase == "Running" and any(.status.conditions[]; .type == "Ready" and .status == "True") and
-      (.status.containerStatuses | length) == 1 and .status.containerStatuses[0].ready == true and
-      .status.containerStatuses[0].restartCount == 0 and .status.containerStatuses[0].imageID == $image)
-  ' "${pods}" >/dev/null
+  local deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )); do
+    kubectl -n fugue-system get pods -l app.kubernetes.io/component=api,app.kubernetes.io/instance=fugue -o json >"${pods}"
+    if jq -e --arg image "${target_image}" '
+      (.items | length) == 2 and all(.items[];
+        .metadata.deletionTimestamp == null and .status.phase == "Running" and
+        any(.status.conditions[]; .type == "Ready" and .status == "True") and
+        (.status.containerStatuses | length) == 1 and .status.containerStatuses[0].ready == true and
+        .status.containerStatuses[0].restartCount == 0 and .status.containerStatuses[0].imageID == $image)
+    ' "${pods}" >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 rollback_api() {
