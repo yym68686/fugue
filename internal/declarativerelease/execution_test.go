@@ -667,7 +667,7 @@ func TestPrepareFailedAtomSuccessorAdvancesFromTypedReadyCountMismatch(t *testin
 		t.Fatal(err)
 	}
 	plan.PlanDigest = digestOf(unsigned)
-	plan, receipt, rendered, lkg, _ := executionFixtureForPlan(t, plan)
+	plan, receipt, rendered, lkg, forward := executionFixtureForPlan(t, plan)
 	if plan.Releases[0].RetrySameLKG || plan.Releases[0].SupersedesFailedConfigSHA == "" {
 		t.Fatalf("fixture is not a failed-atom successor: %+v", plan.Releases[0])
 	}
@@ -679,12 +679,29 @@ func TestPrepareFailedAtomSuccessorAdvancesFromTypedReadyCountMismatch(t *testin
 		},
 		cas: []Observation{degraded, degraded},
 	}
-	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Now().UTC())
 	if err != nil || !prepared.DegradedPredecessor || prepared.AlreadyConverged || len(fake.verifiedTargets) != 1 || len(fake.healthTargets) != 1 {
 		t.Fatalf("independent degraded predecessor: plan=%+v verified=%d health_waits=%d err=%v", prepared, len(fake.verifiedTargets), len(fake.healthTargets), err)
 	}
 	if fake.healthTargets[0] != prepared.LKG || fake.verifiedTargets[0] != prepared.LKG || len(fake.casManifests) != 2 || len(fake.converged) != 1 || fake.dryRuns != 2 {
 		t.Fatalf("independent degraded predecessor was not exact-CAS verified: health=%+v verified=%+v cas=%d converged=%d dryRuns=%d", fake.healthTargets, fake.verifiedTargets, len(fake.casManifests), len(fake.converged), fake.dryRuns)
+	}
+	encoded, err := CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = DecodeExecutionPlan(bytes.NewReader(encoded), plan, rendered.Forward, rendered.LKG)
+	if err != nil {
+		t.Fatalf("decode failed-atom execution plan: %v", err)
+	}
+	current := casOnlyObservation(lkg)
+	current.ResourceVersion = "11"
+	current.Resources[0].ResourceVersion = "11"
+	fake.cas = []Observation{current}
+	fake.health = []Observation{forward}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "verified" || result.Reason != "forward-verified" || result.ForwardApplyCount != 1 || fake.applies != 1 {
+		t.Fatalf("failed-atom degraded predecessor did not execute: result=%+v applies=%d", result, fake.applies)
 	}
 }
 
@@ -701,6 +718,26 @@ func TestPrepareFailedAtomSuccessorRejectsUntypedReadyCountMismatch(t *testing.T
 	}
 	if len(fake.verifiedTargets) != 0 || len(fake.casManifests) != 0 || fake.dryRuns != 0 {
 		t.Fatalf("untyped predecessor error entered degraded recovery: verified=%d cas=%d dryRuns=%d", len(fake.verifiedTargets), len(fake.casManifests), fake.dryRuns)
+	}
+}
+
+func TestExecuteDegradedPredecessorRejectsIndependentNonRetryWithoutFailedAtom(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	degraded := casOnlyObservation(lkg)
+	fake := &fakeCluster{
+		observations: []Observation{lkg},
+		healthErrors: []error{
+			fmt.Errorf("%w: ready workload pod count mismatch: got=0 want=1", ErrDegradedPredecessorHealth),
+		},
+		cas: []Observation{degraded, degraded},
+	}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || !prepared.DegradedPredecessor || plan.Releases[0].RetrySameLKG || plan.Releases[0].SupersedesFailedConfigSHA != "" {
+		t.Fatalf("fixture is not an ordinary independent non-retry: plan=%+v prepared=%+v err=%v", plan.Releases[0], prepared, err)
+	}
+	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+	if result.Status != "recovery-required" || result.Reason != "execution-plan-invalid" || result.ForwardApplyCount != 0 || fake.applies != 0 {
+		t.Fatalf("ordinary independent non-retry entered degraded execution: result=%+v applies=%d", result, fake.applies)
 	}
 }
 

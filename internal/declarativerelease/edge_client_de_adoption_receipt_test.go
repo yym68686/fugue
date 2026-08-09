@@ -63,7 +63,7 @@ func TestEdgeClientDEIndependentTransitionReceipt(t *testing.T) {
 	}
 	previous := intent
 	previous.Generation--
-	previous.SupersedesFailedConfigSHA = ""
+	previous.SupersedesFailedConfigSHA = "6145b4ef69da0c2ea133cf8c3a9e4b58c1566e73"
 	plan, err := BuildPlan(registry,
 		"1111111111111111111111111111111111111111",
 		"2222222222222222222222222222222222222222",
@@ -75,13 +75,13 @@ func TestEdgeClientDEIndependentTransitionReceipt(t *testing.T) {
 	bound, err := BindIntents(registry, plan,
 		map[string]Intent{component.ID: intent},
 		map[string]Intent{component.ID: previous},
-		map[string]string{component.ID: "6145b4ef69da0c2ea133cf8c3a9e4b58c1566e73"},
+		map[string]string{component.ID: "4d125e8a49675ee3d4b51e82750892e114fb9196"},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bound.Releases) != 1 || bound.Releases[0].ComponentID != component.ID || bound.Releases[0].RetrySameLKG ||
-		bound.Releases[0].SupersedesFailedConfigSHA != "6145b4ef69da0c2ea133cf8c3a9e4b58c1566e73" ||
+		bound.Releases[0].SupersedesFailedConfigSHA != "4d125e8a49675ee3d4b51e82750892e114fb9196" ||
 		bound.Releases[0].MigrationState != "independent" || bound.Releases[0].OwnershipAdoption != nil ||
 		bound.Releases[0].BootstrapRuntime != nil || bound.Releases[0].BootstrapLKGPath != "" {
 		t.Fatalf("edge-client-de failed-atom successor retained a force/bootstrap path: %+v", bound.Releases)

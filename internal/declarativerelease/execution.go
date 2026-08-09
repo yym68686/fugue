@@ -1065,7 +1065,8 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 		return err
 	}
 	if plan.DegradedPredecessor {
-		if !release.RetrySameLKG || !release.ExpectedPreviousPresent || plan.AlreadyConverged {
+		failedAtomSuccessor := release.MigrationState == "independent" && shaPattern.MatchString(release.SupersedesFailedConfigSHA)
+		if !release.ExpectedPreviousPresent || plan.AlreadyConverged || (!release.RetrySameLKG && !failedAtomSuccessor) {
 			return errors.New("degraded predecessor execution is not authorized")
 		}
 		if err := plan.Prewrite.ValidateDegradedPredecessor(release); err != nil {
