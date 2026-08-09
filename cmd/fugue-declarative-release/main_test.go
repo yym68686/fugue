@@ -43,6 +43,127 @@ func TestLoadLKGManifestUsesBootstrapOnlyForExplicitAdoption(t *testing.T) {
 	}
 }
 
+func TestLoadLKGManifestUsesReceiptWhenProductionSourcePredatesRegistry(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	release := declarativerelease.PlanRelease{
+		ComponentID: "image-cache", MigrationState: "independent", ExpectedPreviousPresent: true, RetrySameLKG: true,
+		AdoptionReceiptPath:         "deploy/releases/image-cache/adoption-receipt.json",
+		ExpectedPreviousConfigSHA:   "e8f3781e3c9282e9daf24842c10cef3eab9f5497",
+		ExpectedPreviousManifestSHA: "e8f3781e3c9282e9daf24842c10cef3eab9f5497",
+		ExpectedPreviousOCIRevision: "e8f3781e3c9282e9daf24842c10cef3eab9f5497",
+		ExpectedPreviousImageDigest: "sha256:18bf0bcc6d3b69a73aed8118acbb98b508216977ddf5b4c4d0d9f6ee3c5494d4",
+		Workload:                    declarativerelease.Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-image-cache", Container: "image-cache"},
+	}
+	got, err := loadLKGManifest(release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("deploy/releases/image-cache/lkg.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("receipt-bound historical LKG bytes changed")
+	}
+}
+
+func TestReceiptBoundLKGFallbackFailsClosed(t *testing.T) {
+	t.Run("historical registry exists but is invalid", func(t *testing.T) {
+		release := receiptBoundImageCacheFixture(t)
+		fakeBin := filepath.Join(t.TempDir(), "bin")
+		writeFile(t, filepath.Join(fakeBin, "git"), []byte("#!/bin/sh\nprintf '{'\n"))
+		if err := os.Chmod(filepath.Join(fakeBin, "git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if _, err := loadLKGManifest(release); err == nil || !strings.Contains(err.Error(), "decode previous production registry") ||
+			strings.Contains(err.Error(), "receipt-bound LKG fallback") {
+			t.Fatalf("invalid historical registry did not fail closed: %v", err)
+		}
+	})
+
+	tests := map[string]func(t *testing.T, release *declarativerelease.PlanRelease){
+		"receipt is invalid": func(t *testing.T, _ *declarativerelease.PlanRelease) {
+			writeFile(t, "deploy/releases/image-cache/adoption-receipt.json", []byte(`{}`))
+		},
+		"receipt identity drifted": func(_ *testing.T, release *declarativerelease.PlanRelease) {
+			release.ExpectedPreviousImageDigest = "sha256:" + strings.Repeat("9", 64)
+		},
+		"receipt path escapes component": func(_ *testing.T, release *declarativerelease.PlanRelease) {
+			release.AdoptionReceiptPath = "deploy/releases/image-cache/../other/adoption-receipt.json"
+		},
+		"receipt path is removed": func(_ *testing.T, release *declarativerelease.PlanRelease) {
+			release.AdoptionReceiptPath = ""
+		},
+		"LKG template identity drifted": func(t *testing.T, _ *declarativerelease.PlanRelease) {
+			raw, err := os.ReadFile("deploy/releases/image-cache/lkg.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = bytes.Replace(raw, []byte("e8f3781e3c9282e9daf24842c10cef3eab9f5497"), []byte(strings.Repeat("9", 40)), 1)
+			writeFile(t, "deploy/releases/image-cache/lkg.json", raw)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			release := receiptBoundImageCacheFixture(t)
+			mutate(t, &release)
+			if _, err := loadReceiptBoundLKGManifest(release); err == nil {
+				t.Fatal("invalid receipt-bound LKG fallback was accepted")
+			}
+		})
+	}
+}
+
+func receiptBoundImageCacheFixture(t *testing.T) declarativerelease.PlanRelease {
+	t.Helper()
+	sourceRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, name := range []string{
+		"deploy/releases/components.json",
+		"deploy/releases/edge-groups.json",
+		"deploy/releases/image-cache/adoption-receipt.json",
+		"deploy/releases/image-cache/lkg.json",
+	} {
+		raw, err := os.ReadFile(filepath.Join(sourceRoot, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(root, name), raw)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	return declarativerelease.PlanRelease{
+		ComponentID: "image-cache", MigrationState: "independent", ExpectedPreviousPresent: true, RetrySameLKG: true,
+		AdoptionReceiptPath:         "deploy/releases/image-cache/adoption-receipt.json",
+		ExpectedPreviousConfigSHA:   "e8f3781e3c9282e9daf24842c10cef3eab9f5497",
+		ExpectedPreviousManifestSHA: "e8f3781e3c9282e9daf24842c10cef3eab9f5497",
+		ExpectedPreviousOCIRevision: "e8f3781e3c9282e9daf24842c10cef3eab9f5497",
+		ExpectedPreviousImageDigest: "sha256:18bf0bcc6d3b69a73aed8118acbb98b508216977ddf5b4c4d0d9f6ee3c5494d4",
+		Workload:                    declarativerelease.Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "fugue-fugue-image-cache", Container: "image-cache"},
+	}
+}
+
 func TestLoadLKGManifestUsesTheHistoricalRegistryManifestPath(t *testing.T) {
 	root := t.TempDir()
 	previousDirectory, err := os.Getwd()

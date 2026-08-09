@@ -206,6 +206,7 @@ type PlanRelease struct {
 	SupersedesFailedConfigSHA   string             `json:"supersedesFailedConfigSha,omitempty"`
 	ManifestPath                string             `json:"manifestPath"`
 	ManifestVariables           map[string]string  `json:"manifestVariables,omitempty"`
+	AdoptionReceiptPath         string             `json:"adoptionReceiptPath,omitempty"`
 	BootstrapLKGPath            string             `json:"bootstrapLkgPath,omitempty"`
 	BootstrapRuntime            *BootstrapRuntime  `json:"bootstrapRuntime,omitempty"`
 	RetrySameLKG                bool               `json:"retrySameLkg,omitempty"`
@@ -842,6 +843,7 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 			return Plan{}, fmt.Errorf("component %q adopting predecessor has no explicit ownership adoption", component.ID)
 		}
 		release.ManifestPath = component.ManifestPath
+		release.AdoptionReceiptPath = component.AdoptionReceiptPath
 		release.ManifestVariables = make(map[string]string, len(component.ManifestVariables))
 		for key, value := range component.ManifestVariables {
 			release.ManifestVariables[key] = value

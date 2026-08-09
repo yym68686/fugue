@@ -102,6 +102,12 @@ func (plan Plan) ValidateBound() error {
 			(release.OwnershipAdoption == nil || release.BootstrapLKGPath == "") {
 			return fmt.Errorf("bound release %d adoption identity is incomplete", index)
 		}
+		if release.AdoptionReceiptPath != "" {
+			expected := "deploy/releases/" + release.ComponentID + "/adoption-receipt.json"
+			if release.MigrationState != "independent" || release.AdoptionReceiptPath != expected || release.BootstrapLKGPath != "" {
+				return fmt.Errorf("bound release %d adoption receipt identity is invalid", index)
+			}
+		}
 		if release.BootstrapRuntime != nil {
 			bootstrap := release.BootstrapRuntime
 			if release.MigrationState != "adopting" || release.OwnershipAdoption == nil || release.BootstrapLKGPath == "" ||

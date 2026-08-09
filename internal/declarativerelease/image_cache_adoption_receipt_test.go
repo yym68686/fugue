@@ -84,7 +84,13 @@ func TestImageCacheIndependentTransitionReceipt(t *testing.T) {
 	}
 	if len(bound.Releases) != 1 || bound.Releases[0].ComponentID != component.ID || !bound.Releases[0].RetrySameLKG ||
 		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].MigrationState != "independent" ||
+		bound.Releases[0].AdoptionReceiptPath != component.AdoptionReceiptPath ||
 		bound.Releases[0].OwnershipAdoption != nil || bound.Releases[0].BootstrapRuntime != nil || bound.Releases[0].BootstrapLKGPath != "" {
 		t.Fatalf("image-cache independent retry retained a force/bootstrap path: %+v", bound.Releases)
+	}
+	drifted := bound
+	drifted.Releases[0].AdoptionReceiptPath = "deploy/releases/image-cache/../other/adoption-receipt.json"
+	if err := drifted.ValidateBound(); err == nil {
+		t.Fatal("release plan accepted an adoption receipt path outside its exact component directory")
 	}
 }
