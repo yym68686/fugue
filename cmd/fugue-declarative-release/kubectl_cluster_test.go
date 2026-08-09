@@ -92,6 +92,36 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	}
 }
 
+func TestExplicitBootstrapDegradedObservationUsesOnlyBoundAdoptingRetry(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		MigrationState: "adopting", RetrySameLKG: true, ExpectedPreviousPresent: true,
+		BootstrapLKGPath:  "deploy/releases/edge-client-test/lkg.json",
+		BootstrapRuntime:  &declarativerelease.BootstrapRuntime{},
+		OwnershipAdoption: &declarativerelease.OwnershipAdoption{},
+	}
+	if !explicitBootstrapDegradedObservation(release) {
+		t.Fatal("exact adopting same-LKG bootstrap retry did not use the explicit bootstrap binder")
+	}
+	for name, mutate := range map[string]func(*declarativerelease.PlanRelease){
+		"independent":       func(got *declarativerelease.PlanRelease) { got.MigrationState = "independent" },
+		"ordinary adopting": func(got *declarativerelease.PlanRelease) { got.RetrySameLKG = false },
+		"absent predecessor": func(got *declarativerelease.PlanRelease) {
+			got.ExpectedPreviousPresent = false
+		},
+		"missing LKG":       func(got *declarativerelease.PlanRelease) { got.BootstrapLKGPath = "" },
+		"missing runtime":   func(got *declarativerelease.PlanRelease) { got.BootstrapRuntime = nil },
+		"missing ownership": func(got *declarativerelease.PlanRelease) { got.OwnershipAdoption = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := release
+			mutate(&got)
+			if explicitBootstrapDegradedObservation(got) {
+				t.Fatal("non-exact bootstrap retry entered the explicit bootstrap binder")
+			}
+		})
+	}
+}
+
 func TestSanitizeObservedResourceDropsDaemonSetControllerGenerationAnnotation(t *testing.T) {
 	resource := map[string]any{
 		"metadata": map[string]any{"annotations": map[string]any{

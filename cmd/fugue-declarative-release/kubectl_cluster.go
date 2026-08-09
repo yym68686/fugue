@@ -157,7 +157,7 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 	}
 	observation.Resources = resources
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
-		if declarativerelease.InitialExplicitBootstrapFailedAtomSuccessor(release) {
+		if explicitBootstrapDegradedObservation(release) {
 			observation, err = cluster.bindExplicitBootstrapDegradedObservation(ctx, release, manifest, workloadRaw, observation)
 		} else {
 			observation, err = cluster.bindReceiptBoundDegradedObservation(ctx, release, workloadRaw, observation, resources)
@@ -185,6 +185,12 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, errors.New("degraded predecessor registry identity mismatch")
 	}
 	return observation, nil
+}
+
+func explicitBootstrapDegradedObservation(release declarativerelease.PlanRelease) bool {
+	return declarativerelease.InitialExplicitBootstrapFailedAtomSuccessor(release) ||
+		(release.MigrationState == "adopting" && release.RetrySameLKG && release.ExpectedPreviousPresent &&
+			release.BootstrapLKGPath != "" && release.BootstrapRuntime != nil && release.OwnershipAdoption != nil)
 }
 
 func (cluster *kubectlCluster) bindExplicitBootstrapDegradedObservation(ctx context.Context, release declarativerelease.PlanRelease, manifest, workloadRaw []byte, observation declarativerelease.Observation) (declarativerelease.Observation, error) {
