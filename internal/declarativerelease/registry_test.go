@@ -129,6 +129,10 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 			if !ok || stringField(container, "name") != "image-cache" {
 				t.Fatalf("bootstrap LKG image-cache container is invalid: %+v", containers[0])
 			}
+			wantImage := imageCache.Artifact.Repository + "@sha256:18bf0bcc6d3b69a73aed8118acbb98b508216977ddf5b4c4d0d9f6ee3c5494d4"
+			if stringField(container, "image") != wantImage {
+				t.Fatalf("bootstrap LKG image is not the declared immutable predecessor: %q", stringField(container, "image"))
+			}
 			for _, field := range []string{"livenessProbe", "readinessProbe", "startupProbe"} {
 				if _, present := container[field]; present {
 					t.Fatalf("bootstrap LKG invented %s absent from the live predecessor", field)
