@@ -71,29 +71,29 @@ func TestEdgeClientUSIndependentTransitionReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if intent.Generation != 5 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
-		intent.ExpectedPreviousConfigSHA != receipt.Final.ConfigSHA ||
-		intent.ExpectedPreviousManifestSHA != receipt.Final.ManifestSHA ||
-		intent.ExpectedPreviousOCIRevision != receipt.Final.OCIRevision ||
-		component.Artifact.Repository+"@"+intent.ExpectedPreviousImageDigest != receipt.Final.ImageRef {
-		t.Fatalf("edge-client-us intent is not bound to the receipt predecessor: intent=%+v receipt=%+v", intent, receipt)
+	if intent.Generation != 6 || intent.SupersedesFailedConfigSHA != "" || intent.Rollback != "previous-git-lkg" ||
+		intent.ExpectedPreviousConfigSHA != "c35dc970a9a9a50fc6efca3d977b5f1e2a80ba06" ||
+		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA ||
+		intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
+		intent.ExpectedPreviousImageDigest != "sha256:4339cd213fbab0b23470b809c4a0057f7ceeec421bd5bd4059884fe19f27148a" {
+		t.Fatalf("edge-client-us successor is not bound to the verified independent LKG: %+v", intent)
 	}
 	prior := intent
-	prior.Generation = 4
-	prior.ExpectedPreviousConfigSHA = "cdd6c08679ac78198e42c870b4ac1d5dfa2d78d0"
+	prior.Generation = 5
+	prior.ExpectedPreviousConfigSHA = receipt.Final.ConfigSHA
 	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
 	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousImageDigest = "sha256:9e75c56633641f6b9f4ebcdf519977180a6a7cf62e48f0aaa56bbbffa5d4fa30"
+	prior.ExpectedPreviousImageDigest = "sha256:2af80209adedb678e26adedb15e459c361a4d94cfa01bf898e654b5a450c9642"
 	plan, err := BuildPlan(registry, "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", []string{component.IntentPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound, err := BindIntents(registry, plan, map[string]Intent{component.ID: intent}, map[string]Intent{component.ID: prior}, map[string]string{})
+	bound, err := BindIntents(registry, plan, map[string]Intent{component.ID: intent}, map[string]Intent{component.ID: prior}, map[string]string{component.ID: intent.ExpectedPreviousConfigSHA})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bound.Releases) != 1 || bound.Releases[0].ComponentID != component.ID || bound.Releases[0].RetrySameLKG ||
-		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].IntentGeneration != 5 ||
+		bound.Releases[0].SupersedesFailedConfigSHA != "" || bound.Releases[0].IntentGeneration != 6 ||
 		bound.Releases[0].MigrationState != "independent" || bound.Releases[0].OwnershipAdoption != nil ||
 		bound.Releases[0].BootstrapRuntime != nil || bound.Releases[0].BootstrapLKGPath != "" ||
 		bound.Releases[0].AdoptionReceiptPath != component.AdoptionReceiptPath {
@@ -111,5 +111,19 @@ func TestEdgeClientUSIndependentTransitionReceipt(t *testing.T) {
 	apiURL, err := adoptionPointerValue(dns, "/spec/template/spec/containers[name=dns]/env[name=FUGUE_API_URL]/value")
 	if err != nil || apiURL != "http://fugue-fugue:80?authority_service=edge-control-us" {
 		t.Fatalf("edge-client-us DNS authority route drifted: value=%v err=%v", apiURL, err)
+	}
+	for _, name := range []string{"fugue-fugue-dns", "fugue-fugue-edge-ssh-front"} {
+		item, err := ResourceSetItem(forwardRaw, ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata, err := objectField(item, "metadata")
+		if err != nil {
+			t.Fatal(err)
+		}
+		annotations, _ := metadata["annotations"].(map[string]any)
+		if annotations["helm.sh/resource-policy"] != "keep" {
+			t.Fatalf("%s is not protected from the final Helm ledger retirement: %#v", name, annotations)
+		}
 	}
 }
