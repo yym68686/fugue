@@ -173,6 +173,7 @@ func setupAppSSHTestServer(t *testing.T) (*store.Store, *Server, string, model.A
 	}
 	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "us-runtime", model.RuntimeTypeManagedOwned, "", map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "us",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-us",
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)

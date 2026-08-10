@@ -1377,16 +1377,6 @@ func derivedEdgeGroupIDForLabels(labels map[string]string) string {
 			return edgeGroupID
 		}
 	}
-	if country := firstRuntimeLabelValue(labels, runtimepkg.LocationCountryCodeLabelKey, "country_code", "countryCode"); country != "" {
-		if slug := edgeRouteSlug(country); slug != "" {
-			return "edge-group-country-" + slug
-		}
-	}
-	if region := firstRuntimeLabelValue(labels, runtimepkg.RegionLabelKey, runtimepkg.LegacyRegionLabelKey, "region"); region != "" {
-		if slug := edgeRouteSlug(region); slug != "" {
-			return "edge-group-region-" + slug
-		}
-	}
 	return defaultEdgeGroupID
 }
 
@@ -1397,26 +1387,6 @@ func firstRuntimeLabelValue(labels map[string]string, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func edgeRouteSlug(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var builder strings.Builder
-	lastDash := false
-	for _, char := range value {
-		switch {
-		case char >= 'a' && char <= 'z':
-			builder.WriteRune(char)
-			lastDash = false
-		case char >= '0' && char <= '9':
-			builder.WriteRune(char)
-			lastDash = false
-		case !lastDash:
-			builder.WriteByte('-')
-			lastDash = true
-		}
-	}
-	return strings.Trim(builder.String(), "-")
 }
 
 func edgeRouteGeneration(binding model.EdgeRouteBinding) string {

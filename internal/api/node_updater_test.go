@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -199,38 +200,21 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 }
 
-func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
+func TestNodeUpdaterEdgeCredentialRequiresExplicitGroupIdentity(t *testing.T) {
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 
-	geoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"success","countryCode":"US"}`))
-	}))
-	defer geoServer.Close()
-	oldClient := geoIPHTTPClient
-	oldEndpoints := geoIPLookupEndpoints
-	defer func() {
-		geoIPHTTPClient = oldClient
-		geoIPLookupEndpoints = oldEndpoints
-	}()
-	geoIPHTTPClient = geoServer.Client()
-	geoIPLookupEndpoints = []geoIPLookupEndpoint{
-		{
-			Name:   "fixture",
-			URL:    func(string) string { return geoServer.URL },
-			Decode: decodeIPAPIComCountryCode,
-		},
-	}
-
 	req := httptest.NewRequest(http.MethodGet, "https://api.fugue.pro/v1/node-updater/desired-state", nil)
 	credential, warnings, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{
 		ClusterNodeName: "dmit",
 		Labels: map[string]string{
-			"fugue.io/public-ip": "191.222.213.223",
-			"fugue.io/role.edge": "true",
+			"fugue.io/public-ip":                   "191.222.213.223",
+			"fugue.io/role.edge":                   "true",
+			runtimepkg.LocationCountryCodeLabelKey: "us",
+			runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 		},
 	}, &model.ClusterNodePolicyStatus{
 		NodeName: "dmit",
@@ -240,8 +224,10 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 			DedicatedMode: "edge",
 		},
 		Labels: map[string]string{
-			"fugue.io/public-ip": "191.222.213.223",
-			"fugue.io/role.edge": "true",
+			"fugue.io/public-ip":                   "191.222.213.223",
+			"fugue.io/role.edge":                   "true",
+			runtimepkg.LocationCountryCodeLabelKey: "us",
+			runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 		},
 	})
 	if err != nil {
@@ -253,15 +239,17 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 	if credential.Token == "" || credential.TokenPrefix == "" {
 		t.Fatalf("expected first credential response to include token, got %+v", credential)
 	}
-	if credential.EdgeGroupID != "edge-group-country-us" || credential.Country != "us" || credential.WorkloadMode != "dynamic" {
-		t.Fatalf("unexpected inferred credential: %+v warnings=%v", credential, warnings)
+	if credential.EdgeGroupID != "edge-group-public-a" || credential.Country != "us" || credential.WorkloadMode != "dynamic" {
+		t.Fatalf("unexpected explicit credential: %+v warnings=%v", credential, warnings)
 	}
 	reportedCredential, _, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{
 		ClusterNodeName:   "dmit",
 		EdgeEnvGeneration: "v2:" + credential.TokenPrefix + ":already-installed",
 		Labels: map[string]string{
-			"fugue.io/public-ip": "191.222.213.223",
-			"fugue.io/role.edge": "true",
+			"fugue.io/public-ip":                   "191.222.213.223",
+			"fugue.io/role.edge":                   "true",
+			runtimepkg.LocationCountryCodeLabelKey: "us",
+			runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 		},
 	}, &model.ClusterNodePolicyStatus{
 		NodeName: "dmit",
@@ -271,8 +259,10 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 			DedicatedMode: "edge",
 		},
 		Labels: map[string]string{
-			"fugue.io/public-ip": "191.222.213.223",
-			"fugue.io/role.edge": "true",
+			"fugue.io/public-ip":                   "191.222.213.223",
+			"fugue.io/role.edge":                   "true",
+			runtimepkg.LocationCountryCodeLabelKey: "us",
+			runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 		},
 	})
 	if err != nil {
@@ -285,8 +275,10 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 		ClusterNodeName:   "dmit",
 		EdgeEnvGeneration: "v2:missing:empty-file",
 		Labels: map[string]string{
-			"fugue.io/public-ip": "191.222.213.223",
-			"fugue.io/role.edge": "true",
+			"fugue.io/public-ip":                   "191.222.213.223",
+			"fugue.io/role.edge":                   "true",
+			runtimepkg.LocationCountryCodeLabelKey: "us",
+			runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 		},
 	}, &model.ClusterNodePolicyStatus{
 		NodeName: "dmit",
@@ -296,8 +288,10 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 			DedicatedMode: "edge",
 		},
 		Labels: map[string]string{
-			"fugue.io/public-ip": "191.222.213.223",
-			"fugue.io/role.edge": "true",
+			"fugue.io/public-ip":                   "191.222.213.223",
+			"fugue.io/role.edge":                   "true",
+			runtimepkg.LocationCountryCodeLabelKey: "us",
+			runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 		},
 	})
 	if err != nil {
@@ -323,7 +317,7 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"fugue.io/location-country-code": "us",
-		"fugue.io/edge-group-id":         "edge-group-country-us",
+		"fugue.io/edge-group-id":         "edge-group-public-a",
 		"fugue.io/edge-workload":         "dynamic",
 		"fugue.io/edge-location-status":  "ready",
 	} {
@@ -331,14 +325,11 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 			t.Fatalf("expected augmented label %s=%s, got %q labels=%v", key, want, got, policy.Labels)
 		}
 	}
-	if !strings.Contains(strings.Join(warnings, "\n"), "inferred from public IP") {
-		t.Fatalf("expected inference warning, got %v", warnings)
-	}
 	node, _, err := s.GetEdgeNode("dmit")
 	if err != nil {
 		t.Fatalf("get created edge node: %v", err)
 	}
-	if node.EdgeGroupID != "edge-group-country-us" || node.Country != "us" || node.WorkloadMode != "dynamic" {
+	if node.EdgeGroupID != "edge-group-public-a" || node.Country != "us" || node.WorkloadMode != "dynamic" {
 		t.Fatalf("unexpected stored edge node: %+v", node)
 	}
 }

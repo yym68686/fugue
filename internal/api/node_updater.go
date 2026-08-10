@@ -218,23 +218,32 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 	country := strings.ToLower(strings.TrimSpace(labels["fugue.io/location-country-code"]))
 	region := strings.TrimSpace(firstNodeLabel(labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"))
 	edgeGroupID := derivedEdgeGroupIDForLabels(labels)
-	if (edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID) && country == "" && publicIP != "" {
+	if country == "" && publicIP != "" {
 		geoCountry, source, err := lookupCountryCodeForPublicIP(r.Context(), publicIP)
 		if err != nil {
-			warnings = append(warnings, "edge credential location inference failed: "+err.Error())
-		} else if slug := edgeRouteSlug(geoCountry); slug != "" {
+			warnings = append(warnings, "edge credential location metadata inference failed: "+err.Error())
+		} else {
 			country = geoCountry
-			edgeGroupID = "edge-group-country-" + slug
-			warnings = append(warnings, "edge credential location inferred from public IP via "+source)
-		}
-	}
-	if (edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID) && country != "" {
-		if slug := edgeRouteSlug(country); slug != "" {
-			edgeGroupID = "edge-group-country-" + slug
+			warnings = append(warnings, "edge credential location metadata inferred from public IP via "+source)
 		}
 	}
 	if edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID {
-		warnings = append(warnings, "edge credential not issued: missing location country/region or explicit edge group")
+		if nodes, _, err := s.store.ListEdgeNodes(""); err == nil {
+			for _, node := range nodes {
+				if strings.TrimSpace(node.ID) == edgeID || (publicIP != "" && (node.PublicIPv4 == publicIP || node.PublicIPv6 == publicIP)) {
+					edgeGroupID = strings.TrimSpace(node.EdgeGroupID)
+					if edgeGroupID != "" {
+						warnings = append(warnings, "edge credential reused explicit edge group from inventory")
+					}
+					break
+				}
+			}
+		} else {
+			warnings = append(warnings, "edge credential inventory lookup failed")
+		}
+	}
+	if edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID {
+		warnings = append(warnings, "edge credential not issued: missing explicit edge group identity")
 		return nil, warnings, nil
 	}
 	workloadMode := nodeUpdaterEdgeWorkloadMode(labels, nodePolicy)

@@ -2026,7 +2026,7 @@ func (s *Store) EnsureManagedSharedLocationLabels(labels map[string]string) (mod
 			return ErrNotFound
 		}
 		runtimeObj = state.Runtimes[index]
-		if len(labels) == 0 || len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0 {
+		if len(labels) == 0 {
 			return nil
 		}
 
@@ -2034,8 +2034,21 @@ func (s *Store) EnsureManagedSharedLocationLabels(labels map[string]string) (mod
 		if runtimeLabels == nil {
 			runtimeLabels = map[string]string{}
 		}
+		placementLocked := len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0
 		for key, value := range labels {
+			// Explicit edge identity is orthogonal to placement metadata and
+			// must remain writable even when a location selector is already set.
+			if key != runtimepkg.EdgeGroupIDLabelKey && placementLocked {
+				continue
+			}
+			if runtimeLabels[key] == value {
+				continue
+			}
 			runtimeLabels[key] = value
+			changed = true
+		}
+		if !changed {
+			return nil
 		}
 		state.Runtimes[index].Labels = runtimeLabels
 		state.Runtimes[index].UpdatedAt = time.Now().UTC()
@@ -2047,17 +2060,19 @@ func (s *Store) EnsureManagedSharedLocationLabels(labels map[string]string) (mod
 }
 
 func normalizeManagedSharedLocationLabels(labels map[string]string) map[string]string {
+	normalized := map[string]string{}
 	if value := strings.TrimSpace(labels[runtimepkg.LocationCountryCodeLabelKey]); value != "" {
-		return map[string]string{
-			runtimepkg.LocationCountryCodeLabelKey: strings.ToLower(value),
-		}
+		normalized[runtimepkg.LocationCountryCodeLabelKey] = strings.ToLower(value)
+	} else if value := strings.TrimSpace(labels[runtimepkg.RegionLabelKey]); value != "" {
+		normalized[runtimepkg.RegionLabelKey] = value
 	}
-	if value := strings.TrimSpace(labels[runtimepkg.RegionLabelKey]); value != "" {
-		return map[string]string{
-			runtimepkg.RegionLabelKey: value,
-		}
+	if value := strings.TrimSpace(labels[runtimepkg.EdgeGroupIDLabelKey]); strings.HasPrefix(value, "edge-group-") {
+		normalized[runtimepkg.EdgeGroupIDLabelKey] = value
 	}
-	return nil
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, error) {

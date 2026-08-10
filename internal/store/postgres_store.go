@@ -2066,7 +2066,7 @@ FOR UPDATE
 	if err != nil {
 		return model.Runtime{}, false, mapDBErr(err)
 	}
-	if len(labels) == 0 || len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0 {
+	if len(labels) == 0 {
 		return runtimeObj, false, nil
 	}
 
@@ -2074,8 +2074,22 @@ FOR UPDATE
 	if runtimeLabels == nil {
 		runtimeLabels = map[string]string{}
 	}
+	placementLocked := len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0
+	changed := false
 	for key, value := range labels {
+		// Explicit edge identity is orthogonal to placement metadata and
+		// must remain writable even when a location selector is already set.
+		if key != runtimepkg.EdgeGroupIDLabelKey && placementLocked {
+			continue
+		}
+		if runtimeLabels[key] == value {
+			continue
+		}
 		runtimeLabels[key] = value
+		changed = true
+	}
+	if !changed {
+		return runtimeObj, false, nil
 	}
 	runtimeObj.Labels = runtimeLabels
 	runtimeObj.UpdatedAt = time.Now().UTC()

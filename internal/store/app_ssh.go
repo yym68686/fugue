@@ -610,15 +610,8 @@ func runtimeByID(state *model.State, id string) (model.Runtime, bool) {
 }
 
 func edgeGroupIDForRuntime(runtimeObj model.Runtime) string {
-	if country := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.LocationCountryCodeLabelKey, "country_code", "countryCode"); country != "" {
-		if slug := edgeRouteSlug(country); slug != "" {
-			return "edge-group-country-" + slug
-		}
-	}
-	if region := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.RegionLabelKey, runtimepkg.LegacyRegionLabelKey, "region"); region != "" {
-		if slug := edgeRouteSlug(region); slug != "" {
-			return "edge-group-region-" + slug
-		}
+	if edgeGroupID := firstRuntimeLabelValue(runtimeObj.Labels, runtimepkg.EdgeGroupIDLabelKey, "edge_group_id", "edgeGroupID"); strings.HasPrefix(edgeGroupID, "edge-group-") {
+		return edgeGroupID
 	}
 	return ""
 }
@@ -630,26 +623,4 @@ func firstRuntimeLabelValue(labels map[string]string, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func edgeRouteSlug(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var b strings.Builder
-	lastDash := false
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-			lastDash = false
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastDash = false
-		default:
-			if b.Len() > 0 && !lastDash {
-				b.WriteByte('-')
-				lastDash = true
-			}
-		}
-	}
-	return strings.Trim(b.String(), "-")
 }

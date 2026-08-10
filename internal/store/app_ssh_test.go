@@ -192,6 +192,7 @@ func TestAppSSHAllocatesPortsAndRoutesByEdgeGroup(t *testing.T) {
 	}
 	runtimeObj, _, err := s.CreateRuntime(tenant.ID, "us-runtime", model.RuntimeTypeManagedOwned, "", map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "us",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
@@ -227,7 +228,7 @@ func TestAppSSHAllocatesPortsAndRoutesByEdgeGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enable app a ssh: %v", err)
 	}
-	if endpointA.PublicPort != 23000 || endpointA.EdgeGroupID != "edge-group-country-us" {
+	if endpointA.PublicPort != 23000 || endpointA.EdgeGroupID != "edge-group-public-a" {
 		t.Fatalf("unexpected endpoint a: %+v", endpointA)
 	}
 	if updatedA.Spec.SSH == nil || len(updatedA.Spec.SSH.AuthorizedKeys) != 1 || updatedA.Spec.SSH.AuthorizedKeys[0] != key.PublicKey {
@@ -248,14 +249,14 @@ func TestAppSSHAllocatesPortsAndRoutesByEdgeGroup(t *testing.T) {
 		t.Fatalf("expected second app to get next public port, got %+v", endpointB)
 	}
 
-	routes, err := s.ListEdgeSSHRoutes(AppSSHRouteOptions{EdgeGroupID: "edge-group-country-us"})
+	routes, err := s.ListEdgeSSHRoutes(AppSSHRouteOptions{EdgeGroupID: "edge-group-public-a"})
 	if err != nil {
 		t.Fatalf("list routes: %v", err)
 	}
 	if len(routes) != 2 {
 		t.Fatalf("expected two routes for us edge group, got %+v", routes)
 	}
-	filtered, err := s.ListEdgeSSHRoutes(AppSSHRouteOptions{EdgeGroupID: "edge-group-country-de"})
+	filtered, err := s.ListEdgeSSHRoutes(AppSSHRouteOptions{EdgeGroupID: "edge-group-public-b"})
 	if err != nil {
 		t.Fatalf("list filtered routes: %v", err)
 	}

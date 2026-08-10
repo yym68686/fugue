@@ -396,6 +396,7 @@ func TestEdgeRoutesBundleSupportsGroupFilterAndConditionalFetch(t *testing.T) {
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "HK",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-hk",
 	}); err != nil {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
@@ -518,6 +519,7 @@ func TestEdgeRoutePolicyCanaryUsesNearestHealthyEdgeGroup(t *testing.T) {
 	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "HK",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-hk",
 	}); err != nil {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
@@ -689,6 +691,7 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "HK",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-hk",
 	}); err != nil {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
@@ -964,6 +967,7 @@ func TestPlatformRoutesBootstrapPendingEdgeGroupReceivesBundle(t *testing.T) {
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	if _, _, err := storeState.EnsureManagedSharedLocationLabels(map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "HK",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-hk",
 	}); err != nil {
 		t.Fatalf("set managed shared location labels: %v", err)
 	}
@@ -1069,7 +1073,7 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 	}
 }
 
-func TestDerivedEdgeGroupIDForRuntimeUsesClusterNodeLabelsFallback(t *testing.T) {
+func TestDerivedEdgeGroupIDForRuntimeRequiresExplicitIdentity(t *testing.T) {
 	t.Parallel()
 
 	runtimeObj := model.Runtime{
@@ -1079,16 +1083,17 @@ func TestDerivedEdgeGroupIDForRuntimeUsesClusterNodeLabelsFallback(t *testing.T)
 	edgeGroupID := derivedEdgeGroupIDForRuntime(runtimeObj, true, map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "US",
 	})
-	if edgeGroupID != "edge-group-country-us" {
-		t.Fatalf("expected node country label fallback, got %q", edgeGroupID)
+	if edgeGroupID != defaultEdgeGroupID {
+		t.Fatalf("country label must not become edge identity, got %q", edgeGroupID)
 	}
 
-	runtimeObj.Labels = map[string]string{runtimepkg.LocationCountryCodeLabelKey: "HK"}
+	runtimeObj.Labels = map[string]string{runtimepkg.LocationCountryCodeLabelKey: "HK", runtimepkg.EdgeGroupIDLabelKey: "edge-group-public-b"}
 	edgeGroupID = derivedEdgeGroupIDForRuntime(runtimeObj, true, map[string]string{
 		runtimepkg.LocationCountryCodeLabelKey: "US",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-public-a",
 	})
-	if edgeGroupID != "edge-group-country-hk" {
-		t.Fatalf("expected runtime labels to take precedence over node labels, got %q", edgeGroupID)
+	if edgeGroupID != "edge-group-public-b" {
+		t.Fatalf("expected explicit runtime group to take precedence over node labels, got %q", edgeGroupID)
 	}
 }
 
