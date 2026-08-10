@@ -128,13 +128,15 @@ type EdgeGroupABTransition struct {
 // HealthProbe is data, not an executable hook. The production entrypoint
 // supports this fixed allowlist and rejects arbitrary commands.
 type HealthProbe struct {
-	Type     string `json:"type"`
-	Name     string `json:"name"`
-	Port     string `json:"port,omitempty"`
-	Path     string `json:"path,omitempty"`
-	Expected string `json:"expected,omitempty"`
-	Address  string `json:"address,omitempty"`
-	Host     string `json:"host,omitempty"`
+	Type            string `json:"type"`
+	Name            string `json:"name"`
+	Port            string `json:"port,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Expected        string `json:"expected,omitempty"`
+	Address         string `json:"address,omitempty"`
+	Host            string `json:"host,omitempty"`
+	SourceWorkload  string `json:"sourceWorkload,omitempty"`
+	SourceContainer string `json:"sourceContainer,omitempty"`
 }
 
 // Intent is changed in the same final commit as runtime code. Desired source
@@ -478,24 +480,32 @@ func (workload Workload) validate(componentID string) error {
 
 func (probe HealthProbe) validate() error {
 	allowed := map[string]bool{
-		"deployment":           true,
-		"daemonset":            true,
-		"job":                  true,
-		"service-http":         true,
-		"pod-http":             true,
-		"public-route-http":    true,
-		"leader-lease":         true,
-		"edge-group-authority": true,
+		"deployment":                true,
+		"daemonset":                 true,
+		"job":                       true,
+		"service-http":              true,
+		"service-http-via-workload": true,
+		"pod-http":                  true,
+		"public-route-http":         true,
+		"leader-lease":              true,
+		"edge-group-authority":      true,
 	}
 	if !allowed[probe.Type] || !componentIDPattern.MatchString(probe.Name) {
 		return errors.New("unsupported health probe")
 	}
-	if strings.ContainsAny(probe.Port+probe.Path+probe.Expected+probe.Address+probe.Host, "\r\n\x00") {
+	if strings.ContainsAny(probe.Port+probe.Path+probe.Expected+probe.Address+probe.Host+probe.SourceWorkload+probe.SourceContainer, "\r\n\x00") {
 		return errors.New("health probe contains control characters")
 	}
-	if (probe.Type == "service-http" || probe.Type == "pod-http") &&
+	if (probe.Type == "service-http" || probe.Type == "service-http-via-workload" || probe.Type == "pod-http") &&
 		(probe.Port == "" || !strings.HasPrefix(probe.Path, "/")) {
 		return errors.New("HTTP health probe requires port and absolute path")
+	}
+	if probe.Type == "service-http-via-workload" {
+		if !componentIDPattern.MatchString(probe.SourceWorkload) || !componentIDPattern.MatchString(probe.SourceContainer) {
+			return errors.New("workload-originated service probe source is invalid")
+		}
+	} else if probe.SourceWorkload != "" || probe.SourceContainer != "" {
+		return errors.New("non-workload-originated probe contains source workload fields")
 	}
 	if probe.Type == "edge-group-authority" && (probe.Port != "" || probe.Path != "" || probe.Expected != "") {
 		return errors.New("edge group authority probe does not accept HTTP fields")

@@ -652,19 +652,30 @@ func rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, fresh ma
 }
 
 func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) []string {
-	allowed := make([]string, 0, 8)
+	allowedSet := make(map[string]bool, 8)
+	add := func(pointer string) {
+		if pointer != "" {
+			allowedSet[pointer] = true
+		}
+	}
 	metadata := mapField(desired, "metadata")
 	annotations := mapField(metadata, "annotations")
 	for _, key := range []string{"fugue.pro/artifact-receipt-digest", "fugue.pro/production-config-sha", "fugue.pro/release-plan-digest"} {
 		if _, ok := annotations[key]; ok {
-			allowed = append(allowed, "/metadata/annotations/"+escapeJSONPointerToken(key))
+			add("/metadata/annotations/" + escapeJSONPointerToken(key))
 		}
 	}
 	templateAnnotations := mapField(mapField(mapField(desired, "spec"), "template"), "metadata")
 	templateAnnotations = mapField(templateAnnotations, "annotations")
 	for _, key := range []string{"fugue.pro/oci-revision", "fugue.pro/production-config-sha", "fugue.pro/source-commit"} {
 		if _, ok := templateAnnotations[key]; ok {
-			allowed = append(allowed, "/spec/template/metadata/annotations/"+escapeJSONPointerToken(key))
+			add("/spec/template/metadata/annotations/" + escapeJSONPointerToken(key))
+		}
+	}
+	if release.Workload.APIVersion == identity.APIVersion && release.Workload.Kind == identity.Kind &&
+		release.Workload.Namespace == identity.Namespace && release.Workload.Name == identity.Name {
+		if _, found, err := declaredContainerImageOptional(desired, release.Workload.Container, "container"); err == nil && found {
+			add("/spec/template/spec/containers[name=" + release.Workload.Container + "]/image")
 		}
 	}
 	for _, target := range release.ArtifactTargets {
@@ -676,8 +687,12 @@ func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity
 			if target.ContainerType == "init-container" {
 				field = "initContainers"
 			}
-			allowed = append(allowed, "/spec/template/spec/"+field+"[name="+target.Container+"]/image")
+			add("/spec/template/spec/" + field + "[name=" + target.Container + "]/image")
 		}
+	}
+	allowed := make([]string, 0, len(allowedSet))
+	for pointer := range allowedSet {
+		allowed = append(allowed, pointer)
 	}
 	sort.Strings(allowed)
 	return allowed
@@ -1042,10 +1057,12 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	}
 }
 
-// CheckHealthyOnce performs one bounded controller observation. It is used by
-// the asynchronous monitor, where repeated scheduled observations provide the
-// failure threshold; it deliberately does not repeat the synchronous rollout
-// soak or wait loop.
+// CheckHealthyOnce performs one bounded controller reconciliation. It is used
+// by the asynchronous monitor, where repeated scheduled observations provide
+// the failure threshold; it deliberately does not repeat the synchronous
+// rollout soak or wait loop. After exact target, probe, and manifest
+// convergence are proven, it removes only reviewed emergency Update ownership
+// by UID/RV/entry CAS without changing resource values.
 func (cluster *kubectlCluster) CheckHealthyOnce(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
 	observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
 	if err != nil {
@@ -1059,13 +1076,101 @@ func (cluster *kubectlCluster) CheckHealthyOnce(ctx context.Context, release dec
 		return observation, err
 	}
 	observation.HealthDigest = digestJoin(observation.HealthDigest, probeDigest)
-	if err := cluster.Converged(ctx, release, manifest); err != nil {
+	if err := cluster.monitorConverged(ctx, release, manifest); err != nil {
+		return observation, err
+	}
+	boundManifest, err := declarativerelease.BindManifestCAS(manifest, observation)
+	if err != nil {
+		return observation, err
+	}
+	if err := cluster.convergeMonitoredEmergencyOwnership(ctx, release, boundManifest); err != nil {
 		return observation, err
 	}
 	if err := cluster.VerifyOwnershipConverged(ctx, release, manifest); err != nil {
 		return observation, err
 	}
 	return observation, nil
+}
+
+func (cluster *kubectlCluster) convergeMonitoredEmergencyOwnership(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
+		if desiredErr != nil {
+			return desiredErr
+		}
+		if len(emergencyOwnershipPointers(release, identity, desired)) == 0 {
+			continue
+		}
+		liveRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil || resourceAbsent(liveRaw) {
+			return fmt.Errorf("read monitored emergency ownership for %s/%s: %w", identity.Kind, identity.Name, getErr)
+		}
+		live, decodeErr := decodeJSONObject(liveRaw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		_, found, ownershipErr := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, emergencyOwnershipPointers(release, identity, desired), false)
+		if ownershipErr != nil {
+			return fmt.Errorf("review monitored emergency ownership for %s/%s: %w", identity.Kind, identity.Name, ownershipErr)
+		}
+		if !found {
+			continue
+		}
+		encoded, encodeErr := declarativerelease.CanonicalJSON(desired)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if applyErr := cluster.applyResourceWithOwnershipConvergence(ctx, release, identity, desired, encoded, false); applyErr != nil {
+			return fmt.Errorf("converge monitored emergency ownership for %s/%s: %w", identity.Kind, identity.Name, applyErr)
+		}
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) monitorConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
+		if desiredErr != nil {
+			return desiredErr
+		}
+		liveRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil {
+			return getErr
+		}
+		if resourceAbsent(liveRaw) {
+			return fmt.Errorf("declared resource %s/%s is absent", identity.Kind, identity.Name)
+		}
+		live, decodeErr := decodeJSONObject(liveRaw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		stripMonitorReleaseEvidence(desired)
+		stripMonitorReleaseEvidence(live)
+		if !declarativerelease.ResourceDesiredSubset(desired, live) {
+			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
+		}
+	}
+	return nil
+}
+
+func stripMonitorReleaseEvidence(resource map[string]any) {
+	metadata := mapField(resource, "metadata")
+	annotations := mapField(metadata, "annotations")
+	for _, key := range []string{
+		"fugue.pro/artifact-receipt-digest",
+		"fugue.pro/production-config-sha",
+		"fugue.pro/release-plan-digest",
+	} {
+		delete(annotations, key)
+	}
 }
 
 func waitHealthyTerminalError(contextErr, lastFailure error) error {
@@ -1335,6 +1440,12 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 				return "", fmt.Errorf("service health probe %q failed", probe.Name)
 			}
 			evidence = append(evidence, probe.Type+":"+digestBytesLocal(body))
+		case "service-http-via-workload":
+			bodies, err := cluster.readServiceHTTPViaWorkload(ctx, release.Workload.Namespace, probe)
+			if err != nil {
+				return "", fmt.Errorf("workload-originated service health probe %q failed: %w", probe.Name, err)
+			}
+			evidence = append(evidence, probe.Type+":"+digestBytesLocal(bodies))
 		case "pod-http":
 			if probe.Name != release.Workload.Name {
 				return "", fmt.Errorf("pod health probe %q does not name the primary workload", probe.Name)
@@ -1396,6 +1507,98 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 	}
 	sort.Strings(evidence)
 	return digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
+}
+
+func (cluster *kubectlCluster) readServiceHTTPViaWorkload(ctx context.Context, namespace string, probe declarativerelease.HealthProbe) ([]byte, error) {
+	source := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: namespace, Name: probe.SourceWorkload}
+	sourceRaw, err := cluster.getResource(ctx, source)
+	if err != nil || resourceAbsent(sourceRaw) {
+		return nil, errors.New("source workload is absent")
+	}
+	selector, err := selectorFromWorkload(sourceRaw)
+	if err != nil {
+		return nil, err
+	}
+	podsRaw, err := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", namespace, "--selector", selector, "--output", "json")
+	if err != nil {
+		return nil, err
+	}
+	service := declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "Service", Namespace: namespace, Name: probe.Name}
+	serviceRaw, err := cluster.getResource(ctx, service)
+	if err != nil || resourceAbsent(serviceRaw) {
+		return nil, errors.New("target Service is absent")
+	}
+	port, err := servicePortByName(serviceRaw, probe.Port)
+	if err != nil {
+		return nil, err
+	}
+	pods, err := readyWorkloadPods(podsRaw, probe.SourceContainer)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]string, 0, len(pods))
+	url := "http://" + probe.Name + ":" + strconv.Itoa(port) + probe.Path
+	for _, pod := range pods {
+		body, runErr := cluster.kubectlRun(ctx, nil, "exec", "--namespace", namespace, pod, "--container", probe.SourceContainer, "--",
+			"wget", "-qO-", "-T", "5", url)
+		if runErr != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
+			return nil, fmt.Errorf("source Pod %s did not observe the expected service response", pod)
+		}
+		results = append(results, pod+":"+digestBytesLocal(body))
+	}
+	return []byte(strings.Join(results, "\n")), nil
+}
+
+func servicePortByName(raw []byte, name string) (int, error) {
+	value, err := decodeJSONObject(raw)
+	if err != nil {
+		return 0, err
+	}
+	port := 0
+	for _, rawPort := range anySlice(mapField(value, "spec")["ports"]) {
+		candidate, _ := rawPort.(map[string]any)
+		if stringValue(candidate["name"]) != name {
+			continue
+		}
+		if port != 0 {
+			return 0, errors.New("target Service port is ambiguous")
+		}
+		port = int(int64Value(candidate["port"]))
+	}
+	if port < 1 || port > 65535 {
+		return 0, errors.New("target Service port is invalid")
+	}
+	return port, nil
+}
+
+func readyWorkloadPods(raw []byte, container string) ([]string, error) {
+	value, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	pods := make([]string, 0)
+	for _, rawItem := range anySlice(value["items"]) {
+		pod, _ := rawItem.(map[string]any)
+		metadata, status := mapField(pod, "metadata"), mapField(pod, "status")
+		if metadata["deletionTimestamp"] != nil || !podReady(status) {
+			continue
+		}
+		containerPresent := false
+		for _, rawContainer := range anySlice(mapField(pod, "spec")["containers"]) {
+			candidate, _ := rawContainer.(map[string]any)
+			containerPresent = containerPresent || stringValue(candidate["name"]) == container
+		}
+		name := stringValue(metadata["name"])
+		if name == "" || !containerPresent {
+			return nil, errors.New("ready source Pod identity is invalid")
+		}
+		pods = append(pods, name)
+	}
+	sort.Strings(pods)
+	if len(pods) == 0 {
+		return nil, errors.New("source workload has no ready Pods")
+	}
+	return pods, nil
 }
 
 func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, kind, name string) (declarativerelease.Observation, error) {

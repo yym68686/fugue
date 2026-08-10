@@ -149,9 +149,9 @@ func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 					t.Fatalf("group %s control canary did not derive exactly from worker data: got=%+v want=%+v", group.ID, probe, workerCanary)
 				}
 			}
-			if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/v1/authority/groups/"+group.GroupID+"/readyz" {
+			if probe.Type == "service-http-via-workload" && probe.Name == group.Control.Workload.Name && probe.Path == "/v1/authority/groups/"+group.GroupID+"/readyz" {
 				authorityCount++
-				if probe.Expected != "\"ready\":true" {
+				if probe.Expected != "\"ready\":true" || probe.SourceWorkload != byID["api"].Workload.Name || probe.SourceContainer != byID["api"].Workload.Container {
 					t.Fatalf("group %s control authority probe is not bound to serving readiness: %+v", group.ID, probe)
 				}
 			}

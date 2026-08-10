@@ -116,6 +116,241 @@ func TestPublicRouteCanaryDialsExactEdgeWithTLSHostAndExpectedBody(t *testing.T)
 	}
 }
 
+func TestMonitorConvergenceIgnoresOnlyRendererEvidenceAnnotations(t *testing.T) {
+	desired := map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{
+			"name": "fugue-api-tls", "namespace": "fugue-system",
+			"annotations": map[string]any{
+				"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("a", 64),
+				"fugue.pro/production-config-sha":   strings.Repeat("1", 40),
+				"fugue.pro/release-plan-digest":     "sha256:" + strings.Repeat("b", 64),
+				"fugue.pro/ownership":               "declarative",
+			},
+		},
+		"spec": map[string]any{"selector": map[string]any{"app": "api"}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	annotations := mapField(mapField(live, "metadata"), "annotations")
+	annotations["fugue.pro/artifact-receipt-digest"] = "sha256:" + strings.Repeat("c", 64)
+	annotations["fugue.pro/production-config-sha"] = strings.Repeat("2", 40)
+	annotations["fugue.pro/release-plan-digest"] = "sha256:" + strings.Repeat("d", 64)
+
+	stripMonitorReleaseEvidence(desired)
+	stripMonitorReleaseEvidence(live)
+	if !declarativerelease.ResourceDesiredSubset(desired, live) {
+		t.Fatal("renderer evidence annotations caused false monitor drift")
+	}
+	annotations["fugue.pro/ownership"] = "legacy"
+	if declarativerelease.ResourceDesiredSubset(desired, live) {
+		t.Fatal("non-evidence annotation drift was ignored")
+	}
+	annotations["fugue.pro/ownership"] = "declarative"
+	mapField(live, "spec")["selector"] = map[string]any{"app": "controller"}
+	if declarativerelease.ResourceDesiredSubset(desired, live) {
+		t.Fatal("runtime spec drift was ignored")
+	}
+}
+
+func TestWorkloadOriginatedServiceProbeUsesEveryReadySourcePod(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	logPath := filepath.Join(directory, "kubectl.log")
+	program := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$KUBECTL_LOG"
+case "$*" in
+  "get deployment fugue-fugue-api --namespace fugue-system --output json --show-managed-fields --ignore-not-found")
+    printf '%s\n' '{"spec":{"selector":{"matchLabels":{"app":"api"}},"template":{"metadata":{"labels":{"app":"api"}}}}}'
+    ;;
+  "get pods --namespace fugue-system --selector app=api --output json")
+    printf '%s\n' '{"items":[{"metadata":{"name":"api-b"},"spec":{"containers":[{"name":"api"}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"api-a"},"spec":{"containers":[{"name":"api"}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"api-not-ready"},"spec":{"containers":[{"name":"api"}]},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}'
+    ;;
+  "get service edge-control-de --namespace fugue-system --output json --show-managed-fields --ignore-not-found")
+    printf '%s\n' '{"spec":{"ports":[{"name":"http","port":8092}]}}'
+    ;;
+  "exec --namespace fugue-system api-a --container api -- wget -qO- -T 5 http://edge-control-de:8092/v1/authority/groups/edge-pool-a/readyz"|\
+  "exec --namespace fugue-system api-b --container api -- wget -qO- -T 5 http://edge-control-de:8092/v1/authority/groups/edge-pool-a/readyz")
+    printf '%s\n' '{"ready":true}'
+    ;;
+  *)
+    exit 41
+    ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECTL_LOG", logPath)
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	probe := declarativerelease.HealthProbe{
+		Type: "service-http-via-workload", Name: "edge-control-de", Port: "http",
+		Path: "/v1/authority/groups/edge-pool-a/readyz", Expected: "\"ready\":true",
+		SourceWorkload: "fugue-fugue-api", SourceContainer: "api",
+	}
+	evidence, err := cluster.readServiceHTTPViaWorkload(context.Background(), "fugue-system", probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(evidence), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "api-a:sha256:") || !strings.HasPrefix(lines[1], "api-b:sha256:") {
+		t.Fatalf("unexpected workload-originated evidence: %q", evidence)
+	}
+	logRaw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(logRaw), "wget -qO- -T 5 http://edge-control-de:8092/v1/authority/groups/edge-pool-a/readyz") != 2 {
+		t.Fatalf("probe did not execute from every ready source Pod: %s", logRaw)
+	}
+}
+
+func TestWorkloadOriginatedServiceProbeParsersAreExact(t *testing.T) {
+	service := []byte(`{"spec":{"ports":[{"name":"http","port":8092},{"name":"metrics","port":9090}]}}`)
+	if port, err := servicePortByName(service, "http"); err != nil || port != 8092 {
+		t.Fatalf("service port=%d err=%v", port, err)
+	}
+	if _, err := servicePortByName(service, "missing"); err == nil {
+		t.Fatal("missing service port was accepted")
+	}
+	pods := []byte(`{"items":[{"metadata":{"name":"api-b"},"spec":{"containers":[{"name":"api"}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"api-a"},"spec":{"containers":[{"name":"api"}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},{"metadata":{"name":"ignored"},"spec":{"containers":[{"name":"api"}]},"status":{"conditions":[{"type":"Ready","status":"False"}]}}]}`)
+	ready, err := readyWorkloadPods(pods, "api")
+	if err != nil || strings.Join(ready, ",") != "api-a,api-b" {
+		t.Fatalf("ready pods=%v err=%v", ready, err)
+	}
+	if _, err := readyWorkloadPods(pods, "controller"); err == nil {
+		t.Fatal("missing source container was accepted")
+	}
+}
+
+func TestMonitorConvergesOnlyReviewedEmergencyOwnership(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	livePath := filepath.Join(directory, "live.json")
+	cleanPath := filepath.Join(directory, "clean.json")
+	statePath := filepath.Join(directory, "cleaned")
+	logPath := filepath.Join(directory, "patch.log")
+	release := declarativerelease.PlanRelease{
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+			Container: "api", FieldManager: "fugue-api-declarative",
+		},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+			Container: "api", ContainerType: "container",
+		}},
+	}
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"name": "fugue-fugue-api", "namespace": "fugue-system", "uid": "api-uid", "resourceVersion": "42",
+			"annotations": map[string]any{
+				"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("a", 64),
+				"fugue.pro/production-config-sha":   strings.Repeat("1", 40),
+				"fugue.pro/release-plan-digest":     "sha256:" + strings.Repeat("b", 64),
+			},
+		},
+		"spec": map[string]any{"template": map[string]any{
+			"metadata": map[string]any{"annotations": map[string]any{
+				"fugue.pro/oci-revision":          strings.Repeat("1", 40),
+				"fugue.pro/production-config-sha": strings.Repeat("1", 40),
+				"fugue.pro/source-commit":         strings.Repeat("1", 40),
+			}},
+			"spec": map[string]any{"containers": []any{map[string]any{
+				"name": "api", "image": "ghcr.io/example/api@sha256:" + strings.Repeat("c", 64),
+			}}},
+		}},
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"}
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["uid"], metadata["resourceVersion"], metadata["generation"] = "api-uid", "42", json.Number("7")
+	declarativeEntry := map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)}
+	emergencyPointer := "/spec/template/spec/containers[name=api]/image"
+	emergencyEntry := map[string]any{"manager": "kubectl", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{emergencyPointer})}
+	metadata["managedFields"] = []any{declarativeEntry, emergencyEntry}
+	clean := deepCopyJSONMap(t, live)
+	mapField(clean, "metadata")["resourceVersion"] = "43"
+	mapField(clean, "metadata")["managedFields"] = []any{declarativeEntry}
+	if err := os.WriteFile(livePath, mustJSON(t, live), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cleanPath, mustJSON(t, clean), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	program := `#!/bin/sh
+set -eu
+case "$1" in
+  get)
+    if test -e "$CLEANED"; then cat "$CLEAN_JSON"; else cat "$LIVE_JSON"; fi
+    ;;
+  patch)
+    printf '%s\n' "$*" > "$PATCH_LOG"
+    : > "$CLEANED"
+    cat "$CLEAN_JSON"
+    ;;
+  apply)
+    if test -e "$CLEANED"; then
+      cat "$CLEAN_JSON"
+    else
+      printf '%s\n' 'Apply failed with 1 conflict: conflict with "kubectl" using apps/v1: .spec.template.spec.containers[name="api"].image' >&2
+      exit 1
+    fi
+    ;;
+  *) exit 51 ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIVE_JSON", livePath)
+	t.Setenv("CLEAN_JSON", cleanPath)
+	t.Setenv("CLEANED", statePath)
+	t.Setenv("PATCH_LOG", logPath)
+	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired}})
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	if err := cluster.convergeMonitoredEmergencyOwnership(context.Background(), release, manifest); err != nil {
+		t.Fatal(err)
+	}
+	patchLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(patchLog), "--type=json") || !strings.Contains(string(patchLog), `"op":"remove"`) {
+		t.Fatalf("monitor ownership cleanup was not an exact JSON patch: %s", patchLog)
+	}
+	if err := verifyNoEmergencyOwnership(release, identity, desired, clean); err != nil {
+		t.Fatalf("post-cleanup ownership did not converge: %v", err)
+	}
+}
+
+func TestEmergencyOwnershipAllowlistIncludesPrimaryWorkloadImageWithoutArtifactTargets(t *testing.T) {
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api",
+		Container: "api", FieldManager: "fugue-api-declarative",
+	}}
+	desired := map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/production-config-sha": strings.Repeat("a", 40)}},
+		"spec": map[string]any{"template": map[string]any{
+			"metadata": map[string]any{"annotations": map[string]any{"fugue.pro/source-commit": strings.Repeat("a", 40)}},
+			"spec": map[string]any{"containers": []any{map[string]any{
+				"name": "api", "image": "ghcr.io/example/api@sha256:" + strings.Repeat("b", 64),
+			}}},
+		}},
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api"}
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	if !stringSubset([]string{"/spec/template/spec/containers[name=api]/image"}, allowed) {
+		t.Fatalf("primary workload image is absent from emergency ownership allowlist: %v", allowed)
+	}
+	other := identity
+	other.Name = "fugue-fugue-controller"
+	if got := emergencyOwnershipPointers(release, other, desired); stringSubset([]string{"/spec/template/spec/containers[name=api]/image"}, got) {
+		t.Fatalf("primary workload image leaked into a different resource allowlist: %v", got)
+	}
+}
+
 func TestSanitizeObservedResourceDropsDaemonSetControllerGenerationAnnotation(t *testing.T) {
 	resource := map[string]any{
 		"metadata": map[string]any{"annotations": map[string]any{

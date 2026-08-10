@@ -353,3 +353,31 @@ func TestPublicRouteHealthProbeIsExactAndDataDriven(t *testing.T) {
 		t.Fatal("ordinary health probe accepted public route fields")
 	}
 }
+
+func TestWorkloadOriginatedServiceProbeRequiresExactSource(t *testing.T) {
+	valid := HealthProbe{
+		Type: "service-http-via-workload", Name: "edge-control-de", Port: "http",
+		Path: "/v1/authority/groups/edge-pool-a/readyz", Expected: "\"ready\":true",
+		SourceWorkload: "fugue-fugue-api", SourceContainer: "api",
+	}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("valid workload-originated probe rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*HealthProbe){
+		"missing-workload":  func(probe *HealthProbe) { probe.SourceWorkload = "" },
+		"missing-container": func(probe *HealthProbe) { probe.SourceContainer = "" },
+		"control-character": func(probe *HealthProbe) { probe.SourceWorkload += "\n" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := candidate.validate(); err == nil {
+				t.Fatal("invalid workload-originated probe was accepted")
+			}
+		})
+	}
+	ordinary := HealthProbe{Type: "service-http", Name: "api", Port: "http", Path: "/healthz", SourceWorkload: "fugue-fugue-api", SourceContainer: "api"}
+	if err := ordinary.validate(); err == nil {
+		t.Fatal("ordinary probe accepted workload-originated source fields")
+	}
+}
