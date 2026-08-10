@@ -590,7 +590,19 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
 			return cleanupErr
 		}
-		if _, retryErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, false)...); retryErr != nil {
+		freshRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil || resourceAbsent(freshRaw) {
+			return fmt.Errorf("read resource after emergency ownership cleanup: %w", getErr)
+		}
+		fresh, decodeErr := decodeJSONObject(freshRaw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		rebound, rebindErr := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, live, fresh)
+		if rebindErr != nil {
+			return rebindErr
+		}
+		if _, retryErr := cluster.kubectlRun(ctx, rebound, applyArguments(release, false)...); retryErr != nil {
 			return fmt.Errorf("ordinary apply after exact emergency ownership cleanup: %w", retryErr)
 		}
 	}
@@ -598,6 +610,42 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		return nil
 	}
 	return cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, true)
+}
+
+// rebindDesiredResourceVersionAfterOwnershipCleanup permits exactly the RV
+// change caused by removing reviewed emergency managedFields entries. The
+// live object must otherwise be byte-equivalent after removing Kubernetes
+// observation metadata, and UID/generation remain explicit CAS witnesses.
+func rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, fresh map[string]any) ([]byte, error) {
+	desiredMetadata := mapField(desired, "metadata")
+	beforeMetadata := mapField(before, "metadata")
+	freshMetadata := mapField(fresh, "metadata")
+	desiredUID, desiredRV := stringValue(desiredMetadata["uid"]), stringValue(desiredMetadata["resourceVersion"])
+	beforeUID, beforeRV := stringValue(beforeMetadata["uid"]), stringValue(beforeMetadata["resourceVersion"])
+	freshUID, freshRV := stringValue(freshMetadata["uid"]), stringValue(freshMetadata["resourceVersion"])
+	beforeGeneration, freshGeneration := int64Value(beforeMetadata["generation"]), int64Value(freshMetadata["generation"])
+	if desiredUID == "" || desiredRV == "" || desiredUID != beforeUID || desiredRV != beforeRV {
+		return nil, errors.New("ownership cleanup rebind is not bound to the original desired UID/RV")
+	}
+	if freshUID == "" || freshRV == "" || freshUID != beforeUID || freshRV == beforeRV {
+		return nil, errors.New("ownership cleanup did not produce the expected fresh UID/RV")
+	}
+	if beforeGeneration <= 0 || freshGeneration != beforeGeneration {
+		return nil, errors.New("ownership cleanup changed the workload generation")
+	}
+	if digestJSON(sanitizeObservedResource(before)) != digestJSON(sanitizeObservedResource(fresh)) {
+		return nil, errors.New("ownership cleanup changed the live resource outside observation metadata")
+	}
+	copyRaw, err := declarativerelease.CanonicalJSON(desired)
+	if err != nil {
+		return nil, err
+	}
+	rebound, err := decodeJSONObject(copyRaw)
+	if err != nil {
+		return nil, err
+	}
+	mapField(rebound, "metadata")["resourceVersion"] = freshRV
+	return declarativerelease.CanonicalJSON(rebound)
 }
 
 func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) []string {

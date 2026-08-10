@@ -333,6 +333,59 @@ func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
 	}
 }
 
+func TestOwnershipCleanupRebindsOnlyFreshResourceVersion(t *testing.T) {
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{"name": "edge-control-us", "namespace": "fugue-system", "uid": "control-uid", "resourceVersion": "42"},
+		"spec":     map[string]any{"replicas": 1, "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "edge-control", "image": "target"}}}}},
+	}
+	before := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"name": "edge-control-us", "namespace": "fugue-system", "uid": "control-uid", "resourceVersion": "42", "generation": json.Number("8"),
+			"managedFields": []any{map[string]any{"manager": "kubectl", "operation": "Update"}},
+		},
+		"spec":   map[string]any{"replicas": 1, "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "edge-control", "image": "lkg"}}}}},
+		"status": map[string]any{"readyReplicas": 1},
+	}
+	fresh := deepCopyJSONMap(t, before)
+	freshMetadata := mapField(fresh, "metadata")
+	freshMetadata["resourceVersion"] = "43"
+	freshMetadata["managedFields"] = []any{map[string]any{"manager": "fugue-edge-control-us-declarative", "operation": "Apply"}}
+	mapField(fresh, "status")["readyReplicas"] = 0
+
+	reboundRaw, err := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebound, err := decodeJSONObject(reboundRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stringValue(mapField(rebound, "metadata")["resourceVersion"]); got != "43" {
+		t.Fatalf("rebound resourceVersion=%q", got)
+	}
+	containers := anySlice(mapField(mapField(mapField(rebound, "spec"), "template"), "spec")["containers"])
+	if got := stringValue(containers[0].(map[string]any)["image"]); got != "target" {
+		t.Fatalf("target image changed during rebind: %q", got)
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"uid":          func(value map[string]any) { mapField(value, "metadata")["uid"] = "other" },
+		"generation":   func(value map[string]any) { mapField(value, "metadata")["generation"] = json.Number("9") },
+		"spec":         func(value map[string]any) { mapField(value, "spec")["replicas"] = 2 },
+		"unchanged-rv": func(value map[string]any) { mapField(value, "metadata")["resourceVersion"] = "42" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := deepCopyJSONMap(t, fresh)
+			mutate(changed)
+			if _, err := rebindDesiredResourceVersionAfterOwnershipCleanup(desired, before, changed); err == nil {
+				t.Fatal("unsafe post-cleanup state was accepted")
+			}
+		})
+	}
+}
+
 func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	allowed := []string{"/spec/template/spec/containers[name=edge-control]/image"}
 	for _, failure := range []error{
