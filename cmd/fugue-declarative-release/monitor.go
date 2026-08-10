@@ -265,6 +265,9 @@ func verifyMonitoredLKG(ctx context.Context, output io.Writer, store *monitorSto
 }
 
 func monitorComponent(component declarativerelease.Component) bool {
+	if component.Delivery != nil && component.Delivery.Writer == "guardian" {
+		return false
+	}
 	return component.ID == "api" || component.Family == "edge"
 }
 

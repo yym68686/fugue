@@ -56,6 +56,20 @@ func TestEmitMonitorOutputDerivesAPIControlAndWorkerMatrix(t *testing.T) {
 	}
 }
 
+func TestMonitorComponentExcludesGuardianDeliveredComponents(t *testing.T) {
+	component := declarativerelease.Component{
+		ID: "edge-control-de", Family: "edge",
+		Delivery: &declarativerelease.Delivery{Writer: "guardian", Group: "de", DependencyService: "fugue-fugue"},
+	}
+	if monitorComponent(component) {
+		t.Fatal("Guardian-delivered component remained in the cron production writer")
+	}
+	component.Delivery = nil
+	if !monitorComponent(component) {
+		t.Fatal("direct edge component was removed from the legacy monitor before migration")
+	}
+}
+
 func TestMonitorStorePersistsImmutableRecordAndCASState(t *testing.T) {
 	files, terminal, release := monitorBundleFixture(t)
 	client := kubernetesfake.NewSimpleClientset()
