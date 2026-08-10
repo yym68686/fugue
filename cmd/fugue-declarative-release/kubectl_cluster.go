@@ -1021,6 +1021,31 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 		if !declarativerelease.ResourceDesiredSubset(desired, live) {
 			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
 		}
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) VerifyOwnershipConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		desired, err := declarativerelease.ResourceSetItem(manifest, identity)
+		if err != nil {
+			return err
+		}
+		if len(emergencyOwnershipPointers(release, identity, desired)) == 0 {
+			continue
+		}
+		liveRaw, err := cluster.getResource(ctx, identity)
+		if err != nil || resourceAbsent(liveRaw) {
+			return fmt.Errorf("read declared ownership %s/%s: %w", identity.Kind, identity.Name, err)
+		}
+		live, err := decodeJSONObject(liveRaw)
+		if err != nil {
+			return err
+		}
 		if err := verifyNoEmergencyOwnership(release, identity, desired, live); err != nil {
 			return err
 		}

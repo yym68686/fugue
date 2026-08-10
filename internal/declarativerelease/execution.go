@@ -110,6 +110,7 @@ type Cluster interface {
 	DeleteCreated(context.Context, PlanRelease, []byte, Observation, Observation) error
 	WaitHealthy(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error)
 	Converged(context.Context, PlanRelease, []byte) error
+	VerifyOwnershipConverged(context.Context, PlanRelease, []byte) error
 }
 
 var ErrDegradedPredecessorHealth = errors.New("declarative predecessor health is degraded")
@@ -454,8 +455,18 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	if prepared.AlreadyConverged {
+		ownershipErr := cluster.VerifyOwnershipConverged(ctx, release, forwardManifest)
+		if ownershipErr != nil {
+			forwardCAS, bindErr := BindManifestCAS(forwardManifest, current)
+			if bindErr != nil {
+				result.Reason = "ownership-convergence-cas-manifest-invalid"
+				return sealResult(result)
+			}
+			result.ForwardApplyCount = 1
+			_ = cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
+		}
 		forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
-		convergedErr := cluster.Converged(ctx, release, forwardManifest)
+		convergedErr := errors.Join(cluster.Converged(ctx, release, forwardManifest), cluster.VerifyOwnershipConverged(ctx, release, forwardManifest))
 		if healthErr == nil && convergedErr == nil && forwardObservation.Matches(prepared.Forward, release, false) {
 			result.Status = "verified"
 			result.Reason = "forward-already-converged"
@@ -473,7 +484,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	result.ForwardApplyCount = 1
 	applyErr := cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
 	forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
-	convergedErr := cluster.Converged(ctx, release, forwardManifest)
+	convergedErr := errors.Join(cluster.Converged(ctx, release, forwardManifest), cluster.VerifyOwnershipConverged(ctx, release, forwardManifest))
 	if healthErr == nil && convergedErr == nil && forwardObservation.Matches(prepared.Forward, release, false) {
 		result.Status = "verified"
 		if applyErr != nil {
@@ -534,7 +545,7 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	var lkgHealthErr, lkgConvergedErr error
 	if prepared.LKG.Present {
 		lkgObservation, lkgHealthErr = cluster.WaitHealthy(ctx, release, prepared.LKG, lkgManifest)
-		lkgConvergedErr = cluster.Converged(ctx, release, lkgManifest)
+		lkgConvergedErr = errors.Join(cluster.Converged(ctx, release, lkgManifest), cluster.VerifyOwnershipConverged(ctx, release, lkgManifest))
 	} else {
 		lkgObservation, lkgHealthErr = cluster.Observe(ctx, release, prepared.LKG, forwardManifest)
 	}

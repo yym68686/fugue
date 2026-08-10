@@ -137,6 +137,10 @@ func (fake *fakeCluster) Converged(_ context.Context, _ PlanRelease, manifest []
 	return nil
 }
 
+func (fake *fakeCluster) VerifyOwnershipConverged(context.Context, PlanRelease, []byte) error {
+	return nil
+}
+
 func executionFixture(t *testing.T) (Plan, ArtifactReceipt, RenderedManifests, Observation, Observation) {
 	t.Helper()
 	return executionFixtureForPlan(t, boundAPIPlan(t))
