@@ -41,6 +41,8 @@ type GroupInventoryHeartbeat struct {
 	Schema             string                 `json:"schema"`
 	KeyID              string                 `json:"key_id"`
 	GroupID            string                 `json:"edge_group_id"`
+	FaultDomainID      string                 `json:"fault_domain_id,omitempty"`
+	EdgePoolID         string                 `json:"edge_pool_id,omitempty"`
 	ProducerNodeID     string                 `json:"producer_node_id,omitempty"`
 	ProducerGeneration uint64                 `json:"producer_generation,omitempty"`
 	ExpectedSequence   uint64                 `json:"expected_sequence"`
@@ -224,10 +226,34 @@ func validateGroupInventoryHeartbeat(value GroupInventoryHeartbeat, groupID stri
 		value.Inventory.Generation != strings.TrimSpace(value.Inventory.Generation) {
 		return errors.New("edge-control inventory heartbeat identity is invalid")
 	}
+	if err := validateInventoryTopology(value.FaultDomainID, value.EdgePoolID); err != nil ||
+		value.Inventory.FaultDomainID != value.FaultDomainID || value.Inventory.EdgePoolID != value.EdgePoolID {
+		return errors.New("edge-control inventory heartbeat topology is invalid")
+	}
 	epoch := value.Inventory.ActiveEpoch
 	if epoch.GroupID != groupID || epoch.Slot != normalizeSlot(epoch.Slot) || !validEdgeSlot(epoch.Slot) ||
 		strings.TrimSpace(epoch.ReleaseEpoch) == "" || epoch.ReleaseEpoch != strings.TrimSpace(epoch.ReleaseEpoch) || epoch.FenceSequence == 0 || epoch.MinHealthyInstances <= 0 {
 		return errors.New("edge-control inventory heartbeat active epoch is invalid")
+	}
+	if epoch.FaultDomainID != value.FaultDomainID || epoch.EdgePoolID != value.EdgePoolID {
+		return errors.New("edge-control inventory heartbeat active epoch topology is invalid")
+	}
+	for _, instance := range value.Inventory.Instances {
+		if instance.FaultDomainID != value.FaultDomainID || instance.EdgePoolID != value.EdgePoolID {
+			return errors.New("edge-control inventory heartbeat instance topology is invalid")
+		}
+	}
+	return nil
+}
+
+func validateInventoryTopology(faultDomainID, edgePoolID string) error {
+	if faultDomainID == "" && edgePoolID == "" {
+		// The empty pair is accepted only as a wire-compatible predecessor. New
+		// workers always project both identities before publishing inventory.
+		return nil
+	}
+	if !topologyIdentityPattern.MatchString(faultDomainID) || !topologyIdentityPattern.MatchString(edgePoolID) {
+		return errors.New("inventory topology identities are invalid")
 	}
 	return nil
 }

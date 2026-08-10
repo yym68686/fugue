@@ -46,6 +46,7 @@ var (
 	errNoHealthyActiveInstances  = errors.New("edge-control group has no healthy active instances")
 	errNoRoutableRoutes          = errors.New("edge-control group has no routable routes")
 	edgeGroupIDPattern           = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+	topologyIdentityPattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 )
 
 // GroupInventorySnapshot is the Edge Control-owned, group-scoped inventory
@@ -53,17 +54,21 @@ var (
 // participate in compilation; inactive instances remain observable but never
 // contribute health to the active group candidate.
 type GroupInventorySnapshot struct {
-	Schema      string           `json:"schema"`
-	GroupID     string           `json:"edge_group_id"`
-	Sequence    uint64           `json:"sequence"`
-	Generation  string           `json:"generation"`
-	ActiveEpoch GroupActiveEpoch `json:"active_epoch"`
-	Instances   []GroupInstance  `json:"instances"`
-	ObservedAt  time.Time        `json:"observed_at"`
+	Schema        string           `json:"schema"`
+	GroupID       string           `json:"edge_group_id"`
+	FaultDomainID string           `json:"fault_domain_id,omitempty"`
+	EdgePoolID    string           `json:"edge_pool_id,omitempty"`
+	Sequence      uint64           `json:"sequence"`
+	Generation    string           `json:"generation"`
+	ActiveEpoch   GroupActiveEpoch `json:"active_epoch"`
+	Instances     []GroupInstance  `json:"instances"`
+	ObservedAt    time.Time        `json:"observed_at"`
 }
 
 type GroupActiveEpoch struct {
 	GroupID             string `json:"edge_group_id"`
+	FaultDomainID       string `json:"fault_domain_id,omitempty"`
+	EdgePoolID          string `json:"edge_pool_id,omitempty"`
 	Slot                string `json:"slot"`
 	ReleaseEpoch        string `json:"release_epoch"`
 	FenceSequence       uint64 `json:"fence_sequence"`
@@ -76,6 +81,8 @@ type GroupActiveEpoch struct {
 type GroupInstance struct {
 	EdgeID           string `json:"edge_id"`
 	GroupID          string `json:"edge_group_id"`
+	FaultDomainID    string `json:"fault_domain_id,omitempty"`
+	EdgePoolID       string `json:"edge_pool_id,omitempty"`
 	Slot             string `json:"slot"`
 	InstanceUID      string `json:"instance_uid"`
 	ReleaseEpoch     string `json:"release_epoch"`
@@ -342,11 +349,15 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot) (gr
 	if snapshot.Schema != GroupInventorySchemaV1 || normalizeGroupID(snapshot.GroupID) != groupID || snapshot.Sequence == 0 || strings.TrimSpace(snapshot.Generation) == "" {
 		return groupInventoryView{}, errGroupInventoryInvalid
 	}
+	if err := validateInventoryTopology(snapshot.FaultDomainID, snapshot.EdgePoolID); err != nil {
+		return groupInventoryView{}, errGroupInventoryInvalid
+	}
 	epoch := snapshot.ActiveEpoch
 	epoch.GroupID = normalizeGroupID(epoch.GroupID)
 	epoch.Slot = normalizeSlot(epoch.Slot)
 	epoch.ReleaseEpoch = strings.TrimSpace(epoch.ReleaseEpoch)
-	if epoch.GroupID != groupID || !validEdgeSlot(epoch.Slot) || epoch.ReleaseEpoch == "" || epoch.FenceSequence == 0 || epoch.MinHealthyInstances <= 0 {
+	if epoch.GroupID != groupID || !validEdgeSlot(epoch.Slot) || epoch.ReleaseEpoch == "" || epoch.FenceSequence == 0 || epoch.MinHealthyInstances <= 0 ||
+		epoch.FaultDomainID != snapshot.FaultDomainID || epoch.EdgePoolID != snapshot.EdgePoolID {
 		return groupInventoryView{}, errGroupInventoryInvalid
 	}
 
@@ -364,7 +375,8 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot) (gr
 			// active epoch for this group.
 			continue
 		}
-		if instanceGroup != groupID || edgeID == "" || strings.TrimSpace(instance.InstanceUID) == "" {
+		if instanceGroup != groupID || edgeID == "" || strings.TrimSpace(instance.InstanceUID) == "" ||
+			instance.FaultDomainID != snapshot.FaultDomainID || instance.EdgePoolID != snapshot.EdgePoolID {
 			return groupInventoryView{}, errGroupInventoryInvalid
 		}
 		if _, duplicate := activeSeen[edgeID]; duplicate {
@@ -761,6 +773,8 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 	type instanceIdentity struct {
 		EdgeID           string `json:"edge_id"`
 		GroupID          string `json:"edge_group_id"`
+		FaultDomainID    string `json:"fault_domain_id,omitempty"`
+		EdgePoolID       string `json:"edge_pool_id,omitempty"`
 		Slot             string `json:"slot"`
 		InstanceUID      string `json:"instance_uid"`
 		ReleaseEpoch     string `json:"release_epoch"`
@@ -779,6 +793,7 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 		}
 		instances = append(instances, instanceIdentity{
 			EdgeID: normalizeEdgeIdentity(instance.EdgeID), GroupID: normalizeGroupID(instance.GroupID),
+			FaultDomainID: strings.TrimSpace(instance.FaultDomainID), EdgePoolID: strings.TrimSpace(instance.EdgePoolID),
 			Slot: normalizeSlot(instance.Slot), InstanceUID: strings.TrimSpace(instance.InstanceUID), ReleaseEpoch: strings.TrimSpace(instance.ReleaseEpoch),
 			EffectiveHealthy: instance.EffectiveHealthy, NodeHealthy: instance.NodeHealthy,
 			NodeStatus: model.NormalizeEdgeHealthStatus(instance.NodeStatus), Draining: instance.Draining,
@@ -797,19 +812,23 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 	})
 	epoch := struct {
 		GroupID            string `json:"edge_group_id"`
+		FaultDomainID      string `json:"fault_domain_id,omitempty"`
+		EdgePoolID         string `json:"edge_pool_id,omitempty"`
 		Slot               string `json:"slot"`
 		ReleaseEpoch       string `json:"release_epoch"`
 		FenceSequence      uint64 `json:"fence_sequence"`
 		MinHealthyInstance int    `json:"min_healthy_instances"`
-	}{normalizeGroupID(snapshot.ActiveEpoch.GroupID), normalizeSlot(snapshot.ActiveEpoch.Slot), strings.TrimSpace(snapshot.ActiveEpoch.ReleaseEpoch), snapshot.ActiveEpoch.FenceSequence, snapshot.ActiveEpoch.MinHealthyInstances}
+	}{normalizeGroupID(snapshot.ActiveEpoch.GroupID), strings.TrimSpace(snapshot.ActiveEpoch.FaultDomainID), strings.TrimSpace(snapshot.ActiveEpoch.EdgePoolID), normalizeSlot(snapshot.ActiveEpoch.Slot), strings.TrimSpace(snapshot.ActiveEpoch.ReleaseEpoch), snapshot.ActiveEpoch.FenceSequence, snapshot.ActiveEpoch.MinHealthyInstances}
 	return digestJSON(struct {
-		Schema     string             `json:"schema"`
-		GroupID    string             `json:"edge_group_id"`
-		Sequence   uint64             `json:"sequence"`
-		Generation string             `json:"generation"`
-		Epoch      any                `json:"active_epoch"`
-		Instances  []instanceIdentity `json:"instances"`
-	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), snapshot.Sequence, strings.TrimSpace(snapshot.Generation), epoch, instances})
+		Schema        string             `json:"schema"`
+		GroupID       string             `json:"edge_group_id"`
+		FaultDomainID string             `json:"fault_domain_id,omitempty"`
+		EdgePoolID    string             `json:"edge_pool_id,omitempty"`
+		Sequence      uint64             `json:"sequence"`
+		Generation    string             `json:"generation"`
+		Epoch         any                `json:"active_epoch"`
+		Instances     []instanceIdentity `json:"instances"`
+	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), strings.TrimSpace(snapshot.FaultDomainID), strings.TrimSpace(snapshot.EdgePoolID), snapshot.Sequence, strings.TrimSpace(snapshot.Generation), epoch, instances})
 }
 
 func groupShadowInputDigest(intentDigest, groupID, inventoryDigest string) string {

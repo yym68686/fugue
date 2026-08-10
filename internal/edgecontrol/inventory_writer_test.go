@@ -399,6 +399,36 @@ func authorityInventoryHeartbeatFixture(groupID, nodeID string, expectedSequence
 	}
 }
 
+func TestGroupInventoryHeartbeatBindsFaultDomainAndPoolAcrossEnvelope(t *testing.T) {
+	value := authorityInventoryHeartbeatFixture("edge-group-neutral-a", "edge-01", 0, 1, time.Now().UTC(), "topology-binding-0001")
+	value.FaultDomainID = "fault-domain-ovh-fra-1"
+	value.EdgePoolID = "edge-pool-public-primary"
+	value.Inventory.FaultDomainID = value.FaultDomainID
+	value.Inventory.EdgePoolID = value.EdgePoolID
+	value.Inventory.ActiveEpoch.FaultDomainID = value.FaultDomainID
+	value.Inventory.ActiveEpoch.EdgePoolID = value.EdgePoolID
+	value.Inventory.Instances[0].FaultDomainID = value.FaultDomainID
+	value.Inventory.Instances[0].EdgePoolID = value.EdgePoolID
+	if err := validateGroupInventoryHeartbeat(value, value.GroupID); err != nil {
+		t.Fatalf("valid topology binding: %v", err)
+	}
+
+	mutations := []func(*GroupInventoryHeartbeat){
+		func(v *GroupInventoryHeartbeat) { v.Inventory.EdgePoolID = "edge-pool-other" },
+		func(v *GroupInventoryHeartbeat) { v.Inventory.ActiveEpoch.FaultDomainID = "fault-domain-other" },
+		func(v *GroupInventoryHeartbeat) { v.Inventory.Instances[0].EdgePoolID = "edge-pool-other" },
+		func(v *GroupInventoryHeartbeat) { v.FaultDomainID = "Country/DE" },
+	}
+	for index, mutate := range mutations {
+		candidate := value
+		candidate.Inventory.Instances = append([]GroupInstance(nil), value.Inventory.Instances...)
+		mutate(&candidate)
+		if err := validateGroupInventoryHeartbeat(candidate, candidate.GroupID); err == nil {
+			t.Fatalf("topology mutation %d was accepted", index)
+		}
+	}
+}
+
 func writeInventoryWriterKeyringFixture(t *testing.T, now time.Time, revoked bool) (string, []byte) {
 	t.Helper()
 	root := t.TempDir()
