@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/releaseguardian"
+	"k8s.io/client-go/kubernetes"
 )
 
 const maxChangedPathsBytes = 1 << 20
@@ -29,7 +31,7 @@ func main() {
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|build|receipt|prepare|execute|reconcile|install-monitor-record|monitor> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|restore-monitor|reconcile|install-monitor-record|monitor> ...")
 	}
 	switch args[0] {
 	case "plan":
@@ -38,6 +40,8 @@ func run(args []string, output io.Writer) error {
 		return runEmitGitHubOutput(args)
 	case "emit-monitor-output":
 		return runEmitMonitorOutput(args)
+	case "emit-delivery":
+		return runEmitDelivery(args, output)
 	case "build":
 		return runBuild(args, output)
 	case "receipt":
@@ -46,6 +50,10 @@ func run(args []string, output io.Writer) error {
 		return runPrepare(args, output)
 	case "execute":
 		return runExecute(args, output)
+	case "guardian-submit":
+		return runGuardianSubmit(args, output)
+	case "restore-monitor":
+		return runRestoreMonitor(args, output)
 	case "reconcile":
 		return runReconcile(args, output)
 	case "install-monitor-record":
@@ -53,8 +61,82 @@ func run(args []string, output io.Writer) error {
 	case "monitor":
 		return runMonitor(args, output)
 	default:
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|build|receipt|prepare|execute|reconcile|install-monitor-record|monitor> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|restore-monitor|reconcile|install-monitor-record|monitor> ...")
 	}
+}
+
+func runEmitDelivery(args []string, output io.Writer) error {
+	if len(args) != 3 {
+		return errors.New("usage: fugue-declarative-release emit-delivery PLAN COMPONENT")
+	}
+	plan, err := readPlan(args[1])
+	if err != nil {
+		return err
+	}
+	release, err := selectedRelease(plan, args[2])
+	if err != nil {
+		return err
+	}
+	value := "direct\n"
+	if release.Delivery != nil {
+		if release.Delivery.Writer != "guardian" {
+			return errors.New("production delivery writer is unsupported")
+		}
+		value = "guardian\n"
+	}
+	_, err = io.WriteString(output, value)
+	return err
+}
+
+func runGuardianSubmit(args []string, output io.Writer) error {
+	if len(args) != 2 {
+		return errors.New("usage: fugue-declarative-release guardian-submit PLAN_DIR")
+	}
+	files, err := readPlanDirectory(args[1])
+	if err != nil {
+		return err
+	}
+	plan, err := declarativerelease.DecodePlan(bytes.NewReader(files["release-plan.json"]))
+	if err != nil || len(plan.Releases) != 1 {
+		return errors.New("Guardian submission requires one exact component plan")
+	}
+	release := plan.Releases[0]
+	if release.Delivery == nil || release.Delivery.Writer != "guardian" {
+		return errors.New("component is not enrolled in Guardian delivery")
+	}
+	key := releaseguardian.Key{Component: release.ComponentID, Group: release.Delivery.Group}
+	config, err := loadComponentLeaseClientConfig()
+	if err != nil {
+		return err
+	}
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create Guardian submission client: %w", err)
+	}
+	store, err := releaseguardian.NewKubeStore(client, []releaseguardian.TargetConfig{{
+		Key: key, Namespace: release.Workload.Namespace, MonitorComponent: release.ComponentID,
+		DependencyService: release.Delivery.DependencyService,
+	}})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	_, desired, err := store.PublishDesired(ctx, key, files)
+	if err != nil {
+		return err
+	}
+	status, waitErr := store.WaitForTerminal(ctx, key, desired, 3*time.Second)
+	if status.StatusDigest != "" {
+		raw, encodeErr := declarativerelease.CanonicalJSON(status)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if _, encodeErr = output.Write(append(raw, '\n')); encodeErr != nil {
+			return encodeErr
+		}
+	}
+	return waitErr
 }
 
 func runPlan(args []string, output io.Writer) error {

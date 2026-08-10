@@ -248,10 +248,19 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 		registry,
 		"1111111111111111111111111111111111111111",
 		"2222222222222222222222222222222222222222",
-		[]string{".github/workflows/ci.yml", "cmd/fugue-declarative-release/main.go", "internal/declarativerelease/spec.go"},
+		[]string{".github/workflows/ci.yml"},
 	)
 	if err != nil || len(toolingPlan.Releases) != 0 {
 		t.Fatalf("registry activated a tooling-only migration commit: plan=%+v err=%v", toolingPlan, err)
+	}
+	guardianPlan, err := BuildPlan(
+		registry,
+		"1111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222",
+		[]string{"cmd/fugue-declarative-release/main.go", "internal/declarativerelease/spec.go", "deploy/releases/guardian/intent.json"},
+	)
+	if err != nil || len(guardianPlan.Releases) != 1 || guardianPlan.Releases[0].ComponentID != "release-guardian" {
+		t.Fatalf("Guardian runtime dependencies are not release-bound: plan=%+v err=%v", guardianPlan, err)
 	}
 	for _, component := range registry.Components {
 		manifestRaw, err := os.ReadFile(filepath.Join("../..", component.ManifestPath))

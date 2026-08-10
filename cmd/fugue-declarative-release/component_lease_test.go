@@ -171,6 +171,22 @@ func TestComponentLeaseIdentityIsStrict(t *testing.T) {
 	}
 }
 
+func TestComponentLeaseGuardianIdentityIsPodAndRecordScoped(t *testing.T) {
+	release := testLeaseRelease()
+	t.Setenv("FUGUE_COMPONENT_LEASE_OWNER", "guardian")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_POD_UID", "a6b0d605-0bf1-4e18-94c8-937dfd6209cf")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("b", 64))
+	holder, err := componentLeaseHolder(release, strings.Repeat("a", 40))
+	want := "guardian:a6b0d605-0bf1-4e18-94c8-937dfd6209cf:" + strings.Repeat("b", 16) + ":controller"
+	if err != nil || holder != want {
+		t.Fatalf("Guardian holder=%q want=%q err=%v", holder, want, err)
+	}
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:bad")
+	if _, err := componentLeaseHolder(release, strings.Repeat("a", 40)); err == nil {
+		t.Fatal("invalid Guardian record digest was accepted")
+	}
+}
+
 func TestComponentLeaseCoversLongestBoundedExecution(t *testing.T) {
 	if componentLeaseDurationSeconds <= int64((12*time.Minute)/time.Second) {
 		t.Fatalf("component lease duration %ds does not cover the 12-minute Edge executor", componentLeaseDurationSeconds)

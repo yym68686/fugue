@@ -1,0 +1,231 @@
+package releaseguardian
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"fugue/internal/declarativerelease"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// PublishDesired persists one immutable CI-produced target and advances only
+// its component/group DesiredRelease pointer with a Kubernetes
+// ResourceVersion CAS. It never writes a workload.
+func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[string][]byte) (ReleaseRecord, DesiredRelease, error) {
+	if store == nil || store.client == nil {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("release Guardian store is unavailable")
+	}
+	target, exists := store.targets[key]
+	if !exists {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("release Guardian target is not configured")
+	}
+	snapshot, err := store.Load(ctx, key)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	if snapshot.CurrentRecordDigest != snapshot.Desired.RecordDigest || snapshot.Health.Local.State != HealthHealthy || snapshot.Health.Dependency.State != HealthHealthy || snapshot.Health.Route.State != HealthHealthy {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
+	}
+	bundle, err := DecodeExecutionBundle(files, key)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	var stableMonitor declarativerelease.MonitorRecord
+	if err := decodeStrict([]byte(snapshot.CurrentMonitorData["record.json"]), &stableMonitor); err != nil || stableMonitor.RecordDigest == "" {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("current stable monitor record is invalid")
+	}
+	if !bundle.Prepared.LKG.Present || bundle.Release.ExpectedPreviousConfigSHA != stableMonitor.ConfigSHA ||
+		bundle.Release.ExpectedPreviousManifestSHA != stableMonitor.ConfigSHA ||
+		bundle.Release.ExpectedPreviousOCIRevision != stableMonitor.ConfigSHA ||
+		bundle.Release.ExpectedPreviousImageDigest != snapshot.Bundle.Artifact.TopDigest ||
+		digest(bundle.LKG) != stableMonitor.ForwardManifestDigest {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian candidate LKG is not the exact current stable release")
+	}
+	record, err := bundle.ReleaseRecord(key, snapshot.CurrentRecordDigest)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	recordRaw, err := declarativerelease.CanonicalJSON(record)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	data := make(map[string]string, len(bundle.Files)+1)
+	total := 0
+	for name, value := range bundle.Files {
+		data[name] = string(value)
+		total += len(name) + len(value)
+	}
+	data["guardian-record.json"] = string(recordRaw)
+	total += len("guardian-record.json") + len(recordRaw)
+	data["lkg-monitor-record-digest"] = stableMonitor.RecordDigest
+	total += len("lkg-monitor-record-digest") + len(stableMonitor.RecordDigest)
+	if total > maxRecordBytes {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian release record exceeds the bounded ConfigMap size")
+	}
+	immutable := true
+	recordMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: releaseRecordName(key, record.RecordDigest), Namespace: target.Namespace, Labels: guardianLabels(key)},
+		Immutable:  &immutable, Data: data,
+	}
+	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
+	created, createErr := configMaps.Create(ctx, recordMap, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(createErr) {
+		created, createErr = configMaps.Get(ctx, recordMap.Name, metav1.GetOptions{})
+		if createErr == nil && (created.Immutable == nil || !*created.Immutable || !stringMapEqual(created.Data, recordMap.Data)) {
+			createErr = errors.New("existing immutable Guardian release record differs from the candidate")
+		}
+	}
+	if createErr != nil {
+		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("persist immutable Guardian release record: %w", createErr)
+	}
+	next := DesiredRelease{
+		APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group,
+		RecordDigest: record.RecordDigest, Generation: snapshot.Desired.Generation + 1,
+	}
+	raw, err := declarativerelease.CanonicalJSON(next)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	desiredMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: desiredName(key), Namespace: target.Namespace, Labels: guardianLabels(key)},
+		Data:       map[string]string{"desired.json": string(raw)},
+	}
+	current, getErr := configMaps.Get(ctx, desiredMap.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(getErr) {
+		if snapshot.DesiredResourceVersion != "" {
+			return ReleaseRecord{}, DesiredRelease{}, errors.New("DesiredRelease disappeared before CAS")
+		}
+		_, err = configMaps.Create(ctx, desiredMap, metav1.CreateOptions{})
+	} else if getErr == nil {
+		if current.ResourceVersion != snapshot.DesiredResourceVersion {
+			return ReleaseRecord{}, DesiredRelease{}, errors.New("DesiredRelease changed before resourceVersion CAS")
+		}
+		updated := current.DeepCopy()
+		updated.Labels, updated.Data = desiredMap.Labels, desiredMap.Data
+		_, err = configMaps.Update(ctx, updated, metav1.UpdateOptions{})
+	} else {
+		err = getErr
+	}
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("advance DesiredRelease with resourceVersion CAS: %w", err)
+	}
+	return record, next, nil
+}
+
+func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected DesiredRelease, interval time.Duration) (ReleaseStatus, error) {
+	if expected.Validate() != nil || expected.Key() != key || interval < time.Second || interval > 30*time.Second {
+		return ReleaseStatus{}, errors.New("Guardian terminal wait configuration is invalid")
+	}
+	target, exists := store.targets[key]
+	if !exists {
+		return ReleaseStatus{}, errors.New("release Guardian target is not configured")
+	}
+	started := store.now().UTC().Add(-interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		value, err := store.client.CoreV1().ConfigMaps(target.Namespace).Get(ctx, statusName(key), metav1.GetOptions{})
+		if err == nil {
+			var status ReleaseStatus
+			if decodeStrict([]byte(value.Data["status.json"]), &status) == nil && status.Key() == key && status.Validate(store.now().UTC()) == nil {
+				observedAt, _ := time.Parse(time.RFC3339Nano, status.ObservedAt)
+				if !observedAt.Before(started) {
+					switch status.State {
+					case StateStable:
+						if status.TargetRecordDigest == expected.RecordDigest && status.CurrentRecordDigest == expected.RecordDigest {
+							return status, nil
+						}
+					case StateRecoveryRequired:
+						if status.TargetRecordDigest == expected.RecordDigest {
+							return status, fmt.Errorf("Guardian release ended in %s: %s", status.State, status.Reason)
+						}
+					case StateLKGStable:
+						if status.RolloutReceiptDigest != "" && status.TargetRecordDigest == status.CurrentRecordDigest && status.TargetRecordDigest != expected.RecordDigest {
+							current, getErr := store.client.CoreV1().ConfigMaps(target.Namespace).Get(ctx, desiredName(key), metav1.GetOptions{})
+							var desired DesiredRelease
+							if getErr == nil && decodeStrict([]byte(current.Data["desired.json"]), &desired) == nil && desired.Validate() == nil &&
+								desired.Generation == expected.Generation+1 && desired.RecordDigest == status.TargetRecordDigest {
+								return status, fmt.Errorf("Guardian release restored its LKG: %s", status.Reason)
+							}
+						}
+					}
+				}
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ReleaseStatus{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return ReleaseStatus{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (store *KubeStore) SetDesiredToLKG(ctx context.Context, snapshot Snapshot) error {
+	if store == nil || snapshot.Record.Validate() != nil || snapshot.DesiredResourceVersion == "" ||
+		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || !digestPattern.MatchString(snapshot.Record.LKGRecordDigest) ||
+		!digestPattern.MatchString(snapshot.LKGMonitorRecordDigest) {
+		return errors.New("DesiredRelease LKG rollback request is invalid")
+	}
+	target, exists := store.targets[snapshot.Key]
+	if !exists {
+		return errors.New("release Guardian target is not configured")
+	}
+	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
+	monitorName := monitorRecordNameFromDigest(target.MonitorComponent, snapshot.LKGMonitorRecordDigest)
+	monitorMap, err := configMaps.Get(ctx, monitorName, metav1.GetOptions{})
+	if err != nil || monitorMap.Immutable == nil || !*monitorMap.Immutable {
+		return errors.New("Guardian LKG monitor record is absent or mutable")
+	}
+	_, _, _, monitor, _, _, err := decodeStableRecord(monitorMap.Data)
+	if err != nil || monitor.RecordDigest != snapshot.LKGMonitorRecordDigest {
+		return errors.New("Guardian LKG monitor record binding is invalid")
+	}
+	current, err := configMaps.Get(ctx, desiredName(snapshot.Key), metav1.GetOptions{})
+	if err != nil || current.ResourceVersion != snapshot.DesiredResourceVersion {
+		return errors.New("DesiredRelease changed before LKG resourceVersion CAS")
+	}
+	var observed DesiredRelease
+	if decodeStrict([]byte(current.Data["desired.json"]), &observed) != nil || observed != snapshot.Desired {
+		return errors.New("DesiredRelease payload changed before LKG CAS")
+	}
+	next := DesiredRelease{
+		APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: snapshot.Key.Component, Group: snapshot.Key.Group,
+		RecordDigest: snapshot.Record.LKGRecordDigest, Generation: snapshot.Desired.Generation + 1,
+	}
+	raw, err := declarativerelease.CanonicalJSON(next)
+	if err != nil {
+		return err
+	}
+	updated := current.DeepCopy()
+	updated.Data = map[string]string{"desired.json": string(raw)}
+	updated.Labels = guardianLabels(snapshot.Key)
+	_, err = configMaps.Update(ctx, updated, metav1.UpdateOptions{})
+	return err
+}
+
+func monitorRecordNameFromDigest(component, recordDigest string) string {
+	suffix := strings.TrimPrefix(recordDigest, "sha256:")
+	if len(suffix) > 16 {
+		suffix = suffix[:16]
+	}
+	return "fugue-release-record-" + component + "-" + suffix
+}
+
+func stringMapEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}

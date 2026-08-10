@@ -42,7 +42,7 @@ func TestObjectNamesRemainComponentAndGroupScoped(t *testing.T) {
 	}
 }
 
-func TestGuardianShadowResourcesHaveIndependentProberAndNoWorkloadWriteRBAC(t *testing.T) {
+func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *testing.T) {
 	raw, err := os.ReadFile("../../deploy/releases/guardian/resources.json")
 	if err != nil {
 		t.Fatal(err)
@@ -58,13 +58,16 @@ func TestGuardianShadowResourcesHaveIndependentProberAndNoWorkloadWriteRBAC(t *t
 	source := string(encoded)
 	for _, required := range []string{
 		`"name":"fugue-release-guardian"`, `"name":"fugue-release-canary-prober"`,
-		`"value":"shadow"`, `"value":"guardian"`, `"value":"canary-prober"`,
+		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,
+		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
+		`"resources":["deployments"],"verbs":["create","delete","get","list","patch","update","watch"]`,
+		`"resources":["daemonsets"],"verbs":["get","list","watch"]`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Guardian resources lack %s", required)
 		}
 	}
-	for _, forbidden := range []string{`"secrets"`, `"delete"`, `"patch"`, `"daemonsets/status"`, `"deployments/status"`} {
+	for _, forbidden := range []string{`"secrets"`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("shadow Guardian resources grant forbidden capability %s", forbidden)
 		}

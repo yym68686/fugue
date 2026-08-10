@@ -103,9 +103,10 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatal("prepare, execute, and reconcile must share the masked read-only registry credential")
 	}
 	for _, required := range []string{
-		"\"${RELEASE_TOOL}\" prepare", "\"${RELEASE_TOOL}\" execute", "\"${RELEASE_TOOL}\" reconcile",
+		"\"${RELEASE_TOOL}\" prepare", "\"${RELEASE_TOOL}\" emit-delivery", "\"${RELEASE_TOOL}\" execute", "\"${RELEASE_TOOL}\" guardian-submit", "\"${RELEASE_TOOL}\" reconcile",
 		"Upload the durable prewrite plan before mutation", "Upload terminal component receipt",
-		"continue-on-error: true", "if: steps.execute.outcome == 'failure'",
+		"continue-on-error: true", "if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'",
+		"if: steps.delivery.outputs.writer == 'guardian'",
 	} {
 		if strings.Count(action, required) != 1 {
 			t.Fatalf("declarative component action must contain %q exactly once", required)

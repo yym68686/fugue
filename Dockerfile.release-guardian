@@ -8,15 +8,23 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags='-s -w' -o /out/fugue-release-guardian ./cmd/fugue-release-guardian
+    go build -trimpath -ldflags='-s -w' -o /out/fugue-release-guardian ./cmd/fugue-release-guardian && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w' -o /out/fugue-declarative-release ./cmd/fugue-declarative-release
+
+FROM registry.k8s.io/kubectl:v1.35.4 AS kubectl
 
 FROM alpine:3.21
 ARG SOURCE_COMMIT
 ARG SOURCE_URL
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates curl python3
 LABEL org.opencontainers.image.title="fugue-release-guardian" \
       org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}"
+WORKDIR /opt/fugue
 COPY --from=build /out/fugue-release-guardian /usr/local/bin/fugue-release-guardian
+COPY --from=build /out/fugue-declarative-release /usr/local/bin/fugue-declarative-release
+COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl
+COPY scripts/verify_registry_image.py scripts/verify_registry_image.py
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/fugue-release-guardian"]

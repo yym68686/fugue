@@ -74,17 +74,16 @@ func (store *KubeStore) Keys() []Key {
 }
 
 type storedRelease struct {
-	record   ReleaseRecord
-	desired  DesiredRelease
-	monitor  declarativerelease.MonitorRecord
-	plan     declarativerelease.Plan
-	artifact declarativerelease.ArtifactReceipt
-	prepared declarativerelease.ExecutionPlan
-	forward  []byte
-	lkg      []byte
-	release  declarativerelease.PlanRelease
-	stateRV  string
-	statusRV string
+	record              ReleaseRecord
+	desired             DesiredRelease
+	currentRecordDigest string
+	bundle              ExecutionBundle
+	currentBundle       ExecutionBundle
+	currentMonitorData  map[string]string
+	desiredRV           string
+	statusRV            string
+	managed             bool
+	lkgMonitorDigest    string
 }
 
 func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
@@ -97,14 +96,16 @@ func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	now := store.now().UTC()
-	local := store.localHealth(ctx, stored.release, stored.prepared.Forward, now)
+	local := store.localHealth(ctx, stored.currentBundle.Release, stored.currentBundle.Prepared.Forward, now)
 	dependency := store.dependencyHealth(ctx, target, now)
 	route := store.routeHealth(ctx, target, stored.record.RecordDigest, now)
 	return Snapshot{
 		Key: key, Record: stored.record, Desired: stored.desired,
-		CurrentRecordDigest: stored.record.RecordDigest, LastSuccessfulLKG: stored.monitor.LKGManifestDigest,
+		CurrentRecordDigest: stored.currentRecordDigest, LastSuccessfulLKG: stored.currentRecordDigest,
 		Health:                HealthSnapshot{Local: local, Dependency: dependency, Route: route},
-		StatusResourceVersion: stored.statusRV,
+		StatusResourceVersion: stored.statusRV, DesiredResourceVersion: stored.desiredRV,
+		Bundle: stored.bundle, CurrentMonitorData: stored.currentMonitorData,
+		LKGMonitorRecordDigest: stored.lkgMonitorDigest, Managed: stored.managed,
 	}, nil
 }
 
@@ -150,18 +151,116 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	if err != nil {
 		return storedRelease{}, err
 	}
-	record, err := NewReleaseRecord(target.Key, prepared.ConfigSHA, artifact.TopDigest, monitor.ForwardManifestDigest, monitor.LKGManifestDigest, digest(healthRaw))
+	stableRecord, err := NewReleaseRecord(target.Key, prepared.ConfigSHA, artifact.TopDigest, monitor.ForwardManifestDigest, monitor.RecordDigest, digest(healthRaw))
 	if err != nil {
 		return storedRelease{}, err
 	}
-	desired := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: target.Key.Component, Group: target.Key.Group, RecordDigest: record.RecordDigest, Generation: 1}
+	stableFiles, err := executionFilesFromStrings(recordMap.Data)
+	if err != nil {
+		return storedRelease{}, err
+	}
+	stableBundle := ExecutionBundle{Plan: plan, Artifact: artifact, Prepared: prepared, Release: release, Forward: forward, LKG: lkg, Files: stableFiles}
+	desired := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: target.Key.Component, Group: target.Key.Group, RecordDigest: stableRecord.RecordDigest, Generation: 1}
+	selectedRecord, selectedBundle := stableRecord, stableBundle
+	lkgMonitorDigest := ""
+	desiredRV := ""
+	managed := false
+	desiredMap, desiredErr := configMaps.Get(ctx, desiredName(target.Key), metav1.GetOptions{})
+	if desiredErr == nil {
+		managed = true
+		desiredRV = desiredMap.ResourceVersion
+		if err := decodeStrict([]byte(desiredMap.Data["desired.json"]), &desired); err != nil || desired.Key() != target.Key || desired.Validate() != nil {
+			return storedRelease{}, errors.New("desired release pointer is invalid")
+		}
+		if desired.RecordDigest != stableRecord.RecordDigest {
+			candidateMap, err := configMaps.Get(ctx, releaseRecordName(target.Key, desired.RecordDigest), metav1.GetOptions{})
+			if err != nil {
+				return storedRelease{}, fmt.Errorf("read immutable Guardian release record: %w", err)
+			}
+			if candidateMap.Immutable == nil || !*candidateMap.Immutable || totalConfigMapBytes(candidateMap.Data) > maxRecordBytes {
+				return storedRelease{}, errors.New("Guardian release record metadata is invalid")
+			}
+			if err := decodeStrict([]byte(candidateMap.Data["guardian-record.json"]), &selectedRecord); err != nil || selectedRecord.Validate() != nil || selectedRecord.Key() != target.Key || selectedRecord.RecordDigest != desired.RecordDigest {
+				return storedRelease{}, errors.New("Guardian release record envelope is invalid")
+			}
+			lkgMonitorDigest = strings.TrimSpace(candidateMap.Data["lkg-monitor-record-digest"])
+			if !digestPattern.MatchString(lkgMonitorDigest) {
+				return storedRelease{}, errors.New("Guardian release record LKG monitor binding is invalid")
+			}
+			candidateFiles, err := executionFilesFromStrings(candidateMap.Data)
+			if err != nil {
+				return storedRelease{}, err
+			}
+			selectedBundle, err = DecodeExecutionBundle(candidateFiles, target.Key)
+			if err != nil {
+				return storedRelease{}, err
+			}
+			want, err := selectedBundle.ReleaseRecord(target.Key, selectedRecord.LKGRecordDigest)
+			if err != nil || want != selectedRecord {
+				return storedRelease{}, errors.New("Guardian release record does not match its canonical execution bundle")
+			}
+		}
+	} else if !apierrors.IsNotFound(desiredErr) {
+		return storedRelease{}, desiredErr
+	}
+	if managed && lkgMonitorDigest == "" {
+		lkgMonitorDigest, err = store.findLKGMonitorDigest(ctx, target, prepared.LKG, monitor.LKGManifestDigest)
+		if err != nil {
+			return storedRelease{}, err
+		}
+	}
+	currentRecordDigest, currentBundle := stableRecord.RecordDigest, stableBundle
+	if stableMatchesRecord(monitor, artifact, selectedRecord) {
+		currentRecordDigest, currentBundle = selectedRecord.RecordDigest, selectedBundle
+	}
 	statusRV := ""
 	if status, statusErr := configMaps.Get(ctx, statusName(target.Key), metav1.GetOptions{}); statusErr == nil {
 		statusRV = status.ResourceVersion
 	} else if !apierrors.IsNotFound(statusErr) {
 		return storedRelease{}, statusErr
 	}
-	return storedRelease{record: record, desired: desired, monitor: monitor, plan: plan, artifact: artifact, prepared: prepared, forward: forward, lkg: lkg, release: release, stateRV: state.ResourceVersion, statusRV: statusRV}, nil
+	monitorData := make(map[string]string, len(recordMap.Data))
+	for name, value := range recordMap.Data {
+		monitorData[name] = value
+	}
+	return storedRelease{
+		record: selectedRecord, desired: desired, currentRecordDigest: currentRecordDigest,
+		bundle: selectedBundle, currentBundle: currentBundle, currentMonitorData: monitorData,
+		desiredRV: desiredRV, statusRV: statusRV, managed: managed, lkgMonitorDigest: lkgMonitorDigest,
+	}, nil
+}
+
+func stableMatchesRecord(monitor declarativerelease.MonitorRecord, artifact declarativerelease.ArtifactReceipt, record ReleaseRecord) bool {
+	return monitor.ConfigSHA == record.ConfigSHA && artifact.TopDigest == record.ImageDigest && monitor.ForwardManifestDigest == record.ManifestDigest
+}
+
+func (store *KubeStore) findLKGMonitorDigest(ctx context.Context, target TargetConfig, lkg declarativerelease.TargetIdentity, lkgManifestDigest string) (string, error) {
+	if !lkg.Present || !digestPattern.MatchString(lkgManifestDigest) {
+		return "", errors.New("current stable release has no valid LKG identity")
+	}
+	values, err := store.client.CoreV1().ConfigMaps(target.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "fugue.pro/component=" + target.MonitorComponent})
+	if err != nil {
+		return "", err
+	}
+	match := ""
+	for _, value := range values.Items {
+		if !strings.HasPrefix(value.Name, "fugue-release-record-"+target.MonitorComponent+"-") || value.Immutable == nil || !*value.Immutable {
+			continue
+		}
+		_, artifact, prepared, monitor, _, _, decodeErr := decodeStableRecord(value.Data)
+		if decodeErr != nil || monitor.ForwardManifestDigest != lkgManifestDigest || prepared.Forward.ConfigSHA != lkg.ConfigSHA ||
+			prepared.Forward.OCIRevision != lkg.OCIRevision || prepared.Forward.ImageRef != lkg.ImageRef || artifact.ImmutableRef != lkg.ImageRef {
+			continue
+		}
+		if match != "" && match != monitor.RecordDigest {
+			return "", errors.New("multiple immutable monitor records match the current LKG")
+		}
+		match = monitor.RecordDigest
+	}
+	if match == "" {
+		return "", errors.New("immutable monitor record for the current LKG is absent")
+	}
+	return match, nil
 }
 
 func decodeStableRecord(data map[string]string) (declarativerelease.Plan, declarativerelease.ArtifactReceipt, declarativerelease.ExecutionPlan, declarativerelease.MonitorRecord, []byte, []byte, error) {
@@ -390,8 +489,17 @@ func NewCanaryResult(record ReleaseRecord, state HealthState, evidenceDigest str
 	return result, nil
 }
 
-func statusName(key Key) string { return objectName("fugue-release-status", key) }
-func canaryName(key Key) string { return objectName("fugue-canary-result", key) }
+func statusName(key Key) string  { return objectName("fugue-release-status", key) }
+func canaryName(key Key) string  { return objectName("fugue-canary-result", key) }
+func desiredName(key Key) string { return objectName("fugue-desired-release", key) }
+
+func releaseRecordName(key Key, recordDigest string) string {
+	suffix := strings.TrimPrefix(recordDigest, "sha256:")
+	if len(suffix) > 16 {
+		suffix = suffix[:16]
+	}
+	return objectName("fugue-guardian-record", key) + "-" + suffix
+}
 
 func objectName(prefix string, key Key) string {
 	name := prefix + "-" + key.Component

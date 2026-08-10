@@ -73,10 +73,17 @@ func runGuardian(ctx context.Context, client kubernetes.Interface, store *releas
 	if mode == "" {
 		mode = releaseguardian.ModeShadow
 	}
-	if mode != releaseguardian.ModeShadow {
-		return errors.New("the first Guardian migration slice is shadow-only")
+	var executor releaseguardian.Executor
+	if mode == releaseguardian.ModeWrite {
+		value, err := releaseguardian.NewProcessExecutor("/usr/local/bin/fugue-declarative-release", os.Getenv("FUGUE_RELEASE_GUARDIAN_POD_UID"))
+		if err != nil {
+			return err
+		}
+		executor = value
+	} else if mode != releaseguardian.ModeShadow {
+		return errors.New("release Guardian mode is invalid")
 	}
-	controller, err := releaseguardian.NewController(mode, store, nil)
+	controller, err := releaseguardian.NewController(mode, store, executor)
 	if err != nil {
 		return err
 	}

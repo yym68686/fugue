@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/declarativerelease"
 )
 
 const (
@@ -52,11 +54,16 @@ func TestClassifySeparatesLocalDependencyAndRouteFailures(t *testing.T) {
 type fakeStore struct {
 	snapshot Snapshot
 	status   ReleaseStatus
+	lkgCAS   int
 }
 
 func (store *fakeStore) Load(context.Context, Key) (Snapshot, error) { return store.snapshot, nil }
 func (store *fakeStore) UpdateStatus(_ context.Context, _ Snapshot, status ReleaseStatus) error {
 	store.status = status
+	return nil
+}
+func (store *fakeStore) SetDesiredToLKG(context.Context, Snapshot) error {
+	store.lkgCAS++
 	return nil
 }
 
@@ -86,6 +93,8 @@ func testSnapshot(t *testing.T, health HealthSnapshot, current string) Snapshot 
 		Key: key, Record: record,
 		Desired:             DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group, RecordDigest: record.RecordDigest, Generation: 1},
 		CurrentRecordDigest: current, LastSuccessfulLKG: otherDigest, Health: health, StatusResourceVersion: "1",
+		Bundle:                 ExecutionBundle{Prepared: declarativerelease.ExecutionPlan{Component: key.Component}},
+		LKGMonitorRecordDigest: testDigest, Managed: true,
 	}
 }
 

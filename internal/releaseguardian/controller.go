@@ -17,13 +17,18 @@ const (
 )
 
 type Snapshot struct {
-	Key                   Key
-	Record                ReleaseRecord
-	Desired               DesiredRelease
-	CurrentRecordDigest   string
-	LastSuccessfulLKG     string
-	Health                HealthSnapshot
-	StatusResourceVersion string
+	Key                    Key
+	Record                 ReleaseRecord
+	Desired                DesiredRelease
+	CurrentRecordDigest    string
+	LastSuccessfulLKG      string
+	Health                 HealthSnapshot
+	StatusResourceVersion  string
+	DesiredResourceVersion string
+	Bundle                 ExecutionBundle
+	CurrentMonitorData     map[string]string
+	LKGMonitorRecordDigest string
+	Managed                bool
 }
 
 func (snapshot Snapshot) Validate(now time.Time) error {
@@ -31,7 +36,8 @@ func (snapshot Snapshot) Validate(now time.Time) error {
 		snapshot.Record.Key() != snapshot.Key || snapshot.Desired.Key() != snapshot.Key ||
 		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || snapshot.Health.Validate(now) != nil ||
 		(snapshot.CurrentRecordDigest != "" && !digestPattern.MatchString(snapshot.CurrentRecordDigest)) ||
-		!digestPattern.MatchString(snapshot.LastSuccessfulLKG) {
+		!digestPattern.MatchString(snapshot.LastSuccessfulLKG) || snapshot.Bundle.Prepared.Component != snapshot.Key.Component ||
+		(snapshot.Managed && !digestPattern.MatchString(snapshot.LKGMonitorRecordDigest)) {
 		return errors.New("release guardian snapshot is invalid")
 	}
 	return nil
@@ -40,6 +46,7 @@ func (snapshot Snapshot) Validate(now time.Time) error {
 type Store interface {
 	Load(context.Context, Key) (Snapshot, error)
 	UpdateStatus(context.Context, Snapshot, ReleaseStatus) error
+	SetDesiredToLKG(context.Context, Snapshot) error
 }
 
 type ExecutionReceipt struct {
@@ -130,8 +137,12 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health,
 		Reason: decision.Reason, ObservedAt: now.Format(time.RFC3339Nano),
 	}
-	if controller.mode == ModeShadow {
-		status.Reason = "shadow: " + status.Reason
+	if controller.mode == ModeShadow || !snapshot.Managed {
+		prefix := "shadow: "
+		if controller.mode == ModeWrite && !snapshot.Managed {
+			prefix = "unmanaged: "
+		}
+		status.Reason = prefix + status.Reason
 		sealed, sealErr := status.Seal()
 		if sealErr != nil {
 			return sealErr
@@ -147,6 +158,25 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		} else {
 			status.RolloutReceiptDigest = receipt.ReceiptDigest
 			status.Reason = receipt.Reason
+			switch receipt.Status {
+			case "verified":
+				status.State = StateVerifying
+				status.CurrentRecordDigest = snapshot.Record.RecordDigest
+			case "compensated", "failed-no-write":
+				if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
+					status.State = StateRecoveryRequired
+					status.Reason = "rollout reached a known safe terminal state but DesiredRelease rollback CAS failed: " + err.Error()
+				} else {
+					status.State = StateLKGStable
+					status.CurrentRecordDigest = snapshot.Record.LKGRecordDigest
+					status.TargetRecordDigest = snapshot.Record.LKGRecordDigest
+				}
+			case "recovery-required":
+				status.State = StateRecoveryRequired
+			default:
+				status.State = StateRecoveryRequired
+				status.Reason = "rollout returned an invalid terminal status"
+			}
 		}
 	}
 	if decision.RollbackEligible {
@@ -157,9 +187,18 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 			status.Reason = "rollback result is unknown: " + executeErr.Error()
 		} else {
 			status.RollbackReceiptDigest = receipt.ReceiptDigest
-			status.CurrentRecordDigest = receipt.RecordDigest
-			status.State = StateLKGStable
-			status.Reason = receipt.Reason
+			if receipt.Status != "compensated" {
+				status.State = StateRecoveryRequired
+				status.Reason = receipt.Reason
+			} else if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
+				status.State = StateRecoveryRequired
+				status.Reason = "LKG is restored but DesiredRelease rollback CAS failed: " + err.Error()
+			} else {
+				status.CurrentRecordDigest = receipt.RecordDigest
+				status.TargetRecordDigest = receipt.RecordDigest
+				status.State = StateLKGStable
+				status.Reason = receipt.Reason
+			}
 		}
 	}
 	sealed, err := status.Seal()

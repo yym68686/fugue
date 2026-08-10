@@ -67,6 +67,17 @@ type Component struct {
 	Transition        *Transition       `json:"transition,omitempty"`
 	Health            []HealthProbe     `json:"health"`
 	Concurrency       string            `json:"concurrency"`
+	Delivery          *Delivery         `json:"delivery,omitempty"`
+}
+
+// Delivery selects the production writer for one component. The default is
+// the existing direct GitHub executor. Guardian delivery is explicitly
+// enrolled per component/group so migration cannot silently change another
+// component's writer.
+type Delivery struct {
+	Writer            string `json:"writer"`
+	Group             string `json:"group,omitempty"`
+	DependencyService string `json:"dependencyService,omitempty"`
 }
 
 // ArtifactTarget identifies every container in the component resource set
@@ -186,6 +197,7 @@ type PlanRelease struct {
 	Transition                  *Transition       `json:"transition,omitempty"`
 	Health                      []HealthProbe     `json:"health"`
 	Concurrency                 string            `json:"concurrency"`
+	Delivery                    *Delivery         `json:"delivery,omitempty"`
 }
 
 // DecodeRegistry accepts exactly one strict JSON document.
@@ -326,6 +338,12 @@ func (component Component) Validate() error {
 	}
 	if component.Concurrency != "fugue-production-"+component.ID {
 		return fmt.Errorf("component %q concurrency must be component-scoped", component.ID)
+	}
+	if component.Delivery != nil {
+		if component.Delivery.Writer != "guardian" || !componentIDPattern.MatchString(component.Delivery.Group) ||
+			!componentIDPattern.MatchString(component.Delivery.DependencyService) {
+			return fmt.Errorf("component %q Guardian delivery identity is invalid", component.ID)
+		}
 	}
 	if err := component.Workload.validate(component.ID); err != nil {
 		return err
@@ -741,6 +759,10 @@ func BindIntents(registry Registry, plan Plan, current, previous map[string]Inte
 		release.Workload = component.Workload
 		release.Health = append([]HealthProbe(nil), component.Health...)
 		release.Concurrency = component.Concurrency
+		if component.Delivery != nil {
+			copyDelivery := *component.Delivery
+			release.Delivery = &copyDelivery
+		}
 	}
 	unsigned, err := CanonicalJSON(plan)
 	if err != nil {

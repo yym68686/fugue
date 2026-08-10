@@ -280,6 +280,45 @@ func (store *monitorStore) updateState(ctx context.Context, snapshot monitorSnap
 	return snapshot, nil
 }
 
+func (store *monitorStore) activateExistingRecord(ctx context.Context, current monitorSnapshot, recordName string, bundle monitorBundle) (monitorSnapshot, error) {
+	if store == nil || store.client == nil || recordName != monitorRecordName(bundle.Record) || bundle.Record.Component != current.Bundle.Record.Component {
+		return monitorSnapshot{}, errors.New("existing monitor record activation is invalid")
+	}
+	configMaps := store.client.ConfigMaps(current.Namespace)
+	recordMap, err := configMaps.Get(ctx, recordName, metav1.GetOptions{})
+	if err != nil || recordMap.Immutable == nil || !*recordMap.Immutable {
+		return monitorSnapshot{}, errors.New("existing monitor record is absent or mutable")
+	}
+	stored, err := decodeStoredMonitorBundle(recordMap.Data)
+	if err != nil || stored.Record != bundle.Record {
+		return monitorSnapshot{}, errors.New("existing monitor record content is invalid")
+	}
+	state, _, err := declarativerelease.NewMonitorState(bundle.Record, declarativerelease.MonitorState{}, true, "", store.now())
+	if err != nil {
+		return monitorSnapshot{}, err
+	}
+	state.RollbackStatus = "lkg-restored"
+	stateRaw, err := declarativerelease.CanonicalJSON(state)
+	if err != nil {
+		return monitorSnapshot{}, err
+	}
+	pointer, err := configMaps.Get(ctx, current.StateName, metav1.GetOptions{})
+	if err != nil || string(pointer.UID) != current.StateUID || pointer.ResourceVersion != current.StateRV || pointer.Data["recordName"] != current.RecordName {
+		return monitorSnapshot{}, errors.New("component monitor pointer changed before LKG activation CAS")
+	}
+	updated := pointer.DeepCopy()
+	updated.Labels = monitorLabels(bundle.Record.Component, bundle.Record.ConfigSHA)
+	updated.Data = map[string]string{"recordName": recordName, "state.json": string(stateRaw)}
+	updated, err = configMaps.Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return monitorSnapshot{}, fmt.Errorf("activate existing LKG monitor record with resourceVersion CAS: %w", err)
+	}
+	return monitorSnapshot{
+		Namespace: current.Namespace, StateName: current.StateName, StateUID: string(updated.UID), StateRV: updated.ResourceVersion,
+		RecordName: recordName, State: state, Bundle: bundle,
+	}, nil
+}
+
 func monitorRecordData(raw map[string][]byte) (map[string]string, int, error) {
 	names := make([]string, 0, len(raw))
 	for name := range raw {

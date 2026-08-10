@@ -48,6 +48,9 @@ func newComponentLeaseCoordinator() (*componentLeaseCoordinator, error) {
 }
 
 func loadComponentLeaseClientConfig() (*rest.Config, error) {
+	if config, err := rest.InClusterConfig(); err == nil && config != nil && strings.TrimSpace(config.Host) != "" {
+		return config, nil
+	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
 	if err != nil {
@@ -60,6 +63,20 @@ func loadComponentLeaseClientConfig() (*rest.Config, error) {
 }
 
 func componentLeaseHolder(release declarativerelease.PlanRelease, configSHA string) (string, error) {
+	if strings.TrimSpace(os.Getenv("FUGUE_COMPONENT_LEASE_OWNER")) == "guardian" {
+		podUID := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_POD_UID"))
+		recordDigest := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST"))
+		if podUID == "" || len(podUID) > 80 || strings.ContainsAny(podUID, "\r\n:\x00") ||
+			!strings.HasPrefix(recordDigest, "sha256:") || len(recordDigest) != 71 || strings.Trim(recordDigest[7:], "0123456789abcdef") != "" ||
+			len(configSHA) != 40 || strings.Trim(configSHA, "0123456789abcdef") != "" {
+			return "", errors.New("Guardian component lease identity is invalid")
+		}
+		holder := "guardian:" + podUID + ":" + recordDigest[7:23] + ":" + release.ComponentID
+		if len(holder) > 253 {
+			return "", errors.New("Guardian component lease identity is oversized")
+		}
+		return holder, nil
+	}
 	repository := strings.TrimSpace(os.Getenv("GITHUB_REPOSITORY"))
 	runID := strings.TrimSpace(os.Getenv("GITHUB_RUN_ID"))
 	attempt := strings.TrimSpace(os.Getenv("GITHUB_RUN_ATTEMPT"))

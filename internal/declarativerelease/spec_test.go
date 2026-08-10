@@ -134,6 +134,29 @@ func TestBuildPlanRequiresSameCommitIntent(t *testing.T) {
 	}
 }
 
+func TestGuardianDeliveryIsExplicitAndGroupScoped(t *testing.T) {
+	component := Component{
+		ID: "edge-control-gamma", Family: "edge", IntentPath: "deploy/releases/edge-control-gamma/intent.json",
+		ManifestPath: "deploy/releases/edge-control-gamma/resources.json", SourceRoots: []string{"cmd/fugue-edge-control"},
+		Artifact: Artifact{Repository: "ghcr.io/example/edge-control", Dockerfile: "Dockerfile.edge-control", Context: ".", BuildPackage: "./cmd/fugue-edge-control"},
+		Workload: Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-gamma", Container: "edge-control", FieldManager: "edge-control-gamma-declarative", Replicas: 1, RolloutMode: "recreate"},
+		Health:   []HealthProbe{{Type: "deployment", Name: "edge-control-gamma"}}, Concurrency: "fugue-production-edge-control-gamma",
+		Delivery: &Delivery{Writer: "guardian", Group: "gamma", DependencyService: "fugue-fugue"},
+	}
+	if err := component.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	component.Delivery.Group = ""
+	if err := component.Validate(); err == nil {
+		t.Fatal("Guardian delivery without a group was accepted")
+	}
+	component.Delivery.Group = "gamma"
+	component.Delivery.Writer = "direct"
+	if err := component.Validate(); err == nil {
+		t.Fatal("implicit direct delivery metadata was accepted")
+	}
+}
+
 func TestBuildPlanTreatsGoTestsAsNonRuntime(t *testing.T) {
 	registry := testRegistry()
 	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{
