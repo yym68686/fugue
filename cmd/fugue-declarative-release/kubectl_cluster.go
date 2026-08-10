@@ -880,12 +880,22 @@ func managedFieldsEntryPointers(fields map[string]any) ([]string, error) {
 					return err
 				}
 			case strings.HasPrefix(key, "k:") && len(path) > 0:
-				var selector map[string]string
-				if err := json.Unmarshal([]byte(strings.TrimPrefix(key, "k:")), &selector); err != nil || len(selector) != 1 || selector["name"] == "" {
+				decoder := json.NewDecoder(strings.NewReader(strings.TrimPrefix(key, "k:")))
+				decoder.UseNumber()
+				var selector map[string]any
+				if err := decoder.Decode(&selector); err != nil || len(selector) == 0 {
 					return errors.New("managedFields associative selector is invalid")
 				}
 				next := append([]string(nil), path...)
-				next[len(next)-1] += "[name=" + selector["name"] + "]"
+				if name, ok := selector["name"].(string); ok && len(selector) == 1 && name != "" {
+					next[len(next)-1] += "[name=" + name + "]"
+				} else {
+					canonical, err := declarativerelease.CanonicalJSON(selector)
+					if err != nil {
+						return errors.New("managedFields associative selector is invalid")
+					}
+					next[len(next)-1] += "[selector=" + strings.TrimPrefix(digestBytesLocal(canonical), "sha256:") + "]"
+				}
 				if err := walk(child, next); err != nil {
 					return err
 				}

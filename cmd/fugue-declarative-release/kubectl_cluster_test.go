@@ -425,6 +425,33 @@ func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
 	}
 }
 
+func TestEmergencyOwnershipVerificationAcceptsOpaqueKubernetesListSelectors(t *testing.T) {
+	allowed := []string{"/spec/template/spec/containers[name=edge]/image"}
+	metadata := map[string]any{"managedFields": []any{
+		map[string]any{"manager": "fugue-edge-worker-de-declarative", "operation": "Apply", "fieldsV1": managedFieldsTree(t, allowed)},
+		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsV1": map[string]any{
+			"f:spec": map[string]any{"f:template": map[string]any{"f:spec": map[string]any{"f:containers": map[string]any{
+				`k:{"name":"edge"}`: map[string]any{"f:ports": map[string]any{
+					`k:{"containerPort":7832,"protocol":"TCP"}`: map[string]any{"f:name": map[string]any{}},
+				}},
+			}}}},
+		}},
+	}}
+	pointers, err := managedFieldsEntryPointers(mapField(metadata["managedFields"].([]any)[1].(map[string]any), "fieldsV1"))
+	if err != nil || len(pointers) != 1 || !strings.Contains(pointers[0], "/ports[selector=") || !strings.HasSuffix(pointers[0], "]/name") {
+		t.Fatalf("opaque associative selector was not preserved safely: pointers=%v err=%v", pointers, err)
+	}
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{FieldManager: "fugue-edge-worker-de-declarative"}, ArtifactTargets: []declarativerelease.ArtifactTarget{{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a", Container: "edge", ContainerType: "container",
+	}}}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "worker-a"}
+	desired := map[string]any{"metadata": map[string]any{}, "spec": map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "edge", "image": "target"}}}}}}
+	live := map[string]any{"metadata": metadata}
+	if err := verifyNoEmergencyOwnership(release, identity, desired, live); err != nil {
+		t.Fatalf("unrelated Kubernetes list selector blocked exact runtime ownership verification: %v", err)
+	}
+}
+
 func deepCopyJSONMap(t *testing.T, value map[string]any) map[string]any {
 	t.Helper()
 	raw := mustJSON(t, value)
