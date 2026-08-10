@@ -64,18 +64,19 @@ func (s *Server) deriveDiscoveryBundle(r *http.Request, principal model.Principa
 
 	apiURL := s.publicAPIURL(r)
 	bundle := model.DiscoveryBundle{
-		SchemaVersion:    model.BundleSchemaVersionV1,
-		GeneratedAt:      now,
-		ValidUntil:       now.Add(s.discoveryBundleTTL()),
-		Issuer:           model.BundleIssuerFugue,
-		APIEndpoints:     s.discoveryAPIEndpoints(apiURL),
-		Kubernetes:       s.discoveryKubernetesEndpoints(),
-		Registry:         s.discoveryRegistryEndpoints(),
-		EdgeGroups:       edgeGroups,
-		EdgeNodes:        edgeNodes,
-		DNSNodes:         dnsNodes,
-		PlatformRoutes:   s.platformRoutes,
-		PublicRuntimeEnv: s.discoveryRuntimeEnv(apiURL),
+		SchemaVersion:       model.BundleSchemaVersionV1,
+		GeneratedAt:         now,
+		ValidUntil:          now.Add(s.discoveryBundleTTL()),
+		Issuer:              model.BundleIssuerFugue,
+		APIEndpoints:        s.discoveryAPIEndpoints(apiURL),
+		Kubernetes:          s.discoveryKubernetesEndpoints(),
+		Registry:            s.discoveryRegistryEndpoints(),
+		EdgeGroups:          edgeGroups,
+		EdgeNodes:           edgeNodes,
+		EdgeSelectionPolicy: model.DefaultEdgeSelectionPolicy(),
+		DNSNodes:            dnsNodes,
+		PlatformRoutes:      s.platformRoutes,
+		PublicRuntimeEnv:    s.discoveryRuntimeEnv(apiURL),
 	}
 	bundle.Generation = discoveryBundleGeneration(bundle, nodePolicies, edgeRoutes)
 	bundle = signDiscoveryBundle(bundle, s.bundleKeyring(), s.discoveryBundleTTL())

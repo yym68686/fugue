@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -412,32 +413,91 @@ type DiscoveryKubernetesEndpoint struct {
 }
 
 type DiscoveryBundle struct {
-	SchemaVersion      string                        `json:"schema_version"`
-	Generation         string                        `json:"generation"`
-	PreviousGeneration string                        `json:"previous_generation,omitempty"`
-	GeneratedAt        time.Time                     `json:"generated_at"`
-	ValidUntil         time.Time                     `json:"valid_until"`
-	Issuer             string                        `json:"issuer"`
-	KeyID              string                        `json:"key_id,omitempty"`
-	Signature          string                        `json:"signature,omitempty"`
-	Signatures         []BundleSignature             `json:"signatures,omitempty"`
-	APIEndpoints       []DiscoveryEndpoint           `json:"api_endpoints"`
-	Kubernetes         []DiscoveryKubernetesEndpoint `json:"kubernetes"`
-	Registry           []DiscoveryRegistryEndpoint   `json:"registry"`
-	EdgeGroups         []EdgeGroup                   `json:"edge_groups"`
-	EdgeNodes          []EdgeNode                    `json:"edge_nodes"`
-	DNSNodes           []DNSNode                     `json:"dns_nodes"`
-	PlatformRoutes     []PlatformRoute               `json:"platform_routes,omitempty"`
-	PublicRuntimeEnv   map[string]string             `json:"public_runtime_env,omitempty"`
+	SchemaVersion       string                        `json:"schema_version"`
+	Generation          string                        `json:"generation"`
+	PreviousGeneration  string                        `json:"previous_generation,omitempty"`
+	GeneratedAt         time.Time                     `json:"generated_at"`
+	ValidUntil          time.Time                     `json:"valid_until"`
+	Issuer              string                        `json:"issuer"`
+	KeyID               string                        `json:"key_id,omitempty"`
+	Signature           string                        `json:"signature,omitempty"`
+	Signatures          []BundleSignature             `json:"signatures,omitempty"`
+	APIEndpoints        []DiscoveryEndpoint           `json:"api_endpoints"`
+	Kubernetes          []DiscoveryKubernetesEndpoint `json:"kubernetes"`
+	Registry            []DiscoveryRegistryEndpoint   `json:"registry"`
+	EdgeGroups          []EdgeGroup                   `json:"edge_groups"`
+	EdgeNodes           []EdgeNode                    `json:"edge_nodes"`
+	EdgeSelectionPolicy *EdgeSelectionPolicy          `json:"edge_selection_policy,omitempty"`
+	DNSNodes            []DNSNode                     `json:"dns_nodes"`
+	PlatformRoutes      []PlatformRoute               `json:"platform_routes,omitempty"`
+	PublicRuntimeEnv    map[string]string             `json:"public_runtime_env,omitempty"`
 }
 
 type EdgeSelectionPolicy struct {
-	RuntimeLocality bool     `json:"runtime_locality"`
-	ClientLocality  bool     `json:"client_locality"`
-	EdgeHealth      bool     `json:"edge_health"`
-	Capacity        bool     `json:"capacity"`
-	Latency         bool     `json:"latency"`
-	FallbackOrder   []string `json:"fallback_order,omitempty"`
+	Mode                     string   `json:"mode"`
+	RuntimeLocality          bool     `json:"runtime_locality"`
+	ClientLocality           bool     `json:"client_locality"`
+	EdgeHealth               bool     `json:"edge_health"`
+	Capacity                 bool     `json:"capacity"`
+	Latency                  bool     `json:"latency"`
+	Sticky                   bool     `json:"sticky"`
+	StandbyCount             int      `json:"standby_count"`
+	FailureThreshold         int      `json:"failure_threshold"`
+	SwitchImprovementPercent int      `json:"switch_improvement_percent"`
+	SwitchCooldownSeconds    int      `json:"switch_cooldown_seconds"`
+	ProbeIntervalSeconds     int      `json:"probe_interval_seconds"`
+	MaxCandidates            int      `json:"max_candidates"`
+	FallbackOrder            []string `json:"fallback_order,omitempty"`
+}
+
+const EdgeSelectionModeStickyLatency = "sticky_latency"
+
+// DefaultEdgeSelectionPolicy is part of the signed discovery contract. It
+// treats country and region as optional hints; health and measured latency
+// choose the endpoint, while stickiness and cooldown prevent flapping.
+func DefaultEdgeSelectionPolicy() *EdgeSelectionPolicy {
+	return &EdgeSelectionPolicy{
+		Mode:                     EdgeSelectionModeStickyLatency,
+		ClientLocality:           true,
+		EdgeHealth:               true,
+		Capacity:                 true,
+		Latency:                  true,
+		Sticky:                   true,
+		StandbyCount:             1,
+		FailureThreshold:         3,
+		SwitchImprovementPercent: 15,
+		SwitchCooldownSeconds:    300,
+		ProbeIntervalSeconds:     30,
+		MaxCandidates:            8,
+	}
+}
+
+func (policy EdgeSelectionPolicy) Validate() error {
+	if policy.Mode != EdgeSelectionModeStickyLatency {
+		return fmt.Errorf("unsupported edge selection mode %q", policy.Mode)
+	}
+	if !policy.EdgeHealth || !policy.Latency || !policy.Sticky {
+		return fmt.Errorf("edge selection policy must require health, latency, and stickiness")
+	}
+	if policy.StandbyCount < 1 || policy.StandbyCount > 4 {
+		return fmt.Errorf("edge selection standby count is invalid: %d", policy.StandbyCount)
+	}
+	if policy.FailureThreshold < 1 || policy.FailureThreshold > 10 {
+		return fmt.Errorf("edge selection failure threshold is invalid: %d", policy.FailureThreshold)
+	}
+	if policy.SwitchImprovementPercent < 1 || policy.SwitchImprovementPercent > 100 {
+		return fmt.Errorf("edge selection improvement threshold is invalid: %d", policy.SwitchImprovementPercent)
+	}
+	if policy.SwitchCooldownSeconds < 1 || policy.SwitchCooldownSeconds > 86400 {
+		return fmt.Errorf("edge selection cooldown is invalid: %d", policy.SwitchCooldownSeconds)
+	}
+	if policy.ProbeIntervalSeconds < 1 || policy.ProbeIntervalSeconds > 3600 {
+		return fmt.Errorf("edge selection probe interval is invalid: %d", policy.ProbeIntervalSeconds)
+	}
+	if policy.MaxCandidates < policy.StandbyCount+1 || policy.MaxCandidates > 100 {
+		return fmt.Errorf("edge selection candidate limit is invalid: %d", policy.MaxCandidates)
+	}
+	return nil
 }
 
 type PlatformDomainBinding struct {

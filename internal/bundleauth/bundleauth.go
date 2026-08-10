@@ -109,6 +109,11 @@ func VerifyDiscoveryBundleWithKeyring(bundle model.DiscoveryBundle, keyring Keyr
 	if err := validateBundleSchemaVersion(bundle.SchemaVersion); err != nil {
 		return err
 	}
+	if bundle.EdgeSelectionPolicy != nil {
+		if err := bundle.EdgeSelectionPolicy.Validate(); err != nil {
+			return err
+		}
+	}
 	return verifyBundleSignature(bundle, keyring, now, bundle.ValidUntil, bundle.KeyID, bundle.Signature, bundle.Signatures)
 }
 
@@ -380,27 +385,28 @@ func bundleSignature(issuer, keyID, signature string, generatedAt, validUntil ti
 }
 
 type bundleSigningPayload struct {
-	SchemaVersion      string            `json:"schema_version,omitempty"`
-	Version            string            `json:"version,omitempty"`
-	Generation         string            `json:"generation,omitempty"`
-	PreviousGeneration string            `json:"previous_generation,omitempty"`
-	GeneratedAt        time.Time         `json:"generated_at,omitempty"`
-	ValidUntil         time.Time         `json:"valid_until,omitempty"`
-	Issuer             string            `json:"issuer,omitempty"`
-	KeyID              string            `json:"key_id,omitempty"`
-	EdgeID             string            `json:"edge_id,omitempty"`
-	EdgeGroupID        string            `json:"edge_group_id,omitempty"`
-	Routes             any               `json:"routes,omitempty"`
-	TLSAllowlist       any               `json:"tls_allowlist,omitempty"`
-	Records            any               `json:"records,omitempty"`
-	APIEndpoints       any               `json:"api_endpoints,omitempty"`
-	Kubernetes         any               `json:"kubernetes,omitempty"`
-	Registry           any               `json:"registry,omitempty"`
-	EdgeGroups         any               `json:"edge_groups,omitempty"`
-	EdgeNodes          any               `json:"edge_nodes,omitempty"`
-	DNSNodes           any               `json:"dns_nodes,omitempty"`
-	PlatformRoutes     any               `json:"platform_routes,omitempty"`
-	PublicRuntimeEnv   map[string]string `json:"public_runtime_env,omitempty"`
+	SchemaVersion       string            `json:"schema_version,omitempty"`
+	Version             string            `json:"version,omitempty"`
+	Generation          string            `json:"generation,omitempty"`
+	PreviousGeneration  string            `json:"previous_generation,omitempty"`
+	GeneratedAt         time.Time         `json:"generated_at,omitempty"`
+	ValidUntil          time.Time         `json:"valid_until,omitempty"`
+	Issuer              string            `json:"issuer,omitempty"`
+	KeyID               string            `json:"key_id,omitempty"`
+	EdgeID              string            `json:"edge_id,omitempty"`
+	EdgeGroupID         string            `json:"edge_group_id,omitempty"`
+	Routes              any               `json:"routes,omitempty"`
+	TLSAllowlist        any               `json:"tls_allowlist,omitempty"`
+	Records             any               `json:"records,omitempty"`
+	APIEndpoints        any               `json:"api_endpoints,omitempty"`
+	Kubernetes          any               `json:"kubernetes,omitempty"`
+	Registry            any               `json:"registry,omitempty"`
+	EdgeGroups          any               `json:"edge_groups,omitempty"`
+	EdgeNodes           any               `json:"edge_nodes,omitempty"`
+	EdgeSelectionPolicy any               `json:"edge_selection_policy,omitempty"`
+	DNSNodes            any               `json:"dns_nodes,omitempty"`
+	PlatformRoutes      any               `json:"platform_routes,omitempty"`
+	PublicRuntimeEnv    map[string]string `json:"public_runtime_env,omitempty"`
 }
 
 func cloneBundleForSigning[T any](bundle T, validUntil time.Time, keyID string) bundleSigningPayload {
@@ -408,21 +414,22 @@ func cloneBundleForSigning[T any](bundle T, validUntil time.Time, keyID string) 
 	switch typed := any(bundle).(type) {
 	case model.DiscoveryBundle:
 		payload = bundleSigningPayload{
-			SchemaVersion:      typed.SchemaVersion,
-			Generation:         typed.Generation,
-			PreviousGeneration: typed.PreviousGeneration,
-			GeneratedAt:        typed.GeneratedAt,
-			ValidUntil:         validUntil,
-			Issuer:             typed.Issuer,
-			KeyID:              keyID,
-			APIEndpoints:       typed.APIEndpoints,
-			Kubernetes:         typed.Kubernetes,
-			Registry:           typed.Registry,
-			EdgeGroups:         typed.EdgeGroups,
-			EdgeNodes:          typed.EdgeNodes,
-			DNSNodes:           typed.DNSNodes,
-			PlatformRoutes:     typed.PlatformRoutes,
-			PublicRuntimeEnv:   typed.PublicRuntimeEnv,
+			SchemaVersion:       typed.SchemaVersion,
+			Generation:          typed.Generation,
+			PreviousGeneration:  typed.PreviousGeneration,
+			GeneratedAt:         typed.GeneratedAt,
+			ValidUntil:          validUntil,
+			Issuer:              typed.Issuer,
+			KeyID:               keyID,
+			APIEndpoints:        typed.APIEndpoints,
+			Kubernetes:          typed.Kubernetes,
+			Registry:            typed.Registry,
+			EdgeGroups:          typed.EdgeGroups,
+			EdgeNodes:           typed.EdgeNodes,
+			EdgeSelectionPolicy: typed.EdgeSelectionPolicy,
+			DNSNodes:            typed.DNSNodes,
+			PlatformRoutes:      typed.PlatformRoutes,
+			PublicRuntimeEnv:    typed.PublicRuntimeEnv,
 		}
 	case model.EdgeRouteBundle:
 		payload = bundleSigningPayload{

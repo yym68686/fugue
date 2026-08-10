@@ -60,6 +60,30 @@ func TestEdgeRouteBundleSignsOnlyCurrentKeyringPayloads(t *testing.T) {
 	}
 }
 
+func TestDiscoveryBundleSignatureBindsEdgeSelectionPolicy(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	bundle := model.DiscoveryBundle{
+		SchemaVersion:       model.BundleSchemaVersionV1,
+		Generation:          "discovery_policy",
+		GeneratedAt:         now,
+		Issuer:              model.BundleIssuerFugue,
+		EdgeSelectionPolicy: model.DefaultEdgeSelectionPolicy(),
+	}
+	signed := SignDiscoveryBundle(bundle, "policy-key", "policy-key-1", time.Hour)
+	if err := VerifyDiscoveryBundle(signed, "policy-key", "policy-key-1", now); err != nil {
+		t.Fatalf("verify signed discovery policy: %v", err)
+	}
+
+	tampered := signed
+	copyPolicy := *signed.EdgeSelectionPolicy
+	copyPolicy.SwitchCooldownSeconds++
+	tampered.EdgeSelectionPolicy = &copyPolicy
+	if err := VerifyDiscoveryBundle(tampered, "policy-key", "policy-key-1", now); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("tampered selection policy must fail signature verification: %v", err)
+	}
+}
+
 func TestEdgeDNSBundleSignsOnlyCurrentKeyringPayloads(t *testing.T) {
 	t.Parallel()
 
