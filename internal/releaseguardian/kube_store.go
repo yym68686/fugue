@@ -191,7 +191,12 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	stableBundle := ExecutionBundle{Plan: plan, Artifact: artifact, Prepared: prepared, Release: release, Forward: forward, LKG: lkg, Files: stableFiles}
 	desired := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: target.Key.Component, Group: target.Key.Group, RecordDigest: stableRecord.RecordDigest, Generation: 1}
 	selectedRecord, selectedBundle := stableRecord, stableBundle
-	lkgMonitorDigest := ""
+	// The stable record is itself the exact rollback anchor for the next
+	// release.  Once DesiredRelease points back to that record after a known
+	// compensation, do not walk the stable record's older LKG chain: the
+	// prober and the next publisher must remain bound to the current production
+	// monitor record.
+	lkgMonitorDigest := monitor.RecordDigest
 	desiredRV := ""
 	managed := false
 	desiredMap, desiredErr := configMaps.Get(ctx, desiredName(target.Key), metav1.GetOptions{})
@@ -232,12 +237,6 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	} else if !apierrors.IsNotFound(desiredErr) {
 		return storedRelease{}, desiredErr
 	}
-	if managed && lkgMonitorDigest == "" {
-		lkgMonitorDigest, err = store.findLKGMonitorDigest(ctx, target, prepared.LKG, monitor.LKGManifestDigest)
-		if err != nil {
-			return storedRelease{}, err
-		}
-	}
 	currentRecordDigest, currentBundle := stableRecord.RecordDigest, stableBundle
 	if stableMatchesRecord(monitor, artifact, selectedRecord) {
 		currentRecordDigest, currentBundle = selectedRecord.RecordDigest, selectedBundle
@@ -261,35 +260,6 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 
 func stableMatchesRecord(monitor declarativerelease.MonitorRecord, artifact declarativerelease.ArtifactReceipt, record ReleaseRecord) bool {
 	return monitor.ConfigSHA == record.ConfigSHA && artifact.TopDigest == record.ImageDigest && monitor.ForwardManifestDigest == record.ManifestDigest
-}
-
-func (store *KubeStore) findLKGMonitorDigest(ctx context.Context, target TargetConfig, lkg declarativerelease.TargetIdentity, lkgManifestDigest string) (string, error) {
-	if !lkg.Present || !digestPattern.MatchString(lkgManifestDigest) {
-		return "", errors.New("current stable release has no valid LKG identity")
-	}
-	values, err := store.client.CoreV1().ConfigMaps(target.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "fugue.pro/component=" + target.MonitorComponent})
-	if err != nil {
-		return "", err
-	}
-	match := ""
-	for _, value := range values.Items {
-		if !strings.HasPrefix(value.Name, "fugue-release-record-"+target.MonitorComponent+"-") || value.Immutable == nil || !*value.Immutable {
-			continue
-		}
-		_, artifact, prepared, monitor, _, _, decodeErr := decodeStableRecord(value.Data)
-		if decodeErr != nil || monitor.ForwardManifestDigest != lkgManifestDigest || prepared.Forward.ConfigSHA != lkg.ConfigSHA ||
-			prepared.Forward.OCIRevision != lkg.OCIRevision || prepared.Forward.ImageRef != lkg.ImageRef || artifact.ImmutableRef != lkg.ImageRef {
-			continue
-		}
-		if match != "" && match != monitor.RecordDigest {
-			return "", errors.New("multiple immutable monitor records match the current LKG")
-		}
-		match = monitor.RecordDigest
-	}
-	if match == "" {
-		return "", errors.New("immutable monitor record for the current LKG is absent")
-	}
-	return match, nil
 }
 
 func decodeStableRecord(data map[string]string) (declarativerelease.Plan, declarativerelease.ArtifactReceipt, declarativerelease.ExecutionPlan, declarativerelease.MonitorRecord, []byte, []byte, error) {

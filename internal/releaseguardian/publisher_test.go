@@ -124,6 +124,14 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	if decodeStrict([]byte(rolledBack.Data["desired.json"]), &restored) != nil || restored.RecordDigest != stableGuardian.RecordDigest || restored.Generation != 3 {
 		t.Fatalf("restored DesiredRelease=%+v", restored)
 	}
+	restoredSnapshot, err := store.Load(context.Background(), key)
+	if err != nil {
+		t.Fatalf("load restored LKG: %v", err)
+	}
+	if restoredSnapshot.Record != stableGuardian || restoredSnapshot.CurrentRecordDigest != stableGuardian.RecordDigest ||
+		restoredSnapshot.LKGMonitorRecordDigest != stableRecord.RecordDigest {
+		t.Fatalf("restored snapshot=%+v", restoredSnapshot)
+	}
 	if err := store.SetDesiredToLKG(context.Background(), snapshot); err == nil {
 		t.Fatalf("stale LKG CAS was accepted: %v", err)
 	}

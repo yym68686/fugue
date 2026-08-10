@@ -60,7 +60,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"name":"fugue-release-guardian"`, `"name":"fugue-release-canary-prober"`,
 		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,
 		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
-		`"resources":["configmaps"],"verbs":["create","get","list","update"]`,
+		`"resources":["configmaps"],"verbs":["create","get","update"]`,
 		`"resources":["deployments"],"verbs":["create","delete","get","list","patch","update","watch"]`,
 		`"resources":["daemonsets"],"verbs":["get","list","watch"]`,
 	} {
