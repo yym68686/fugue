@@ -52,7 +52,7 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 	control := byID[virtual.Control.ID]
 	client := byID[virtual.Client.ID]
 	worker := byID[virtual.Worker.ID]
-	if client.ID != "edge-client-gamma" || client.Concurrency != "fugue-production-edge-client-gamma" ||
+	if client.ID != "edge-client-gamma" || client.Concurrency != "fugue-production-edge-client-gamma" || virtual.FaultDomainID != "fault-domain-test-gamma" || virtual.EdgePoolID != "edge-pool-test-gamma" || virtual.Labels["country"] != "test" ||
 		control.Workload.Name != "edge-control-gamma" || control.Concurrency != "fugue-production-edge-control-gamma" ||
 		worker.Concurrency != "fugue-production-edge-worker-gamma" {
 		t.Fatalf("third group did not get independent resources and Lease: client=%+v control=%+v worker=%+v", client, control, worker)
@@ -361,5 +361,5 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "edge-group-authority", Name: groupID}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
 		Concurrency: "fugue-production-edge-worker-" + id,
 	}
-	return EdgeGroup{ID: id, GroupID: groupID, Client: client, Control: control, Worker: worker}
+	return EdgeGroup{ID: id, GroupID: groupID, FaultDomainID: "fault-domain-test-" + id, EdgePoolID: "edge-pool-test-" + id, Labels: map[string]string{"country": "test", "region": "test"}, Client: client, Control: control, Worker: worker}
 }

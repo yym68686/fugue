@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 )
 
 const (
@@ -25,11 +26,14 @@ type EdgeGroupRegistry struct {
 // component records intentionally remain ordinary declarative Component data:
 // adding a group adds data, not a new execution path.
 type EdgeGroup struct {
-	ID      string    `json:"id"`
-	GroupID string    `json:"groupId"`
-	Client  Component `json:"client"`
-	Control Component `json:"control"`
-	Worker  Component `json:"worker"`
+	ID            string            `json:"id"`
+	GroupID       string            `json:"groupId"`
+	FaultDomainID string            `json:"faultDomainId"`
+	EdgePoolID    string            `json:"edgePoolId"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Client        Component         `json:"client"`
+	Control       Component         `json:"control"`
+	Worker        Component         `json:"worker"`
 }
 
 func DecodeEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, error) {
@@ -51,10 +55,14 @@ func DecodeHistoricalEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, err
 		APIVersion string `json:"apiVersion"`
 		Kind       string `json:"kind"`
 		Groups     []struct {
-			ID      string    `json:"id"`
-			GroupID string    `json:"groupId"`
-			Control Component `json:"control"`
-			Worker  Component `json:"worker"`
+			ID            string            `json:"id"`
+			GroupID       string            `json:"groupId"`
+			FaultDomainID string            `json:"faultDomainId,omitempty"`
+			EdgePoolID    string            `json:"edgePoolId,omitempty"`
+			Labels        map[string]string `json:"labels,omitempty"`
+			Client        Component         `json:"client,omitempty"`
+			Control       Component         `json:"control"`
+			Worker        Component         `json:"worker"`
 		} `json:"groups"`
 	}
 	if err := decodeStrict(reader, &legacy); err != nil {
@@ -62,7 +70,10 @@ func DecodeHistoricalEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, err
 	}
 	registry := EdgeGroupRegistry{APIVersion: legacy.APIVersion, Kind: legacy.Kind, Groups: make([]EdgeGroup, 0, len(legacy.Groups))}
 	for _, group := range legacy.Groups {
-		registry.Groups = append(registry.Groups, EdgeGroup{ID: group.ID, GroupID: group.GroupID, Control: group.Control, Worker: group.Worker})
+		registry.Groups = append(registry.Groups, EdgeGroup{
+			ID: group.ID, GroupID: group.GroupID, FaultDomainID: group.FaultDomainID, EdgePoolID: group.EdgePoolID, Labels: group.Labels,
+			Client: group.Client, Control: group.Control, Worker: group.Worker,
+		})
 	}
 	if err := registry.validate(false); err != nil {
 		return EdgeGroupRegistry{}, err
@@ -100,6 +111,14 @@ func (registry EdgeGroupRegistry) validate(requireClient bool) error {
 func (group EdgeGroup) validate(requireClient bool) error {
 	if !componentIDPattern.MatchString(group.ID) || !edgeGroupIDPattern.MatchString(group.GroupID) {
 		return errors.New("edge group identity is invalid")
+	}
+	if requireClient && (!componentIDPattern.MatchString(group.FaultDomainID) || !componentIDPattern.MatchString(group.EdgePoolID)) {
+		return errors.New("edge group fault domain and pool identity are invalid")
+	}
+	for key, value := range group.Labels {
+		if !componentIDPattern.MatchString(key) || strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
+			return errors.New("edge group labels are invalid")
+		}
 	}
 	wantControl := "edge-control-" + group.ID
 	wantClient := "edge-client-" + group.ID
