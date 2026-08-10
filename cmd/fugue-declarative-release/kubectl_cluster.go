@@ -975,10 +975,17 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		}
 		select {
 		case <-ctx.Done():
-			return observation, ctx.Err()
+			return observation, waitHealthyTerminalError(ctx.Err(), lastFailure)
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func waitHealthyTerminalError(contextErr, lastFailure error) error {
+	if lastFailure == nil {
+		return contextErr
+	}
+	return fmt.Errorf("%v; last health observation: %w", contextErr, lastFailure)
 }
 
 func shouldReturnTypedPrewritePredecessorHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, err error) bool {

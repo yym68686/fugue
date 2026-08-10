@@ -563,6 +563,17 @@ func TestHealthSoakTrackerRequiresOneContinuousWindow(t *testing.T) {
 	}
 }
 
+func TestWaitHealthyTerminalErrorPreservesLastObservation(t *testing.T) {
+	lastFailure := errors.New("live registry identity mismatch")
+	err := waitHealthyTerminalError(context.DeadlineExceeded, lastFailure)
+	if !errors.Is(err, lastFailure) || !strings.Contains(err.Error(), "context deadline exceeded; last health observation: live registry identity mismatch") {
+		t.Fatalf("terminal health error lost its concrete observation: %v", err)
+	}
+	if err := waitHealthyTerminalError(context.DeadlineExceeded, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("empty last observation changed the context error: %v", err)
+	}
+}
+
 func TestPodHTTPUsesBoundReadyPodIPAndNamedPort(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/readyz" {
