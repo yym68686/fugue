@@ -284,6 +284,60 @@ func TestProductionRegistryNamesEveryRuntimeLane(t *testing.T) {
 	}
 }
 
+func TestProductionAPIHasGenericPublicRouteCanaryForEveryEdgeGroup(t *testing.T) {
+	baseFile, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := DecodeRegistry(baseFile)
+	_ = baseFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := DecodeEdgeGroupRegistry(edgeFile)
+	_ = edgeFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := MergeEdgeGroupRegistry(base, edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var api Component
+	for _, component := range merged.Components {
+		if component.ID == "api" {
+			api = component
+			break
+		}
+	}
+	apiCanaries := map[string]HealthProbe{}
+	for _, probe := range api.Health {
+		if probe.Type == "public-route-http" {
+			apiCanaries[probe.Address] = probe
+		}
+	}
+	if len(apiCanaries) != len(edge.Groups) {
+		t.Fatalf("API public route canaries=%d edge groups=%d", len(apiCanaries), len(edge.Groups))
+	}
+	for _, group := range edge.Groups {
+		var address string
+		for _, probe := range group.Worker.Health {
+			if probe.Type == "public-route-http" {
+				address = probe.Address
+				break
+			}
+		}
+		probe, ok := apiCanaries[address]
+		if !ok || probe.Host != "api.fugue.pro" || probe.Path != "/healthz" || probe.Expected != "\"status\":\"ok\"" {
+			t.Fatalf("API lacks the generic route canary for group %s: %+v", group.ID, probe)
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

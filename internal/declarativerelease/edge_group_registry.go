@@ -140,6 +140,18 @@ func (group EdgeGroup) validate(requireClient bool) error {
 	if err := group.Worker.Validate(); err != nil {
 		return fmt.Errorf("worker component: %w", err)
 	}
+	publicRoute, err := edgeGroupPublicRouteProbe(group)
+	if err != nil {
+		return err
+	}
+	if publicRoute.Name != group.GroupID {
+		return errors.New("edge worker public route canary is not group-bound")
+	}
+	for _, probe := range group.Control.Health {
+		if probe.Type == "public-route-http" {
+			return errors.New("edge control public route canary must derive from worker group data")
+		}
+	}
 	transition := group.Worker.Transition
 	if transition == nil || transition.EdgeGroupAB == nil || transition.EdgeGroupAB.GroupID != group.GroupID {
 		return errors.New("edge worker transition is not bound to the registry group")
@@ -173,6 +185,22 @@ func (group EdgeGroup) validate(requireClient bool) error {
 	return nil
 }
 
+func edgeGroupPublicRouteProbe(group EdgeGroup) (HealthProbe, error) {
+	var found HealthProbe
+	count := 0
+	for _, probe := range group.Worker.Health {
+		if probe.Type != "public-route-http" {
+			continue
+		}
+		found = probe
+		count++
+	}
+	if count != 1 {
+		return HealthProbe{}, fmt.Errorf("edge group %q must define exactly one worker public route canary", group.ID)
+	}
+	return found, nil
+}
+
 // MergeEdgeGroupRegistry expands data-defined Edge groups into the ordinary
 // component inventory used by the planner and executor.
 func MergeEdgeGroupRegistry(base Registry, edge EdgeGroupRegistry) (Registry, error) {
@@ -187,8 +215,36 @@ func MergeEdgeGroupRegistry(base Registry, edge EdgeGroupRegistry) (Registry, er
 	}
 	merged := base
 	merged.Components = append([]Component(nil), base.Components...)
+	apiIndex := -1
+	for index := range merged.Components {
+		component := &merged.Components[index]
+		component.Health = append([]HealthProbe(nil), component.Health...)
+		if component.ID != "api" {
+			continue
+		}
+		apiIndex = index
+		for _, probe := range component.Health {
+			if probe.Type == "public-route-http" {
+				return Registry{}, errors.New("API public route canaries must derive from edge group data")
+			}
+		}
+	}
+	if apiIndex < 0 {
+		return Registry{}, errors.New("production component registry omits API")
+	}
 	for _, group := range edge.Groups {
-		merged.Components = append(merged.Components, group.Client, group.Control, group.Worker)
+		publicRoute, err := edgeGroupPublicRouteProbe(group)
+		if err != nil {
+			return Registry{}, err
+		}
+		control := group.Control
+		control.Health = append(append([]HealthProbe(nil), control.Health...), publicRoute)
+		apiProbe := publicRoute
+		apiProbe.Name = "api-via-" + group.GroupID
+		apiProbe.Host = "api.fugue.pro"
+		apiProbe.Expected = "\"status\":\"ok\""
+		merged.Components[apiIndex].Health = append(merged.Components[apiIndex].Health, apiProbe)
+		merged.Components = append(merged.Components, group.Client, control, group.Worker)
 	}
 	sort.Slice(merged.Components, func(i, j int) bool { return merged.Components[i].ID < merged.Components[j].ID })
 	if err := merged.Validate(); err != nil {

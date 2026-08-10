@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -94,6 +95,15 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 }
 
 func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
+	baseFile, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := DecodeRegistry(baseFile)
+	_ = baseFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
 	if err != nil {
 		t.Fatal(err)
@@ -103,13 +113,23 @@ func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	merged, err := MergeEdgeGroupRegistry(base, edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]Component, len(merged.Components))
+	for _, component := range merged.Components {
+		byID[component.ID] = component
+	}
 	for _, group := range edge.Groups {
 		count := 0
+		var workerCanary HealthProbe
 		for _, probe := range group.Worker.Health {
 			if probe.Type != "public-route-http" {
 				continue
 			}
 			count++
+			workerCanary = probe
 			if err := probe.validate(); err != nil {
 				t.Fatalf("group %s public route canary is invalid: %v", group.ID, err)
 			}
@@ -119,6 +139,18 @@ func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 		}
 		if count != 1 {
 			t.Fatalf("group %s must define exactly one generic public route canary, got %d", group.ID, count)
+		}
+		controlCount := 0
+		for _, probe := range byID[group.Control.ID].Health {
+			if probe.Type == "public-route-http" {
+				controlCount++
+				if !reflect.DeepEqual(probe, workerCanary) {
+					t.Fatalf("group %s control canary did not derive exactly from worker data: got=%+v want=%+v", group.ID, probe, workerCanary)
+				}
+			}
+		}
+		if controlCount != 1 {
+			t.Fatalf("group %s control must inherit exactly one public route canary, got %d", group.ID, controlCount)
 		}
 	}
 }
@@ -386,9 +418,15 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: workerAName, Container: "edge", ContainerType: "container"},
 			{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: workerBName, Container: "edge", ContainerType: "container"},
 		},
-		Workload:    Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: frontName, Container: "edge-front", FieldManager: "fugue-edge-worker-" + id + "-declarative", RolloutMode: "on-delete"},
-		Transition:  &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: groupID, FrontName: frontName, WorkerAName: workerAName, WorkerBName: workerBName, WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
-		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "edge-group-authority", Name: groupID}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
+		Workload:   Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: frontName, Container: "edge-front", FieldManager: "fugue-edge-worker-" + id + "-declarative", RolloutMode: "on-delete"},
+		Transition: &Transition{Type: "edge-group-ab", EdgeGroupAB: &EdgeGroupABTransition{GroupID: groupID, FrontName: frontName, WorkerAName: workerAName, WorkerBName: workerBName, WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}},
+		Health: []HealthProbe{
+			{Type: "daemonset", Name: frontName},
+			{Type: "edge-group-authority", Name: groupID},
+			{Type: "public-route-http", Name: groupID, Address: "192.0.2.10:443", Host: "platform.example.test", Path: "/healthz", Expected: "ok"},
+			{Type: "daemonset", Name: workerAName},
+			{Type: "daemonset", Name: workerBName},
+		},
 		Concurrency: "fugue-production-edge-worker-" + id,
 	}
 	return EdgeGroup{ID: id, GroupID: groupID, FaultDomainID: "fault-domain-test-" + id, EdgePoolID: "edge-pool-test-" + id, Labels: map[string]string{"country": "test", "region": "test"}, Client: client, Control: control, Worker: worker}
