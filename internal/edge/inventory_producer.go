@@ -28,7 +28,12 @@ const (
 )
 
 type InventoryProducerConfig struct {
-	URL                 string
+	URL string
+	// AuthorityService is the explicit service identity projected by the
+	// component manifest. It is deliberately independent of EdgeGroupID:
+	// groups are publication/fencing partitions, not a naming convention for
+	// Kubernetes services.
+	AuthorityService    string
 	IdentityKeyringFile string
 	ActivationStateFile string
 	Interval            time.Duration
@@ -48,6 +53,7 @@ type inventoryProducerIdentityKeyringFile struct {
 func InventoryProducerConfigFromEnv() InventoryProducerConfig {
 	cfg := InventoryProducerConfig{
 		URL:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_HEARTBEAT_URL")),
+		AuthorityService:    strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_AUTHORITY_SERVICE")),
 		IdentityKeyringFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_IDENTITY_KEYRING_FILE")),
 		ActivationStateFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_ACTIVATION_STATE_FILE")),
 	}
@@ -79,11 +85,13 @@ func validateInventoryProducerConfig(producer InventoryProducerConfig, edgeConfi
 		endpoint.Hostname() != strings.ToLower(endpoint.Hostname()) || endpoint.Port() != "8092" {
 		return errors.New("Edge inventory producer endpoint must be exact cluster-local HTTP authority heartbeat URL")
 	}
-	groupID := strings.TrimSpace(edgeConfig.EdgeGroupID)
-	groupSuffix := strings.TrimPrefix(groupID, "edge-group-country-")
-	expectedURL := "http://edge-control-" + groupSuffix + ".fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1
-	if groupSuffix == groupID || groupSuffix == "" || strings.Contains(groupSuffix, ".") || rawURL != expectedURL {
-		return errors.New("Edge inventory producer endpoint is not bound to its exact group Service")
+	authorityService := strings.TrimSpace(producer.AuthorityService)
+	if !validAuthorityServiceName(authorityService) {
+		return errors.New("Edge inventory producer authority service identity is invalid")
+	}
+	expectedURL := "http://" + authorityService + ".fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1
+	if rawURL != expectedURL {
+		return errors.New("Edge inventory producer endpoint is not bound to its explicit authority Service")
 	}
 	for _, item := range []struct {
 		name string
@@ -102,6 +110,18 @@ func validateInventoryProducerConfig(producer InventoryProducerConfig, edgeConfi
 		return errors.New("Edge inventory producer requires the complete projected workload identity")
 	}
 	return nil
+}
+
+func validAuthorityServiceName(value string) bool {
+	if value == "" || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func newInventoryProducerHTTPClient(timeout time.Duration) *http.Client {

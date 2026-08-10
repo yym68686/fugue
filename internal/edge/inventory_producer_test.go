@@ -81,6 +81,7 @@ func TestInventoryProducerBindsPlatformIdentityNodeGroupAndMonotonicCursor(t *te
 	}
 	producer := InventoryProducerConfig{
 		URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-us",
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}
 	service := NewServiceWithEdgeSources(edgeConfig, RouteBundleSourceConfig{}, producer, log.New(io.Discard, "", 0))
@@ -165,6 +166,7 @@ func TestInventoryProducerInteroperatesWithGroupAuthorityVerifierAndDurableLedge
 		HTTPTimeout: time.Second,
 	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
 		URL:                 "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-de",
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}, log.New(io.Discard, "", 0))
 	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -198,6 +200,7 @@ func TestInventoryProducerInactiveSlotDoesNotWriteAndCrossGroupIdentityFailsClos
 	keyringFile, _ := writeInventoryProducerKeyringFixture(t, "edge-group-country-us")
 	producer := InventoryProducerConfig{
 		URL:                 "http://edge-control-de.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-de",
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}
 	edgeConfig := config.EdgeConfig{
@@ -233,6 +236,7 @@ func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *test
 	keyringFile, secret := writeInventoryProducerKeyringFixture(t, groupID)
 	producer := InventoryProducerConfig{
 		URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-us",
 		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
 	}
 	service := NewServiceWithEdgeSources(config.EdgeConfig{
@@ -248,6 +252,40 @@ func TestInventoryProducerTransportFailureDoesNotExposeProjectedIdentity(t *test
 	err := service.InventoryHeartbeatOnce(context.Background())
 	if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(service.Status().InventoryHeartbeatError, secret) {
 		t.Fatalf("transport error exposed projected identity: err=%v status=%+v", err, service.Status())
+	}
+}
+
+func TestInventoryProducerUsesExplicitAuthorityServiceNotCountryDerivedName(t *testing.T) {
+	groupID := "edge-group-country-de"
+	producer := InventoryProducerConfig{
+		URL:                 "http://edge-control-eu-backup.fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-eu-backup",
+		IdentityKeyringFile: "/var/run/keyring.json", ActivationStateFile: "/var/run/activation.json",
+		Interval: 30 * time.Second,
+	}
+	if err := validateInventoryProducerConfig(producer, config.EdgeConfig{
+		EdgeID: "edge-01", EdgeGroupID: groupID, EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40),
+	}); err != nil {
+		t.Fatalf("explicit authority service was rejected: %v", err)
+	}
+	producer.URL = "http://edge-control-de.fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1
+	producer.AuthorityService = "edge-control-eu-backup"
+	if err := validateInventoryProducerConfig(producer, config.EdgeConfig{
+		EdgeID: "edge-01", EdgeGroupID: "edge-group-neutral-a", EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40),
+	}); err == nil {
+		t.Fatal("endpoint accepted when it did not match the explicit authority service")
+	}
+}
+
+func TestInventoryProducerRejectsMissingExplicitAuthorityService(t *testing.T) {
+	producer := InventoryProducerConfig{
+		URL:                 "http://edge-control-de.fugue-system.svc:8092" + groupAuthorityInventoryHeartbeatPathV1,
+		IdentityKeyringFile: "/var/run/keyring.json", ActivationStateFile: "/var/run/activation.json", Interval: 30 * time.Second,
+	}
+	if err := validateInventoryProducerConfig(producer, config.EdgeConfig{
+		EdgeID: "edge-01", EdgeGroupID: "edge-group-country-de", EdgeSlot: "a", EdgeInstanceUID: "uid-1", EdgeReleaseEpoch: strings.Repeat("a", 40),
+	}); err == nil || !strings.Contains(err.Error(), "authority service") {
+		t.Fatalf("missing authority service was not rejected: %v", err)
 	}
 }
 
