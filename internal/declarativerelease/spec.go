@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"path"
 	"regexp"
 	"sort"
@@ -35,6 +36,7 @@ var (
 	repositoryPattern            = regexp.MustCompile(`^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$`)
 	manifestVariableNamePattern  = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 	manifestVariableValuePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+	publicCanaryHostPattern      = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
 	fieldManagerPattern          = regexp.MustCompile(
 		`^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$`,
 	)
@@ -131,6 +133,8 @@ type HealthProbe struct {
 	Port     string `json:"port,omitempty"`
 	Path     string `json:"path,omitempty"`
 	Expected string `json:"expected,omitempty"`
+	Address  string `json:"address,omitempty"`
+	Host     string `json:"host,omitempty"`
 }
 
 // Intent is changed in the same final commit as runtime code. Desired source
@@ -479,13 +483,14 @@ func (probe HealthProbe) validate() error {
 		"job":                  true,
 		"service-http":         true,
 		"pod-http":             true,
+		"public-route-http":    true,
 		"leader-lease":         true,
 		"edge-group-authority": true,
 	}
 	if !allowed[probe.Type] || !componentIDPattern.MatchString(probe.Name) {
 		return errors.New("unsupported health probe")
 	}
-	if strings.ContainsAny(probe.Port+probe.Path+probe.Expected, "\r\n\x00") {
+	if strings.ContainsAny(probe.Port+probe.Path+probe.Expected+probe.Address+probe.Host, "\r\n\x00") {
 		return errors.New("health probe contains control characters")
 	}
 	if (probe.Type == "service-http" || probe.Type == "pod-http") &&
@@ -494,6 +499,16 @@ func (probe HealthProbe) validate() error {
 	}
 	if probe.Type == "edge-group-authority" && (probe.Port != "" || probe.Path != "" || probe.Expected != "") {
 		return errors.New("edge group authority probe does not accept HTTP fields")
+	}
+	if probe.Type == "public-route-http" {
+		address, err := netip.ParseAddrPort(probe.Address)
+		if err != nil || address.Port() != 443 || !publicCanaryHostPattern.MatchString(probe.Host) ||
+			probe.Port != "" || !strings.HasPrefix(probe.Path, "/") || strings.ContainsAny(probe.Path, "?#") ||
+			probe.Expected == "" || len(probe.Expected) > 256 {
+			return errors.New("public route health probe is invalid")
+		}
+	} else if probe.Address != "" || probe.Host != "" {
+		return errors.New("non-public health probe contains public route fields")
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,30 @@ func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	cas, err := cluster.ObserveCAS(context.Background(), release, manifest)
 	if err != nil || !cas.SameResourceCAS(observation) {
 		t.Fatalf("JSON null changed between full and CAS observations: observation=%+v cas=%+v err=%v", observation, cas, err)
+	}
+}
+
+func TestPublicRouteCanaryDialsExactEdgeWithTLSHostAndExpectedBody(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Host != "example.com" || request.URL.Path != "/healthz" {
+			t.Fatalf("unexpected canary request: host=%q path=%q", request.Host, request.URL.Path)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	probe := declarativerelease.HealthProbe{
+		Type: "public-route-http", Name: "edge-group-test", Address: server.Listener.Addr().String(),
+		Host: "example.com", Path: "/healthz", Expected: "ok",
+	}
+	body, err := readPublicRouteCanaryWithRoots(context.Background(), probe, roots)
+	if err != nil || string(body) != "ok" {
+		t.Fatalf("public route canary failed: body=%q err=%v", body, err)
+	}
+	probe.Expected = "different"
+	if _, err := readPublicRouteCanaryWithRoots(context.Background(), probe, roots); err == nil {
+		t.Fatal("public route canary accepted the wrong response")
 	}
 }
 

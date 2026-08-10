@@ -204,16 +204,25 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 		return errors.New("Edge inventory producer cursor is exhausted")
 	}
 	now := time.Now().UTC()
+	expiresAt := time.Unix(now.Add(time.Minute).Unix(), 0).UTC()
 	nonce, err := newInventoryProducerNonce()
 	if err != nil {
 		return errors.New("Edge inventory producer nonce is unavailable")
 	}
 	nextProducerGeneration := producerGeneration + 1
-	nodeStatus, nodeHealthy, effectiveHealthy := inventoryProducerHealth(status, edgeConfig)
+	nodeStatus, nodeHealthy, servingHealthy, bootstrapEligible := inventoryProducerHealth(status, edgeConfig)
+	servingHealthyValue := servingHealthy
+	var bootstrap *groupBootstrapEligibility
+	if bootstrapEligible {
+		bootstrap = &groupBootstrapEligibility{
+			GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
+			ProducerGeneration: nextProducerGeneration, ValidUntil: expiresAt,
+		}
+	}
 	heartbeat := groupInventoryHeartbeat{
 		Schema: groupInventoryHeartbeatSchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID),
 		ProducerNodeID: strings.TrimSpace(edgeConfig.EdgeID), ProducerGeneration: nextProducerGeneration,
-		ExpectedSequence: sequence, IssuedAtUnix: now.Unix(), ExpiresAtUnix: now.Add(time.Minute).Unix(), Nonce: nonce,
+		ExpectedSequence: sequence, IssuedAtUnix: now.Unix(), ExpiresAtUnix: expiresAt.Unix(), Nonce: nonce,
 		Inventory: groupInventorySnapshot{
 			Schema: groupInventorySchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Sequence: sequence + 1,
 			Generation: producerInventoryEnvelopeGeneration(nextProducerGeneration), ObservedAt: now,
@@ -224,7 +233,8 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 			Instances: []groupInstance{{
 				EdgeID: strings.TrimSpace(edgeConfig.EdgeID), GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: strings.TrimSpace(edgeConfig.EdgeSlot),
 				InstanceUID: strings.TrimSpace(edgeConfig.EdgeInstanceUID), ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
-				EffectiveHealthy: effectiveHealthy, NodeHealthy: nodeHealthy, NodeStatus: nodeStatus, Draining: edgeConfig.Draining,
+				EffectiveHealthy: servingHealthy, ServingHealthy: &servingHealthyValue, BootstrapEligibility: bootstrap,
+				NodeHealthy: nodeHealthy, NodeStatus: nodeStatus, Draining: edgeConfig.Draining,
 				FailureClass: strings.TrimSpace(status.FailureClass),
 			}},
 		},
@@ -265,18 +275,17 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 	return nil
 }
 
-func inventoryProducerHealth(status Status, edgeConfig config.EdgeConfig) (string, bool, bool) {
+func inventoryProducerHealth(status Status, edgeConfig config.EdgeConfig) (string, bool, bool, bool) {
 	nodeStatus := edgeHealthStatus(status)
-	effectiveHealthy := nodeStatus == model.EdgeHealthHealthy && !edgeConfig.Draining && strings.TrimSpace(status.FailureClass) == ""
-	if effectiveHealthy || !groupBundleBootstrapEligible(status, edgeConfig) {
-		return nodeStatus, status.Healthy, effectiveHealthy
+	servingHealthy := nodeStatus == model.EdgeHealthHealthy && !edgeConfig.Draining && strings.TrimSpace(status.FailureClass) == ""
+	if servingHealthy || !groupBundleBootstrapEligible(status, edgeConfig) {
+		return nodeStatus, status.Healthy, servingHealthy, false
 	}
-	// The group authority requires one healthy active worker before it can
-	// publish the first bundle, while a worker without a bundle is normally
-	// unhealthy. Admit only this exact authority response as bootstrap
-	// readiness so the next sync can install the signed bundle. Signature,
-	// Caddy, draining, and all other failures remain fail-closed.
-	return model.EdgeHealthHealthy, true, true
+	// Bootstrap eligibility is not serving health. It is a short-lived,
+	// signed-heartbeat capability that Edge Control may consume only before the
+	// first group publication. The worker remains non-serving until it installs
+	// and verifies the signed bundle.
+	return model.EdgeHealthHealthy, true, false, true
 }
 
 func groupBundleBootstrapEligible(status Status, edgeConfig config.EdgeConfig) bool {

@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
@@ -1311,6 +1314,12 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 				}
 				evidence = append(evidence, probe.Type+":"+pod.Name+":"+digestBytesLocal(body))
 			}
+		case "public-route-http":
+			body, err := readPublicRouteCanary(ctx, probe)
+			if err != nil {
+				return "", fmt.Errorf("public route health probe %q failed: %w", probe.Name, err)
+			}
+			evidence = append(evidence, probe.Type+":"+probe.Name+":"+digestBytesLocal(body))
 		case "leader-lease":
 			leaseRaw, err := cluster.kubectlRun(ctx, nil, "get", "lease", probe.Name,
 				"--namespace", release.Workload.Namespace, "--output", "json")
@@ -1713,6 +1722,58 @@ func readPodHTTP(ctx context.Context, endpoint podHTTPEndpoint, path string) ([]
 	}
 	if response.StatusCode != http.StatusOK || len(body) > 1<<20 {
 		return nil, errors.New("pod HTTP response is invalid")
+	}
+	return body, nil
+}
+
+func readPublicRouteCanary(ctx context.Context, probe declarativerelease.HealthProbe) ([]byte, error) {
+	return readPublicRouteCanaryWithRoots(ctx, probe, nil)
+}
+
+func readPublicRouteCanaryWithRoots(ctx context.Context, probe declarativerelease.HealthProbe, roots *x509.CertPool) ([]byte, error) {
+	address, err := netip.ParseAddrPort(probe.Address)
+	if err != nil || address.Port() == 0 || probe.Host == "" || !strings.HasPrefix(probe.Path, "/") ||
+		strings.ContainsAny(probe.Path, "?#\r\n\x00") || probe.Expected == "" {
+		return nil, errors.New("public route canary is invalid")
+	}
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	transport := &http.Transport{
+		Proxy: nil,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: probe.Host,
+			RootCAs:    roots,
+		},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			if network != "tcp" && network != "tcp4" && network != "tcp6" {
+				return nil, errors.New("public route canary network is invalid")
+			}
+			return dialer.DialContext(ctx, "tcp", probe.Address)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("public route canary redirect is forbidden")
+		},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+probe.Host+probe.Path, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK || len(body) > 1<<20 || !bytes.Contains(body, []byte(probe.Expected)) {
+		return nil, errors.New("public route canary response is invalid")
 	}
 	return body, nil
 }

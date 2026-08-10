@@ -62,16 +62,25 @@ type groupActiveEpoch struct {
 }
 
 type groupInstance struct {
-	EdgeID           string `json:"edge_id"`
-	GroupID          string `json:"edge_group_id"`
-	Slot             string `json:"slot"`
-	InstanceUID      string `json:"instance_uid"`
-	ReleaseEpoch     string `json:"release_epoch"`
-	EffectiveHealthy bool   `json:"effective_healthy"`
-	NodeHealthy      bool   `json:"node_healthy"`
-	NodeStatus       string `json:"node_status"`
-	Draining         bool   `json:"draining"`
-	FailureClass     string `json:"failure_class,omitempty"`
+	EdgeID               string                     `json:"edge_id"`
+	GroupID              string                     `json:"edge_group_id"`
+	Slot                 string                     `json:"slot"`
+	InstanceUID          string                     `json:"instance_uid"`
+	ReleaseEpoch         string                     `json:"release_epoch"`
+	EffectiveHealthy     bool                       `json:"effective_healthy"`
+	ServingHealthy       *bool                      `json:"serving_healthy,omitempty"`
+	BootstrapEligibility *groupBootstrapEligibility `json:"bootstrap_eligibility,omitempty"`
+	NodeHealthy          bool                       `json:"node_healthy"`
+	NodeStatus           string                     `json:"node_status"`
+	Draining             bool                       `json:"draining"`
+	FailureClass         string                     `json:"failure_class,omitempty"`
+}
+
+type groupBootstrapEligibility struct {
+	GroupID            string    `json:"edge_group_id"`
+	ReleaseEpoch       string    `json:"release_epoch"`
+	ProducerGeneration uint64    `json:"producer_generation"`
+	ValidUntil         time.Time `json:"valid_until"`
 }
 
 type authorityGroupStatus struct {

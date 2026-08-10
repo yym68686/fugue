@@ -324,3 +324,32 @@ func TestBindIntentsAllowsAbsentLKGRetry(t *testing.T) {
 		t.Fatal("absent-LKG retry with a predecessor identity was accepted")
 	}
 }
+
+func TestPublicRouteHealthProbeIsExactAndDataDriven(t *testing.T) {
+	valid := HealthProbe{
+		Type: "public-route-http", Name: "edge-group-metro-test", Address: "192.0.2.10:443",
+		Host: "platform.example.test", Path: "/healthz", Expected: "ok",
+	}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("valid public route probe rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*HealthProbe){
+		"non-ip":       func(probe *HealthProbe) { probe.Address = "edge.example.test:443" },
+		"wrong-port":   func(probe *HealthProbe) { probe.Address = "192.0.2.10:8443" },
+		"missing-host": func(probe *HealthProbe) { probe.Host = "" },
+		"query":        func(probe *HealthProbe) { probe.Path = "/healthz?tenant=x" },
+		"no-expected":  func(probe *HealthProbe) { probe.Expected = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := candidate.validate(); err == nil {
+				t.Fatal("unsafe public route probe was accepted")
+			}
+		})
+	}
+	ordinary := HealthProbe{Type: "service-http", Name: "api", Port: "http", Path: "/healthz", Address: "192.0.2.10:443"}
+	if err := ordinary.validate(); err == nil {
+		t.Fatal("ordinary health probe accepted public route fields")
+	}
+}

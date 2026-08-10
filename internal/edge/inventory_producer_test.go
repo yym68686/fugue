@@ -123,9 +123,9 @@ func TestInventoryProducerBreaksOnlyGroupBundleBootstrapDeadlock(t *testing.T) {
 		CaddyEnabled: true,
 		LastError:    `edge routes returned status 503: {"schema":"edge-control-error/v1","error":"group_bundle_unavailable"}`,
 	}
-	nodeStatus, nodeHealthy, effectiveHealthy := inventoryProducerHealth(base, config.EdgeConfig{CaddyEnabled: true})
-	if nodeStatus != model.EdgeHealthHealthy || !nodeHealthy || !effectiveHealthy {
-		t.Fatalf("group bundle bootstrap health = %q, %t, %t", nodeStatus, nodeHealthy, effectiveHealthy)
+	nodeStatus, nodeHealthy, servingHealthy, bootstrapEligible := inventoryProducerHealth(base, config.EdgeConfig{CaddyEnabled: true})
+	if nodeStatus != model.EdgeHealthHealthy || !nodeHealthy || servingHealthy || !bootstrapEligible {
+		t.Fatalf("group bundle bootstrap health = %q, node=%t serving=%t bootstrap=%t", nodeStatus, nodeHealthy, servingHealthy, bootstrapEligible)
 	}
 
 	tests := []struct {
@@ -153,9 +153,9 @@ func TestInventoryProducerBreaksOnlyGroupBundleBootstrapDeadlock(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			nodeStatus, nodeHealthy, effectiveHealthy := inventoryProducerHealth(test.status, test.config)
-			if nodeStatus == model.EdgeHealthHealthy || nodeHealthy || effectiveHealthy {
-				t.Fatalf("unsafe bootstrap health = %q, %t, %t", nodeStatus, nodeHealthy, effectiveHealthy)
+			nodeStatus, nodeHealthy, servingHealthy, bootstrapEligible := inventoryProducerHealth(test.status, test.config)
+			if nodeStatus == model.EdgeHealthHealthy || nodeHealthy || servingHealthy || bootstrapEligible {
+				t.Fatalf("unsafe bootstrap health = %q, node=%t serving=%t bootstrap=%t", nodeStatus, nodeHealthy, servingHealthy, bootstrapEligible)
 			}
 		})
 	}
@@ -196,8 +196,11 @@ func TestInventoryProducerPublishesBootstrapHealthyHeartbeat(t *testing.T) {
 			t.Fatal(err)
 		}
 		instance := heartbeat.Inventory.Instances[0]
-		if !instance.NodeHealthy || !instance.EffectiveHealthy || instance.NodeStatus != model.EdgeHealthHealthy {
-			t.Fatalf("bootstrap heartbeat did not break health cycle: %+v", instance)
+		if !instance.NodeHealthy || instance.EffectiveHealthy || instance.ServingHealthy == nil || *instance.ServingHealthy ||
+			instance.NodeStatus != model.EdgeHealthHealthy || instance.BootstrapEligibility == nil ||
+			instance.BootstrapEligibility.GroupID != groupID || instance.BootstrapEligibility.ReleaseEpoch != sourceCommit ||
+			instance.BootstrapEligibility.ProducerGeneration != 3 || instance.BootstrapEligibility.ValidUntil.IsZero() {
+			t.Fatalf("bootstrap heartbeat did not separate bootstrap from serving health: %+v", instance)
 		}
 		return inventoryJSONResponse(http.StatusCreated, edgecontrol.GroupInventoryHeartbeatReceipt{
 			Schema: edgecontrol.GroupInventoryHeartbeatReceiptSchemaV1, GroupID: groupID, Sequence: 3,
