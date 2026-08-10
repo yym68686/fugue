@@ -147,16 +147,19 @@ func (group EdgeGroup) validate(requireClient bool) error {
 	if publicRoute.Name != group.GroupID {
 		return errors.New("edge worker public route canary is not group-bound")
 	}
+	readyPath := "/v1/authority/groups/" + group.GroupID + "/readyz"
 	for _, probe := range group.Control.Health {
 		if probe.Type == "public-route-http" {
 			return errors.New("edge control public route canary must derive from worker group data")
+		}
+		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath {
+			return errors.New("edge control authority health must derive from group identity")
 		}
 	}
 	transition := group.Worker.Transition
 	if transition == nil || transition.EdgeGroupAB == nil || transition.EdgeGroupAB.GroupID != group.GroupID {
 		return errors.New("edge worker transition is not bound to the registry group")
 	}
-	readyPath := "/v1/authority/groups/" + group.GroupID + "/readyz"
 	controlProcessReady := false
 	legacyControlPublicationReady := false
 	for _, probe := range group.Control.Health {
@@ -238,7 +241,11 @@ func MergeEdgeGroupRegistry(base Registry, edge EdgeGroupRegistry) (Registry, er
 			return Registry{}, err
 		}
 		control := group.Control
-		control.Health = append(append([]HealthProbe(nil), control.Health...), publicRoute)
+		controlAuthority := HealthProbe{
+			Type: "service-http", Name: control.Workload.Name, Port: "http",
+			Path: "/v1/authority/groups/" + group.GroupID + "/readyz", Expected: "\"ready\":true",
+		}
+		control.Health = append(append([]HealthProbe(nil), control.Health...), controlAuthority, publicRoute)
 		apiProbe := publicRoute
 		apiProbe.Name = "api-via-" + group.GroupID
 		apiProbe.Host = "api.fugue.pro"

@@ -132,11 +132,8 @@ func IsPrewritePredecessorHealthWait(ctx context.Context) bool {
 }
 
 func DecodeExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lkgManifest []byte) (ExecutionPlan, error) {
-	var plan ExecutionPlan
-	if err := decodeStrict(reader, &plan); err != nil {
-		return ExecutionPlan{}, fmt.Errorf("decode execution plan: %w", err)
-	}
-	if err := plan.Validate(releasePlan, forwardManifest, lkgManifest); err != nil {
+	plan, err := decodeExecutionPlan(reader, releasePlan, forwardManifest, lkgManifest)
+	if err != nil {
 		return ExecutionPlan{}, err
 	}
 	preparedAt, err := time.Parse(time.RFC3339Nano, plan.PreparedAt)
@@ -146,6 +143,28 @@ func DecodeExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lk
 	now := time.Now().UTC()
 	if preparedAt.After(now.Add(30*time.Second)) || now.Sub(preparedAt) > 15*time.Minute {
 		return ExecutionPlan{}, errors.New("execution plan is stale or from the future")
+	}
+	return plan, nil
+}
+
+// DecodeRecordedExecutionPlan validates a plan that is already bound to a
+// verified terminal receipt and stored as durable LKG evidence. The transient
+// 15-minute prewrite window applies only before the first mutation; recorded
+// plans remain cryptographically bound and usable by the continuous monitor.
+func DecodeRecordedExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lkgManifest []byte) (ExecutionPlan, error) {
+	return decodeExecutionPlan(reader, releasePlan, forwardManifest, lkgManifest)
+}
+
+func decodeExecutionPlan(reader io.Reader, releasePlan Plan, forwardManifest, lkgManifest []byte) (ExecutionPlan, error) {
+	var plan ExecutionPlan
+	if err := decodeStrict(reader, &plan); err != nil {
+		return ExecutionPlan{}, fmt.Errorf("decode execution plan: %w", err)
+	}
+	if err := plan.Validate(releasePlan, forwardManifest, lkgManifest); err != nil {
+		return ExecutionPlan{}, err
+	}
+	if _, err := time.Parse(time.RFC3339Nano, plan.PreparedAt); err != nil {
+		return ExecutionPlan{}, errors.New("execution plan preparedAt is invalid")
 	}
 	return plan, nil
 }

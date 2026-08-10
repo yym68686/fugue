@@ -1042,6 +1042,32 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 	}
 }
 
+// CheckHealthyOnce performs one bounded controller observation. It is used by
+// the asynchronous monitor, where repeated scheduled observations provide the
+// failure threshold; it deliberately does not repeat the synchronous rollout
+// soak or wait loop.
+func (cluster *kubectlCluster) CheckHealthyOnce(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
+	observation, err := cluster.observeExpected(ctx, release, target.OCIRevision, manifest)
+	if err != nil {
+		return observation, err
+	}
+	if !observation.Matches(target, release, false) {
+		return observation, errors.New("live workload does not match the monitored immutable target")
+	}
+	probeDigest, err := cluster.verifyProbes(ctx, release, target, manifest, observation)
+	if err != nil {
+		return observation, err
+	}
+	observation.HealthDigest = digestJoin(observation.HealthDigest, probeDigest)
+	if err := cluster.Converged(ctx, release, manifest); err != nil {
+		return observation, err
+	}
+	if err := cluster.VerifyOwnershipConverged(ctx, release, manifest); err != nil {
+		return observation, err
+	}
+	return observation, nil
+}
+
 func waitHealthyTerminalError(contextErr, lastFailure error) error {
 	if lastFailure == nil {
 		return contextErr

@@ -29,13 +29,15 @@ func main() {
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|prepare|execute|reconcile> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|build|receipt|prepare|execute|reconcile|install-monitor-record|monitor> ...")
 	}
 	switch args[0] {
 	case "plan":
 		return runPlan(args, output)
 	case "emit-github-output":
 		return runEmitGitHubOutput(args)
+	case "emit-monitor-output":
+		return runEmitMonitorOutput(args)
 	case "build":
 		return runBuild(args, output)
 	case "receipt":
@@ -46,8 +48,12 @@ func run(args []string, output io.Writer) error {
 		return runExecute(args, output)
 	case "reconcile":
 		return runReconcile(args, output)
+	case "install-monitor-record":
+		return runInstallMonitorRecord(args, output)
+	case "monitor":
+		return runMonitor(args, output)
 	default:
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|build|receipt|prepare|execute|reconcile> ...")
+		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|build|receipt|prepare|execute|reconcile|install-monitor-record|monitor> ...")
 	}
 }
 
@@ -632,6 +638,15 @@ func runExecute(args []string, output io.Writer) error {
 	if !finalizeComponentLeaseStatus(result.Status) {
 		return errors.New("component release produced a non-terminal status")
 	}
+	var monitorRecordErr error
+	if result.Status == "verified" {
+		monitor, monitorErr := newMonitorStore()
+		if monitorErr != nil {
+			monitorRecordErr = monitorErr
+		} else {
+			_, monitorRecordErr = monitor.persistVerified(ctx, release, files, result)
+		}
+	}
 	leaseReleaseErr := leaseCoordinator.release(ctx, heldLease)
 	encoded, err := declarativerelease.CanonicalJSON(result)
 	if err != nil {
@@ -642,6 +657,9 @@ func runExecute(args []string, output io.Writer) error {
 	}
 	if leaseReleaseErr != nil {
 		return fmt.Errorf("component release terminal state is recorded but lease release is unproven: %w", leaseReleaseErr)
+	}
+	if monitorRecordErr != nil {
+		return fmt.Errorf("component release is verified but its continuous rollback record is unproven: %w", monitorRecordErr)
 	}
 	if result.Status != "verified" {
 		return fmt.Errorf("component release ended with status=%s reason=%s", result.Status, result.Reason)

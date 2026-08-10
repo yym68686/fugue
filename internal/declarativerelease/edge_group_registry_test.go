@@ -141,6 +141,7 @@ func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 			t.Fatalf("group %s must define exactly one generic public route canary, got %d", group.ID, count)
 		}
 		controlCount := 0
+		authorityCount := 0
 		for _, probe := range byID[group.Control.ID].Health {
 			if probe.Type == "public-route-http" {
 				controlCount++
@@ -148,9 +149,18 @@ func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 					t.Fatalf("group %s control canary did not derive exactly from worker data: got=%+v want=%+v", group.ID, probe, workerCanary)
 				}
 			}
+			if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/v1/authority/groups/"+group.GroupID+"/readyz" {
+				authorityCount++
+				if probe.Expected != "\"ready\":true" {
+					t.Fatalf("group %s control authority probe is not bound to serving readiness: %+v", group.ID, probe)
+				}
+			}
 		}
 		if controlCount != 1 {
 			t.Fatalf("group %s control must inherit exactly one public route canary, got %d", group.ID, controlCount)
+		}
+		if authorityCount != 1 {
+			t.Fatalf("group %s control must derive exactly one group-bound authority probe, got %d", group.ID, authorityCount)
 		}
 	}
 }

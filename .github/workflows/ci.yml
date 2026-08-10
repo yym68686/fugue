@@ -4,6 +4,7 @@ on:
   push:
   pull_request:
   schedule:
+    - cron: '*/5 * * * *'
     - cron: '23 18 * * *'
 
 permissions:
@@ -253,8 +254,56 @@ jobs:
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: image-cache, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
+  monitor-plan:
+    if: github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *'
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    outputs:
+      monitor_count: ${{ steps.monitor.outputs.monitor_count }}
+      monitor_matrix: ${{ steps.monitor.outputs.monitor_matrix }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with: {go-version-file: go.mod}
+      - name: Materialize the monitored component matrix from the production registry
+        id: monitor
+        env:
+          RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
+        run: |
+          set -euo pipefail
+          go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
+          "${RELEASE_TOOL}" emit-monitor-output deploy/releases/components.json "${GITHUB_OUTPUT}"
+
+  monitor-production:
+    needs: monitor-plan
+    if: needs.monitor-plan.result == 'success' && needs.monitor-plan.outputs.monitor_count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.monitor-plan.outputs.monitor_matrix) }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
+    permissions: {contents: read, packages: read}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with: {go-version-file: go.mod}
+      - name: Reconcile one component against its verified forward and exact LKG
+        env:
+          COMPONENT: ${{ matrix.component }}
+          FUGUE_REGISTRY_USERNAME: ${{ github.actor }}
+          FUGUE_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
+        run: |
+          set -euo pipefail
+          go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
+          "${RELEASE_TOOL}" monitor deploy/releases/components.json "${COMPONENT}"
+
   audit:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' && github.event.schedule == '23 18 * * *'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
