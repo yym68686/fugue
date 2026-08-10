@@ -21,12 +21,13 @@ type EdgeGroupRegistry struct {
 	Groups     []EdgeGroup `json:"groups"`
 }
 
-// EdgeGroup binds one group-local control plane and one A/B worker lane. The
+// EdgeGroup binds one group-local client, control plane, and A/B worker lane. The
 // component records intentionally remain ordinary declarative Component data:
 // adding a group adds data, not a new execution path.
 type EdgeGroup struct {
 	ID      string    `json:"id"`
 	GroupID string    `json:"groupId"`
+	Client  Component `json:"client"`
 	Control Component `json:"control"`
 	Worker  Component `json:"worker"`
 }
@@ -36,13 +37,44 @@ func DecodeEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, error) {
 	if err := decodeStrict(reader, &registry); err != nil {
 		return EdgeGroupRegistry{}, fmt.Errorf("decode edge group registry: %w", err)
 	}
-	if err := registry.Validate(); err != nil {
+	if err := registry.validate(true); err != nil {
+		return EdgeGroupRegistry{}, err
+	}
+	return registry, nil
+}
+
+// DecodeHistoricalEdgeGroupRegistry reads the predecessor shape that predates
+// the data-owned client lane. It is used only to compare an exact Git parent;
+// current registries must still use DecodeEdgeGroupRegistry and include client.
+func DecodeHistoricalEdgeGroupRegistry(reader io.Reader) (EdgeGroupRegistry, error) {
+	var legacy struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Groups     []struct {
+			ID      string    `json:"id"`
+			GroupID string    `json:"groupId"`
+			Control Component `json:"control"`
+			Worker  Component `json:"worker"`
+		} `json:"groups"`
+	}
+	if err := decodeStrict(reader, &legacy); err != nil {
+		return EdgeGroupRegistry{}, fmt.Errorf("decode historical edge group registry: %w", err)
+	}
+	registry := EdgeGroupRegistry{APIVersion: legacy.APIVersion, Kind: legacy.Kind, Groups: make([]EdgeGroup, 0, len(legacy.Groups))}
+	for _, group := range legacy.Groups {
+		registry.Groups = append(registry.Groups, EdgeGroup{ID: group.ID, GroupID: group.GroupID, Control: group.Control, Worker: group.Worker})
+	}
+	if err := registry.validate(false); err != nil {
 		return EdgeGroupRegistry{}, err
 	}
 	return registry, nil
 }
 
 func (registry EdgeGroupRegistry) Validate() error {
+	return registry.validate(true)
+}
+
+func (registry EdgeGroupRegistry) validate(requireClient bool) error {
 	if registry.APIVersion != EdgeGroupRegistryAPIVersion || registry.Kind != EdgeGroupRegistryKind {
 		return fmt.Errorf("unsupported edge group registry identity %q/%q", registry.APIVersion, registry.Kind)
 	}
@@ -51,7 +83,7 @@ func (registry EdgeGroupRegistry) Validate() error {
 	}
 	seenGroupIDs := make(map[string]struct{}, len(registry.Groups))
 	for index, group := range registry.Groups {
-		if err := group.validate(); err != nil {
+		if err := group.validate(requireClient); err != nil {
 			return fmt.Errorf("edge group %d: %w", index, err)
 		}
 		if index > 0 && registry.Groups[index-1].ID >= group.ID {
@@ -65,17 +97,23 @@ func (registry EdgeGroupRegistry) Validate() error {
 	return nil
 }
 
-func (group EdgeGroup) validate() error {
+func (group EdgeGroup) validate(requireClient bool) error {
 	if !componentIDPattern.MatchString(group.ID) || !edgeGroupIDPattern.MatchString(group.GroupID) {
 		return errors.New("edge group identity is invalid")
 	}
 	wantControl := "edge-control-" + group.ID
+	wantClient := "edge-client-" + group.ID
 	wantWorker := "edge-worker-" + group.ID
-	if group.Control.ID != wantControl || group.Worker.ID != wantWorker {
-		return fmt.Errorf("edge group components must be %q and %q", wantControl, wantWorker)
+	if (requireClient && group.Client.ID != wantClient) || group.Control.ID != wantControl || group.Worker.ID != wantWorker {
+		return fmt.Errorf("edge group components must be %q, %q, and %q", wantClient, wantControl, wantWorker)
 	}
-	if group.Control.Family != "edge" || group.Worker.Family != "edge" {
-		return errors.New("edge group component family must be edge")
+	if (requireClient && group.Client.Family != "edge-client") || group.Control.Family != "edge" || group.Worker.Family != "edge" {
+		return errors.New("edge group component families are invalid")
+	}
+	if group.Client.ID != "" {
+		if err := group.Client.Validate(); err != nil {
+			return fmt.Errorf("client component: %w", err)
+		}
 	}
 	if err := group.Control.Validate(); err != nil {
 		return fmt.Errorf("control component: %w", err)
@@ -131,7 +169,7 @@ func MergeEdgeGroupRegistry(base Registry, edge EdgeGroupRegistry) (Registry, er
 	merged := base
 	merged.Components = append([]Component(nil), base.Components...)
 	for _, group := range edge.Groups {
-		merged.Components = append(merged.Components, group.Control, group.Worker)
+		merged.Components = append(merged.Components, group.Client, group.Control, group.Worker)
 	}
 	sort.Slice(merged.Components, func(i, j int) bool { return merged.Components[i].ID < merged.Components[j].ID })
 	if err := merged.Validate(); err != nil {
@@ -164,6 +202,9 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 			return errors.New("initial edge group registry must not activate a production component")
 		}
 		for _, group := range current.Groups {
+			if _, exists := changed[group.Client.IntentPath]; exists {
+				return fmt.Errorf("new edge group %q client intent must be a later production atom", group.ID)
+			}
 			if _, exists := changed[group.Control.IntentPath]; exists {
 				return fmt.Errorf("new edge group %q control intent must be a later production atom", group.ID)
 			}
@@ -173,7 +214,7 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 		}
 		return nil
 	}
-	if err := previous.Validate(); err != nil {
+	if err := previous.validate(false); err != nil {
 		return fmt.Errorf("previous edge group registry: %w", err)
 	}
 	before := make(map[string]EdgeGroup, len(previous.Groups))
@@ -192,7 +233,10 @@ func ValidateEdgeGroupRegistryUpdate(previous *EdgeGroupRegistry, current EdgeGr
 		for _, pair := range []struct {
 			id             string
 			previous, next Component
-		}{{group.Control.ID, prior.Control, group.Control}, {group.Worker.ID, prior.Worker, group.Worker}} {
+		}{{group.Client.ID, prior.Client, group.Client}, {group.Control.ID, prior.Control, group.Control}, {group.Worker.ID, prior.Worker, group.Worker}} {
+			if pair.id == group.Client.ID && pair.previous.ID == "" {
+				continue
+			}
 			priorJSON, err := CanonicalJSON(pair.previous)
 			if err != nil {
 				return err

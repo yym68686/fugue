@@ -29,6 +29,8 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 		t.Fatal(err)
 	}
 	virtual := edgeGroupFixture("gamma", "edge-group-metro-gamma")
+	virtual.Client.Artifact = edge.Groups[0].Client.Artifact
+	virtual.Client.SourceRoots = append([]string(nil), edge.Groups[0].Client.SourceRoots...)
 	virtual.Control.Artifact = edge.Groups[0].Control.Artifact
 	virtual.Worker.Artifact = edge.Groups[0].Worker.Artifact
 	virtual.Control.SourceRoots = append([]string(nil), edge.Groups[0].Control.SourceRoots...)
@@ -48,10 +50,12 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 		byID[component.ID] = component
 	}
 	control := byID[virtual.Control.ID]
+	client := byID[virtual.Client.ID]
 	worker := byID[virtual.Worker.ID]
-	if control.Workload.Name != "edge-control-gamma" || control.Concurrency != "fugue-production-edge-control-gamma" ||
+	if client.ID != "edge-client-gamma" || client.Concurrency != "fugue-production-edge-client-gamma" ||
+		control.Workload.Name != "edge-control-gamma" || control.Concurrency != "fugue-production-edge-control-gamma" ||
 		worker.Concurrency != "fugue-production-edge-worker-gamma" {
-		t.Fatalf("third group did not get independent resources and Lease: control=%+v worker=%+v", control, worker)
+		t.Fatalf("third group did not get independent resources and Lease: client=%+v control=%+v worker=%+v", client, control, worker)
 	}
 	transition := worker.Transition.EdgeGroupAB
 	if transition.GroupID != virtual.GroupID || transition.FrontName != "edge-gamma-front" ||
@@ -301,6 +305,16 @@ func TestEdgeWorkerTemplateOmitsAPIServerDefaultedEmptyEnvValues(t *testing.T) {
 }
 
 func edgeGroupFixture(id, groupID string) EdgeGroup {
+	client := Component{
+		ID: "edge-client-" + id, Family: "edge-client",
+		IntentPath: "deploy/releases/edge-client-" + id + "/intent.json", ManifestPath: "deploy/releases/edge-client-" + id + "/resources.json",
+		SourceRoots:     []string{"Dockerfile.edge", "cmd/fugue-dns", "cmd/fugue-ssh-front", "internal/edgefront"},
+		Artifact:        Artifact{Repository: "ghcr.io/example/fugue-edge", Dockerfile: "Dockerfile.edge", Context: ".", BuildPackage: "./cmd/fugue-ssh-front"},
+		ArtifactTargets: []ArtifactTarget{{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-client-" + id + "-front", Container: "ssh-front", ContainerType: "container"}},
+		Workload:        Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-client-" + id + "-front", Container: "ssh-front", FieldManager: "fugue-edge-client-" + id + "-declarative", RolloutMode: "rolling"},
+		Health:          []HealthProbe{{Type: "daemonset", Name: "edge-client-" + id + "-front"}},
+		Concurrency:     "fugue-production-edge-client-" + id,
+	}
 	controlName := "edge-control-" + id
 	frontName := "edge-" + id + "-front"
 	workerAName := "edge-" + id + "-worker-a"
@@ -347,5 +361,5 @@ func edgeGroupFixture(id, groupID string) EdgeGroup {
 		Health:      []HealthProbe{{Type: "daemonset", Name: frontName}, {Type: "edge-group-authority", Name: groupID}, {Type: "daemonset", Name: workerAName}, {Type: "daemonset", Name: workerBName}},
 		Concurrency: "fugue-production-edge-worker-" + id,
 	}
-	return EdgeGroup{ID: id, GroupID: groupID, Control: control, Worker: worker}
+	return EdgeGroup{ID: id, GroupID: groupID, Client: client, Control: control, Worker: worker}
 }

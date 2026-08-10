@@ -252,11 +252,36 @@ func TestReceiptCommandMaterializesCanonicalArtifact(t *testing.T) {
 }
 
 func TestEmitGitHubOutputUsesCanonicalSingleComponentMatrix(t *testing.T) {
+	content := emitGitHubOutputForComponent(t, "api", "fugue-production-api", "ghcr.io/example/fugue-api")
+	apiLane := sha256.Sum256([]byte("ghcr.io/example/fugue-api"))
+	want := fmt.Sprintf(
+		"release_count=1\nrelease_matrix={\"include\":[{\"build_lane\":\"%x\",\"component\":\"api\"}]}\nrelease_components=[\"api\"]\nedge_client_count=0\nedge_client_matrix={\"include\":[]}\nedge_control_count=0\nedge_control_matrix={\"include\":[]}\nedge_worker_count=0\nedge_worker_matrix={\"include\":[]}\n",
+		apiLane[:8],
+	)
+	if string(content) != want {
+		t.Fatalf("unexpected GitHub output:\n%s", content)
+	}
+}
+
+func TestEmitGitHubOutputRoutesDataDefinedEdgeClient(t *testing.T) {
+	content := emitGitHubOutputForComponent(t, "edge-client-gamma", "fugue-production-edge-client-gamma", "ghcr.io/example/fugue-edge")
+	edgeLane := sha256.Sum256([]byte("ghcr.io/example/fugue-edge"))
+	want := fmt.Sprintf(
+		"release_count=1\nrelease_matrix={\"include\":[{\"build_lane\":\"%x\",\"component\":\"edge-client-gamma\"}]}\nrelease_components=[\"edge-client-gamma\"]\nedge_client_count=1\nedge_client_matrix={\"include\":[{\"component\":\"edge-client-gamma\",\"concurrency\":\"fugue-production-edge-client-gamma\"}]}\nedge_control_count=0\nedge_control_matrix={\"include\":[]}\nedge_worker_count=0\nedge_worker_matrix={\"include\":[]}\n",
+		edgeLane[:8],
+	)
+	if string(content) != want {
+		t.Fatalf("unexpected Edge client GitHub output:\n%s", content)
+	}
+}
+
+func emitGitHubOutputForComponent(t *testing.T, component, concurrency, repository string) []byte {
+	t.Helper()
 	plan := declarativerelease.Plan{
 		APIVersion: declarativerelease.IntentAPIVersion, Kind: "ProductionReleasePlan",
 		BaseSHA: "1111111111111111111111111111111111111111", HeadSHA: "2222222222222222222222222222222222222222",
 		Releases: []declarativerelease.PlanRelease{
-			{ComponentID: "api", IntentDigest: "sha256:" + strings.Repeat("a", 64), IntentGeneration: 1, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: strings.Repeat("1", 40), ExpectedPreviousManifestSHA: strings.Repeat("1", 40), ExpectedPreviousOCIRevision: strings.Repeat("1", 40), ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64), Concurrency: "fugue-production-api", Artifact: declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-api"}, Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", FieldManager: "fugue-api-declarative", Replicas: 2, RolloutMode: "rolling"}},
+			{ComponentID: component, IntentDigest: "sha256:" + strings.Repeat("a", 64), IntentGeneration: 1, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: strings.Repeat("1", 40), ExpectedPreviousManifestSHA: strings.Repeat("1", 40), ExpectedPreviousOCIRevision: strings.Repeat("1", 40), ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("b", 64), Concurrency: concurrency, Artifact: declarativerelease.Artifact{Repository: repository}, Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", FieldManager: "fugue-api-declarative", Replicas: 2, RolloutMode: "rolling"}},
 		},
 	}
 	unsigned, err := declarativerelease.CanonicalJSON(plan)
@@ -278,14 +303,7 @@ func TestEmitGitHubOutputUsesCanonicalSingleComponentMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	apiLane := sha256.Sum256([]byte("ghcr.io/example/fugue-api"))
-	want := fmt.Sprintf(
-		"release_count=1\nrelease_matrix={\"include\":[{\"build_lane\":\"%x\",\"component\":\"api\"}]}\nrelease_components=[\"api\"]\nedge_control_count=0\nedge_control_matrix={\"include\":[]}\nedge_worker_count=0\nedge_worker_matrix={\"include\":[]}\n",
-		apiLane[:8],
-	)
-	if string(content) != want {
-		t.Fatalf("unexpected GitHub output:\n%s", content)
-	}
+	return content
 }
 
 func writeJSON(t *testing.T, name string, value any) {

@@ -48,7 +48,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobs := yamlMappingValue(t, root, "jobs")
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
-		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client_de", "deploy_edge_client_us", "deploy_edge_control", "deploy_edge_worker",
+		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_schema", "deploy_telemetry", "prepush",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
@@ -60,8 +60,6 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"uses: ./.github/actions/deploy-declarative-component",
 		"group: fugue-production-api",
 		"group: fugue-production-controller",
-		"group: fugue-production-edge-client-de",
-		"group: fugue-production-edge-client-us",
 		"group: '${{ matrix.concurrency }}'",
 		"group: fugue-production-image-cache",
 		"group: fugue-production-schema",
@@ -72,6 +70,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"needs: [prepush, component-build, deploy_api]",
 		"needs: [prepush, component-build, deploy_api, deploy_edge_control]",
 		"edge_control_matrix",
+		"edge_client_matrix",
 		"edge_worker_matrix",
 		"needs: [prepush, component-build, deploy_controller]",
 	} {
@@ -80,7 +79,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"deploy_edge_control_de", "deploy_edge_control_us", "deploy_edge_worker_de", "deploy_edge_worker_us",
+		"deploy_edge_client_de", "deploy_edge_client_us", "deploy_edge_control_de", "deploy_edge_control_us", "deploy_edge_worker_de", "deploy_edge_worker_us",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("CI workflow retained fixed group job %q", forbidden)

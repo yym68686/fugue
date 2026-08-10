@@ -19,6 +19,8 @@ jobs:
       release_count: ${{ steps.release.outputs.release_count }}
       release_matrix: ${{ steps.release.outputs.release_matrix }}
       release_components: ${{ steps.release.outputs.release_components }}
+      edge_client_count: ${{ steps.release.outputs.edge_client_count }}
+      edge_client_matrix: ${{ steps.release.outputs.edge_client_matrix }}
       edge_control_count: ${{ steps.release.outputs.edge_control_count }}
       edge_control_matrix: ${{ steps.release.outputs.edge_control_matrix }}
       edge_worker_count: ${{ steps.release.outputs.edge_worker_count }}
@@ -219,33 +221,23 @@ jobs:
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: '${{ matrix.component }}', registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
-  deploy_edge_client_de:
+  deploy_edge_client:
     needs: [prepush, component-build]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-client-de') }}
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.edge_client_count != '0' }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepush.outputs.edge_client_matrix) }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-edge-client-de, cancel-in-progress: false}
+    concurrency: {group: '${{ matrix.concurrency }}', cancel-in-progress: false}
     permissions: {actions: read, contents: read, packages: read}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
       - uses: ./.github/actions/deploy-declarative-component
-        with: {component: edge-client-de, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
-
-  deploy_edge_client_us:
-    needs: [prepush, component-build]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'edge-client-us') }}
-    timeout-minutes: 15
-    runs-on: [self-hosted, linux, x64, fugue, control-plane]
-    environment: production
-    concurrency: {group: fugue-production-edge-client-us, cancel-in-progress: false}
-    permissions: {actions: read, contents: read, packages: read}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with: {ref: '${{ github.sha }}', fetch-depth: 0}
-      - uses: ./.github/actions/deploy-declarative-component
-        with: {component: edge-client-us, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+        with: {component: '${{ matrix.component }}', registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_image_cache:
     needs: [prepush, component-build, deploy_controller]

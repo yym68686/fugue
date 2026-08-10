@@ -181,6 +181,9 @@ func loadGitEdgeGroupRegistry(revision, registryPath string) (*declarativereleas
 	}
 	edge, err := declarativerelease.DecodeEdgeGroupRegistry(bytes.NewReader(raw))
 	if err != nil {
+		edge, err = declarativerelease.DecodeHistoricalEdgeGroupRegistry(bytes.NewReader(raw))
+	}
+	if err != nil {
 		return nil, fmt.Errorf("decode previous edge group registry: %w", err)
 	}
 	return &edge, nil
@@ -324,6 +327,7 @@ func runEmitGitHubOutput(args []string) error {
 	}
 	value := matrix{Include: make([]matrixEntry, 0, len(plan.Releases))}
 	edgeControl := matrix{Include: make([]matrixEntry, 0, 1)}
+	edgeClient := matrix{Include: make([]matrixEntry, 0, 1)}
 	edgeWorker := matrix{Include: make([]matrixEntry, 0, 1)}
 	components := make([]string, 0, len(plan.Releases))
 	for _, release := range plan.Releases {
@@ -334,6 +338,8 @@ func runEmitGitHubOutput(args []string) error {
 		})
 		entry := matrixEntry{Component: release.ComponentID, Concurrency: release.Concurrency}
 		switch {
+		case strings.HasPrefix(release.ComponentID, "edge-client-"):
+			edgeClient.Include = append(edgeClient.Include, entry)
 		case strings.HasPrefix(release.ComponentID, "edge-control-"):
 			edgeControl.Include = append(edgeControl.Include, entry)
 		case strings.HasPrefix(release.ComponentID, "edge-worker-"):
@@ -353,6 +359,10 @@ func runEmitGitHubOutput(args []string) error {
 	if err != nil {
 		return err
 	}
+	edgeClientJSON, err := declarativerelease.CanonicalJSON(edgeClient)
+	if err != nil {
+		return err
+	}
 	edgeWorkerJSON, err := declarativerelease.CanonicalJSON(edgeWorker)
 	if err != nil {
 		return err
@@ -367,8 +377,8 @@ func runEmitGitHubOutput(args []string) error {
 	}
 	_, writeErr := fmt.Fprintf(
 		file,
-		"release_count=%d\nrelease_matrix=%s\nrelease_components=%s\nedge_control_count=%d\nedge_control_matrix=%s\nedge_worker_count=%d\nedge_worker_matrix=%s\n",
-		len(plan.Releases), encoded, componentJSON, len(edgeControl.Include), edgeControlJSON, len(edgeWorker.Include), edgeWorkerJSON,
+		"release_count=%d\nrelease_matrix=%s\nrelease_components=%s\nedge_client_count=%d\nedge_client_matrix=%s\nedge_control_count=%d\nedge_control_matrix=%s\nedge_worker_count=%d\nedge_worker_matrix=%s\n",
+		len(plan.Releases), encoded, componentJSON, len(edgeClient.Include), edgeClientJSON, len(edgeControl.Include), edgeControlJSON, len(edgeWorker.Include), edgeWorkerJSON,
 	)
 	closeErr := file.Close()
 	if writeErr != nil {
