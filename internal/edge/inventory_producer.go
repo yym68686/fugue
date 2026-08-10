@@ -209,8 +209,7 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 		return errors.New("Edge inventory producer nonce is unavailable")
 	}
 	nextProducerGeneration := producerGeneration + 1
-	nodeStatus := edgeHealthStatus(status)
-	effectiveHealthy := nodeStatus == model.EdgeHealthHealthy && !edgeConfig.Draining && strings.TrimSpace(status.FailureClass) == ""
+	nodeStatus, nodeHealthy, effectiveHealthy := inventoryProducerHealth(status, edgeConfig)
 	heartbeat := groupInventoryHeartbeat{
 		Schema: groupInventoryHeartbeatSchemaV1, GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID),
 		ProducerNodeID: strings.TrimSpace(edgeConfig.EdgeID), ProducerGeneration: nextProducerGeneration,
@@ -225,7 +224,7 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 			Instances: []groupInstance{{
 				EdgeID: strings.TrimSpace(edgeConfig.EdgeID), GroupID: strings.TrimSpace(edgeConfig.EdgeGroupID), Slot: strings.TrimSpace(edgeConfig.EdgeSlot),
 				InstanceUID: strings.TrimSpace(edgeConfig.EdgeInstanceUID), ReleaseEpoch: strings.TrimSpace(edgeConfig.EdgeReleaseEpoch),
-				EffectiveHealthy: effectiveHealthy, NodeHealthy: status.Healthy, NodeStatus: nodeStatus, Draining: edgeConfig.Draining,
+				EffectiveHealthy: effectiveHealthy, NodeHealthy: nodeHealthy, NodeStatus: nodeStatus, Draining: edgeConfig.Draining,
 				FailureClass: strings.TrimSpace(status.FailureClass),
 			}},
 		},
@@ -264,6 +263,38 @@ func (s *Service) InventoryHeartbeatOnce(ctx context.Context) (err error) {
 	}
 	s.recordInventoryHeartbeatSuccess(receipt.ProducerGeneration, now)
 	return nil
+}
+
+func inventoryProducerHealth(status Status, edgeConfig config.EdgeConfig) (string, bool, bool) {
+	nodeStatus := edgeHealthStatus(status)
+	effectiveHealthy := nodeStatus == model.EdgeHealthHealthy && !edgeConfig.Draining && strings.TrimSpace(status.FailureClass) == ""
+	if effectiveHealthy || !groupBundleBootstrapEligible(status, edgeConfig) {
+		return nodeStatus, status.Healthy, effectiveHealthy
+	}
+	// The group authority requires one healthy active worker before it can
+	// publish the first bundle, while a worker without a bundle is normally
+	// unhealthy. Admit only this exact authority response as bootstrap
+	// readiness so the next sync can install the signed bundle. Signature,
+	// Caddy, draining, and all other failures remain fail-closed.
+	return model.EdgeHealthHealthy, true, true
+}
+
+func groupBundleBootstrapEligible(status Status, edgeConfig config.EdgeConfig) bool {
+	if !edgeConfig.CaddyEnabled || !status.CaddyEnabled || edgeConfig.Draining || strings.TrimSpace(status.FailureClass) != "" || strings.TrimSpace(status.CaddyLastError) != "" {
+		return false
+	}
+	const prefix = "edge routes returned status 503:"
+	message := strings.TrimSpace(status.LastError)
+	if !strings.HasPrefix(message, prefix) {
+		return false
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(message, prefix))), &payload); err != nil {
+		return false
+	}
+	return payload.Error == "group_bundle_unavailable"
 }
 
 func (s *Service) readInventoryProducerCursor(ctx context.Context, groupID string) (uint64, uint64, error) {

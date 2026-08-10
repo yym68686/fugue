@@ -114,6 +114,102 @@ func TestInventoryProducerStatusSurvivesRouteSyncSnapshotReplacement(t *testing.
 	}
 }
 
+func TestInventoryProducerBreaksOnlyGroupBundleBootstrapDeadlock(t *testing.T) {
+	t.Parallel()
+
+	base := Status{
+		Status:       "unhealthy",
+		Healthy:      false,
+		CaddyEnabled: true,
+		LastError:    `edge routes returned status 503: {"schema":"edge-control-error/v1","error":"group_bundle_unavailable"}`,
+	}
+	nodeStatus, nodeHealthy, effectiveHealthy := inventoryProducerHealth(base, config.EdgeConfig{CaddyEnabled: true})
+	if nodeStatus != model.EdgeHealthHealthy || !nodeHealthy || !effectiveHealthy {
+		t.Fatalf("group bundle bootstrap health = %q, %t, %t", nodeStatus, nodeHealthy, effectiveHealthy)
+	}
+
+	tests := []struct {
+		name   string
+		status Status
+		config config.EdgeConfig
+	}{
+		{name: "different authority error", status: func() Status {
+			value := base
+			value.LastError = `edge routes returned status 503: {"schema":"edge-control-error/v1","error":"store_unavailable"}`
+			return value
+		}(), config: config.EdgeConfig{CaddyEnabled: true}},
+		{name: "signature failure", status: func() Status {
+			value := base
+			value.FailureClass = model.EdgeInstanceFailureSignatureInvalid
+			return value
+		}(), config: config.EdgeConfig{CaddyEnabled: true}},
+		{name: "caddy failure", status: func() Status {
+			value := base
+			value.CaddyLastError = "admin endpoint unavailable"
+			return value
+		}(), config: config.EdgeConfig{CaddyEnabled: true}},
+		{name: "draining", status: base, config: config.EdgeConfig{CaddyEnabled: true, Draining: true}},
+		{name: "caddy disabled", status: base, config: config.EdgeConfig{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			nodeStatus, nodeHealthy, effectiveHealthy := inventoryProducerHealth(test.status, test.config)
+			if nodeStatus == model.EdgeHealthHealthy || nodeHealthy || effectiveHealthy {
+				t.Fatalf("unsafe bootstrap health = %q, %t, %t", nodeStatus, nodeHealthy, effectiveHealthy)
+			}
+		})
+	}
+}
+
+func TestInventoryProducerPublishesBootstrapHealthyHeartbeat(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-country-us"
+	nodeID := "edge-node-us-bootstrap"
+	sourceCommit := strings.Repeat("f", 40)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, sourceCommit)
+	keyringFile, _ := writeInventoryProducerKeyringFixture(t, groupID)
+
+	service := NewServiceWithEdgeSources(config.EdgeConfig{
+		EdgeID: nodeID, EdgeGroupID: groupID, EdgeSlot: model.EdgeSlotA, EdgeInstanceUID: "pod-uid-us-bootstrap", EdgeReleaseEpoch: sourceCommit,
+		HTTPTimeout: time.Second, CaddyEnabled: true,
+	}, RouteBundleSourceConfig{}, InventoryProducerConfig{
+		URL:                 "http://edge-control-us.fugue-system.svc:8092" + edgecontrol.GroupAuthorityInventoryHeartbeatPathV1,
+		AuthorityService:    "edge-control-us",
+		IdentityKeyringFile: keyringFile, ActivationStateFile: activationFile, Interval: 30 * time.Second,
+	}, log.New(io.Discard, "", 0))
+	service.mu.Lock()
+	service.snapshot = Status{
+		Status:       "unhealthy",
+		Healthy:      false,
+		CaddyEnabled: true,
+		LastError:    `edge routes returned status 503: {"schema":"edge-control-error/v1","error":"group_bundle_unavailable"}`,
+	}
+	service.mu.Unlock()
+	service.InventoryProducerHTTPClient = &http.Client{Transport: inventoryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			return inventoryJSONResponse(http.StatusServiceUnavailable, edgecontrol.AuthorityGroupStatus{
+				GroupID: groupID, InventorySequence: 2, InventoryProducerGeneration: 2,
+			}), nil
+		}
+		var heartbeat edgecontrol.GroupInventoryHeartbeat
+		if err := json.NewDecoder(request.Body).Decode(&heartbeat); err != nil {
+			t.Fatal(err)
+		}
+		instance := heartbeat.Inventory.Instances[0]
+		if !instance.NodeHealthy || !instance.EffectiveHealthy || instance.NodeStatus != model.EdgeHealthHealthy {
+			t.Fatalf("bootstrap heartbeat did not break health cycle: %+v", instance)
+		}
+		return inventoryJSONResponse(http.StatusCreated, edgecontrol.GroupInventoryHeartbeatReceipt{
+			Schema: edgecontrol.GroupInventoryHeartbeatReceiptSchemaV1, GroupID: groupID, Sequence: 3,
+			Generation: "inventory-bootstrap", InventoryDigest: "sha256:" + strings.Repeat("d", 64),
+			Authority: "edge-control", Publication: true, ProducerNodeID: nodeID, ProducerGeneration: 3,
+		}), nil
+	})}
+	if err := service.InventoryHeartbeatOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInventoryProducerInteroperatesWithGroupAuthorityVerifierAndDurableLedger(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	groupID := "edge-group-country-de"
