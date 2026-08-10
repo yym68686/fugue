@@ -113,6 +113,21 @@ func TestParseEdgeGroupPodsRequiresOneReadyGroupBoundPodPerNode(t *testing.T) {
 	}
 }
 
+func TestParseEdgeGroupPodsAcceptsReadyLKGWithHistoricalRestarts(t *testing.T) {
+	pod := edgeGroupPodFixture("worker-1", "uid-1", "node-1", "edge-group-country-de", strings.Repeat("1", 40), strings.Repeat("a", 64))
+	pod["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["restartCount"] = 2
+	raw, _ := json.Marshal(map[string]any{"items": []any{pod}})
+
+	got, err := parseEdgeGroupPods(raw, "edge", 1, "edge-group-country-de", false, "")
+	if err != nil || !got["node-1"].Ready || got["node-1"].RestartCount != 2 {
+		t.Fatalf("ready LKG with historical restarts was rejected: got=%+v err=%v", got, err)
+	}
+	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: strings.Repeat("1", 40), ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64)}
+	if edgePodMatchesTarget(got["node-1"], target) {
+		t.Fatal("new target accepted a restarted pod")
+	}
+}
+
 func TestEdgeGroupTargetMatchingRequiresExactSourceAndImmutableRef(t *testing.T) {
 	target := declarativerelease.TargetIdentity{Present: true, ConfigSHA: strings.Repeat("1", 40), ImageRef: "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("a", 64)}
 	pod := edgeGroupPod{Ready: true, SourceCommit: target.ConfigSHA, ImageRef: target.ImageRef}

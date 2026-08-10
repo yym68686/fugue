@@ -78,6 +78,7 @@ type edgeGroupPod struct {
 	SourceCommit                 string
 	ImageRef                     string
 	ImageID                      string
+	RestartCount                 int64
 	BundleGeneration             string
 	RouteBundleSource            string
 	PublicationSequence          uint64
@@ -547,9 +548,7 @@ func parseEdgeGroupPodsWithReadiness(raw []byte, container string, expectedNodes
 		for _, rawStatus := range anySlice(status["containerStatuses"]) {
 			entry, _ := rawStatus.(map[string]any)
 			if stringValue(entry["name"]) == container {
-				if int64Value(entry["restartCount"]) != 0 {
-					pod.Ready = false
-				}
+				pod.RestartCount = int64Value(entry["restartCount"])
 				pod.ImageID = stringValue(entry["imageID"])
 			}
 		}
@@ -883,7 +882,7 @@ func otherEdgeSlot(slot string) string {
 }
 
 func edgePodMatchesTarget(pod edgeGroupPod, target declarativerelease.TargetIdentity) bool {
-	return pod.Ready && pod.SourceCommit == target.ConfigSHA && pod.ImageRef == target.ImageRef
+	return pod.Ready && pod.RestartCount == 0 && pod.SourceCommit == target.ConfigSHA && pod.ImageRef == target.ImageRef
 }
 
 func edgePodsMatchTarget(pods map[string]edgeGroupPod, target declarativerelease.TargetIdentity) bool {
