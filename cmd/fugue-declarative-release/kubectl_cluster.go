@@ -1120,9 +1120,6 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release); err != nil {
-		return declarativerelease.Observation{}, err
-	}
 	partial, err := parseObservation(workloadRaw, podsRaw, release)
 	if err != nil {
 		return declarativerelease.Observation{}, err
@@ -1140,6 +1137,9 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	}
 	if verification.Image != verificationImage || verification.OCIRevision != expectedOCI {
 		return declarativerelease.Observation{}, errors.New("live registry identity mismatch")
+	}
+	if err := verifyDeclaredArtifactImageIDs(podsRaw, manifest, release, verification.Image, verification.ManifestDigest); err != nil {
+		return declarativerelease.Observation{}, err
 	}
 	partial.OCIRevision = expectedOCI
 	resources, err := cluster.observeResources(ctx, manifest, release, workloadRaw)
@@ -1399,7 +1399,11 @@ func targetIdentityFromDeclaredWorkload(desired map[string]any, workload declara
 	return declarativerelease.TargetIdentity{Present: true, ImageRef: image, ConfigSHA: configSHA, ManifestSHA: manifestSHA, OCIRevision: ociRevision}, nil
 }
 
-func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease) error {
+func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativerelease.PlanRelease, verifiedImage, platformManifestDigest string) error {
+	if !strings.Contains(verifiedImage, "@sha256:") || !strings.HasPrefix(platformManifestDigest, "sha256:") || len(platformManifestDigest) != len("sha256:")+64 {
+		return errors.New("verified artifact runtime identity is invalid")
+	}
+	topDigest := verifiedImage[strings.LastIndex(verifiedImage, "@")+1:]
 	identity := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	desired, err := declarativerelease.ResourceSetItem(manifest, identity)
 	if err != nil {
@@ -1417,12 +1421,18 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		if !found {
 			continue
 		}
+		if workload != verifiedImage {
+			return fmt.Errorf("declared workload container %s is not bound to the verified artifact", target.Container)
+		}
 		expected[target.ContainerType+"\x00"+target.Container] = workload
 	}
 	if len(expected) == 0 {
 		image, imageErr := declaredContainerImage(desired, release.Workload.Container, "container")
 		if imageErr != nil {
 			return imageErr
+		}
+		if image != verifiedImage {
+			return errors.New("declared workload primary image is not bound to the verified artifact")
 		}
 		expected["container\x00"+release.Workload.Container] = image
 	}
@@ -1443,7 +1453,7 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 			continue
 		}
 		status := mapField(pod, "status")
-		for key, image := range expected {
+		for key := range expected {
 			parts := strings.SplitN(key, "\x00", 2)
 			field := "containerStatuses"
 			if parts[0] == "init-container" {
@@ -1453,7 +1463,6 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 			if !ok {
 				return fmt.Errorf("Pod %s are absent", field)
 			}
-			wantDigest := image[strings.LastIndex(image, "@")+1:]
 			matched := false
 			for _, rawStatus := range statuses {
 				containerStatus, ok := rawStatus.(map[string]any)
@@ -1461,7 +1470,7 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 					continue
 				}
 				imageID := stringValue(containerStatus["imageID"])
-				if imageID != wantDigest && !strings.HasSuffix(imageID, "@"+wantDigest) {
+				if !imageIDMatchesAnyDigest(imageID, topDigest, platformManifestDigest) {
 					return fmt.Errorf("Pod container %s imageID does not match declared immutable image", parts[1])
 				}
 				matched = true
@@ -1472,6 +1481,15 @@ func verifyDeclaredArtifactImageIDs(podsRaw, manifest []byte, release declarativ
 		}
 	}
 	return nil
+}
+
+func imageIDMatchesAnyDigest(imageID string, digests ...string) bool {
+	for _, digest := range digests {
+		if imageID == digest || strings.HasSuffix(imageID, "@"+digest) || strings.HasSuffix(imageID, "://"+digest) {
+			return true
+		}
+	}
+	return false
 }
 
 func declaredContainerImage(desired map[string]any, name, containerType string) (string, error) {

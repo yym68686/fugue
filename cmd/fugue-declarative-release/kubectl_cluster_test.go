@@ -490,6 +490,46 @@ func TestParseSucceededJobPodRequiresOneZeroExitImmutableExecution(t *testing.T)
 	}
 }
 
+func TestDeclaredArtifactImageIDsAcceptVerifiedPlatformManifest(t *testing.T) {
+	topDigest := "sha256:" + strings.Repeat("a", 64)
+	platformDigest := "sha256:" + strings.Repeat("b", 64)
+	image := "ghcr.io/example/edge-control@" + topDigest
+	release := declarativerelease.PlanRelease{
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", Container: "edge-control",
+		},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", ContainerType: "container", Container: "edge-control"},
+			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", ContainerType: "init-container", Container: "state-permissions"},
+		},
+	}
+	manifest := mustJSON(t, map[string]any{
+		"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet",
+		"items": []any{map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment",
+			"metadata": map[string]any{"name": "edge-control-de", "namespace": "fugue-system"},
+			"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+				"containers":     []any{map[string]any{"name": "edge-control", "image": image}},
+				"initContainers": []any{map[string]any{"name": "state-permissions", "image": image}},
+			}}},
+		}},
+	})
+	pods := map[string]any{"items": []any{map[string]any{
+		"metadata": map[string]any{"name": "edge-control-de-1"},
+		"status": map[string]any{
+			"containerStatuses":     []any{map[string]any{"name": "edge-control", "imageID": "containerd://" + platformDigest}},
+			"initContainerStatuses": []any{map[string]any{"name": "state-permissions", "imageID": "docker-pullable://ghcr.io/example/edge-control@" + platformDigest}},
+		},
+	}}}
+	if err := verifyDeclaredArtifactImageIDs(mustJSON(t, pods), manifest, release, image, platformDigest); err != nil {
+		t.Fatalf("verified platform manifest was rejected: %v", err)
+	}
+	pods["items"].([]any)[0].(map[string]any)["status"].(map[string]any)["containerStatuses"].([]any)[0].(map[string]any)["imageID"] = "containerd://sha256:" + strings.Repeat("c", 64)
+	if err := verifyDeclaredArtifactImageIDs(mustJSON(t, pods), manifest, release, image, platformDigest); err == nil {
+		t.Fatal("unverified runtime digest was accepted")
+	}
+}
+
 func TestWorkloadFromDeclaredResourceDerivesOnlyTypedRolloutShapes(t *testing.T) {
 	identity := declarativerelease.ResourceIdentity{
 		APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-worker-de-a",
