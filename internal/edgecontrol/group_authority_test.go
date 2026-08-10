@@ -118,6 +118,85 @@ func TestGroupAuthorityPublishesAndPreservesLKGWithoutCrossGroupTransaction(t *t
 	}
 }
 
+func TestGroupAuthorityConsumesBootstrapEligibilityOnlyForFirstPublicationAndRestartsFromLKG(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 10, 14, 40, 0, 0, time.UTC)
+	groupID := "edge-group-country-us"
+	root := privateStateDir(t)
+	store, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serving := false
+	bootstrapInventory := GroupInventorySnapshot{
+		Schema: GroupInventorySchemaV1, GroupID: groupID, Sequence: 1, Generation: ProducerInventoryEnvelopeGeneration(1), ObservedAt: now,
+		ActiveEpoch: GroupActiveEpoch{GroupID: groupID, Slot: "a", ReleaseEpoch: "worker-epoch-1", FenceSequence: 1, MinHealthyInstances: 1},
+		Instances: []GroupInstance{{
+			EdgeID: "edge-us-1", GroupID: groupID, Slot: "a", InstanceUID: "worker-us-1", ReleaseEpoch: "worker-epoch-1",
+			ServingHealthy: &serving, NodeHealthy: true, NodeStatus: model.EdgeHealthHealthy,
+			BootstrapEligibility: &GroupBootstrapEligibility{GroupID: groupID, ReleaseEpoch: "worker-epoch-1", ProducerGeneration: 1, ValidUntil: now.Add(time.Minute)},
+		}},
+	}
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, bootstrapInventory); err != nil {
+		t.Fatal(err)
+	}
+	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }, InventoryMaxAge: GroupInventoryHeartbeatMaxAge}
+	compiled, err := compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Succeeded != 1 || compiled.Results[0].Status != GroupShadowStatusCompiled {
+		t.Fatalf("first bootstrap compilation = %+v, %v", compiled, err)
+	}
+	head, exists, err := store.Head(ctx, groupID)
+	if err != nil || !exists || head.ActiveHealthyInstances != 0 || head.ActiveBootstrapInstances != 1 {
+		t.Fatalf("bootstrap and serving evidence were conflated: %+v exists=%t err=%v", head, exists, err)
+	}
+	key := bytes.Repeat([]byte{0x31}, 32)
+	publisher := GroupAuthorityPublisher{Store: store, Signer: &fixtureGroupSigner{keys: map[string][]byte{groupID: key}, validFor: 30 * time.Minute}, Now: func() time.Time { return now }}
+	published, err := publisher.Publish(ctx, compiled)
+	if err != nil || published.Published != 1 || published.Failed != 0 {
+		t.Fatalf("first bootstrap publication = %+v, %v", published, err)
+	}
+	firstState, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !firstState.PublishedExists {
+		t.Fatalf("first group LKG missing: %+v, %v", firstState, err)
+	}
+
+	now = now.Add(10 * time.Second)
+	bootstrapInventory.Sequence = 2
+	bootstrapInventory.Generation = ProducerInventoryEnvelopeGeneration(2)
+	bootstrapInventory.ObservedAt = now
+	bootstrapInventory.Instances[0].BootstrapEligibility.ProducerGeneration = 2
+	bootstrapInventory.Instances[0].BootstrapEligibility.ValidUntil = now.Add(time.Minute)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 1, bootstrapInventory); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err = compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Failed != 1 || compiled.Results[0].FailureCode != GroupShadowFailureNoHealthyActive {
+		t.Fatalf("bootstrap eligibility was reused after first publication: %+v, %v", compiled, err)
+	}
+	failed, err := publisher.Publish(ctx, compiled)
+	if err != nil || failed.Published != 0 || failed.Failed != 1 {
+		t.Fatalf("post-bootstrap failure was not recorded: %+v, %v", failed, err)
+	}
+
+	restarted, err := OpenPersistentGroupStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedState, err := restarted.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !restartedState.PublishedExists || restartedState.Published.Digest != firstState.Published.Digest {
+		t.Fatalf("restarted control lost its signed group LKG: %+v, %v", restartedState, err)
+	}
+	statusHandler, err := NewAuthorityStatusHandler(restarted, []string{groupID}, NewAuthorityRuntimeState(func() time.Time { return now }), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	statusHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, authorityGroupReadyPath(groupID), nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"serving_lkg"`) || !strings.Contains(recorder.Body.String(), `"ready":true`) {
+		t.Fatalf("restarted control did not serve persisted LKG: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestGroupAuthorityReconcileIsIdempotentUntilSignatureRefreshWindow(t *testing.T) {
 	t.Parallel()
 

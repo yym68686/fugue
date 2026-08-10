@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,18 +80,27 @@ type GroupActiveEpoch struct {
 // Control. Core node credentials, addresses, logs, and other mutable fields
 // are deliberately outside the durable Edge Control inventory.
 type GroupInstance struct {
-	EdgeID           string `json:"edge_id"`
-	GroupID          string `json:"edge_group_id"`
-	FaultDomainID    string `json:"fault_domain_id,omitempty"`
-	EdgePoolID       string `json:"edge_pool_id,omitempty"`
-	Slot             string `json:"slot"`
-	InstanceUID      string `json:"instance_uid"`
-	ReleaseEpoch     string `json:"release_epoch"`
-	EffectiveHealthy bool   `json:"effective_healthy"`
-	NodeHealthy      bool   `json:"node_healthy"`
-	NodeStatus       string `json:"node_status"`
-	Draining         bool   `json:"draining"`
-	FailureClass     string `json:"failure_class,omitempty"`
+	EdgeID               string                     `json:"edge_id"`
+	GroupID              string                     `json:"edge_group_id"`
+	FaultDomainID        string                     `json:"fault_domain_id,omitempty"`
+	EdgePoolID           string                     `json:"edge_pool_id,omitempty"`
+	Slot                 string                     `json:"slot"`
+	InstanceUID          string                     `json:"instance_uid"`
+	ReleaseEpoch         string                     `json:"release_epoch"`
+	EffectiveHealthy     bool                       `json:"effective_healthy"`
+	ServingHealthy       *bool                      `json:"serving_healthy,omitempty"`
+	BootstrapEligibility *GroupBootstrapEligibility `json:"bootstrap_eligibility,omitempty"`
+	NodeHealthy          bool                       `json:"node_healthy"`
+	NodeStatus           string                     `json:"node_status"`
+	Draining             bool                       `json:"draining"`
+	FailureClass         string                     `json:"failure_class,omitempty"`
+}
+
+type GroupBootstrapEligibility struct {
+	GroupID            string    `json:"edge_group_id"`
+	ReleaseEpoch       string    `json:"release_epoch"`
+	ProducerGeneration uint64    `json:"producer_generation"`
+	ValidUntil         time.Time `json:"valid_until"`
 }
 
 // GroupInventoryReader deliberately has no global inventory method. A caller
@@ -117,6 +127,7 @@ type GroupShadowLedgerEntry struct {
 	ActiveReleaseEpoch             string                 `json:"active_release_epoch,omitempty"`
 	ActiveFenceSequence            uint64                 `json:"active_fence_sequence,omitempty"`
 	ActiveHealthyInstances         int                    `json:"active_healthy_instances,omitempty"`
+	ActiveBootstrapInstances       int                    `json:"active_bootstrap_eligible_instances,omitempty"`
 	BundleGeneration               string                 `json:"bundle_generation,omitempty"`
 	LastSuccessfulBundleGeneration string                 `json:"last_successful_bundle_generation,omitempty"`
 	FailureCode                    string                 `json:"failure_code,omitempty"`
@@ -256,12 +267,21 @@ func (compiler GroupShadowCompiler) reconcileGroupAttempt(ctx context.Context, s
 	entry.InventoryDigest = groupInventorySemanticDigest(inventory)
 	entry.InputDigest = groupShadowInputDigest(intentDigest, groupID, entry.InventoryDigest)
 
+	allowBootstrap := false
+	if lastSuccessful == "" {
+		if reader, ok := compiler.Ledger.(interface {
+			ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
+		}); ok {
+			authority, authorityErr := reader.ReadGroupAuthority(ctx, groupID)
+			allowBootstrap = authorityErr == nil && !authority.PublishedExists
+		}
+	}
 	var view groupInventoryView
 	var inventoryErr error
 	if compiler.InventoryMaxAge > 0 && (inventory.ObservedAt.IsZero() || inventory.ObservedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) || now.Sub(inventory.ObservedAt) > compiler.InventoryMaxAge) {
 		inventoryErr = errGroupInventoryInvalid
 	} else {
-		view, inventoryErr = validateGroupInventory(groupID, inventory)
+		view, inventoryErr = validateGroupInventory(groupID, inventory, allowBootstrap, now)
 	}
 	if inventoryErr != nil {
 		entry.Status = GroupShadowStatusFailed
@@ -277,7 +297,8 @@ func (compiler GroupShadowCompiler) reconcileGroupAttempt(ctx context.Context, s
 	entry.ActiveSlot = view.activeEpoch.Slot
 	entry.ActiveReleaseEpoch = view.activeEpoch.ReleaseEpoch
 	entry.ActiveFenceSequence = view.activeEpoch.FenceSequence
-	entry.ActiveHealthyInstances = len(view.healthyEdgeIDs)
+	entry.ActiveHealthyInstances = len(view.servingEdgeIDs)
+	entry.ActiveBootstrapInstances = len(view.bootstrapEdgeIDs)
 
 	bundle, compileErr := compileGroupShadowCandidate(snapshot, inventory, view, lastSuccessful, now)
 	if compileErr != nil {
@@ -340,11 +361,13 @@ func sameGroupShadowFailure(head GroupShadowLedgerEntry, exists bool, candidate 
 }
 
 type groupInventoryView struct {
-	activeEpoch    GroupActiveEpoch
-	healthyEdgeIDs []string
+	activeEpoch      GroupActiveEpoch
+	servingEdgeIDs   []string
+	bootstrapEdgeIDs []string
+	candidateEdgeIDs []string
 }
 
-func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot) (groupInventoryView, error) {
+func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot, allowBootstrap bool, now time.Time) (groupInventoryView, error) {
 	groupID = normalizeGroupID(groupID)
 	if snapshot.Schema != GroupInventorySchemaV1 || normalizeGroupID(snapshot.GroupID) != groupID || snapshot.Sequence == 0 || strings.TrimSpace(snapshot.Generation) == "" {
 		return groupInventoryView{}, errGroupInventoryInvalid
@@ -362,8 +385,10 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot) (gr
 	}
 
 	activeSeen := make(map[string]struct{})
-	healthySeen := make(map[string]struct{})
-	healthy := make([]string, 0, len(snapshot.Instances))
+	servingSeen := make(map[string]struct{})
+	bootstrapSeen := make(map[string]struct{})
+	serving := make([]string, 0, len(snapshot.Instances))
+	bootstrap := make([]string, 0, len(snapshot.Instances))
 	for _, instance := range snapshot.Instances {
 		instanceGroup := normalizeGroupID(instance.GroupID)
 		edgeID := normalizeEdgeIdentity(instance.EdgeID)
@@ -383,24 +408,47 @@ func validateGroupInventory(groupID string, snapshot GroupInventorySnapshot) (gr
 			return groupInventoryView{}, errGroupInventoryInvalid
 		}
 		activeSeen[edgeID] = struct{}{}
-		if !instance.EffectiveHealthy || !instance.NodeHealthy || instance.Draining ||
-			model.NormalizeEdgeHealthStatus(instance.NodeStatus) != model.EdgeHealthHealthy || strings.TrimSpace(instance.FailureClass) != "" {
+		servingHealthy := instance.EffectiveHealthy
+		if instance.ServingHealthy != nil {
+			servingHealthy = *instance.ServingHealthy
+			if servingHealthy != instance.EffectiveHealthy {
+				return groupInventoryView{}, errGroupInventoryInvalid
+			}
+		}
+		baseHealthy := instance.NodeHealthy && !instance.Draining &&
+			model.NormalizeEdgeHealthStatus(instance.NodeStatus) == model.EdgeHealthHealthy && strings.TrimSpace(instance.FailureClass) == ""
+		if servingHealthy && baseHealthy {
+			if _, duplicate := servingSeen[edgeID]; duplicate {
+				continue
+			}
+			servingSeen[edgeID] = struct{}{}
+			serving = append(serving, edgeID)
 			continue
 		}
-		if _, duplicate := healthySeen[edgeID]; duplicate {
+		eligibility := instance.BootstrapEligibility
+		if !allowBootstrap || !baseHealthy || eligibility == nil || instance.ServingHealthy == nil || *instance.ServingHealthy ||
+			eligibility.GroupID != groupID || eligibility.ReleaseEpoch != releaseEpoch || eligibility.ProducerGeneration == 0 ||
+			inventoryProducerGeneration(eligibility.ProducerGeneration) != strings.TrimSpace(snapshot.Generation) ||
+			eligibility.ValidUntil.IsZero() || !eligibility.ValidUntil.After(now) || eligibility.ValidUntil.After(snapshot.ObservedAt.Add(time.Minute)) {
 			continue
 		}
-		healthySeen[edgeID] = struct{}{}
-		healthy = append(healthy, edgeID)
+		if _, duplicate := bootstrapSeen[edgeID]; duplicate {
+			continue
+		}
+		bootstrapSeen[edgeID] = struct{}{}
+		bootstrap = append(bootstrap, edgeID)
 	}
 	if len(activeSeen) == 0 {
 		return groupInventoryView{}, errGroupInventoryInvalid
 	}
-	if len(healthy) < epoch.MinHealthyInstances {
+	candidates := append(append([]string(nil), serving...), bootstrap...)
+	if len(candidates) < epoch.MinHealthyInstances {
 		return groupInventoryView{}, errNoHealthyActiveInstances
 	}
-	sort.Strings(healthy)
-	return groupInventoryView{activeEpoch: epoch, healthyEdgeIDs: healthy}, nil
+	sort.Strings(serving)
+	sort.Strings(bootstrap)
+	sort.Strings(candidates)
+	return groupInventoryView{activeEpoch: epoch, servingEdgeIDs: serving, bootstrapEdgeIDs: bootstrap, candidateEdgeIDs: candidates}, nil
 }
 
 func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, inventory GroupInventorySnapshot, view groupInventoryView, previousGeneration string, now time.Time) (model.EdgeRouteBundle, error) {
@@ -436,7 +484,7 @@ func compileGroupShadowCandidate(snapshot model.EdgeRouteIntentSnapshot, invento
 		if !applies {
 			continue
 		}
-		binding, included, err := compileGroupRouteBinding(intent, snapshot.Generation, inventory.Generation, groupID, view.healthyEdgeIDs)
+		binding, included, err := compileGroupRouteBinding(intent, snapshot.Generation, inventory.Generation, groupID, view.candidateEdgeIDs)
 		if err != nil {
 			return model.EdgeRouteBundle{}, err
 		}
@@ -771,18 +819,20 @@ func cachePolicyIDSet(values []model.CachePolicy) map[string]struct{} {
 
 func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 	type instanceIdentity struct {
-		EdgeID           string `json:"edge_id"`
-		GroupID          string `json:"edge_group_id"`
-		FaultDomainID    string `json:"fault_domain_id,omitempty"`
-		EdgePoolID       string `json:"edge_pool_id,omitempty"`
-		Slot             string `json:"slot"`
-		InstanceUID      string `json:"instance_uid"`
-		ReleaseEpoch     string `json:"release_epoch"`
-		EffectiveHealthy bool   `json:"effective_healthy"`
-		NodeHealthy      bool   `json:"node_healthy"`
-		NodeStatus       string `json:"node_status"`
-		Draining         bool   `json:"draining"`
-		FailureClass     string `json:"failure_class,omitempty"`
+		EdgeID               string                     `json:"edge_id"`
+		GroupID              string                     `json:"edge_group_id"`
+		FaultDomainID        string                     `json:"fault_domain_id,omitempty"`
+		EdgePoolID           string                     `json:"edge_pool_id,omitempty"`
+		Slot                 string                     `json:"slot"`
+		InstanceUID          string                     `json:"instance_uid"`
+		ReleaseEpoch         string                     `json:"release_epoch"`
+		EffectiveHealthy     bool                       `json:"effective_healthy"`
+		ServingHealthy       *bool                      `json:"serving_healthy,omitempty"`
+		BootstrapEligibility *GroupBootstrapEligibility `json:"bootstrap_eligibility,omitempty"`
+		NodeHealthy          bool                       `json:"node_healthy"`
+		NodeStatus           string                     `json:"node_status"`
+		Draining             bool                       `json:"draining"`
+		FailureClass         string                     `json:"failure_class,omitempty"`
 	}
 	instances := make([]instanceIdentity, 0, len(snapshot.Instances))
 	activeSlot := normalizeSlot(snapshot.ActiveEpoch.Slot)
@@ -795,7 +845,8 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 			EdgeID: normalizeEdgeIdentity(instance.EdgeID), GroupID: normalizeGroupID(instance.GroupID),
 			FaultDomainID: strings.TrimSpace(instance.FaultDomainID), EdgePoolID: strings.TrimSpace(instance.EdgePoolID),
 			Slot: normalizeSlot(instance.Slot), InstanceUID: strings.TrimSpace(instance.InstanceUID), ReleaseEpoch: strings.TrimSpace(instance.ReleaseEpoch),
-			EffectiveHealthy: instance.EffectiveHealthy, NodeHealthy: instance.NodeHealthy,
+			EffectiveHealthy: instance.EffectiveHealthy, ServingHealthy: cloneBool(instance.ServingHealthy),
+			BootstrapEligibility: cloneBootstrapEligibility(instance.BootstrapEligibility), NodeHealthy: instance.NodeHealthy,
 			NodeStatus: model.NormalizeEdgeHealthStatus(instance.NodeStatus), Draining: instance.Draining,
 			FailureClass: strings.TrimSpace(instance.FailureClass),
 		})
@@ -829,6 +880,26 @@ func groupInventorySemanticDigest(snapshot GroupInventorySnapshot) string {
 		Epoch         any                `json:"active_epoch"`
 		Instances     []instanceIdentity `json:"instances"`
 	}{snapshot.Schema, normalizeGroupID(snapshot.GroupID), strings.TrimSpace(snapshot.FaultDomainID), strings.TrimSpace(snapshot.EdgePoolID), snapshot.Sequence, strings.TrimSpace(snapshot.Generation), epoch, instances})
+}
+
+func inventoryProducerGeneration(generation uint64) string {
+	return "producer-" + strconv.FormatUint(generation, 10)
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneBootstrapEligibility(value *GroupBootstrapEligibility) *GroupBootstrapEligibility {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func groupShadowInputDigest(intentDigest, groupID, inventoryDigest string) string {

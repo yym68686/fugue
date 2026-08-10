@@ -399,6 +399,51 @@ func authorityInventoryHeartbeatFixture(groupID, nodeID string, expectedSequence
 	}
 }
 
+func TestAuthorityBootstrapEligibilityIsExactlyBoundAndNeverServingHealthy(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	groupID := "edge-group-neutral-bootstrap"
+	nodeID := "edge-bootstrap-1"
+	value := authorityInventoryHeartbeatFixture(groupID, nodeID, 0, 7, now, "bootstrap-binding-0001")
+	serving := false
+	instance := &value.Inventory.Instances[0]
+	instance.EffectiveHealthy = false
+	instance.ServingHealthy = &serving
+	instance.BootstrapEligibility = &GroupBootstrapEligibility{
+		GroupID: groupID, ReleaseEpoch: instance.ReleaseEpoch, ProducerGeneration: value.ProducerGeneration,
+		ValidUntil: time.Unix(value.ExpiresAtUnix, 0).UTC(),
+	}
+	identity := GroupInventoryProducerIdentity{NodeID: nodeID, GroupID: groupID}
+	if err := validateAuthorityInventoryProducerHeartbeat(value, identity, now); err != nil {
+		t.Fatalf("valid bootstrap eligibility: %v", err)
+	}
+	mutations := []func(*GroupInventoryHeartbeat){
+		func(v *GroupInventoryHeartbeat) {
+			v.Inventory.Instances[0].BootstrapEligibility.GroupID = "edge-group-other"
+		},
+		func(v *GroupInventoryHeartbeat) {
+			v.Inventory.Instances[0].BootstrapEligibility.ReleaseEpoch = "other-epoch"
+		},
+		func(v *GroupInventoryHeartbeat) { v.Inventory.Instances[0].BootstrapEligibility.ProducerGeneration++ },
+		func(v *GroupInventoryHeartbeat) {
+			v.Inventory.Instances[0].BootstrapEligibility.ValidUntil = now.Add(30 * time.Second)
+		},
+		func(v *GroupInventoryHeartbeat) {
+			trueValue := true
+			v.Inventory.Instances[0].ServingHealthy = &trueValue
+		},
+	}
+	for index, mutate := range mutations {
+		candidate := value
+		candidate.Inventory.Instances = append([]GroupInstance(nil), value.Inventory.Instances...)
+		eligibility := *value.Inventory.Instances[0].BootstrapEligibility
+		candidate.Inventory.Instances[0].BootstrapEligibility = &eligibility
+		mutate(&candidate)
+		if err := validateAuthorityInventoryProducerHeartbeat(candidate, identity, now); err == nil {
+			t.Fatalf("bootstrap binding mutation %d was accepted", index)
+		}
+	}
+}
+
 func TestGroupInventoryHeartbeatBindsFaultDomainAndPoolAcrossEnvelope(t *testing.T) {
 	value := authorityInventoryHeartbeatFixture("edge-group-neutral-a", "edge-01", 0, 1, time.Now().UTC(), "topology-binding-0001")
 	value.FaultDomainID = "fault-domain-ovh-fra-1"

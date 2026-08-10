@@ -187,6 +187,17 @@ func validateAuthorityInventoryProducerHeartbeat(value GroupInventoryHeartbeat, 
 		model.NormalizeEdgeHealthStatus(instance.NodeStatus) != model.EdgeHealthHealthy) {
 		return errGroupInventoryInvalid
 	}
+	if instance.ServingHealthy != nil && *instance.ServingHealthy != instance.EffectiveHealthy {
+		return errGroupInventoryInvalid
+	}
+	if eligibility := instance.BootstrapEligibility; eligibility != nil {
+		if instance.ServingHealthy == nil || *instance.ServingHealthy || instance.EffectiveHealthy || !instance.NodeHealthy || instance.Draining ||
+			instance.FailureClass != "" || model.NormalizeEdgeHealthStatus(instance.NodeStatus) != model.EdgeHealthHealthy ||
+			eligibility.GroupID != groupID || eligibility.ReleaseEpoch != instance.ReleaseEpoch ||
+			eligibility.ProducerGeneration != value.ProducerGeneration || !eligibility.ValidUntil.Equal(expiresAt) {
+			return errGroupInventoryInvalid
+		}
+	}
 	return nil
 }
 
