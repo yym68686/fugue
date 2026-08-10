@@ -15,6 +15,8 @@ class CanonicalReceiptTest(unittest.TestCase):
     def test_ci_always_runs_the_single_repository_prepush_entrypoint(self) -> None:
         source = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertEqual(source.count("run: make prepush"), 1)
+        self.assertEqual(source.count('PREPUSH_TIMEOUT_SECONDS: "180"'), 1)
+        self.assertEqual(source.count('PREPUSH_MAX_ELAPSED_SECONDS: "180"'), 1)
         self.assertNotIn("Classify release-related", source)
         self.assertNotIn("grep -Eq", source)
 
