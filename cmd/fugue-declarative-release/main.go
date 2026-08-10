@@ -73,6 +73,10 @@ func runPlan(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	changed, err = addProductionRuntimeChanges(registry, headSHA, changed)
+	if err != nil {
+		return err
+	}
 	plan, err := declarativerelease.BuildPlan(registry, baseSHA, headSHA, changed)
 	if err != nil {
 		return err
@@ -136,6 +140,83 @@ func runPlan(args []string, output io.Writer) error {
 	}
 	_, err = output.Write(append(encoded, '\n'))
 	return err
+}
+
+func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA string, changed []string) ([]string, error) {
+	componentsByIntent := make(map[string]declarativerelease.Component, len(registry.Components))
+	for _, component := range registry.Components {
+		componentsByIntent[component.IntentPath] = component
+	}
+	seenChanged := make(map[string]struct{}, len(changed))
+	var selected *declarativerelease.Component
+	for _, changedPath := range changed {
+		if _, exists := seenChanged[changedPath]; exists {
+			return nil, fmt.Errorf("duplicate changed path %q", changedPath)
+		}
+		seenChanged[changedPath] = struct{}{}
+		component, exists := componentsByIntent[changedPath]
+		if !exists {
+			continue
+		}
+		if selected != nil {
+			return nil, errors.New("runtime commit contains multiple production intents; split it into independent production atoms")
+		}
+		copy := component
+		selected = &copy
+	}
+	if selected == nil {
+		return changed, nil
+	}
+	intent, err := loadIntent(selected.IntentPath)
+	if err != nil {
+		return nil, fmt.Errorf("load component %q intent for production runtime diff: %w", selected.ID, err)
+	}
+	if err := intent.Validate(); err != nil {
+		return nil, fmt.Errorf("component %q intent for production runtime diff: %w", selected.ID, err)
+	}
+	if intent.Component != selected.ID {
+		return nil, fmt.Errorf("component %q production runtime intent identity mismatch", selected.ID)
+	}
+	if !intent.ExpectedPreviousPresent {
+		return changed, nil
+	}
+	baseline := intent.ExpectedPreviousOCIRevision
+	if err := exec.Command("git", "merge-base", "--is-ancestor", baseline, headSHA).Run(); err != nil {
+		return nil, fmt.Errorf("component %q production OCI revision is not in target ancestry", selected.ID)
+	}
+	raw, err := exec.Command("git", "diff", "--no-renames", "--name-only", baseline, headSHA, "--").Output()
+	if err != nil {
+		return nil, fmt.Errorf("compute component %q production runtime diff: %w", selected.ID, err)
+	}
+	merged := make(map[string]struct{}, len(changed)+32)
+	for _, path := range changed {
+		merged[path] = struct{}{}
+	}
+	for _, path := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if path == "" || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		if path == selected.ManifestPath {
+			merged[path] = struct{}{}
+			continue
+		}
+		for _, root := range selected.SourceRoots {
+			if pathMatchesComponentRoot(path, root) {
+				merged[path] = struct{}{}
+				break
+			}
+		}
+	}
+	result := make([]string, 0, len(merged))
+	for path := range merged {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func pathMatchesComponentRoot(filename, root string) bool {
+	return filename == root || strings.HasPrefix(filename, strings.TrimSuffix(root, "/")+"/")
 }
 
 func containsPath(paths []string, want string) bool {

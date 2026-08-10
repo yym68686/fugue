@@ -201,6 +201,60 @@ func TestPlanCommandBindsSuccessorToLastComponentIntentCommit(t *testing.T) {
 	}
 }
 
+func TestPlanCommandIncludesRuntimeChangesSinceProductionOCIRevision(t *testing.T) {
+	root := t.TempDir()
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	runGit(t, "init", "--initial-branch=main")
+	runGit(t, "config", "user.email", "release@example.test")
+	runGit(t, "config", "user.name", "Release Test")
+	writeFile(t, "go.mod", []byte("module example.test/release\n\ngo 1.22\n"))
+
+	registry := declarativerelease.Registry{APIVersion: declarativerelease.RegistryAPIVersion, Kind: declarativerelease.RegistryKind, Components: []declarativerelease.Component{{
+		ID: "api", Family: "control-plane", IntentPath: "deploy/releases/api/intent.json", ManifestPath: "deploy/releases/api/deployment.json",
+		SourceRoots: []string{"Dockerfile.api", "cmd/fugue-api"}, Artifact: declarativerelease.Artifact{Repository: "ghcr.io/example/fugue-api", Dockerfile: "Dockerfile.api", Context: ".", BuildPackage: "./cmd/fugue-api"},
+		Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api", FieldManager: "fugue-api-declarative", Replicas: 2, RolloutMode: "rolling"},
+		Health:   []declarativerelease.HealthProbe{{Type: "deployment", Name: "fugue-fugue-api"}}, Concurrency: "fugue-production-api",
+	}}}
+	writeJSON(t, "deploy/releases/components.json", registry)
+	writeFile(t, "Dockerfile.api", []byte("FROM scratch\n"))
+	writeFile(t, "cmd/fugue-api/main.go", []byte("package main\nfunc main() {}\n"))
+	writeJSON(t, "deploy/releases/api/intent.json", declarativerelease.Intent{APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "api", Generation: 1, ExpectedPreviousPresent: false, Rollback: "previous-git-lkg"})
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "first production api atom")
+	production := runGit(t, "rev-parse", "HEAD")
+
+	writeFile(t, "cmd/fugue-api/main.go", []byte("package main\nfunc main() { println(\"latent\") }\n"))
+	runGit(t, "add", "cmd/fugue-api/main.go")
+	runGit(t, "commit", "-m", "latent api runtime change")
+	base := runGit(t, "rev-parse", "HEAD")
+	writeFile(t, "README.md", []byte("release the accumulated API runtime delta\n"))
+	writeJSON(t, "deploy/releases/api/intent.json", declarativerelease.Intent{APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "api", Generation: 2, ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: production, ExpectedPreviousManifestSHA: production, ExpectedPreviousOCIRevision: production, ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("a", 64), Rollback: "previous-git-lkg"})
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "release accumulated api runtime")
+	head := runGit(t, "rev-parse", "HEAD")
+	writeFile(t, "changed.txt", []byte("README.md\ndeploy/releases/api/intent.json\n"))
+
+	var output bytes.Buffer
+	if err := run([]string{"plan", "deploy/releases/components.json", base, head, "changed.txt"}, &output); err != nil {
+		t.Fatalf("plan command: %v", err)
+	}
+	var plan declarativerelease.Plan
+	if err := json.Unmarshal(output.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Releases) != 1 || plan.Releases[0].ComponentID != "api" ||
+		!containsPath(plan.Releases[0].ChangedPaths, "cmd/fugue-api/main.go") {
+		t.Fatalf("production runtime delta was omitted: %+v", plan.Releases)
+	}
+}
+
 func TestPlanCommandRejectsExtraArguments(t *testing.T) {
 	if err := run([]string{"plan", "a", "b", "c", "d", "extra"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("extra argument was accepted")
