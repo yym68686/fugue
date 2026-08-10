@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,23 @@ import (
 )
 
 const maxKubernetesOutputBytes = 4 << 20
+
+var (
+	emergencyConflictCountPattern = regexp.MustCompile(`Apply failed with ([1-9][0-9]*) conflicts?`)
+	emergencyConflictPattern      = regexp.MustCompile(`conflict with "([^"]+)" using [^:]+: (\.[^[:space:]]+)`)
+	emergencyConflictGroupPattern = regexp.MustCompile(`conflicts with "([^"]+)" using [^:]+:`)
+)
+
+type emergencySSAConflict struct {
+	manager string
+	field   string
+}
+
+var emergencyOwnershipManagers = map[string]bool{
+	"kubectl":       true,
+	"kubectl-patch": true,
+	"kubectl-set":   true,
+}
 
 type kubectlCluster struct {
 	kubectl  string
@@ -465,7 +483,7 @@ func (cluster *kubectlCluster) applyResourceSet(ctx context.Context, release dec
 		if encodeErr != nil {
 			return encodeErr
 		}
-		if _, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...); applyErr != nil {
+		if applyErr := cluster.applyResourceWithOwnershipConvergence(ctx, release, identity, item, encoded, dryRun); applyErr != nil {
 			return fmt.Errorf("apply %s/%s: %w", identity.Kind, identity.Name, applyErr)
 		}
 	}
@@ -539,6 +557,378 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 		arguments = append(arguments, "--dry-run=server")
 	}
 	return append(arguments, "--filename", "-", "--output", "json")
+}
+
+// applyResourceWithOwnershipConvergence is the one bounded recovery path for
+// emergency kubectl writes. It never force-applies an unreviewed field. A
+// typed SSA conflict must exactly match the release-owned annotation/image
+// allowlist and an Update managedFields entry. Execute removes only that exact
+// entry with UID/RV/entry JSON-Patch tests, then retries ordinary SSA. Prepare
+// remains read-only and accepts only the same typed proof. No broad takeover
+// or persistent compatibility mode exists.
+func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
+	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
+	if applyErr != nil {
+		allowed := emergencyOwnershipPointers(release, identity, desired)
+		if len(allowed) == 0 {
+			return applyErr
+		}
+		liveRaw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil || resourceAbsent(liveRaw) {
+			return fmt.Errorf("read emergency ownership witness: %w", getErr)
+		}
+		live, decodeErr := decodeJSONObject(liveRaw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if evidenceErr := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); evidenceErr != nil {
+			return evidenceErr
+		}
+		if dryRun {
+			return nil
+		}
+		if cleanupErr := cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, false); cleanupErr != nil {
+			return cleanupErr
+		}
+		if _, retryErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, false)...); retryErr != nil {
+			return fmt.Errorf("ordinary apply after exact emergency ownership cleanup: %w", retryErr)
+		}
+	}
+	if dryRun {
+		return nil
+	}
+	return cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, true)
+}
+
+func emergencyOwnershipPointers(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) []string {
+	allowed := make([]string, 0, 8)
+	metadata := mapField(desired, "metadata")
+	annotations := mapField(metadata, "annotations")
+	for _, key := range []string{"fugue.pro/artifact-receipt-digest", "fugue.pro/production-config-sha", "fugue.pro/release-plan-digest"} {
+		if _, ok := annotations[key]; ok {
+			allowed = append(allowed, "/metadata/annotations/"+escapeJSONPointerToken(key))
+		}
+	}
+	templateAnnotations := mapField(mapField(mapField(desired, "spec"), "template"), "metadata")
+	templateAnnotations = mapField(templateAnnotations, "annotations")
+	for _, key := range []string{"fugue.pro/oci-revision", "fugue.pro/production-config-sha", "fugue.pro/source-commit"} {
+		if _, ok := templateAnnotations[key]; ok {
+			allowed = append(allowed, "/spec/template/metadata/annotations/"+escapeJSONPointerToken(key))
+		}
+	}
+	for _, target := range release.ArtifactTargets {
+		if target.APIVersion != identity.APIVersion || target.Kind != identity.Kind || target.Namespace != identity.Namespace || target.Name != identity.Name {
+			continue
+		}
+		if _, found, err := declaredContainerImageOptional(desired, target.Container, target.ContainerType); err == nil && found {
+			field := "containers"
+			if target.ContainerType == "init-container" {
+				field = "initContainers"
+			}
+			allowed = append(allowed, "/spec/template/spec/"+field+"[name="+target.Container+"]/image")
+		}
+	}
+	sort.Strings(allowed)
+	return allowed
+}
+
+func validateEmergencyOwnershipConflictEvidence(desired, live map[string]any, allowed []string, applyErr error) error {
+	desiredMetadata, liveMetadata := mapField(desired, "metadata"), mapField(live, "metadata")
+	if stringValue(desiredMetadata["uid"]) == "" || stringValue(desiredMetadata["uid"]) != stringValue(liveMetadata["uid"]) ||
+		stringValue(desiredMetadata["resourceVersion"]) == "" || stringValue(desiredMetadata["resourceVersion"]) != stringValue(liveMetadata["resourceVersion"]) {
+		return errors.New("emergency ownership witness is not UID/RV bound")
+	}
+	conflicts, err := parseEmergencySSAConflicts(applyErr)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(conflicts))
+	for _, conflict := range conflicts {
+		pointer := pointerForEmergencySSAField(conflict.field, allowed)
+		if pointer == "" || !emergencyOwnershipManagers[conflict.manager] {
+			return fmt.Errorf("emergency ownership conflict %s:%s is outside the exact allowlist", conflict.manager, conflict.field)
+		}
+		key := conflict.manager + "\x00" + pointer
+		if seen[key] {
+			return errors.New("emergency ownership conflict is duplicated")
+		}
+		seen[key] = true
+		matchedEntry := false
+		for _, rawEntry := range anySlice(liveMetadata["managedFields"]) {
+			entry, _ := rawEntry.(map[string]any)
+			if stringValue(entry["manager"]) != conflict.manager || stringValue(entry["operation"]) != "Update" || stringValue(entry["subresource"]) != "" ||
+				!managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), []string{pointer}, true) {
+				continue
+			}
+			pointers, flattenErr := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
+			if flattenErr != nil || len(pointers) == 0 || !stringSubset(pointers, allowed) {
+				return errors.New("emergency managedFields entry expands beyond the exact allowlist")
+			}
+			matchedEntry = true
+		}
+		if !matchedEntry {
+			return errors.New("emergency ownership conflict lacks an exact Update managedFields witness")
+		}
+	}
+	return nil
+}
+
+func (cluster *kubectlCluster) cleanupEmergencyOwnership(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, requireDeclarativeOwner bool) error {
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	if len(allowed) == 0 {
+		return nil
+	}
+	for attempts := 0; attempts < 4; attempts++ {
+		liveRaw, err := cluster.getResource(ctx, identity)
+		if err != nil || resourceAbsent(liveRaw) {
+			return fmt.Errorf("read post-apply ownership: %w", err)
+		}
+		live, err := decodeJSONObject(liveRaw)
+		if err != nil {
+			return err
+		}
+		patch, found, err := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, allowed, requireDeclarativeOwner)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+		encoded, err := declarativerelease.CanonicalJSON(patch)
+		if err != nil {
+			return err
+		}
+		if _, err := cluster.kubectlRun(ctx, nil, "patch", strings.ToLower(identity.Kind), identity.Name,
+			"--namespace", identity.Namespace, "--type=json", "--patch", string(encoded), "--output", "json"); err != nil {
+			return fmt.Errorf("remove exact emergency managedFields entry: %w", err)
+		}
+	}
+	return errors.New("emergency ownership cleanup exceeded bounded entry count")
+}
+
+func nextEmergencyOwnershipPatch(live map[string]any, declarativeManager string, allowed []string, requireDeclarativeOwner bool) ([]map[string]any, bool, error) {
+	metadata := mapField(live, "metadata")
+	uid, rv := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"])
+	if uid == "" || rv == "" {
+		return nil, false, errors.New("emergency ownership cleanup lacks UID/RV")
+	}
+	entries := anySlice(metadata["managedFields"])
+	for index, rawEntry := range entries {
+		entry, _ := rawEntry.(map[string]any)
+		manager := stringValue(entry["manager"])
+		if !emergencyOwnershipManagers[manager] || stringValue(entry["operation"]) != "Update" || stringValue(entry["subresource"]) != "" {
+			continue
+		}
+		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
+		if err != nil || len(pointers) == 0 || !stringsOverlap(pointers, allowed) {
+			continue
+		}
+		if !stringSubset(pointers, allowed) {
+			return nil, false, errors.New("emergency managedFields cleanup would remove unreviewed ownership")
+		}
+		if requireDeclarativeOwner && !managedFieldsOwnPointers(metadata, declarativeManager, pointers) {
+			return nil, false, errors.New("emergency ownership cleanup lacks declarative co-ownership")
+		}
+		path := "/metadata/managedFields/" + strconv.Itoa(index)
+		return []map[string]any{
+			{"op": "test", "path": "/metadata/uid", "value": uid},
+			{"op": "test", "path": "/metadata/resourceVersion", "value": rv},
+			{"op": "test", "path": path, "value": entry},
+			{"op": "remove", "path": path},
+		}, true, nil
+	}
+	return nil, false, nil
+}
+
+func parseEmergencySSAConflicts(applyErr error) ([]emergencySSAConflict, error) {
+	if applyErr == nil {
+		return nil, errors.New("emergency ownership conflict evidence is absent")
+	}
+	raw := applyErr.Error()
+	countMatch := emergencyConflictCountPattern.FindStringSubmatch(raw)
+	conflicts := make([]emergencySSAConflict, 0)
+	groupManager := ""
+	for _, line := range strings.Split(raw, "\n") {
+		if match := emergencyConflictPattern.FindStringSubmatch(line); len(match) == 3 {
+			conflicts = append(conflicts, emergencySSAConflict{manager: match[1], field: match[2]})
+			groupManager = ""
+			continue
+		}
+		if match := emergencyConflictGroupPattern.FindStringSubmatch(line); len(match) == 2 {
+			groupManager = match[1]
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if groupManager != "" && strings.HasPrefix(trimmed, "- .") {
+			conflicts = append(conflicts, emergencySSAConflict{manager: groupManager, field: strings.TrimPrefix(trimmed, "- ")})
+			continue
+		}
+		if groupManager != "" && trimmed != "" {
+			groupManager = ""
+		}
+	}
+	if len(countMatch) != 2 || len(conflicts) == 0 {
+		return nil, errors.New("emergency ownership failure is not a typed SSA conflict")
+	}
+	count, err := strconv.Atoi(countMatch[1])
+	if err != nil || count != len(conflicts) {
+		return nil, errors.New("emergency ownership conflict count is inconsistent")
+	}
+	return conflicts, nil
+}
+
+func pointerForEmergencySSAField(field string, allowed []string) string {
+	for _, pointer := range allowed {
+		if ssaFieldForPointer(pointer) == field {
+			return pointer
+		}
+	}
+	return ""
+}
+
+func ssaFieldForPointer(pointer string) string {
+	parts := strings.Split(strings.TrimPrefix(pointer, "/"), "/")
+	for index, part := range parts {
+		part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+		if open := strings.Index(part, "[name="); open > 0 && strings.HasSuffix(part, "]") {
+			name := part[open+len("[name=") : len(part)-1]
+			part = part[:open] + `[name="` + name + `"]`
+		}
+		parts[index] = part
+	}
+	return "." + strings.Join(parts, ".")
+}
+
+func managedFieldsEntryPointers(fields map[string]any) ([]string, error) {
+	result := make([]string, 0)
+	var walk func(map[string]any, []string) error
+	walk = func(node map[string]any, path []string) error {
+		keys := make([]string, 0, len(node))
+		for key := range node {
+			if key != "." {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) == 0 {
+			if len(path) == 0 {
+				return errors.New("managedFields entry has an empty root")
+			}
+			result = append(result, "/"+strings.Join(path, "/"))
+			return nil
+		}
+		for _, key := range keys {
+			child, ok := node[key].(map[string]any)
+			if !ok {
+				return errors.New("managedFields entry is not FieldsV1")
+			}
+			switch {
+			case strings.HasPrefix(key, "f:"):
+				next := append(append([]string(nil), path...), escapeJSONPointerToken(strings.TrimPrefix(key, "f:")))
+				if err := walk(child, next); err != nil {
+					return err
+				}
+			case strings.HasPrefix(key, "k:") && len(path) > 0:
+				var selector map[string]string
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(key, "k:")), &selector); err != nil || len(selector) != 1 || selector["name"] == "" {
+					return errors.New("managedFields associative selector is invalid")
+				}
+				next := append([]string(nil), path...)
+				next[len(next)-1] += "[name=" + selector["name"] + "]"
+				if err := walk(child, next); err != nil {
+					return err
+				}
+			default:
+				return errors.New("managedFields entry contains an unsupported field key")
+			}
+		}
+		return nil
+	}
+	if err := walk(fields, nil); err != nil {
+		return nil, err
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func managedFieldsOwnPointers(metadata map[string]any, manager string, pointers []string) bool {
+	for _, rawEntry := range anySlice(metadata["managedFields"]) {
+		entry, _ := rawEntry.(map[string]any)
+		if stringValue(entry["manager"]) == manager && stringValue(entry["operation"]) == "Apply" && stringValue(entry["subresource"]) == "" &&
+			managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), pointers, true) {
+			return true
+		}
+	}
+	return false
+}
+
+func managedFieldsEntryOwnsPointers(fields map[string]any, pointers []string, requireAll bool) bool {
+	matched := 0
+	for _, pointer := range pointers {
+		current := fields
+		owned := true
+		for _, encoded := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+			token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+			field, selector := token, ""
+			if open := strings.Index(token, "[name="); open > 0 && strings.HasSuffix(token, "]") {
+				field, selector = token[:open], token[open+len("[name="):len(token)-1]
+			}
+			next, ok := current["f:"+field].(map[string]any)
+			if !ok {
+				owned = false
+				break
+			}
+			current = next
+			if selector != "" {
+				encodedSelector, _ := json.Marshal(selector)
+				next, ok = current[`k:{"name":`+string(encodedSelector)+`}`].(map[string]any)
+				if !ok {
+					owned = false
+					break
+				}
+				current = next
+			}
+		}
+		if owned {
+			matched++
+			if !requireAll {
+				return true
+			}
+		} else if requireAll {
+			return false
+		}
+	}
+	return matched > 0 && (!requireAll || matched == len(pointers))
+}
+
+func stringSubset(values, allowed []string) bool {
+	set := make(map[string]bool, len(allowed))
+	for _, value := range allowed {
+		set[value] = true
+	}
+	for _, value := range values {
+		if !set[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func stringsOverlap(left, right []string) bool {
+	set := make(map[string]bool, len(right))
+	for _, value := range right {
+		set[value] = true
+	}
+	for _, value := range left {
+		if set[value] {
+			return true
+		}
+	}
+	return false
+}
+
+func escapeJSONPointerToken(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "~", "~0"), "/", "~1")
 }
 
 func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) (declarativerelease.Observation, error) {
@@ -631,6 +1021,34 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 		if !declarativerelease.ResourceDesiredSubset(desired, live) {
 			return fmt.Errorf("declared resource %s/%s has not converged", identity.Kind, identity.Name)
 		}
+		if err := verifyNoEmergencyOwnership(release, identity, desired, live); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyNoEmergencyOwnership(release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired, live map[string]any) error {
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	if len(allowed) == 0 {
+		return nil
+	}
+	metadata := mapField(live, "metadata")
+	for _, rawEntry := range anySlice(metadata["managedFields"]) {
+		entry, _ := rawEntry.(map[string]any)
+		if !emergencyOwnershipManagers[stringValue(entry["manager"])] || stringValue(entry["subresource"]) != "" {
+			continue
+		}
+		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
+		if err != nil {
+			return err
+		}
+		if stringsOverlap(pointers, allowed) {
+			return fmt.Errorf("declared resource %s/%s retains emergency field ownership", identity.Kind, identity.Name)
+		}
+	}
+	if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, allowed) {
+		return fmt.Errorf("declared resource %s/%s lacks declarative ownership of the exact runtime allowlist", identity.Kind, identity.Name)
 	}
 	return nil
 }

@@ -268,6 +268,126 @@ printf '{}\n'
 	}
 }
 
+func TestEmergencyOwnershipConvergenceIsExactAndCASBound(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		Workload: declarativerelease.Workload{FieldManager: "fugue-edge-control-de-declarative"},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{
+			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", Container: "edge-control", ContainerType: "container"},
+			{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de", Container: "state-permissions", ContainerType: "init-container"},
+		},
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de"}
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"name": "edge-control-de", "namespace": "fugue-system", "uid": "control-uid", "resourceVersion": "42",
+			"annotations": map[string]any{
+				"fugue.pro/artifact-receipt-digest": "sha256:" + strings.Repeat("a", 64),
+				"fugue.pro/production-config-sha":   strings.Repeat("1", 40),
+				"fugue.pro/release-plan-digest":     "sha256:" + strings.Repeat("b", 64),
+			},
+		},
+		"spec": map[string]any{"template": map[string]any{
+			"metadata": map[string]any{"annotations": map[string]any{
+				"fugue.pro/oci-revision":          strings.Repeat("1", 40),
+				"fugue.pro/production-config-sha": strings.Repeat("1", 40),
+				"fugue.pro/source-commit":         strings.Repeat("1", 40),
+			}},
+			"spec": map[string]any{
+				"containers":     []any{map[string]any{"name": "edge-control", "image": "ghcr.io/example/control@sha256:" + strings.Repeat("c", 64)}},
+				"initContainers": []any{map[string]any{"name": "state-permissions", "image": "ghcr.io/example/control@sha256:" + strings.Repeat("c", 64)}},
+			},
+		}},
+	}
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	if len(allowed) != 8 {
+		t.Fatalf("allowlist=%v", allowed)
+	}
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
+		map[string]any{"manager": "kubectl", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, allowed)},
+	}
+	conflictLines := make([]string, 0, len(allowed)+1)
+	conflictLines = append(conflictLines, fmt.Sprintf("Apply failed with %d conflicts: conflicts with \"kubectl\" using apps/v1:", len(allowed)))
+	for _, pointer := range allowed {
+		conflictLines = append(conflictLines, "- "+ssaFieldForPointer(pointer))
+	}
+	applyErr := errors.New(strings.Join(conflictLines, "\n"))
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err != nil {
+		t.Fatalf("exact emergency conflict rejected: %v", err)
+	}
+	patch, found, err := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, allowed, true)
+	if err != nil || !found || len(patch) != 4 || patch[0]["path"] != "/metadata/uid" || patch[1]["path"] != "/metadata/resourceVersion" || patch[3]["path"] != "/metadata/managedFields/1" {
+		t.Fatalf("unexpected cleanup patch: patch=%v found=%v err=%v", patch, found, err)
+	}
+
+	extra := append(append([]string(nil), allowed...), "/spec/replicas")
+	metadata["managedFields"].([]any)[1].(map[string]any)["fieldsV1"] = managedFieldsTree(t, extra)
+	if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, applyErr); err == nil || !strings.Contains(err.Error(), "expands beyond") {
+		t.Fatalf("expanded emergency manager was accepted: %v", err)
+	}
+	if _, _, err := nextEmergencyOwnershipPatch(live, release.Workload.FieldManager, allowed, true); err == nil || !strings.Contains(err.Error(), "unreviewed") {
+		t.Fatalf("cleanup accepted expanded ownership: %v", err)
+	}
+}
+
+func TestEmergencyOwnershipRejectsUnknownManagerAndField(t *testing.T) {
+	allowed := []string{"/spec/template/spec/containers[name=edge-control]/image"}
+	for _, failure := range []error{
+		errors.New(`Apply failed with 1 conflict: conflict with "helm" using apps/v1: .spec.template.spec.containers[name="edge-control"].image`),
+		errors.New(`Apply failed with 1 conflict: conflict with "kubectl" using apps/v1: .spec.replicas`),
+	} {
+		desired := map[string]any{"metadata": map[string]any{"uid": "u", "resourceVersion": "1"}}
+		live := map[string]any{"metadata": map[string]any{"uid": "u", "resourceVersion": "1", "managedFields": []any{}}}
+		if err := validateEmergencyOwnershipConflictEvidence(desired, live, allowed, failure); err == nil || !strings.Contains(err.Error(), "outside the exact allowlist") {
+			t.Fatalf("unknown ownership conflict was accepted: %v", err)
+		}
+	}
+}
+
+func deepCopyJSONMap(t *testing.T, value map[string]any) map[string]any {
+	t.Helper()
+	raw := mustJSON(t, value)
+	var copy map[string]any
+	if err := json.Unmarshal(raw, &copy); err != nil {
+		t.Fatal(err)
+	}
+	return copy
+}
+
+func managedFieldsTree(t *testing.T, pointers []string) map[string]any {
+	t.Helper()
+	root := map[string]any{}
+	for _, pointer := range pointers {
+		current := root
+		for _, encoded := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+			token := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+			field, selector := token, ""
+			if open := strings.Index(token, "[name="); open > 0 && strings.HasSuffix(token, "]") {
+				field, selector = token[:open], token[open+len("[name="):len(token)-1]
+			}
+			next, _ := current["f:"+field].(map[string]any)
+			if next == nil {
+				next = map[string]any{}
+				current["f:"+field] = next
+			}
+			current = next
+			if selector != "" {
+				key := `k:{"name":` + strconv.Quote(selector) + `}`
+				next, _ = current[key].(map[string]any)
+				if next == nil {
+					next = map[string]any{}
+					current[key] = next
+				}
+				current = next
+			}
+		}
+	}
+	return root
+}
+
 func TestParseLeaderLeaseRequiresTypedRenewTime(t *testing.T) {
 	raw := []byte(`{"spec":{"holderIdentity":"controller-1","renewTime":"2026-08-05T01:02:03.123456Z"}}`)
 	holder, renew, err := parseLeaderLease(raw)
