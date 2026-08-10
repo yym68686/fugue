@@ -93,6 +93,36 @@ func TestThirdEdgeGroupIsPureDataAndPlansIndependently(t *testing.T) {
 	}
 }
 
+func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
+	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := DecodeEdgeGroupRegistry(edgeFile)
+	_ = edgeFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range edge.Groups {
+		count := 0
+		for _, probe := range group.Worker.Health {
+			if probe.Type != "public-route-http" {
+				continue
+			}
+			count++
+			if err := probe.validate(); err != nil {
+				t.Fatalf("group %s public route canary is invalid: %v", group.ID, err)
+			}
+			if probe.Name != group.GroupID {
+				t.Fatalf("group %s public route canary is not group-bound: %+v", group.ID, probe)
+			}
+		}
+		if count != 1 {
+			t.Fatalf("group %s must define exactly one generic public route canary, got %d", group.ID, count)
+		}
+	}
+}
+
 func TestProductionGoAndWorkflowDoNotNameConfiguredGroups(t *testing.T) {
 	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
 	if err != nil {
