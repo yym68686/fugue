@@ -121,6 +121,35 @@ func (store *KubeStore) LoadRecord(ctx context.Context, key Key) (ReleaseRecord,
 	return stored.record, nil
 }
 
+// LoadStableLKG returns the byte-exact forward manifest from the immutable
+// monitor record that currently represents production. It is read-only and
+// binds the requested predecessor identity before CI uses those bytes as the
+// Guardian candidate's rollback target.
+func (store *KubeStore) LoadStableLKG(ctx context.Context, key Key, release declarativerelease.PlanRelease) ([]byte, error) {
+	target, exists := store.targets[key]
+	if !exists || release.ComponentID != key.Component || release.Delivery == nil ||
+		release.Delivery.Writer != "guardian" || release.Delivery.Group != key.Group || !release.ExpectedPreviousPresent {
+		return nil, errors.New("stable Guardian LKG request is invalid")
+	}
+	stored, err := store.loadRelease(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	_, artifact, prepared, monitor, forward, _, err := decodeStableRecord(stored.currentMonitorData)
+	if err != nil {
+		return nil, err
+	}
+	if monitor.Component != release.ComponentID || monitor.ConfigSHA != release.ExpectedPreviousConfigSHA ||
+		prepared.Forward.ConfigSHA != release.ExpectedPreviousConfigSHA ||
+		prepared.Forward.ManifestSHA != release.ExpectedPreviousManifestSHA ||
+		prepared.Forward.OCIRevision != release.ExpectedPreviousOCIRevision ||
+		artifact.TopDigest != release.ExpectedPreviousImageDigest ||
+		monitor.ForwardManifestDigest != digest(forward) {
+		return nil, errors.New("stable Guardian LKG does not match the declared predecessor")
+	}
+	return append([]byte(nil), forward...), nil
+}
+
 func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (storedRelease, error) {
 	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
 	stateName := "fugue-release-monitor-" + target.MonitorComponent

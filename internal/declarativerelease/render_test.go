@@ -58,6 +58,64 @@ func TestRenderManifestsChangesOnlyReleaseIdentityAndSelectedImage(t *testing.T)
 	}
 }
 
+func TestBindGuardianLKGPreservesStableProvenanceAndRejectsRuntimeDrift(t *testing.T) {
+	plan := boundAPIPlan(t)
+	plan.Releases[0].Delivery = &Delivery{Writer: "guardian", Group: "de", DependencyService: "fugue-fugue"}
+	plan.PlanDigest = ""
+	planRaw, err := CanonicalJSON(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PlanDigest = digestOf(planRaw)
+	receipt, err := MaterializeArtifactReceipt(plan, "api", RegistryVerification{
+		Image: "ghcr.io/example/fugue-api@sha256:" + strings.Repeat("b", 64), IndexDigest: "sha256:" + strings.Repeat("b", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("c", 64), ConfigDigest: "sha256:" + strings.Repeat("d", 64),
+		OCIRevision: testSHA2, Platform: "linux/amd64", Verification: "registry_manifest_config_and_layer_get",
+		BlobCount: 2, LayerProbeCount: 1, RequestCount: 5, TotalLayerBytes: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fugue-fugue-api","namespace":"fugue-system"},"spec":{"replicas":2,"strategy":{"type":"RollingUpdate"},"template":{"metadata":{},"spec":{"containers":[{"image":"placeholder","name":"api"}]}}}}],"kind":"ComponentResourceSet"}`)
+	rendered, err := RenderManifests(plan, "api", receipt, bytes.NewReader(manifest), bytes.NewReader(manifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stable ResourceSet
+	if err := json.Unmarshal(rendered.LKG, &stable); err != nil {
+		t.Fatal(err)
+	}
+	metadata := stable.Items[0]["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]any)
+	annotations["fugue.pro/release-plan-digest"] = "sha256:" + strings.Repeat("e", 64)
+	annotations["fugue.pro/artifact-receipt-digest"] = "sha256:" + strings.Repeat("f", 64)
+	exact, err := CanonicalJSON(stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := BindGuardianLKG(plan, "api", rendered, exact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bound.LKG, exact) || bound.LKGDigest != digestOf(exact) || bytes.Equal(bound.LKG, rendered.LKG) {
+		t.Fatalf("exact stable provenance was not preserved: digest=%s", bound.LKGDigest)
+	}
+	workload := stable.Items[0]["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	workload["containers"].([]any)[0].(map[string]any)["image"] = receipt.ImmutableRef
+	drifted, _ := CanonicalJSON(stable)
+	if _, err := BindGuardianLKG(plan, "api", rendered, drifted); err == nil || !strings.Contains(err.Error(), "artifact identity") {
+		t.Fatalf("runtime-drifted LKG was accepted: %v", err)
+	}
+	directPlan := plan
+	directPlan.Releases[0].Delivery = nil
+	directPlan.PlanDigest = ""
+	directRaw, _ := CanonicalJSON(directPlan)
+	directPlan.PlanDigest = digestOf(directRaw)
+	if _, err := BindGuardianLKG(directPlan, "api", rendered, exact); err == nil {
+		t.Fatal("direct writer used Guardian exact-LKG binding")
+	}
+}
+
 func TestRenderManifestsBindsEveryDeclaredArtifactTarget(t *testing.T) {
 	registry := testRegistry()
 	registry.Components[0].ArtifactTargets = []ArtifactTarget{

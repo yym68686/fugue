@@ -591,14 +591,43 @@ func runPrepare(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	lkgManifest, lkgErr := loadLKGManifest(release)
-	if lkgErr != nil {
-		return lkgErr
-	}
-	if lkgManifest != nil {
-		lkgManifest, err = declarativerelease.MaterializePredecessorManifestTemplate(lkgManifest, release.ManifestVariables)
+	var exactGuardianLKG []byte
+	var lkgManifest []byte
+	if release.Delivery != nil && release.Delivery.Writer == "guardian" {
+		config, configErr := loadComponentLeaseClientConfig()
+		if configErr != nil {
+			return configErr
+		}
+		client, clientErr := kubernetes.NewForConfig(config)
+		if clientErr != nil {
+			return fmt.Errorf("create Guardian LKG client: %w", clientErr)
+		}
+		store, storeErr := releaseguardian.NewKubeStore(client, []releaseguardian.TargetConfig{{
+			Key:       releaseguardian.Key{Component: release.ComponentID, Group: release.Delivery.Group},
+			Namespace: release.Workload.Namespace, MonitorComponent: release.ComponentID,
+			DependencyService: release.Delivery.DependencyService,
+		}})
+		if storeErr != nil {
+			return storeErr
+		}
+		lkgContext, cancelLKG := context.WithTimeout(context.Background(), 30*time.Second)
+		exactGuardianLKG, err = store.LoadStableLKG(lkgContext, releaseguardian.Key{Component: release.ComponentID, Group: release.Delivery.Group}, release)
+		cancelLKG()
 		if err != nil {
 			return err
+		}
+		lkgManifest = exactGuardianLKG
+	} else {
+		var lkgErr error
+		lkgManifest, lkgErr = loadLKGManifest(release)
+		if lkgErr != nil {
+			return lkgErr
+		}
+		if lkgManifest != nil {
+			lkgManifest, err = declarativerelease.MaterializePredecessorManifestTemplate(lkgManifest, release.ManifestVariables)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	var lkgReader io.Reader
@@ -608,6 +637,12 @@ func runPrepare(args []string, output io.Writer) error {
 	rendered, renderErr := declarativerelease.RenderManifests(plan, args[2], receipt, bytes.NewReader(manifestRaw), lkgReader)
 	if renderErr != nil {
 		return renderErr
+	}
+	if exactGuardianLKG != nil {
+		rendered, err = declarativerelease.BindGuardianLKG(plan, args[2], rendered, exactGuardianLKG)
+		if err != nil {
+			return err
+		}
 	}
 	cluster, err := newKubectlCluster()
 	if err != nil {

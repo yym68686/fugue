@@ -19,6 +19,112 @@ type RenderedManifests struct {
 	LKGDigest     string
 }
 
+// BindGuardianLKG replaces the renderer-produced predecessor with the exact
+// immutable manifest recorded for the currently stable release. The normal
+// renderer still validates the predecessor schema and selected image, but a
+// Guardian rollback must preserve the stable release's original provenance
+// bytes rather than restamp them with the candidate plan and receipt.
+func BindGuardianLKG(plan Plan, componentID string, rendered RenderedManifests, exact []byte) (RenderedManifests, error) {
+	if err := plan.ValidateBound(); err != nil {
+		return RenderedManifests{}, err
+	}
+	release, err := releaseByID(plan, componentID)
+	if err != nil {
+		return RenderedManifests{}, err
+	}
+	if release.Delivery == nil || release.Delivery.Writer != "guardian" || !release.ExpectedPreviousPresent {
+		return RenderedManifests{}, errors.New("exact LKG binding is restricted to Guardian predecessor releases")
+	}
+	exact = bytes.TrimSpace(exact)
+	lkg, err := DecodeResourceSet(bytes.NewReader(exact))
+	if err != nil {
+		return RenderedManifests{}, fmt.Errorf("decode exact Guardian LKG: %w", err)
+	}
+	canonical, err := CanonicalJSON(lkg)
+	if err != nil || !bytes.Equal(canonical, exact) {
+		return RenderedManifests{}, errors.New("exact Guardian LKG is not canonical")
+	}
+	forward, err := DecodeResourceSet(bytes.NewReader(rendered.Forward))
+	if err != nil {
+		return RenderedManifests{}, fmt.Errorf("decode Guardian forward resource set: %w", err)
+	}
+	if _, err := lkg.Primary(release.Workload); err != nil {
+		return RenderedManifests{}, fmt.Errorf("validate exact Guardian LKG primary workload: %w", err)
+	}
+	if !lkgResourceIdentitiesSubset(forward, lkg) {
+		return RenderedManifests{}, errors.New("exact Guardian LKG resource identities are not a subset of forward")
+	}
+	if err := validateImmutableResourceSetImages(lkg); err != nil {
+		return RenderedManifests{}, fmt.Errorf("validate exact Guardian LKG images: %w", err)
+	}
+	if err := validateGuardianLKGIdentity(lkg, release); err != nil {
+		return RenderedManifests{}, err
+	}
+	rendered.LKG = append([]byte(nil), exact...)
+	sum := sha256.Sum256(exact)
+	rendered.LKGDigest = fmt.Sprintf("sha256:%x", sum)
+	return rendered, nil
+}
+
+func validateGuardianLKGIdentity(set ResourceSet, release PlanRelease) error {
+	for _, item := range set.Items {
+		metadata, err := objectField(item, "metadata")
+		if err != nil {
+			return err
+		}
+		annotations := ensureStringMap(metadata, "annotations")
+		if stringField(annotations, "fugue.pro/production-config-sha") != release.ExpectedPreviousConfigSHA ||
+			!digestPattern.MatchString(stringField(annotations, "fugue.pro/release-plan-digest")) ||
+			!digestPattern.MatchString(stringField(annotations, "fugue.pro/artifact-receipt-digest")) {
+			return errors.New("exact Guardian LKG provenance is invalid")
+		}
+	}
+	targets := release.ArtifactTargets
+	if len(targets) == 0 {
+		targets = []ArtifactTarget{{
+			APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind,
+			Namespace: release.Workload.Namespace, Name: release.Workload.Name,
+			Container: release.Workload.Container, ContainerType: "container",
+		}}
+	}
+	wantImage := release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
+	seenWorkloads := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		item, err := resourceSetTarget(&set, target)
+		if err != nil {
+			return err
+		}
+		image, err := workloadContainerImage(item, target.Container, target.ContainerType)
+		if err != nil || image != wantImage {
+			return errors.New("exact Guardian LKG artifact identity is invalid")
+		}
+		key := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name
+		if _, exists := seenWorkloads[key]; exists {
+			continue
+		}
+		seenWorkloads[key] = struct{}{}
+		spec, err := objectField(item, "spec")
+		if err != nil {
+			return err
+		}
+		template, err := objectField(spec, "template")
+		if err != nil {
+			return err
+		}
+		templateMetadata, err := objectField(template, "metadata")
+		if err != nil {
+			return err
+		}
+		annotations := ensureStringMap(templateMetadata, "annotations")
+		if stringField(annotations, "fugue.pro/source-commit") != release.ExpectedPreviousManifestSHA ||
+			stringField(annotations, "fugue.pro/oci-revision") != release.ExpectedPreviousOCIRevision ||
+			stringField(annotations, "fugue.pro/production-config-sha") != release.ExpectedPreviousConfigSHA {
+			return errors.New("exact Guardian LKG workload identity is invalid")
+		}
+	}
+	return nil
+}
+
 // RenderManifests creates digest-pinned forward and LKG resources from one
 // reviewed base workload. It cannot add or remove Kubernetes objects and only
 // writes release identity plus the selected container image.

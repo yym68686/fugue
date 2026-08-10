@@ -71,6 +71,19 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 		t.Fatal(err)
 	}
 	candidate := guardianCandidateFixture(t, key, stableTarget, stableArtifact.TopDigest, []byte(stableData["forward.json"]), now)
+	candidatePlan, err := declarativerelease.DecodePlan(bytes.NewReader(candidate["release-plan.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactLKG, err := store.LoadStableLKG(context.Background(), key, candidatePlan.Releases[0])
+	if err != nil || !bytes.Equal(exactLKG, bytes.TrimSpace([]byte(stableData["forward.json"]))) {
+		t.Fatalf("exact stable LKG=%s err=%v", exactLKG, err)
+	}
+	driftedRelease := candidatePlan.Releases[0]
+	driftedRelease.ExpectedPreviousImageDigest = testDigest
+	if _, err := store.LoadStableLKG(context.Background(), key, driftedRelease); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("drifted predecessor was accepted: %v", err)
+	}
 	record, desired, err := store.PublishDesired(context.Background(), key, candidate)
 	if err != nil {
 		t.Fatal(err)
