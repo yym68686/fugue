@@ -49,7 +49,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_schema", "deploy_telemetry", "monitor-plan", "monitor-production", "prepush",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "monitor-plan", "monitor-production", "prepush",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -62,6 +62,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"group: fugue-production-controller",
 		"group: '${{ matrix.concurrency }}'",
 		"group: fugue-production-image-cache",
+		"group: fugue-production-release-guardian",
 		"group: fugue-production-schema",
 		"group: fugue-production-telemetry",
 		"group: fugue-build-${{ matrix.build_lane }}-${{ github.sha }}",

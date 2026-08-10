@@ -130,6 +130,20 @@ jobs:
           include-hidden-files: false
           retention-days: 7
 
+  deploy_release_guardian:
+    needs: [prepush, component-build]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'release-guardian') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-release-guardian, cancel-in-progress: false}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: release-guardian, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+
   deploy_schema:
     needs: [prepush, component-build]
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'schema') }}

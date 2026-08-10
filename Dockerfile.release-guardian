@@ -1,0 +1,22 @@
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w' -o /out/fugue-release-guardian ./cmd/fugue-release-guardian
+
+FROM alpine:3.21
+ARG SOURCE_COMMIT
+ARG SOURCE_URL
+RUN apk add --no-cache ca-certificates
+LABEL org.opencontainers.image.title="fugue-release-guardian" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}"
+COPY --from=build /out/fugue-release-guardian /usr/local/bin/fugue-release-guardian
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/fugue-release-guardian"]
