@@ -28,6 +28,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	testEdgeRouteDigestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testEdgeRouteDigestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -283,6 +288,56 @@ func TestProxyHandlerEmitsAndForwardsEdgeRequestID(t *testing.T) {
 	}
 	if originClientRemoteAddr != "" {
 		t.Fatalf("expected internal client remote addr header not to reach origin, got %q", originClientRemoteAddr)
+	}
+}
+
+func TestCandidateProxyResponseAttestsExactLoadedPublicationEvenWhenRouteIsMissing(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
+	service.mu.Lock()
+	service.routePublication = routePublicationMetadata{
+		Source: edgeControlRouteSourceV1, GroupID: "edge-group-pool-a", Generation: "candidate-1",
+		PublicationSequence: 9, Candidate: true, CandidateRecord: testEdgeRouteDigestA,
+		ReleaseRecord: testEdgeRouteDigestB, WorkerSlot: model.EdgeSlotB,
+	}
+	service.bundle = &model.EdgeRouteBundle{Version: "candidate-missing-route", EdgeGroupID: "edge-group-pool-a"}
+	service.mu.Unlock()
+
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://canary.fugue.pro/route-canary", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get(edgeControlCandidateRecordHeader); got != testEdgeRouteDigestA {
+		t.Fatalf("candidate record header=%q", got)
+	}
+	if got := recorder.Header().Get(edgeControlReleaseRecordHeader); got != testEdgeRouteDigestB {
+		t.Fatalf("release record header=%q", got)
+	}
+	if got := recorder.Header().Get(edgeControlCandidateSlotHeader); got != model.EdgeSlotB {
+		t.Fatalf("candidate slot header=%q", got)
+	}
+}
+
+func TestCurrentProxyResponseNeverEmitsCandidateAttestation(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
+	service.mu.Lock()
+	service.routePublication = routePublicationMetadata{
+		Source: edgeControlRouteSourceV1, GroupID: "edge-group-pool-a", Generation: "current-1",
+		PublicationSequence: 8, CandidateRecord: testEdgeRouteDigestA, ReleaseRecord: testEdgeRouteDigestB, WorkerSlot: model.EdgeSlotA,
+	}
+	service.bundle = &model.EdgeRouteBundle{Version: "current-route", EdgeGroupID: "edge-group-pool-a"}
+	service.mu.Unlock()
+
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://canary.fugue.pro/route-canary", nil))
+	for _, header := range []string{edgeControlCandidateRecordHeader, edgeControlReleaseRecordHeader, edgeControlCandidateSlotHeader} {
+		if value := recorder.Header().Get(header); value != "" {
+			t.Fatalf("current response leaked %s=%q", header, value)
+		}
 	}
 }
 

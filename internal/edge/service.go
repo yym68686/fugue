@@ -1110,6 +1110,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	route, ok, fallbackHit, bundleVersion := s.routeForRequestWithBundle(host, r.URL.Path)
 	edgeRequestID := edgeRequestIDForProxy(r)
 	traceID := edgeTraceIDForProxy(r)
+	s.writeCandidateRouteAttestationHeaders(w)
 	selectedRoute := route
 	selectedUpstream := model.EdgeRouteUpstream{}
 	if ok {
@@ -1283,6 +1284,26 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if !observedWriter.wroteHeader && observed.WebSocket && observed.UpstreamError == "" {
 		observed.StatusCode = http.StatusSwitchingProtocols
 	}
+}
+
+// writeCandidateRouteAttestationHeaders exposes only the immutable identity
+// already verified while loading a candidate publication. Current/LKG workers
+// never emit these headers. The independent canary binds all three values on
+// every real routed response; no request header or query parameter can select
+// a slot or synthesize this identity.
+func (s *Service) writeCandidateRouteAttestationHeaders(w http.ResponseWriter) {
+	if s == nil || w == nil {
+		return
+	}
+	publication, _ := s.currentRoutePublicationAndBundle()
+	if !publication.Candidate || !edgeRouteDigestPattern.MatchString(publication.CandidateRecord) ||
+		!edgeRouteDigestPattern.MatchString(publication.ReleaseRecord) ||
+		(publication.WorkerSlot != model.EdgeSlotA && publication.WorkerSlot != model.EdgeSlotB) {
+		return
+	}
+	w.Header().Set(edgeControlCandidateRecordHeader, publication.CandidateRecord)
+	w.Header().Set(edgeControlReleaseRecordHeader, publication.ReleaseRecord)
+	w.Header().Set(edgeControlCandidateSlotHeader, publication.WorkerSlot)
 }
 
 func (s *Service) edgeCacheRevalidateAsync(r *http.Request, target *url.URL, route model.EdgeRouteBinding, decision edgeHTTPCacheDecision, host string) {
