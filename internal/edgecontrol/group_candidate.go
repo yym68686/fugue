@@ -48,21 +48,24 @@ func (identity CandidateReleaseIdentity) Validate() error {
 // GroupCandidateBundle is the durable inactive publication for one group. It
 // can be loaded by an inactive Worker but cannot grant ordinary traffic.
 type GroupCandidateBundle struct {
-	Schema                  string                          `json:"schema"`
-	GroupID                 string                          `json:"edge_group_id"`
-	Epoch                   uint64                          `json:"epoch"`
-	CandidateLedgerSequence uint64                          `json:"candidate_ledger_sequence"`
-	RouteIntentGeneration   string                          `json:"route_intent_generation"`
-	InventoryGeneration     string                          `json:"inventory_generation"`
-	ReleaseRecordDigest     string                          `json:"release_record_digest"`
-	WorkerSlot              string                          `json:"worker_slot"`
-	PublishedAt             time.Time                       `json:"published_at"`
-	Record                  edgeauthority.RouteBundleRecord `json:"record"`
-	Bundle                  model.EdgeRouteBundle           `json:"bundle"`
+	Schema                  string                           `json:"schema"`
+	GroupID                 string                           `json:"edge_group_id"`
+	Epoch                   uint64                           `json:"epoch"`
+	CandidateLedgerSequence uint64                           `json:"candidate_ledger_sequence"`
+	RouteIntentGeneration   string                           `json:"route_intent_generation"`
+	InventoryGeneration     string                           `json:"inventory_generation"`
+	ReleaseRecordDigest     string                           `json:"release_record_digest"`
+	WorkerSlot              string                           `json:"worker_slot"`
+	PublishedAt             time.Time                        `json:"published_at"`
+	CurrentRecord           *edgeauthority.RouteBundleRecord `json:"current_record,omitempty"`
+	CurrentWorkerSlot       string                           `json:"current_worker_slot,omitempty"`
+	Record                  edgeauthority.RouteBundleRecord  `json:"record"`
+	Bundle                  model.EdgeRouteBundle            `json:"bundle"`
 }
 
 type GroupCandidateStore interface {
 	Head(context.Context, string) (GroupShadowLedgerEntry, bool, error)
+	History(context.Context, string) ([]GroupShadowLedgerEntry, error)
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
@@ -164,6 +167,16 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	if err != nil || !authority.PublishedExists || validateGroupPublishedBundle(groupID, authority.Published) != nil {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
+	history, err := publisher.Store.History(ctx, groupID)
+	if err != nil || authority.Published.CandidateLedgerSequence == 0 || authority.Published.CandidateLedgerSequence > uint64(len(history)) {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	currentLedger := history[authority.Published.CandidateLedgerSequence-1]
+	if currentLedger.Sequence != authority.Published.CandidateLedgerSequence ||
+		!groupAuthorityDigestPattern.MatchString(currentLedger.InventoryDigest) ||
+		(currentLedger.ActiveSlot != "a" && currentLedger.ActiveSlot != "b") {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
 	epoch := authority.Published.PublicationSequence + 1
 	if previousExists && previous.Epoch >= epoch {
 		epoch = previous.Epoch + 1
@@ -197,11 +210,21 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	if err != nil {
 		return failed(GroupAuthorityFailureSigning)
 	}
+	currentRecord, err := (edgeauthority.RouteBundleRecord{
+		GroupID: groupID, Epoch: int64(authority.Published.PublicationSequence), BundleDigest: authority.Published.Digest,
+		SourceSHA: publisher.Identity.SourceSHA, ControlImageDigest: publisher.Identity.ControlImageDigest,
+		InventoryDigest: currentLedger.InventoryDigest, ManifestDigest: publisher.Identity.ManifestDigest,
+		HealthContractDigest: publisher.Identity.HealthContractDigest, IssuedAt: now.Format(time.RFC3339Nano),
+		KeyID: authority.Published.Bundle.KeyID, Signature: authority.Published.Bundle.Signature,
+	}).Seal()
+	if err != nil || currentLedger.ActiveSlot == workerSlot {
+		return failed(GroupAuthorityFailureSigning)
+	}
 	candidate := GroupCandidateBundle{
 		Schema: GroupCandidateBundleSchemaV1, GroupID: groupID, Epoch: epoch,
 		CandidateLedgerSequence: head.Sequence, RouteIntentGeneration: head.RouteIntentGeneration,
 		InventoryGeneration: head.InventoryGeneration, ReleaseRecordDigest: publisher.Identity.ReleaseRecordDigest, WorkerSlot: workerSlot,
-		PublishedAt: now, Record: record, Bundle: signed,
+		PublishedAt: now, CurrentRecord: &currentRecord, CurrentWorkerSlot: currentLedger.ActiveSlot, Record: record, Bundle: signed,
 	}
 	expectedEpoch := uint64(0)
 	if previousExists {
@@ -237,10 +260,27 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 		candidate.Bundle.GeneratedAt.IsZero() || !candidate.Bundle.ValidUntil.After(candidate.Bundle.GeneratedAt) {
 		return errors.New("edge-control group candidate bundle is invalid")
 	}
+	if candidate.CurrentRecord == nil && candidate.CurrentWorkerSlot == "" {
+		return nil
+	}
+	if candidate.CurrentRecord == nil || candidate.CurrentRecord.Validate() != nil || candidate.CurrentRecord.GroupID != groupID ||
+		candidate.CurrentRecord.RecordDigest == candidate.Record.RecordDigest ||
+		candidate.CurrentRecord.BundleDigest == candidate.Record.BundleDigest || candidate.CurrentRecord.Epoch >= candidate.Record.Epoch ||
+		candidate.CurrentRecord.SourceSHA != candidate.Record.SourceSHA ||
+		candidate.CurrentRecord.ControlImageDigest != candidate.Record.ControlImageDigest ||
+		candidate.CurrentRecord.ManifestDigest != candidate.Record.ManifestDigest ||
+		candidate.CurrentRecord.HealthContractDigest != candidate.Record.HealthContractDigest ||
+		(candidate.CurrentWorkerSlot != "a" && candidate.CurrentWorkerSlot != "b") || candidate.CurrentWorkerSlot == candidate.WorkerSlot {
+		return errors.New("edge-control group candidate current authority binding is invalid")
+	}
 	return nil
 }
 
 func cloneGroupCandidateBundle(value GroupCandidateBundle) GroupCandidateBundle {
+	if value.CurrentRecord != nil {
+		current := *value.CurrentRecord
+		value.CurrentRecord = &current
+	}
 	value.Bundle = cloneEdgeRouteBundle(value.Bundle)
 	return value
 }

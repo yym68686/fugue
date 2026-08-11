@@ -55,7 +55,9 @@ func TestCandidatePublisherPersistsInactiveBundleWithoutChangingCurrent(t *testi
 	candidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
 	if err != nil || !exists || validateGroupCandidateBundle(groupID, candidate) != nil ||
 		candidate.Record.SourceSHA != identity.SourceSHA || candidate.Record.ControlImageDigest != identity.ControlImageDigest ||
-		candidate.ReleaseRecordDigest != identity.ReleaseRecordDigest || candidate.Epoch <= currentBefore.Published.PublicationSequence {
+		candidate.ReleaseRecordDigest != identity.ReleaseRecordDigest || candidate.Epoch <= currentBefore.Published.PublicationSequence ||
+		candidate.CurrentRecord == nil || candidate.CurrentRecord.BundleDigest != currentBefore.Published.Digest ||
+		candidate.CurrentRecord.SourceSHA != identity.SourceSHA || candidate.CurrentWorkerSlot != "a" || candidate.WorkerSlot != "b" {
 		t.Fatalf("durable candidate is invalid: candidate=%+v exists=%v err=%v", candidate, exists, err)
 	}
 
@@ -111,6 +113,73 @@ func TestCandidatePublisherRejectsUnboundReleaseIdentity(t *testing.T) {
 	if _, err := publisher.Publish(context.Background(), GroupShadowBatch{}); err == nil {
 		t.Fatal("candidate publisher accepted incomplete release provenance")
 	}
+}
+
+func TestCandidateCurrentAuthorityBindingRejectsCrossReleaseAndSameSlot(t *testing.T) {
+	candidate := candidateWithCurrentRecordFixture(t, "edge-group-country-de")
+	current := candidate.Record
+	current.Epoch = candidate.Record.Epoch - 1
+	current.BundleDigest = "sha256:" + strings.Repeat("b", 64)
+	current.Signature = strings.Repeat("B", 43)
+	current, err := current.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.CurrentRecord = &current
+	candidate.CurrentWorkerSlot = candidate.WorkerSlot
+	if err := validateGroupCandidateBundle(candidate.GroupID, candidate); err == nil {
+		t.Fatal("candidate accepted the same current and inactive slot")
+	}
+	candidate.CurrentWorkerSlot = "a"
+	if candidate.WorkerSlot == "a" {
+		candidate.CurrentWorkerSlot = "b"
+	}
+	changed := current
+	changed.SourceSHA = strings.Repeat("c", 40)
+	changed, err = changed.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.CurrentRecord = &changed
+	if err := validateGroupCandidateBundle(candidate.GroupID, candidate); err == nil {
+		t.Fatal("candidate accepted a current record from another release")
+	}
+}
+
+func candidateWithCurrentRecordFixture(t *testing.T, groupID string) GroupCandidateBundle {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 1, 15, 0, 0, time.UTC)
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-current-record", false)); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}).Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := &fixtureGroupSigner{keys: map[string][]byte{groupID: bytes.Repeat([]byte{0x53}, 32)}, validFor: 30 * time.Minute}
+	current := GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now }}
+	if batch, err := current.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("seed current publication: batch=%+v err=%v", batch, err)
+	}
+	identity := CandidateReleaseIdentity{
+		SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64),
+	}
+	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &current, Identity: identity, Now: func() time.Time { return now.Add(time.Minute) }}
+	if batch, err := publisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("publish candidate: batch=%+v err=%v", batch, err)
+	}
+	candidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists {
+		t.Fatalf("read candidate: exists=%v err=%v", exists, err)
+	}
+	return candidate
 }
 
 func TestCandidateObservationDoesNotClaimCurrentPublication(t *testing.T) {
