@@ -443,6 +443,66 @@ func TestEdgeWorkerTemplateOmitsAPIServerDefaultedEmptyEnvValues(t *testing.T) {
 	}
 }
 
+func TestEdgeWorkerTemplateBindsCurrentAndInactiveCandidateBundleSources(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/edge/component/resources.inventory-producer.group.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := edgeGroupFixture("gamma", "edge-group-metro-gamma")
+	materialized, err := MaterializeManifestTemplate(raw, group.Worker.ManifestVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := DecodeResourceSet(strings.NewReader(string(materialized)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCurrent := "http://edge-control-gamma.fugue-system.svc:8092/v1/edge/routes"
+	wantCandidate := "http://edge-control-gamma.fugue-system.svc:8092/v1/edge/candidate-routes"
+	checked := 0
+	for _, item := range set.Items {
+		if item["kind"] != "DaemonSet" {
+			continue
+		}
+		metadata, _ := item["metadata"].(map[string]any)
+		name := fmt.Sprint(metadata["name"])
+		if name != "edge-gamma-worker-a" && name != "edge-gamma-worker-b" {
+			continue
+		}
+		spec, _ := item["spec"].(map[string]any)
+		template, _ := spec["template"].(map[string]any)
+		templateSpec, _ := template["spec"].(map[string]any)
+		containers, _ := templateSpec["containers"].([]any)
+		var container map[string]any
+		for _, rawContainer := range containers {
+			candidate, _ := rawContainer.(map[string]any)
+			if candidate["name"] == "edge" {
+				container = candidate
+				break
+			}
+		}
+		if container == nil {
+			t.Fatalf("%s has no edge container", name)
+		}
+		environment, _ := container["env"].([]any)
+		values := make(map[string]string, len(environment))
+		for _, rawEnv := range environment {
+			env, _ := rawEnv.(map[string]any)
+			values[fmt.Sprint(env["name"])] = fmt.Sprint(env["value"])
+		}
+		if values["FUGUE_EDGE_ROUTE_BUNDLE_URL"] != wantCurrent {
+			t.Fatalf("%s current route source=%q, want %q", name, values["FUGUE_EDGE_ROUTE_BUNDLE_URL"], wantCurrent)
+		}
+		if values["FUGUE_EDGE_CANDIDATE_ROUTE_BUNDLE_URL"] != wantCandidate {
+			t.Fatalf("%s candidate route source=%q, want %q", name, values["FUGUE_EDGE_CANDIDATE_ROUTE_BUNDLE_URL"], wantCandidate)
+		}
+		checked++
+	}
+	if checked != 2 {
+		t.Fatalf("checked %d worker slots, want 2", checked)
+	}
+}
+
 func edgeGroupFixture(id, groupID string) EdgeGroup {
 	client := Component{
 		ID: "edge-client-" + id, Family: "edge-client",

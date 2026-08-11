@@ -295,6 +295,10 @@
                     "value": "http://@@CONTROL_NAME@@.fugue-system.svc:8092/v1/edge/routes"
                   },
                   {
+                    "name": "FUGUE_EDGE_CANDIDATE_ROUTE_BUNDLE_URL",
+                    "value": "http://@@CONTROL_NAME@@.fugue-system.svc:8092/v1/edge/candidate-routes"
+                  },
+                  {
                     "name": "FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE",
                     "value": "/var/run/secrets/fugue-edge/route-reader/token"
                   },
@@ -804,6 +808,10 @@
                   {
                     "name": "FUGUE_EDGE_ROUTE_BUNDLE_URL",
                     "value": "http://@@CONTROL_NAME@@.fugue-system.svc:8092/v1/edge/routes"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CANDIDATE_ROUTE_BUNDLE_URL",
+                    "value": "http://@@CONTROL_NAME@@.fugue-system.svc:8092/v1/edge/candidate-routes"
                   },
                   {
                     "name": "FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE",
