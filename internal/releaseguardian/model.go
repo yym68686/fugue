@@ -25,6 +25,7 @@ var (
 	groupPattern     = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 	shaPattern       = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	digestPattern    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	signaturePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 )
 
 type Key struct {

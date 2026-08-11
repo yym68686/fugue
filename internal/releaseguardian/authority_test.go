@@ -1,0 +1,168 @@
+package releaseguardian
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+const testSignature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+func sealedRouteRecord(t *testing.T, groupID string, epoch int64) RouteBundleRecord {
+	t.Helper()
+	record, err := (RouteBundleRecord{
+		GroupID: groupID, Epoch: epoch, BundleDigest: testDigest, SourceSHA: testSHA,
+		ControlImageDigest: testDigest, InventoryDigest: testDigest, ManifestDigest: testDigest,
+		HealthContractDigest: testDigest, IssuedAt: time.Unix(epoch, 0).UTC().Format(time.RFC3339Nano),
+		KeyID: "authority-key-1", Signature: testSignature,
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func TestAuthorityModelsBindCandidateCurrentAndLKGIdentity(t *testing.T) {
+	record := sealedRouteRecord(t, "edge-pool-a", 7)
+	if err := record.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	tampered := record
+	tampered.GroupID = "edge-pool-b"
+	if err := tampered.Validate(); err == nil {
+		t.Fatal("cross-group route record tampering was accepted")
+	}
+
+	for _, authority := range []CurrentAuthority{
+		{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: "edge-pool-a", CurrentRecordDigest: record.RecordDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 1},
+		{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: "edge-pool-a", CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, PreviousRecordDigest: record.RecordDigest, PreviousWorkerSlot: AuthoritySlotA, AuthorityEpoch: 2},
+	} {
+		if err := authority.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invalid := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: "edge-pool-a", CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, PreviousRecordDigest: otherDigest, PreviousWorkerSlot: AuthoritySlotA, AuthorityEpoch: 2}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("current authority accepted a non-distinct LKG")
+	}
+}
+
+func TestCandidateCanaryIsImmutableCandidateBoundAndFresh(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	result, err := (CandidateCanaryResult{
+		GroupID: "edge-pool-a", CandidateRecordDigest: testDigest, WorkerSlot: AuthoritySlotB,
+		ReleaseRecordDigest: otherDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
+		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
+		KeyID: "canary-key-1", Signature: testSignature,
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := result.Validate(now.Add(29 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.Validate(now.Add(31 * time.Second)); err == nil {
+		t.Fatal("expired candidate canary was accepted")
+	}
+	result.CandidateRecordDigest = otherDigest
+	if err := result.Validate(now); err == nil {
+		t.Fatal("candidate canary was reusable for another record")
+	}
+}
+
+func TestAuthorityStoreKeepsGroupsImmutableAndCASIsolated(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := sealedRouteRecord(t, "edge-pool-a", 1)
+	b := sealedRouteRecord(t, "edge-pool-b", 1)
+	for _, record := range []RouteBundleRecord{a, b} {
+		if err := store.CreateRouteBundleRecord(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateRouteBundleRecord(ctx, record); err != nil {
+			t.Fatalf("byte-identical immutable create is not idempotent: %v", err)
+		}
+	}
+	if routeBundleRecordName(a.GroupID, a.RecordDigest) == routeBundleRecordName(b.GroupID, b.RecordDigest) ||
+		candidateAuthorityName(a.GroupID) == candidateAuthorityName(b.GroupID) ||
+		currentAuthorityName(a.GroupID) == currentAuthorityName(b.GroupID) {
+		t.Fatal("group authority object names collided")
+	}
+
+	candidateA := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: a.GroupID, RecordDigest: a.RecordDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	_, _, err = store.PutCandidate(ctx, candidateA, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake client does not assign server metadata, so bind exact test CAS
+	// metadata before exercising update semantics.
+	object, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, candidateAuthorityName(a.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.UID, object.ResourceVersion = types.UID("candidate-a"), "10"
+	object, err = client.CoreV1().ConfigMaps("fugue-system").Update(ctx, object, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, rv := object.UID, object.ResourceVersion
+	verified := candidateA
+	verified.State, verified.Generation = CandidateAuthorityVerified, 2
+	if _, _, err := store.PutCandidate(ctx, verified, uid, rv); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.PutCandidate(ctx, verified, uid, "stale"); err == nil {
+		t.Fatal("stale candidate resourceVersion CAS was accepted")
+	}
+	crossGroup := verified
+	crossGroup.GroupID = b.GroupID
+	if _, _, err := store.PutCandidate(ctx, crossGroup, uid, rv); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("cross-group candidate CAS was accepted: %v", err)
+	}
+}
+
+func TestCurrentAuthorityCASRequiresExactPreviousAndSlotSwitch(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: "edge-pool-a", CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 1}
+	if _, _, err := store.SwitchCurrent(ctx, initial, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, currentAuthorityName(initial.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.UID, object.ResourceVersion = types.UID("current-a"), "20"
+	object, err = client.CoreV1().ConfigMaps("fugue-system").Update(ctx, object, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: initial.GroupID, CurrentRecordDigest: otherDigest, CurrentWorkerSlot: AuthoritySlotB, PreviousRecordDigest: testDigest, PreviousWorkerSlot: AuthoritySlotA, AuthorityEpoch: 2}
+	if _, _, err := store.SwitchCurrent(ctx, next, object.UID, object.ResourceVersion); err != nil {
+		t.Fatal(err)
+	}
+	object, err = client.CoreV1().ConfigMaps("fugue-system").Get(ctx, currentAuthorityName(initial.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongLKG := next
+	wrongLKG.AuthorityEpoch = 3
+	wrongLKG.CurrentRecordDigest, wrongLKG.CurrentWorkerSlot = testDigest, AuthoritySlotA
+	wrongLKG.PreviousRecordDigest = strings.Replace(otherDigest, "b", "c", 1)
+	if _, _, err := store.SwitchCurrent(ctx, wrongLKG, object.UID, object.ResourceVersion); err == nil {
+		t.Fatal("authority switch with the wrong previous record was accepted")
+	}
+}
