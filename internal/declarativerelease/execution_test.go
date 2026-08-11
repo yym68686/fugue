@@ -687,7 +687,8 @@ func TestExecuteRetainsRecoveryRequiredWhenLKGUnproven(t *testing.T) {
 	fake.health = []Observation{unhealthy, unhealthy}
 	fake.healthErrors = []error{errors.New("forward unhealthy"), errors.New("LKG unknown")}
 	result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
-	if result.Status != "recovery-required" || result.Reason != "lkg-unproven" || fake.applies != 2 {
+	if result.Status != "recovery-required" || result.Reason != "lkg-unproven" ||
+		!strings.Contains(result.FailureDetail, "LKG health: LKG unknown") || fake.applies != 2 {
 		t.Fatalf("unproven rollback was not retained: %+v", result)
 	}
 }

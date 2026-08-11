@@ -580,8 +580,88 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	result.Reason = "lkg-unproven"
+	result.FailureDetail = lkgFailureDetail(lkgHealthErr, lkgConvergedErr, lkgObservation, prepared.LKG, release)
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func lkgFailureDetail(healthErr, convergedErr error, observed Observation, target TargetIdentity, release PlanRelease) string {
+	switch {
+	case healthErr != nil:
+		return boundedFailureDetail("LKG health: " + healthErr.Error())
+	case convergedErr != nil:
+		return boundedFailureDetail("LKG convergence: " + convergedErr.Error())
+	case !observed.Matches(target, release, true):
+		return boundedFailureDetail("LKG identity: " + observationMismatchClass(observed, target, release, true))
+	default:
+		return "LKG terminal proof is unavailable"
+	}
+}
+
+func observationMismatchClass(observed Observation, target TargetIdentity, release PlanRelease, allowLegacyManager bool) string {
+	if observed.Present != target.Present {
+		return "presence mismatch"
+	}
+	if !target.Present {
+		for _, resource := range observed.Resources {
+			if resource.Present && !resource.RetainOnRollback {
+				return "unexpected retained resource"
+			}
+		}
+		return "absent target mismatch"
+	}
+	imageMatches := observed.ImageRef == target.ImageRef
+	if !imageMatches && allowLegacyManager {
+		separator := strings.LastIndex(target.ImageRef, "@")
+		imageMatches = separator > 0 && observed.ImageID == target.ImageRef[separator+1:]
+	}
+	switch {
+	case !imageMatches:
+		return "image mismatch"
+	case observed.ConfigSHA != target.ConfigSHA:
+		return "config source mismatch"
+	case observed.ManifestSHA != target.ManifestSHA:
+		return "manifest source mismatch"
+	case observed.OCIRevision != target.OCIRevision:
+		return "OCI revision mismatch"
+	case observed.ObservedGeneration != observed.Generation:
+		return "generation is not observed"
+	}
+	activeDesired := observed.Desired - int32(release.Workload.PreservedUnavailable)
+	switch {
+	case activeDesired < 1:
+		return "active desired replicas are invalid"
+	case observed.Updated != activeDesired:
+		return "updated replicas mismatch"
+	case observed.Ready != activeDesired:
+		return "ready replicas mismatch"
+	case observed.Available != activeDesired:
+		return "available replicas mismatch"
+	case observed.Unavailable != int32(release.Workload.PreservedUnavailable):
+		return "unavailable replicas mismatch"
+	}
+	for _, manager := range observed.FieldManagers {
+		if manager == release.Workload.FieldManager {
+			return "unknown identity mismatch"
+		}
+	}
+	if allowLegacyManager {
+		return "unknown identity mismatch"
+	}
+	return "declarative field manager is absent"
+}
+
+func boundedFailureDetail(detail string) string {
+	detail = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, detail)
+	if len(detail) > 512 {
+		return detail[:512]
+	}
+	return detail
 }
 
 func forwardFailureDetail(healthErr, convergedErr error) string {
@@ -591,16 +671,7 @@ func forwardFailureDetail(healthErr, convergedErr error) string {
 	} else if convergedErr != nil {
 		detail = convergedErr.Error()
 	}
-	detail = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, detail)
-	if len(detail) > 512 {
-		detail = detail[:512]
-	}
-	return detail
+	return boundedFailureDetail(detail)
 }
 
 func forwardFailureClass(applyErr, healthErr, convergedErr error, observed Observation, target TargetIdentity, release PlanRelease) string {

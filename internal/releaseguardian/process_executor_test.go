@@ -61,6 +61,7 @@ func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
 
 	degradedLKG := processResult(t, "recovery-required", "continuous-repair-lkg-unproven")
 	degradedLKG.LKGApplyCount = 1
+	degradedLKG.FailureDetail = "LKG route health: public canary failed"
 	degradedLKG = resealProcessResult(t, degradedLKG)
 	binary = writeExecutorFixture(t, "repair-monitor", snapshot.Record.RecordDigest, degradedLKG)
 	executor, err = NewProcessExecutor(binary, "pod-uid")
@@ -68,7 +69,8 @@ func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	receipt, err = executor.Repair(context.Background(), snapshot)
-	if err != nil || receipt.Status != "recovery-required" || receipt.RecordDigest != snapshot.Record.LKGRecordDigest {
+	if err != nil || receipt.Status != "recovery-required" || receipt.RecordDigest != snapshot.Record.LKGRecordDigest ||
+		receipt.Reason != "continuous-repair-lkg-unproven: LKG route health: public canary failed" {
 		t.Fatalf("degraded LKG receipt=%+v err=%v", receipt, err)
 	}
 }

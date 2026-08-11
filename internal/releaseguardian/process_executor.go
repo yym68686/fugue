@@ -165,7 +165,20 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	if ((operation == "repair-monitor" || operation == "restore-monitor") && result.Status == "compensated") || degradedLKGRestored {
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
-	return ExecutionReceipt{Status: result.Status, Reason: result.Reason, RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
+	return ExecutionReceipt{Status: result.Status, Reason: guardianTerminalReason(result), RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
+}
+
+func guardianTerminalReason(result declarativerelease.ExecutionResult) string {
+	reason := strings.TrimSpace(result.Reason)
+	detail := strings.TrimSpace(result.FailureDetail)
+	if detail == "" {
+		return reason
+	}
+	combined := reason + ": " + detail
+	if len(combined) > 512 {
+		return combined[:512]
+	}
+	return combined
 }
 
 func writeInClusterKubeconfig(directory, caPath, tokenPath string) (string, error) {
