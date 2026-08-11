@@ -196,12 +196,13 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 			status.Reason = "component recovery result is unknown: " + executeErr.Error()
 		} else {
 			status.RollbackReceiptDigest = receipt.ReceiptDigest
+			degradedLKGRestored := receipt.Status == "recovery-required" && receipt.RecordDigest == snapshot.Record.LKGRecordDigest
 			if stableDrift && receipt.Status == "verified" {
 				status.State = StateStable
 				status.CurrentRecordDigest = receipt.RecordDigest
 				status.TargetRecordDigest = receipt.RecordDigest
 				status.Reason = receipt.Reason
-			} else if receipt.Status != "compensated" {
+			} else if receipt.Status != "compensated" && !degradedLKGRestored {
 				status.State = StateRecoveryRequired
 				status.Reason = receipt.Reason
 			} else if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
@@ -210,7 +211,11 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 			} else {
 				status.CurrentRecordDigest = receipt.RecordDigest
 				status.TargetRecordDigest = receipt.RecordDigest
-				status.State = StateLKGStable
+				if degradedLKGRestored {
+					status.State = StateRecoveryRequired
+				} else {
+					status.State = StateLKGStable
+				}
 				status.Reason = receipt.Reason
 			}
 		}

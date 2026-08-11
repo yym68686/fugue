@@ -58,6 +58,19 @@ func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
 	if err != nil || receipt.Status != "compensated" || receipt.RecordDigest != snapshot.Record.LKGRecordDigest {
 		t.Fatalf("compensated repair receipt=%+v err=%v", receipt, err)
 	}
+
+	degradedLKG := processResult(t, "recovery-required", "continuous-repair-lkg-unproven")
+	degradedLKG.LKGApplyCount = 1
+	degradedLKG = resealProcessResult(t, degradedLKG)
+	binary = writeExecutorFixture(t, "repair-monitor", snapshot.Record.RecordDigest, degradedLKG)
+	executor, err = NewProcessExecutor(binary, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = executor.Repair(context.Background(), snapshot)
+	if err != nil || receipt.Status != "recovery-required" || receipt.RecordDigest != snapshot.Record.LKGRecordDigest {
+		t.Fatalf("degraded LKG receipt=%+v err=%v", receipt, err)
+	}
 }
 
 func TestProcessExecutorRejectsACompensatedRepairWithUnprovenTerminalMetadata(t *testing.T) {
@@ -224,6 +237,17 @@ func processResult(t *testing.T, status, reason string) declarativerelease.Execu
 		Component: "edge-control-de", ConfigSHA: testSHA, ExecutionPlanDigest: testDigest,
 		Status: status, Reason: reason,
 	}
+	raw, err := declarativerelease.CanonicalJSON(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.ReceiptDigest = digest(raw)
+	return result
+}
+
+func resealProcessResult(t *testing.T, result declarativerelease.ExecutionResult) declarativerelease.ExecutionResult {
+	t.Helper()
+	result.ReceiptDigest = ""
 	raw, err := declarativerelease.CanonicalJSON(result)
 	if err != nil {
 		t.Fatal(err)

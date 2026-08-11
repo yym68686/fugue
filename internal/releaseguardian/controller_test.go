@@ -76,6 +76,7 @@ type fakeExecutor struct {
 	rollouts  int
 	repairs   int
 	rollbacks int
+	repair    *ExecutionReceipt
 }
 
 func (executor *fakeExecutor) Rollout(context.Context, Snapshot) (ExecutionReceipt, error) {
@@ -85,6 +86,9 @@ func (executor *fakeExecutor) Rollout(context.Context, Snapshot) (ExecutionRecei
 
 func (executor *fakeExecutor) Repair(_ context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
 	executor.repairs++
+	if executor.repair != nil {
+		return *executor.repair, nil
+	}
 	return ExecutionReceipt{Status: "verified", Reason: "stable forward repaired", RecordDigest: snapshot.Record.RecordDigest, ReceiptDigest: testDigest}, nil
 }
 
@@ -187,6 +191,31 @@ func TestWriteModeRollsBackAStableRecordWithRuntimeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if executor.repairs != 0 || executor.rollbacks != 1 || store.lkgCAS != 1 || store.status.State != StateLKGStable {
+		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
+	}
+}
+
+func TestWriteModeRecordsAnExactButDegradedLKGAsCurrentRecoveryState(t *testing.T) {
+	now := time.Unix(37, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), "")
+	snapshot.Health.Local.Reason = "Deployment release identity differs from the stable record"
+	snapshot.CurrentRecordDigest = snapshot.Record.RecordDigest
+	snapshot.LastSuccessfulLKG = snapshot.Record.RecordDigest
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{repair: &ExecutionReceipt{
+		Status: "recovery-required", Reason: "continuous-repair-lkg-unproven",
+		RecordDigest: snapshot.Record.LKGRecordDigest, ReceiptDigest: testDigest,
+	}}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.repairs != 1 || store.lkgCAS != 1 || store.status.State != StateRecoveryRequired ||
+		store.status.CurrentRecordDigest != snapshot.Record.LKGRecordDigest || store.status.TargetRecordDigest != snapshot.Record.LKGRecordDigest {
 		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
 	}
 }

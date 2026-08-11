@@ -155,12 +155,14 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	// component Lease finalization before returning success.  A canonical
 	// workload receipt accompanied by a non-zero process result therefore does
 	// not prove that the metadata transaction completed.
+	degradedLKGRestored := operation == "repair-monitor" && result.Status == "recovery-required" &&
+		result.Reason == "continuous-repair-lkg-unproven" && result.LKGApplyCount == 1
 	if (operation == "repair-monitor" || operation == "restore-monitor") && runErr != nil &&
-		(result.Status == "verified" || result.Status == "compensated") {
+		(result.Status == "verified" || result.Status == "compensated" || degradedLKGRestored) {
 		return ExecutionReceipt{}, fmt.Errorf("Guardian %s terminal metadata is unproven: %w", operation, runErr)
 	}
 	recordDigest := snapshot.Record.RecordDigest
-	if (operation == "repair-monitor" || operation == "restore-monitor") && result.Status == "compensated" {
+	if ((operation == "repair-monitor" || operation == "restore-monitor") && result.Status == "compensated") || degradedLKGRestored {
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
 	return ExecutionReceipt{Status: result.Status, Reason: result.Reason, RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil

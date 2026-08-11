@@ -69,7 +69,17 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
 	defer finalizeCancel()
 	var activateErr error
-	if result.Status == "compensated" {
+	lkgMetadataRestored := result.Status == "compensated"
+	if result.Status == "recovery-required" && result.Reason == "continuous-repair-lkg-unproven" && result.LKGApplyCount == 1 &&
+		result.Final.Matches(currentBundle.Prepared.LKG, release, true) &&
+		errors.Join(cluster.Converged(finalizeCtx, release, currentBundle.LKG), cluster.VerifyOwnershipConverged(finalizeCtx, release, currentBundle.LKG)) == nil {
+		// The predecessor can be byte-exact and ownership-converged while its
+		// business health remains degraded.  Persist that truthful runtime
+		// identity so a reviewed degraded-predecessor successor can repair it;
+		// do not call it healthy or compensated.
+		lkgMetadataRestored = true
+	}
+	if lkgMetadataRestored {
 		_, activateErr = store.activateExistingRecord(finalizeCtx, fresh, lkgName, lkgBundle)
 	}
 	releaseErr := lease.release(finalizeCtx, held)
@@ -86,7 +96,7 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 	if releaseErr != nil {
 		return fmt.Errorf("stable repair terminal state is recorded but Lease release is unproven: %w", releaseErr)
 	}
-	if result.Status != "verified" && result.Status != "compensated" {
+	if result.Status != "verified" && result.Status != "compensated" && !lkgMetadataRestored {
 		return fmt.Errorf("Guardian stable repair ended with status=%s reason=%s", result.Status, result.Reason)
 	}
 	return nil
