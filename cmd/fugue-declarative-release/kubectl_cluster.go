@@ -1207,8 +1207,8 @@ func (cluster *kubectlCluster) WaitHealthy(ctx context.Context, release declarat
 		if err != nil {
 			lastFailure = err
 		}
-		if shouldReturnTypedPrewritePredecessorHealth(ctx, release, target, err) {
-			return observation, err
+		if typed := typedPrewritePredecessorHealth(ctx, release, target, err); typed != nil {
+			return observation, typed
 		}
 		if time.Now().After(deadline) {
 			if lastErr == nil {
@@ -1352,12 +1352,24 @@ func waitHealthyTerminalError(contextErr, lastFailure error) error {
 }
 
 func shouldReturnTypedPrewritePredecessorHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, err error) bool {
+	return typedPrewritePredecessorHealth(ctx, release, target, err) != nil
+}
+
+func typedPrewritePredecessorHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, err error) error {
 	exactPredecessor := release.ExpectedPreviousPresent && target.Present &&
 		target.ImageRef == release.Artifact.Repository+"@"+release.ExpectedPreviousImageDigest &&
 		target.ConfigSHA == release.ExpectedPreviousConfigSHA && target.ManifestSHA == release.ExpectedPreviousManifestSHA &&
 		target.OCIRevision == release.ExpectedPreviousOCIRevision
-	return declarativerelease.IsPrewritePredecessorHealthWait(ctx) && exactPredecessor &&
-		errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth)
+	if !declarativerelease.IsPrewritePredecessorHealthWait(ctx) || !exactPredecessor || err == nil {
+		return nil
+	}
+	if errors.Is(err, declarativerelease.ErrDegradedPredecessorHealth) {
+		return err
+	}
+	if errors.Is(err, errWorkloadOriginatedServiceHealth) {
+		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+	}
+	return nil
 }
 
 func healthSoakDuration(release declarativerelease.PlanRelease) time.Duration {
@@ -1713,12 +1725,14 @@ func (cluster *kubectlCluster) readServiceHTTPViaWorkload(ctx context.Context, n
 		body, runErr := cluster.kubectlRun(ctx, nil, "exec", "--namespace", namespace, pod, "--container", probe.SourceContainer, "--",
 			"wget", "-qO-", "-T", "5", url)
 		if runErr != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
-			return nil, fmt.Errorf("source Pod %s did not observe the expected service response", pod)
+			return nil, fmt.Errorf("%w: source Pod %s did not observe the expected service response", errWorkloadOriginatedServiceHealth, pod)
 		}
 		results = append(results, pod+":"+digestBytesLocal(body))
 	}
 	return []byte(strings.Join(results, "\n")), nil
 }
+
+var errWorkloadOriginatedServiceHealth = errors.New("workload-originated service health is degraded")
 
 func servicePortByName(raw []byte, name string) (int, error) {
 	value, err := decodeJSONObject(raw)
