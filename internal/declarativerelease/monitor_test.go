@@ -177,6 +177,20 @@ func TestContinuousRepairReassertsStableForwardFromExactPredecessorLKG(t *testin
 	}
 }
 
+func TestContinuousRepairReassertsForwardFromAnExactButUnhealthyPredecessorLKG(t *testing.T) {
+	plan, _, rendered, prepared, _, lkg, forward := verifiedMonitorFixture(t)
+	cluster := &fakeCluster{
+		observationErrors: []error{errors.New("forward is not live"), errors.New("LKG route is unhealthy")},
+		degraded:          []Observation{lkg},
+		health:            []Observation{forward},
+	}
+	result := RepairMonitoredForward(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "verified" || result.Reason != "continuous-stable-forward-repaired" ||
+		result.ForwardApplyCount != 1 || cluster.applies != 1 || len(cluster.verifiedTargets) != 1 || cluster.verifiedTargets[0] != prepared.LKG {
+		t.Fatalf("unhealthy exact LKG repair result=%+v applies=%d verified=%+v", result, cluster.applies, cluster.verifiedTargets)
+	}
+}
+
 func TestContinuousRepairAcceptsOnlyExactLKGOrReviewedEmergencyDrift(t *testing.T) {
 	plan, _, rendered, prepared, _, _, forward := verifiedMonitorFixture(t)
 	emergency := forward

@@ -309,6 +309,9 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 	// accepted.
 	if prepared.LKG.Present {
 		lkg, lkgErr := cluster.Observe(ctx, healthRelease, prepared.LKG, lkgManifest)
+		if lkgErr != nil && cluster.VerifyTarget(ctx, prepared.LKG) == nil {
+			lkg, lkgErr = cluster.ObserveDegraded(ctx, healthRelease, lkgManifest)
+		}
 		if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && cluster.Converged(ctx, healthRelease, lkgManifest) == nil {
 			current = lkg
 			forwardErr = nil
