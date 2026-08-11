@@ -1,6 +1,9 @@
 package releaseguardian
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"time"
 
@@ -201,6 +204,63 @@ func (result CandidateCanaryResult) Validate(now time.Time) error {
 	return nil
 }
 
+// SignCandidateCanaryResult seals a candidate-bound canary result with a
+// domain-separated HMAC. The canary signer is deliberately distinct from the
+// authority writer: possessing this key can attest probe evidence, but does
+// not grant permission to mutate CurrentAuthority.
+func SignCandidateCanaryResult(result CandidateCanaryResult, key []byte) (CandidateCanaryResult, error) {
+	if len(key) < 32 || len(key) > 4096 {
+		return CandidateCanaryResult{}, errors.New("candidate canary signing key is invalid")
+	}
+	result.APIVersion = APIVersion
+	result.Kind = CandidateCanaryResultKind
+	result.Signature = testableSignaturePlaceholder
+	result.ResultDigest = ""
+	if err := result.validateUnsigned(time.Time{}); err != nil {
+		return CandidateCanaryResult{}, err
+	}
+	result.Signature = ""
+	raw, err := candidateCanarySigningBytes(result)
+	if err != nil {
+		return CandidateCanaryResult{}, err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(raw)
+	result.Signature = base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return result.Seal()
+}
+
+// VerifySignature verifies only the independent canary attestation. Callers
+// must still Validate freshness and bind CandidateAuthority UID/RV before
+// using the result in an authority decision.
+func (result CandidateCanaryResult) VerifySignature(key []byte) error {
+	if len(key) < 32 || len(key) > 4096 || result.Validate(time.Time{}) != nil {
+		return errors.New("candidate canary signature input is invalid")
+	}
+	want := result.Signature
+	copy := result
+	copy.Signature = ""
+	copy.ResultDigest = ""
+	raw, err := candidateCanarySigningBytes(copy)
+	if err != nil {
+		return err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(raw)
+	got := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(got), []byte(want)) {
+		return errors.New("candidate canary signature is invalid")
+	}
+	return nil
+}
+
+func candidateCanarySigningBytes(result CandidateCanaryResult) ([]byte, error) {
+	return declarativerelease.CanonicalJSON(struct {
+		Domain string                `json:"domain"`
+		Result CandidateCanaryResult `json:"result"`
+	}{Domain: "fugue-candidate-canary-result/v1", Result: result})
+}
+
 func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	if result.APIVersion != APIVersion || result.Kind != CandidateCanaryResultKind ||
 		!groupPattern.MatchString(result.GroupID) || !digestPattern.MatchString(result.CandidateRecordDigest) ||
@@ -214,7 +274,7 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	observedAt, observedErr := time.Parse(time.RFC3339Nano, result.ObservedAt)
 	expiresAt, expiresErr := time.Parse(time.RFC3339Nano, result.ExpiresAt)
 	if observedErr != nil || expiresErr != nil || !observedAt.Equal(observedAt.UTC()) ||
-		!expiresAt.Equal(expiresAt.UTC()) || !expiresAt.After(observedAt) {
+		!expiresAt.Equal(expiresAt.UTC()) || !expiresAt.After(observedAt) || expiresAt.Sub(observedAt) > time.Minute {
 		return errors.New("candidate canary result freshness is invalid")
 	}
 	if !now.IsZero() && now.UTC().After(expiresAt) {
@@ -222,3 +282,5 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	}
 	return nil
 }
+
+const testableSignaturePlaceholder = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"

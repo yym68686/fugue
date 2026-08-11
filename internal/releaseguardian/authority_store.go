@@ -43,6 +43,48 @@ func (store *AuthorityStore) CreateCandidateCanaryResult(ctx context.Context, re
 	return store.createImmutable(ctx, candidateCanaryResultName(result.GroupID, result.ResultDigest), result.GroupID, "result.json", result)
 }
 
+func (store *AuthorityStore) LoadCandidate(ctx context.Context, groupID string) (CandidateAuthority, types.UID, string, error) {
+	var candidate CandidateAuthority
+	uid, rv, err := store.loadMutable(ctx, candidateAuthorityName(groupID), groupID, "candidate.json", &candidate)
+	if err != nil {
+		return CandidateAuthority{}, "", "", err
+	}
+	if err := candidate.Validate(); err != nil {
+		return CandidateAuthority{}, "", "", err
+	}
+	return candidate, uid, rv, nil
+}
+
+func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (CurrentAuthority, types.UID, string, error) {
+	var authority CurrentAuthority
+	uid, rv, err := store.loadMutable(ctx, currentAuthorityName(groupID), groupID, "authority.json", &authority)
+	if err != nil {
+		return CurrentAuthority{}, "", "", err
+	}
+	if err := authority.Validate(); err != nil {
+		return CurrentAuthority{}, "", "", err
+	}
+	return authority, uid, rv, nil
+}
+
+func (store *AuthorityStore) loadMutable(ctx context.Context, name, groupID, key string, destination any) (types.UID, string, error) {
+	if !groupPattern.MatchString(groupID) {
+		return "", "", errors.New("authority group identity is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	if object.Immutable != nil && *object.Immutable || object.UID == "" || strings.TrimSpace(object.ResourceVersion) == "" ||
+		object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-store"] != "true" || len(object.Data) != 1 {
+		return "", "", errors.New("mutable authority object metadata is invalid")
+	}
+	if err := decodeStrict([]byte(object.Data[key]), destination); err != nil {
+		return "", "", errors.New("mutable authority payload is invalid")
+	}
+	return object.UID, object.ResourceVersion, nil
+}
+
 func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID, key string, value any) error {
 	raw, err := declarativerelease.CanonicalJSON(value)
 	if err != nil {

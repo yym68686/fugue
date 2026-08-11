@@ -63,6 +63,17 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		candidateProbes, err := parseCandidateCanaryProbes(os.Getenv("FUGUE_RELEASE_GUARDIAN_CANDIDATE_CANARY"))
+		if err != nil {
+			return err
+		}
+		if len(candidateProbes) > 0 {
+			authorityStore, err := releaseguardian.NewAuthorityStore(client, targets[0].Namespace)
+			if err != nil {
+				return err
+			}
+			startCandidateCanaryProbers(ctx, authorityStore, candidateProbes)
+		}
 		return runCanaryProbers(ctx, store, probes)
 	}
 	return runGuardian(ctx, client, store, targets)

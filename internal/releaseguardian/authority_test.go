@@ -115,6 +115,10 @@ func TestAuthorityStoreKeepsGroupsImmutableAndCASIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid, rv := object.UID, object.ResourceVersion
+	loaded, loadedUID, loadedRV, err := store.LoadCandidate(ctx, a.GroupID)
+	if err != nil || loaded != candidateA || loadedUID != uid || loadedRV != rv {
+		t.Fatalf("load candidate=%+v uid=%s rv=%s err=%v", loaded, loadedUID, loadedRV, err)
+	}
 	verified := candidateA
 	verified.State, verified.Generation = CandidateAuthorityVerified, 2
 	if _, _, err := store.PutCandidate(ctx, verified, uid, rv); err != nil {
@@ -157,6 +161,10 @@ func TestCurrentAuthorityCASRequiresExactPreviousAndSlotSwitch(t *testing.T) {
 	object, err = client.CoreV1().ConfigMaps("fugue-system").Get(ctx, currentAuthorityName(initial.GroupID), metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	loaded, loadedUID, loadedRV, err := store.LoadCurrent(ctx, initial.GroupID)
+	if err != nil || loaded != next || loadedUID != object.UID || loadedRV != object.ResourceVersion {
+		t.Fatalf("load current=%+v uid=%s rv=%s err=%v", loaded, loadedUID, loadedRV, err)
 	}
 	wrongLKG := next
 	wrongLKG.AuthorityEpoch = 3
