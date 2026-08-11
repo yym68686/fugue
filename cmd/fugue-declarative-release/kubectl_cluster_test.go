@@ -380,6 +380,11 @@ func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *tes
 		},
 	}
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de"}
+	serviceAccountIdentity := declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "ServiceAccount", Namespace: "fugue-system", Name: "edge-control-de"}
+	desiredServiceAccount := map[string]any{
+		"apiVersion": "v1", "kind": "ServiceAccount",
+		"metadata": map[string]any{"name": "edge-control-de", "namespace": "fugue-system"},
+	}
 	imagePointer := "/spec/template/spec/containers[name=edge-control]/image"
 	live := deepCopyJSONMap(t, desired)
 	metadata := mapField(live, "metadata")
@@ -396,7 +401,18 @@ func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *tes
 
 	directory := t.TempDir()
 	livePath := filepath.Join(directory, "live.json")
+	serviceAccountPath := filepath.Join(directory, "service-account.json")
 	kubectl := filepath.Join(directory, "kubectl")
+	liveServiceAccount := deepCopyJSONMap(t, desiredServiceAccount)
+	serviceAccountMetadata := mapField(liveServiceAccount, "metadata")
+	serviceAccountMetadata["uid"], serviceAccountMetadata["resourceVersion"] = "service-account-uid", "20"
+	serviceAccountMetadata["managedFields"] = []any{map[string]any{
+		"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1",
+		"fieldsV1": managedFieldsTree(t, []string{"/metadata/name"}),
+	}}
+	if err := os.WriteFile(serviceAccountPath, mustJSON(t, liveServiceAccount), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	writeLive := func(value map[string]any) declarativerelease.Observation {
 		t.Helper()
 		if err := os.WriteFile(livePath, mustJSON(t, value), 0o600); err != nil {
@@ -406,13 +422,18 @@ func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *tes
 			Identity: identity, Present: true, UID: "edge-uid", ResourceVersion: "44", Generation: 9,
 			ObjectDigest: digestJSON(sanitizeObservedResource(value)),
 		}
-		return declarativerelease.Observation{Present: true, Primary: identity, UID: "edge-uid", ResourceVersion: "44", Generation: 9, Resources: []declarativerelease.ResourceObservation{resource}}
+		serviceAccountResource := declarativerelease.ResourceObservation{
+			Identity: serviceAccountIdentity, Present: true, UID: "service-account-uid", ResourceVersion: "20",
+			ObjectDigest: digestJSON(sanitizeObservedResource(liveServiceAccount)),
+		}
+		return declarativerelease.Observation{Present: true, Primary: identity, UID: "edge-uid", ResourceVersion: "44", Generation: 9, Resources: []declarativerelease.ResourceObservation{resource, serviceAccountResource}}
 	}
-	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nset -eu\ntest \"$1\" = get\ncat \"$LIVE_JSON\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nset -eu\ntest \"$1\" = get\ncase \"$2/$3\" in\n  deployment/edge-control-de) cat \"$LIVE_JSON\" ;;\n  serviceaccount/edge-control-de) cat \"$LIVE_SERVICE_ACCOUNT_JSON\" ;;\n  *) exit 51 ;;\nesac\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LIVE_JSON", livePath)
-	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired}})
+	t.Setenv("LIVE_SERVICE_ACCOUNT_JSON", serviceAccountPath)
+	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired, desiredServiceAccount}})
 	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
 	observation := writeLive(live)
 	observation.ResourceVersion = "43"
@@ -421,7 +442,7 @@ func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *tes
 	if err != nil {
 		t.Fatalf("exact emergency image drift was rejected: %v", err)
 	}
-	if validated.ResourceVersion != "44" || validated.Resources[0].ResourceVersion != "44" {
+	if validated.ResourceVersion != "44" || validated.Resources[0].ResourceVersion != "44" || validated.Resources[1].Generation != 0 || validated.Resources[1].ResourceVersion != "20" {
 		t.Fatalf("status-only RV movement was not freshly rebound: %+v", validated)
 	}
 

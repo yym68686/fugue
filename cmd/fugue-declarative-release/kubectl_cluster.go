@@ -156,7 +156,8 @@ func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Contex
 	for _, identity := range identities {
 		index, ok := observed[identity]
 		expected := current.Resources[index]
-		if !ok || !expected.Present || expected.UID == "" || expected.ResourceVersion == "" || expected.Generation < 1 {
+		if !ok || !expected.Present || expected.UID == "" || expected.ResourceVersion == "" ||
+			(identity == current.Primary && expected.Generation < 1) {
 			return declarativerelease.Observation{}, fmt.Errorf("emergency rollback resource %s/%s lacks exact CAS", identity.Kind, identity.Name)
 		}
 		raw, getErr := cluster.getResource(ctx, identity)
