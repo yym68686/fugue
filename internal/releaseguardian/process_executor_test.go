@@ -122,7 +122,7 @@ func TestProcessExecutorAllowsCancelledChildToEmitTerminalReceipt(t *testing.T) 
 	directory := t.TempDir()
 	started := filepath.Join(directory, "started")
 	binary := filepath.Join(directory, "executor")
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntouch %q\ntrap %q TERM\nwhile :; do :; done\n", started, "printf '%s\\n' '"+string(raw)+"'; exit 1")
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntrap %q TERM\ntouch %q\nwhile :; do :; done\n", "printf '%s\\n' '"+string(raw)+"'; exit 1", started)
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
