@@ -751,6 +751,21 @@ func applyArguments(release declarativerelease.PlanRelease, dryRun bool) []strin
 func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any, encoded []byte, dryRun bool) error {
 	_, applyErr := cluster.kubectlRun(ctx, encoded, applyArguments(release, dryRun)...)
 	if applyErr != nil {
+		// A server-side apply may commit before the client loses its response.
+		// Continue only when a fresh GET proves the same pre-existing UID now
+		// contains the complete desired object and the declarative manager owns
+		// every reviewed runtime pointer.  Creates remain fail-closed because
+		// they have no prewrite UID to distinguish our object from a concurrent
+		// writer.  Dry-runs never use live state to mask a validation failure.
+		if !dryRun {
+			converged, reconcileErr := cluster.reconcileApplyCommitUnknown(ctx, release, identity, desired)
+			if reconcileErr != nil {
+				return errors.Join(applyErr, reconcileErr)
+			}
+			if converged {
+				return cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, true)
+			}
+		}
 		allowed := emergencyOwnershipPointers(release, identity, desired)
 		if len(allowed) == 0 {
 			return applyErr
@@ -792,6 +807,46 @@ func (cluster *kubectlCluster) applyResourceWithOwnershipConvergence(ctx context
 		return nil
 	}
 	return cluster.cleanupEmergencyOwnership(ctx, release, identity, desired, true)
+}
+
+func (cluster *kubectlCluster) reconcileApplyCommitUnknown(ctx context.Context, release declarativerelease.PlanRelease, identity declarativerelease.ResourceIdentity, desired map[string]any) (bool, error) {
+	desiredMetadata := mapField(desired, "metadata")
+	desiredUID := stringValue(desiredMetadata["uid"])
+	if desiredUID == "" {
+		return false, nil
+	}
+	liveRaw, err := cluster.getResource(ctx, identity)
+	if err != nil {
+		return false, fmt.Errorf("read server-side apply commit-unknown state: %w", err)
+	}
+	if resourceAbsent(liveRaw) {
+		return false, nil
+	}
+	live, err := decodeJSONObject(liveRaw)
+	if err != nil {
+		return false, err
+	}
+	liveMetadata := mapField(live, "metadata")
+	if stringValue(liveMetadata["uid"]) != desiredUID || !declarativerelease.ResourceDesiredSubset(desired, live) {
+		return false, nil
+	}
+	manager := release.Workload.FieldManager
+	if manager == "" {
+		return false, errors.New("server-side apply commit-unknown state lacks a declarative manager")
+	}
+	allowed := emergencyOwnershipPointers(release, identity, desired)
+	if len(allowed) > 0 {
+		if !managedFieldsOwnPointers(liveMetadata, manager, allowed) {
+			return false, nil
+		}
+		return true, nil
+	}
+	for _, observed := range managedFieldManagers(liveMetadata) {
+		if observed == manager {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // rebindDesiredResourceVersionAfterOwnershipCleanup permits exactly the RV

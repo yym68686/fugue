@@ -110,6 +110,99 @@ esac
 	}
 }
 
+func TestApplyReconcilesCommittedResponseLossButRejectsUnprovenState(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	program := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  apply)
+    cat >/dev/null
+    exit 42
+    ;;
+  get)
+    printf '%s\n' "$LIVE_RESOURCE"
+    ;;
+  *)
+    exit 43
+    ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	revision := strings.Repeat("a", 40)
+	image := "ghcr.io/example/edge@sha256:" + strings.Repeat("b", 64)
+	manager := "fugue-edge-worker-de-declarative"
+	release := declarativerelease.PlanRelease{
+		ComponentID: "edge-worker-de",
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front",
+			Container: "edge-front", FieldManager: manager, RolloutMode: "on-delete",
+		},
+		ArtifactTargets: []declarativerelease.ArtifactTarget{{
+			APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front",
+			Container: "edge-front", ContainerType: "container",
+		}},
+	}
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": "edge-front", "namespace": "fugue-system", "uid": "uid-1", "resourceVersion": "41",
+			"annotations": map[string]any{"fugue.pro/production-config-sha": revision},
+		},
+		"spec": map[string]any{"template": map[string]any{
+			"metadata": map[string]any{"annotations": map[string]any{
+				"fugue.pro/source-commit": revision, "fugue.pro/oci-revision": revision,
+			}},
+			"spec": map[string]any{"containers": []any{map[string]any{"name": "edge-front", "image": image}}},
+		}},
+	}
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["resourceVersion"] = "42"
+	metadata["generation"] = 8
+	metadata["managedFields"] = []any{map[string]any{
+		"manager": manager, "operation": "Apply", "apiVersion": "apps/v1", "fieldsType": "FieldsV1",
+		"fieldsV1": map[string]any{
+			"f:metadata": map[string]any{"f:annotations": map[string]any{".": map[string]any{}, "f:fugue.pro/production-config-sha": map[string]any{}}},
+			"f:spec": map[string]any{"f:template": map[string]any{
+				"f:metadata": map[string]any{"f:annotations": map[string]any{
+					".": map[string]any{}, "f:fugue.pro/source-commit": map[string]any{}, "f:fugue.pro/oci-revision": map[string]any{},
+				}},
+				"f:spec": map[string]any{"f:containers": map[string]any{
+					`k:{"name":"edge-front"}`: map[string]any{".": map[string]any{}, "f:image": map[string]any{}, "f:name": map[string]any{}},
+				}},
+			}},
+		},
+	}}
+	liveRaw, err := declarativerelease.CanonicalJSON(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIVE_RESOURCE", string(liveRaw))
+	encoded, err := declarativerelease.CanonicalJSON(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: "fugue-system", Name: "edge-front"}
+	if err := cluster.applyResourceWithOwnershipConvergence(context.Background(), release, identity, desired, encoded, false); err != nil {
+		t.Fatalf("committed response loss was not reconciled: %v", err)
+	}
+
+	drifted := deepCopyJSONMap(t, live)
+	mapField(mapField(mapField(drifted, "spec"), "template"), "spec")["containers"] = []any{map[string]any{"name": "edge-front", "image": "ghcr.io/example/edge@sha256:" + strings.Repeat("c", 64)}}
+	driftedRaw, err := declarativerelease.CanonicalJSON(drifted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIVE_RESOURCE", string(driftedRaw))
+	if err := cluster.applyResourceWithOwnershipConvergence(context.Background(), release, identity, desired, encoded, false); err == nil {
+		t.Fatal("response loss with live image drift was accepted")
+	}
+}
+
 func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	kubectl := filepath.Join(t.TempDir(), "kubectl")
 	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf 'null\\n'\n"), 0o700); err != nil {
