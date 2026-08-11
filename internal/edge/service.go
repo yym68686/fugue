@@ -130,6 +130,10 @@ type Status struct {
 	InventoryHeartbeatAt         *time.Time `json:"inventory_heartbeat_at,omitempty"`
 	InventoryHeartbeatGeneration uint64     `json:"inventory_heartbeat_generation,omitempty"`
 	InventoryHeartbeatError      string     `json:"inventory_heartbeat_error,omitempty"`
+	CandidateBundleLoaded        bool       `json:"candidate_bundle_loaded,omitempty"`
+	CandidateRecordDigest        string     `json:"candidate_record_digest,omitempty"`
+	CandidateReleaseRecordDigest string     `json:"candidate_release_record_digest,omitempty"`
+	CandidateWorkerSlot          string     `json:"candidate_worker_slot,omitempty"`
 }
 
 type edgeDesiredStateEnvelope struct {
@@ -151,13 +155,17 @@ type edgeDesiredState struct {
 }
 
 type cacheFile struct {
-	Version             int                   `json:"version"`
-	ETag                string                `json:"etag,omitempty"`
-	CachedAt            time.Time             `json:"cached_at"`
-	RouteBundleSource   string                `json:"route_bundle_source,omitempty"`
-	PublicationSequence uint64                `json:"publication_sequence,omitempty"`
-	RecoveryEpoch       uint64                `json:"recovery_epoch,omitempty"`
-	Bundle              model.EdgeRouteBundle `json:"bundle"`
+	Version               int                   `json:"version"`
+	ETag                  string                `json:"etag,omitempty"`
+	CachedAt              time.Time             `json:"cached_at"`
+	RouteBundleSource     string                `json:"route_bundle_source,omitempty"`
+	PublicationSequence   uint64                `json:"publication_sequence,omitempty"`
+	RecoveryEpoch         uint64                `json:"recovery_epoch,omitempty"`
+	Candidate             bool                  `json:"candidate,omitempty"`
+	CandidateRecordDigest string                `json:"candidate_record_digest,omitempty"`
+	ReleaseRecordDigest   string                `json:"release_record_digest,omitempty"`
+	CandidateWorkerSlot   string                `json:"candidate_worker_slot,omitempty"`
+	Bundle                model.EdgeRouteBundle `json:"bundle"`
 }
 
 type telemetry struct {
@@ -585,7 +593,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		s.recordSyncError(err)
 		return err
 	}
-	req, err := s.newRoutesRequest(ctx)
+	req, routeSelection, err := s.newRoutesRequestWithSelection(ctx)
 	if err != nil {
 		s.recordSyncError(err)
 		return err
@@ -628,6 +636,13 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 				s.recordSyncError(err)
 				return err
 			}
+			if routeSelection.candidate {
+				publication, err = bindCandidatePublication(resp.Header, publication, s.Config.EdgeSlot)
+				if err != nil {
+					s.recordSyncError(err)
+					return err
+				}
+			}
 			currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
 			previousBundle = currentBundle
 			if err = validateRoutePublicationAdvance(currentPublication, publication); err != nil {
@@ -635,6 +650,10 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 				return err
 			}
 			if err = validateNonCatastrophicGroupBundle(currentBundle, bundle, publication.RecoveryEpoch > currentPublication.RecoveryEpoch); err != nil {
+				s.recordSyncError(err)
+				return err
+			}
+			if err = s.validateRouteBundleSourceSelection(routeSelection); err != nil {
 				s.recordSyncError(err)
 				return err
 			}
@@ -651,13 +670,17 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		if err := s.writeCache(cacheFile{
-			Version:             cacheFileVersion,
-			ETag:                etag,
-			CachedAt:            now,
-			RouteBundleSource:   publication.Source,
-			PublicationSequence: publication.PublicationSequence,
-			RecoveryEpoch:       publication.RecoveryEpoch,
-			Bundle:              bundle,
+			Version:               cacheFileVersion,
+			ETag:                  etag,
+			CachedAt:              now,
+			RouteBundleSource:     publication.Source,
+			PublicationSequence:   publication.PublicationSequence,
+			RecoveryEpoch:         publication.RecoveryEpoch,
+			Candidate:             publication.Candidate,
+			CandidateRecordDigest: publication.CandidateRecord,
+			ReleaseRecordDigest:   publication.ReleaseRecord,
+			CandidateWorkerSlot:   publication.WorkerSlot,
+			Bundle:                bundle,
 		}); err != nil {
 			if previousBundle != nil && s.Config.CaddyEnabled {
 				if _, restoreErr := s.applyCaddyConfigOnly(ctx, *previousBundle); restoreErr != nil {
@@ -685,7 +708,10 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 				return err
 			}
 			observedPublication, publicationErr := routePublicationFromResponse(resp.Header, *currentBundle, s.Config.EdgeGroupID)
-			if publicationErr != nil || observedPublication != currentPublication {
+			if routeSelection.candidate {
+				observedPublication, publicationErr = bindCandidatePublication(resp.Header, observedPublication, s.Config.EdgeSlot)
+			}
+			if publicationErr != nil || observedPublication != currentPublication || s.validateRouteBundleSourceSelection(routeSelection) != nil {
 				err := fmt.Errorf("edge-control routes returned 304 with mismatched publication metadata")
 				s.recordSyncError(err)
 				return err
@@ -2760,23 +2786,29 @@ func (s *Service) startProxyServer() (func(context.Context) error, error) {
 }
 
 func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
-	routeSource := s.edgeRouteSourceConfig()
+	request, _, err := s.newRoutesRequestWithSelection(ctx)
+	return request, err
+}
+
+func (s *Service) newRoutesRequestWithSelection(ctx context.Context) (*http.Request, routeSourceSelection, error) {
+	selection, err := s.selectRouteBundleSource()
+	if err != nil {
+		return nil, routeSourceSelection{}, err
+	}
+	routeSource := selection.config
 	baseURL := strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/")
 	token := strings.TrimSpace(s.Config.EdgeToken)
 	if s.edgeControlRouteSourceEnabled() {
-		if err := validateEdgeControlRouteSourceConfig(routeSource); err != nil {
-			return nil, err
-		}
 		baseURL = routeSource.url
 		var err error
 		token, err = loadEdgeRouteReaderToken(routeSource.tokenFile)
 		if err != nil {
-			return nil, err
+			return nil, routeSourceSelection{}, err
 		}
 	}
 	base, err := url.Parse(baseURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("invalid edge route bundle URL")
+		return nil, routeSourceSelection{}, fmt.Errorf("invalid edge route bundle URL")
 	}
 	if !s.edgeControlRouteSourceEnabled() {
 		base.Path = strings.TrimRight(base.Path, "/") + edgeControlBundlePath
@@ -2795,7 +2827,7 @@ func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("build edge routes request: %w", err)
+		return nil, routeSourceSelection{}, fmt.Errorf("build edge routes request: %w", err)
 	}
 	if s.edgeControlRouteSourceEnabled() {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -2803,7 +2835,7 @@ func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
 	if etag := s.currentETag(); etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-	return req, nil
+	return req, selection, nil
 }
 
 func (s *Service) RefreshDesiredState(ctx context.Context) error {
@@ -4305,25 +4337,29 @@ func (s *Service) statusForBundleLocked(bundle model.EdgeRouteBundle, syncAt tim
 	}
 	generation := edgeCacheGeneration(bundle)
 	out := Status{
-		Status:              status,
-		Healthy:             healthy,
-		EdgeID:              strings.TrimSpace(s.Config.EdgeID),
-		EdgeGroupID:         strings.TrimSpace(s.Config.EdgeGroupID),
-		BundleVersion:       bundle.Version,
-		RouteBundleSource:   s.routePublication.Source,
-		PublicationSequence: s.routePublication.PublicationSequence,
-		RecoveryEpoch:       s.routePublication.RecoveryEpoch,
-		ServingGeneration:   generation,
-		LKGGeneration:       generation,
-		LastGoodGeneration:  generation,
-		RouteCount:          len(bundle.Routes),
-		TLSAllowlistCount:   len(bundle.TLSAllowlist),
-		LastSyncAt:          &syncAt,
-		LastSuccessAt:       successAt,
-		DegradedReason:      degradedReason,
-		StaleCache:          stale,
-		MaxStaleExceeded:    maxStaleExceeded,
-		CachePath:           strings.TrimSpace(s.Config.CachePath),
+		Status:                       status,
+		Healthy:                      healthy,
+		EdgeID:                       strings.TrimSpace(s.Config.EdgeID),
+		EdgeGroupID:                  strings.TrimSpace(s.Config.EdgeGroupID),
+		BundleVersion:                bundle.Version,
+		RouteBundleSource:            s.routePublication.Source,
+		PublicationSequence:          s.routePublication.PublicationSequence,
+		RecoveryEpoch:                s.routePublication.RecoveryEpoch,
+		CandidateBundleLoaded:        s.routePublication.Candidate,
+		CandidateRecordDigest:        s.routePublication.CandidateRecord,
+		CandidateReleaseRecordDigest: s.routePublication.ReleaseRecord,
+		CandidateWorkerSlot:          s.routePublication.WorkerSlot,
+		ServingGeneration:            generation,
+		LKGGeneration:                generation,
+		LastGoodGeneration:           generation,
+		RouteCount:                   len(bundle.Routes),
+		TLSAllowlistCount:            len(bundle.TLSAllowlist),
+		LastSyncAt:                   &syncAt,
+		LastSuccessAt:                successAt,
+		DegradedReason:               degradedReason,
+		StaleCache:                   stale,
+		MaxStaleExceeded:             maxStaleExceeded,
+		CachePath:                    strings.TrimSpace(s.Config.CachePath),
 	}
 	if !validUntil.IsZero() {
 		out.BundleValidUntil = &validUntil

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"fugue/internal/bundleauth"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/model"
 )
 
@@ -25,15 +26,22 @@ const (
 	edgeControlRouteSourceV1          = "edge-control-group-authority/v1"
 	edgeControlSigningKeyringSchemaV1 = "edge-control-group-bundle-signing-keyring/v1"
 	edgeControlBundlePath             = "/v1/edge/routes"
+	edgeControlCandidateBundlePath    = "/v1/edge/candidate-routes"
 	edgeControlGroupHeader            = "X-Fugue-Edge-Group"
 	edgeControlGenerationHeader       = "X-Fugue-Edge-Route-Bundle-Generation"
 	edgeControlPublicationHeader      = "X-Fugue-Edge-Publication-Sequence"
 	edgeControlRecoveryEpochHeader    = "X-Fugue-Edge-Recovery-Epoch"
+	edgeControlCandidateRecordHeader  = "X-Fugue-Candidate-Record-Digest"
+	edgeControlReleaseRecordHeader    = "X-Fugue-Release-Record-Digest"
+	edgeControlCandidateSlotHeader    = "X-Fugue-Candidate-Worker-Slot"
 	maxEdgeRouteCredentialBytes       = 512
 	maxEdgeRouteVerifierKeyringBytes  = 128 << 10
 )
 
-var edgeRouteKeyIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
+var (
+	edgeRouteKeyIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
+	edgeRouteDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
 
 type routePublicationMetadata struct {
 	Source              string
@@ -41,6 +49,10 @@ type routePublicationMetadata struct {
 	Generation          string
 	PublicationSequence uint64
 	RecoveryEpoch       uint64
+	Candidate           bool
+	CandidateRecord     string
+	ReleaseRecord       string
+	WorkerSlot          string
 }
 
 type edgeRouteVerifierKeyringFile struct {
@@ -62,16 +74,20 @@ type edgeRouteVerifierKeyring struct {
 // from the Core API configuration used for heartbeat and desired state.
 type RouteBundleSourceConfig struct {
 	URL                 string
+	CandidateURL        string
 	TokenFile           string
 	VerifierKeyringFile string
+	ActivationStateFile string
 }
 
 // RouteBundleSourceFromEnv reads only the Edge-owned group publication source.
 func RouteBundleSourceFromEnv() RouteBundleSourceConfig {
 	return RouteBundleSourceConfig{
 		URL:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_URL")),
+		CandidateURL:        strings.TrimSpace(os.Getenv("FUGUE_EDGE_CANDIDATE_ROUTE_BUNDLE_URL")),
 		TokenFile:           strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE")),
 		VerifierKeyringFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_VERIFIER_KEYRING_FILE")),
+		ActivationStateFile: strings.TrimSpace(os.Getenv("FUGUE_EDGE_INVENTORY_ACTIVATION_STATE_FILE")),
 	}
 }
 
@@ -103,13 +119,31 @@ func validateEdgeControlRouteSourceConfig(cfg configEdgeRouteSource) error {
 			return fmt.Errorf("%s must be an absolute normalized path", item.name)
 		}
 	}
+	if cfg.candidateURL == "" {
+		return nil
+	}
+	candidate, err := url.Parse(cfg.candidateURL)
+	if err != nil || candidate.Scheme != parsed.Scheme || candidate.Host != parsed.Host || candidate.User != nil ||
+		candidate.Path != edgeControlCandidateBundlePath || candidate.RawQuery != "" || candidate.Fragment != "" ||
+		!filepath.IsAbs(cfg.activationFile) || filepath.Clean(cfg.activationFile) != cfg.activationFile {
+		return errors.New("candidate route source must use the current authority host and an exact activation-bound endpoint")
+	}
 	return nil
 }
 
 type configEdgeRouteSource struct {
-	url          string
-	tokenFile    string
-	verifierFile string
+	url            string
+	candidateURL   string
+	tokenFile      string
+	verifierFile   string
+	activationFile string
+}
+
+type routeSourceSelection struct {
+	config               configEdgeRouteSource
+	candidate            bool
+	activationGeneration uint64
+	activeSlot           string
 }
 
 func newEdgeRouteBundleHTTPClient(timeout time.Duration) *http.Client {
@@ -130,10 +164,55 @@ func newEdgeRouteBundleHTTPClient(timeout time.Duration) *http.Client {
 
 func (s *Service) edgeRouteSourceConfig() configEdgeRouteSource {
 	return configEdgeRouteSource{
-		url:          strings.TrimSpace(s.RouteBundleSource.URL),
-		tokenFile:    strings.TrimSpace(s.RouteBundleSource.TokenFile),
-		verifierFile: strings.TrimSpace(s.RouteBundleSource.VerifierKeyringFile),
+		url:            strings.TrimSpace(s.RouteBundleSource.URL),
+		candidateURL:   strings.TrimSpace(s.RouteBundleSource.CandidateURL),
+		tokenFile:      strings.TrimSpace(s.RouteBundleSource.TokenFile),
+		verifierFile:   strings.TrimSpace(s.RouteBundleSource.VerifierKeyringFile),
+		activationFile: strings.TrimSpace(s.RouteBundleSource.ActivationStateFile),
 	}
+}
+
+func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
+	cfg := s.edgeRouteSourceConfig()
+	if err := validateEdgeControlRouteSourceConfig(cfg); err != nil {
+		return routeSourceSelection{}, err
+	}
+	selection := routeSourceSelection{config: cfg}
+	if cfg.candidateURL == "" {
+		return selection, nil
+	}
+	slot := strings.TrimSpace(s.Config.EdgeSlot)
+	if slot != model.EdgeSlotA && slot != model.EdgeSlotB {
+		return routeSourceSelection{}, errors.New("candidate route source requires an exact worker slot identity")
+	}
+	activation, exists, err := edgegroupfront.ReadActivationState(cfg.activationFile)
+	if err != nil || !exists || activation.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
+		(activation.ActiveSlot != model.EdgeSlotA && activation.ActiveSlot != model.EdgeSlotB) {
+		return routeSourceSelection{}, errors.New("candidate route source activation state is unavailable or unbound")
+	}
+	selection.activationGeneration = activation.Generation
+	selection.activeSlot = activation.ActiveSlot
+	if activation.ActiveSlot != slot {
+		selection.candidate = true
+		selection.config.url = cfg.candidateURL
+	}
+	return selection, nil
+}
+
+func (s *Service) validateRouteBundleSourceSelection(selection routeSourceSelection) error {
+	if selection.config.candidateURL == "" {
+		return nil
+	}
+	activation, exists, err := edgegroupfront.ReadActivationState(selection.config.activationFile)
+	if err != nil || !exists || activation.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
+		activation.Generation != selection.activationGeneration || activation.ActiveSlot != selection.activeSlot {
+		return errors.New("edge route authority changed while loading a bundle")
+	}
+	isCandidate := activation.ActiveSlot != strings.TrimSpace(s.Config.EdgeSlot)
+	if isCandidate != selection.candidate {
+		return errors.New("edge route authority slot changed while loading a bundle")
+	}
+	return nil
 }
 
 func loadEdgeRouteReaderToken(path string) (string, error) {
@@ -278,6 +357,29 @@ func routePublicationFromResponse(headers map[string][]string, bundle model.Edge
 	return routePublicationMetadata{Source: edgeControlRouteSourceV1, GroupID: groupID, Generation: generation, PublicationSequence: sequence, RecoveryEpoch: recoveryEpoch}, nil
 }
 
+func bindCandidatePublication(headers map[string][]string, publication routePublicationMetadata, expectedSlot string) (routePublicationMetadata, error) {
+	get := func(key string) string {
+		for header, values := range headers {
+			if strings.EqualFold(header, key) && len(values) == 1 {
+				return strings.TrimSpace(values[0])
+			}
+		}
+		return ""
+	}
+	candidateRecord := get(edgeControlCandidateRecordHeader)
+	releaseRecord := get(edgeControlReleaseRecordHeader)
+	workerSlot := get(edgeControlCandidateSlotHeader)
+	if !edgeRouteDigestPattern.MatchString(candidateRecord) || !edgeRouteDigestPattern.MatchString(releaseRecord) ||
+		(workerSlot != model.EdgeSlotA && workerSlot != model.EdgeSlotB) || workerSlot != strings.TrimSpace(expectedSlot) {
+		return routePublicationMetadata{}, errors.New("edge-control candidate publication identity is invalid or unbound")
+	}
+	publication.Candidate = true
+	publication.CandidateRecord = candidateRecord
+	publication.ReleaseRecord = releaseRecord
+	publication.WorkerSlot = workerSlot
+	return publication, nil
+}
+
 func groupPublicationVersion(generation string, sequence, recoveryEpoch uint64) string {
 	return strings.TrimSpace(generation) + ".p" + strconv.FormatUint(sequence, 10) + ".r" + strconv.FormatUint(recoveryEpoch, 10)
 }
@@ -305,6 +407,10 @@ func routePublicationFromCache(cached cacheFile) routePublicationMetadata {
 		Generation:          strings.TrimSpace(cached.Bundle.Generation),
 		PublicationSequence: cached.PublicationSequence,
 		RecoveryEpoch:       cached.RecoveryEpoch,
+		Candidate:           cached.Candidate,
+		CandidateRecord:     strings.TrimSpace(cached.CandidateRecordDigest),
+		ReleaseRecord:       strings.TrimSpace(cached.ReleaseRecordDigest),
+		WorkerSlot:          strings.TrimSpace(cached.CandidateWorkerSlot),
 	}
 }
 
@@ -330,6 +436,10 @@ func (s *Service) validateCachedRouteSource(cached cacheFile) error {
 	if cached.Version != cacheFileVersion || metadata.Source != edgeControlRouteSourceV1 || metadata.GroupID != strings.TrimSpace(s.Config.EdgeGroupID) ||
 		metadata.Generation == "" || metadata.PublicationSequence == 0 || cached.Bundle.Version != groupPublicationVersion(metadata.Generation, metadata.PublicationSequence, metadata.RecoveryEpoch) {
 		return errors.New("edge-control route publication cache is invalid or belongs to another source")
+	}
+	if metadata.Candidate && (!edgeRouteDigestPattern.MatchString(metadata.CandidateRecord) || !edgeRouteDigestPattern.MatchString(metadata.ReleaseRecord) ||
+		(metadata.WorkerSlot != model.EdgeSlotA && metadata.WorkerSlot != model.EdgeSlotB)) {
+		return errors.New("edge-control candidate publication cache is invalid")
 	}
 	return validateNonCatastrophicGroupBundle(nil, cached.Bundle, false)
 }

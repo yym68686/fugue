@@ -19,6 +19,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/model"
 )
 
@@ -184,6 +185,147 @@ func TestRouteBundleSourceFromEnvIsIndependentFromHeartbeatAPI(t *testing.T) {
 		routes.TokenFile != "/var/run/secrets/fugue-edge/route-reader/token" ||
 		routes.VerifierKeyringFile != "/var/run/secrets/fugue-edge/bundle-verifier/keyring.json" {
 		t.Fatalf("edge route source was not independently configured: heartbeat=%+v routes=%+v", heartbeat, routes)
+	}
+}
+
+func TestInactiveWorkerLoadsCandidateWithoutChangingActiveWorkerOrAuthority(t *testing.T) {
+	const groupID = "edge-group-country-us"
+	const readerToken = "reader-token-0123456789-abcdef-0123456789"
+	const keyID = "edge-us-key-v1"
+	const candidateRecord = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const releaseRecord = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	key := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Now().UTC()
+	root := t.TempDir()
+	tokenFile := filepath.Join(root, "reader-token")
+	if err := os.WriteFile(tokenFile, []byte(readerToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyringFile := filepath.Join(root, "verifier-keyring.json")
+	writeEdgeVerifierKeyring(t, keyringFile, groupID, keyID, key)
+	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, strings.Repeat("1", 40))
+
+	current := signedEdgeControlTestBundle(groupID, "generation-current", 1, 0, keyID, key)
+	canaryRoute := current.Routes[0]
+	canaryRoute.Hostname = "candidate-canary.example.test"
+	stableRoute := current.Routes[0]
+	stableRoute.Hostname = "stable.example.test"
+	current.Routes = []model.EdgeRouteBinding{canaryRoute, stableRoute}
+	current.Signature, current.Signatures = "", nil
+	current = bundleauth.SignEdgeRouteBundleWithKeyring(current, bundleauth.NewKeyring(string(key), keyID, "", "", nil), 30*time.Minute)
+
+	// This is a valid, signed and routable candidate, but deliberately lacks
+	// the canary route. The inactive worker may load it; CurrentAuthority must
+	// remain on slot A and ordinary traffic must retain the current bundle.
+	candidate := signedEdgeControlTestBundle(groupID, "generation-candidate", 2, 0, keyID, key)
+	candidate.Routes = []model.EdgeRouteBinding{stableRoute}
+	candidate.Signature, candidate.Signatures = "", nil
+	candidate = bundleauth.SignEdgeRouteBundleWithKeyring(candidate, bundleauth.NewKeyring(string(key), keyID, "", "", nil), 30*time.Minute)
+
+	var currentRequests, candidateRequests int
+	routeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.Header.Get("Authorization") != "Bearer "+readerToken ||
+			request.URL.Query().Get("edge_group_id") != groupID {
+			t.Fatalf("unexpected route request: %s %s", request.Method, request.URL.String())
+		}
+		var bundle model.EdgeRouteBundle
+		var sequence uint64
+		switch request.URL.Path {
+		case edgeControlBundlePath:
+			currentRequests++
+			bundle, sequence = current, 1
+		case edgeControlCandidateBundlePath:
+			candidateRequests++
+			bundle, sequence = candidate, 2
+			w.Header().Set(edgeControlCandidateRecordHeader, candidateRecord)
+			w.Header().Set(edgeControlReleaseRecordHeader, releaseRecord)
+			w.Header().Set(edgeControlCandidateSlotHeader, model.EdgeSlotB)
+		default:
+			t.Fatalf("unexpected route path: %s", request.URL.Path)
+		}
+		w.Header().Set("ETag", strconv.Quote(bundle.Version))
+		w.Header().Set(edgeControlGroupHeader, groupID)
+		w.Header().Set(edgeControlGenerationHeader, bundle.Generation)
+		w.Header().Set(edgeControlPublicationHeader, strconv.FormatUint(sequence, 10))
+		w.Header().Set(edgeControlRecoveryEpochHeader, "0")
+		_ = json.NewEncoder(w).Encode(bundle)
+	}))
+	defer routeServer.Close()
+
+	newWorker := func(slot, cacheName string) *Service {
+		return NewServiceWithRouteBundleSource(config.EdgeConfig{
+			APIURL: "http://127.0.0.1:1", EdgeToken: "heartbeat-token", EdgeID: "edge-us-" + slot,
+			EdgeGroupID: groupID, EdgeSlot: slot, CachePath: filepath.Join(root, cacheName), HTTPTimeout: time.Second,
+		}, RouteBundleSourceConfig{
+			URL: routeServer.URL + edgeControlBundlePath, CandidateURL: routeServer.URL + edgeControlCandidateBundlePath,
+			TokenFile: tokenFile, VerifierKeyringFile: keyringFile, ActivationStateFile: activationFile,
+		}, log.New(io.Discard, "", 0))
+	}
+	active := newWorker(model.EdgeSlotA, "active-cache.json")
+	inactive := newWorker(model.EdgeSlotB, "inactive-cache.json")
+	if err := active.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("active worker current sync: %v", err)
+	}
+	if err := inactive.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("inactive worker candidate sync: %v", err)
+	}
+	activeStatus, inactiveStatus := active.Status(), inactive.Status()
+	if activeStatus.CandidateBundleLoaded || activeStatus.ServingGeneration != "generation-current" || activeStatus.RouteCount != 2 {
+		t.Fatalf("active worker was changed by candidate loading: %+v", activeStatus)
+	}
+	if !inactiveStatus.CandidateBundleLoaded || inactiveStatus.CandidateRecordDigest != candidateRecord ||
+		inactiveStatus.CandidateReleaseRecordDigest != releaseRecord || inactiveStatus.CandidateWorkerSlot != model.EdgeSlotB ||
+		inactiveStatus.ServingGeneration != "generation-candidate" || inactiveStatus.RouteCount != 1 {
+		t.Fatalf("inactive worker did not bind the candidate: %+v", inactiveStatus)
+	}
+	activeBundle, ok := active.Bundle()
+	if !ok || len(activeBundle.Routes) != 2 || activeBundle.Routes[0].Hostname != "candidate-canary.example.test" {
+		t.Fatalf("ordinary current bundle changed: %+v", activeBundle)
+	}
+	activation, exists, err := edgegroupfront.ReadActivationState(activationFile)
+	if err != nil || !exists || activation.ActiveSlot != model.EdgeSlotA || activation.Generation != 1 {
+		t.Fatalf("candidate loading changed CurrentAuthority: state=%+v exists=%t err=%v", activation, exists, err)
+	}
+	if currentRequests != 1 || candidateRequests != 1 {
+		t.Fatalf("route source selection current=%d candidate=%d", currentRequests, candidateRequests)
+	}
+}
+
+func TestCandidateRouteSourceRejectsActivationChangeAndCrossSlotRecord(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC()
+	activationFile := writeInventoryActivationFixture(t, now, "edge-group-country-us", model.EdgeSlotA, strings.Repeat("1", 40))
+	service := NewServiceWithRouteBundleSource(config.EdgeConfig{EdgeGroupID: "edge-group-country-us", EdgeSlot: model.EdgeSlotB}, RouteBundleSourceConfig{
+		URL:          "http://edge-control-us.fugue-system.svc:8092" + edgeControlBundlePath,
+		CandidateURL: "http://edge-control-us.fugue-system.svc:8092" + edgeControlCandidateBundlePath,
+		TokenFile:    filepath.Join(root, "token"), VerifierKeyringFile: filepath.Join(root, "keyring"),
+		ActivationStateFile: activationFile,
+	}, log.New(io.Discard, "", 0))
+	if err := validateEdgeControlRouteSourceConfig(service.edgeRouteSourceConfig()); err != nil {
+		t.Fatal(err)
+	}
+	selection, err := service.selectRouteBundleSource()
+	if err != nil || !selection.candidate {
+		t.Fatalf("inactive candidate selection failed: selection=%+v err=%v", selection, err)
+	}
+	if _, err := edgegroupfront.ApplyActivationCAS(activationFile, edgegroupfront.ActivationCASRequest{
+		GroupID: "edge-group-country-us", ExpectedGeneration: 1, ExpectedSlot: model.EdgeSlotA, TargetSlot: model.EdgeSlotB,
+		BundleGeneration: "bundle-generation-2", WorkerSourceCommit: strings.Repeat("2", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("c", 64), Operation: edgegroupfront.ActivationOperationPromote,
+		Reason: "candidate source selection race test",
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.validateRouteBundleSourceSelection(selection); err == nil {
+		t.Fatal("candidate bundle selection survived an authority CAS change")
+	}
+	publication := routePublicationMetadata{Source: edgeControlRouteSourceV1, GroupID: "edge-group-country-us", Generation: "generation", PublicationSequence: 1}
+	headers := http.Header{}
+	headers.Set(edgeControlCandidateRecordHeader, "sha256:"+strings.Repeat("a", 64))
+	headers.Set(edgeControlReleaseRecordHeader, "sha256:"+strings.Repeat("b", 64))
+	headers.Set(edgeControlCandidateSlotHeader, model.EdgeSlotA)
+	if _, err := bindCandidatePublication(headers, publication, model.EdgeSlotB); err == nil {
+		t.Fatal("candidate record for another worker slot was accepted")
 	}
 }
 
