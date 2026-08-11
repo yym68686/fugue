@@ -57,16 +57,16 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(set.Items) != 9 {
+	if len(set.Items) != 8 {
 		t.Fatalf("resource count=%d", len(set.Items))
 	}
 	encoded, _ := json.Marshal(set)
 	source := string(encoded)
 	for _, required := range []string{
-		`"name":"fugue-release-guardian"`, `"name":"fugue-release-canary-prober"`, `"name":"fugue-release-canary-prober-edge-worker-de"`,
+		`"name":"fugue-release-guardian"`, `"name":"fugue-release-canary-prober"`,
 		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,
 		`"value":"edge-control-de,de,fugue-system,edge-control-de,fugue-fugue;edge-worker-de,de,fugue-system,edge-worker-de,edge-control-de"`,
-		`"value":"edge-worker-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10"`,
+		`"value":"edge-control-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-worker-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10"`,
 		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
 		`"resources":["configmaps"],"verbs":["create","get","update"]`,
 		`"resourceNames":["fugue-api-route-intent-ca-de","fugue-edge-control-inventory-writer-de","fugue-edge-control-reader-de","fugue-edge-control-recovery-de","fugue-edge-control-route-intent-identity-de","fugue-edge-control-signing-de","fugue-edge-token-vps-84c8f0a9","fugue-edge-worker-reader-de","fugue-fugue-config"],"resources":["secrets"],"verbs":["get"]`,

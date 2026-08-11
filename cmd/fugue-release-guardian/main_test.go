@@ -28,3 +28,13 @@ func TestParseCanaryRejectsUnboundedOrMalformedInput(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCanariesIsDataDrivenAndRejectsDuplicateTargets(t *testing.T) {
+	probes, err := parseProbes("edge-control-de,de,192.0.2.1:443,platform.example,/healthz,ok,10;edge-worker-de,de,192.0.2.1:443,platform.example,/healthz,ok,10")
+	if err != nil || len(probes) != 2 || probes[0].Key == probes[1].Key {
+		t.Fatalf("probes=%+v err=%v", probes, err)
+	}
+	if _, err := parseProbes("edge-control-de,de,192.0.2.1:443,platform.example,/healthz,ok,10;edge-control-de,de,192.0.2.1:443,platform.example,/healthz,ok,10"); err == nil {
+		t.Fatal("duplicate canary target was accepted")
+	}
+}

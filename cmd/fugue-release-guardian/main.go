@@ -59,11 +59,11 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if role == "canary-prober" {
-		probe, err := parseProbe(os.Getenv("FUGUE_RELEASE_GUARDIAN_CANARY"))
+		probes, err := parseProbes(os.Getenv("FUGUE_RELEASE_GUARDIAN_CANARY"))
 		if err != nil {
 			return err
 		}
-		return runCanaryProber(ctx, store, probe)
+		return runCanaryProbers(ctx, store, probes)
 	}
 	return runGuardian(ctx, client, store, targets)
 }
@@ -181,6 +181,25 @@ func runCanaryProber(ctx context.Context, store *releaseguardian.KubeStore, prob
 	}
 }
 
+func runCanaryProbers(ctx context.Context, store *releaseguardian.KubeStore, probes []canaryProbe) error {
+	if len(probes) == 0 {
+		return errors.New("release Guardian has no canary probe")
+	}
+	done := make(chan struct{}, len(probes))
+	for _, probe := range probes {
+		probe := probe
+		go func() {
+			_ = runCanaryProber(ctx, store, probe)
+			done <- struct{}{}
+		}()
+	}
+	<-ctx.Done()
+	for range probes {
+		<-done
+	}
+	return nil
+}
+
 func probeOnce(ctx context.Context, store *releaseguardian.KubeStore, probe canaryProbe) error {
 	record, err := store.LoadRecord(ctx, probe.Key)
 	if err != nil {
@@ -269,6 +288,26 @@ func parseProbe(value string) (canaryProbe, error) {
 		return canaryProbe{}, errors.New("canary configuration is invalid")
 	}
 	return probe, nil
+}
+
+func parseProbes(value string) ([]canaryProbe, error) {
+	var probes []canaryProbe
+	seen := map[releaseguardian.Key]bool{}
+	for _, raw := range strings.Split(strings.TrimSpace(value), ";") {
+		probe, err := parseProbe(raw)
+		if err != nil {
+			return nil, err
+		}
+		if seen[probe.Key] {
+			return nil, errors.New("canary target is duplicated")
+		}
+		seen[probe.Key] = true
+		probes = append(probes, probe)
+	}
+	if len(probes) == 0 {
+		return nil, errors.New("release Guardian has no canary probe")
+	}
+	return probes, nil
 }
 
 func loadKubeConfig() (*rest.Config, error) {
