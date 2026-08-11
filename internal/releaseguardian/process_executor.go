@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"fugue/internal/declarativerelease"
 )
@@ -76,7 +78,10 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	if operation == "restore-monitor" {
 		arguments = append(arguments, snapshot.LKGMonitorRecordDigest)
 	}
-	command := exec.CommandContext(ctx, executor.Binary, arguments...)
+	if err := ctx.Err(); err != nil {
+		return ExecutionReceipt{}, err
+	}
+	command := exec.Command(executor.Binary, arguments...)
 	environment := os.Environ()
 	if strings.TrimSpace(os.Getenv("KUBECONFIG")) == "" {
 		kubeconfigDirectory, directoryErr := os.MkdirTemp("", "fugue-release-guardian-kubeconfig-")
@@ -101,7 +106,32 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	var stdout, stderr boundedBuffer
 	stdout.limit, stderr.limit = 1<<20, 1<<20
 	command.Stdout, command.Stderr = &stdout, &stderr
-	runErr := command.Run()
+	if err := command.Start(); err != nil {
+		return ExecutionReceipt{}, err
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- command.Wait() }()
+	var runErr error
+	select {
+	case runErr = <-waited:
+	case <-ctx.Done():
+		if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+			_ = command.Process.Kill()
+			runErr = <-waited
+			return ExecutionReceipt{}, fmt.Errorf("signal Guardian %s child for lease finalization: %w", operation, err)
+		}
+		timer := time.NewTimer(15 * time.Second)
+		select {
+		case runErr = <-waited:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			_ = command.Process.Kill()
+			runErr = <-waited
+			return ExecutionReceipt{}, fmt.Errorf("Guardian %s child did not finalize after termination: %w", operation, runErr)
+		}
+	}
 	result, decodeErr := declarativerelease.DecodeExecutionResult(bytes.NewReader(bytes.TrimSpace(stdout.Bytes())))
 	if decodeErr != nil {
 		if runErr != nil {

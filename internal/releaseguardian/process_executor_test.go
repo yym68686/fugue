@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/declarativerelease"
 )
@@ -50,6 +51,58 @@ func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
 	}
 	if _, err := executor.Rollout(context.Background(), snapshot); err == nil || !strings.Contains(err.Error(), "result is unknown") {
 		t.Fatalf("unknown child result was accepted: %v", err)
+	}
+}
+
+func TestProcessExecutorAllowsCancelledChildToEmitTerminalReceipt(t *testing.T) {
+	configureInClusterExecutorFixture(t)
+	snapshot := processSnapshot(t)
+	result := processResult(t, "recovery-required", "terminated-before-write")
+	raw, err := declarativerelease.CanonicalJSON(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	started := filepath.Join(directory, "started")
+	binary := filepath.Join(directory, "executor")
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntouch %q\ntrap %q TERM\nwhile :; do :; done\n", started, "printf '%s\\n' '"+string(raw)+"'; exit 1")
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewProcessExecutor(binary, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		receipt ExecutionReceipt
+		err     error
+	}, 1)
+	go func() {
+		receipt, runErr := executor.Rollout(ctx, snapshot)
+		done <- struct {
+			receipt ExecutionReceipt
+			err     error
+		}{receipt: receipt, err: runErr}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("executor fixture did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got.err != nil || got.receipt.Status != "recovery-required" || got.receipt.ReceiptDigest != result.ReceiptDigest {
+			t.Fatalf("receipt=%+v err=%v", got.receipt, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled child did not finalize within its grace period")
 	}
 }
 

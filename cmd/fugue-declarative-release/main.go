@@ -10,9 +10,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"fugue/internal/declarativerelease"
@@ -23,13 +25,19 @@ import (
 const maxChangedPathsBytes = 1 << 20
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runContext(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "declarative-release:", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string, output io.Writer) error {
+	return runContext(context.Background(), args, output)
+}
+
+func runContext(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-monitor-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|restore-monitor|reconcile|install-monitor-record|monitor> ...")
 	}
@@ -49,11 +57,11 @@ func run(args []string, output io.Writer) error {
 	case "prepare":
 		return runPrepare(args, output)
 	case "execute":
-		return runExecute(args, output)
+		return runExecuteContext(ctx, args, output)
 	case "guardian-submit":
 		return runGuardianSubmit(args, output)
 	case "restore-monitor":
-		return runRestoreMonitor(args, output)
+		return runRestoreMonitorContext(ctx, args, output)
 	case "reconcile":
 		return runReconcile(args, output)
 	case "install-monitor-record":
@@ -702,6 +710,10 @@ func historicalComponentManifestPath(revision, componentID string) (string, erro
 	return "", fmt.Errorf("previous production registry does not contain component %q", componentID)
 }
 func runExecute(args []string, output io.Writer) error {
+	return runExecuteContext(context.Background(), args, output)
+}
+
+func runExecuteContext(parent context.Context, args []string, output io.Writer) error {
 	if len(args) != 2 {
 		return errors.New("usage: fugue-declarative-release execute PLAN_DIR")
 	}
@@ -737,7 +749,7 @@ func runExecute(args []string, output io.Writer) error {
 	if release.Transition != nil && release.Transition.EdgeGroupAB != nil {
 		executeTimeout = 12 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), executeTimeout)
+	ctx, cancel := context.WithTimeout(parent, executeTimeout)
 	defer cancel()
 	leaseCoordinator, err := newComponentLeaseCoordinator()
 	if err != nil {
@@ -761,10 +773,14 @@ func runExecute(args []string, output io.Writer) error {
 		if monitorErr != nil {
 			monitorRecordErr = monitorErr
 		} else {
-			_, monitorRecordErr = monitor.persistVerified(ctx, release, files, result)
+			finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
+			_, monitorRecordErr = monitor.persistVerified(finalizeCtx, release, files, result)
+			finalizeCancel()
 		}
 	}
-	leaseReleaseErr := leaseCoordinator.release(ctx, heldLease)
+	leaseCtx, leaseCancel := componentLeaseFinalizationContext(ctx)
+	leaseReleaseErr := leaseCoordinator.release(leaseCtx, heldLease)
+	leaseCancel()
 	encoded, err := declarativerelease.CanonicalJSON(result)
 	if err != nil {
 		return err

@@ -17,6 +17,10 @@ import (
 )
 
 func runRestoreMonitor(args []string, output io.Writer) error {
+	return runRestoreMonitorContext(context.Background(), args, output)
+}
+
+func runRestoreMonitorContext(parent context.Context, args []string, output io.Writer) error {
 	if len(args) != 3 {
 		return errors.New("usage: fugue-declarative-release restore-monitor MONITOR_DIR LKG_RECORD_DIGEST")
 	}
@@ -35,7 +39,7 @@ func runRestoreMonitor(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 8*time.Minute)
 	defer cancel()
 	current, err := store.load(ctx, release.Workload.Namespace, release.ComponentID)
 	if err != nil || current.Bundle.Record != currentBundle.Record {
@@ -68,15 +72,19 @@ func runRestoreMonitor(args []string, output io.Writer) error {
 	}
 	fresh, freshErr := store.load(ctx, release.Workload.Namespace, release.ComponentID)
 	if freshErr != nil || fresh.Bundle.Record != currentBundle.Record {
-		_ = lease.release(ctx, held)
+		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
+		_ = lease.release(releaseCtx, held)
+		releaseCancel()
 		return errors.New("monitor pointer changed after component Lease acquisition")
 	}
 	result := declarativerelease.RestoreMonitoredLKG(ctx, cluster, currentBundle.Plan, currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG, release)
+	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
+	defer finalizeCancel()
 	var activateErr error
 	if result.Status == "compensated" {
-		_, activateErr = store.activateExistingRecord(ctx, fresh, lkgName, lkgBundle)
+		_, activateErr = store.activateExistingRecord(finalizeCtx, fresh, lkgName, lkgBundle)
 	}
-	releaseErr := lease.release(ctx, held)
+	releaseErr := lease.release(finalizeCtx, held)
 	raw, encodeErr := declarativerelease.CanonicalJSON(result)
 	if encodeErr != nil {
 		return encodeErr

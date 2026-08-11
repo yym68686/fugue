@@ -21,6 +21,11 @@ import (
 // lease valid for that entire process lifetime without introducing a second
 // renewal state machine; a crashed runner becomes reclaimable after 15 minutes.
 const componentLeaseDurationSeconds int64 = 900
+const componentLeaseFinalizationTimeout = 10 * time.Second
+
+func componentLeaseFinalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), componentLeaseFinalizationTimeout)
+}
 
 type heldComponentLease struct {
 	Namespace       string
