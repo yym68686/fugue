@@ -12,7 +12,9 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	coordinationclient "k8s.io/client-go/kubernetes/typed/coordination/v1"
+	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -37,6 +39,7 @@ type heldComponentLease struct {
 
 type componentLeaseCoordinator struct {
 	client coordinationclient.CoordinationV1Interface
+	pods   coreclient.CoreV1Interface
 	now    func() time.Time
 }
 
@@ -45,11 +48,11 @@ func newComponentLeaseCoordinator() (*componentLeaseCoordinator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load Kubernetes client config for component lease: %w", err)
 	}
-	client, err := coordinationclient.NewForConfig(config)
+	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client for component lease: %w", err)
 	}
-	return &componentLeaseCoordinator{client: client, now: time.Now}, nil
+	return &componentLeaseCoordinator{client: client.CoordinationV1(), pods: client.CoreV1(), now: time.Now}, nil
 }
 
 func loadComponentLeaseClientConfig() (*rest.Config, error) {
@@ -109,7 +112,7 @@ func decimalIdentity(value string) bool {
 }
 
 func (coordinator *componentLeaseCoordinator) acquire(ctx context.Context, release declarativerelease.PlanRelease, configSHA string) (heldComponentLease, error) {
-	if coordinator == nil || coordinator.client == nil || coordinator.now == nil {
+	if coordinator == nil || coordinator.client == nil || coordinator.pods == nil || coordinator.now == nil {
 		return heldComponentLease{}, errors.New("component lease coordinator is unavailable")
 	}
 	holder, err := componentLeaseHolder(release, configSHA)
@@ -136,7 +139,13 @@ func (coordinator *componentLeaseCoordinator) acquire(ctx context.Context, relea
 		return heldLeaseFromObject(current, holder)
 	}
 	if currentHolder != "" && coordinator.now().UTC().Before(renewTime.Add(time.Duration(componentLeaseDurationSeconds)*time.Second)) {
-		return heldComponentLease{}, fmt.Errorf("component lease is held by another release: %s", currentHolder)
+		orphaned, orphanErr := coordinator.guardianHolderOrphaned(ctx, release, currentHolder, holder)
+		if orphanErr != nil {
+			return heldComponentLease{}, orphanErr
+		}
+		if !orphaned {
+			return heldComponentLease{}, fmt.Errorf("component lease is held by another release: %s", currentHolder)
+		}
 	}
 	updated := current.DeepCopy()
 	setComponentLeaseSpec(updated, holder, coordinator.now().UTC())
@@ -145,6 +154,42 @@ func (coordinator *componentLeaseCoordinator) acquire(ctx context.Context, relea
 		return heldComponentLease{}, fmt.Errorf("acquire expired component lease with resourceVersion CAS: %w", err)
 	}
 	return heldLeaseFromObject(updated, holder)
+}
+
+func (coordinator *componentLeaseCoordinator) guardianHolderOrphaned(ctx context.Context, release declarativerelease.PlanRelease, currentHolder, requestedHolder string) (bool, error) {
+	currentPodUID, currentOK := guardianLeasePodUID(currentHolder, release.ComponentID)
+	requestedPodUID, requestedOK := guardianLeasePodUID(requestedHolder, release.ComponentID)
+	if !currentOK || !requestedOK {
+		return false, nil
+	}
+	pods, err := coordinator.pods.Pods(release.Workload.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, fmt.Errorf("prove Guardian lease holder Pod liveness: %w", err)
+	}
+	requestedPresent := false
+	for index := range pods.Items {
+		pod := &pods.Items[index]
+		uid := string(pod.GetUID())
+		if uid == currentPodUID {
+			return false, nil
+		}
+		if uid == requestedPodUID && pod.GetDeletionTimestamp() == nil && pod.GetLabels()["app.kubernetes.io/component"] == "release-guardian" {
+			requestedPresent = true
+		}
+	}
+	if !requestedPresent {
+		return false, errors.New("requesting Guardian Pod identity is not live")
+	}
+	return true, nil
+}
+
+func guardianLeasePodUID(holder, component string) (string, bool) {
+	parts := strings.Split(holder, ":")
+	if len(parts) != 4 || parts[0] != "guardian" || parts[1] == "" || len(parts[1]) > 80 ||
+		len(parts[2]) != 16 || strings.Trim(parts[2], "0123456789abcdef") != "" || parts[3] != component {
+		return "", false
+	}
+	return parts[1], true
 }
 
 func (coordinator *componentLeaseCoordinator) release(ctx context.Context, held heldComponentLease) error {

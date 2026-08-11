@@ -11,11 +11,14 @@ import (
 
 	"fugue/internal/declarativerelease"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestComponentLeaseLoadsDefaultKubeconfigAndFailsClosed(t *testing.T) {
@@ -97,7 +100,7 @@ func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *t
 	release := testLeaseRelease()
 	active := testLeaseObject(release, "github:other/repo:1:1:"+strings.Repeat("a", 40)+":controller", now.Add(-time.Minute))
 	client := kubernetesfake.NewSimpleClientset(active)
-	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), now: func() time.Time { return now }}
+	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), pods: client.CoreV1(), now: func() time.Time { return now }}
 	t.Setenv("GITHUB_REPOSITORY", "example/fugue")
 	t.Setenv("GITHUB_RUN_ID", "42")
 	t.Setenv("GITHUB_RUN_ATTEMPT", "1")
@@ -108,6 +111,7 @@ func TestComponentLeaseCASRejectsActiveForeignHolderAndReclaimsExpiredLease(t *t
 	expired := testLeaseObject(release, "github:other/repo:1:1:"+strings.Repeat("a", 40)+":controller", now.Add(-20*time.Minute))
 	client = kubernetesfake.NewSimpleClientset(expired)
 	coordinator.client = client.CoordinationV1()
+	coordinator.pods = client.CoreV1()
 	held, err := coordinator.acquire(context.Background(), release, strings.Repeat("b", 40))
 	if err != nil {
 		t.Fatalf("reclaim expired lease: %v", err)
@@ -135,7 +139,7 @@ func TestComponentLeaseAcquiresReleasedLeaseWithoutTimestamps(t *testing.T) {
 	released.Spec.AcquireTime = nil
 	released.Spec.RenewTime = nil
 	client := kubernetesfake.NewSimpleClientset(released)
-	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), now: func() time.Time { return now }}
+	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), pods: client.CoreV1(), now: func() time.Time { return now }}
 	t.Setenv("GITHUB_REPOSITORY", "example/fugue")
 	t.Setenv("GITHUB_RUN_ID", "31176668421")
 	t.Setenv("GITHUB_RUN_ATTEMPT", "1")
@@ -184,6 +188,59 @@ func TestComponentLeaseGuardianIdentityIsPodAndRecordScoped(t *testing.T) {
 	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:bad")
 	if _, err := componentLeaseHolder(release, strings.Repeat("a", 40)); err == nil {
 		t.Fatal("invalid Guardian record digest was accepted")
+	}
+}
+
+func TestComponentLeaseReclaimsOnlyAnAbsentGuardianPodWithExactCAS(t *testing.T) {
+	now := time.Date(2026, 8, 11, 3, 30, 0, 0, time.UTC)
+	release := testLeaseRelease()
+	release.ComponentID = "edge-control-de"
+	release.Concurrency = "fugue-production-edge-control-de"
+	oldUID := "448e0913-d7ce-4d50-9b94-c6c33b492d5b"
+	newUID := "af1fa623-7e9d-413e-bac7-80dd7b145ca0"
+	oldHolder := "guardian:" + oldUID + ":" + strings.Repeat("a", 16) + ":edge-control-de"
+	lease := testLeaseObject(release, oldHolder, now.Add(-time.Minute))
+	requester := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "guardian-new", Namespace: release.Workload.Namespace, UID: types.UID(newUID),
+		Labels: map[string]string{"app.kubernetes.io/component": "release-guardian"},
+	}}
+	oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "guardian-old", Namespace: release.Workload.Namespace, UID: types.UID(oldUID)}}
+	client := kubernetesfake.NewSimpleClientset(lease, requester, oldPod)
+	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), pods: client.CoreV1(), now: func() time.Time { return now }}
+	t.Setenv("FUGUE_COMPONENT_LEASE_OWNER", "guardian")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_POD_UID", newUID)
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("b", 64))
+	if _, err := coordinator.acquire(context.Background(), release, strings.Repeat("c", 40)); err == nil || !strings.Contains(err.Error(), "held by another release") {
+		t.Fatalf("live Guardian holder was reclaimed: %v", err)
+	}
+	if err := client.CoreV1().Pods(release.Workload.Namespace).Delete(context.Background(), oldPod.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	held, err := coordinator.acquire(context.Background(), release, strings.Repeat("c", 40))
+	if err != nil {
+		t.Fatalf("reclaim absent Guardian holder: %v", err)
+	}
+	want := "guardian:" + newUID + ":" + strings.Repeat("b", 16) + ":edge-control-de"
+	if held.Holder != want || held.UID != string(lease.UID) {
+		t.Fatalf("reclaimed lease=%+v want holder=%s", held, want)
+	}
+}
+
+func TestComponentLeaseGuardianOrphanProofFailsClosed(t *testing.T) {
+	now := time.Date(2026, 8, 11, 3, 30, 0, 0, time.UTC)
+	release := testLeaseRelease()
+	oldHolder := "guardian:old-pod:" + strings.Repeat("a", 16) + ":controller"
+	lease := testLeaseObject(release, oldHolder, now.Add(-time.Minute))
+	client := kubernetesfake.NewSimpleClientset(lease)
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("test")
+	})
+	coordinator := &componentLeaseCoordinator{client: client.CoordinationV1(), pods: client.CoreV1(), now: func() time.Time { return now }}
+	t.Setenv("FUGUE_COMPONENT_LEASE_OWNER", "guardian")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_POD_UID", "new-pod")
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST", "sha256:"+strings.Repeat("b", 64))
+	if _, err := coordinator.acquire(context.Background(), release, strings.Repeat("c", 40)); err == nil || !strings.Contains(err.Error(), "prove Guardian lease holder Pod liveness") {
+		t.Fatalf("unknown Pod liveness was accepted: %v", err)
 	}
 }
 
