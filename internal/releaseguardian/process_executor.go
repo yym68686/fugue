@@ -79,7 +79,15 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	command := exec.CommandContext(ctx, executor.Binary, arguments...)
 	environment := os.Environ()
 	if strings.TrimSpace(os.Getenv("KUBECONFIG")) == "" {
-		kubeconfig, configErr := writeInClusterKubeconfig(directory, serviceAccountCAPath, serviceAccountTokenPath)
+		kubeconfigDirectory, directoryErr := os.MkdirTemp("", "fugue-release-guardian-kubeconfig-")
+		if directoryErr != nil {
+			return ExecutionReceipt{}, directoryErr
+		}
+		defer os.RemoveAll(kubeconfigDirectory)
+		if directoryErr := os.Chmod(kubeconfigDirectory, 0o700); directoryErr != nil {
+			return ExecutionReceipt{}, directoryErr
+		}
+		kubeconfig, configErr := writeInClusterKubeconfig(kubeconfigDirectory, serviceAccountCAPath, serviceAccountTokenPath)
 		if configErr != nil {
 			return ExecutionReceipt{}, configErr
 		}
