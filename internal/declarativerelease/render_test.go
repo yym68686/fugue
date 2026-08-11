@@ -50,6 +50,12 @@ func TestRenderManifestsChangesOnlyReleaseIdentityAndSelectedImage(t *testing.T)
 	if forwardContainers[0].(map[string]any)["env"].([]any)[0].(map[string]any)["value"] != "yes" {
 		t.Fatal("unrelated workload configuration changed")
 	}
+	forwardAnnotations := forward.Items[0]["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	if forwardAnnotations["fugue.pro/artifact-image"] != verification.Image ||
+		forwardAnnotations["fugue.pro/artifact-receipt-digest"] != receipt.ReceiptDigest ||
+		forwardAnnotations["fugue.pro/release-plan-digest"] != plan.PlanDigest {
+		t.Fatalf("forward pod provenance is incomplete: %+v", forwardAnnotations)
+	}
 	for label, set := range map[string]ResourceSet{"forward": forward, "lkg": lkg} {
 		labels := set.Items[0]["metadata"].(map[string]any)["labels"].(map[string]any)
 		if labels["app.kubernetes.io/managed-by"] != "Helm" {

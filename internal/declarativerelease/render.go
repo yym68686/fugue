@@ -369,7 +369,7 @@ func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, m
 		}
 		workloadKey := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name
 		if _, exists := patchedWorkloads[workloadKey]; !exists {
-			if err := patchWorkloadIdentity(item, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest); err != nil {
+			if err := patchWorkloadIdentity(item, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest, image); err != nil {
 				return err
 			}
 			patchedWorkloads[workloadKey] = struct{}{}
@@ -392,7 +392,7 @@ func validateManifestIdentity(value map[string]any, workload Workload) error {
 	return nil
 }
 
-func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string) error {
+func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest, image string) error {
 	metadata, err := objectField(value, "metadata")
 	if err != nil {
 		return err
@@ -417,6 +417,9 @@ func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevi
 	templateAnnotations["fugue.pro/source-commit"] = manifestSHA
 	templateAnnotations["fugue.pro/oci-revision"] = ociRevision
 	templateAnnotations["fugue.pro/production-config-sha"] = configSHA
+	templateAnnotations["fugue.pro/release-plan-digest"] = planDigest
+	templateAnnotations["fugue.pro/artifact-receipt-digest"] = receiptDigest
+	templateAnnotations["fugue.pro/artifact-image"] = image
 	return nil
 }
 
