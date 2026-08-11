@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"fugue/internal/declarativerelease"
@@ -18,6 +20,11 @@ type ProcessExecutor struct {
 	Binary string
 	PodUID string
 }
+
+var (
+	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+)
 
 func NewProcessExecutor(binary, podUID string) (*ProcessExecutor, error) {
 	binary, podUID = strings.TrimSpace(binary), strings.TrimSpace(podUID)
@@ -70,7 +77,15 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		arguments = append(arguments, snapshot.LKGMonitorRecordDigest)
 	}
 	command := exec.CommandContext(ctx, executor.Binary, arguments...)
-	command.Env = append(os.Environ(),
+	environment := os.Environ()
+	if strings.TrimSpace(os.Getenv("KUBECONFIG")) == "" {
+		kubeconfig, configErr := writeInClusterKubeconfig(directory, serviceAccountCAPath, serviceAccountTokenPath)
+		if configErr != nil {
+			return ExecutionReceipt{}, configErr
+		}
+		environment = setEnvironment(environment, "KUBECONFIG", kubeconfig)
+	}
+	command.Env = append(environment,
 		"FUGUE_COMPONENT_LEASE_OWNER=guardian",
 		"FUGUE_RELEASE_GUARDIAN_POD_UID="+executor.PodUID,
 		"FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST="+snapshot.Record.RecordDigest,
@@ -94,6 +109,41 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
 	return ExecutionReceipt{Status: result.Status, Reason: result.Reason, RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
+}
+
+func writeInClusterKubeconfig(directory, caPath, tokenPath string) (string, error) {
+	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
+	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS"))
+	if net.ParseIP(host) == nil {
+		return "", errors.New("Guardian in-cluster Kubernetes host is invalid")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return "", errors.New("Guardian in-cluster Kubernetes port is invalid")
+	}
+	for _, path := range []string{caPath, tokenPath} {
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return "", errors.New("Guardian in-cluster service account material is unavailable")
+		}
+	}
+	path := filepath.Join(directory, "kubeconfig")
+	content := fmt.Sprintf("apiVersion: v1\nkind: Config\nclusters:\n- name: in-cluster\n  cluster:\n    certificate-authority: %s\n    server: https://%s\ncontexts:\n- name: in-cluster\n  context:\n    cluster: in-cluster\n    user: service-account\ncurrent-context: in-cluster\nusers:\n- name: service-account\n  user:\n    tokenFile: %s\n", caPath, net.JoinHostPort(host, port), tokenPath)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func setEnvironment(environment []string, name, value string) []string {
+	prefix := name + "="
+	filtered := environment[:0]
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, prefix+value)
 }
 
 type boundedBuffer struct {

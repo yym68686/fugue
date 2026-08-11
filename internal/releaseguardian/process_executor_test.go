@@ -12,6 +12,7 @@ import (
 )
 
 func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
+	configureInClusterExecutorFixture(t)
 	snapshot := processSnapshot(t)
 	verified := processResult(t, "verified", "forward-verified")
 	binary := writeExecutorFixture(t, "execute", snapshot.Record.RecordDigest, verified)
@@ -37,6 +38,7 @@ func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
 }
 
 func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
+	configureInClusterExecutorFixture(t)
 	snapshot := processSnapshot(t)
 	path := filepath.Join(t.TempDir(), "executor")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
@@ -48,6 +50,21 @@ func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
 	}
 	if _, err := executor.Rollout(context.Background(), snapshot); err == nil || !strings.Contains(err.Error(), "result is unknown") {
 		t.Fatalf("unknown child result was accepted: %v", err)
+	}
+}
+
+func TestProcessExecutorFailsClosedWithoutInClusterKubeconfigMaterial(t *testing.T) {
+	t.Setenv("KUBECONFIG", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "not-an-ip")
+	t.Setenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+	snapshot := processSnapshot(t)
+	binary := writeExecutorFixture(t, "execute", snapshot.Record.RecordDigest, processResult(t, "verified", "forward-verified"))
+	executor, err := NewProcessExecutor(binary, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Rollout(context.Background(), snapshot); err == nil || !strings.Contains(err.Error(), "host is invalid") {
+		t.Fatalf("invalid in-cluster identity was accepted: %v", err)
 	}
 }
 
@@ -95,9 +112,33 @@ func writeExecutorFixture(t *testing.T, operation, recordDigest string, result d
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "executor")
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\nprintf '%%s\\n' %q\n", operation, recordDigest, string(raw))
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\ntest -f \"$KUBECONFIG\"\ntest \"$(stat -f '%%Lp' \"$KUBECONFIG\" 2>/dev/null || stat -c '%%a' \"$KUBECONFIG\")\" = 600\ngrep -F \"tokenFile: $FUGUE_TEST_TOKEN_FILE\" \"$KUBECONFIG\" >/dev/null\n! grep -F \"$FUGUE_TEST_TOKEN_VALUE\" \"$KUBECONFIG\" >/dev/null\nprintf '%%s\\n' %q\n", operation, recordDigest, string(raw))
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func configureInClusterExecutorFixture(t *testing.T) {
+	t.Helper()
+	directory := t.TempDir()
+	caPath := filepath.Join(directory, "ca.crt")
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(caPath, []byte("test-ca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const token = "test-service-account-token"
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+	t.Setenv("FUGUE_TEST_TOKEN_FILE", tokenPath)
+	t.Setenv("FUGUE_TEST_TOKEN_VALUE", token)
+	oldCA, oldToken := serviceAccountCAPath, serviceAccountTokenPath
+	serviceAccountCAPath, serviceAccountTokenPath = caPath, tokenPath
+	t.Cleanup(func() {
+		serviceAccountCAPath, serviceAccountTokenPath = oldCA, oldToken
+	})
 }
