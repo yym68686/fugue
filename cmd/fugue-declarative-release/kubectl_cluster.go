@@ -136,40 +136,49 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 // all other declared fields byte-equivalent to the recorded forward manifest,
 // and requires both the declarative owner and an exact allowlisted Update
 // managedFields witness for each differing pointer.
-func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, current declarativerelease.Observation) error {
+func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, current declarativerelease.Observation) (declarativerelease.Observation, error) {
 	if !current.Present || len(current.Resources) == 0 {
-		return errors.New("emergency rollback drift lacks a present resource CAS")
+		return declarativerelease.Observation{}, errors.New("emergency rollback drift lacks a present resource CAS")
 	}
-	observed := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(current.Resources))
-	for _, resource := range current.Resources {
-		observed[resource.Identity] = resource
+	observed := make(map[declarativerelease.ResourceIdentity]int, len(current.Resources))
+	for index, resource := range current.Resources {
+		observed[resource.Identity] = index
 	}
 	identities, err := declarativerelease.ResourceSetIdentities(manifest)
 	if err != nil || len(identities) != len(observed) {
-		return errors.New("emergency rollback resource inventory is inconsistent")
+		return declarativerelease.Observation{}, errors.New("emergency rollback resource inventory is inconsistent")
 	}
 	drifted := false
 	for _, identity := range identities {
-		expected, ok := observed[identity]
+		index, ok := observed[identity]
+		expected := current.Resources[index]
 		if !ok || !expected.Present || expected.UID == "" || expected.ResourceVersion == "" || expected.Generation < 1 {
-			return fmt.Errorf("emergency rollback resource %s/%s lacks exact CAS", identity.Kind, identity.Name)
+			return declarativerelease.Observation{}, fmt.Errorf("emergency rollback resource %s/%s lacks exact CAS", identity.Kind, identity.Name)
 		}
 		raw, getErr := cluster.getResource(ctx, identity)
 		if getErr != nil || resourceAbsent(raw) {
-			return fmt.Errorf("read emergency rollback resource %s/%s: %w", identity.Kind, identity.Name, getErr)
+			return declarativerelease.Observation{}, fmt.Errorf("read emergency rollback resource %s/%s: %w", identity.Kind, identity.Name, getErr)
 		}
 		live, decodeErr := decodeJSONObject(raw)
 		if decodeErr != nil {
-			return decodeErr
+			return declarativerelease.Observation{}, decodeErr
 		}
 		metadata := mapField(live, "metadata")
-		if stringValue(metadata["uid"]) != expected.UID || stringValue(metadata["resourceVersion"]) != expected.ResourceVersion ||
-			int64Value(metadata["generation"]) != expected.Generation || digestJSON(sanitizeObservedResource(live)) != expected.ObjectDigest {
-			return fmt.Errorf("emergency rollback resource %s/%s changed after CAS observation", identity.Kind, identity.Name)
+		freshUID, freshRV, freshGeneration := stringValue(metadata["uid"]), stringValue(metadata["resourceVersion"]), int64Value(metadata["generation"])
+		if freshUID != expected.UID || freshRV == "" || freshGeneration != expected.Generation || digestJSON(sanitizeObservedResource(live)) != expected.ObjectDigest {
+			return declarativerelease.Observation{}, fmt.Errorf("emergency rollback resource %s/%s changed after CAS observation", identity.Kind, identity.Name)
+		}
+		// Status-only controller updates may advance RV continuously while an
+		// invalid Pod is failing. Keep the newest RV from the same UID,
+		// generation, and desired-object digest so the subsequent SSA CAS is
+		// fresh without accepting any spec movement.
+		current.Resources[index].ResourceVersion = freshRV
+		if identity == current.Primary {
+			current.UID, current.ResourceVersion, current.Generation = freshUID, freshRV, freshGeneration
 		}
 		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
 		if desiredErr != nil {
-			return desiredErr
+			return declarativerelease.Observation{}, desiredErr
 		}
 		normalized := sanitizeObservedResource(live)
 		allowed := emergencyOwnershipPointers(release, identity, desired)
@@ -181,21 +190,21 @@ func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Contex
 			}
 			if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, []string{pointer}) ||
 				!reviewedEmergencyUpdateOwnsPointer(metadata, pointer, allowed) {
-				return fmt.Errorf("emergency rollback pointer %s lacks exact ownership evidence", pointer)
+				return declarativerelease.Observation{}, fmt.Errorf("emergency rollback pointer %s lacks exact ownership evidence", pointer)
 			}
 			if !setEmergencyRuntimePointerValue(normalized, pointer, desiredValue) {
-				return fmt.Errorf("emergency rollback pointer %s is unsupported", pointer)
+				return declarativerelease.Observation{}, fmt.Errorf("emergency rollback pointer %s is unsupported", pointer)
 			}
 			drifted = true
 		}
 		if !declarativerelease.ResourceDesiredSubset(desired, normalized) {
-			return fmt.Errorf("emergency rollback resource %s/%s drift expands beyond the exact allowlist", identity.Kind, identity.Name)
+			return declarativerelease.Observation{}, fmt.Errorf("emergency rollback resource %s/%s drift expands beyond the exact allowlist", identity.Kind, identity.Name)
 		}
 	}
 	if !drifted {
-		return errors.New("emergency rollback drift evidence is absent")
+		return declarativerelease.Observation{}, errors.New("emergency rollback drift evidence is absent")
 	}
-	return nil
+	return current, nil
 }
 
 func reviewedEmergencyUpdateOwnsPointer(metadata map[string]any, pointer string, allowed []string) bool {

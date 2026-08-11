@@ -412,15 +412,21 @@ func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *tes
 	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired}})
 	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
 	observation := writeLive(live)
-	if err := cluster.ValidateEmergencyRollbackDrift(context.Background(), release, manifest, observation); err != nil {
+	observation.ResourceVersion = "43"
+	observation.Resources[0].ResourceVersion = "43"
+	validated, err := cluster.ValidateEmergencyRollbackDrift(context.Background(), release, manifest, observation)
+	if err != nil {
 		t.Fatalf("exact emergency image drift was rejected: %v", err)
+	}
+	if validated.ResourceVersion != "44" || validated.Resources[0].ResourceVersion != "44" {
+		t.Fatalf("status-only RV movement was not freshly rebound: %+v", validated)
 	}
 
 	drifted := deepCopyJSONMap(t, live)
 	driftedContainer := anySlice(mapField(mapField(mapField(drifted, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
 	anySlice(driftedContainer["env"])[0].(map[string]any)["value"] = "unsafe"
 	observation = writeLive(drifted)
-	if err := cluster.ValidateEmergencyRollbackDrift(context.Background(), release, manifest, observation); err == nil || !strings.Contains(err.Error(), "beyond the exact allowlist") {
+	if _, err := cluster.ValidateEmergencyRollbackDrift(context.Background(), release, manifest, observation); err == nil || !strings.Contains(err.Error(), "beyond the exact allowlist") {
 		t.Fatalf("unreviewed environment drift was accepted: %v", err)
 	}
 }

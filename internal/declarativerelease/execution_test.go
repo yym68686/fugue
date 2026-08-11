@@ -143,14 +143,14 @@ func (fake *fakeCluster) VerifyOwnershipConverged(context.Context, PlanRelease, 
 	return nil
 }
 
-func (fake *fakeCluster) ValidateEmergencyRollbackDrift(context.Context, PlanRelease, []byte, Observation) error {
+func (fake *fakeCluster) ValidateEmergencyRollbackDrift(_ context.Context, _ PlanRelease, _ []byte, current Observation) (Observation, error) {
 	fake.rollbackDriftChecks++
 	if len(fake.rollbackDriftErrors) == 0 {
-		return nil
+		return current, nil
 	}
 	err := fake.rollbackDriftErrors[0]
 	fake.rollbackDriftErrors = fake.rollbackDriftErrors[1:]
-	return err
+	return Observation{}, err
 }
 
 func executionFixture(t *testing.T) (Plan, ArtifactReceipt, RenderedManifests, Observation, Observation) {

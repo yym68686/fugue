@@ -211,7 +211,10 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 		// reviewed short-lived Update manager. This is the only path that may
 		// proceed without a full forward identity match.
 		cas, casErr := cluster.ObserveCAS(ctx, healthRelease, forwardManifest)
-		if casErr == nil && cluster.ValidateEmergencyRollbackDrift(ctx, healthRelease, forwardManifest, cas) == nil {
+		if casErr == nil {
+			cas, casErr = cluster.ValidateEmergencyRollbackDrift(ctx, healthRelease, forwardManifest, cas)
+		}
+		if casErr == nil {
 			current = cas
 			err = nil
 		} else {
