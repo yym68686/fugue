@@ -274,6 +274,73 @@ func TestSharedEdgeWorkerManifestRollsOneGroupPerIntent(t *testing.T) {
 	}
 }
 
+func TestUSEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
+	baseFile, err := os.Open("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := DecodeRegistry(baseFile)
+	closeErr := baseFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("decode base registry: %v close: %v", err, closeErr)
+	}
+	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge, err := DecodeEdgeGroupRegistry(edgeFile)
+	closeErr = edgeFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("decode edge registry: %v close: %v", err, closeErr)
+	}
+	var worker Component
+	for _, group := range edge.Groups {
+		if group.ID == "us" {
+			worker = group.Worker
+			break
+		}
+	}
+	if worker.ID != "edge-worker-us" || worker.Delivery == nil || worker.Delivery.Writer != "guardian" ||
+		worker.Delivery.Group != "us" || worker.Delivery.DependencyService != "edge-control-us" {
+		t.Fatalf("US Edge Worker delivery is not Guardian-scoped: %+v", worker)
+	}
+	intentFile, err := os.Open("../../" + worker.IntentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := DecodeIntent(intentFile)
+	closeErr = intentFile.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("decode US Worker intent: %v close: %v", err, closeErr)
+	}
+	const lkgSHA = "07c1f483253dc0c659bdc7b30ff5d8ec10a67e59"
+	const lkgImage = "sha256:935ef3bc6b4aaa5358367054daf1bb5969e3a5a9983417c875b4604e08fb6807"
+	if intent.Generation != 18 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage ||
+		intent.SupersedesFailedConfigSHA != "" {
+		t.Fatalf("US Edge Worker intent does not bind the exact live LKG: %+v", intent)
+	}
+	registry, err := MergeEdgeGroupRegistry(base, edge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildPlan(registry, testSHA1, testSHA2, []string{"deploy/releases/edge-groups.json", worker.IntentPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := intent
+	prior.Generation = 17
+	prior.ExpectedPreviousConfigSHA = "d2d4bff24ac1e007b6cf4d1c3eeecc3133cad716"
+	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
+	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
+	prior.ExpectedPreviousImageDigest = "sha256:cc21b32a5ff1dbc2ad80cfbbd9bbef8e581a48e556cc613be85cbc340b23b775"
+	bound, err := BindIntents(registry, plan, map[string]Intent{worker.ID: intent}, map[string]Intent{worker.ID: prior}, map[string]string{})
+	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != worker.ID || bound.Releases[0].Delivery == nil ||
+		bound.Releases[0].Delivery.Writer != "guardian" {
+		t.Fatalf("US Edge Worker Guardian migration expanded the planner: %+v", plan.Releases)
+	}
+}
+
 func TestEdgeWorkerTemplatePreservesExternalCaddyAndTenantNodePlacement(t *testing.T) {
 	edgeFile, err := os.Open("../../deploy/releases/edge-groups.json")
 	if err != nil {
