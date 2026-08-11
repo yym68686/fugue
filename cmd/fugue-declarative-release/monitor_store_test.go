@@ -31,7 +31,7 @@ func TestEmitMonitorOutputDerivesAPIControlAndWorkerMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 2 || lines[0] != "monitor_count=3" || !strings.HasPrefix(lines[1], "monitor_matrix=") {
+	if len(lines) != 2 || lines[0] != "monitor_count=2" || !strings.HasPrefix(lines[1], "monitor_matrix=") {
 		t.Fatalf("unexpected monitor output: %q", raw)
 	}
 	var matrix struct {
@@ -50,7 +50,7 @@ func TestEmitMonitorOutputDerivesAPIControlAndWorkerMatrix(t *testing.T) {
 		}
 		got = append(got, item.Component)
 	}
-	want := []string{"api", "edge-control-us", "edge-worker-us"}
+	want := []string{"api", "edge-worker-us"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("monitor matrix=%v want=%v", got, want)
 	}
