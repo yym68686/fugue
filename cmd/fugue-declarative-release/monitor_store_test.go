@@ -76,8 +76,8 @@ func TestEmitMonitorOutputExcludesAPIAfterGuardianHandoff(t *testing.T) {
 	}
 	const lkgSHA = "787054f0b9260f1178c1c2f276c5f72c71264f22"
 	const lkgImage = "sha256:ce7b3b5f04e7e4a78fbef5258068a514e3236d2953ca1fdef76743b0e519efaf"
-	const failedAtom = "9e648cb25f4159ef803a31511fdbeeb3a8f570dc"
-	if intent.Generation != 26 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	const failedAtom = "8e61b6e9f6421da62250e8e27597e6699573f548"
+	if intent.Generation != 27 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != failedAtom {
 		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
 	}
