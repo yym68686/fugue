@@ -203,8 +203,16 @@ func TestWriteModeFencesUnprovenLKGUntilFreshHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	if executor.rollouts != 0 || executor.rollbacks != 0 || store.lkgCAS != 0 || store.status.State != StateRecoveryRequired ||
-		!strings.Contains(store.status.Reason, "fenced") {
+		!strings.HasPrefix(store.status.Reason, "lkg-unproven: ") || !strings.Contains(store.status.Reason, "fenced") {
 		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
+	}
+	snapshot.PreviousStatus = &store.status
+	store.snapshot = snapshot
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 0 || executor.rollbacks != 0 || store.lkgCAS != 0 || store.status.State != StateRecoveryRequired {
+		t.Fatalf("second reconcile retried the fenced candidate: executor=%+v store=%+v status=%+v", executor, store, store.status)
 	}
 }
 

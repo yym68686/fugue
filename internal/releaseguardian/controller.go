@@ -143,7 +143,7 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKGRecovery(snapshot) {
 		status.State = StateRecoveryRequired
 		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
-		status.Reason = joinedReason("failed candidate is fenced while LKG health awaits complete evidence", snapshot.Health)
+		status.Reason = joinedReason("lkg-unproven: failed candidate is fenced while LKG health awaits complete evidence", snapshot.Health)
 		if allLayersHealthy(snapshot.Health) {
 			if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
 				status.Reason = "LKG is healthy but failed-candidate DesiredRelease rollback CAS failed: " + err.Error()
@@ -259,7 +259,8 @@ func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {
 		return false
 	}
 	reason := previous.Reason
-	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ")
+	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ") ||
+		strings.HasPrefix(reason, "failed candidate is fenced while LKG health awaits complete evidence")
 }
 
 func allLayersHealthy(health HealthSnapshot) bool {
