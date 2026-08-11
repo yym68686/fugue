@@ -120,7 +120,7 @@ func TestAuthorityStoreKeepsGroupsImmutableAndCASIsolated(t *testing.T) {
 		t.Fatalf("load candidate=%+v uid=%s rv=%s err=%v", loaded, loadedUID, loadedRV, err)
 	}
 	verified := candidateA
-	verified.State, verified.Generation = CandidateAuthorityVerified, 2
+	verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, 2, testDigest
 	if _, _, err := store.PutCandidate(ctx, verified, uid, rv); err != nil {
 		t.Fatal(err)
 	}

@@ -98,6 +98,15 @@ func runGuardian(ctx context.Context, client kubernetes.Interface, store *releas
 	if err != nil {
 		return err
 	}
+	authorityStore, err := releaseguardian.NewAuthorityStore(client, targets[0].Namespace)
+	if err != nil {
+		return err
+	}
+	authority, err := newAuthorityRuntime(authorityStore, os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"))
+	if err != nil {
+		return err
+	}
+	authority.Start(ctx)
 	namespace := targets[0].Namespace
 	for _, target := range targets[1:] {
 		if target.Namespace != namespace {
@@ -106,9 +115,9 @@ func runGuardian(ctx context.Context, client kubernetes.Interface, store *releas
 	}
 	factory := informers.NewSharedInformerFactoryWithOptions(client, 0, informers.WithNamespace(namespace))
 	handler := cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(value any) { enqueueEvent(controller, store.Keys(), value) },
-		UpdateFunc: func(_, value any) { enqueueEvent(controller, store.Keys(), value) },
-		DeleteFunc: func(value any) { enqueueEvent(controller, store.Keys(), value) },
+		AddFunc:    func(value any) { enqueueEvent(controller, authority, store.Keys(), value) },
+		UpdateFunc: func(_, value any) { enqueueEvent(controller, authority, store.Keys(), value) },
+		DeleteFunc: func(value any) { enqueueEvent(controller, authority, store.Keys(), value) },
 	}
 	informersToWatch := []cache.SharedIndexInformer{
 		factory.Core().V1().ConfigMaps().Informer(),
@@ -144,13 +153,14 @@ func runGuardian(ctx context.Context, client kubernetes.Interface, store *releas
 	return controller.Run(ctx, len(store.Keys()))
 }
 
-func enqueueEvent(controller *releaseguardian.Controller, keys []releaseguardian.Key, value any) {
+func enqueueEvent(controller *releaseguardian.Controller, authority *authorityRuntime, keys []releaseguardian.Key, value any) {
 	if metadata, ok := value.(metav1.Object); ok && strings.HasPrefix(metadata.GetName(), "fugue-release-status-") {
 		return
 	}
 	for _, key := range keys {
 		_ = controller.Enqueue(key)
 	}
+	authority.EnqueueAll()
 }
 
 func enqueueFreshness(ctx context.Context, controller *releaseguardian.Controller, keys []releaseguardian.Key, interval time.Duration) {

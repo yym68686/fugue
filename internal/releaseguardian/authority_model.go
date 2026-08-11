@@ -115,6 +115,7 @@ type CandidateAuthority struct {
 	ReleaseRecordDigest string                  `json:"releaseRecordDigest"`
 	State               CandidateAuthorityState `json:"state"`
 	Generation          int64                   `json:"generation"`
+	CanaryResultDigest  string                  `json:"canaryResultDigest,omitempty"`
 }
 
 func (candidate CandidateAuthority) Validate() error {
@@ -124,6 +125,13 @@ func (candidate CandidateAuthority) Validate() error {
 		(candidate.State != CandidateAuthorityLoaded && candidate.State != CandidateAuthorityVerified && candidate.State != CandidateAuthorityRejected) ||
 		candidate.Generation < 1 {
 		return errors.New("candidate authority is invalid")
+	}
+	if candidate.State == CandidateAuthorityLoaded {
+		if candidate.CanaryResultDigest != "" {
+			return errors.New("loaded candidate cannot carry a canary result")
+		}
+	} else if !digestPattern.MatchString(candidate.CanaryResultDigest) {
+		return errors.New("terminal candidate must bind a canary result")
 	}
 	return nil
 }
@@ -284,3 +292,90 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 }
 
 const testableSignaturePlaceholder = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+type AuthorityTransitionAction string
+
+const (
+	AuthorityCandidateRejected AuthorityTransitionAction = "candidate_rejected"
+	AuthorityCurrentSwitched   AuthorityTransitionAction = "current_switched"
+	AuthorityCurrentReverted   AuthorityTransitionAction = "current_reverted"
+)
+
+type AuthorityTransitionReceipt struct {
+	APIVersion         string                    `json:"apiVersion"`
+	Kind               string                    `json:"kind"`
+	GroupID            string                    `json:"groupId"`
+	Action             AuthorityTransitionAction `json:"action"`
+	CandidateDigest    string                    `json:"candidateDigest,omitempty"`
+	CanaryResultDigest string                    `json:"canaryResultDigest,omitempty"`
+	Before             CurrentAuthority          `json:"before"`
+	After              CurrentAuthority          `json:"after"`
+	ObservedAt         string                    `json:"observedAt"`
+	ReceiptDigest      string                    `json:"receiptDigest"`
+}
+
+func (receipt AuthorityTransitionReceipt) Seal() (AuthorityTransitionReceipt, error) {
+	receipt.APIVersion = APIVersion
+	receipt.Kind = "AuthorityTransitionReceipt"
+	receipt.ReceiptDigest = ""
+	if err := receipt.validateUnsigned(); err != nil {
+		return AuthorityTransitionReceipt{}, err
+	}
+	raw, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return AuthorityTransitionReceipt{}, err
+	}
+	receipt.ReceiptDigest = digest(raw)
+	return receipt, nil
+}
+
+func (receipt AuthorityTransitionReceipt) Validate() error {
+	if !digestPattern.MatchString(receipt.ReceiptDigest) || receipt.validateUnsigned() != nil {
+		return errors.New("authority transition receipt is invalid")
+	}
+	copy := receipt
+	copy.ReceiptDigest = ""
+	raw, err := declarativerelease.CanonicalJSON(copy)
+	if err != nil || digest(raw) != receipt.ReceiptDigest {
+		return errors.New("authority transition receipt digest is invalid")
+	}
+	return nil
+}
+
+func (receipt AuthorityTransitionReceipt) validateUnsigned() error {
+	if receipt.APIVersion != APIVersion || receipt.Kind != "AuthorityTransitionReceipt" ||
+		!groupPattern.MatchString(receipt.GroupID) || receipt.Before.Validate() != nil || receipt.After.Validate() != nil ||
+		receipt.Before.GroupID != receipt.GroupID || receipt.After.GroupID != receipt.GroupID {
+		return errors.New("authority transition receipt identity is invalid")
+	}
+	switch receipt.Action {
+	case AuthorityCandidateRejected:
+		if receipt.After != receipt.Before {
+			return errors.New("candidate rejection changed current authority")
+		}
+	case AuthorityCurrentSwitched:
+		if receipt.After.AuthorityEpoch != receipt.Before.AuthorityEpoch+1 ||
+			receipt.After.CurrentRecordDigest != receipt.CandidateDigest ||
+			receipt.After.PreviousRecordDigest != receipt.Before.CurrentRecordDigest ||
+			receipt.After.PreviousWorkerSlot != receipt.Before.CurrentWorkerSlot ||
+			receipt.After.CurrentRecordDigest == receipt.Before.CurrentRecordDigest || receipt.After.CurrentWorkerSlot == receipt.Before.CurrentWorkerSlot {
+			return errors.New("authority switch receipt is invalid")
+		}
+	case AuthorityCurrentReverted:
+		if receipt.After.AuthorityEpoch != receipt.Before.AuthorityEpoch+1 || receipt.Before.CurrentRecordDigest != receipt.CandidateDigest ||
+			receipt.After.CurrentRecordDigest != receipt.Before.PreviousRecordDigest || receipt.After.CurrentWorkerSlot != receipt.Before.PreviousWorkerSlot ||
+			receipt.After.PreviousRecordDigest != receipt.Before.CurrentRecordDigest || receipt.After.PreviousWorkerSlot != receipt.Before.CurrentWorkerSlot {
+			return errors.New("authority revert receipt is invalid")
+		}
+	default:
+		return errors.New("authority transition receipt action is invalid")
+	}
+	if !digestPattern.MatchString(receipt.CandidateDigest) || !digestPattern.MatchString(receipt.CanaryResultDigest) {
+		return errors.New("authority transition receipt candidate binding is invalid")
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
+	if err != nil || !observedAt.Equal(observedAt.UTC()) {
+		return errors.New("authority transition receipt time is invalid")
+	}
+	return nil
+}

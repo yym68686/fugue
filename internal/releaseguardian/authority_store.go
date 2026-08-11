@@ -11,9 +11,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
+
+var ErrCandidateCanaryUnavailable = errors.New("candidate canary result is unavailable")
 
 // AuthorityStore persists only group-local authority records. It is not wired
 // into the rollout controller until the inactive candidate path is proven.
@@ -33,14 +36,14 @@ func (store *AuthorityStore) CreateRouteBundleRecord(ctx context.Context, record
 	if err := record.Validate(); err != nil {
 		return err
 	}
-	return store.createImmutable(ctx, routeBundleRecordName(record.GroupID, record.RecordDigest), record.GroupID, "record.json", record)
+	return store.createImmutable(ctx, routeBundleRecordName(record.GroupID, record.RecordDigest), record.GroupID, "route-bundle", "record.json", record)
 }
 
 func (store *AuthorityStore) CreateCandidateCanaryResult(ctx context.Context, result CandidateCanaryResult, now time.Time) error {
 	if err := result.Validate(now); err != nil {
 		return err
 	}
-	return store.createImmutable(ctx, candidateCanaryResultName(result.GroupID, result.ResultDigest), result.GroupID, "result.json", result)
+	return store.createImmutable(ctx, candidateCanaryResultName(result.GroupID, result.ResultDigest), result.GroupID, "candidate-canary", "result.json", result)
 }
 
 func (store *AuthorityStore) LoadCandidate(ctx context.Context, groupID string) (CandidateAuthority, types.UID, string, error) {
@@ -85,13 +88,15 @@ func (store *AuthorityStore) loadMutable(ctx context.Context, name, groupID, key
 	return object.UID, object.ResourceVersion, nil
 }
 
-func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID, key string, value any) error {
+func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID, kind, key string, value any) error {
 	raw, err := declarativerelease.CanonicalJSON(value)
 	if err != nil {
 		return err
 	}
 	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
-	desired := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: store.namespace, Labels: authorityLabels(groupID)}, Immutable: boolPointer(true), Data: map[string]string{key: string(raw)}}
+	labels := authorityLabels(groupID)
+	labels["fugue.pro/authority-kind"] = kind
+	desired := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: store.namespace, Labels: labels}, Immutable: boolPointer(true), Data: map[string]string{key: string(raw)}}
 	created, err := configMaps.Create(ctx, desired, metav1.CreateOptions{})
 	if err == nil {
 		if created.Immutable == nil || !*created.Immutable {
@@ -103,10 +108,75 @@ func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID,
 		return err
 	}
 	existing, getErr := configMaps.Get(ctx, name, metav1.GetOptions{})
-	if getErr != nil || existing.Immutable == nil || !*existing.Immutable || existing.Data[key] != string(raw) || existing.Labels["fugue.pro/group"] != groupID {
+	if getErr != nil || existing.Immutable == nil || !*existing.Immutable || existing.Data[key] != string(raw) || existing.Labels["fugue.pro/group"] != groupID || existing.Labels["fugue.pro/authority-kind"] != kind {
 		return errors.New("immutable authority record conflicts with existing object")
 	}
 	return nil
+}
+
+func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, candidate CandidateAuthority, resultDigest string, now time.Time) (CandidateCanaryResult, error) {
+	if candidate.Validate() != nil || !digestPattern.MatchString(resultDigest) {
+		return CandidateCanaryResult{}, errors.New("candidate canary lookup is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, candidateCanaryResultName(candidate.GroupID, resultDigest), metav1.GetOptions{})
+	if err != nil {
+		return CandidateCanaryResult{}, err
+	}
+	if object.Immutable == nil || !*object.Immutable || object.Labels["fugue.pro/group"] != candidate.GroupID ||
+		object.Labels["fugue.pro/authority-kind"] != "candidate-canary" || len(object.Data) != 1 {
+		return CandidateCanaryResult{}, errors.New("candidate canary object metadata is invalid")
+	}
+	var result CandidateCanaryResult
+	if err := decodeStrict([]byte(object.Data["result.json"]), &result); err != nil || result.Validate(now) != nil ||
+		result.ResultDigest != resultDigest || result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
+		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
+		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
+	}
+	return result, nil
+}
+
+func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context, candidate CandidateAuthority, now time.Time) (CandidateCanaryResult, error) {
+	if candidate.Validate() != nil {
+		return CandidateCanaryResult{}, errors.New("candidate canary lookup is invalid")
+	}
+	selector := labels.Set{"fugue.pro/group": candidate.GroupID, "fugue.pro/authority-kind": "candidate-canary"}.AsSelector().String()
+	objects, err := store.client.CoreV1().ConfigMaps(store.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 65})
+	if err != nil {
+		return CandidateCanaryResult{}, err
+	}
+	if objects.Continue != "" || len(objects.Items) > 64 {
+		return CandidateCanaryResult{}, errors.New("candidate canary result set exceeds its bound")
+	}
+	var latest CandidateCanaryResult
+	var latestAt time.Time
+	for index := range objects.Items {
+		object := &objects.Items[index]
+		if object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 ||
+			object.Labels["fugue.pro/group"] != candidate.GroupID || object.Labels["fugue.pro/authority-kind"] != "candidate-canary" {
+			return CandidateCanaryResult{}, errors.New("candidate canary object metadata is invalid")
+		}
+		var result CandidateCanaryResult
+		if err := decodeStrict([]byte(object.Data["result.json"]), &result); err != nil || result.Validate(time.Time{}) != nil ||
+			object.Name != candidateCanaryResultName(result.GroupID, result.ResultDigest) {
+			return CandidateCanaryResult{}, errors.New("candidate canary object is invalid")
+		}
+		if result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
+			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
+			continue
+		}
+		expiresAt, _ := time.Parse(time.RFC3339Nano, result.ExpiresAt)
+		if now.UTC().After(expiresAt) {
+			continue
+		}
+		observedAt, _ := time.Parse(time.RFC3339Nano, result.ObservedAt)
+		if latest.ResultDigest == "" || observedAt.After(latestAt) || observedAt.Equal(latestAt) && result.ResultDigest > latest.ResultDigest {
+			latest, latestAt = result, observedAt
+		}
+	}
+	if latest.ResultDigest == "" {
+		return CandidateCanaryResult{}, ErrCandidateCanaryUnavailable
+	}
+	return latest, nil
 }
 
 func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate CandidateAuthority, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
