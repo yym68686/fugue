@@ -385,7 +385,10 @@ func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *tes
 	metadata := mapField(live, "metadata")
 	metadata["uid"], metadata["resourceVersion"], metadata["generation"] = "edge-uid", "44", json.Number("9")
 	metadata["managedFields"] = []any{
-		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{imagePointer})},
+		// Kubernetes transfers the image leaf out of the original Apply entry
+		// when kubectl-patch claims it through Update. The verified monitor record
+		// is the durable witness that the declarative manager owned it before.
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{"/spec/replicas"})},
 		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{imagePointer})},
 	}
 	container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)

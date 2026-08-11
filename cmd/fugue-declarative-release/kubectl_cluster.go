@@ -134,8 +134,12 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 // responding only to a reviewed emergency mutation of release-owned runtime
 // pointers. It binds every live resource to the fresh CAS observation, keeps
 // all other declared fields byte-equivalent to the recorded forward manifest,
-// and requires both the declarative owner and an exact allowlisted Update
-// managedFields witness for each differing pointer.
+// and requires an exact allowlisted Update managedFields witness for each
+// differing pointer. The immutable verified monitor record proves that the
+// declarative manager owned the target before the emergency write; Kubernetes
+// transfers a leaf out of an Apply entry when a later Update claims it, so
+// requiring current co-ownership would make exact recovery impossible. The
+// post-apply convergence check still requires declarative-exclusive ownership.
 func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, current declarativerelease.Observation) (declarativerelease.Observation, error) {
 	if !current.Present || len(current.Resources) == 0 {
 		return declarativerelease.Observation{}, errors.New("emergency rollback drift lacks a present resource CAS")
@@ -188,8 +192,7 @@ func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Contex
 			if !desiredFound || !liveFound || desiredValue == liveValue {
 				continue
 			}
-			if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, []string{pointer}) ||
-				!reviewedEmergencyUpdateOwnsPointer(metadata, pointer, allowed) {
+			if !reviewedEmergencyUpdateOwnsPointer(metadata, pointer, allowed) {
 				return declarativerelease.Observation{}, fmt.Errorf("emergency rollback pointer %s lacks exact ownership evidence", pointer)
 			}
 			if !setEmergencyRuntimePointerValue(normalized, pointer, desiredValue) {
