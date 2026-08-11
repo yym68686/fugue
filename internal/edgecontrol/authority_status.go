@@ -76,6 +76,7 @@ type AuthorityStatusSnapshot struct {
 	LastReconciledAt          *time.Time             `json:"last_reconciled_at,omitempty"`
 	LastRouteIntentGeneration string                 `json:"last_route_intent_generation,omitempty"`
 	LastPublished             int                    `json:"last_published,omitempty"`
+	LastCandidatePublished    int                    `json:"last_candidate_published,omitempty"`
 	LastFailed                int                    `json:"last_failed,omitempty"`
 	RuntimeFailureCode        string                 `json:"runtime_failure_code,omitempty"`
 	CanonicalDigest           string                 `json:"canonical_digest"`
@@ -217,6 +218,7 @@ func (handler *authorityStatusHandler) snapshot(ctx context.Context) AuthoritySt
 		out.LastReconciledAt = &lastAt
 		out.LastRouteIntentGeneration = observation.RouteIntentGeneration
 		out.LastPublished = observation.Published
+		out.LastCandidatePublished = observation.CandidatePublished
 		out.LastFailed = observation.Failed
 		out.RuntimeFailureCode = observation.FailureCode
 		if observation.FailureCode != "" && out.Status == "healthy" {
@@ -316,6 +318,7 @@ func (handler *authorityStatusHandler) processReadySnapshot() AuthorityStatusSna
 		out.LastReconciledAt = &lastAt
 		out.LastRouteIntentGeneration = observation.RouteIntentGeneration
 		out.LastPublished = observation.Published
+		out.LastCandidatePublished = observation.CandidatePublished
 		out.LastFailed = observation.Failed
 		out.RuntimeFailureCode = observation.FailureCode
 	}
@@ -339,6 +342,7 @@ func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery h
 	mux.Handle("GET "+AuthorityStatusPathV1, status)
 	mux.Handle("GET "+AuthorityGroupReadyPrefixV1, status)
 	mux.Handle("GET "+GroupBundleReadPathV1, bundles)
+	mux.Handle("GET "+GroupCandidateBundleReadPathV1, bundles)
 	mux.Handle("POST "+GroupRecoveryPathV1, recovery)
 	mux.Handle("/", boundary)
 	return mux, nil

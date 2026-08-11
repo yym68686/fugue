@@ -52,12 +52,19 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 		"FUGUE_EDGE_CONTROL_GROUP_READER_KEYRING_DIR":      filepath.Join(root, "readers"),
 		"FUGUE_EDGE_CONTROL_GROUP_RECOVERY_KEYRING_DIR":    filepath.Join(root, "recovery"),
 		"FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY":         "30m",
+		"FUGUE_EDGE_CONTROL_CANDIDATE_PUBLISHER_ENABLED":   "true",
+		"FUGUE_EDGE_CONTROL_SOURCE_SHA":                    strings.Repeat("1", 40),
+		"FUGUE_EDGE_CONTROL_SELF_IMAGE_REF":                "ghcr.io/example/fugue-edge-control@sha256:" + strings.Repeat("2", 64),
+		"FUGUE_EDGE_CONTROL_MANIFEST_DIGEST":               "sha256:" + strings.Repeat("3", 64),
+		"FUGUE_EDGE_CONTROL_HEALTH_CONTRACT_DIGEST":        "sha256:" + strings.Repeat("4", 64),
+		"FUGUE_EDGE_CONTROL_RELEASE_RECORD_DIGEST":         "sha256:" + strings.Repeat("5", 64),
 	}
 	cfg, err := configFromEnv(func(key string) string { return values[key] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.AuthorityRuntimeEnabled || cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
+	if !cfg.AuthorityRuntimeEnabled || !cfg.CandidatePublisher || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
+		cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
 		cfg.AuthorityPollInterval != 30*time.Second || cfg.GroupBundleValidity != 30*time.Minute ||
 		!reflect.DeepEqual(cfg.AuthorityGroupIDs, []string{"edge-group-country-us"}) {
 		t.Fatalf("unexpected authority config: %+v", cfg)
@@ -66,7 +73,7 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime == nil || handler == nil || len(runtime.GroupIDs) != 1 || runtime.Status == nil {
+	if runtime == nil || handler == nil || len(runtime.GroupIDs) != 1 || runtime.Status == nil || runtime.Candidate == nil {
 		t.Fatalf("incomplete authority process: runtime=%+v handler=%v", runtime, handler)
 	}
 	for path, wantCode := range map[string]int{

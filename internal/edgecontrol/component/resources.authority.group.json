@@ -193,6 +193,50 @@
                   {
                     "name": "FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY",
                     "value": "30m"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_CANDIDATE_PUBLISHER_ENABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_SOURCE_SHA",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/source-commit']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_SELF_IMAGE_REF",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/artifact-image']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_MANIFEST_DIGEST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/release-plan-digest']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_RELEASE_RECORD_DIGEST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.annotations['fugue.pro/artifact-receipt-digest']"
+                      }
+                    }
+                  },
+                  {
+                    "name": "FUGUE_EDGE_CONTROL_HEALTH_CONTRACT_DIGEST",
+                    "value": "sha256:2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"
                   }
                 ],
                 "volumeMounts": [

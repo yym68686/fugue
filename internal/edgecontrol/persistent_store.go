@@ -39,6 +39,7 @@ type persistentGroupState struct {
 	Ledger            []GroupShadowLedgerEntry     `json:"ledger,omitempty"`
 	AuthorityLedger   []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
 	Published         *GroupPublishedBundle        `json:"published_bundle,omitempty"`
+	Candidate         *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
 	Digest            string                       `json:"digest"`
 }
 
@@ -165,6 +166,52 @@ func (store *PersistentGroupStore) ReadGroupAuthority(ctx context.Context, group
 		return nil
 	})
 	return snapshot, err
+}
+
+func (store *PersistentGroupStore) ReadGroupCandidate(ctx context.Context, groupID string) (GroupCandidateBundle, bool, error) {
+	var candidate GroupCandidateBundle
+	exists := false
+	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {
+		if state.Candidate != nil {
+			candidate = cloneGroupCandidateBundle(*state.Candidate)
+			exists = true
+		}
+		return nil
+	})
+	return candidate, exists, err
+}
+
+func (store *PersistentGroupStore) PutGroupCandidateCAS(ctx context.Context, groupID string, expectedEpoch, expectedCandidateSequence uint64, candidate GroupCandidateBundle) (GroupCandidateBundle, error) {
+	var stored GroupCandidateBundle
+	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
+		currentEpoch := uint64(0)
+		if state.Candidate != nil {
+			currentEpoch = state.Candidate.Epoch
+		}
+		currentPublicationSequence := uint64(0)
+		if state.Published != nil {
+			currentPublicationSequence = state.Published.PublicationSequence
+		}
+		if currentEpoch != expectedEpoch || candidate.Epoch <= expectedEpoch || candidate.Epoch <= currentPublicationSequence || len(state.Ledger) == 0 ||
+			state.Ledger[len(state.Ledger)-1].Sequence != expectedCandidateSequence || candidate.CandidateLedgerSequence != expectedCandidateSequence {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		if err := validateGroupCandidateBundle(state.GroupID, candidate); err != nil {
+			return err
+		}
+		head := state.Ledger[len(state.Ledger)-1]
+		if head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
+			head.BundleGeneration != candidate.Bundle.Generation || head.RouteIntentGeneration != candidate.RouteIntentGeneration ||
+			head.InventoryGeneration != candidate.InventoryGeneration || head.InventoryDigest != candidate.Record.InventoryDigest ||
+			head.ActiveSlot == candidate.WorkerSlot || (head.ActiveSlot != "a" && head.ActiveSlot != "b") ||
+			groupAuthorityCandidateDigest(*head.Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		stored = cloneGroupCandidateBundle(candidate)
+		state.Candidate = &stored
+		return nil
+	})
+	return cloneGroupCandidateBundle(stored), err
 }
 
 func (store *PersistentGroupStore) ReadGroupAuthorityStatus(ctx context.Context, groupID string) (AuthorityGroupStoreSnapshot, error) {
@@ -598,6 +645,22 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 			return errors.New("edge-control persistent group published head does not match authority ledger")
 		}
 	}
+	if state.Candidate != nil {
+		if err := validateGroupCandidateBundle(groupID, *state.Candidate); err != nil {
+			return err
+		}
+		candidate := state.Candidate
+		if candidate.CandidateLedgerSequence > uint64(len(state.Ledger)) || state.Ledger[candidate.CandidateLedgerSequence-1].Bundle == nil ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].BundleArchived ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].RouteIntentGeneration != candidate.RouteIntentGeneration ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryGeneration != candidate.InventoryGeneration ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot == candidate.WorkerSlot ||
+			(state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "a" && state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "b") ||
+			groupAuthorityCandidateDigest(*state.Ledger[candidate.CandidateLedgerSequence-1].Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) {
+			return errors.New("edge-control persistent candidate is not bound to the group shadow ledger")
+		}
+	}
 	return nil
 }
 
@@ -629,6 +692,10 @@ func clonePersistentGroupState(state persistentGroupState) persistentGroupState 
 	if state.Published != nil {
 		published := cloneGroupPublishedBundle(*state.Published)
 		state.Published = &published
+	}
+	if state.Candidate != nil {
+		candidate := cloneGroupCandidateBundle(*state.Candidate)
+		state.Candidate = &candidate
 	}
 	return state
 }

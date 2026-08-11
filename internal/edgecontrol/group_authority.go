@@ -311,6 +311,35 @@ func (publisher GroupAuthorityPublisher) refreshExpiredPublishedLKG(ctx context.
 	if !observed.LedgerExists || !observed.PublishedExists || observed.Published.Bundle.ValidUntil.After(now) {
 		return GroupAuthorityResult{}, false
 	}
+	return publisher.refreshPublishedLKG(ctx, groupID, observed, now, "automatic persisted group LKG refresh after expiry")
+}
+
+// RefreshPublishedLKG renews only the exact durable current bundle when half
+// its validity has elapsed. It never reads current RouteIntent and therefore
+// cannot activate a newly compiled candidate.
+func (publisher GroupAuthorityPublisher) RefreshPublishedLKG(ctx context.Context, groupID string, now time.Time) (GroupAuthorityResult, error) {
+	if publisher.Store == nil || publisher.Signer == nil {
+		return GroupAuthorityResult{}, errors.New("edge-control current LKG maintainer is invalid")
+	}
+	observed, err := publisher.Store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !observed.LedgerExists || !observed.PublishedExists || validateGroupPublishedBundle(groupID, observed.Published) != nil {
+		return GroupAuthorityResult{}, errors.New("edge-control current LKG is unavailable")
+	}
+	lifetime := observed.Published.Bundle.ValidUntil.Sub(observed.Published.Bundle.GeneratedAt)
+	if lifetime <= 0 {
+		return GroupAuthorityResult{}, errors.New("edge-control current LKG validity is invalid")
+	}
+	if observed.Published.Bundle.ValidUntil.Sub(now.UTC()) > lifetime/2 {
+		return authorityResultFromEntry(observed.LedgerHead), nil
+	}
+	result, ok := publisher.refreshPublishedLKG(ctx, groupID, observed, now.UTC(), "automatic exact LKG validity refresh during candidate publication")
+	if !ok {
+		return GroupAuthorityResult{}, errors.New("edge-control current LKG refresh failed")
+	}
+	return result, nil
+}
+
+func (publisher GroupAuthorityPublisher) refreshPublishedLKG(ctx context.Context, groupID string, observed GroupAuthorityState, now time.Time, reason string) (GroupAuthorityResult, bool) {
 	store, ok := publisher.Store.(GroupRecoveryStore)
 	if !ok {
 		return GroupAuthorityResult{}, false
@@ -340,7 +369,7 @@ func (publisher GroupAuthorityPublisher) refreshExpiredPublishedLKG(ctx context.
 		InventoryGeneration: candidate.InventoryGeneration, BundleGeneration: signed.Generation,
 		LastPublishedBundleGeneration: signed.Generation, PublishedBundleDigest: signedGroupBundleDigest(signed),
 		SigningKeyID: signed.KeyID, RecoveryEpoch: recoveryEpoch + 1,
-		RecoveryReason: "automatic persisted group LKG refresh after expiry",
+		RecoveryReason: reason,
 		Authority:      "edge-control", PublicationEnabled: true, RecordedAt: now,
 	}
 	appended, err := store.RecoverGroupAuthorityCAS(ctx, groupID, authority.LedgerHead.Sequence, recoveryEpoch, entry, signed)

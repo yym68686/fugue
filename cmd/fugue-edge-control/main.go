@@ -51,6 +51,8 @@ type config struct {
 	GroupReaderKeyringDir   string
 	GroupRecoveryKeyringDir string
 	GroupBundleValidity     time.Duration
+	CandidatePublisher      bool
+	CandidateIdentity       edgecontrol.CandidateReleaseIdentity
 }
 
 func main() {
@@ -104,6 +106,10 @@ func run(ctx context.Context, cfg config, logger *log.Logger) error {
 			done <- authorityRuntime.Run(runCtx, cfg.AuthorityPollInterval, func(observation edgecontrol.AuthorityRuntimeObservation) {
 				if observation.FailureCode != "" {
 					logger.Printf("edge-control group authority reconcile status=failed failure_code=%s authority=edge-control publication=enabled", observation.FailureCode)
+					return
+				}
+				if observation.CandidatePublished > 0 {
+					logger.Printf("edge-control candidate reconcile status=observed generation=%s candidate_published=%d failed=%d authority=current-preserved", observation.RouteIntentGeneration, observation.CandidatePublished, observation.Failed)
 					return
 				}
 				logger.Printf("edge-control group authority reconcile status=observed generation=%s published=%d failed=%d authority=edge-control publication=enabled", observation.RouteIntentGeneration, observation.Published, observation.Failed)
@@ -188,6 +194,23 @@ func configFromEnv(getenv func(string) string) (config, error) {
 				return config{}, errors.New("FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY must be a duration")
 			}
 		}
+		cfg.CandidatePublisher, err = strictBool(getenv("FUGUE_EDGE_CONTROL_CANDIDATE_PUBLISHER_ENABLED"))
+		if err != nil {
+			return config{}, fmt.Errorf("FUGUE_EDGE_CONTROL_CANDIDATE_PUBLISHER_ENABLED: %w", err)
+		}
+		if cfg.CandidatePublisher {
+			imageRef := strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_SELF_IMAGE_REF"))
+			separator := strings.LastIndex(imageRef, "@")
+			if separator < 1 {
+				return config{}, errors.New("FUGUE_EDGE_CONTROL_SELF_IMAGE_REF must be an immutable image reference")
+			}
+			cfg.CandidateIdentity = edgecontrol.CandidateReleaseIdentity{
+				SourceSHA: strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_SOURCE_SHA")), ControlImageDigest: imageRef[separator+1:],
+				ManifestDigest:       strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_MANIFEST_DIGEST")),
+				HealthContractDigest: strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_HEALTH_CONTRACT_DIGEST")),
+				ReleaseRecordDigest:  strings.TrimSpace(getenv("FUGUE_EDGE_CONTROL_RELEASE_RECORD_DIGEST")),
+			}
+		}
 	}
 	if err := cfg.validate(); err != nil {
 		return config{}, err
@@ -240,6 +263,9 @@ func (cfg config) validate() error {
 		if cfg.GroupBundleValidity < 5*time.Minute || cfg.GroupBundleValidity > 24*time.Hour {
 			return errors.New("group bundle validity must be between 5m and 24h")
 		}
+		if cfg.CandidatePublisher && cfg.CandidateIdentity.Validate() != nil {
+			return errors.New("candidate publisher release identity is invalid")
+		}
 	}
 	if err := edgecontrol.ValidateRouteIntentClientConfig(edgecontrol.RouteIntentClientConfig{
 		Endpoint: cfg.RouteIntentURL, IssuerFile: cfg.RouteIntentIssuerFile, IdentityNodeID: cfg.RouteIntentIdentityNode, CAFile: cfg.RouteIntentCAFile, ServerName: cfg.RouteIntentServerName,
@@ -276,6 +302,10 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 		Publisher:    edgecontrol.GroupAuthorityPublisher{Store: store, Signer: signer},
 		GroupIDs:     append([]string(nil), cfg.AuthorityGroupIDs...),
 		Status:       edgecontrol.NewAuthorityRuntimeState(nil),
+	}
+	if cfg.CandidatePublisher {
+		candidate := edgecontrol.GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &runtime.Publisher, Identity: cfg.CandidateIdentity}
+		runtime.Candidate = &candidate
 	}
 	heartbeat, err := edgecontrol.NewGroupInventoryHeartbeatHandler(edgecontrol.GroupInventoryHeartbeatHandlerConfig{
 		Store: store, GroupIDs: cfg.AuthorityGroupIDs, KeyringDir: cfg.InventoryKeyringDir,

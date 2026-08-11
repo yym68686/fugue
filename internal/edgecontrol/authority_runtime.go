@@ -10,6 +10,7 @@ type AuthorityRuntime struct {
 	RouteIntents RouteIntentSource
 	Compiler     GroupShadowCompiler
 	Publisher    GroupAuthorityPublisher
+	Candidate    *GroupCandidatePublisher
 	GroupIDs     []string
 	Status       *AuthorityRuntimeState
 }
@@ -17,6 +18,7 @@ type AuthorityRuntime struct {
 type AuthorityRuntimeBatch struct {
 	Compiled  GroupShadowBatch    `json:"compiled"`
 	Published GroupAuthorityBatch `json:"published"`
+	Candidate GroupCandidateBatch `json:"candidate,omitempty"`
 }
 
 func (runtime AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeBatch, error) {
@@ -31,6 +33,13 @@ func (runtime AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeBa
 	if err != nil {
 		return AuthorityRuntimeBatch{}, err
 	}
+	if runtime.Candidate != nil {
+		candidate, err := runtime.Candidate.Publish(ctx, compiled)
+		if err != nil {
+			return AuthorityRuntimeBatch{}, err
+		}
+		return AuthorityRuntimeBatch{Compiled: compiled, Candidate: candidate}, nil
+	}
 	published, err := runtime.Publisher.Publish(ctx, compiled)
 	if err != nil {
 		return AuthorityRuntimeBatch{}, err
@@ -42,6 +51,7 @@ type AuthorityRuntimeObservation struct {
 	RouteIntentGeneration string `json:"route_intent_generation,omitempty"`
 	Published             int    `json:"published"`
 	Failed                int    `json:"failed"`
+	CandidatePublished    int    `json:"candidate_published,omitempty"`
 	FailureCode           string `json:"failure_code,omitempty"`
 }
 
@@ -66,9 +76,15 @@ func (runtime AuthorityRuntime) Run(ctx context.Context, interval time.Duration,
 		if err != nil {
 			observation.FailureCode = RouteIntentFailureCode(err)
 		} else {
-			observation.RouteIntentGeneration = batch.Published.RouteIntentGeneration
-			observation.Published = batch.Published.Published
-			observation.Failed = batch.Published.Failed
+			if runtime.Candidate != nil {
+				observation.RouteIntentGeneration = batch.Candidate.RouteIntentGeneration
+				observation.CandidatePublished = batch.Candidate.Published
+				observation.Failed = batch.Candidate.Failed
+			} else {
+				observation.RouteIntentGeneration = batch.Published.RouteIntentGeneration
+				observation.Published = batch.Published.Published
+				observation.Failed = batch.Published.Failed
+			}
 		}
 		if runtime.Status != nil {
 			runtime.Status.Observe(observation)

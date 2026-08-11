@@ -19,11 +19,15 @@ import (
 
 const (
 	GroupBundleReadPathV1            = "/v1/edge/routes"
+	GroupCandidateBundleReadPathV1   = "/v1/edge/candidate-routes"
 	GroupBundleReaderKeyringSchemaV1 = "edge-control-group-bundle-reader-keyring/v1"
 	GroupBundleGenerationHeader      = "X-Fugue-Edge-Route-Bundle-Generation"
 	GroupBundleGroupHeader           = "X-Fugue-Edge-Group"
 	GroupBundlePublicationHeader     = "X-Fugue-Edge-Publication-Sequence"
 	GroupBundleRecoveryEpochHeader   = "X-Fugue-Edge-Recovery-Epoch"
+	GroupCandidateRecordHeader       = "X-Fugue-Candidate-Record-Digest"
+	GroupCandidateReleaseHeader      = "X-Fugue-Release-Record-Digest"
+	GroupCandidateSlotHeader         = "X-Fugue-Candidate-Worker-Slot"
 	maxGroupBundleReaderKeyringBytes = 128 << 10
 )
 
@@ -87,7 +91,7 @@ func NewGroupBundleHandler(config GroupBundleHandlerConfig) (http.Handler, error
 }
 
 func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet || request.URL.Path != GroupBundleReadPathV1 || request.URL.RawQuery == "" {
+	if request.Method != http.MethodGet || (request.URL.Path != GroupBundleReadPathV1 && request.URL.Path != GroupCandidateBundleReadPathV1) || request.URL.RawQuery == "" {
 		http.NotFound(w, request)
 		return
 	}
@@ -113,6 +117,36 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 	}
 	if err := authenticateGroupBundleReader(filepath.Join(handler.keyringDir, groupID+".json"), groupID, edgeID, token, handler.now()); err != nil {
 		writeGroupBundleError(w, http.StatusUnauthorized, "credential_rejected")
+		return
+	}
+	if request.URL.Path == GroupCandidateBundleReadPathV1 {
+		reader, ok := handler.store.(interface {
+			ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
+		})
+		if !ok {
+			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
+			return
+		}
+		candidate, exists, err := reader.ReadGroupCandidate(request.Context(), groupID)
+		if err != nil || !exists || validateGroupCandidateBundle(groupID, candidate) != nil || !candidate.Bundle.ValidUntil.After(handler.now()) {
+			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
+			return
+		}
+		etag := strconv.Quote(candidate.Record.RecordDigest)
+		w.Header().Set("ETag", etag)
+		w.Header().Set(GroupBundleGenerationHeader, candidate.Bundle.Generation)
+		w.Header().Set(GroupBundleGroupHeader, groupID)
+		w.Header().Set(GroupBundlePublicationHeader, strconv.FormatUint(candidate.Epoch, 10))
+		w.Header().Set(GroupBundleRecoveryEpochHeader, "0")
+		w.Header().Set(GroupCandidateRecordHeader, candidate.Record.RecordDigest)
+		w.Header().Set(GroupCandidateReleaseHeader, candidate.ReleaseRecordDigest)
+		w.Header().Set(GroupCandidateSlotHeader, candidate.WorkerSlot)
+		w.Header().Set("Cache-Control", "private, no-cache, no-store")
+		if strings.TrimSpace(request.Header.Get("If-None-Match")) == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writeJSON(w, http.StatusOK, candidate.Bundle)
 		return
 	}
 	state, err := handler.store.ReadGroupAuthority(request.Context(), groupID)

@@ -1,0 +1,246 @@
+package edgecontrol
+
+import (
+	"context"
+	"errors"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"fugue/internal/edgeauthority"
+	"fugue/internal/model"
+)
+
+const (
+	GroupCandidateBundleSchemaV1 = "edge-control-group-candidate-bundle/v1"
+	GroupCandidateBatchSchemaV1  = "edge-control-group-candidate-batch/v1"
+
+	GroupCandidateStatusPublished = "candidate_published"
+	GroupCandidateStatusFailed    = "candidate_failed"
+)
+
+var groupCandidateSourcePattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// CandidateReleaseIdentity is immutable provenance injected by the
+// declarative renderer. It lets Edge Control bind a signed route candidate to
+// the exact source, OCI, manifest and component artifact that produced it.
+type CandidateReleaseIdentity struct {
+	SourceSHA            string
+	ControlImageDigest   string
+	ManifestDigest       string
+	HealthContractDigest string
+	ReleaseRecordDigest  string
+}
+
+func (identity CandidateReleaseIdentity) Validate() error {
+	if !groupCandidateSourcePattern.MatchString(identity.SourceSHA) ||
+		!groupAuthorityDigestPattern.MatchString(identity.ControlImageDigest) ||
+		!groupAuthorityDigestPattern.MatchString(identity.ManifestDigest) ||
+		!groupAuthorityDigestPattern.MatchString(identity.HealthContractDigest) ||
+		!groupAuthorityDigestPattern.MatchString(identity.ReleaseRecordDigest) {
+		return errors.New("edge-control candidate release identity is invalid")
+	}
+	return nil
+}
+
+// GroupCandidateBundle is the durable inactive publication for one group. It
+// can be loaded by an inactive Worker but cannot grant ordinary traffic.
+type GroupCandidateBundle struct {
+	Schema                  string                          `json:"schema"`
+	GroupID                 string                          `json:"edge_group_id"`
+	Epoch                   uint64                          `json:"epoch"`
+	CandidateLedgerSequence uint64                          `json:"candidate_ledger_sequence"`
+	RouteIntentGeneration   string                          `json:"route_intent_generation"`
+	InventoryGeneration     string                          `json:"inventory_generation"`
+	ReleaseRecordDigest     string                          `json:"release_record_digest"`
+	WorkerSlot              string                          `json:"worker_slot"`
+	PublishedAt             time.Time                       `json:"published_at"`
+	Record                  edgeauthority.RouteBundleRecord `json:"record"`
+	Bundle                  model.EdgeRouteBundle           `json:"bundle"`
+}
+
+type GroupCandidateStore interface {
+	Head(context.Context, string) (GroupShadowLedgerEntry, bool, error)
+	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
+	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
+	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
+}
+
+type GroupCandidatePublisher struct {
+	Store      GroupCandidateStore
+	Signer     GroupBundleSigner
+	CurrentLKG *GroupAuthorityPublisher
+	Identity   CandidateReleaseIdentity
+	Now        func() time.Time
+}
+
+type GroupCandidateResult struct {
+	GroupID                 string `json:"edge_group_id"`
+	Status                  string `json:"status"`
+	Epoch                   uint64 `json:"epoch,omitempty"`
+	CandidateLedgerSequence uint64 `json:"candidate_ledger_sequence,omitempty"`
+	RecordDigest            string `json:"record_digest,omitempty"`
+	FailureCode             string `json:"failure_code,omitempty"`
+}
+
+type GroupCandidateBatch struct {
+	Schema                string                 `json:"schema"`
+	RouteIntentGeneration string                 `json:"route_intent_generation"`
+	Results               []GroupCandidateResult `json:"results"`
+	Published             int                    `json:"published"`
+	Failed                int                    `json:"failed"`
+}
+
+func (publisher GroupCandidatePublisher) Publish(ctx context.Context, compiled GroupShadowBatch) (GroupCandidateBatch, error) {
+	if publisher.Store == nil || publisher.Signer == nil || publisher.CurrentLKG == nil || publisher.Identity.Validate() != nil {
+		return GroupCandidateBatch{}, errors.New("edge-control candidate publisher configuration is invalid")
+	}
+	if compiled.Schema != GroupShadowBatchSchemaV1 || strings.TrimSpace(compiled.RouteIntentGeneration) == "" || len(compiled.Results) == 0 {
+		return GroupCandidateBatch{}, errors.New("edge-control candidate compiler batch is invalid")
+	}
+	results := append([]GroupShadowResult(nil), compiled.Results...)
+	sort.Slice(results, func(i, j int) bool { return results[i].GroupID < results[j].GroupID })
+	batch := GroupCandidateBatch{Schema: GroupCandidateBatchSchemaV1, RouteIntentGeneration: compiled.RouteIntentGeneration, Results: make([]GroupCandidateResult, len(results))}
+	now := time.Now().UTC()
+	if publisher.Now != nil {
+		now = publisher.Now().UTC()
+	}
+	var wait sync.WaitGroup
+	for index, result := range results {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			batch.Results[index] = publisher.publishGroup(ctx, result, now)
+		}()
+	}
+	wait.Wait()
+	for _, result := range batch.Results {
+		if result.Status == GroupCandidateStatusPublished {
+			batch.Published++
+		} else {
+			batch.Failed++
+		}
+	}
+	if batch.Published != compiled.Succeeded || batch.Failed != compiled.Failed {
+		return GroupCandidateBatch{}, errors.New("edge-control candidate batch counts are invalid")
+	}
+	return batch, nil
+}
+
+func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compiled GroupShadowResult, now time.Time) GroupCandidateResult {
+	groupID := normalizeGroupID(compiled.GroupID)
+	failed := func(code string) GroupCandidateResult {
+		return GroupCandidateResult{GroupID: groupID, Status: GroupCandidateStatusFailed, FailureCode: code}
+	}
+	if groupID == "" || compiled.Status != GroupShadowStatusCompiled || compiled.LedgerSequence == 0 || strings.TrimSpace(compiled.BundleGeneration) == "" {
+		code := strings.TrimSpace(compiled.FailureCode)
+		if code == "" {
+			code = GroupAuthorityFailureCandidateRead
+		}
+		return failed(code)
+	}
+	if _, err := publisher.CurrentLKG.RefreshPublishedLKG(ctx, groupID, now); err != nil {
+		return failed(GroupAuthorityFailurePublicationCAS)
+	}
+	head, exists, err := publisher.Store.Head(ctx, groupID)
+	if err != nil || !exists || head.Status != GroupShadowStatusCompiled || head.Sequence != compiled.LedgerSequence ||
+		head.Bundle == nil || head.BundleGeneration != compiled.BundleGeneration || !groupAuthorityDigestPattern.MatchString(head.InventoryDigest) {
+		return failed(GroupAuthorityFailureCandidateCAS)
+	}
+	previous, previousExists, err := publisher.Store.ReadGroupCandidate(ctx, groupID)
+	if err != nil {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	if previousExists && previous.CandidateLedgerSequence == head.Sequence && previous.ReleaseRecordDigest == publisher.Identity.ReleaseRecordDigest &&
+		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) {
+		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
+		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
+			return candidateResult(previous)
+		}
+	}
+	authority, err := publisher.Store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !authority.PublishedExists || validateGroupPublishedBundle(groupID, authority.Published) != nil {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	epoch := authority.Published.PublicationSequence + 1
+	if previousExists && previous.Epoch >= epoch {
+		epoch = previous.Epoch + 1
+	}
+	bundle := cloneEdgeRouteBundle(*head.Bundle)
+	workerSlot := "a"
+	if head.ActiveSlot == "a" {
+		workerSlot = "b"
+	} else if head.ActiveSlot != "b" {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	bundle.Issuer = groupAuthorityIssuer
+	bundle.GeneratedAt = now
+	bundle.ValidUntil = time.Time{}
+	bundle.KeyID = ""
+	bundle.Signature = ""
+	bundle.Signatures = nil
+	bundle.PreviousGeneration = authority.Published.Bundle.Generation
+	bundle.Version = groupPublicationVersion(bundle.Generation, epoch, 0)
+	signed, err := publisher.Signer.SignGroupBundle(ctx, groupID, bundle)
+	if err != nil {
+		return failed(GroupAuthorityFailureSigning)
+	}
+	record, err := (edgeauthority.RouteBundleRecord{
+		GroupID: groupID, Epoch: int64(epoch), BundleDigest: signedGroupBundleDigest(signed),
+		SourceSHA: publisher.Identity.SourceSHA, ControlImageDigest: publisher.Identity.ControlImageDigest,
+		InventoryDigest: head.InventoryDigest, ManifestDigest: publisher.Identity.ManifestDigest,
+		HealthContractDigest: publisher.Identity.HealthContractDigest, IssuedAt: now.Format(time.RFC3339Nano),
+		KeyID: signed.KeyID, Signature: signed.Signature,
+	}).Seal()
+	if err != nil {
+		return failed(GroupAuthorityFailureSigning)
+	}
+	candidate := GroupCandidateBundle{
+		Schema: GroupCandidateBundleSchemaV1, GroupID: groupID, Epoch: epoch,
+		CandidateLedgerSequence: head.Sequence, RouteIntentGeneration: head.RouteIntentGeneration,
+		InventoryGeneration: head.InventoryGeneration, ReleaseRecordDigest: publisher.Identity.ReleaseRecordDigest, WorkerSlot: workerSlot,
+		PublishedAt: now, Record: record, Bundle: signed,
+	}
+	expectedEpoch := uint64(0)
+	if previousExists {
+		expectedEpoch = previous.Epoch
+	}
+	stored, err := publisher.Store.PutGroupCandidateCAS(ctx, groupID, expectedEpoch, head.Sequence, candidate)
+	if err != nil {
+		return failed(GroupAuthorityFailureCandidateCAS)
+	}
+	return candidateResult(stored)
+}
+
+func candidateRecordMatchesIdentity(record edgeauthority.RouteBundleRecord, identity CandidateReleaseIdentity) bool {
+	return record.SourceSHA == identity.SourceSHA && record.ControlImageDigest == identity.ControlImageDigest &&
+		record.ManifestDigest == identity.ManifestDigest && record.HealthContractDigest == identity.HealthContractDigest
+}
+
+func candidateResult(candidate GroupCandidateBundle) GroupCandidateResult {
+	return GroupCandidateResult{GroupID: candidate.GroupID, Status: GroupCandidateStatusPublished, Epoch: candidate.Epoch,
+		CandidateLedgerSequence: candidate.CandidateLedgerSequence, RecordDigest: candidate.Record.RecordDigest}
+}
+
+func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle) error {
+	groupID = normalizeGroupID(groupID)
+	if candidate.Schema != GroupCandidateBundleSchemaV1 || candidate.GroupID != groupID || candidate.Epoch == 0 ||
+		candidate.CandidateLedgerSequence == 0 || strings.TrimSpace(candidate.RouteIntentGeneration) == "" ||
+		strings.TrimSpace(candidate.InventoryGeneration) == "" || !groupAuthorityDigestPattern.MatchString(candidate.ReleaseRecordDigest) ||
+		candidate.PublishedAt.IsZero() || candidate.Record.Validate() != nil || candidate.Record.GroupID != groupID ||
+		candidate.Record.Epoch != int64(candidate.Epoch) || candidate.Record.BundleDigest != signedGroupBundleDigest(candidate.Bundle) ||
+		(candidate.WorkerSlot != "a" && candidate.WorkerSlot != "b") || candidate.Bundle.EdgeGroupID != groupID ||
+		candidate.Bundle.Version != groupPublicationVersion(candidate.Bundle.Generation, candidate.Epoch, 0) ||
+		candidate.Bundle.Issuer != groupAuthorityIssuer || strings.TrimSpace(candidate.Bundle.KeyID) == "" || strings.TrimSpace(candidate.Bundle.Signature) == "" ||
+		candidate.Bundle.GeneratedAt.IsZero() || !candidate.Bundle.ValidUntil.After(candidate.Bundle.GeneratedAt) {
+		return errors.New("edge-control group candidate bundle is invalid")
+	}
+	return nil
+}
+
+func cloneGroupCandidateBundle(value GroupCandidateBundle) GroupCandidateBundle {
+	value.Bundle = cloneEdgeRouteBundle(value.Bundle)
+	return value
+}
