@@ -58,6 +58,7 @@ type GroupCandidateBundle struct {
 	WorkerSlot              string                           `json:"worker_slot"`
 	PublishedAt             time.Time                        `json:"published_at"`
 	CurrentRecord           *edgeauthority.RouteBundleRecord `json:"current_record,omitempty"`
+	CurrentBundle           *model.EdgeRouteBundle           `json:"current_bundle,omitempty"`
 	CurrentWorkerSlot       string                           `json:"current_worker_slot,omitempty"`
 	Record                  edgeauthority.RouteBundleRecord  `json:"record"`
 	Bundle                  model.EdgeRouteBundle            `json:"bundle"`
@@ -224,7 +225,7 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		Schema: GroupCandidateBundleSchemaV1, GroupID: groupID, Epoch: epoch,
 		CandidateLedgerSequence: head.Sequence, RouteIntentGeneration: head.RouteIntentGeneration,
 		InventoryGeneration: head.InventoryGeneration, ReleaseRecordDigest: publisher.Identity.ReleaseRecordDigest, WorkerSlot: workerSlot,
-		PublishedAt: now, CurrentRecord: &currentRecord, CurrentWorkerSlot: currentLedger.ActiveSlot, Record: record, Bundle: signed,
+		PublishedAt: now, CurrentRecord: &currentRecord, CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: currentLedger.ActiveSlot, Record: record, Bundle: signed,
 	}
 	expectedEpoch := uint64(0)
 	if previousExists {
@@ -260,12 +261,16 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 		candidate.Bundle.GeneratedAt.IsZero() || !candidate.Bundle.ValidUntil.After(candidate.Bundle.GeneratedAt) {
 		return errors.New("edge-control group candidate bundle is invalid")
 	}
-	if candidate.CurrentRecord == nil && candidate.CurrentWorkerSlot == "" {
+	if candidate.CurrentRecord == nil && candidate.CurrentBundle == nil && candidate.CurrentWorkerSlot == "" {
 		return nil
 	}
-	if candidate.CurrentRecord == nil || candidate.CurrentRecord.Validate() != nil || candidate.CurrentRecord.GroupID != groupID ||
+	if candidate.CurrentRecord == nil || candidate.CurrentBundle == nil || candidate.CurrentRecord.Validate() != nil || candidate.CurrentRecord.GroupID != groupID ||
 		candidate.CurrentRecord.RecordDigest == candidate.Record.RecordDigest ||
 		candidate.CurrentRecord.BundleDigest == candidate.Record.BundleDigest || candidate.CurrentRecord.Epoch >= candidate.Record.Epoch ||
+		candidate.CurrentRecord.BundleDigest != signedGroupBundleDigest(*candidate.CurrentBundle) ||
+		candidate.CurrentBundle.EdgeGroupID != groupID || candidate.CurrentBundle.Issuer != groupAuthorityIssuer ||
+		strings.TrimSpace(candidate.CurrentBundle.KeyID) == "" || strings.TrimSpace(candidate.CurrentBundle.Signature) == "" ||
+		candidate.CurrentBundle.GeneratedAt.IsZero() || !candidate.CurrentBundle.ValidUntil.After(candidate.CurrentBundle.GeneratedAt) ||
 		candidate.CurrentRecord.SourceSHA != candidate.Record.SourceSHA ||
 		candidate.CurrentRecord.ControlImageDigest != candidate.Record.ControlImageDigest ||
 		candidate.CurrentRecord.ManifestDigest != candidate.Record.ManifestDigest ||
@@ -280,6 +285,10 @@ func cloneGroupCandidateBundle(value GroupCandidateBundle) GroupCandidateBundle 
 	if value.CurrentRecord != nil {
 		current := *value.CurrentRecord
 		value.CurrentRecord = &current
+	}
+	if value.CurrentBundle != nil {
+		current := cloneEdgeRouteBundle(*value.CurrentBundle)
+		value.CurrentBundle = &current
 	}
 	value.Bundle = cloneEdgeRouteBundle(value.Bundle)
 	return value

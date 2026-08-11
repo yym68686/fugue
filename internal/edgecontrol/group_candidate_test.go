@@ -57,6 +57,7 @@ func TestCandidatePublisherPersistsInactiveBundleWithoutChangingCurrent(t *testi
 		candidate.Record.SourceSHA != identity.SourceSHA || candidate.Record.ControlImageDigest != identity.ControlImageDigest ||
 		candidate.ReleaseRecordDigest != identity.ReleaseRecordDigest || candidate.Epoch <= currentBefore.Published.PublicationSequence ||
 		candidate.CurrentRecord == nil || candidate.CurrentRecord.BundleDigest != currentBefore.Published.Digest ||
+		candidate.CurrentBundle == nil || !reflect.DeepEqual(*candidate.CurrentBundle, currentBefore.Published.Bundle) ||
 		candidate.CurrentRecord.SourceSHA != identity.SourceSHA || candidate.CurrentWorkerSlot != "a" || candidate.WorkerSlot != "b" {
 		t.Fatalf("durable candidate is invalid: candidate=%+v exists=%v err=%v", candidate, exists, err)
 	}
@@ -122,6 +123,20 @@ func TestCandidateCurrentAuthorityBindingRejectsCrossReleaseAndSameSlot(t *testi
 	current.BundleDigest = "sha256:" + strings.Repeat("b", 64)
 	current.Signature = strings.Repeat("B", 43)
 	current, err := current.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.CurrentRecord = &current
+	currentBundle := candidate.Bundle
+	currentBundle.Version = "current-version"
+	currentBundle.Generation = "current-generation"
+	currentBundle.PreviousGeneration = ""
+	currentBundle.GeneratedAt = candidate.Bundle.GeneratedAt.Add(-time.Minute)
+	currentBundle.ValidUntil = candidate.Bundle.ValidUntil.Add(-time.Minute)
+	currentBundle.Signature = strings.Repeat("B", 43)
+	candidate.CurrentBundle = &currentBundle
+	current.BundleDigest = signedGroupBundleDigest(currentBundle)
+	current, err = current.Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
