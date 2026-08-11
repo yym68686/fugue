@@ -203,17 +203,30 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 	}
 	current, err := cluster.Observe(ctx, healthRelease, prepared.Forward, forwardManifest)
 	if err != nil || !current.Matches(prepared.Forward, healthRelease, false) {
-		if prepared.LKG.Present {
-			lkg, lkgErr := cluster.WaitHealthy(ctx, healthRelease, prepared.LKG, lkgManifest)
-			if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && cluster.Converged(ctx, healthRelease, lkgManifest) == nil {
-				result.Status = "compensated"
-				result.Reason = "continuous-rollback-lkg-already-restored"
-				result.Final = lkg
-				return sealResult(result)
+		// A reviewed emergency write can make the live image unverifiable as the
+		// recorded forward target while leaving the component/resource identity
+		// and every other declared field intact. Recapture Kubernetes CAS without
+		// trusting the drifted image, then require the adapter to prove that every
+		// mismatch is both inside the exact emergency allowlist and owned by a
+		// reviewed short-lived Update manager. This is the only path that may
+		// proceed without a full forward identity match.
+		cas, casErr := cluster.ObserveCAS(ctx, healthRelease, forwardManifest)
+		if casErr == nil && cluster.ValidateEmergencyRollbackDrift(ctx, healthRelease, forwardManifest, cas) == nil {
+			current = cas
+			err = nil
+		} else {
+			if prepared.LKG.Present {
+				lkg, lkgErr := cluster.WaitHealthy(ctx, healthRelease, prepared.LKG, lkgManifest)
+				if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && cluster.Converged(ctx, healthRelease, lkgManifest) == nil {
+					result.Status = "compensated"
+					result.Reason = "continuous-rollback-lkg-already-restored"
+					result.Final = lkg
+					return sealResult(result)
+				}
 			}
+			result.Reason = "continuous-rollback-forward-identity-drift"
+			return sealResult(result)
 		}
-		result.Reason = "continuous-rollback-forward-identity-drift"
-		return sealResult(result)
 	}
 	result.LKGApplyCount = 1
 	var rollbackErr error

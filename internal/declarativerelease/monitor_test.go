@@ -3,6 +3,7 @@ package declarativerelease
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -128,5 +129,37 @@ func TestContinuousRollbackRestoresOnlyRecordedComponentLKG(t *testing.T) {
 	result = RestoreMonitoredLKG(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, other)
 	if result.Status != "recovery-required" || result.Reason != "continuous-rollback-plan-invalid" {
 		t.Fatalf("cross-component rollback was accepted: %+v", result)
+	}
+}
+
+func TestContinuousRollbackAcceptsOnlyAdapterVerifiedEmergencyDrift(t *testing.T) {
+	plan, _, rendered, prepared, _, lkg, forward := verifiedMonitorFixture(t)
+	emergency := forward
+	emergency.ResourceVersion = "99"
+	emergency.Generation++
+	emergency.Resources = append([]ResourceObservation(nil), forward.Resources...)
+	emergency.Resources[0].ResourceVersion = "99"
+	emergency.Resources[0].Generation++
+	emergency.Resources[0].ObjectDigest = "sha256:" + strings.Repeat("7", 64)
+
+	cluster := &fakeCluster{
+		observationErrors: []error{errors.New("drifted image has no immutable registry record")},
+		cas:               []Observation{emergency},
+		health:            []Observation{lkg},
+	}
+	result := RestoreMonitoredLKG(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "compensated" || result.LKGApplyCount != 1 || cluster.applies != 1 || cluster.rollbackDriftChecks != 1 {
+		t.Fatalf("verified emergency drift was not restored: result=%+v applies=%d checks=%d", result, cluster.applies, cluster.rollbackDriftChecks)
+	}
+
+	rejected := &fakeCluster{
+		observationErrors:   []error{errors.New("drifted image")},
+		cas:                 []Observation{emergency},
+		rollbackDriftErrors: []error{errors.New("unreviewed spec drift")},
+		healthErrors:        []error{errors.New("LKG is not live")},
+	}
+	result = RestoreMonitoredLKG(context.Background(), rejected, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "recovery-required" || result.Reason != "continuous-rollback-forward-identity-drift" || rejected.applies != 0 {
+		t.Fatalf("unreviewed drift reached rollback apply: %+v applies=%d", result, rejected.applies)
 	}
 }

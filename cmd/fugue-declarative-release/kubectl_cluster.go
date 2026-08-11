@@ -130,6 +130,164 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 	return observation, nil
 }
 
+// ValidateEmergencyRollbackDrift proves that a continuous rollback is
+// responding only to a reviewed emergency mutation of release-owned runtime
+// pointers. It binds every live resource to the fresh CAS observation, keeps
+// all other declared fields byte-equivalent to the recorded forward manifest,
+// and requires both the declarative owner and an exact allowlisted Update
+// managedFields witness for each differing pointer.
+func (cluster *kubectlCluster) ValidateEmergencyRollbackDrift(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte, current declarativerelease.Observation) error {
+	if !current.Present || len(current.Resources) == 0 {
+		return errors.New("emergency rollback drift lacks a present resource CAS")
+	}
+	observed := make(map[declarativerelease.ResourceIdentity]declarativerelease.ResourceObservation, len(current.Resources))
+	for _, resource := range current.Resources {
+		observed[resource.Identity] = resource
+	}
+	identities, err := declarativerelease.ResourceSetIdentities(manifest)
+	if err != nil || len(identities) != len(observed) {
+		return errors.New("emergency rollback resource inventory is inconsistent")
+	}
+	drifted := false
+	for _, identity := range identities {
+		expected, ok := observed[identity]
+		if !ok || !expected.Present || expected.UID == "" || expected.ResourceVersion == "" || expected.Generation < 1 {
+			return fmt.Errorf("emergency rollback resource %s/%s lacks exact CAS", identity.Kind, identity.Name)
+		}
+		raw, getErr := cluster.getResource(ctx, identity)
+		if getErr != nil || resourceAbsent(raw) {
+			return fmt.Errorf("read emergency rollback resource %s/%s: %w", identity.Kind, identity.Name, getErr)
+		}
+		live, decodeErr := decodeJSONObject(raw)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		metadata := mapField(live, "metadata")
+		if stringValue(metadata["uid"]) != expected.UID || stringValue(metadata["resourceVersion"]) != expected.ResourceVersion ||
+			int64Value(metadata["generation"]) != expected.Generation || digestJSON(sanitizeObservedResource(live)) != expected.ObjectDigest {
+			return fmt.Errorf("emergency rollback resource %s/%s changed after CAS observation", identity.Kind, identity.Name)
+		}
+		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
+		if desiredErr != nil {
+			return desiredErr
+		}
+		normalized := sanitizeObservedResource(live)
+		allowed := emergencyOwnershipPointers(release, identity, desired)
+		for _, pointer := range allowed {
+			desiredValue, desiredFound := emergencyRuntimePointerValue(desired, pointer)
+			liveValue, liveFound := emergencyRuntimePointerValue(normalized, pointer)
+			if !desiredFound || !liveFound || desiredValue == liveValue {
+				continue
+			}
+			if !managedFieldsOwnPointers(metadata, release.Workload.FieldManager, []string{pointer}) ||
+				!reviewedEmergencyUpdateOwnsPointer(metadata, pointer, allowed) {
+				return fmt.Errorf("emergency rollback pointer %s lacks exact ownership evidence", pointer)
+			}
+			if !setEmergencyRuntimePointerValue(normalized, pointer, desiredValue) {
+				return fmt.Errorf("emergency rollback pointer %s is unsupported", pointer)
+			}
+			drifted = true
+		}
+		if !declarativerelease.ResourceDesiredSubset(desired, normalized) {
+			return fmt.Errorf("emergency rollback resource %s/%s drift expands beyond the exact allowlist", identity.Kind, identity.Name)
+		}
+	}
+	if !drifted {
+		return errors.New("emergency rollback drift evidence is absent")
+	}
+	return nil
+}
+
+func reviewedEmergencyUpdateOwnsPointer(metadata map[string]any, pointer string, allowed []string) bool {
+	for _, rawEntry := range anySlice(metadata["managedFields"]) {
+		entry, _ := rawEntry.(map[string]any)
+		if !emergencyOwnershipManagers[stringValue(entry["manager"])] || stringValue(entry["operation"]) != "Update" ||
+			stringValue(entry["subresource"]) != "" || !managedFieldsEntryOwnsPointers(mapField(entry, "fieldsV1"), []string{pointer}, true) {
+			continue
+		}
+		pointers, err := managedFieldsEntryPointers(mapField(entry, "fieldsV1"))
+		if err == nil && len(pointers) > 0 && stringSubset(pointers, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func emergencyRuntimePointerValue(resource map[string]any, pointer string) (string, bool) {
+	if strings.HasPrefix(pointer, "/metadata/annotations/") {
+		key := unescapeJSONPointerToken(strings.TrimPrefix(pointer, "/metadata/annotations/"))
+		value, ok := mapField(mapField(resource, "metadata"), "annotations")[key].(string)
+		return value, ok
+	}
+	if strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
+		key := unescapeJSONPointerToken(strings.TrimPrefix(pointer, "/spec/template/metadata/annotations/"))
+		value, ok := mapField(mapField(mapField(mapField(resource, "spec"), "template"), "metadata"), "annotations")[key].(string)
+		return value, ok
+	}
+	return emergencyContainerImagePointerValue(resource, pointer)
+}
+
+func setEmergencyRuntimePointerValue(resource map[string]any, pointer, value string) bool {
+	if strings.HasPrefix(pointer, "/metadata/annotations/") {
+		key := unescapeJSONPointerToken(strings.TrimPrefix(pointer, "/metadata/annotations/"))
+		mapField(mapField(resource, "metadata"), "annotations")[key] = value
+		return true
+	}
+	if strings.HasPrefix(pointer, "/spec/template/metadata/annotations/") {
+		key := unescapeJSONPointerToken(strings.TrimPrefix(pointer, "/spec/template/metadata/annotations/"))
+		mapField(mapField(mapField(mapField(resource, "spec"), "template"), "metadata"), "annotations")[key] = value
+		return true
+	}
+	field, name, ok := emergencyContainerPointerParts(pointer)
+	if !ok {
+		return false
+	}
+	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
+		container, _ := raw.(map[string]any)
+		if stringValue(container["name"]) == name {
+			container["image"] = value
+			return true
+		}
+	}
+	return false
+}
+
+func emergencyContainerImagePointerValue(resource map[string]any, pointer string) (string, bool) {
+	field, name, ok := emergencyContainerPointerParts(pointer)
+	if !ok {
+		return "", false
+	}
+	for _, raw := range anySlice(mapField(mapField(mapField(resource, "spec"), "template"), "spec")[field]) {
+		container, _ := raw.(map[string]any)
+		if stringValue(container["name"]) == name {
+			value, found := container["image"].(string)
+			return value, found
+		}
+	}
+	return "", false
+}
+
+func emergencyContainerPointerParts(pointer string) (string, string, bool) {
+	const prefix = "/spec/template/spec/"
+	if !strings.HasPrefix(pointer, prefix) || !strings.HasSuffix(pointer, "]/image") {
+		return "", "", false
+	}
+	remainder := strings.TrimSuffix(strings.TrimPrefix(pointer, prefix), "]/image")
+	open := strings.Index(remainder, "[name=")
+	if open < 1 {
+		return "", "", false
+	}
+	field, name := remainder[:open], remainder[open+len("[name="):]
+	if (field != "containers" && field != "initContainers") || name == "" {
+		return "", "", false
+	}
+	return field, name, true
+}
+
+func unescapeJSONPointerToken(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "~1", "/"), "~0", "~")
+}
+
 func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) (declarativerelease.Observation, error) {
 	primary := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	workloadRaw, err := cluster.getResource(ctx, primary)

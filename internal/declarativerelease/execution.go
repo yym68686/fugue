@@ -109,6 +109,7 @@ type Cluster interface {
 	Delete(context.Context, PlanRelease, []byte, Observation) error
 	DeleteCreated(context.Context, PlanRelease, []byte, Observation, Observation) error
 	WaitHealthy(context.Context, PlanRelease, TargetIdentity, []byte) (Observation, error)
+	ValidateEmergencyRollbackDrift(context.Context, PlanRelease, []byte, Observation) error
 	Converged(context.Context, PlanRelease, []byte) error
 	VerifyOwnershipConverged(context.Context, PlanRelease, []byte) error
 }

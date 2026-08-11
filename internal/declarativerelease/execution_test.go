@@ -11,24 +11,26 @@ import (
 )
 
 type fakeCluster struct {
-	observations      []Observation
-	observationErrors []error
-	observedManifests [][]byte
-	cas               []Observation
-	casManifests      [][]byte
-	degraded          []Observation
-	verifiedTargets   []TargetIdentity
-	verifyErrors      []error
-	dryRuns           int
-	applies           int
-	applyErrors       []error
-	deleteCreated     int
-	health            []Observation
-	healthErrors      []error
-	healthTargets     []TargetIdentity
-	healthPrewrite    []bool
-	converged         [][]byte
-	convergedErrors   []error
+	observations        []Observation
+	observationErrors   []error
+	observedManifests   [][]byte
+	cas                 []Observation
+	casManifests        [][]byte
+	degraded            []Observation
+	verifiedTargets     []TargetIdentity
+	verifyErrors        []error
+	dryRuns             int
+	applies             int
+	applyErrors         []error
+	deleteCreated       int
+	health              []Observation
+	healthErrors        []error
+	healthTargets       []TargetIdentity
+	healthPrewrite      []bool
+	converged           [][]byte
+	convergedErrors     []error
+	rollbackDriftChecks int
+	rollbackDriftErrors []error
 }
 
 func (fake *fakeCluster) Observe(_ context.Context, _ PlanRelease, _ TargetIdentity, manifest []byte) (Observation, error) {
@@ -139,6 +141,16 @@ func (fake *fakeCluster) Converged(_ context.Context, _ PlanRelease, manifest []
 
 func (fake *fakeCluster) VerifyOwnershipConverged(context.Context, PlanRelease, []byte) error {
 	return nil
+}
+
+func (fake *fakeCluster) ValidateEmergencyRollbackDrift(context.Context, PlanRelease, []byte, Observation) error {
+	fake.rollbackDriftChecks++
+	if len(fake.rollbackDriftErrors) == 0 {
+		return nil
+	}
+	err := fake.rollbackDriftErrors[0]
+	fake.rollbackDriftErrors = fake.rollbackDriftErrors[1:]
+	return err
 }
 
 func executionFixture(t *testing.T) (Plan, ArtifactReceipt, RenderedManifests, Observation, Observation) {

@@ -351,6 +351,80 @@ func TestEmergencyOwnershipAllowlistIncludesPrimaryWorkloadImageWithoutArtifactT
 	}
 }
 
+func TestValidateEmergencyRollbackDriftAllowsOnlyExactOwnedRuntimePointer(t *testing.T) {
+	release := declarativerelease.PlanRelease{
+		ComponentID: "edge-control-de",
+		Workload: declarativerelease.Workload{
+			APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de",
+			Container: "edge-control", FieldManager: "fugue-edge-control-de-declarative",
+		},
+	}
+	desiredImage := "ghcr.io/example/edge-control@sha256:" + strings.Repeat("a", 64)
+	desired := map[string]any{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": map[string]any{
+			"name": "edge-control-de", "namespace": "fugue-system",
+			"annotations": map[string]any{"fugue.pro/production-config-sha": strings.Repeat("1", 40)},
+		},
+		"spec": map[string]any{
+			"replicas": json.Number("1"),
+			"template": map[string]any{
+				"metadata": map[string]any{"annotations": map[string]any{
+					"fugue.pro/oci-revision": strings.Repeat("1", 40), "fugue.pro/source-commit": strings.Repeat("1", 40),
+				}},
+				"spec": map[string]any{"containers": []any{map[string]any{
+					"name": "edge-control", "image": desiredImage,
+					"env": []any{map[string]any{"name": "MODE", "value": "safe"}},
+				}}},
+			},
+		},
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fugue-system", Name: "edge-control-de"}
+	imagePointer := "/spec/template/spec/containers[name=edge-control]/image"
+	live := deepCopyJSONMap(t, desired)
+	metadata := mapField(live, "metadata")
+	metadata["uid"], metadata["resourceVersion"], metadata["generation"] = "edge-uid", "44", json.Number("9")
+	metadata["managedFields"] = []any{
+		map[string]any{"manager": release.Workload.FieldManager, "operation": "Apply", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{imagePointer})},
+		map[string]any{"manager": "kubectl-patch", "operation": "Update", "fieldsType": "FieldsV1", "fieldsV1": managedFieldsTree(t, []string{imagePointer})},
+	}
+	container := anySlice(mapField(mapField(mapField(live, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	container["image"] = "ghcr.io/example/edge-control@sha256:" + strings.Repeat("0", 64)
+
+	directory := t.TempDir()
+	livePath := filepath.Join(directory, "live.json")
+	kubectl := filepath.Join(directory, "kubectl")
+	writeLive := func(value map[string]any) declarativerelease.Observation {
+		t.Helper()
+		if err := os.WriteFile(livePath, mustJSON(t, value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		resource := declarativerelease.ResourceObservation{
+			Identity: identity, Present: true, UID: "edge-uid", ResourceVersion: "44", Generation: 9,
+			ObjectDigest: digestJSON(sanitizeObservedResource(value)),
+		}
+		return declarativerelease.Observation{Present: true, Primary: identity, UID: "edge-uid", ResourceVersion: "44", Generation: 9, Resources: []declarativerelease.ResourceObservation{resource}}
+	}
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nset -eu\ntest \"$1\" = get\ncat \"$LIVE_JSON\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIVE_JSON", livePath)
+	manifest := mustJSON(t, map[string]any{"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{desired}})
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second}
+	observation := writeLive(live)
+	if err := cluster.ValidateEmergencyRollbackDrift(context.Background(), release, manifest, observation); err != nil {
+		t.Fatalf("exact emergency image drift was rejected: %v", err)
+	}
+
+	drifted := deepCopyJSONMap(t, live)
+	driftedContainer := anySlice(mapField(mapField(mapField(drifted, "spec"), "template"), "spec")["containers"])[0].(map[string]any)
+	anySlice(driftedContainer["env"])[0].(map[string]any)["value"] = "unsafe"
+	observation = writeLive(drifted)
+	if err := cluster.ValidateEmergencyRollbackDrift(context.Background(), release, manifest, observation); err == nil || !strings.Contains(err.Error(), "beyond the exact allowlist") {
+		t.Fatalf("unreviewed environment drift was accepted: %v", err)
+	}
+}
+
 func TestSanitizeObservedResourceDropsDaemonSetControllerGenerationAnnotation(t *testing.T) {
 	resource := map[string]any{
 		"metadata": map[string]any{"annotations": map[string]any{
