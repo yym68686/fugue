@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,50 +15,21 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
-func TestEmitMonitorOutputExcludesAPIAfterGuardianHandoff(t *testing.T) {
+func TestAPIGuardianHandoffBindsProductionLKG(t *testing.T) {
 	t.Chdir("../..")
-	output := filepath.Join(t.TempDir(), "github-output")
-	if err := os.WriteFile(output, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := runEmitMonitorOutput([]string{"emit-monitor-output", "deploy/releases/components.json", output}); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 2 || lines[0] != "monitor_count=0" || !strings.HasPrefix(lines[1], "monitor_matrix=") {
-		t.Fatalf("unexpected monitor output: %q", raw)
-	}
-	var matrix struct {
-		Include []struct {
-			Component   string `json:"component"`
-			Concurrency string `json:"concurrency"`
-		} `json:"include"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[1], "monitor_matrix=")), &matrix); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]string, 0, len(matrix.Include))
-	for _, item := range matrix.Include {
-		if item.Concurrency == "" {
-			t.Fatalf("component %s lacks a component-scoped concurrency key", item.Component)
-		}
-		got = append(got, item.Component)
-	}
-	want := []string{}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("monitor matrix=%v want=%v", got, want)
-	}
 	registry, err := loadProductionRegistry("deploy/releases/components.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	api, err := registryComponent(registry, "api")
-	if err != nil {
-		t.Fatal(err)
+	var api declarativerelease.Component
+	for _, component := range registry.Components {
+		if component.ID == "api" {
+			api = component
+			break
+		}
+	}
+	if api.ID == "" {
+		t.Fatal("API component is absent from the production registry")
 	}
 	if api.Delivery == nil || api.Delivery.Writer != "guardian" || api.Delivery.Group != "global" || api.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("API Guardian delivery is not exact: %+v", api.Delivery)
@@ -80,20 +49,6 @@ func TestEmitMonitorOutputExcludesAPIAfterGuardianHandoff(t *testing.T) {
 	if intent.Generation != 28 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != failedAtom {
 		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
-	}
-}
-
-func TestMonitorComponentExcludesGuardianDeliveredComponents(t *testing.T) {
-	component := declarativerelease.Component{
-		ID: "edge-control-de", Family: "edge",
-		Delivery: &declarativerelease.Delivery{Writer: "guardian", Group: "de", DependencyService: "fugue-fugue"},
-	}
-	if monitorComponent(component) {
-		t.Fatal("Guardian-delivered component remained in the cron production writer")
-	}
-	component.Delivery = nil
-	if !monitorComponent(component) {
-		t.Fatal("direct edge component was removed from the legacy monitor before migration")
 	}
 }
 

@@ -49,7 +49,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	jobKeys := yamlMappingKeys(t, jobs)
 	if !reflect.DeepEqual(jobKeys, []string{
 		"audit", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_worker",
-		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "monitor-plan", "monitor-production", "prepush",
+		"deploy_image_cache", "deploy_release_guardian", "deploy_schema", "deploy_telemetry", "prepush",
 	}) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
@@ -74,10 +74,8 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"edge_client_matrix",
 		"edge_worker_matrix",
 		"needs: [prepush, component-build, deploy_controller]",
-		"'*/5 * * * *'",
-		"\"${RELEASE_TOOL}\" emit-monitor-output",
-		"\"${RELEASE_TOOL}\" monitor",
-		"needs: monitor-plan",
+		"'23 18 * * *'",
+		"Run the full asynchronous audit",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("CI workflow is missing %q", required)
@@ -85,9 +83,19 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"deploy_edge_client_de", "deploy_edge_client_us", "deploy_edge_control_de", "deploy_edge_control_us", "deploy_edge_worker_de", "deploy_edge_worker_us",
+		"monitor-plan", "monitor-production", "emit-monitor-output", "'*/5 * * * *'",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("CI workflow retained fixed group job %q", forbidden)
+		}
+	}
+	cliRaw, err := os.ReadFile("../../cmd/fugue-declarative-release/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"emit-monitor-output"`, `case "monitor":`} {
+		if strings.Contains(string(cliRaw), forbidden) {
+			t.Fatalf("declarative release CLI retained retired cron writer command %q", forbidden)
 		}
 	}
 	actionRaw, err := os.ReadFile("../../.github/actions/deploy-declarative-component/action.yml")
