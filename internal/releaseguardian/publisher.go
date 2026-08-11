@@ -76,7 +76,7 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	created, createErr := configMaps.Create(ctx, recordMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) {
 		created, createErr = configMaps.Get(ctx, recordMap.Name, metav1.GetOptions{})
-		if createErr == nil && (created.Immutable == nil || !*created.Immutable || !stringMapEqual(created.Data, recordMap.Data)) {
+		if createErr == nil && !immutableReleaseRecordMatches(created, recordMap, key, record) {
 			createErr = errors.New("existing immutable Guardian release record differs from the candidate")
 		}
 	}
@@ -86,6 +86,29 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	next := DesiredRelease{
 		APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group,
 		RecordDigest: record.RecordDigest, Generation: snapshot.Desired.Generation + 1,
+	}
+	executionData := map[string]string{
+		"execution-plan.json": string(bundle.Files["execution-plan.json"]),
+		"record-digest":       record.RecordDigest,
+	}
+	if totalConfigMapBytes(executionData) > maxRecordBytes {
+		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian execution snapshot exceeds the bounded ConfigMap size")
+	}
+	executionMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: executionSnapshotName(key, next.Generation), Namespace: target.Namespace, Labels: guardianLabels(key)},
+		Immutable:  &immutable,
+		Data:       executionData,
+	}
+	executionCreated, executionErr := configMaps.Create(ctx, executionMap, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(executionErr) {
+		executionCreated, executionErr = configMaps.Get(ctx, executionMap.Name, metav1.GetOptions{})
+		if executionErr == nil && (executionCreated.Immutable == nil || !*executionCreated.Immutable ||
+			!stringMapEqual(executionCreated.Labels, executionMap.Labels) || !stringMapEqual(executionCreated.Data, executionMap.Data)) {
+			executionErr = errors.New("existing immutable Guardian execution snapshot differs from the candidate")
+		}
+	}
+	if executionErr != nil {
+		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("persist immutable Guardian execution snapshot: %w", executionErr)
 	}
 	raw, err := declarativerelease.CanonicalJSON(next)
 	if err != nil {
@@ -115,6 +138,38 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("advance DesiredRelease with resourceVersion CAS: %w", err)
 	}
 	return record, next, nil
+}
+
+func immutableReleaseRecordMatches(observed, expected *corev1.ConfigMap, key Key, record ReleaseRecord) bool {
+	if observed == nil || expected == nil || observed.Immutable == nil || !*observed.Immutable ||
+		!stringMapEqual(observed.Labels, expected.Labels) {
+		return false
+	}
+	observedStable := make(map[string]string, len(observed.Data))
+	expectedStable := make(map[string]string, len(expected.Data))
+	for name, value := range observed.Data {
+		if name != "execution-plan.json" {
+			observedStable[name] = value
+		}
+	}
+	for name, value := range expected.Data {
+		if name != "execution-plan.json" {
+			expectedStable[name] = value
+		}
+	}
+	if !stringMapEqual(observedStable, expectedStable) {
+		return false
+	}
+	files, err := executionFilesFromStrings(observed.Data)
+	if err != nil {
+		return false
+	}
+	bundle, err := DecodeExecutionBundle(files, key)
+	if err != nil {
+		return false
+	}
+	bound, err := bundle.ReleaseRecord(key, record.LKGRecordDigest)
+	return err == nil && bound == record
 }
 
 func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected DesiredRelease, interval time.Duration) (ReleaseStatus, error) {

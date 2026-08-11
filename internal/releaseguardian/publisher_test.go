@@ -132,9 +132,63 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 		restoredSnapshot.LKGMonitorRecordDigest != stableRecord.RecordDigest {
 		t.Fatalf("restored snapshot=%+v", restoredSnapshot)
 	}
+	freshCandidate := guardianCandidateWithResourceVersion(t, candidate, "11")
+	retriedRecord, retriedDesired, err := store.PublishDesired(context.Background(), key, freshCandidate)
+	if err != nil {
+		t.Fatalf("publish same immutable target with a fresh prewrite snapshot: %v", err)
+	}
+	if retriedRecord != record || retriedDesired.RecordDigest != record.RecordDigest || retriedDesired.Generation != 4 {
+		t.Fatalf("retried record=%+v desired=%+v", retriedRecord, retriedDesired)
+	}
+	executionMap, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), executionSnapshotName(key, 4), metav1.GetOptions{})
+	if err != nil || executionMap.Immutable == nil || !*executionMap.Immutable || executionMap.Data["record-digest"] != record.RecordDigest {
+		t.Fatalf("fresh execution snapshot=%+v err=%v", executionMap, err)
+	}
+	retriedSnapshot, err := store.Load(context.Background(), key)
+	if err != nil {
+		t.Fatalf("load retried target: %v", err)
+	}
+	if retriedSnapshot.Bundle.Prepared.Prewrite.ResourceVersion != "11" || retriedSnapshot.Bundle.Prepared.PlanDigest == snapshot.Bundle.Prepared.PlanDigest {
+		t.Fatalf("fresh execution snapshot was not selected: %+v", retriedSnapshot.Bundle.Prepared)
+	}
+	immutableTarget, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), releaseRecordName(key, record.RecordDigest), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var embedded declarativerelease.ExecutionPlan
+	if err := decodeStrict([]byte(immutableTarget.Data["execution-plan.json"]), &embedded); err != nil || embedded.Prewrite.ResourceVersion != "10" {
+		t.Fatalf("immutable target execution plan changed: %+v err=%v", embedded, err)
+	}
 	if err := store.SetDesiredToLKG(context.Background(), snapshot); err == nil {
 		t.Fatalf("stale LKG CAS was accepted: %v", err)
 	}
+}
+
+func guardianCandidateWithResourceVersion(t *testing.T, candidate map[string][]byte, resourceVersion string) map[string][]byte {
+	t.Helper()
+	result := make(map[string][]byte, len(candidate))
+	for name, value := range candidate {
+		result[name] = append([]byte(nil), value...)
+	}
+	var prepared declarativerelease.ExecutionPlan
+	if err := decodeStrict(result["execution-plan.json"], &prepared); err != nil {
+		t.Fatal(err)
+	}
+	prepared.Prewrite.ResourceVersion = resourceVersion
+	for index := range prepared.Prewrite.Resources {
+		prepared.Prewrite.Resources[index].ResourceVersion = resourceVersion
+	}
+	prepared.PlanDigest = ""
+	raw, err := declarativerelease.CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.PlanDigest = digest(raw)
+	result["execution-plan.json"], err = declarativerelease.CanonicalJSON(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestWaitForTerminalRecognizesSuccessAndExactLKGCompensation(t *testing.T) {

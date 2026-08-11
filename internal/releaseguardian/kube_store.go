@@ -221,7 +221,23 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 			if !digestPattern.MatchString(lkgMonitorDigest) {
 				return storedRelease{}, errors.New("Guardian release record LKG monitor binding is invalid")
 			}
-			candidateFiles, err := executionFilesFromStrings(candidateMap.Data)
+			candidateData := make(map[string]string, len(candidateMap.Data))
+			for name, value := range candidateMap.Data {
+				candidateData[name] = value
+			}
+			executionMap, executionErr := configMaps.Get(ctx, executionSnapshotName(target.Key, desired.Generation), metav1.GetOptions{})
+			if executionErr == nil {
+				if executionMap.Immutable == nil || !*executionMap.Immutable || totalConfigMapBytes(executionMap.Data) > maxRecordBytes ||
+					!stringMapEqual(executionMap.Labels, guardianLabels(target.Key)) ||
+					strings.TrimSpace(executionMap.Data["record-digest"]) != desired.RecordDigest ||
+					strings.TrimSpace(executionMap.Data["execution-plan.json"]) == "" || len(executionMap.Data) != 2 {
+					return storedRelease{}, errors.New("Guardian execution snapshot metadata is invalid")
+				}
+				candidateData["execution-plan.json"] = executionMap.Data["execution-plan.json"]
+			} else if !apierrors.IsNotFound(executionErr) {
+				return storedRelease{}, fmt.Errorf("read immutable Guardian execution snapshot: %w", executionErr)
+			}
+			candidateFiles, err := executionFilesFromStrings(candidateData)
 			if err != nil {
 				return storedRelease{}, err
 			}
@@ -652,6 +668,10 @@ func releaseRecordName(key Key, recordDigest string) string {
 		suffix = suffix[:16]
 	}
 	return objectName("fugue-guardian-record", key) + "-" + suffix
+}
+
+func executionSnapshotName(key Key, generation int64) string {
+	return fmt.Sprintf("%s-%d", objectName("fugue-guardian-execution", key), generation)
 }
 
 func objectName(prefix string, key Key) string {
