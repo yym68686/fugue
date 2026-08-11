@@ -61,6 +61,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,
 		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
 		`"resources":["configmaps"],"verbs":["create","get","update"]`,
+		`"resourceNames":["fugue-api-route-intent-ca-de","fugue-edge-control-inventory-writer-de","fugue-edge-control-reader-de","fugue-edge-control-recovery-de","fugue-edge-control-route-intent-identity-de","fugue-edge-control-signing-de"],"resources":["secrets"],"verbs":["get"]`,
 		`"resources":["deployments"],"verbs":["create","delete","get","list","patch","update","watch"]`,
 		`"resources":["daemonsets"],"verbs":["get","list","watch"]`,
 	} {
@@ -68,7 +69,10 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 			t.Fatalf("Guardian resources lack %s", required)
 		}
 	}
-	for _, forbidden := range []string{`"secrets"`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
+	if strings.Count(source, `"resources":["secrets"]`) != 1 {
+		t.Fatal("Guardian Secret metadata access is not one exact resourceNames-scoped rule")
+	}
+	for _, forbidden := range []string{`"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("shadow Guardian resources grant forbidden capability %s", forbidden)
 		}
