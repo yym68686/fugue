@@ -17,7 +17,7 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
-func TestEmitMonitorOutputDerivesAPIControlAndWorkerMatrix(t *testing.T) {
+func TestEmitMonitorOutputExcludesAPIAfterGuardianHandoff(t *testing.T) {
 	t.Chdir("../..")
 	output := filepath.Join(t.TempDir(), "github-output")
 	if err := os.WriteFile(output, nil, 0o600); err != nil {
@@ -31,7 +31,7 @@ func TestEmitMonitorOutputDerivesAPIControlAndWorkerMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 2 || lines[0] != "monitor_count=1" || !strings.HasPrefix(lines[1], "monitor_matrix=") {
+	if len(lines) != 2 || lines[0] != "monitor_count=0" || !strings.HasPrefix(lines[1], "monitor_matrix=") {
 		t.Fatalf("unexpected monitor output: %q", raw)
 	}
 	var matrix struct {
@@ -50,9 +50,36 @@ func TestEmitMonitorOutputDerivesAPIControlAndWorkerMatrix(t *testing.T) {
 		}
 		got = append(got, item.Component)
 	}
-	want := []string{"api"}
+	want := []string{}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("monitor matrix=%v want=%v", got, want)
+	}
+	registry, err := loadProductionRegistry("deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := registryComponent(registry, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.Delivery == nil || api.Delivery.Writer != "guardian" || api.Delivery.Group != "global" || api.Delivery.DependencyService != "fugue-fugue" {
+		t.Fatalf("API Guardian delivery is not exact: %+v", api.Delivery)
+	}
+	intentFile, err := os.Open(api.IntentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, decodeErr := declarativerelease.DecodeIntent(intentFile)
+	closeErr := intentFile.Close()
+	if decodeErr != nil || closeErr != nil {
+		t.Fatalf("decode API intent: %v close: %v", decodeErr, closeErr)
+	}
+	const lkgSHA = "787054f0b9260f1178c1c2f276c5f72c71264f22"
+	const lkgImage = "sha256:ce7b3b5f04e7e4a78fbef5258068a514e3236d2953ca1fdef76743b0e519efaf"
+	const failedAtom = "c3b79fc1dd803c326860059176e02193bddb60f3"
+	if intent.Generation != 25 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage || intent.SupersedesFailedConfigSHA != failedAtom {
+		t.Fatalf("API Guardian intent is not bound to the production LKG: %+v", intent)
 	}
 }
 
