@@ -68,6 +68,36 @@ func TestProcessExecutorFailsClosedWithoutInClusterKubeconfigMaterial(t *testing
 	}
 }
 
+func TestWriteInClusterKubeconfigUsesAProtectedTokenFileReference(t *testing.T) {
+	directory := t.TempDir()
+	caPath := filepath.Join(directory, "ca.crt")
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(caPath, []byte("test-ca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const token = "test-service-account-token"
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+	path, err := writeInClusterKubeconfig(directory, caPath, tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("kubeconfig mode=%v err=%v", info.Mode().Perm(), err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "tokenFile: "+tokenPath) || strings.Contains(string(raw), token) {
+		t.Fatalf("kubeconfig did not preserve token-file-only authentication: %q", raw)
+	}
+}
+
 func processSnapshot(t *testing.T) Snapshot {
 	t.Helper()
 	key := Key{Component: "edge-control-de", Group: "de"}
@@ -112,7 +142,7 @@ func writeExecutorFixture(t *testing.T, operation, recordDigest string, result d
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "executor")
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\ntest -f \"$KUBECONFIG\"\ntest \"$(stat -f '%%Lp' \"$KUBECONFIG\" 2>/dev/null || stat -c '%%a' \"$KUBECONFIG\")\" = 600\ngrep -F \"tokenFile: $FUGUE_TEST_TOKEN_FILE\" \"$KUBECONFIG\" >/dev/null\n! grep -F \"$FUGUE_TEST_TOKEN_VALUE\" \"$KUBECONFIG\" >/dev/null\nprintf '%%s\\n' %q\n", operation, recordDigest, string(raw))
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\ntest -f \"$KUBECONFIG\"\ngrep -F \"tokenFile: $FUGUE_TEST_TOKEN_FILE\" \"$KUBECONFIG\" >/dev/null\n! grep -F \"$FUGUE_TEST_TOKEN_VALUE\" \"$KUBECONFIG\" >/dev/null\nprintf '%%s\\n' %q\n", operation, recordDigest, string(raw))
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
