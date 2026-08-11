@@ -357,7 +357,161 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 			}
 		}
 	}
-	return healthy(map[string]any{"desired": desired, "updated": updated, "ready": ready, "available": available, "generation": generation, "image": target.ImageRef})
+	componentWorkloads, err := store.componentWorkloadHealth(ctx, release, target)
+	if err != nil {
+		return degraded(err.Error())
+	}
+	return healthy(map[string]any{
+		"desired": desired, "updated": updated, "ready": ready, "available": available,
+		"generation": generation, "image": target.ImageRef, "componentWorkloads": componentWorkloads,
+	})
+}
+
+type workloadHealthEvidence struct {
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Desired    int32  `json:"desired"`
+	Updated    int32  `json:"updated"`
+	Ready      int32  `json:"ready"`
+	Available  int32  `json:"available"`
+	Generation int64  `json:"generation"`
+}
+
+// componentWorkloadHealth keeps continuous Guardian health component-scoped:
+// every Deployment/DaemonSet explicitly named by the immutable health
+// contract must have converged to the same target identity.  This matters for
+// multi-workload components such as an Edge worker group, where the primary
+// front can remain Ready while one inactive worker slot has crashed or drifted.
+func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) ([]workloadHealthEvidence, error) {
+	seen := map[string]bool{}
+	result := make([]workloadHealthEvidence, 0, len(release.Health))
+	for _, probe := range release.Health {
+		if probe.Type != "deployment" && probe.Type != "daemonset" {
+			continue
+		}
+		key := probe.Type + "/" + probe.Name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		evidence, err := store.oneWorkloadHealth(ctx, release, target, probe.Type, probe.Name)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, evidence)
+	}
+	if len(result) == 0 {
+		return nil, errors.New("component health contract has no workload probe")
+	}
+	return result, nil
+}
+
+func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, probeType, name string) (workloadHealthEvidence, error) {
+	var selector labels.Selector
+	var desired, updated, ready, available int32
+	var generation, observed int64
+	var podNamespace string
+	kind := "DaemonSet"
+	if probeType == "deployment" {
+		kind = "Deployment"
+		workload, err := store.client.AppsV1().Deployments(release.Workload.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return workloadHealthEvidence{}, fmt.Errorf("read health Deployment/%s: %w", name, err)
+		}
+		if err := workloadReleaseIdentity(release, target, "Deployment", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
+			return workloadHealthEvidence{}, err
+		}
+		selector, err = metav1.LabelSelectorAsSelector(workload.Spec.Selector)
+		if err != nil {
+			return workloadHealthEvidence{}, fmt.Errorf("health Deployment/%s selector is invalid", name)
+		}
+		desired, updated, ready, available = derefReplicas(workload.Spec.Replicas), workload.Status.UpdatedReplicas, workload.Status.ReadyReplicas, workload.Status.AvailableReplicas
+		generation, observed, podNamespace = workload.Generation, workload.Status.ObservedGeneration, workload.Namespace
+	} else {
+		workload, err := store.client.AppsV1().DaemonSets(release.Workload.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return workloadHealthEvidence{}, fmt.Errorf("read health DaemonSet/%s: %w", name, err)
+		}
+		if err := workloadReleaseIdentity(release, target, "DaemonSet", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
+			return workloadHealthEvidence{}, err
+		}
+		selector, err = metav1.LabelSelectorAsSelector(workload.Spec.Selector)
+		if err != nil {
+			return workloadHealthEvidence{}, fmt.Errorf("health DaemonSet/%s selector is invalid", name)
+		}
+		desired, updated, ready, available = workload.Status.DesiredNumberScheduled, workload.Status.UpdatedNumberScheduled, workload.Status.NumberReady, workload.Status.NumberAvailable
+		generation, observed, podNamespace = workload.Generation, workload.Status.ObservedGeneration, workload.Namespace
+	}
+	if desired < 1 || updated != desired || ready != desired || available != desired || observed != generation {
+		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s rollout is incomplete desired=%d updated=%d ready=%d available=%d generation=%d observed=%d", probeType, name, desired, updated, ready, available, generation, observed)
+	}
+	pods, err := store.client.CoreV1().Pods(podNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil || len(pods.Items) != int(desired) {
+		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod inventory is incomplete", probeType, name)
+	}
+	artifactContainers := artifactTargetContainers(release, kind, name)
+	if len(artifactContainers) == 0 {
+		return workloadHealthEvidence{}, fmt.Errorf("health %s/%s has no immutable artifact target", probeType, name)
+	}
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil || !podReady(pod) {
+			return workloadHealthEvidence{}, fmt.Errorf("health %s/%s Pod is not Ready", probeType, name)
+		}
+		for container, containerType := range artifactContainers {
+			statuses := pod.Status.ContainerStatuses
+			if containerType == "init-container" {
+				statuses = pod.Status.InitContainerStatuses
+			}
+			if err := immutableContainerStatus(statuses, container); err != nil {
+				return workloadHealthEvidence{}, fmt.Errorf("health %s/%s: %w", probeType, name, err)
+			}
+		}
+	}
+	return workloadHealthEvidence{Kind: kind, Name: name, Desired: desired, Updated: updated, Ready: ready, Available: available, Generation: generation}, nil
+}
+
+func workloadReleaseIdentity(release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, kind, name string, annotations, templateAnnotations map[string]string, containers, initContainers []corev1.Container) error {
+	if annotations["fugue.pro/production-config-sha"] != target.ConfigSHA || templateAnnotations["fugue.pro/oci-revision"] != target.OCIRevision {
+		return fmt.Errorf("health %s/%s release identity differs from the stable record", kind, name)
+	}
+	for container, containerType := range artifactTargetContainers(release, kind, name) {
+		values := containers
+		if containerType == "init-container" {
+			values = initContainers
+		}
+		if err := containerImageMatches(values, container, target.ImageRef); err != nil {
+			return fmt.Errorf("health %s/%s: %w", kind, name, err)
+		}
+	}
+	return nil
+}
+
+func artifactTargetContainers(release declarativerelease.PlanRelease, kind, name string) map[string]string {
+	result := map[string]string{}
+	for _, artifact := range release.ArtifactTargets {
+		if artifact.Kind == kind && artifact.Namespace == release.Workload.Namespace && artifact.Name == name {
+			result[artifact.Container] = artifact.ContainerType
+		}
+	}
+	// Older immutable monitor records predate explicit artifactTargets for a
+	// single primary workload.  The primary workload identity remains an exact,
+	// unambiguous artifact binding and is safe to preserve during migration.
+	if len(result) == 0 && release.Workload.Kind == kind && release.Workload.Name == name {
+		result[release.Workload.Container] = "container"
+	}
+	return result
+}
+
+func immutableContainerStatus(statuses []corev1.ContainerStatus, name string) error {
+	for _, status := range statuses {
+		if status.Name == name {
+			if status.RestartCount != 0 || status.ImageID == "" {
+				return fmt.Errorf("artifact container %s restarted or lacks immutable image identity", name)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("artifact container %s status is absent", name)
 }
 
 func workloadIdentityMatchesDeployment(workload *appsv1.Deployment, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) error {
