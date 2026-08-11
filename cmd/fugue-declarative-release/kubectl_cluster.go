@@ -30,7 +30,12 @@ import (
 	metadataclient "k8s.io/client-go/metadata"
 )
 
-const maxKubernetesOutputBytes = 4 << 20
+const (
+	maxKubernetesOutputBytes     = 4 << 20
+	defaultKubectlReadTimeout    = 15 * time.Second
+	defaultKubectlReadAttempts   = 2
+	defaultKubectlReadRetryDelay = 250 * time.Millisecond
+)
 
 var (
 	emergencyConflictCountPattern = regexp.MustCompile(`Apply failed with ([1-9][0-9]*) conflicts?`)
@@ -50,10 +55,13 @@ var emergencyOwnershipManagers = map[string]bool{
 }
 
 type kubectlCluster struct {
-	kubectl  string
-	verifier string
-	timeout  time.Duration
-	metadata metadataclient.Interface
+	kubectl        string
+	verifier       string
+	timeout        time.Duration
+	readTimeout    time.Duration
+	readAttempts   int
+	readRetryDelay time.Duration
+	metadata       metadataclient.Interface
 }
 
 type healthSoakTracker struct {
@@ -2203,7 +2211,44 @@ func readPublicRouteCanaryWithRoots(ctx context.Context, probe declarativereleas
 }
 
 func (cluster *kubectlCluster) kubectlRun(ctx context.Context, input []byte, arguments ...string) ([]byte, error) {
-	return cluster.run(ctx, input, cluster.kubectl, arguments...)
+	if len(arguments) == 0 || arguments[0] != "get" {
+		return cluster.run(ctx, input, cluster.kubectl, arguments...)
+	}
+	timeout := cluster.readTimeout
+	if timeout <= 0 {
+		timeout = defaultKubectlReadTimeout
+	}
+	attempts := cluster.readAttempts
+	if attempts <= 0 {
+		attempts = defaultKubectlReadAttempts
+	}
+	delay := cluster.readRetryDelay
+	if delay <= 0 {
+		delay = defaultKubectlReadRetryDelay
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		readCtx, cancel := context.WithTimeout(ctx, timeout)
+		output, err := cluster.run(readCtx, input, cluster.kubectl, arguments...)
+		cancel()
+		if err == nil {
+			return output, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || attempt+1 == attempts {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("read-only kubectl get failed after %d attempts: %w", attempts, lastErr)
 }
 
 func (cluster *kubectlCluster) run(ctx context.Context, input []byte, binary string, arguments ...string) ([]byte, error) {

@@ -62,6 +62,54 @@ func TestSelectorFromWorkloadNarrowsSharedSelectorWithPodComponent(t *testing.T)
 	}
 }
 
+func TestKubectlGetIsBoundedAndRetriedWithoutRetryingWrites(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	getCount := filepath.Join(directory, "get-count")
+	writeCount := filepath.Join(directory, "write-count")
+	program := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  get)
+    count=0
+    if test -f "$GET_COUNT"; then read -r count <"$GET_COUNT"; fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$GET_COUNT"
+    if test "$count" -eq 1; then exec sleep 5; fi
+    printf '%s\n' '{"items":[]}'
+    ;;
+  *)
+    count=0
+    if test -f "$WRITE_COUNT"; then read -r count <"$WRITE_COUNT"; fi
+    printf '%s\n' "$((count + 1))" >"$WRITE_COUNT"
+    exit 41
+    ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GET_COUNT", getCount)
+	t.Setenv("WRITE_COUNT", writeCount)
+	cluster := &kubectlCluster{
+		kubectl: kubectl, readTimeout: 500 * time.Millisecond, readAttempts: 2, readRetryDelay: time.Millisecond,
+	}
+	started := time.Now()
+	output, err := cluster.kubectlRun(context.Background(), nil, "get", "pods", "--output", "json")
+	if err != nil || string(output) != "{\"items\":[]}\n" || time.Since(started) >= 2*time.Second {
+		t.Fatalf("bounded read retry output=%q elapsed=%s err=%v", output, time.Since(started), err)
+	}
+	if raw, err := os.ReadFile(getCount); err != nil || strings.TrimSpace(string(raw)) != "2" {
+		t.Fatalf("read attempts=%q err=%v", raw, err)
+	}
+	if _, err := cluster.kubectlRun(context.Background(), nil, "delete", "pod", "example"); err == nil {
+		t.Fatal("failed mutating kubectl command was accepted")
+	}
+	if raw, err := os.ReadFile(writeCount); err != nil || strings.TrimSpace(string(raw)) != "1" {
+		t.Fatalf("mutating attempts=%q err=%v", raw, err)
+	}
+}
+
 func TestObserveTreatsKubectlJSONNullAsAbsentFirstInstall(t *testing.T) {
 	kubectl := filepath.Join(t.TempDir(), "kubectl")
 	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf 'null\\n'\n"), 0o700); err != nil {
