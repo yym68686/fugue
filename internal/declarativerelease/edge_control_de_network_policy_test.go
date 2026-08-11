@@ -34,6 +34,22 @@ func TestEdgeControlDENetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	}
 	deIngress := materializedNetworkPolicyIngress(t, de.Control.ManifestPath, de.Control.ManifestVariables)
 	sharedIngress := materializedNetworkPolicyIngress(t, "internal/edgecontrol/component/resources.authority.group.json", de.Control.ManifestVariables)
+	importerRule := map[string]any{
+		"from": []any{map[string]any{
+			"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "fugue-system"}},
+			"podSelector":       map[string]any{"matchLabels": map[string]any{"fugue.io/edge-authority-importer": "true"}},
+		}},
+		"ports": []any{map[string]any{"port": float64(8092), "protocol": "TCP"}},
+	}
+	importerRules := 0
+	for _, rawRule := range sharedIngress {
+		if reflect.DeepEqual(rawRule, importerRule) {
+			importerRules++
+		}
+	}
+	if importerRules != 1 {
+		t.Fatalf("shared Edge Control NetworkPolicy importer rules=%d want=1: %#v", importerRules, sharedIngress)
+	}
 	if len(deIngress) != len(sharedIngress)+1 || !reflect.DeepEqual(deIngress[:len(sharedIngress)], sharedIngress) {
 		t.Fatalf("DE NetworkPolicy changed existing ingress rules: DE=%#v shared=%#v", deIngress, sharedIngress)
 	}

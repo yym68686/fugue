@@ -515,6 +515,28 @@
                 "port": 8092
               }
             ]
+          },
+          {
+            "from": [
+              {
+                "namespaceSelector": {
+                  "matchLabels": {
+                    "kubernetes.io/metadata.name": "fugue-system"
+                  }
+                },
+                "podSelector": {
+                  "matchLabels": {
+                    "fugue.io/edge-authority-importer": "true"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "TCP",
+                "port": 8092
+              }
+            ]
           }
         ],
         "egress": [
