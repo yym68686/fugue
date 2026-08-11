@@ -20,6 +20,7 @@ import (
 const (
 	GroupBundleReadPathV1            = "/v1/edge/routes"
 	GroupCandidateBundleReadPathV1   = "/v1/edge/candidate-routes"
+	GroupCandidateEnvelopeReadPathV1 = "/v1/edge/candidate-envelope"
 	GroupBundleReaderKeyringSchemaV1 = "edge-control-group-bundle-reader-keyring/v1"
 	GroupBundleGenerationHeader      = "X-Fugue-Edge-Route-Bundle-Generation"
 	GroupBundleGroupHeader           = "X-Fugue-Edge-Group"
@@ -91,7 +92,7 @@ func NewGroupBundleHandler(config GroupBundleHandlerConfig) (http.Handler, error
 }
 
 func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet || (request.URL.Path != GroupBundleReadPathV1 && request.URL.Path != GroupCandidateBundleReadPathV1) || request.URL.RawQuery == "" {
+	if request.Method != http.MethodGet || (request.URL.Path != GroupBundleReadPathV1 && request.URL.Path != GroupCandidateBundleReadPathV1 && request.URL.Path != GroupCandidateEnvelopeReadPathV1) || request.URL.RawQuery == "" {
 		http.NotFound(w, request)
 		return
 	}
@@ -119,7 +120,7 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 		writeGroupBundleError(w, http.StatusUnauthorized, "credential_rejected")
 		return
 	}
-	if request.URL.Path == GroupCandidateBundleReadPathV1 {
+	if request.URL.Path == GroupCandidateBundleReadPathV1 || request.URL.Path == GroupCandidateEnvelopeReadPathV1 {
 		reader, ok := handler.store.(interface {
 			ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
 		})
@@ -146,7 +147,11 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-		writeJSON(w, http.StatusOK, candidate.Bundle)
+		if request.URL.Path == GroupCandidateEnvelopeReadPathV1 {
+			writeJSON(w, http.StatusOK, candidate)
+		} else {
+			writeJSON(w, http.StatusOK, candidate.Bundle)
+		}
 		return
 	}
 	state, err := handler.store.ReadGroupAuthority(request.Context(), groupID)

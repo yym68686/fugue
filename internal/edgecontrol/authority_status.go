@@ -343,6 +343,7 @@ func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery h
 	mux.Handle("GET "+AuthorityGroupReadyPrefixV1, status)
 	mux.Handle("GET "+GroupBundleReadPathV1, bundles)
 	mux.Handle("GET "+GroupCandidateBundleReadPathV1, bundles)
+	mux.Handle("GET "+GroupCandidateEnvelopeReadPathV1, bundles)
 	mux.Handle("POST "+GroupRecoveryPathV1, recovery)
 	mux.Handle("/", boundary)
 	return mux, nil

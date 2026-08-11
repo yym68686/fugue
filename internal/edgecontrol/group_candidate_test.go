@@ -81,6 +81,21 @@ func TestCandidatePublisherPersistsInactiveBundleWithoutChangingCurrent(t *testi
 	if err := json.Unmarshal(recorder.Body.Bytes(), &served); err != nil || served.Version != groupPublicationVersion(candidate.Bundle.Generation, candidate.Epoch, 0) {
 		t.Fatalf("candidate endpoint served wrong bundle: %+v err=%v", served, err)
 	}
+	var bundleBody map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &bundleBody); err != nil || bundleBody["record"] != nil || bundleBody["release_record_digest"] != nil {
+		t.Fatalf("candidate bundle endpoint exposed envelope fields: body=%s err=%v", recorder.Body.String(), err)
+	}
+	envelopeRequest := httptest.NewRequest(http.MethodGet, GroupCandidateEnvelopeReadPathV1+"?edge_group_id="+groupID+"&edge_id=edge-de-1", nil)
+	envelopeRequest.Header.Set("Authorization", "Bearer "+readerToken)
+	envelopeRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(envelopeRecorder, envelopeRequest)
+	var envelope GroupCandidateBundle
+	if envelopeRecorder.Code != http.StatusOK || envelopeRecorder.Header().Get("ETag") != `"`+candidate.Record.RecordDigest+`"` ||
+		envelopeRecorder.Header().Get(GroupCandidateRecordHeader) != candidate.Record.RecordDigest ||
+		json.Unmarshal(envelopeRecorder.Body.Bytes(), &envelope) != nil || !reflect.DeepEqual(envelope, candidate) ||
+		validateGroupCandidateBundle(groupID, envelope) != nil {
+		t.Fatalf("candidate envelope is not the exact durable record: status=%d headers=%v envelope=%+v body=%s", envelopeRecorder.Code, envelopeRecorder.Header(), envelope, envelopeRecorder.Body.String())
+	}
 	currentRequest := httptest.NewRequest(http.MethodGet, GroupBundleReadPathV1+"?edge_group_id="+groupID+"&edge_id=edge-de-1", nil)
 	currentRequest.Header.Set("Authorization", "Bearer "+readerToken)
 	currentRecorder := httptest.NewRecorder()
