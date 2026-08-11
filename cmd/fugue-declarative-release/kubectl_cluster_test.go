@@ -346,6 +346,62 @@ esac
 	}
 }
 
+func TestServiceHTTPProbeUsesInClusterDataPlaneAndKeepsExternalPrepareProxy(t *testing.T) {
+	directory := t.TempDir()
+	kubectl := filepath.Join(directory, "kubectl")
+	logPath := filepath.Join(directory, "kubectl.log")
+	program := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$KUBECTL_LOG"
+case "$*" in
+  "get service fugue-fugue --namespace fugue-system --output json --show-managed-fields --ignore-not-found")
+    printf '%s\n' '{"spec":{"ports":[{"name":"http","port":80}]}}'
+    ;;
+  "get --raw /api/v1/namespaces/fugue-system/services/fugue-fugue:http/proxy/healthz")
+    printf '%s\n' '{"status":"proxy-ok"}'
+    ;;
+  *) exit 41 ;;
+esac
+`
+	if err := os.WriteFile(kubectl, []byte(program), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECTL_LOG", logPath)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/healthz" {
+			t.Fatalf("path = %q", request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(`{"status":"direct-ok"}`))
+	}))
+	defer server.Close()
+	probe := declarativerelease.HealthProbe{Type: "service-http", Name: "fugue-fugue", Port: "http", Path: "/healthz", Expected: "ok"}
+	cluster := &kubectlCluster{kubectl: kubectl, timeout: time.Second, serviceHTTPURL: func(namespace, name string, port int) string {
+		if namespace != "fugue-system" || name != "fugue-fugue" || port != 80 {
+			t.Fatalf("service identity = %s/%s:%d", namespace, name, port)
+		}
+		return server.URL
+	}}
+	body, err := cluster.readServiceHTTP(context.Background(), "fugue-system", probe)
+	if err != nil || string(body) != `{"status":"direct-ok"}` {
+		t.Fatalf("direct body=%q err=%v", body, err)
+	}
+	logRaw, err := os.ReadFile(logPath)
+	if err != nil || strings.Contains(string(logRaw), "get --raw") {
+		t.Fatalf("in-cluster probe used API proxy: %q err=%v", logRaw, err)
+	}
+	cluster.serviceHTTPURL = nil
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
+	if got := cluster.serviceHTTPDataPlaneURL("fugue-system", "fugue-fugue", 80); got != "http://fugue-fugue.fugue-system.svc:80" {
+		t.Fatalf("in-cluster data-plane URL = %q", got)
+	}
+
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	body, err = cluster.readServiceHTTP(context.Background(), "fugue-system", probe)
+	if err != nil || string(body) != "{\"status\":\"proxy-ok\"}\n" {
+		t.Fatalf("prepare proxy body=%q err=%v", body, err)
+	}
+}
+
 func TestWorkloadOriginatedServiceProbeParsersAreExact(t *testing.T) {
 	service := []byte(`{"spec":{"ports":[{"name":"http","port":8092},{"name":"metrics","port":9090}]}}`)
 	if port, err := servicePortByName(service, "http"); err != nil || port != 8092 {

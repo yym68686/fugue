@@ -61,6 +61,7 @@ type kubectlCluster struct {
 	readTimeout    time.Duration
 	readAttempts   int
 	readRetryDelay time.Duration
+	serviceHTTPURL func(string, string, int) string
 	metadata       metadataclient.Interface
 }
 
@@ -1680,10 +1681,12 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 			}
 			evidence = append(evidence, probe.Type+":"+probe.Name+":"+auxiliary.TemplateDigest+":"+auxiliary.HealthDigest)
 		case "service-http":
-			resource := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy%s", release.Workload.Namespace, probe.Name, probe.Port, probe.Path)
-			body, err := cluster.kubectlRun(ctx, nil, "get", "--raw", resource)
+			body, err := cluster.readServiceHTTP(ctx, release.Workload.Namespace, probe)
 			if err != nil || (probe.Expected != "" && !bytes.Contains(body, []byte(probe.Expected))) {
-				return "", fmt.Errorf("service health probe %q failed", probe.Name)
+				if err == nil {
+					err = errors.New("response does not contain the expected marker")
+				}
+				return "", fmt.Errorf("service health probe %q failed: %w", probe.Name, err)
 			}
 			evidence = append(evidence, probe.Type+":"+digestBytesLocal(body))
 		case "service-http-via-workload":
@@ -1753,6 +1756,60 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 	}
 	sort.Strings(evidence)
 	return digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
+}
+
+func (cluster *kubectlCluster) readServiceHTTP(ctx context.Context, namespace string, probe declarativerelease.HealthProbe) ([]byte, error) {
+	service := declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "Service", Namespace: namespace, Name: probe.Name}
+	serviceRaw, err := cluster.getResource(ctx, service)
+	if err != nil || resourceAbsent(serviceRaw) {
+		return nil, errors.New("target Service is absent")
+	}
+	port, err := servicePortByName(serviceRaw, probe.Port)
+	if err != nil {
+		return nil, err
+	}
+	address := cluster.serviceHTTPDataPlaneURL(namespace, probe.Name, port)
+	if address == "" {
+		resource := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy%s", namespace, probe.Name, probe.Port, probe.Path)
+		return cluster.kubectlRun(ctx, nil, "get", "--raw", resource)
+	}
+	return readServiceHTTPDataPlane(ctx, address, probe.Path)
+}
+
+func (cluster *kubectlCluster) serviceHTTPDataPlaneURL(namespace, name string, port int) string {
+	if cluster != nil && cluster.serviceHTTPURL != nil {
+		return cluster.serviceHTTPURL(namespace, name, port)
+	}
+	if net.ParseIP(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))) == nil {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(name+"."+namespace+".svc", strconv.Itoa(port))
+}
+
+func readServiceHTTPDataPlane(ctx context.Context, address, path string) ([]byte, error) {
+	if !strings.HasPrefix(address, "http://") || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\r\n\x00") {
+		return nil, errors.New("service HTTP endpoint is invalid")
+	}
+	transport := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(address, "/")+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK || len(body) > 1<<20 {
+		return nil, errors.New("service HTTP response is invalid")
+	}
+	return body, nil
 }
 
 func (cluster *kubectlCluster) readServiceHTTPViaWorkload(ctx context.Context, namespace string, probe declarativerelease.HealthProbe) ([]byte, error) {
