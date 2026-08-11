@@ -6,6 +6,7 @@ type Decision struct {
 	State            ReleaseState
 	Reason           string
 	RolloutEligible  bool
+	RepairEligible   bool
 	RollbackEligible bool
 }
 
@@ -23,7 +24,10 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 		return Decision{State: StateRecoveryRequired, Reason: joinedReason("health evidence is incomplete", health)}
 	}
 	if health.Local.State == HealthDegraded {
-		return Decision{State: StateRollbackPending, Reason: joinedReason("component-local health is degraded", health), RollbackEligible: true}
+		return Decision{
+			State: StateRollbackPending, Reason: joinedReason("component-local health is degraded", health),
+			RepairEligible: stableIdentityDrift(health.Local.Reason), RollbackEligible: true,
+		}
 	}
 	if health.Dependency.State == HealthDegraded {
 		return Decision{State: StateDegraded, Reason: joinedReason("component dependency is degraded", health)}
@@ -32,6 +36,13 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 		return Decision{State: StateDegraded, Reason: joinedReason("independent route canary is degraded", health)}
 	}
 	return Decision{State: StateStable, Reason: "local, dependency, and route health are verified"}
+}
+
+func stableIdentityDrift(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return reason == "Deployment release identity differs from the stable record" ||
+		reason == "DaemonSet release identity differs from the stable record" ||
+		reason == "workload image differs from the stable record"
 }
 
 func joinedReason(prefix string, health HealthSnapshot) string {

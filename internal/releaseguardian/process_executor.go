@@ -40,6 +40,14 @@ func (executor *ProcessExecutor) Rollout(ctx context.Context, snapshot Snapshot)
 	return executor.execute(ctx, snapshot, "execute", snapshot.Bundle.Files)
 }
 
+func (executor *ProcessExecutor) Repair(ctx context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
+	files := make(map[string][]byte, len(snapshot.CurrentMonitorData))
+	for name, value := range snapshot.CurrentMonitorData {
+		files[name] = []byte(value)
+	}
+	return executor.execute(ctx, snapshot, "repair-monitor", files)
+}
+
 func (executor *ProcessExecutor) Rollback(ctx context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
 	files := make(map[string][]byte, len(snapshot.CurrentMonitorData))
 	for name, value := range snapshot.CurrentMonitorData {
@@ -49,7 +57,8 @@ func (executor *ProcessExecutor) Rollback(ctx context.Context, snapshot Snapshot
 }
 
 func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot, operation string, files map[string][]byte) (ExecutionReceipt, error) {
-	if executor == nil || snapshot.Record.Validate() != nil || (operation != "execute" && operation != "restore-monitor") {
+	if executor == nil || snapshot.Record.Validate() != nil ||
+		(operation != "execute" && operation != "repair-monitor" && operation != "restore-monitor") {
 		return ExecutionReceipt{}, errors.New("Guardian executor request is invalid")
 	}
 	directory, err := os.MkdirTemp("", "fugue-release-guardian-")

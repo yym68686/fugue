@@ -20,6 +20,67 @@ func runRestoreMonitor(args []string, output io.Writer) error {
 	return runRestoreMonitorContext(context.Background(), args, output)
 }
 
+func runRepairMonitorContext(parent context.Context, args []string, output io.Writer) error {
+	if len(args) != 2 {
+		return errors.New("usage: fugue-declarative-release repair-monitor MONITOR_DIR")
+	}
+	currentBundle, err := readMonitorDirectory(args[1])
+	if err != nil {
+		return err
+	}
+	release, err := selectedRelease(currentBundle.Plan, currentBundle.Record.Component)
+	if err != nil {
+		return err
+	}
+	store, err := newMonitorStore()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(parent, 8*time.Minute)
+	defer cancel()
+	current, err := store.load(ctx, release.Workload.Namespace, release.ComponentID)
+	if err != nil || current.Bundle.Record != currentBundle.Record {
+		return errors.New("live monitor pointer is not bound to the requested stable record")
+	}
+	cluster, err := newKubectlCluster()
+	if err != nil {
+		return err
+	}
+	lease, err := newComponentLeaseCoordinator()
+	if err != nil {
+		return err
+	}
+	held, err := lease.acquire(ctx, release, currentBundle.Record.ConfigSHA)
+	if err != nil {
+		return fmt.Errorf("acquire component mutation lease: %w", err)
+	}
+	fresh, freshErr := store.load(ctx, release.Workload.Namespace, release.ComponentID)
+	if freshErr != nil || fresh.Bundle.Record != currentBundle.Record {
+		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
+		_ = lease.release(releaseCtx, held)
+		releaseCancel()
+		return errors.New("monitor pointer changed after component Lease acquisition")
+	}
+	result := declarativerelease.RepairMonitoredForward(ctx, cluster, currentBundle.Plan, currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG, release)
+	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
+	defer finalizeCancel()
+	releaseErr := lease.release(finalizeCtx, held)
+	raw, encodeErr := declarativerelease.CanonicalJSON(result)
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if _, encodeErr = output.Write(append(raw, '\n')); encodeErr != nil {
+		return encodeErr
+	}
+	if releaseErr != nil {
+		return fmt.Errorf("stable repair terminal state is recorded but Lease release is unproven: %w", releaseErr)
+	}
+	if result.Status != "verified" {
+		return fmt.Errorf("Guardian stable repair ended with status=%s reason=%s", result.Status, result.Reason)
+	}
+	return nil
+}
+
 func runRestoreMonitorContext(parent context.Context, args []string, output io.Writer) error {
 	if len(args) != 3 {
 		return errors.New("usage: fugue-declarative-release restore-monitor MONITOR_DIR LKG_RECORD_DIGEST")

@@ -36,6 +36,17 @@ func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
 	if err != nil || receipt.Status != "compensated" || receipt.RecordDigest != snapshot.Record.LKGRecordDigest {
 		t.Fatalf("rollback receipt=%+v err=%v", receipt, err)
 	}
+
+	repaired := processResult(t, "verified", "continuous-stable-forward-repaired")
+	binary = writeExecutorFixture(t, "repair-monitor", snapshot.Record.RecordDigest, repaired)
+	executor, err = NewProcessExecutor(binary, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = executor.Repair(context.Background(), snapshot)
+	if err != nil || receipt.Status != "verified" || receipt.RecordDigest != snapshot.Record.RecordDigest {
+		t.Fatalf("repair receipt=%+v err=%v", receipt, err)
+	}
 }
 
 func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
@@ -196,7 +207,7 @@ func writeExecutorFixture(t *testing.T, operation, recordDigest string, result d
 	}
 	path := filepath.Join(t.TempDir(), "executor")
 	expectedFiles := len(executionFileNames)
-	if operation == "restore-monitor" {
+	if operation == "restore-monitor" || operation == "repair-monitor" {
 		expectedFiles = 7
 	}
 	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest \"$1\" = %q\ntest \"$FUGUE_COMPONENT_LEASE_OWNER\" = guardian\ntest \"$FUGUE_RELEASE_GUARDIAN_POD_UID\" = pod-uid\ntest \"$FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST\" = %q\ntest -f \"$KUBECONFIG\"\ntest \"${KUBECONFIG%%/*}\" != \"$2\"\ntest \"$(find \"$2\" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')\" = %d\ngrep -F \"tokenFile: $FUGUE_TEST_TOKEN_FILE\" \"$KUBECONFIG\" >/dev/null\n! grep -F \"$FUGUE_TEST_TOKEN_VALUE\" \"$KUBECONFIG\" >/dev/null\nprintf '%%s\\n' %q\n", operation, recordDigest, expectedFiles, string(raw))

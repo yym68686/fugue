@@ -163,3 +163,60 @@ func TestContinuousRollbackAcceptsOnlyAdapterVerifiedEmergencyDrift(t *testing.T
 		t.Fatalf("unreviewed drift reached rollback apply: %+v applies=%d", result, rejected.applies)
 	}
 }
+
+func TestContinuousRepairReassertsStableForwardFromExactPredecessorLKG(t *testing.T) {
+	plan, _, rendered, prepared, _, lkg, forward := verifiedMonitorFixture(t)
+	cluster := &fakeCluster{
+		observations: []Observation{lkg, lkg},
+		health:       []Observation{forward},
+	}
+	result := RepairMonitoredForward(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "verified" || result.Reason != "continuous-stable-forward-repaired" ||
+		result.ForwardApplyCount != 1 || cluster.dryRuns != 1 || cluster.applies != 1 || cluster.rollbackDriftChecks != 0 {
+		t.Fatalf("stable repair result=%+v dryRuns=%d applies=%d emergencyChecks=%d", result, cluster.dryRuns, cluster.applies, cluster.rollbackDriftChecks)
+	}
+}
+
+func TestContinuousRepairAcceptsOnlyExactLKGOrReviewedEmergencyDrift(t *testing.T) {
+	plan, _, rendered, prepared, _, _, forward := verifiedMonitorFixture(t)
+	emergency := forward
+	emergency.ResourceVersion = "99"
+	emergency.Generation++
+	emergency.Resources = append([]ResourceObservation(nil), forward.Resources...)
+	emergency.Resources[0].ResourceVersion = "99"
+	emergency.Resources[0].Generation++
+	emergency.Resources[0].ObjectDigest = "sha256:" + strings.Repeat("7", 64)
+	cluster := &fakeCluster{
+		observationErrors: []error{errors.New("forward drift"), errors.New("not exact LKG")},
+		cas:               []Observation{emergency},
+		health:            []Observation{forward},
+	}
+	result := RepairMonitoredForward(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "verified" || cluster.rollbackDriftChecks != 1 || cluster.applies != 1 {
+		t.Fatalf("reviewed emergency repair result=%+v checks=%d applies=%d", result, cluster.rollbackDriftChecks, cluster.applies)
+	}
+
+	rejected := &fakeCluster{
+		observationErrors:   []error{errors.New("forward drift"), errors.New("not exact LKG")},
+		cas:                 []Observation{emergency},
+		rollbackDriftErrors: []error{errors.New("unreviewed drift")},
+	}
+	result = RepairMonitoredForward(context.Background(), rejected, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "recovery-required" || result.Reason != "continuous-repair-live-identity-unreviewed" || rejected.applies != 0 {
+		t.Fatalf("unreviewed drift reached repair apply: %+v applies=%d", result, rejected.applies)
+	}
+}
+
+func TestContinuousRepairCompensatesAForwardThatFailsHealth(t *testing.T) {
+	plan, _, rendered, prepared, _, lkg, forward := verifiedMonitorFixture(t)
+	cluster := &fakeCluster{
+		observations: []Observation{lkg, lkg},
+		health:       []Observation{forward, lkg},
+		healthErrors: []error{errors.New("forward route unavailable"), nil},
+	}
+	result := RepairMonitoredForward(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	if result.Status != "compensated" || result.Reason != "continuous-repair-forward-unhealthy-lkg-restored" ||
+		result.ForwardApplyCount != 1 || result.LKGApplyCount != 1 || cluster.applies != 2 {
+		t.Fatalf("failed stable repair result=%+v applies=%d", result, cluster.applies)
+	}
+}

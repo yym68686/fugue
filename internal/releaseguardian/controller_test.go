@@ -74,12 +74,18 @@ func (store *fakeStore) SetDesiredToLKG(context.Context, Snapshot) error {
 
 type fakeExecutor struct {
 	rollouts  int
+	repairs   int
 	rollbacks int
 }
 
 func (executor *fakeExecutor) Rollout(context.Context, Snapshot) (ExecutionReceipt, error) {
 	executor.rollouts++
 	return ExecutionReceipt{Status: "verified", Reason: "rollout verified", RecordDigest: otherDigest, ReceiptDigest: testDigest}, nil
+}
+
+func (executor *fakeExecutor) Repair(_ context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
+	executor.repairs++
+	return ExecutionReceipt{Status: "verified", Reason: "stable forward repaired", RecordDigest: snapshot.Record.RecordDigest, ReceiptDigest: testDigest}, nil
 }
 
 func (executor *fakeExecutor) Rollback(context.Context, Snapshot) (ExecutionReceipt, error) {
@@ -139,6 +145,49 @@ func TestWriteModeRollsBackOnlyLocalFailure(t *testing.T) {
 	}
 	if executor.rollouts != 0 || executor.rollbacks != 1 || store.status.State != StateLKGStable || store.status.RollbackReceiptDigest != testDigest {
 		t.Fatalf("executor=%+v status=%+v", executor, store.status)
+	}
+}
+
+func TestWriteModeRepairsCurrentStableRecordInsteadOfWalkingItsOlderLKG(t *testing.T) {
+	now := time.Unix(35, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), "")
+	snapshot.Health.Local.Reason = "Deployment release identity differs from the stable record"
+	snapshot.CurrentRecordDigest = snapshot.Record.RecordDigest
+	snapshot.LastSuccessfulLKG = snapshot.Record.RecordDigest
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.repairs != 1 || executor.rollbacks != 0 || store.lkgCAS != 0 || store.status.State != StateStable ||
+		store.status.CurrentRecordDigest != snapshot.Record.RecordDigest || store.status.TargetRecordDigest != snapshot.Record.RecordDigest {
+		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
+	}
+}
+
+func TestWriteModeRollsBackAStableRecordWithRuntimeFailure(t *testing.T) {
+	now := time.Unix(36, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), "")
+	snapshot.Health.Local.Reason = "workload container restarted or lacks immutable image identity"
+	snapshot.CurrentRecordDigest = snapshot.Record.RecordDigest
+	snapshot.LastSuccessfulLKG = snapshot.Record.RecordDigest
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.repairs != 0 || executor.rollbacks != 1 || store.lkgCAS != 1 || store.status.State != StateLKGStable {
+		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
 	}
 }
 

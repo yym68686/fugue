@@ -58,6 +58,7 @@ type ExecutionReceipt struct {
 
 type Executor interface {
 	Rollout(context.Context, Snapshot) (ExecutionReceipt, error)
+	Repair(context.Context, Snapshot) (ExecutionReceipt, error)
 	Rollback(context.Context, Snapshot) (ExecutionReceipt, error)
 }
 
@@ -181,13 +182,26 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	}
 	if decision.RollbackEligible {
 		status.State = StateRollingBack
-		receipt, executeErr := controller.executor.Rollback(ctx, snapshot)
+		stableDrift := decision.RepairEligible && snapshot.CurrentRecordDigest == snapshot.Desired.RecordDigest &&
+			snapshot.LastSuccessfulLKG == snapshot.CurrentRecordDigest
+		var receipt ExecutionReceipt
+		var executeErr error
+		if stableDrift {
+			receipt, executeErr = controller.executor.Repair(ctx, snapshot)
+		} else {
+			receipt, executeErr = controller.executor.Rollback(ctx, snapshot)
+		}
 		if executeErr != nil {
 			status.State = StateRecoveryRequired
-			status.Reason = "rollback result is unknown: " + executeErr.Error()
+			status.Reason = "component recovery result is unknown: " + executeErr.Error()
 		} else {
 			status.RollbackReceiptDigest = receipt.ReceiptDigest
-			if receipt.Status != "compensated" {
+			if stableDrift && receipt.Status == "verified" {
+				status.State = StateStable
+				status.CurrentRecordDigest = receipt.RecordDigest
+				status.TargetRecordDigest = receipt.RecordDigest
+				status.Reason = receipt.Reason
+			} else if receipt.Status != "compensated" {
 				status.State = StateRecoveryRequired
 				status.Reason = receipt.Reason
 			} else if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {

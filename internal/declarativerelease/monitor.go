@@ -267,6 +267,125 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 	return sealResult(result)
 }
 
+// RepairMonitoredForward reasserts the immutable forward target of a release
+// that was already production-stable before a reviewed external drift. It is
+// deliberately distinct from rollback: an exact predecessor LKG may be used
+// only as a fresh CAS starting point, while the recovery target remains the
+// current stable record. Arbitrary live drift cannot enter this path.
+func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, healthRelease PlanRelease) ExecutionResult {
+	result := ExecutionResult{
+		APIVersion: ExecutionPlanAPIVersion, Kind: ExecutionResultKind,
+		Component: prepared.Component, ConfigSHA: prepared.ConfigSHA,
+		ExecutionPlanDigest: prepared.PlanDigest, Status: "recovery-required", Reason: "continuous-repair-not-started",
+	}
+	release, err := releaseByID(plan, prepared.Component)
+	if err != nil || prepared.Validate(plan, forwardManifest, lkgManifest) != nil || healthRelease.ComponentID != release.ComponentID ||
+		healthRelease.Workload != release.Workload || healthRelease.Concurrency != release.Concurrency {
+		result.Reason = "continuous-repair-plan-invalid"
+		return sealResult(result)
+	}
+	current, forwardErr := cluster.Observe(ctx, healthRelease, prepared.Forward, forwardManifest)
+	if forwardErr == nil && current.Matches(prepared.Forward, healthRelease, false) {
+		final, healthErr := cluster.WaitHealthy(ctx, healthRelease, prepared.Forward, forwardManifest)
+		convergedErr := errors.Join(cluster.Converged(ctx, healthRelease, forwardManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, forwardManifest))
+		result.Final = final
+		if healthErr == nil && convergedErr == nil && final.Matches(prepared.Forward, healthRelease, false) {
+			result.Status = "verified"
+			result.Reason = "continuous-repair-forward-already-converged"
+			return sealResult(result)
+		}
+		result.Reason = "continuous-repair-forward-unproven"
+		result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
+		return sealResult(result)
+	}
+	if forwardErr == nil {
+		forwardErr = errors.New("live workload does not match the stable forward target")
+	}
+
+	// A prior Guardian attempt may already have restored the exact predecessor
+	// LKG. That identity is safe as a fresh prewrite CAS even when its business
+	// health no longer satisfies the current contract. Otherwise only a
+	// reviewed emergency Update-manager drift from the stable forward is
+	// accepted.
+	if prepared.LKG.Present {
+		lkg, lkgErr := cluster.Observe(ctx, healthRelease, prepared.LKG, lkgManifest)
+		if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && cluster.Converged(ctx, healthRelease, lkgManifest) == nil {
+			current = lkg
+			forwardErr = nil
+		}
+	}
+	if forwardErr != nil {
+		cas, casErr := cluster.ObserveCAS(ctx, healthRelease, forwardManifest)
+		if casErr == nil {
+			cas, casErr = cluster.ValidateEmergencyRollbackDrift(ctx, healthRelease, forwardManifest, cas)
+		}
+		if casErr != nil {
+			result.Reason = "continuous-repair-live-identity-unreviewed"
+			return sealResult(result)
+		}
+		current = cas
+	}
+	forwardCAS, bindErr := BindManifestCAS(forwardManifest, current)
+	if bindErr != nil {
+		result.Reason = "continuous-repair-forward-cas-invalid"
+		return sealResult(result)
+	}
+	if err := cluster.DryRunApply(ctx, healthRelease, forwardCAS); err != nil {
+		result.Status = "failed-no-write"
+		result.Reason = "continuous-repair-forward-dry-run-rejected"
+		return sealResult(result)
+	}
+	result.ForwardApplyCount = 1
+	applyErr := cluster.Apply(ctx, healthRelease, prepared.Forward, forwardCAS)
+	final, healthErr := cluster.WaitHealthy(ctx, healthRelease, prepared.Forward, forwardManifest)
+	convergedErr := errors.Join(cluster.Converged(ctx, healthRelease, forwardManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, forwardManifest))
+	result.Final = final
+	if healthErr == nil && convergedErr == nil && final.Matches(prepared.Forward, healthRelease, false) {
+		result.Status = "verified"
+		if applyErr != nil {
+			result.Reason = "continuous-repair-forward-commit-unknown-reconciled"
+		} else {
+			result.Reason = "continuous-stable-forward-repaired"
+		}
+		return sealResult(result)
+	}
+	result.FailureDetail = forwardFailureDetail(healthErr, convergedErr)
+	if !prepared.LKG.Present {
+		result.Reason = "continuous-repair-forward-unproven"
+		return sealResult(result)
+	}
+	rollbackBase := final
+	if !rollbackBase.Present || rollbackBase.UID == "" || !resourceVersionPattern.MatchString(rollbackBase.ResourceVersion) {
+		rollbackBase, err = cluster.ObserveCAS(ctx, healthRelease, forwardManifest)
+		if err != nil {
+			result.Reason = "continuous-repair-rollback-observation-failed"
+			return sealResult(result)
+		}
+	}
+	lkgCAS, bindErr := BindManifestCAS(lkgManifest, rollbackBase)
+	if bindErr != nil {
+		result.Reason = "continuous-repair-lkg-cas-invalid"
+		return sealResult(result)
+	}
+	result.LKGApplyCount = 1
+	rollbackErr := cluster.Apply(ctx, healthRelease, prepared.LKG, lkgCAS)
+	rollbackErr = errors.Join(rollbackErr, cluster.DeleteCreated(ctx, healthRelease, forwardManifest, current, rollbackBase))
+	lkgObservation, lkgHealthErr := cluster.WaitHealthy(ctx, healthRelease, prepared.LKG, lkgManifest)
+	lkgConvergedErr := errors.Join(cluster.Converged(ctx, healthRelease, lkgManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, lkgManifest))
+	result.Final = lkgObservation
+	if lkgHealthErr == nil && lkgConvergedErr == nil && lkgObservation.Matches(prepared.LKG, healthRelease, true) {
+		result.Status = "compensated"
+		if rollbackErr != nil {
+			result.Reason = "continuous-repair-lkg-commit-unknown-reconciled"
+		} else {
+			result.Reason = "continuous-repair-forward-unhealthy-lkg-restored"
+		}
+		return sealResult(result)
+	}
+	result.Reason = "continuous-repair-lkg-unproven"
+	return sealResult(result)
+}
+
 func mustReleaseByID(plan Plan, componentID string) PlanRelease {
 	release, err := releaseByID(plan, componentID)
 	if err != nil {
