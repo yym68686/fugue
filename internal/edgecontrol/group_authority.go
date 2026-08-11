@@ -241,6 +241,16 @@ func (publisher GroupAuthorityPublisher) publishGroup(ctx context.Context, route
 		if failureCode == "" {
 			failureCode = GroupAuthorityFailureCandidateRead
 		}
+		// A worker whose signed bundle expired is deliberately not serving
+		// healthy. That must not deadlock a restarted Control process: refresh
+		// only the exact durable LKG that this authority previously published.
+		// This is not bootstrap eligibility (which remains first-publication
+		// only), and it never compiles current route intent into a new bundle.
+		if failureCode == GroupShadowFailureNoHealthyActive {
+			if refreshed, ok := publisher.refreshExpiredPublishedLKG(ctx, groupID, state, now); ok {
+				return refreshed
+			}
+		}
 		candidateSequence := compiled.LedgerSequence
 		if failureCode == GroupShadowFailureLedgerCAS {
 			candidateSequence = 0
@@ -295,6 +305,49 @@ func (publisher GroupAuthorityPublisher) publishGroup(ctx context.Context, route
 			CandidateLedgerSequence: candidate.Sequence, LastPublishedBundleGeneration: lastPublished, FailureCode: GroupAuthorityFailurePublicationCAS}
 	}
 	return authorityResultFromEntry(appended)
+}
+
+func (publisher GroupAuthorityPublisher) refreshExpiredPublishedLKG(ctx context.Context, groupID string, observed GroupAuthorityState, now time.Time) (GroupAuthorityResult, bool) {
+	if !observed.LedgerExists || !observed.PublishedExists || observed.Published.Bundle.ValidUntil.After(now) {
+		return GroupAuthorityResult{}, false
+	}
+	store, ok := publisher.Store.(GroupRecoveryStore)
+	if !ok {
+		return GroupAuthorityResult{}, false
+	}
+	authority, candidate, recoveryEpoch, err := store.ReadGroupRecoveryTarget(ctx, groupID, observed.Published.Bundle.Generation)
+	if err != nil || !authority.LedgerExists || !authority.PublishedExists ||
+		authority.LedgerHead.Sequence != observed.LedgerHead.Sequence || authority.Published.Digest != observed.Published.Digest ||
+		authority.Published.Bundle.Generation != observed.Published.Bundle.Generation || candidate.Bundle == nil {
+		return GroupAuthorityResult{}, false
+	}
+	bundle := cloneEdgeRouteBundle(*candidate.Bundle)
+	bundle.Issuer = groupAuthorityIssuer
+	bundle.GeneratedAt = now
+	bundle.ValidUntil = time.Time{}
+	bundle.KeyID = ""
+	bundle.Signature = ""
+	bundle.Signatures = nil
+	bundle.PreviousGeneration = ""
+	bundle.Version = groupPublicationVersion(bundle.Generation, authority.LedgerHead.Sequence+1, recoveryEpoch+1)
+	signed, err := publisher.Signer.SignGroupBundle(ctx, groupID, bundle)
+	if err != nil {
+		return GroupAuthorityResult{}, false
+	}
+	entry := GroupAuthorityLedgerEntry{
+		Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusPublished,
+		CandidateLedgerSequence: candidate.Sequence, RouteIntentGeneration: candidate.RouteIntentGeneration,
+		InventoryGeneration: candidate.InventoryGeneration, BundleGeneration: signed.Generation,
+		LastPublishedBundleGeneration: signed.Generation, PublishedBundleDigest: signedGroupBundleDigest(signed),
+		SigningKeyID: signed.KeyID, RecoveryEpoch: recoveryEpoch + 1,
+		RecoveryReason: "automatic persisted group LKG refresh after expiry",
+		Authority:      "edge-control", PublicationEnabled: true, RecordedAt: now,
+	}
+	appended, err := store.RecoverGroupAuthorityCAS(ctx, groupID, authority.LedgerHead.Sequence, recoveryEpoch, entry, signed)
+	if err != nil {
+		return GroupAuthorityResult{}, false
+	}
+	return authorityResultFromEntry(appended), true
 }
 
 func authorityResultFromEntry(entry GroupAuthorityLedgerEntry) GroupAuthorityResult {

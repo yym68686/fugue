@@ -17,6 +17,7 @@ const (
 
 	GroupAuthorityHealthReady       = "ready"
 	GroupAuthorityHealthServingLKG  = "serving_lkg"
+	GroupAuthorityHealthPublication = "publication_ready"
 	GroupAuthorityHealthUnavailable = "unavailable"
 
 	GroupAuthorityLKGCurrent   = "current"
@@ -230,6 +231,7 @@ func (handler *authorityStatusHandler) snapshot(ctx context.Context) AuthoritySt
 
 func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupID string, now time.Time) AuthorityGroupStatus {
 	group := AuthorityGroupStatus{GroupID: groupID, Status: GroupAuthorityHealthUnavailable, LKGState: GroupAuthorityLKGMissing}
+	servingHealthy := false
 	stored, storeErr := handler.store.ReadGroupAuthorityStatus(ctx, groupID)
 	inventoryErr := storeErr
 	if storeErr == nil && !stored.InventoryExists {
@@ -239,6 +241,9 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 		inventory := stored.Inventory
 		group.InventorySequence = inventory.Sequence
 		group.InventoryGeneration = inventory.Generation
+		if view, err := validateGroupInventory(groupID, inventory, true, now); err == nil {
+			servingHealthy = len(view.servingEdgeIDs) >= inventory.ActiveEpoch.MinHealthyInstances
+		}
 	}
 	producerErr := storeErr
 	if producerErr == nil && stored.ProducerExists {
@@ -268,16 +273,21 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 	}
 	if authorityErr == nil && authority.PublishedExists && validateGroupPublishedBundle(groupID, authority.Published) == nil && authority.Published.Bundle.ValidUntil.After(now) {
 		validUntil := authority.Published.Bundle.ValidUntil
-		group.Ready = true
 		group.BundleGeneration = authority.Published.Bundle.Generation
 		group.PublishedBundleDigest = authority.Published.Digest
 		group.RecoveryEpoch = authority.Published.RecoveryEpoch
 		group.BundleValidUntil = &validUntil
-		group.Status = GroupAuthorityHealthReady
+		group.Status = GroupAuthorityHealthPublication
 		group.LKGState = GroupAuthorityLKGCurrent
 		if !authority.LedgerExists || authority.LedgerHead.Status != GroupAuthorityStatusPublished || authority.LedgerHead.BundleGeneration != authority.Published.Bundle.Generation {
-			group.Status = GroupAuthorityHealthServingLKG
 			group.LKGState = GroupAuthorityLKGPreserved
+		}
+		if servingHealthy {
+			group.Ready = true
+			group.Status = GroupAuthorityHealthReady
+			if group.LKGState == GroupAuthorityLKGPreserved {
+				group.Status = GroupAuthorityHealthServingLKG
+			}
 		}
 	}
 	if inventoryErr != nil && !errors.Is(inventoryErr, ErrGroupInventoryNotFound) && group.FailureCode == "" {

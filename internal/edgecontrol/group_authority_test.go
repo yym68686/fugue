@@ -178,12 +178,36 @@ func TestGroupAuthorityConsumesBootstrapEligibilityOnlyForFirstPublicationAndRes
 		t.Fatalf("post-bootstrap failure was not recorded: %+v, %v", failed, err)
 	}
 
+	// Once the first publication exists, bootstrap eligibility is never
+	// consumed again. If that signed bundle later expires, Control refreshes
+	// the exact persisted LKG instead of compiling current intent from a
+	// non-serving worker inventory.
+	now = now.Add(31 * time.Minute)
+	bootstrapInventory.Sequence = 3
+	bootstrapInventory.Generation = ProducerInventoryEnvelopeGeneration(3)
+	bootstrapInventory.ObservedAt = now
+	bootstrapInventory.Instances[0].BootstrapEligibility.ProducerGeneration = 3
+	bootstrapInventory.Instances[0].BootstrapEligibility.ValidUntil = now.Add(time.Minute)
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 2, bootstrapInventory); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err = compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil || compiled.Failed != 1 || compiled.Results[0].FailureCode != GroupShadowFailureNoHealthyActive {
+		t.Fatalf("expired LKG precondition = %+v, %v", compiled, err)
+	}
+	refreshed, err := publisher.Publish(ctx, compiled)
+	if err != nil || refreshed.Published != 1 || refreshed.Failed != 0 {
+		t.Fatalf("persisted LKG refresh = %+v, %v", refreshed, err)
+	}
+
 	restarted, err := OpenPersistentGroupStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	restartedState, err := restarted.ReadGroupAuthority(ctx, groupID)
-	if err != nil || !restartedState.PublishedExists || restartedState.Published.Digest != firstState.Published.Digest {
+	if err != nil || !restartedState.PublishedExists || restartedState.Published.Digest == firstState.Published.Digest ||
+		restartedState.Published.Bundle.Generation != firstState.Published.Bundle.Generation || restartedState.Published.RecoveryEpoch != 1 ||
+		!restartedState.Published.Bundle.ValidUntil.After(now) {
 		t.Fatalf("restarted control lost its signed group LKG: %+v, %v", restartedState, err)
 	}
 	statusHandler, err := NewAuthorityStatusHandler(restarted, []string{groupID}, NewAuthorityRuntimeState(func() time.Time { return now }), func() time.Time { return now })
@@ -192,8 +216,26 @@ func TestGroupAuthorityConsumesBootstrapEligibilityOnlyForFirstPublicationAndRes
 	}
 	recorder := httptest.NewRecorder()
 	statusHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, authorityGroupReadyPath(groupID), nil))
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"serving_lkg"`) || !strings.Contains(recorder.Body.String(), `"ready":true`) {
-		t.Fatalf("restarted control did not serve persisted LKG: status=%d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"status":"publication_ready"`) ||
+		!strings.Contains(recorder.Body.String(), `"ready":false`) {
+		t.Fatalf("refreshed LKG was confused with serving health: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	serving = true
+	bootstrapInventory.Sequence = 4
+	bootstrapInventory.Generation = ProducerInventoryEnvelopeGeneration(4)
+	bootstrapInventory.ObservedAt = now.Add(time.Second)
+	bootstrapInventory.Instances[0].ServingHealthy = &serving
+	bootstrapInventory.Instances[0].EffectiveHealthy = true
+	bootstrapInventory.Instances[0].BootstrapEligibility = nil
+	if err := restarted.StoreGroupInventoryCAS(ctx, groupID, 3, bootstrapInventory); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	statusHandler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, authorityGroupReadyPath(groupID), nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"ready"`) ||
+		!strings.Contains(recorder.Body.String(), `"ready":true`) {
+		t.Fatalf("worker bundle sync did not establish serving health: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
