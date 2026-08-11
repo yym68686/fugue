@@ -56,6 +56,12 @@ func TestRenderManifestsChangesOnlyReleaseIdentityAndSelectedImage(t *testing.T)
 		forwardAnnotations["fugue.pro/release-plan-digest"] != plan.PlanDigest {
 		t.Fatalf("forward pod provenance is incomplete: %+v", forwardAnnotations)
 	}
+	lkgAnnotations := lkg.Items[0]["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]any)
+	for _, key := range []string{"fugue.pro/artifact-image", "fugue.pro/artifact-receipt-digest", "fugue.pro/release-plan-digest"} {
+		if _, exists := lkgAnnotations[key]; exists {
+			t.Fatalf("historical LKG gained forward-only pod provenance %q: %+v", key, lkgAnnotations)
+		}
+	}
 	for label, set := range map[string]ResourceSet{"forward": forward, "lkg": lkg} {
 		labels := set.Items[0]["metadata"].(map[string]any)["labels"].(map[string]any)
 		if labels["app.kubernetes.io/managed-by"] != "Helm" {

@@ -156,7 +156,7 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 	}
 	forward := deepCopyResourceSet(base)
 	lkg := ResourceSet{APIVersion: ResourceSetAPIVersion, Kind: ResourceSetKind}
-	if err := patchResourceSet(&forward, *release, receipt.Repository+"@"+receipt.TopDigest, plan.HeadSHA, plan.HeadSHA, plan.HeadSHA, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
+	if err := patchResourceSet(&forward, *release, receipt.Repository+"@"+receipt.TopDigest, plan.HeadSHA, plan.HeadSHA, plan.HeadSHA, plan.PlanDigest, receipt.ReceiptDigest, true); err != nil {
 		return RenderedManifests{}, err
 	}
 	if err := validateImmutableResourceSetImages(forward); err != nil {
@@ -176,7 +176,7 @@ func RenderManifests(plan Plan, componentID string, receipt ArtifactReceipt, man
 		if !lkgResourceIdentitiesSubset(forward, lkg) {
 			return RenderedManifests{}, errors.New("LKG resource identities are not a subset of forward")
 		}
-		if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest); err != nil {
+		if err := patchResourceSet(&lkg, *release, receipt.Repository+"@"+release.ExpectedPreviousImageDigest, release.ExpectedPreviousConfigSHA, release.ExpectedPreviousManifestSHA, release.ExpectedPreviousOCIRevision, plan.PlanDigest, receipt.ReceiptDigest, false); err != nil {
 			return RenderedManifests{}, err
 		}
 		if err := validateImmutableResourceSetImages(lkg); err != nil {
@@ -339,7 +339,7 @@ func decodeManifest(reader io.Reader) (map[string]any, error) {
 	return value, nil
 }
 
-func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string) error {
+func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest string, bindPodArtifactProvenance bool) error {
 	if _, err := set.Primary(release.Workload); err != nil {
 		return err
 	}
@@ -369,7 +369,7 @@ func patchResourceSet(set *ResourceSet, release PlanRelease, image, configSHA, m
 		}
 		workloadKey := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name
 		if _, exists := patchedWorkloads[workloadKey]; !exists {
-			if err := patchWorkloadIdentity(item, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest, image); err != nil {
+			if err := patchWorkloadIdentity(item, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest, image, bindPodArtifactProvenance); err != nil {
 				return err
 			}
 			patchedWorkloads[workloadKey] = struct{}{}
@@ -392,7 +392,7 @@ func validateManifestIdentity(value map[string]any, workload Workload) error {
 	return nil
 }
 
-func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest, image string) error {
+func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevision, planDigest, receiptDigest, image string, bindPodArtifactProvenance bool) error {
 	metadata, err := objectField(value, "metadata")
 	if err != nil {
 		return err
@@ -417,9 +417,11 @@ func patchWorkloadIdentity(value map[string]any, configSHA, manifestSHA, ociRevi
 	templateAnnotations["fugue.pro/source-commit"] = manifestSHA
 	templateAnnotations["fugue.pro/oci-revision"] = ociRevision
 	templateAnnotations["fugue.pro/production-config-sha"] = configSHA
-	templateAnnotations["fugue.pro/release-plan-digest"] = planDigest
-	templateAnnotations["fugue.pro/artifact-receipt-digest"] = receiptDigest
-	templateAnnotations["fugue.pro/artifact-image"] = image
+	if bindPodArtifactProvenance {
+		templateAnnotations["fugue.pro/release-plan-digest"] = planDigest
+		templateAnnotations["fugue.pro/artifact-receipt-digest"] = receiptDigest
+		templateAnnotations["fugue.pro/artifact-image"] = image
+	}
 	return nil
 }
 
