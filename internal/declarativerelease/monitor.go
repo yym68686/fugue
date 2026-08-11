@@ -186,6 +186,24 @@ func sanitizeMonitorReason(reason string) string {
 	return reason
 }
 
+// monitorConvergenceChecker keeps continuous-monitor convergence deliberately
+// narrower than ordinary release convergence. Monitor records carry immutable
+// runtime state, while their transaction-evidence annotations may legitimately
+// describe the failed forward atom until the stable pointer CAS completes.
+// A production adapter must opt in explicitly; falling back to the ordinary
+// comparator would recreate the evidence/runtime coupling this path removes.
+type monitorConvergenceChecker interface {
+	MonitorConverged(context.Context, PlanRelease, []byte) error
+}
+
+func requireMonitorConverged(ctx context.Context, cluster Cluster, release PlanRelease, manifest []byte) error {
+	checker, ok := cluster.(monitorConvergenceChecker)
+	if !ok {
+		return errors.New("cluster monitor convergence verifier is unavailable")
+	}
+	return checker.MonitorConverged(ctx, release, manifest)
+}
+
 // RestoreMonitoredLKG performs one component-scoped rollback from a verified
 // forward record. It reuses the existing resource CAS, component transition,
 // health, ownership, and LKG semantics; it cannot address another component.
@@ -220,7 +238,7 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 		} else {
 			if prepared.LKG.Present {
 				lkg, lkgErr := cluster.WaitHealthy(ctx, healthRelease, prepared.LKG, lkgManifest)
-				if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && cluster.Converged(ctx, healthRelease, lkgManifest) == nil {
+				if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && requireMonitorConverged(ctx, cluster, healthRelease, lkgManifest) == nil {
 					result.Status = "compensated"
 					result.Reason = "continuous-rollback-lkg-already-restored"
 					result.Final = lkg
@@ -248,7 +266,7 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 	var healthErr, convergedErr error
 	if prepared.LKG.Present {
 		final, healthErr = cluster.WaitHealthy(ctx, healthRelease, prepared.LKG, lkgManifest)
-		convergedErr = errors.Join(cluster.Converged(ctx, healthRelease, lkgManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, lkgManifest))
+		convergedErr = errors.Join(requireMonitorConverged(ctx, cluster, healthRelease, lkgManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, lkgManifest))
 	} else {
 		final, healthErr = cluster.Observe(ctx, healthRelease, prepared.LKG, forwardManifest)
 	}
@@ -287,7 +305,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 	current, forwardErr := cluster.Observe(ctx, healthRelease, prepared.Forward, forwardManifest)
 	if forwardErr == nil && current.Matches(prepared.Forward, healthRelease, false) {
 		final, healthErr := cluster.WaitHealthy(ctx, healthRelease, prepared.Forward, forwardManifest)
-		convergedErr := errors.Join(cluster.Converged(ctx, healthRelease, forwardManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, forwardManifest))
+		convergedErr := errors.Join(requireMonitorConverged(ctx, cluster, healthRelease, forwardManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, forwardManifest))
 		result.Final = final
 		if healthErr == nil && convergedErr == nil && final.Matches(prepared.Forward, healthRelease, false) {
 			result.Status = "verified"
@@ -312,7 +330,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 		if lkgErr != nil && cluster.VerifyTarget(ctx, prepared.LKG) == nil {
 			lkg, lkgErr = cluster.ObserveDegraded(ctx, healthRelease, lkgManifest)
 		}
-		if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && cluster.Converged(ctx, healthRelease, lkgManifest) == nil {
+		if lkgErr == nil && lkg.Matches(prepared.LKG, healthRelease, true) && requireMonitorConverged(ctx, cluster, healthRelease, lkgManifest) == nil {
 			current = lkg
 			forwardErr = nil
 		}
@@ -341,7 +359,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 	result.ForwardApplyCount = 1
 	applyErr := cluster.Apply(ctx, healthRelease, prepared.Forward, forwardCAS)
 	final, healthErr := cluster.WaitHealthy(ctx, healthRelease, prepared.Forward, forwardManifest)
-	convergedErr := errors.Join(cluster.Converged(ctx, healthRelease, forwardManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, forwardManifest))
+	convergedErr := errors.Join(requireMonitorConverged(ctx, cluster, healthRelease, forwardManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, forwardManifest))
 	result.Final = final
 	if healthErr == nil && convergedErr == nil && final.Matches(prepared.Forward, healthRelease, false) {
 		result.Status = "verified"
@@ -374,7 +392,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 	rollbackErr := cluster.Apply(ctx, healthRelease, prepared.LKG, lkgCAS)
 	rollbackErr = errors.Join(rollbackErr, cluster.DeleteCreated(ctx, healthRelease, forwardManifest, current, rollbackBase))
 	lkgObservation, lkgHealthErr := cluster.WaitHealthy(ctx, healthRelease, prepared.LKG, lkgManifest)
-	lkgConvergedErr := errors.Join(cluster.Converged(ctx, healthRelease, lkgManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, lkgManifest))
+	lkgConvergedErr := errors.Join(requireMonitorConverged(ctx, cluster, healthRelease, lkgManifest), cluster.VerifyOwnershipConverged(ctx, healthRelease, lkgManifest))
 	result.Final = lkgObservation
 	if lkgHealthErr == nil && lkgConvergedErr == nil && lkgObservation.Matches(prepared.LKG, healthRelease, true) {
 		result.Status = "compensated"

@@ -72,7 +72,7 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 	lkgMetadataRestored := result.Status == "compensated"
 	if result.Status == "recovery-required" && result.Reason == "continuous-repair-lkg-unproven" && result.LKGApplyCount == 1 &&
 		result.Final.Matches(currentBundle.Prepared.LKG, release, true) &&
-		errors.Join(cluster.Converged(finalizeCtx, release, currentBundle.LKG), cluster.VerifyOwnershipConverged(finalizeCtx, release, currentBundle.LKG)) == nil {
+		errors.Join(cluster.MonitorConverged(finalizeCtx, release, currentBundle.LKG), cluster.VerifyOwnershipConverged(finalizeCtx, release, currentBundle.LKG)) == nil {
 		// The predecessor can be byte-exact and ownership-converged while its
 		// business health remains degraded.  Persist that truthful runtime
 		// identity so a reviewed degraded-predecessor successor can repair it;

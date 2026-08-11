@@ -29,6 +29,8 @@ type fakeCluster struct {
 	healthPrewrite      []bool
 	converged           [][]byte
 	convergedErrors     []error
+	monitorConverged    [][]byte
+	monitorErrors       []error
 	rollbackDriftChecks int
 	rollbackDriftErrors []error
 }
@@ -134,6 +136,16 @@ func (fake *fakeCluster) Converged(_ context.Context, _ PlanRelease, manifest []
 	if len(fake.convergedErrors) > 0 {
 		err := fake.convergedErrors[0]
 		fake.convergedErrors = fake.convergedErrors[1:]
+		return err
+	}
+	return nil
+}
+
+func (fake *fakeCluster) MonitorConverged(_ context.Context, _ PlanRelease, manifest []byte) error {
+	fake.monitorConverged = append(fake.monitorConverged, append([]byte(nil), manifest...))
+	if len(fake.monitorErrors) > 0 {
+		err := fake.monitorErrors[0]
+		fake.monitorErrors = fake.monitorErrors[1:]
 		return err
 	}
 	return nil

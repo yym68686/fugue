@@ -183,11 +183,13 @@ func TestContinuousRepairReassertsForwardFromAnExactButUnhealthyPredecessorLKG(t
 		observationErrors: []error{errors.New("forward is not live"), errors.New("LKG route is unhealthy")},
 		degraded:          []Observation{lkg},
 		health:            []Observation{forward},
+		convergedErrors:   []error{errors.New("ordinary convergence must not gate monitor evidence")},
 	}
 	result := RepairMonitoredForward(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
 	if result.Status != "verified" || result.Reason != "continuous-stable-forward-repaired" ||
-		result.ForwardApplyCount != 1 || cluster.applies != 1 || len(cluster.verifiedTargets) != 1 || cluster.verifiedTargets[0] != prepared.LKG {
-		t.Fatalf("unhealthy exact LKG repair result=%+v applies=%d verified=%+v", result, cluster.applies, cluster.verifiedTargets)
+		result.ForwardApplyCount != 1 || cluster.applies != 1 || len(cluster.verifiedTargets) != 1 || cluster.verifiedTargets[0] != prepared.LKG ||
+		len(cluster.converged) != 0 || len(cluster.monitorConverged) == 0 {
+		t.Fatalf("unhealthy exact LKG repair result=%+v applies=%d verified=%+v ordinary=%d monitor=%d", result, cluster.applies, cluster.verifiedTargets, len(cluster.converged), len(cluster.monitorConverged))
 	}
 }
 

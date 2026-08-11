@@ -1247,7 +1247,7 @@ func (cluster *kubectlCluster) CheckHealthyOnce(ctx context.Context, release dec
 		return observation, err
 	}
 	observation.HealthDigest = digestJoin(observation.HealthDigest, probeDigest)
-	if err := cluster.monitorConverged(ctx, release, manifest); err != nil {
+	if err := cluster.MonitorConverged(ctx, release, manifest); err != nil {
 		return observation, err
 	}
 	boundManifest, err := declarativerelease.BindManifestCAS(manifest, observation)
@@ -1302,7 +1302,7 @@ func (cluster *kubectlCluster) convergeMonitoredEmergencyOwnership(ctx context.C
 	return nil
 }
 
-func (cluster *kubectlCluster) monitorConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+func (cluster *kubectlCluster) MonitorConverged(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
 	identities, err := declarativerelease.ResourceSetIdentities(manifest)
 	if err != nil {
 		return err
