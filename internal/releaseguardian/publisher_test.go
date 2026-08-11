@@ -35,7 +35,7 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 		ObjectMeta: metav1.ObjectMeta{Name: "edge-control-de", Namespace: "fugue-system", Annotations: map[string]string{"fugue.pro/production-config-sha": stableTarget.ConfigSHA}, Generation: 4},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge-control-de"}},
-			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"fugue.pro/oci-revision": stableTarget.OCIRevision}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "edge-control", Image: stableTarget.ImageRef}}}},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "edge-control-de"}, Annotations: map[string]string{"fugue.pro/oci-revision": stableTarget.OCIRevision}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "edge-control", Image: stableTarget.ImageRef}}}},
 		},
 		Status: appsv1.DeploymentStatus{ObservedGeneration: 4, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
 	}

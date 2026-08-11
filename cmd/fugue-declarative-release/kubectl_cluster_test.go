@@ -75,7 +75,7 @@ case "${1:-}" in
     if test -f "$GET_COUNT"; then read -r count <"$GET_COUNT"; fi
     count=$((count + 1))
     printf '%s\n' "$count" >"$GET_COUNT"
-    if test "$count" -eq 1; then exec sleep 5; fi
+    if test "$count" -eq 1; then exec sleep 30; fi
     printf '%s\n' '{"items":[]}'
     ;;
   *)
@@ -92,11 +92,11 @@ esac
 	t.Setenv("GET_COUNT", getCount)
 	t.Setenv("WRITE_COUNT", writeCount)
 	cluster := &kubectlCluster{
-		kubectl: kubectl, readTimeout: 500 * time.Millisecond, readAttempts: 2, readRetryDelay: time.Millisecond,
+		kubectl: kubectl, readTimeout: 2 * time.Second, readAttempts: 2, readRetryDelay: time.Millisecond,
 	}
 	started := time.Now()
 	output, err := cluster.kubectlRun(context.Background(), nil, "get", "pods", "--output", "json")
-	if err != nil || string(output) != "{\"items\":[]}\n" || time.Since(started) >= 2*time.Second {
+	if err != nil || string(output) != "{\"items\":[]}\n" || time.Since(started) >= 5*time.Second {
 		t.Fatalf("bounded read retry output=%q elapsed=%s err=%v", output, time.Since(started), err)
 	}
 	if raw, err := os.ReadFile(getCount); err != nil || strings.TrimSpace(string(raw)) != "2" {

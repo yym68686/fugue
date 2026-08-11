@@ -155,3 +155,53 @@ func TestLocalHealthCoversEveryDeclaredDaemonSetArtifact(t *testing.T) {
 		t.Fatalf("unhealthy auxiliary worker was not attributed: %+v", health)
 	}
 }
+
+func TestLocalHealthUsesPodTemplateLabelsForBroadDeploymentSelector(t *testing.T) {
+	now := time.Unix(600, 0).UTC()
+	image := "ghcr.io/example/fugue-api@" + testDigest
+	target := declarativerelease.TargetIdentity{ConfigSHA: testSHA, ManifestSHA: testSHA, OCIRevision: testSHA, ImageRef: image}
+	release := declarativerelease.PlanRelease{
+		ComponentID: "api",
+		Workload: declarativerelease.Workload{
+			Kind: "Deployment", Namespace: "fugue-system", Name: "fugue-fugue-api", Container: "api",
+		},
+		Health: []declarativerelease.HealthProbe{{Type: "deployment", Name: "fugue-fugue-api"}},
+	}
+	broad := map[string]string{"app.kubernetes.io/instance": "fugue", "app.kubernetes.io/name": "fugue"}
+	apiLabels := map[string]string{"app.kubernetes.io/component": "api", "app.kubernetes.io/instance": "fugue", "app.kubernetes.io/name": "fugue"}
+	controllerLabels := map[string]string{"app.kubernetes.io/component": "controller", "app.kubernetes.io/instance": "fugue", "app.kubernetes.io/name": "fugue"}
+	readyPod := func(name string, podLabels map[string]string, container string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "fugue-system", Labels: podLabels},
+			Status: corev1.PodStatus{
+				Conditions:        []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				ContainerStatuses: []corev1.ContainerStatus{{Name: container, ImageID: image, Ready: true}},
+			},
+		}
+	}
+	replicas := int32(2)
+	client := fake.NewSimpleClientset(
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "fugue-fugue-api", Namespace: "fugue-system", Generation: 1, Annotations: map[string]string{"fugue.pro/production-config-sha": testSHA}},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: broad},
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: apiLabels, Annotations: map[string]string{"fugue.pro/oci-revision": testSHA}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "api", Image: image}}}},
+			},
+			Status: appsv1.DeploymentStatus{ObservedGeneration: 1, Replicas: 2, UpdatedReplicas: 2, ReadyReplicas: 2, AvailableReplicas: 2},
+		},
+		readyPod("api-1", apiLabels, "api"),
+		readyPod("api-2", apiLabels, "api"),
+		readyPod("controller-1", controllerLabels, "controller"),
+	)
+	store := &KubeStore{client: client}
+	if health := store.localHealth(context.Background(), release, target, now); health.State != HealthHealthy {
+		t.Fatalf("broad workload selector included another component: %+v", health)
+	}
+	if _, err := client.CoreV1().Pods("fugue-system").Create(context.Background(), readyPod("api-collision", apiLabels, "api"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	health := store.localHealth(context.Background(), release, target, now)
+	if health.State != HealthDegraded || !strings.Contains(health.Reason, "inventory") {
+		t.Fatalf("same-template label collision was not rejected: %+v", health)
+	}
+}

@@ -332,9 +332,9 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		if err := workloadIdentityMatchesDeployment(workload, release, target); err != nil {
 			return degraded(err.Error())
 		}
-		selector, err = metav1.LabelSelectorAsSelector(workload.Spec.Selector)
+		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
-			return degraded("Deployment selector is invalid")
+			return degraded("Deployment Pod template labels are invalid")
 		}
 		desired = derefReplicas(workload.Spec.Replicas)
 		updated, ready, available = workload.Status.UpdatedReplicas, workload.Status.ReadyReplicas, workload.Status.AvailableReplicas
@@ -347,9 +347,9 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		if err := workloadIdentityMatchesDaemonSet(workload, release, target); err != nil {
 			return degraded(err.Error())
 		}
-		selector, err = metav1.LabelSelectorAsSelector(workload.Spec.Selector)
+		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
-			return degraded("DaemonSet selector is invalid")
+			return degraded("DaemonSet Pod template labels are invalid")
 		}
 		desired, updated, ready, available = workload.Status.DesiredNumberScheduled, workload.Status.UpdatedNumberScheduled, workload.Status.NumberReady, workload.Status.NumberAvailable
 		generation, observed = workload.Generation, workload.Status.ObservedGeneration
@@ -437,9 +437,9 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		if err := workloadReleaseIdentity(release, target, "Deployment", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
 			return workloadHealthEvidence{}, err
 		}
-		selector, err = metav1.LabelSelectorAsSelector(workload.Spec.Selector)
+		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
-			return workloadHealthEvidence{}, fmt.Errorf("health Deployment/%s selector is invalid", name)
+			return workloadHealthEvidence{}, fmt.Errorf("health Deployment/%s Pod template labels are invalid", name)
 		}
 		desired, updated, ready, available = derefReplicas(workload.Spec.Replicas), workload.Status.UpdatedReplicas, workload.Status.ReadyReplicas, workload.Status.AvailableReplicas
 		generation, observed, podNamespace = workload.Generation, workload.Status.ObservedGeneration, workload.Namespace
@@ -451,9 +451,9 @@ func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarati
 		if err := workloadReleaseIdentity(release, target, "DaemonSet", name, workload.Annotations, workload.Spec.Template.Annotations, workload.Spec.Template.Spec.Containers, workload.Spec.Template.Spec.InitContainers); err != nil {
 			return workloadHealthEvidence{}, err
 		}
-		selector, err = metav1.LabelSelectorAsSelector(workload.Spec.Selector)
+		selector, err = podTemplateLabelSelector(workload.Spec.Template.Labels)
 		if err != nil {
-			return workloadHealthEvidence{}, fmt.Errorf("health DaemonSet/%s selector is invalid", name)
+			return workloadHealthEvidence{}, fmt.Errorf("health DaemonSet/%s Pod template labels are invalid", name)
 		}
 		desired, updated, ready, available = workload.Status.DesiredNumberScheduled, workload.Status.UpdatedNumberScheduled, workload.Status.NumberReady, workload.Status.NumberAvailable
 		generation, observed, podNamespace = workload.Generation, workload.Status.ObservedGeneration, workload.Namespace
@@ -500,6 +500,13 @@ func workloadReleaseIdentity(release declarativerelease.PlanRelease, target decl
 		}
 	}
 	return nil
+}
+
+func podTemplateLabelSelector(templateLabels map[string]string) (labels.Selector, error) {
+	if len(templateLabels) == 0 {
+		return nil, errors.New("Pod template labels are empty")
+	}
+	return labels.ValidatedSelectorFromSet(labels.Set(templateLabels))
 }
 
 func artifactTargetContainers(release declarativerelease.PlanRelease, kind, name string) map[string]string {
