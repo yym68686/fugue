@@ -18,6 +18,12 @@ func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnaps
 		if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown {
 			return Decision{State: StateRolloutPending, Reason: joinedReason("desired release is waiting for complete health evidence", health)}
 		}
+		if health.Local.State == HealthDegraded {
+			return Decision{State: StateRecoveryRequired, Reason: joinedReason("desired rollout is fenced because the current component is degraded", health)}
+		}
+		if health.Dependency.State == HealthDegraded || health.Route.State == HealthDegraded {
+			return Decision{State: StateDegraded, Reason: joinedReason("desired rollout is fenced because the current release dependencies are degraded", health)}
+		}
 		return Decision{State: StateRolloutPending, Reason: "desired release differs from the current component record", RolloutEligible: true}
 	}
 	if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown {

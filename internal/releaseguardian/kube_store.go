@@ -75,6 +75,7 @@ func (store *KubeStore) Keys() []Key {
 
 type storedRelease struct {
 	record              ReleaseRecord
+	currentRecord       ReleaseRecord
 	desired             DesiredRelease
 	currentRecordDigest string
 	bundle              ExecutionBundle
@@ -82,6 +83,7 @@ type storedRelease struct {
 	currentMonitorData  map[string]string
 	desiredRV           string
 	statusRV            string
+	previousStatus      *ReleaseStatus
 	managed             bool
 	lkgMonitorDigest    string
 }
@@ -98,13 +100,14 @@ func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
 	now := store.now().UTC()
 	local := store.localHealth(ctx, stored.currentBundle.Release, stored.currentBundle.Prepared.Forward, now)
 	dependency := store.dependencyHealth(ctx, target, now)
-	route := store.routeHealth(ctx, target, stored.record.RecordDigest, now)
+	route := store.routeHealth(ctx, target, stored.currentRecordDigest, now)
 	return Snapshot{
 		Key: key, Record: stored.record, Desired: stored.desired,
 		CurrentRecordDigest: stored.currentRecordDigest, LastSuccessfulLKG: stored.currentRecordDigest,
 		Health:                HealthSnapshot{Local: local, Dependency: dependency, Route: route},
 		StatusResourceVersion: stored.statusRV, DesiredResourceVersion: stored.desiredRV,
-		Bundle: stored.bundle, CurrentMonitorData: stored.currentMonitorData,
+		PreviousStatus: stored.previousStatus,
+		Bundle:         stored.bundle, CurrentMonitorData: stored.currentMonitorData,
 		LKGMonitorRecordDigest: stored.lkgMonitorDigest, Managed: stored.managed,
 	}, nil
 }
@@ -118,7 +121,7 @@ func (store *KubeStore) LoadRecord(ctx context.Context, key Key) (ReleaseRecord,
 	if err != nil {
 		return ReleaseRecord{}, err
 	}
-	return stored.record, nil
+	return stored.currentRecord, nil
 }
 
 // LoadStableLKG returns the byte-exact forward manifest from the immutable
@@ -253,13 +256,24 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	} else if !apierrors.IsNotFound(desiredErr) {
 		return storedRelease{}, desiredErr
 	}
-	currentRecordDigest, currentBundle := stableRecord.RecordDigest, stableBundle
+	currentRecord, currentBundle := stableRecord, stableBundle
 	if stableMatchesRecord(monitor, artifact, selectedRecord) {
-		currentRecordDigest, currentBundle = selectedRecord.RecordDigest, selectedBundle
+		currentRecord, currentBundle = selectedRecord, selectedBundle
 	}
+	currentRecordDigest := currentRecord.RecordDigest
 	statusRV := ""
+	var previousStatus *ReleaseStatus
 	if status, statusErr := configMaps.Get(ctx, statusName(target.Key), metav1.GetOptions{}); statusErr == nil {
 		statusRV = status.ResourceVersion
+		var decoded ReleaseStatus
+		if err := decodeStrict([]byte(status.Data["status.json"]), &decoded); err != nil || decoded.Key() != target.Key {
+			return storedRelease{}, errors.New("release status payload is invalid")
+		}
+		observedAt, err := time.Parse(time.RFC3339Nano, decoded.ObservedAt)
+		if err != nil || decoded.Validate(observedAt) != nil {
+			return storedRelease{}, errors.New("release status digest binding is invalid")
+		}
+		previousStatus = &decoded
 	} else if !apierrors.IsNotFound(statusErr) {
 		return storedRelease{}, statusErr
 	}
@@ -268,9 +282,9 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 		monitorData[name] = value
 	}
 	return storedRelease{
-		record: selectedRecord, desired: desired, currentRecordDigest: currentRecordDigest,
+		record: selectedRecord, currentRecord: currentRecord, desired: desired, currentRecordDigest: currentRecordDigest,
 		bundle: selectedBundle, currentBundle: currentBundle, currentMonitorData: monitorData,
-		desiredRV: desiredRV, statusRV: statusRV, managed: managed, lkgMonitorDigest: lkgMonitorDigest,
+		desiredRV: desiredRV, statusRV: statusRV, previousStatus: previousStatus, managed: managed, lkgMonitorDigest: lkgMonitorDigest,
 	}, nil
 }
 

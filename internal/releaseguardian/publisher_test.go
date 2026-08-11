@@ -91,6 +91,10 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	if desired.RecordDigest != record.RecordDigest || desired.Generation != 2 || record.LKGRecordDigest != stableGuardian.RecordDigest {
 		t.Fatalf("record=%+v desired=%+v", record, desired)
 	}
+	currentRecord, err := store.LoadRecord(context.Background(), key)
+	if err != nil || currentRecord != stableGuardian {
+		t.Fatalf("public route canary was rebound from current LKG to an inactive candidate: record=%+v err=%v", currentRecord, err)
+	}
 	created, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), releaseRecordName(key, record.RecordDigest), metav1.GetOptions{})
 	if err != nil || created.Immutable == nil || !*created.Immutable || created.Data["lkg-monitor-record-digest"] != stableRecord.RecordDigest {
 		t.Fatalf("immutable candidate=%+v err=%v", created, err)

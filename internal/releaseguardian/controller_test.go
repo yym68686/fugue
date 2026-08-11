@@ -54,6 +54,22 @@ func TestClassifySeparatesLocalDependencyAndRouteFailures(t *testing.T) {
 		!strings.Contains(waiting.Reason, "waiting for complete health evidence") {
 		t.Fatalf("waiting decision=%+v", waiting)
 	}
+	for _, test := range []struct {
+		name   string
+		health HealthSnapshot
+		state  ReleaseState
+	}{
+		{"local degraded", testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), StateRecoveryRequired},
+		{"dependency degraded", testHealth(HealthHealthy, HealthDegraded, HealthHealthy, now), StateDegraded},
+		{"route degraded", testHealth(HealthHealthy, HealthHealthy, HealthDegraded, now), StateDegraded},
+	} {
+		t.Run("pending "+test.name, func(t *testing.T) {
+			decision := Classify(testDigest, otherDigest, test.health)
+			if decision.State != test.state || decision.RolloutEligible || decision.RollbackEligible {
+				t.Fatalf("decision=%+v", decision)
+			}
+		})
+	}
 }
 
 type fakeStore struct {
@@ -128,8 +144,67 @@ func TestShadowNeverExecutesProductionMutation(t *testing.T) {
 	if executor.rollouts != 0 || executor.rollbacks != 0 {
 		t.Fatalf("shadow mutations rollout=%d rollback=%d", executor.rollouts, executor.rollbacks)
 	}
-	if store.status.State != StateRolloutPending || !strings.HasPrefix(store.status.Reason, "shadow: ") {
+	if store.status.State != StateRecoveryRequired || !strings.HasPrefix(store.status.Reason, "shadow: ") {
 		t.Fatalf("status=%+v", store.status)
+	}
+}
+
+func TestWriteModeReconcilesUnprovenLKGBeforeRetryingCandidate(t *testing.T) {
+	now := time.Unix(25, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), otherDigest)
+	previous, err := (ReleaseStatus{
+		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: StateRecoveryRequired,
+		CurrentRecordDigest: otherDigest, TargetRecordDigest: snapshot.Record.RecordDigest,
+		LastSuccessfulLKG: otherDigest, Health: snapshot.Health, Reason: "lkg-unproven: service probe failed",
+		RolloutReceiptDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.PreviousStatus = &previous
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 0 || executor.rollbacks != 0 || store.lkgCAS != 1 || store.status.State != StateLKGStable ||
+		store.status.CurrentRecordDigest != otherDigest || store.status.TargetRecordDigest != otherDigest ||
+		store.status.RolloutReceiptDigest != testDigest {
+		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
+	}
+}
+
+func TestWriteModeFencesUnprovenLKGUntilFreshHealth(t *testing.T) {
+	now := time.Unix(26, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), otherDigest)
+	previous, err := (ReleaseStatus{
+		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: StateRecoveryRequired,
+		CurrentRecordDigest: otherDigest, TargetRecordDigest: snapshot.Record.RecordDigest,
+		LastSuccessfulLKG: otherDigest, Health: snapshot.Health, Reason: "lkg-unproven",
+		RolloutReceiptDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.PreviousStatus = &previous
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 0 || executor.rollbacks != 0 || store.lkgCAS != 0 || store.status.State != StateRecoveryRequired ||
+		!strings.Contains(store.status.Reason, "fenced") {
+		t.Fatalf("executor=%+v store=%+v status=%+v", executor, store, store.status)
 	}
 }
 

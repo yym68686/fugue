@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
@@ -25,6 +26,7 @@ type Snapshot struct {
 	Health                 HealthSnapshot
 	StatusResourceVersion  string
 	DesiredResourceVersion string
+	PreviousStatus         *ReleaseStatus
 	Bundle                 ExecutionBundle
 	CurrentMonitorData     map[string]string
 	LKGMonitorRecordDigest string
@@ -138,6 +140,26 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health,
 		Reason: decision.Reason, ObservedAt: now.Format(time.RFC3339Nano),
 	}
+	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKGRecovery(snapshot) {
+		status.State = StateRecoveryRequired
+		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
+		status.Reason = joinedReason("failed candidate is fenced while LKG health awaits complete evidence", snapshot.Health)
+		if allLayersHealthy(snapshot.Health) {
+			if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
+				status.Reason = "LKG is healthy but failed-candidate DesiredRelease rollback CAS failed: " + err.Error()
+			} else {
+				status.State = StateLKGStable
+				status.CurrentRecordDigest = snapshot.CurrentRecordDigest
+				status.TargetRecordDigest = snapshot.CurrentRecordDigest
+				status.Reason = "LKG health is verified and the failed candidate DesiredRelease was rolled back by CAS"
+			}
+		}
+		sealed, err := status.Seal()
+		if err != nil {
+			return err
+		}
+		return controller.store.UpdateStatus(ctx, snapshot, sealed)
+	}
 	if controller.mode == ModeShadow || !snapshot.Managed {
 		prefix := "shadow: "
 		if controller.mode == ModeWrite && !snapshot.Managed {
@@ -225,4 +247,21 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		return err
 	}
 	return controller.store.UpdateStatus(ctx, snapshot, sealed)
+}
+
+func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {
+	previous := snapshot.PreviousStatus
+	if previous == nil || previous.State != StateRecoveryRequired || previous.Key() != snapshot.Key ||
+		previous.RolloutReceiptDigest == "" || snapshot.CurrentRecordDigest == snapshot.Desired.RecordDigest ||
+		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || snapshot.CurrentRecordDigest != snapshot.Record.LKGRecordDigest ||
+		previous.CurrentRecordDigest != snapshot.CurrentRecordDigest || previous.TargetRecordDigest != snapshot.Desired.RecordDigest ||
+		previous.LastSuccessfulLKG != snapshot.CurrentRecordDigest {
+		return false
+	}
+	reason := previous.Reason
+	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ")
+}
+
+func allLayersHealthy(health HealthSnapshot) bool {
+	return health.Local.State == HealthHealthy && health.Dependency.State == HealthHealthy && health.Route.State == HealthHealthy
 }
