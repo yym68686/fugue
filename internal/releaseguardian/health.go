@@ -13,11 +13,14 @@ type Decision struct {
 // route-only failures remain visible but cannot roll back a locally healthy
 // component. Unknown evidence always fails closed.
 func Classify(currentRecordDigest, targetRecordDigest string, health HealthSnapshot) Decision {
+	if currentRecordDigest != targetRecordDigest {
+		if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown {
+			return Decision{State: StateRolloutPending, Reason: joinedReason("desired release is waiting for complete health evidence", health)}
+		}
+		return Decision{State: StateRolloutPending, Reason: "desired release differs from the current component record", RolloutEligible: true}
+	}
 	if health.Local.State == HealthUnknown || health.Dependency.State == HealthUnknown || health.Route.State == HealthUnknown {
 		return Decision{State: StateRecoveryRequired, Reason: joinedReason("health evidence is incomplete", health)}
-	}
-	if currentRecordDigest != targetRecordDigest {
-		return Decision{State: StateRolloutPending, Reason: "desired release differs from the current component record", RolloutEligible: true}
 	}
 	if health.Local.State == HealthDegraded {
 		return Decision{State: StateRollbackPending, Reason: joinedReason("component-local health is degraded", health), RollbackEligible: true}

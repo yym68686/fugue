@@ -49,6 +49,11 @@ func TestClassifySeparatesLocalDependencyAndRouteFailures(t *testing.T) {
 	if rollout.State != StateRolloutPending || !rollout.RolloutEligible || rollout.RollbackEligible {
 		t.Fatalf("rollout decision=%+v", rollout)
 	}
+	waiting := Classify(testDigest, otherDigest, testHealth(HealthHealthy, HealthHealthy, HealthUnknown, now))
+	if waiting.State != StateRolloutPending || waiting.RolloutEligible || waiting.RollbackEligible ||
+		!strings.Contains(waiting.Reason, "waiting for complete health evidence") {
+		t.Fatalf("waiting decision=%+v", waiting)
+	}
 }
 
 type fakeStore struct {
