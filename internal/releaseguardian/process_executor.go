@@ -84,7 +84,7 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		}
 	}
 	arguments := []string{operation, directory}
-	if operation == "restore-monitor" {
+	if operation == "repair-monitor" || operation == "restore-monitor" {
 		arguments = append(arguments, snapshot.LKGMonitorRecordDigest)
 	}
 	if err := ctx.Err(); err != nil {
@@ -151,8 +151,16 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	if result.Component != snapshot.Key.Component || result.ConfigSHA != snapshot.Bundle.Prepared.ConfigSHA || result.ReceiptDigest == "" {
 		return ExecutionReceipt{}, errors.New("Guardian executor receipt binding is invalid")
 	}
+	// The monitor repair/restore commands finish their monitor-pointer CAS and
+	// component Lease finalization before returning success.  A canonical
+	// workload receipt accompanied by a non-zero process result therefore does
+	// not prove that the metadata transaction completed.
+	if (operation == "repair-monitor" || operation == "restore-monitor") && runErr != nil &&
+		(result.Status == "verified" || result.Status == "compensated") {
+		return ExecutionReceipt{}, fmt.Errorf("Guardian %s terminal metadata is unproven: %w", operation, runErr)
+	}
 	recordDigest := snapshot.Record.RecordDigest
-	if operation == "restore-monitor" && result.Status == "compensated" {
+	if (operation == "repair-monitor" || operation == "restore-monitor") && result.Status == "compensated" {
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
 	return ExecutionReceipt{Status: result.Status, Reason: result.Reason, RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
