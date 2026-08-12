@@ -187,7 +187,7 @@ func candidateWithCurrentRecordFixture(t *testing.T, groupID string) GroupCandid
 		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64),
 	}
-	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &current, Identity: identity, Now: func() time.Time { return now.Add(time.Minute) }}
+	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &current, Identity: identity, Now: func() time.Time { return now.Add(31 * time.Minute) }}
 	if batch, err := publisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
 		t.Fatalf("publish candidate: batch=%+v err=%v", batch, err)
 	}
@@ -310,7 +310,7 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("6", 40), ControlImageDigest: "sha256:" + strings.Repeat("7", 64),
 		ManifestDigest: "sha256:" + strings.Repeat("8", 64), HealthContractDigest: "sha256:" + strings.Repeat("9", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("a", 64)}
-	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &current, Identity: identity, Now: func() time.Time { return now.Add(time.Minute) }}
+	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &current, Identity: identity, Now: func() time.Time { return now.Add(31 * time.Minute) }}
 	degraded := GroupShadowBatch{Schema: GroupShadowBatchSchemaV1, RouteIntentGeneration: compiled.RouteIntentGeneration,
 		Results: []GroupShadowResult{{GroupID: groupID, Status: GroupShadowStatusFailed, FailureCode: GroupShadowFailureNoHealthyActive}}, Failed: 1}
 	batch, err := publisher.Publish(ctx, degraded)
@@ -324,6 +324,10 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 		candidate.CurrentRecord.BundleDigest != authority.Published.Digest || candidate.CandidateLedgerSequence != authority.Published.CandidateLedgerSequence ||
 		candidate.Epoch <= authority.Published.PublicationSequence || candidate.WorkerSlot == candidate.CurrentWorkerSlot {
 		t.Fatalf("rebuilt LKG candidate is invalid: candidate=%+v authority=%+v err=%v/%v", candidate, authority, err, authorityErr)
+	}
+	if !candidate.CurrentBundle.ValidUntil.After(now.Add(31*time.Minute)) || candidate.CurrentBundle.GeneratedAt.Before(now.Add(31*time.Minute)) ||
+		candidate.CurrentRecord.BundleDigest != authority.Published.Digest {
+		t.Fatalf("rebuilt candidate retained an expired current LKG: candidate=%+v authority=%+v", candidate, authority)
 	}
 	if _, err := store.PutGroupCurrentLKGCandidateCAS(ctx, groupID, candidate.Epoch, candidate.CandidateLedgerSequence,
 		authority.Published.PublicationSequence+1, authority.Published.Digest, candidate); !errors.Is(err, ErrGroupAuthorityCandidateCAS) {

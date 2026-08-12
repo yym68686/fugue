@@ -154,6 +154,9 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		// advances CurrentAuthority: it only replaces the candidate pointer with
 		// a release-bound envelope that can be independently loaded and probed.
 		if strings.TrimSpace(compiled.FailureCode) == GroupShadowFailureNoHealthyActive {
+			if _, err := publisher.CurrentLKG.RefreshPublishedLKG(ctx, groupID, now); err != nil {
+				return failed(GroupAuthorityFailurePublicationCAS)
+			}
 			if rebuilt, ok := publisher.publishCurrentLKGCandidate(ctx, groupID, now); ok {
 				return rebuilt
 			}
