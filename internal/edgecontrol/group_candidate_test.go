@@ -257,3 +257,44 @@ func TestCandidateModeRefreshesOnlyTheExactPersistedCurrentLKG(t *testing.T) {
 		t.Fatalf("candidate epoch did not remain inactive and above current: candidate=%+v err=%v", candidate, err)
 	}
 }
+
+func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServeLKG(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 12, 3, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-current", false)); err != nil {
+		t.Fatal(err)
+	}
+	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}
+	compiled, err := compiler.Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := &fixtureGroupSigner{keys: map[string][]byte{groupID: bytes.Repeat([]byte{0x54}, 32)}, validFor: 30 * time.Minute}
+	current := GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now }}
+	if batch, err := current.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("seed current publication: batch=%+v err=%v", batch, err)
+	}
+	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("6", 40), ControlImageDigest: "sha256:" + strings.Repeat("7", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("8", 64), HealthContractDigest: "sha256:" + strings.Repeat("9", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("a", 64)}
+	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &current, Identity: identity, Now: func() time.Time { return now.Add(time.Minute) }}
+	degraded := GroupShadowBatch{Schema: GroupShadowBatchSchemaV1, RouteIntentGeneration: compiled.RouteIntentGeneration,
+		Results: []GroupShadowResult{{GroupID: groupID, Status: GroupShadowStatusFailed, FailureCode: GroupShadowFailureNoHealthyActive}}, Failed: 1}
+	batch, err := publisher.Publish(ctx, degraded)
+	if err != nil || batch.Published != 1 || batch.Failed != 0 {
+		t.Fatalf("rebuild candidate from exact current LKG: batch=%+v err=%v", batch, err)
+	}
+	candidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	authority, authorityErr := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || authorityErr != nil || !exists || validateGroupCandidateBundle(groupID, candidate) != nil ||
+		candidate.Record.SourceSHA != identity.SourceSHA || candidate.CurrentRecord == nil ||
+		candidate.CurrentRecord.BundleDigest != authority.Published.Digest || candidate.CandidateLedgerSequence != authority.Published.CandidateLedgerSequence ||
+		candidate.Epoch <= authority.Published.PublicationSequence || candidate.WorkerSlot == candidate.CurrentWorkerSlot {
+		t.Fatalf("rebuilt LKG candidate is invalid: candidate=%+v authority=%+v err=%v/%v", candidate, authority, err, authorityErr)
+	}
+}

@@ -127,7 +127,14 @@ func (publisher GroupCandidatePublisher) Publish(ctx context.Context, compiled G
 			batch.Failed++
 		}
 	}
-	if batch.Published != compiled.Succeeded || batch.Failed != compiled.Failed {
+	for index, result := range results {
+		published := batch.Results[index].Status == GroupCandidateStatusPublished
+		if (result.Status == GroupShadowStatusCompiled && !published) ||
+			(result.Status == GroupShadowStatusFailed && result.FailureCode != GroupShadowFailureNoHealthyActive && published) {
+			return GroupCandidateBatch{}, errors.New("edge-control candidate batch result is invalid")
+		}
+	}
+	if batch.Published+batch.Failed != len(results) {
 		return GroupCandidateBatch{}, errors.New("edge-control candidate batch counts are invalid")
 	}
 	return batch, nil
@@ -139,6 +146,17 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		return GroupCandidateResult{GroupID: groupID, Status: GroupCandidateStatusFailed, FailureCode: code}
 	}
 	if groupID == "" || compiled.Status != GroupShadowStatusCompiled || compiled.LedgerSequence == 0 || strings.TrimSpace(compiled.BundleGeneration) == "" {
+		// A candidate publisher may restart while workers are deliberately
+		// serving the signed group LKG and the newest shadow compilation is
+		// therefore unhealthy. Rebuild the inactive candidate from the exact
+		// immutable ledger entry that backs the current publication. This never
+		// advances CurrentAuthority: it only replaces the candidate pointer with
+		// a release-bound envelope that can be independently loaded and probed.
+		if strings.TrimSpace(compiled.FailureCode) == GroupShadowFailureNoHealthyActive {
+			if rebuilt, ok := publisher.publishCurrentLKGCandidate(ctx, groupID, now); ok {
+				return rebuilt
+			}
+		}
 		code := strings.TrimSpace(compiled.FailureCode)
 		if code == "" {
 			code = GroupAuthorityFailureCandidateRead
@@ -178,15 +196,31 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		(currentLedger.ActiveSlot != "a" && currentLedger.ActiveSlot != "b") {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
+	workerSlot := "a"
+	if head.ActiveSlot == "a" {
+		workerSlot = "b"
+	} else if head.ActiveSlot != "b" {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now)
+}
+
+func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Context, groupID string, head GroupShadowLedgerEntry, authority GroupAuthorityState, previous GroupCandidateBundle, previousExists bool, workerSlot string, now time.Time) GroupCandidateResult {
+	failed := func(code string) GroupCandidateResult {
+		return GroupCandidateResult{GroupID: groupID, Status: GroupCandidateStatusFailed, FailureCode: code}
+	}
 	epoch := authority.Published.PublicationSequence + 1
 	if previousExists && previous.Epoch >= epoch {
 		epoch = previous.Epoch + 1
 	}
 	bundle := cloneEdgeRouteBundle(*head.Bundle)
-	workerSlot := "a"
-	if head.ActiveSlot == "a" {
-		workerSlot = "b"
-	} else if head.ActiveSlot != "b" {
+	history, err := publisher.Store.History(ctx, groupID)
+	if err != nil || authority.Published.CandidateLedgerSequence == 0 || authority.Published.CandidateLedgerSequence > uint64(len(history)) {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	currentLedger := history[authority.Published.CandidateLedgerSequence-1]
+	if currentLedger.Sequence != authority.Published.CandidateLedgerSequence || !groupAuthorityDigestPattern.MatchString(currentLedger.InventoryDigest) ||
+		(currentLedger.ActiveSlot != "a" && currentLedger.ActiveSlot != "b") || currentLedger.ActiveSlot == workerSlot {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
 	bundle.Issuer = groupAuthorityIssuer
@@ -236,6 +270,33 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		return failed(GroupAuthorityFailureCandidateCAS)
 	}
 	return candidateResult(stored)
+}
+
+func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.Context, groupID string, now time.Time) (GroupCandidateResult, bool) {
+	authority, err := publisher.Store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !authority.PublishedExists || validateGroupPublishedBundle(groupID, authority.Published) != nil {
+		return GroupCandidateResult{}, false
+	}
+	history, err := publisher.Store.History(ctx, groupID)
+	sequence := authority.Published.CandidateLedgerSequence
+	if err != nil || sequence == 0 || sequence > uint64(len(history)) {
+		return GroupCandidateResult{}, false
+	}
+	head := history[sequence-1]
+	if head.Sequence != sequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
+		head.BundleGeneration != authority.Published.Bundle.Generation || !groupAuthorityDigestPattern.MatchString(head.InventoryDigest) ||
+		(head.ActiveSlot != "a" && head.ActiveSlot != "b") {
+		return GroupCandidateResult{}, false
+	}
+	previous, previousExists, err := publisher.Store.ReadGroupCandidate(ctx, groupID)
+	if err != nil {
+		return GroupCandidateResult{}, false
+	}
+	workerSlot := "a"
+	if head.ActiveSlot == "a" {
+		workerSlot = "b"
+	}
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now), true
 }
 
 func candidateBindsCurrentAuthority(candidate GroupCandidateBundle, authority GroupAuthorityState) bool {
