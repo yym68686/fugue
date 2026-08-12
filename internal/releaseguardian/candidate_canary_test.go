@@ -60,12 +60,16 @@ func TestCandidateCanaryRequiresThreeCandidateBoundRouteSuccesses(t *testing.T) 
 	if err := result.Validate(now.Add(29 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := result.VerifySignature(candidateCanaryTestKey); err != nil {
+	publicKey, err := CandidateCanaryPublicKey(candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := result.VerifySignature(publicKey); err != nil {
 		t.Fatal(err)
 	}
 	tampered := result
 	tampered.RouteState = HealthDegraded
-	if err := tampered.VerifySignature(candidateCanaryTestKey); err == nil {
+	if err := tampered.VerifySignature(publicKey); err == nil {
 		t.Fatal("tampered candidate canary signature was accepted")
 	}
 }

@@ -32,7 +32,7 @@ func TestParseCandidateCanaryProbesIsExactAndLoadsIndependentKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(probes) != 1 || probes[0].GroupID != "edge-pool-a" || probes[0].Interval != 10*time.Second ||
-		probes[0].SlotAddresses[releaseguardian.AuthoritySlotA] != "192.0.2.1:18443" || len(probes[0].SigningKey) < 32 {
+		probes[0].SlotAddresses[releaseguardian.AuthoritySlotA] != "192.0.2.1:18443" || len(probes[0].SigningMaterial) < 32 {
 		t.Fatalf("candidate canary config is not exact: %+v", probes)
 	}
 }

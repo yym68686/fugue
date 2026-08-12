@@ -2,10 +2,12 @@ package releaseguardian
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -58,7 +60,7 @@ func TestCandidateCanaryIsImmutableCandidateBoundAndFresh(t *testing.T) {
 		GroupID: "edge-pool-a", CandidateRecordDigest: testDigest, WorkerSlot: AuthoritySlotB,
 		ReleaseRecordDigest: otherDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
 		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
-		KeyID: "canary-key-1", Signature: testSignature,
+		KeyID: "canary-key-1", Signature: testableSignaturePlaceholder,
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +74,56 @@ func TestCandidateCanaryIsImmutableCandidateBoundAndFresh(t *testing.T) {
 	result.CandidateRecordDigest = otherDigest
 	if err := result.Validate(now); err == nil {
 		t.Fatal("candidate canary was reusable for another record")
+	}
+}
+
+func TestCandidateCanaryStoreScopesLookupAndPrunesOnlyExpiredValidResults(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_000, 0).UTC()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := CandidateAuthority{
+		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
+		RecordDigest: testDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
+		State: CandidateAuthorityLoaded, Generation: 1,
+	}
+	result, err := SignCandidateCanaryResult(CandidateCanaryResult{
+		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
+		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
+		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
+		KeyID: "candidate-canary-v1",
+	}, candidateCanaryTestKey)
+	if err != nil || store.CreateCandidateCanaryResult(ctx, result, now) != nil {
+		t.Fatalf("create candidate canary: result=%+v err=%v", result, err)
+	}
+	object, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, candidateCanaryResultName(result.GroupID, result.ResultDigest), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.Labels["fugue.pro/candidate-record"] != candidateRecordLabel(candidate.RecordDigest) {
+		t.Fatalf("candidate label=%q", object.Labels["fugue.pro/candidate-record"])
+	}
+	object.UID, object.ResourceVersion = types.UID("candidate-canary-result"), "30"
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now.Add(29*time.Second))
+	if err != nil || latest.ResultDigest != result.ResultDigest {
+		t.Fatalf("latest result=%+v err=%v", latest, err)
+	}
+	otherCandidate := candidate
+	otherCandidate.RecordDigest = otherDigest
+	if _, err := store.LoadLatestCandidateCanaryResult(ctx, otherCandidate, now); !errors.Is(err, ErrCandidateCanaryUnavailable) {
+		t.Fatalf("cross-candidate lookup err=%v", err)
+	}
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, candidate.GroupID, now.Add(31*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, object.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired result remains: %v", err)
 	}
 }
 

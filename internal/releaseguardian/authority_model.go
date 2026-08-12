@@ -1,10 +1,11 @@
 package releaseguardian
 
 import (
-	"crypto/hmac"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"regexp"
 	"time"
 
 	"fugue/internal/declarativerelease"
@@ -154,12 +155,27 @@ func (result CandidateCanaryResult) Validate(now time.Time) error {
 	return nil
 }
 
+// CandidateCanaryPublicKey derives the public half of the candidate-only
+// signing identity. The private key never needs to be projected into the
+// authority writer: it receives only this public key.
+func CandidateCanaryPublicKey(signingMaterial []byte) (ed25519.PublicKey, error) {
+	if len(signingMaterial) < 32 || len(signingMaterial) > 4096 {
+		return nil, errors.New("candidate canary signing material is invalid")
+	}
+	seedInput := append([]byte("fugue-candidate-canary-ed25519-v1\x00"), signingMaterial...)
+	seed := sha256.Sum256(seedInput)
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	publicKey := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	copy(publicKey, privateKey[ed25519.SeedSize:])
+	return publicKey, nil
+}
+
 // SignCandidateCanaryResult seals a candidate-bound canary result with a
-// domain-separated HMAC. The canary signer is deliberately distinct from the
-// authority writer: possessing this key can attest probe evidence, but does
-// not grant permission to mutate CurrentAuthority.
-func SignCandidateCanaryResult(result CandidateCanaryResult, key []byte) (CandidateCanaryResult, error) {
-	if len(key) < 32 || len(key) > 4096 {
+// domain-separated Ed25519 identity. The canary signer is deliberately
+// distinct from the authority writer: only the prober receives signing
+// material, while the writer receives the derived public key.
+func SignCandidateCanaryResult(result CandidateCanaryResult, signingMaterial []byte) (CandidateCanaryResult, error) {
+	if len(signingMaterial) < 32 || len(signingMaterial) > 4096 {
 		return CandidateCanaryResult{}, errors.New("candidate canary signing key is invalid")
 	}
 	result.APIVersion = APIVersion
@@ -174,17 +190,17 @@ func SignCandidateCanaryResult(result CandidateCanaryResult, key []byte) (Candid
 	if err != nil {
 		return CandidateCanaryResult{}, err
 	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(raw)
-	result.Signature = base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	seedInput := append([]byte("fugue-candidate-canary-ed25519-v1\x00"), signingMaterial...)
+	seed := sha256.Sum256(seedInput)
+	result.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ed25519.NewKeyFromSeed(seed[:]), raw))
 	return result.Seal()
 }
 
 // VerifySignature verifies only the independent canary attestation. Callers
 // must still Validate freshness and bind CandidateAuthority UID/RV before
 // using the result in an authority decision.
-func (result CandidateCanaryResult) VerifySignature(key []byte) error {
-	if len(key) < 32 || len(key) > 4096 || result.Validate(time.Time{}) != nil {
+func (result CandidateCanaryResult) VerifySignature(publicKey []byte) error {
+	if len(publicKey) != ed25519.PublicKeySize || result.Validate(time.Time{}) != nil {
 		return errors.New("candidate canary signature input is invalid")
 	}
 	want := result.Signature
@@ -195,10 +211,8 @@ func (result CandidateCanaryResult) VerifySignature(key []byte) error {
 	if err != nil {
 		return err
 	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(raw)
-	got := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(got), []byte(want)) {
+	signature, err := base64.RawURLEncoding.DecodeString(want)
+	if err != nil || !ed25519.Verify(ed25519.PublicKey(publicKey), raw, signature) {
 		return errors.New("candidate canary signature is invalid")
 	}
 	return nil
@@ -218,7 +232,7 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 		(result.RouteState != HealthHealthy && result.RouteState != HealthDegraded) ||
 		(result.DependencyState != HealthHealthy && result.DependencyState != HealthDegraded) ||
 		!digestPattern.MatchString(result.EvidenceDigest) || !componentPattern.MatchString(result.KeyID) ||
-		!signaturePattern.MatchString(result.Signature) {
+		!candidateCanarySignaturePattern.MatchString(result.Signature) {
 		return errors.New("candidate canary result identity is invalid")
 	}
 	observedAt, observedErr := time.Parse(time.RFC3339Nano, result.ObservedAt)
@@ -233,7 +247,9 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	return nil
 }
 
-const testableSignaturePlaceholder = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+var candidateCanarySignaturePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{86}$`)
+
+const testableSignaturePlaceholder = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 type AuthorityTransitionAction string
 

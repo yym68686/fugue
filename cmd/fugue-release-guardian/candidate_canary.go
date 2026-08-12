@@ -25,15 +25,15 @@ import (
 )
 
 type candidateCanaryProbe struct {
-	GroupID            string
-	SlotAddresses      map[releaseguardian.AuthoritySlot]string
-	Host               string
-	Path               string
-	ExpectedBodyDigest string
-	Interval           time.Duration
-	KeyID              string
-	SigningKeyFile     string
-	SigningKey         []byte
+	GroupID             string
+	SlotAddresses       map[releaseguardian.AuthoritySlot]string
+	Host                string
+	Path                string
+	ExpectedBodyDigest  string
+	Interval            time.Duration
+	KeyID               string
+	SigningMaterialFile string
+	SigningMaterial     []byte
 }
 
 func parseCandidateCanaryProbes(value string) ([]candidateCanaryProbe, error) {
@@ -52,7 +52,7 @@ func parseCandidateCanaryProbes(value string) ([]candidateCanaryProbe, error) {
 		probe := candidateCanaryProbe{
 			GroupID: strings.TrimSpace(fields[0]), Host: strings.TrimSpace(fields[3]), Path: strings.TrimSpace(fields[4]),
 			ExpectedBodyDigest: strings.TrimSpace(fields[5]), Interval: time.Duration(seconds) * time.Second,
-			KeyID: strings.TrimSpace(fields[7]), SigningKeyFile: strings.TrimSpace(fields[8]),
+			KeyID: strings.TrimSpace(fields[7]), SigningMaterialFile: strings.TrimSpace(fields[8]),
 			SlotAddresses: map[releaseguardian.AuthoritySlot]string{
 				releaseguardian.AuthoritySlotA: strings.TrimSpace(fields[1]),
 				releaseguardian.AuthoritySlotB: strings.TrimSpace(fields[2]),
@@ -62,11 +62,11 @@ func parseCandidateCanaryProbes(value string) ([]candidateCanaryProbe, error) {
 			return nil, errors.New("candidate canary configuration is invalid")
 		}
 		seen[probe.GroupID] = true
-		key, err := os.ReadFile(probe.SigningKeyFile)
-		if err != nil || len(key) < 32 || len(key) > 4096 {
+		material, err := os.ReadFile(probe.SigningMaterialFile)
+		if err != nil || len(material) < 32 || len(material) > 4096 || strings.ContainsAny(string(material), "\r\n\t ") {
 			return nil, errors.New("candidate canary signing key is unavailable")
 		}
-		probe.SigningKey = append([]byte(nil), key...)
+		probe.SigningMaterial = append([]byte(nil), material...)
 		probes = append(probes, probe)
 	}
 	return probes, nil
@@ -77,7 +77,7 @@ func validCandidateProbe(probe candidateCanaryProbe) bool {
 		probe.Interval < 5*time.Second || probe.Interval > 20*time.Second ||
 		!exactSHA256Digest(probe.ExpectedBodyDigest) ||
 		(releaseguardian.Key{Component: probe.KeyID}).Validate() != nil || strings.ContainsAny(probe.GroupID+probe.Host+probe.Path+probe.KeyID, "\r\n\x00") ||
-		!filepath.IsAbs(probe.SigningKeyFile) || filepath.Clean(probe.SigningKeyFile) != probe.SigningKeyFile {
+		!filepath.IsAbs(probe.SigningMaterialFile) || filepath.Clean(probe.SigningMaterialFile) != probe.SigningMaterialFile {
 		return false
 	}
 	parsed, err := url.Parse(probe.Path)
@@ -127,6 +127,10 @@ func startCandidateCanaryProbers(ctx context.Context, store *releaseguardian.Aut
 }
 
 func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthorityStore, probe candidateCanaryProbe) error {
+	now := time.Now().UTC()
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, probe.GroupID, now); err != nil {
+		return err
+	}
 	candidate, candidateUID, candidateRV, err := store.LoadCandidate(ctx, probe.GroupID)
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -136,6 +140,11 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	}
 	if candidate.State != releaseguardian.CandidateAuthorityLoaded {
 		return nil
+	}
+	if _, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now); err == nil {
+		return nil
+	} else if !errors.Is(err, releaseguardian.ErrCandidateCanaryUnavailable) {
+		return err
 	}
 	current, currentUID, currentRV, err := store.LoadCurrent(ctx, probe.GroupID)
 	if err != nil {
@@ -158,7 +167,7 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	if err != nil || latestCurrent != current || latestCurrentUID != currentUID || latestCurrentRV != currentRV {
 		return errors.New("current authority changed during route canary")
 	}
-	result, err := releaseguardian.EvaluateCandidateCanary(candidate, current, candidateSamples, previousSamples, observedAt, 3*probe.Interval, probe.KeyID, probe.SigningKey)
+	result, err := releaseguardian.EvaluateCandidateCanary(candidate, current, candidateSamples, previousSamples, observedAt, 3*probe.Interval, probe.KeyID, probe.SigningMaterial)
 	if err != nil {
 		return err
 	}

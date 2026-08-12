@@ -36,7 +36,7 @@ func newAuthorityRuntime(store *releaseguardian.AuthorityStore, value string) (*
 			return nil, errors.New("authority group configuration is invalid")
 		}
 		key, err := os.ReadFile(keyFile)
-		if err != nil {
+		if err != nil || len(key) != 32 {
 			return nil, errors.New("authority canary verification key is unavailable")
 		}
 		verifiers[group] = releaseguardian.CandidateCanaryVerifier{KeyID: keyID, Key: key}

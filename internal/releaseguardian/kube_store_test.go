@@ -67,13 +67,17 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 		`"value":"write"`, `"value":"guardian"`, `"value":"canary-prober"`,
 		`"value":"edge-control-de,de,fugue-system,edge-control-de,fugue-fugue;edge-worker-de,de,fugue-system,edge-worker-de,edge-control-de;edge-control-us,us,fugue-system,edge-control-us,fugue-fugue;edge-worker-us,us,fugue-system,edge-worker-us,edge-control-us;api,global,fugue-system,api,fugue-fugue"`,
 		`"value":"edge-control-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-worker-de,de,51.38.126.103:443,fugue.pro,/healthz,ok,10;edge-control-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;edge-worker-us,us,15.204.94.71:443,fugue.pro,/healthz,ok,10;api,global,15.204.94.71:443,api.fugue.pro,/healthz,ok,10"`,
+		`"name":"FUGUE_RELEASE_GUARDIAN_CANDIDATE_CANARY"`,
+		`"value":"edge-group-country-de,51.38.126.103:18443,51.38.126.103:28443,edge-observe-canary-0731-1333.fugue.pro,/,sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de,10,candidate-canary-de-v1,/var/run/secrets/fugue-candidate-canary-de/token"`,
+		`"mountPath":"/var/run/secrets/fugue-candidate-canary-de"`,
+		`"secretName":"fugue-edge-worker-reader-de"`,
 		`"fieldPath":"metadata.uid"`, `"mountPath":"/tmp"`,
 		`"fugue.io/edge-authority-importer":"true"`,
 		`"name":"fugue-release-guardian-edge-control-de-import"`,
 		`"app.kubernetes.io/instance":"edge-control-de"`,
 		`"fugue.io/edge-group-id":"edge-group-country-de"`,
 		`"port":8092,"protocol":"TCP"`,
-		`"resources":["configmaps"],"verbs":["create","get","update"]`,
+		`"resources":["configmaps"],"verbs":["create","delete","get","list","update"]`,
 		`"resourceNames":["fugue-api-route-intent-ca-de","fugue-api-route-intent-ca-us","fugue-api-tls","fugue-edge-control-inventory-writer-de","fugue-edge-control-inventory-writer-us","fugue-edge-control-reader-de","fugue-edge-control-reader-us","fugue-edge-control-recovery-de","fugue-edge-control-recovery-us","fugue-edge-control-route-intent-identity-de","fugue-edge-control-route-intent-identity-us","fugue-edge-control-signing-de","fugue-edge-control-signing-us","fugue-edge-route-intent-identity","fugue-edge-token-vps-591f4447","fugue-edge-token-vps-84c8f0a9","fugue-edge-worker-reader-de","fugue-edge-worker-reader-us","fugue-fugue-config","fugue-fugue-edge-activation-signing-v1","fugue-fugue-platform-component-identity"],"resources":["secrets"],"verbs":["get"]`,
 		`"resources":["events"],"verbs":["get","list","watch"]`,
 		`"resources":["pods"],"verbs":["delete","get","list","watch"]`,
@@ -88,7 +92,7 @@ func TestGuardianWriterResourcesKeepIndependentProberAndComponentScopedRBAC(t *t
 	if strings.Count(source, `"resources":["secrets"]`) != 1 {
 		t.Fatal("Guardian Secret metadata access is not one exact resourceNames-scoped rule")
 	}
-	for _, forbidden := range []string{`"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
+	for _, forbidden := range []string{`FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS`, `"resources":["events","pods"]`, `"resources":["pods"],"verbs":["*"]`, `"resources":["pods/exec"],"verbs":["*"]`, `"daemonsets/status"`, `"deployments/status"`, `"clusterroles"`, `"clusterrolebindings"`} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("shadow Guardian resources grant forbidden capability %s", forbidden)
 		}

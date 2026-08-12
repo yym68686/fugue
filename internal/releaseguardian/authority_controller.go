@@ -2,6 +2,7 @@ package releaseguardian
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"time"
 
@@ -67,7 +68,7 @@ func NewAuthorityController(store authorityDecisionStore, verifiers map[string]C
 	}
 	values := make(map[string]CandidateCanaryVerifier, len(verifiers))
 	for group, verifier := range verifiers {
-		if !groupPattern.MatchString(group) || !componentPattern.MatchString(verifier.KeyID) || len(verifier.Key) < 32 || len(verifier.Key) > 4096 {
+		if !groupPattern.MatchString(group) || !componentPattern.MatchString(verifier.KeyID) || len(verifier.Key) != ed25519.PublicKeySize {
 			return nil, errors.New("authority controller signing key is invalid")
 		}
 		verifier.Key = append([]byte(nil), verifier.Key...)

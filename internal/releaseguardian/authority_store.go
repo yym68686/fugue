@@ -43,7 +43,45 @@ func (store *AuthorityStore) CreateCandidateCanaryResult(ctx context.Context, re
 	if err := result.Validate(now); err != nil {
 		return err
 	}
-	return store.createImmutable(ctx, candidateCanaryResultName(result.GroupID, result.ResultDigest), result.GroupID, "candidate-canary", "result.json", result)
+	return store.createImmutableWithLabels(ctx, candidateCanaryResultName(result.GroupID, result.ResultDigest), result.GroupID, "candidate-canary", "result.json", result,
+		map[string]string{"fugue.pro/candidate-record": candidateRecordLabel(result.CandidateRecordDigest)})
+}
+
+func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Context, groupID string, now time.Time) error {
+	if !groupPattern.MatchString(groupID) || now.IsZero() || !now.Equal(now.UTC()) {
+		return errors.New("candidate canary prune request is invalid")
+	}
+	selector := labels.Set{"fugue.pro/group": groupID, "fugue.pro/authority-kind": "candidate-canary"}.AsSelector().String()
+	objects, err := store.client.CoreV1().ConfigMaps(store.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 257})
+	if err != nil {
+		return err
+	}
+	if objects.Continue != "" || len(objects.Items) > 256 {
+		return errors.New("candidate canary result set exceeds its cleanup bound")
+	}
+	for index := range objects.Items {
+		object := &objects.Items[index]
+		var result CandidateCanaryResult
+		if object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 ||
+			object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-kind"] != "candidate-canary" ||
+			decodeStrict([]byte(object.Data["result.json"]), &result) != nil || result.Validate(time.Time{}) != nil ||
+			object.Name != candidateCanaryResultName(result.GroupID, result.ResultDigest) ||
+			object.Labels["fugue.pro/candidate-record"] != candidateRecordLabel(result.CandidateRecordDigest) {
+			return errors.New("candidate canary cleanup encountered an invalid object")
+		}
+		expiresAt, _ := time.Parse(time.RFC3339Nano, result.ExpiresAt)
+		if now.Before(expiresAt) {
+			continue
+		}
+		uid := object.UID
+		rv := object.ResourceVersion
+		if err := store.client.CoreV1().ConfigMaps(store.namespace).Delete(ctx, object.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+		}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (store *AuthorityStore) LoadCandidate(ctx context.Context, groupID string) (CandidateAuthority, types.UID, string, error) {
@@ -89,6 +127,10 @@ func (store *AuthorityStore) loadMutable(ctx context.Context, name, groupID, key
 }
 
 func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID, kind, key string, value any) error {
+	return store.createImmutableWithLabels(ctx, name, groupID, kind, key, value, nil)
+}
+
+func (store *AuthorityStore) createImmutableWithLabels(ctx context.Context, name, groupID, kind, key string, value any, additional map[string]string) error {
 	raw, err := declarativerelease.CanonicalJSON(value)
 	if err != nil {
 		return err
@@ -96,6 +138,9 @@ func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID,
 	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
 	labels := authorityLabels(groupID)
 	labels["fugue.pro/authority-kind"] = kind
+	for label, value := range additional {
+		labels[label] = value
+	}
 	desired := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: store.namespace, Labels: labels}, Immutable: boolPointer(true), Data: map[string]string{key: string(raw)}}
 	created, err := configMaps.Create(ctx, desired, metav1.CreateOptions{})
 	if err == nil {
@@ -110,6 +155,11 @@ func (store *AuthorityStore) createImmutable(ctx context.Context, name, groupID,
 	existing, getErr := configMaps.Get(ctx, name, metav1.GetOptions{})
 	if getErr != nil || existing.Immutable == nil || !*existing.Immutable || existing.Data[key] != string(raw) || existing.Labels["fugue.pro/group"] != groupID || existing.Labels["fugue.pro/authority-kind"] != kind {
 		return errors.New("immutable authority record conflicts with existing object")
+	}
+	for label, value := range additional {
+		if existing.Labels[label] != value {
+			return errors.New("immutable authority record labels conflict with existing object")
+		}
 	}
 	return nil
 }
@@ -139,7 +189,10 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 	if candidate.Validate() != nil {
 		return CandidateCanaryResult{}, errors.New("candidate canary lookup is invalid")
 	}
-	selector := labels.Set{"fugue.pro/group": candidate.GroupID, "fugue.pro/authority-kind": "candidate-canary"}.AsSelector().String()
+	selector := labels.Set{
+		"fugue.pro/group": candidate.GroupID, "fugue.pro/authority-kind": "candidate-canary",
+		"fugue.pro/candidate-record": candidateRecordLabel(candidate.RecordDigest),
+	}.AsSelector().String()
 	objects, err := store.client.CoreV1().ConfigMaps(store.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 65})
 	if err != nil {
 		return CandidateCanaryResult{}, err
@@ -152,7 +205,8 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 	for index := range objects.Items {
 		object := &objects.Items[index]
 		if object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 ||
-			object.Labels["fugue.pro/group"] != candidate.GroupID || object.Labels["fugue.pro/authority-kind"] != "candidate-canary" {
+			object.Labels["fugue.pro/group"] != candidate.GroupID || object.Labels["fugue.pro/authority-kind"] != "candidate-canary" ||
+			object.Labels["fugue.pro/candidate-record"] != candidateRecordLabel(candidate.RecordDigest) {
 			return CandidateCanaryResult{}, errors.New("candidate canary object metadata is invalid")
 		}
 		var result CandidateCanaryResult
@@ -298,6 +352,14 @@ func routeBundleRecordName(groupID, recordDigest string) string {
 
 func candidateCanaryResultName(groupID, resultDigest string) string {
 	return authorityImmutableName("fugue-candidate-canary", groupID, resultDigest)
+}
+
+func candidateRecordLabel(recordDigest string) string {
+	value := strings.TrimPrefix(recordDigest, "sha256:")
+	if len(value) > 32 {
+		value = value[:32]
+	}
+	return value
 }
 
 func candidateAuthorityName(groupID string) string { return "fugue-candidate-authority-" + groupID }

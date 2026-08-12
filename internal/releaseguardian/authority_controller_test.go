@@ -53,7 +53,11 @@ func TestAuthorityControllerSwitchesAndRevertsOneGroupWithExactCAS(t *testing.T)
 	if err := store.CreateCandidateCanaryResult(ctx, result, now); err != nil {
 		t.Fatal(err)
 	}
-	controller, err := NewAuthorityController(store, map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: candidateCanaryTestKey}})
+	publicKey, err := CandidateCanaryPublicKey(candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := NewAuthorityController(store, map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: publicKey}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +129,12 @@ func TestAuthorityControllerWaitsForBoundCandidateCanary(t *testing.T) {
 	if err := store.CreateCandidateCanaryResult(ctx, stale, staleAt); err != nil {
 		t.Fatal(err)
 	}
+	publicKey, err := CandidateCanaryPublicKey(candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	controller, err := NewAuthorityController(store, map[string]CandidateCanaryVerifier{
-		group: {KeyID: "candidate-canary-v1", Key: candidateCanaryTestKey},
+		group: {KeyID: "candidate-canary-v1", Key: publicKey},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +175,11 @@ func TestAuthorityControllerRejectsBadCandidateWithoutChangingCurrent(t *testing
 	if err := store.CreateCandidateCanaryResult(ctx, result, now); err != nil {
 		t.Fatal(err)
 	}
-	wrongController, _ := NewAuthorityController(store, map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: []byte("wrong-candidate-canary-signing-key-material-32")}})
+	wrongKey, err := CandidateCanaryPublicKey([]byte("wrong-candidate-canary-signing-key-material-32"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongController, _ := NewAuthorityController(store, map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: wrongKey}})
 	wrongController.now = func() time.Time { return now.Add(time.Second) }
 	if _, err := wrongController.VerifyAndSwitch(ctx, group, result.ResultDigest); err == nil {
 		t.Fatal("candidate canary signed by another key was accepted")
@@ -176,7 +188,11 @@ func TestAuthorityControllerRejectsBadCandidateWithoutChangingCurrent(t *testing
 	if err != nil || stillLoaded.State != CandidateAuthorityLoaded {
 		t.Fatalf("bad signature changed candidate state: %+v err=%v", stillLoaded, err)
 	}
-	controller, _ := NewAuthorityController(store, map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: candidateCanaryTestKey}})
+	publicKey, err := CandidateCanaryPublicKey(candidateCanaryTestKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, _ := NewAuthorityController(store, map[string]CandidateCanaryVerifier{group: {KeyID: "candidate-canary-v1", Key: publicKey}})
 	controller.now = func() time.Time { return now.Add(time.Second) }
 	receipt, err := controller.VerifyAndSwitch(ctx, group, result.ResultDigest)
 	if err != nil {
