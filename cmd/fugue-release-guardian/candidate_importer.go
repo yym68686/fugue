@@ -59,6 +59,8 @@ type candidateImportStore interface {
 	LoadCurrent(context.Context, string) (releaseguardian.CurrentAuthority, types.UID, string, error)
 	PutCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
 	SwitchCurrent(context.Context, releaseguardian.CurrentAuthority, types.UID, string) (types.UID, string, error)
+	ReplaceLoadedCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
+	RefreshImportedCurrent(context.Context, releaseguardian.CurrentAuthority, types.UID, string) (types.UID, string, error)
 }
 
 func parseCandidateImports(value string) ([]candidateImportConfig, error) {
@@ -147,33 +149,48 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		CurrentRecordDigest: envelope.CurrentRecord.RecordDigest, CurrentWorkerSlot: envelope.CurrentWorkerSlot,
 		AuthorityEpoch: envelope.CurrentRecord.Epoch,
 	}
-	existingCurrent, _, _, err := store.LoadCurrent(ctx, config.GroupID)
-	if apierrors.IsNotFound(err) {
-		if _, _, err := store.SwitchCurrent(ctx, current, "", ""); err != nil {
-			return false, fmt.Errorf("bootstrap current authority: %w", err)
-		}
-		changed = true
-	} else if err != nil {
+	existingCurrent, currentUID, currentRV, err := store.LoadCurrent(ctx, config.GroupID)
+	currentMissing := apierrors.IsNotFound(err)
+	if err != nil && !currentMissing {
 		return false, fmt.Errorf("load current authority: %w", err)
-	} else if existingCurrent != current {
-		return false, errors.New("candidate envelope conflicts with existing current authority")
 	}
 	candidate := releaseguardian.CandidateAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: config.GroupID,
 		RecordDigest: envelope.Record.RecordDigest, WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
-	existingCandidate, _, _, err := store.LoadCandidate(ctx, config.GroupID)
-	if apierrors.IsNotFound(err) {
+	existingCandidate, candidateUID, candidateRV, err := store.LoadCandidate(ctx, config.GroupID)
+	candidateMissing := apierrors.IsNotFound(err)
+	if err != nil && !candidateMissing {
+		return false, fmt.Errorf("read candidate authority: %w", err)
+	}
+	candidateChanged := !candidateMissing && (existingCandidate.GroupID != candidate.GroupID || existingCandidate.RecordDigest != candidate.RecordDigest ||
+		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
+	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
+		return false, errors.New("candidate envelope conflicts with terminal candidate authority")
+	}
+	if candidateMissing {
 		if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 			return false, fmt.Errorf("load candidate authority: %w", err)
 		}
 		changed = true
-	} else if err != nil {
-		return false, fmt.Errorf("read candidate authority: %w", err)
-	} else if existingCandidate.GroupID != candidate.GroupID || existingCandidate.RecordDigest != candidate.RecordDigest ||
-		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
-		return false, errors.New("candidate envelope conflicts with existing candidate authority")
+	} else if candidateChanged {
+		candidate.Generation = existingCandidate.Generation + 1
+		if _, _, err := store.ReplaceLoadedCandidate(ctx, candidate, candidateUID, candidateRV); err != nil {
+			return false, fmt.Errorf("replace imported candidate authority: %w", err)
+		}
+		changed = true
+	}
+	if currentMissing {
+		if _, _, err := store.SwitchCurrent(ctx, current, "", ""); err != nil {
+			return false, fmt.Errorf("bootstrap current authority: %w", err)
+		}
+		changed = true
+	} else if existingCurrent != current {
+		if _, _, err := store.RefreshImportedCurrent(ctx, current, currentUID, currentRV); err != nil {
+			return false, fmt.Errorf("refresh imported current authority: %w", err)
+		}
+		changed = true
 	}
 	return changed, nil
 }

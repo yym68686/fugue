@@ -174,3 +174,69 @@ func TestCurrentAuthorityCASRequiresExactPreviousAndSlotSwitch(t *testing.T) {
 		t.Fatal("authority switch with the wrong previous record was accepted")
 	}
 }
+
+func TestImportedAuthorityRefreshAndLoadedCandidateReplacementAreBounded(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, err := NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCurrent := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: "edge-pool-a", CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotB, AuthorityEpoch: 1}
+	if _, _, err := store.SwitchCurrent(ctx, oldCurrent, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	currentObject, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, currentAuthorityName(oldCurrent.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentObject.UID, currentObject.ResourceVersion = types.UID("current-import"), "10"
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, currentObject, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := oldCurrent
+	refreshed.CurrentRecordDigest = otherDigest
+	refreshed.CurrentWorkerSlot = AuthoritySlotA
+	refreshed.AuthorityEpoch = 2
+	if _, _, err := store.RefreshImportedCurrent(ctx, refreshed, currentObject.UID, currentObject.ResourceVersion); err != nil {
+		t.Fatal(err)
+	}
+	loadedCurrent, _, _, err := store.LoadCurrent(ctx, oldCurrent.GroupID)
+	if err != nil || loadedCurrent != refreshed {
+		t.Fatalf("refreshed current=%+v err=%v", loadedCurrent, err)
+	}
+
+	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: oldCurrent.GroupID, RecordDigest: testDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	candidateObject, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, candidateAuthorityName(oldCurrent.GroupID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateObject.UID, candidateObject.ResourceVersion = types.UID("candidate-import"), "20"
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, candidateObject, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := candidate
+	replacement.RecordDigest = otherDigest
+	replacement.WorkerSlot = AuthoritySlotA
+	replacement.Generation = 2
+	replacedUID, replacedRV, err := store.ReplaceLoadedCandidate(ctx, replacement, candidateObject.UID, candidateObject.ResourceVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadedCandidate, _, _, err := store.LoadCandidate(ctx, oldCurrent.GroupID)
+	if err != nil || loadedCandidate != replacement {
+		t.Fatalf("replaced candidate=%+v err=%v", loadedCandidate, err)
+	}
+	terminal := replacement
+	terminal.State, terminal.Generation, terminal.CanaryResultDigest = CandidateAuthorityVerified, 3, testDigest
+	terminalUID, terminalRV, err := store.PutCandidate(ctx, terminal, replacedUID, replacedRV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReplaceLoadedCandidate(ctx, candidate, terminalUID, terminalRV); err == nil {
+		t.Fatal("terminal candidate was replaceable by importer")
+	}
+}
