@@ -18,6 +18,23 @@ import (
 
 var ErrCandidateCanaryUnavailable = errors.New("candidate canary result is unavailable")
 
+type legacyCandidateCanaryResultV1 struct {
+	APIVersion            string        `json:"apiVersion"`
+	Kind                  string        `json:"kind"`
+	GroupID               string        `json:"groupId"`
+	CandidateRecordDigest string        `json:"candidateRecordDigest"`
+	WorkerSlot            AuthoritySlot `json:"workerSlot"`
+	ReleaseRecordDigest   string        `json:"releaseRecordDigest"`
+	RouteState            HealthState   `json:"routeState"`
+	DependencyState       HealthState   `json:"dependencyState"`
+	EvidenceDigest        string        `json:"evidenceDigest"`
+	ObservedAt            string        `json:"observedAt"`
+	ExpiresAt             string        `json:"expiresAt"`
+	KeyID                 string        `json:"keyId"`
+	Signature             string        `json:"signature"`
+	ResultDigest          string        `json:"resultDigest"`
+}
+
 // AuthorityStore persists only group-local authority records. It is not wired
 // into the rollout controller until the inactive candidate path is proven.
 type AuthorityStore struct {
@@ -61,10 +78,10 @@ func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Cont
 	}
 	for index := range objects.Items {
 		object := &objects.Items[index]
-		var result CandidateCanaryResult
+		result, resultErr := decodeCandidateCanaryForCleanup(object.Data["result.json"])
 		if object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 ||
 			object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-kind"] != "candidate-canary" ||
-			decodeStrict([]byte(object.Data["result.json"]), &result) != nil || result.Validate(time.Time{}) != nil ||
+			resultErr != nil ||
 			object.Name != candidateCanaryResultName(result.GroupID, result.ResultDigest) ||
 			object.Labels["fugue.pro/candidate-record"] != candidateRecordLabel(result.CandidateRecordDigest) {
 			return errors.New("candidate canary cleanup encountered an invalid object")
@@ -82,6 +99,38 @@ func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Cont
 		}
 	}
 	return nil
+}
+
+// Legacy candidate results are recognized only so an expired immutable object
+// cannot permanently block the prober after a schema upgrade. They are never
+// returned by either canary lookup and therefore cannot authorize authority.
+func decodeCandidateCanaryForCleanup(raw string) (CandidateCanaryResult, error) {
+	var current CandidateCanaryResult
+	if decodeStrict([]byte(raw), &current) == nil && current.Validate(time.Time{}) == nil {
+		return current, nil
+	}
+	var legacy legacyCandidateCanaryResultV1
+	if decodeStrict([]byte(raw), &legacy) != nil || legacy.APIVersion != APIVersion || legacy.Kind != CandidateCanaryResultKind ||
+		!groupPattern.MatchString(legacy.GroupID) || !digestPattern.MatchString(legacy.CandidateRecordDigest) || legacy.WorkerSlot.Validate() != nil ||
+		!digestPattern.MatchString(legacy.ReleaseRecordDigest) || (legacy.RouteState != HealthHealthy && legacy.RouteState != HealthDegraded) ||
+		(legacy.DependencyState != HealthHealthy && legacy.DependencyState != HealthDegraded) || !digestPattern.MatchString(legacy.EvidenceDigest) ||
+		!componentPattern.MatchString(legacy.KeyID) || !candidateCanarySignaturePattern.MatchString(legacy.Signature) || !digestPattern.MatchString(legacy.ResultDigest) {
+		return CandidateCanaryResult{}, errors.New("legacy candidate canary result is invalid")
+	}
+	observedAt, observedErr := time.Parse(time.RFC3339Nano, legacy.ObservedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339Nano, legacy.ExpiresAt)
+	if observedErr != nil || expiresErr != nil || !observedAt.Equal(observedAt.UTC()) || !expiresAt.Equal(expiresAt.UTC()) ||
+		!expiresAt.After(observedAt) || expiresAt.Sub(observedAt) > time.Minute {
+		return CandidateCanaryResult{}, errors.New("legacy candidate canary freshness is invalid")
+	}
+	copy := legacy
+	copy.ResultDigest = ""
+	encoded, err := declarativerelease.CanonicalJSON(copy)
+	if err != nil || digest(encoded) != legacy.ResultDigest {
+		return CandidateCanaryResult{}, errors.New("legacy candidate canary digest is invalid")
+	}
+	return CandidateCanaryResult{GroupID: legacy.GroupID, CandidateRecordDigest: legacy.CandidateRecordDigest,
+		ResultDigest: legacy.ResultDigest, ExpiresAt: legacy.ExpiresAt}, nil
 }
 
 func (store *AuthorityStore) LoadCandidate(ctx context.Context, groupID string) (CandidateAuthority, types.UID, string, error) {

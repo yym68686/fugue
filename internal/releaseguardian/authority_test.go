@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/declarativerelease"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -129,6 +131,51 @@ func TestCandidateCanaryStoreScopesLookupAndPrunesOnlyExpiredValidResults(t *tes
 	}
 	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, object.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expired result remains: %v", err)
+	}
+}
+
+func TestLegacyCandidateCanaryCanOnlyBeRecognizedForBoundedExpiryCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(2_000, 0).UTC()
+	groupID := "edge-pool-a"
+	legacy := legacyCandidateCanaryResultV1{
+		APIVersion: APIVersion, Kind: CandidateCanaryResultKind, GroupID: groupID,
+		CandidateRecordDigest: testDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
+		RouteState: HealthHealthy, DependencyState: HealthHealthy, EvidenceDigest: testDigest,
+		ObservedAt: now.Add(-40 * time.Second).Format(time.RFC3339Nano), ExpiresAt: now.Add(-10 * time.Second).Format(time.RFC3339Nano),
+		KeyID: "candidate-canary-v1", Signature: testableSignaturePlaceholder,
+	}
+	raw, err := declarativerelease.CanonicalJSON(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.ResultDigest = digest(raw)
+	raw, _ = declarativerelease.CanonicalJSON(legacy)
+	immutable := true
+	name := candidateCanaryResultName(groupID, legacy.ResultDigest)
+	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "fugue-system", UID: "legacy-result", ResourceVersion: "10", Labels: map[string]string{
+		"fugue.pro/group": groupID, "fugue.pro/authority-kind": "candidate-canary", "fugue.pro/candidate-record": candidateRecordLabel(legacy.CandidateRecordDigest),
+	}}, Immutable: &immutable, Data: map[string]string{"result.json": string(raw)}}
+	client := fake.NewSimpleClientset(object)
+	store, _ := NewAuthorityStore(client, "fugue-system")
+	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: groupID,
+		RecordDigest: legacy.CandidateRecordDigest, BundleGeneration: testCandidateBundle, WorkerSlot: legacy.WorkerSlot,
+		ReleaseRecordDigest: legacy.ReleaseRecordDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	if _, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now); err == nil {
+		t.Fatal("legacy result was accepted as authority evidence")
+	}
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, groupID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired legacy result remains: %v", err)
+	}
+
+	tampered := legacy
+	tampered.EvidenceDigest = otherDigest
+	tamperedRaw, _ := declarativerelease.CanonicalJSON(tampered)
+	if _, err := decodeCandidateCanaryForCleanup(string(tamperedRaw)); err == nil {
+		t.Fatal("tampered legacy result was eligible for cleanup")
 	}
 }
 
