@@ -151,16 +151,13 @@ func TestProductionEdgeWorkersHaveGenericPublicRouteCanary(t *testing.T) {
 			}
 			if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == "/v1/authority/groups/"+group.GroupID+"/readyz" {
 				authorityCount++
-				if probe.Expected != "\"ready\":true" || probe.SourceWorkload != "" || probe.SourceContainer != "" {
-					t.Fatalf("group %s control authority probe is not bound to serving readiness: %+v", group.ID, probe)
-				}
 			}
 		}
 		if controlCount != 1 {
 			t.Fatalf("group %s control must inherit exactly one public route canary, got %d", group.ID, controlCount)
 		}
-		if authorityCount != 1 {
-			t.Fatalf("group %s control must derive exactly one group-bound authority probe, got %d", group.ID, authorityCount)
+		if authorityCount != 0 {
+			t.Fatalf("group %s inactive control candidate must not gate LKG health on candidate authority readiness, got %d probes", group.ID, authorityCount)
 		}
 	}
 }

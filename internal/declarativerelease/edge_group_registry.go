@@ -245,11 +245,15 @@ func MergeEdgeGroupRegistry(base Registry, edge EdgeGroupRegistry) (Registry, er
 			return Registry{}, err
 		}
 		control := group.Control
-		controlAuthority := HealthProbe{
-			Type: "service-http", Name: control.Workload.Name, Port: "http",
-			Path: "/v1/authority/groups/" + group.GroupID + "/readyz", Expected: "\"ready\":true",
-		}
-		control.Health = append(append([]HealthProbe(nil), control.Health...), controlAuthority, publicRoute)
+		// A Control release is installed as an inactive candidate publisher. Its
+		// candidate endpoint is therefore allowed to be unavailable while the
+		// previously verified authority continues to serve users. Binding the
+		// Control workload's LKG health to the candidate/authority ready endpoint
+		// creates a circular dependency: the new publisher cannot be installed
+		// until it publishes, while it cannot publish until it is installed.
+		// Keep the process-local probe and the independent public route canary;
+		// candidate readiness is verified later by the candidate-bound canary.
+		control.Health = append(append([]HealthProbe(nil), control.Health...), publicRoute)
 		apiProbe := publicRoute
 		apiProbe.Name = "api-via-" + group.GroupID
 		apiProbe.Host = "api.fugue.pro"
