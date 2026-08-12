@@ -152,7 +152,7 @@ func (group EdgeGroup) validate(requireClient bool) error {
 		if probe.Type == "public-route-http" {
 			return errors.New("edge control public route canary must derive from worker group data")
 		}
-		if probe.Type == "service-http-via-workload" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath {
+		if probe.Type == "service-http" && probe.Name == group.Control.Workload.Name && probe.Path == readyPath {
 			return errors.New("edge control authority health must derive from group identity")
 		}
 	}
@@ -246,9 +246,8 @@ func MergeEdgeGroupRegistry(base Registry, edge EdgeGroupRegistry) (Registry, er
 		}
 		control := group.Control
 		controlAuthority := HealthProbe{
-			Type: "service-http-via-workload", Name: control.Workload.Name, Port: "http",
+			Type: "service-http", Name: control.Workload.Name, Port: "http",
 			Path: "/v1/authority/groups/" + group.GroupID + "/readyz", Expected: "\"ready\":true",
-			SourceWorkload: api.Workload.Name, SourceContainer: api.Workload.Container,
 		}
 		control.Health = append(append([]HealthProbe(nil), control.Health...), controlAuthority, publicRoute)
 		apiProbe := publicRoute
