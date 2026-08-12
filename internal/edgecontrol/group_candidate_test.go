@@ -333,4 +333,8 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 		authority.Published.PublicationSequence+1, authority.Published.Digest, candidate); !errors.Is(err, ErrGroupAuthorityCandidateCAS) {
 		t.Fatalf("candidate CAS accepted a changed CurrentAuthority epoch: %v", err)
 	}
+	repeated, err := publisher.Publish(ctx, degraded)
+	if err != nil || repeated.Published != 1 || repeated.Results[0].Epoch != candidate.Epoch || repeated.Results[0].RecordDigest != candidate.Record.RecordDigest {
+		t.Fatalf("fresh fallback candidate was replaced during reconcile: batch=%+v candidate=%+v err=%v", repeated, candidate, err)
+	}
 }

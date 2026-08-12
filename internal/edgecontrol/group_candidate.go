@@ -302,6 +302,13 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 	if err != nil {
 		return GroupCandidateResult{}, false
 	}
+	if previousExists && previous.CandidateLedgerSequence == head.Sequence && previous.ReleaseRecordDigest == publisher.Identity.ReleaseRecordDigest &&
+		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) && candidateBindsCurrentAuthority(previous, authority) {
+		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
+		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
+			return candidateResult(previous), true
+		}
+	}
 	workerSlot := "a"
 	if head.ActiveSlot == "a" {
 		workerSlot = "b"
