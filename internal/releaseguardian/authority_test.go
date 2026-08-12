@@ -279,7 +279,7 @@ func TestCurrentAuthorityCASRequiresExactPreviousAndSlotSwitch(t *testing.T) {
 	}
 }
 
-func TestImportedAuthorityRefreshAndLoadedCandidateReplacementAreBounded(t *testing.T) {
+func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
 	store, err := NewAuthorityStore(client, "fugue-system")
@@ -290,26 +290,6 @@ func TestImportedAuthorityRefreshAndLoadedCandidateReplacementAreBounded(t *test
 	if _, _, err := store.SwitchCurrent(ctx, oldCurrent, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	currentObject, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, currentAuthorityName(oldCurrent.GroupID), metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentObject.UID, currentObject.ResourceVersion = types.UID("current-import"), "10"
-	if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(ctx, currentObject, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	refreshed := oldCurrent
-	refreshed.CurrentRecordDigest = otherDigest
-	refreshed.CurrentWorkerSlot = AuthoritySlotA
-	refreshed.AuthorityEpoch = 2
-	if _, _, err := store.RefreshImportedCurrent(ctx, refreshed, currentObject.UID, currentObject.ResourceVersion); err != nil {
-		t.Fatal(err)
-	}
-	loadedCurrent, _, _, err := store.LoadCurrent(ctx, oldCurrent.GroupID)
-	if err != nil || loadedCurrent != refreshed {
-		t.Fatalf("refreshed current=%+v err=%v", loadedCurrent, err)
-	}
-
 	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: oldCurrent.GroupID, RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 		t.Fatal(err)

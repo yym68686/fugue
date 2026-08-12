@@ -60,7 +60,6 @@ type candidateImportStore interface {
 	PutCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
 	SwitchCurrent(context.Context, releaseguardian.CurrentAuthority, types.UID, string) (types.UID, string, error)
 	ReplaceLoadedCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
-	RefreshImportedCurrent(context.Context, releaseguardian.CurrentAuthority, types.UID, string) (types.UID, string, error)
 }
 
 func parseCandidateImports(value string) ([]candidateImportConfig, error) {
@@ -149,7 +148,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		CurrentRecordDigest: envelope.CurrentRecord.RecordDigest, CurrentWorkerSlot: envelope.CurrentWorkerSlot,
 		AuthorityEpoch: envelope.CurrentRecord.Epoch,
 	}
-	existingCurrent, currentUID, currentRV, err := store.LoadCurrent(ctx, config.GroupID)
+	_, _, _, err = store.LoadCurrent(ctx, config.GroupID)
 	currentMissing := apierrors.IsNotFound(err)
 	if err != nil && !currentMissing {
 		return false, fmt.Errorf("load current authority: %w", err)
@@ -186,11 +185,6 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	if currentMissing {
 		if _, _, err := store.SwitchCurrent(ctx, current, "", ""); err != nil {
 			return false, fmt.Errorf("bootstrap current authority: %w", err)
-		}
-		changed = true
-	} else if existingCurrent != current {
-		if _, _, err := store.RefreshImportedCurrent(ctx, current, currentUID, currentRV); err != nil {
-			return false, fmt.Errorf("refresh imported current authority: %w", err)
 		}
 		changed = true
 	}

@@ -85,6 +85,39 @@ func TestCandidateImporterBootstrapsExactGroupPointersIdempotently(t *testing.T)
 	}
 }
 
+func TestCandidateImporterNeverRefreshesAnExistingCurrentAuthority(t *testing.T) {
+	now := time.Date(2026, 8, 12, 4, 15, 0, 0, time.UTC)
+	groupID := "edge-pool-a"
+	token := strings.Repeat("t", 48)
+	envelope := candidateImporterEnvelopeFixture(t, groupID, now)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(envelope) }))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}}
+	client := fake.NewSimpleClientset(pod)
+	store, _ := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	current := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: groupID, CurrentRecordDigest: "sha256:" + strings.Repeat("8", 64), CurrentWorkerSlot: releaseguardian.AuthoritySlotB,
+		PreviousRecordDigest: "sha256:" + strings.Repeat("9", 64), PreviousWorkerSlot: releaseguardian.AuthoritySlotA, AuthorityEpoch: 20}
+	if _, _, err := store.SwitchCurrent(context.Background(), current, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-current-authority-"+groupID, "current-authority", "20")
+	config := candidateImportConfig{GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile}
+	if changed, err := importCandidateOnce(context.Background(), store, client, config, now); err != nil || !changed {
+		t.Fatalf("candidate import: changed=%v err=%v", changed, err)
+	}
+	loaded, _, _, err := store.LoadCurrent(context.Background(), groupID)
+	if err != nil || loaded != current {
+		t.Fatalf("importer changed Guardian-owned current: current=%+v err=%v", loaded, err)
+	}
+}
+
 func TestCandidateImporterRejectsDigestDriftWithoutChangingPointers(t *testing.T) {
 	now := time.Date(2026, 8, 12, 4, 30, 0, 0, time.UTC)
 	groupID := "edge-pool-a"

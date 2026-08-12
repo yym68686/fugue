@@ -323,25 +323,6 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 	})
 }
 
-// RefreshImportedCurrent synchronizes only the bootstrap current fact exposed
-// by Edge Control. It cannot alter an authority that already carries a
-// previous/LKG pointer, so it cannot impersonate a verified traffic switch.
-func (store *AuthorityStore) RefreshImportedCurrent(ctx context.Context, authority CurrentAuthority, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
-	if err := authority.Validate(); err != nil || authority.PreviousRecordDigest != "" || authority.PreviousWorkerSlot != "" {
-		return "", "", errors.New("imported current refresh is invalid")
-	}
-	return store.putMutable(ctx, currentAuthorityName(authority.GroupID), authority.GroupID, "authority.json", authority, expectedUID, expectedResourceVersion, func(raw string) error {
-		var current CurrentAuthority
-		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil ||
-			current.PreviousRecordDigest != "" || current.PreviousWorkerSlot != "" || current.GroupID != authority.GroupID ||
-			authority.AuthorityEpoch <= current.AuthorityEpoch ||
-			(authority.CurrentRecordDigest == current.CurrentRecordDigest && authority.CurrentWorkerSlot == current.CurrentWorkerSlot) {
-			return errors.New("imported current refresh changes an ineligible pointer")
-		}
-		return nil
-	})
-}
-
 func (store *AuthorityStore) SwitchCurrent(ctx context.Context, authority CurrentAuthority, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
 	if err := authority.Validate(); err != nil {
 		return "", "", err
