@@ -343,4 +343,22 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 	if err != nil || repeated.Published != 1 || repeated.Results[0].Epoch != candidate.Epoch || repeated.Results[0].RecordDigest != candidate.Record.RecordDigest {
 		t.Fatalf("fresh fallback candidate was replaced during reconcile: batch=%+v candidate=%+v err=%v", repeated, candidate, err)
 	}
+	state, err = store.readGroupState(statePath, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Inventory.ActiveEpoch.Slot = "b"
+	state.Inventory.ActiveEpoch.ReleaseEpoch = "epoch-de-b-next"
+	state.Inventory.ObservedAt = now.Add(32 * time.Minute)
+	state.Revision++
+	if err := store.writeGroupState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	publisher.Now = func() time.Time { return now.Add(32 * time.Minute) }
+	replaced, err := publisher.Publish(ctx, degraded)
+	updated, updatedExists, readErr := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || readErr != nil || !updatedExists || replaced.Published != 1 || updated.Epoch <= candidate.Epoch ||
+		updated.CurrentWorkerSlot != "b" || updated.WorkerSlot != "a" || updated.Record.RecordDigest == candidate.Record.RecordDigest {
+		t.Fatalf("stale candidate was not atomically rebound after Front slot change: batch=%+v candidate=%+v err=%v/%v", replaced, updated, err, readErr)
+	}
 }

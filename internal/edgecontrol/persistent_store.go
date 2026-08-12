@@ -692,8 +692,7 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 			state.Ledger[candidate.CandidateLedgerSequence-1].BundleArchived ||
 			state.Ledger[candidate.CandidateLedgerSequence-1].RouteIntentGeneration != candidate.RouteIntentGeneration ||
 			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryGeneration != candidate.InventoryGeneration ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest || state.Inventory == nil ||
-			state.Inventory.ActiveEpoch.Slot != candidate.CurrentWorkerSlot || state.Inventory.ActiveEpoch.Slot == candidate.WorkerSlot ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest ||
 			(state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "a" && state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "b") ||
 			groupAuthorityCandidateDigest(*state.Ledger[candidate.CandidateLedgerSequence-1].Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) {
 			return errors.New("edge-control persistent candidate is not bound to the group shadow ledger")
