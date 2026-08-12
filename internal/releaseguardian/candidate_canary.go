@@ -53,6 +53,78 @@ func (sample CandidateRouteSample) validate(candidate CandidateAuthority, requir
 	return nil
 }
 
+type CandidateWorkerInstance struct {
+	NodeName string `json:"nodeName"`
+	PodUID   string `json:"podUid"`
+}
+
+type CandidateWorkerCohort struct {
+	GroupID           string                    `json:"groupId"`
+	WorkerSlot        AuthoritySlot             `json:"workerSlot"`
+	BundleGeneration  string                    `json:"bundleGeneration"`
+	WorkerSourceSHA   string                    `json:"workerSourceSha"`
+	WorkerImageDigest string                    `json:"workerImageDigest"`
+	Instances         []CandidateWorkerInstance `json:"instances"`
+	CohortDigest      string                    `json:"cohortDigest"`
+}
+
+func (cohort CandidateWorkerCohort) Seal() (CandidateWorkerCohort, error) {
+	cohort.CohortDigest = ""
+	cohort.Instances = append([]CandidateWorkerInstance(nil), cohort.Instances...)
+	if err := cohort.validateUnsigned(); err != nil {
+		return CandidateWorkerCohort{}, err
+	}
+	sort.Slice(cohort.Instances, func(i, j int) bool {
+		if cohort.Instances[i].NodeName != cohort.Instances[j].NodeName {
+			return cohort.Instances[i].NodeName < cohort.Instances[j].NodeName
+		}
+		return cohort.Instances[i].PodUID < cohort.Instances[j].PodUID
+	})
+	raw, err := declarativerelease.CanonicalJSON(cohort)
+	if err != nil {
+		return CandidateWorkerCohort{}, err
+	}
+	cohort.CohortDigest = digest(raw)
+	return cohort, nil
+}
+
+func (cohort CandidateWorkerCohort) Validate() error {
+	if !digestPattern.MatchString(cohort.CohortDigest) || cohort.validateUnsigned() != nil {
+		return errors.New("candidate worker cohort is invalid")
+	}
+	copy := cohort
+	copy.CohortDigest = ""
+	copy.Instances = append([]CandidateWorkerInstance(nil), cohort.Instances...)
+	sort.Slice(copy.Instances, func(i, j int) bool {
+		if copy.Instances[i].NodeName != copy.Instances[j].NodeName {
+			return copy.Instances[i].NodeName < copy.Instances[j].NodeName
+		}
+		return copy.Instances[i].PodUID < copy.Instances[j].PodUID
+	})
+	raw, err := declarativerelease.CanonicalJSON(copy)
+	if err != nil || digest(raw) != cohort.CohortDigest {
+		return errors.New("candidate worker cohort digest is invalid")
+	}
+	return nil
+}
+
+func (cohort CandidateWorkerCohort) validateUnsigned() error {
+	if !groupPattern.MatchString(cohort.GroupID) || cohort.WorkerSlot.Validate() != nil ||
+		!authorityGenerationPattern.MatchString(cohort.BundleGeneration) || !shaPattern.MatchString(cohort.WorkerSourceSHA) ||
+		!digestPattern.MatchString(cohort.WorkerImageDigest) || len(cohort.Instances) < 1 || len(cohort.Instances) > 100 {
+		return errors.New("candidate worker cohort identity is invalid")
+	}
+	seenNodes, seenPods := map[string]bool{}, map[string]bool{}
+	for _, instance := range cohort.Instances {
+		if !componentPattern.MatchString(instance.NodeName) || len(instance.PodUID) < 8 || len(instance.PodUID) > 64 ||
+			strings.ContainsAny(instance.PodUID, "\r\n\t ,") || seenNodes[instance.NodeName] || seenPods[instance.PodUID] {
+			return errors.New("candidate worker cohort member is invalid")
+		}
+		seenNodes[instance.NodeName], seenPods[instance.PodUID] = true, true
+	}
+	return nil
+}
+
 func (sample CandidateRouteSample) healthy() bool {
 	return sample.TransportErrorClass == "" && sample.StatusCode >= 200 && sample.StatusCode < 300 &&
 		sample.BodyDigest == sample.ExpectedBodyDigest
@@ -63,8 +135,9 @@ func (sample CandidateRouteSample) healthy() bool {
 // CurrentAuthority. A candidate failure with a healthy previous route is
 // candidate-local; simultaneous failure is dependency degradation and cannot
 // authorize a switch or an unrelated rollback.
-func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthority, candidateSamples, previousSamples []CandidateRouteSample, observedAt time.Time, ttl time.Duration, keyID string, signingKey []byte) (CandidateCanaryResult, error) {
-	if candidate.Validate() != nil || candidate.State != CandidateAuthorityLoaded || current.Validate() != nil ||
+func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthority, cohort CandidateWorkerCohort, candidateSamples, previousSamples []CandidateRouteSample, observedAt time.Time, ttl time.Duration, keyID string, signingKey []byte) (CandidateCanaryResult, error) {
+	if candidate.Validate() != nil || !authorityGenerationPattern.MatchString(candidate.BundleGeneration) || candidate.State != CandidateAuthorityLoaded || current.Validate() != nil ||
+		cohort.Validate() != nil || cohort.GroupID != candidate.GroupID || cohort.WorkerSlot != candidate.WorkerSlot || cohort.BundleGeneration != candidate.BundleGeneration ||
 		candidate.GroupID != current.GroupID || candidate.RecordDigest == current.CurrentRecordDigest ||
 		candidate.WorkerSlot == current.CurrentWorkerSlot || len(candidateSamples) != CandidateCanaryRequiredSamples ||
 		len(previousSamples) != CandidateCanaryRequiredSamples || ttl <= 0 || ttl > time.Minute ||
@@ -87,7 +160,7 @@ func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthor
 	}
 	previousBinding := CandidateAuthority{
 		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: current.GroupID,
-		RecordDigest: current.CurrentRecordDigest, WorkerSlot: current.CurrentWorkerSlot,
+		RecordDigest: current.CurrentRecordDigest, BundleGeneration: candidate.BundleGeneration, WorkerSlot: current.CurrentWorkerSlot,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, State: CandidateAuthorityLoaded, Generation: candidate.Generation,
 	}
 	for _, sample := range previousSamples {
@@ -127,6 +200,8 @@ func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthor
 	}
 	return SignCandidateCanaryResult(CandidateCanaryResult{
 		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
+		BundleGeneration: candidate.BundleGeneration, WorkerSourceSHA: cohort.WorkerSourceSHA,
+		WorkerImageDigest: cohort.WorkerImageDigest, WorkerCohortDigest: cohort.CohortDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: routeState, DependencyState: dependencyState,
 		EvidenceDigest: digest(evidence), ObservedAt: observedAt.Format(time.RFC3339Nano),
 		ExpiresAt: observedAt.Add(ttl).Format(time.RFC3339Nano), KeyID: keyID,

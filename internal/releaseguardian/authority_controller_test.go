@@ -21,7 +21,7 @@ func TestAuthorityControllerSwitchesAndRevertsOneGroupWithExactCAS(t *testing.T)
 	group := "edge-pool-a"
 	candidate := CandidateAuthority{
 		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: group,
-		RecordDigest: otherDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
+		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
 		State: CandidateAuthorityLoaded, Generation: 1,
 	}
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
@@ -41,12 +41,7 @@ func TestAuthorityControllerSwitchesAndRevertsOneGroupWithExactCAS(t *testing.T)
 		t.Fatal(err)
 	}
 	setAuthorityObjectCAS(t, client, currentAuthorityName(otherGroup.GroupID), "current-b", "21")
-	result, err := SignCandidateCanaryResult(CandidateCanaryResult{
-		GroupID: group, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
-		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
-		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
-		KeyID: "candidate-canary-v1",
-	}, candidateCanaryTestKey)
+	result, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +96,7 @@ func TestAuthorityControllerWaitsForBoundCandidateCanary(t *testing.T) {
 	group := "edge-pool-c"
 	candidate := CandidateAuthority{
 		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: group,
-		RecordDigest: otherDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
+		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
 		State: CandidateAuthorityLoaded, Generation: 1,
 	}
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
@@ -117,12 +112,7 @@ func TestAuthorityControllerWaitsForBoundCandidateCanary(t *testing.T) {
 	}
 	setAuthorityObjectCAS(t, client, currentAuthorityName(group), "current-c", "60")
 	staleAt := time.Unix(3_900, 0).UTC()
-	stale, err := SignCandidateCanaryResult(CandidateCanaryResult{
-		GroupID: group, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
-		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
-		EvidenceDigest: testDigest, ObservedAt: staleAt.Format(time.RFC3339Nano), ExpiresAt: staleAt.Add(30 * time.Second).Format(time.RFC3339Nano),
-		KeyID: "candidate-canary-v1",
-	}, candidateCanaryTestKey)
+	stale, err := SignCandidateCanaryResult(candidateResultFixture(candidate, staleAt, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,17 +148,13 @@ func TestAuthorityControllerRejectsBadCandidateWithoutChangingCurrent(t *testing
 		t.Fatal(err)
 	}
 	group := "edge-pool-b"
-	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: group, RecordDigest: otherDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: group, RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
 	_, _, _ = store.PutCandidate(ctx, candidate, "", "")
 	setAuthorityObjectCAS(t, client, candidateAuthorityName(group), "candidate-b", "30")
 	current := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: group, CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 8}
 	_, _, _ = store.SwitchCurrent(ctx, current, "", "")
 	setAuthorityObjectCAS(t, client, currentAuthorityName(group), "current-b", "40")
-	result, err := SignCandidateCanaryResult(CandidateCanaryResult{
-		GroupID: group, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot, ReleaseRecordDigest: candidate.ReleaseRecordDigest,
-		RouteState: HealthDegraded, DependencyState: HealthHealthy, EvidenceDigest: testDigest,
-		ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano), KeyID: "candidate-canary-v1",
-	}, candidateCanaryTestKey)
+	result, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthDegraded, HealthHealthy), candidateCanaryTestKey)
 	if err != nil {
 		t.Fatal(err)
 	}

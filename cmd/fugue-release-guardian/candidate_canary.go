@@ -21,7 +21,11 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/proxyproto"
 	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/kubernetes"
 )
 
 type candidateCanaryProbe struct {
@@ -106,14 +110,14 @@ func exactSHA256Digest(value string) bool {
 	return err == nil && value == strings.ToLower(value)
 }
 
-func startCandidateCanaryProbers(ctx context.Context, store *releaseguardian.AuthorityStore, probes []candidateCanaryProbe) {
+func startCandidateCanaryProbers(ctx context.Context, store *releaseguardian.AuthorityStore, client kubernetes.Interface, namespace string, probes []candidateCanaryProbe) {
 	for _, probe := range probes {
 		probe := probe
 		go func() {
 			ticker := time.NewTicker(probe.Interval)
 			defer ticker.Stop()
 			for {
-				if err := candidateCanaryOnce(ctx, store, probe); err != nil {
+				if err := candidateCanaryOnce(ctx, store, client, namespace, probe); err != nil {
 					logCandidateCanaryError(probe.GroupID, err)
 				}
 				select {
@@ -126,7 +130,10 @@ func startCandidateCanaryProbers(ctx context.Context, store *releaseguardian.Aut
 	}
 }
 
-func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthorityStore, probe candidateCanaryProbe) error {
+func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthorityStore, client kubernetes.Interface, namespace string, probe candidateCanaryProbe) error {
+	if client == nil || strings.TrimSpace(namespace) == "" {
+		return errors.New("candidate worker observer is unavailable")
+	}
 	now := time.Now().UTC()
 	if err := store.PruneExpiredCandidateCanaryResults(ctx, probe.GroupID, now); err != nil {
 		return err
@@ -150,6 +157,10 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	if err != nil {
 		return err
 	}
+	cohort, err := observeCandidateWorkerCohort(ctx, client, namespace, candidate)
+	if err != nil {
+		return err
+	}
 	candidateSamples := make([]releaseguardian.CandidateRouteSample, 0, releaseguardian.CandidateCanaryRequiredSamples)
 	previousSamples := make([]releaseguardian.CandidateRouteSample, 0, releaseguardian.CandidateCanaryRequiredSamples)
 	for index := 0; index < releaseguardian.CandidateCanaryRequiredSamples; index++ {
@@ -167,11 +178,93 @@ func candidateCanaryOnce(ctx context.Context, store *releaseguardian.AuthoritySt
 	if err != nil || latestCurrent != current || latestCurrentUID != currentUID || latestCurrentRV != currentRV {
 		return errors.New("current authority changed during route canary")
 	}
-	result, err := releaseguardian.EvaluateCandidateCanary(candidate, current, candidateSamples, previousSamples, observedAt, 3*probe.Interval, probe.KeyID, probe.SigningMaterial)
+	latestCohort, err := observeCandidateWorkerCohort(ctx, client, namespace, candidate)
+	if err != nil || latestCohort.CohortDigest != cohort.CohortDigest {
+		return errors.New("candidate worker cohort changed during route canary")
+	}
+	result, err := releaseguardian.EvaluateCandidateCanary(candidate, current, cohort, candidateSamples, previousSamples, observedAt, 3*probe.Interval, probe.KeyID, probe.SigningMaterial)
 	if err != nil {
 		return err
 	}
 	return store.CreateCandidateCanaryResult(ctx, result, observedAt)
+}
+
+func observeCandidateWorkerCohort(ctx context.Context, client kubernetes.Interface, namespace string, candidate releaseguardian.CandidateAuthority) (releaseguardian.CandidateWorkerCohort, error) {
+	selector := labels.Set{
+		"fugue.io/edge-group-id": candidate.GroupID,
+		"fugue.io/edge-slot":     string(candidate.WorkerSlot),
+	}.AsSelector().String()
+	pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 101})
+	if err != nil || pods.Continue != "" || len(pods.Items) < 1 || len(pods.Items) > 100 {
+		return releaseguardian.CandidateWorkerCohort{}, errors.New("candidate worker cohort is unavailable")
+	}
+	cohort := releaseguardian.CandidateWorkerCohort{
+		GroupID: candidate.GroupID, WorkerSlot: candidate.WorkerSlot, BundleGeneration: candidate.BundleGeneration,
+		Instances: make([]releaseguardian.CandidateWorkerInstance, 0, len(pods.Items)),
+	}
+	for index := range pods.Items {
+		pod := &pods.Items[index]
+		if pod.DeletionTimestamp != nil || pod.UID == "" || strings.TrimSpace(pod.Spec.NodeName) == "" ||
+			pod.Labels["fugue.io/edge-control-client"] != "true" || !podReady(pod.Status.Conditions) {
+			return releaseguardian.CandidateWorkerCohort{}, errors.New("candidate worker cohort is not ready")
+		}
+		source := strings.TrimSpace(pod.Annotations["fugue.pro/source-commit"])
+		imageRef := ""
+		for _, container := range pod.Spec.Containers {
+			if container.Name == "edge" {
+				imageRef = strings.TrimSpace(container.Image)
+			}
+		}
+		runtimeDigest := ""
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.Name == "edge" {
+				if !status.Ready || status.RestartCount != 0 {
+					return releaseguardian.CandidateWorkerCohort{}, errors.New("candidate worker process is not stable")
+				}
+				runtimeDigest = imageDigest(status.ImageID)
+			}
+		}
+		declaredDigest := imageDigest(imageRef)
+		if !exactSourceSHA(source) || declaredDigest == "" || runtimeDigest != declaredDigest {
+			return releaseguardian.CandidateWorkerCohort{}, errors.New("candidate worker immutable identity is invalid")
+		}
+		if cohort.WorkerSourceSHA == "" {
+			cohort.WorkerSourceSHA, cohort.WorkerImageDigest = source, declaredDigest
+		} else if cohort.WorkerSourceSHA != source || cohort.WorkerImageDigest != declaredDigest {
+			return releaseguardian.CandidateWorkerCohort{}, errors.New("candidate worker cohort contains mixed releases")
+		}
+		cohort.Instances = append(cohort.Instances, releaseguardian.CandidateWorkerInstance{NodeName: strings.TrimSpace(pod.Spec.NodeName), PodUID: string(pod.UID)})
+	}
+	return cohort.Seal()
+}
+
+func podReady(conditions []corev1.PodCondition) bool {
+	for _, condition := range conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func imageDigest(value string) string {
+	index := strings.LastIndex(strings.TrimSpace(value), "@sha256:")
+	if index < 0 {
+		return ""
+	}
+	digest := strings.TrimSpace(value)[index+1:]
+	if !exactSHA256Digest(digest) {
+		return ""
+	}
+	return digest
+}
+
+func exactSourceSHA(value string) bool {
+	if len(value) != 40 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func observeCandidateRoute(ctx context.Context, probe candidateCanaryProbe, binding releaseguardian.CandidateAuthority, slot releaseguardian.AuthoritySlot) releaseguardian.CandidateRouteSample {

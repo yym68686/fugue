@@ -13,7 +13,7 @@ func candidateCanaryFixture(t *testing.T) (CandidateAuthority, CurrentAuthority,
 	now := time.Unix(1_000, 0).UTC()
 	candidate := CandidateAuthority{
 		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
-		RecordDigest: otherDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
+		RecordDigest: otherDigest, BundleGeneration: "candidate-bundle-7", WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
 		State: CandidateAuthorityLoaded, Generation: 7,
 	}
 	current := CurrentAuthority{
@@ -21,6 +21,19 @@ func candidateCanaryFixture(t *testing.T) (CandidateAuthority, CurrentAuthority,
 		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 11,
 	}
 	return candidate, current, now
+}
+
+func candidateWorkerCohortFixture(t *testing.T, candidate CandidateAuthority) CandidateWorkerCohort {
+	t.Helper()
+	cohort, err := (CandidateWorkerCohort{
+		GroupID: candidate.GroupID, WorkerSlot: candidate.WorkerSlot, BundleGeneration: candidate.BundleGeneration,
+		WorkerSourceSHA: strings.Repeat("a", 40), WorkerImageDigest: testDigest,
+		Instances: []CandidateWorkerInstance{{NodeName: "edge-node-a", PodUID: "pod-uid-candidate-a"}},
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cohort
 }
 
 func routeSamples(candidate CandidateAuthority, now time.Time, healthy, attested bool) []CandidateRouteSample {
@@ -50,7 +63,7 @@ func TestCandidateCanaryRequiresThreeCandidateBoundRouteSuccesses(t *testing.T) 
 	candidate, current, now := candidateCanaryFixture(t)
 	previous := candidate
 	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
-	result, err := EvaluateCandidateCanary(candidate, current, routeSamples(candidate, now, true, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
+	result, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +91,7 @@ func TestCandidateCanaryAttributesMissingRouteToCandidateWhenPreviousIsHealthy(t
 	candidate, current, now := candidateCanaryFixture(t)
 	previous := candidate
 	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
-	result, err := EvaluateCandidateCanary(candidate, current, routeSamples(candidate, now, false, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
+	result, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, false, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +104,7 @@ func TestCandidateCanaryAttributesSharedOriginFailureToDependency(t *testing.T) 
 	candidate, current, now := candidateCanaryFixture(t)
 	previous := candidate
 	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
-	result, err := EvaluateCandidateCanary(candidate, current, routeSamples(candidate, now, false, true), routeSamples(previous, now, false, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
+	result, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, false, true), routeSamples(previous, now, false, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,12 +119,12 @@ func TestCandidateCanaryRejectsCrossCandidateReplayAndStaleSamples(t *testing.T)
 	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
 	cross := routeSamples(candidate, now, true, true)
 	cross[1].ObservedRecordDigest = testDigest
-	if _, err := EvaluateCandidateCanary(candidate, current, cross, routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil || !strings.Contains(err.Error(), "attestation") {
+	if _, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), cross, routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil || !strings.Contains(err.Error(), "attestation") {
 		t.Fatalf("cross-candidate result was accepted: %v", err)
 	}
 	stale := routeSamples(candidate, now, true, true)
 	stale[0].ObservedAt = now.Add(-11 * time.Second).Format(time.RFC3339Nano)
-	if _, err := EvaluateCandidateCanary(candidate, current, stale, routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil || !strings.Contains(err.Error(), "window") {
+	if _, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), stale, routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil || !strings.Contains(err.Error(), "window") {
 		t.Fatalf("stale candidate sample was accepted: %v", err)
 	}
 }
@@ -121,7 +134,7 @@ func TestCandidateCanaryCannotEvaluateCurrentSlotOrUnloadedCandidate(t *testing.
 	previous := candidate
 	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
 	candidate.WorkerSlot = current.CurrentWorkerSlot
-	if _, err := EvaluateCandidateCanary(candidate, current, routeSamples(candidate, now, true, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil {
+	if _, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), routeSamples(previous, now, true, false), now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil {
 		t.Fatal("current slot was accepted as a candidate")
 	}
 }

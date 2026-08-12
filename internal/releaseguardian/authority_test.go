@@ -15,6 +15,18 @@ import (
 
 const testSignature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
+const testCandidateBundle = "candidate-bundle-generation-1"
+
+func candidateResultFixture(candidate CandidateAuthority, now time.Time, route, dependency HealthState) CandidateCanaryResult {
+	return CandidateCanaryResult{
+		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, BundleGeneration: candidate.BundleGeneration,
+		WorkerSlot: candidate.WorkerSlot, WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
+		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: route, DependencyState: dependency,
+		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
+		KeyID: "candidate-canary-v1",
+	}
+}
+
 func sealedRouteRecord(t *testing.T, groupID string, epoch int64) RouteBundleRecord {
 	t.Helper()
 	record, err := (RouteBundleRecord{
@@ -56,12 +68,10 @@ func TestAuthorityModelsBindCandidateCurrentAndLKGIdentity(t *testing.T) {
 
 func TestCandidateCanaryIsImmutableCandidateBoundAndFresh(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
-	result, err := (CandidateCanaryResult{
-		GroupID: "edge-pool-a", CandidateRecordDigest: testDigest, WorkerSlot: AuthoritySlotB,
-		ReleaseRecordDigest: otherDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
-		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
-		KeyID: "canary-key-1", Signature: testableSignaturePlaceholder,
-	}).Seal()
+	candidate := CandidateAuthority{GroupID: "edge-pool-a", RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest}
+	unsigned := candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy)
+	unsigned.KeyID, unsigned.Signature = "canary-key-1", testableSignaturePlaceholder
+	result, err := unsigned.Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,15 +97,10 @@ func TestCandidateCanaryStoreScopesLookupAndPrunesOnlyExpiredValidResults(t *tes
 	}
 	candidate := CandidateAuthority{
 		APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
-		RecordDigest: testDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
+		RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: otherDigest,
 		State: CandidateAuthorityLoaded, Generation: 1,
 	}
-	result, err := SignCandidateCanaryResult(CandidateCanaryResult{
-		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
-		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
-		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
-		KeyID: "candidate-canary-v1",
-	}, candidateCanaryTestKey)
+	result, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
 	if err != nil || store.CreateCandidateCanaryResult(ctx, result, now) != nil {
 		t.Fatalf("create candidate canary: result=%+v err=%v", result, err)
 	}
@@ -150,7 +155,7 @@ func TestAuthorityStoreKeepsGroupsImmutableAndCASIsolated(t *testing.T) {
 		t.Fatal("group authority object names collided")
 	}
 
-	candidateA := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: a.GroupID, RecordDigest: a.RecordDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidateA := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: a.GroupID, RecordDigest: a.RecordDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
 	_, _, err = store.PutCandidate(ctx, candidateA, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -258,7 +263,7 @@ func TestImportedAuthorityRefreshAndLoadedCandidateReplacementAreBounded(t *test
 		t.Fatalf("refreshed current=%+v err=%v", loadedCurrent, err)
 	}
 
-	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: oldCurrent.GroupID, RecordDigest: testDigest, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
+	candidate := CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: oldCurrent.GroupID, RecordDigest: testDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest, State: CandidateAuthorityLoaded, Generation: 1}
 	if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 		t.Fatal(err)
 	}

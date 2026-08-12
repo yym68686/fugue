@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestParseCandidateCanaryProbesIsExactAndLoadsIndependentKey(t *testing.T) {
@@ -59,6 +63,68 @@ func TestCandidateCanaryConfigurationIsOptionalUntilAuthorityPublisherExists(t *
 	probes, err := parseCandidateCanaryProbes("")
 	if err != nil || len(probes) != 0 {
 		t.Fatalf("empty candidate canary config did not remain dormant: probes=%v err=%v", probes, err)
+	}
+}
+
+func TestCandidateWorkerCohortBindsExactReadySlotRelease(t *testing.T) {
+	candidate := releaseguardian.CandidateAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind,
+		GroupID: "edge-pool-a", RecordDigest: "sha256:" + strings.Repeat("a", 64), BundleGeneration: "candidate-generation-1",
+		WorkerSlot: releaseguardian.AuthoritySlotB, ReleaseRecordDigest: "sha256:" + strings.Repeat("b", 64),
+		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
+	}
+	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("c", 64)
+	pod := candidateWorkerPod("worker-b", "edge-node-a", "pod-uid-worker-b", string(candidate.WorkerSlot), strings.Repeat("d", 40), image)
+	client := fake.NewSimpleClientset(pod)
+	cohort, err := observeCandidateWorkerCohort(context.Background(), client, "fugue-system", candidate)
+	if err != nil || cohort.Validate() != nil || cohort.GroupID != candidate.GroupID || cohort.WorkerSlot != candidate.WorkerSlot ||
+		cohort.WorkerSourceSHA != strings.Repeat("d", 40) || cohort.WorkerImageDigest != "sha256:"+strings.Repeat("c", 64) || len(cohort.Instances) != 1 {
+		t.Fatalf("candidate cohort=%+v err=%v", cohort, err)
+	}
+
+	mixed := candidateWorkerPod("worker-b-2", "edge-node-b", "pod-uid-worker-b-2", string(candidate.WorkerSlot), strings.Repeat("e", 40), image)
+	if _, err := client.CoreV1().Pods("fugue-system").Create(context.Background(), mixed, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observeCandidateWorkerCohort(context.Background(), client, "fugue-system", candidate); err == nil || !strings.Contains(err.Error(), "mixed") {
+		t.Fatalf("mixed source cohort was accepted: %v", err)
+	}
+}
+
+func TestCandidateWorkerCohortRejectsRuntimeDigestAndRestartDrift(t *testing.T) {
+	candidate := releaseguardian.CandidateAuthority{
+		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind,
+		GroupID: "edge-pool-a", RecordDigest: "sha256:" + strings.Repeat("a", 64), BundleGeneration: "candidate-generation-1",
+		WorkerSlot: releaseguardian.AuthoritySlotB, ReleaseRecordDigest: "sha256:" + strings.Repeat("b", 64),
+		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
+	}
+	image := "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("c", 64)
+	for _, test := range []struct {
+		name   string
+		mutate func(*corev1.Pod)
+	}{{"runtime digest", func(pod *corev1.Pod) {
+		pod.Status.ContainerStatuses[0].ImageID = "ghcr.io/example/fugue-edge@sha256:" + strings.Repeat("f", 64)
+	}},
+		{"restart", func(pod *corev1.Pod) { pod.Status.ContainerStatuses[0].RestartCount = 1 }},
+		{"not ready", func(pod *corev1.Pod) { pod.Status.Conditions[0].Status = corev1.ConditionFalse }}} {
+		t.Run(test.name, func(t *testing.T) {
+			pod := candidateWorkerPod("worker-b", "edge-node-a", "pod-uid-worker-b", string(candidate.WorkerSlot), strings.Repeat("d", 40), image)
+			test.mutate(pod)
+			if _, err := observeCandidateWorkerCohort(context.Background(), fake.NewSimpleClientset(pod), "fugue-system", candidate); err == nil {
+				t.Fatal("drifted candidate worker was accepted")
+			}
+		})
+	}
+}
+
+func candidateWorkerPod(name, node, uid, slot, source, image string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "fugue-system", UID: types.UID(uid), Labels: map[string]string{
+			"fugue.io/edge-group-id": "edge-pool-a", "fugue.io/edge-slot": slot, "fugue.io/edge-control-client": "true",
+		}, Annotations: map[string]string{"fugue.pro/source-commit": source}},
+		Spec: corev1.PodSpec{NodeName: node, Containers: []corev1.Container{{Name: "edge", Image: image}}},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "edge", Ready: true, ImageID: image}}},
 	}
 }
 

@@ -156,7 +156,8 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	}
 	candidate := releaseguardian.CandidateAuthority{
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: config.GroupID,
-		RecordDigest: envelope.Record.RecordDigest, WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
+		RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version,
+		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
 	existingCandidate, candidateUID, candidateRV, err := store.LoadCandidate(ctx, config.GroupID)
@@ -165,6 +166,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		return false, fmt.Errorf("read candidate authority: %w", err)
 	}
 	candidateChanged := !candidateMissing && (existingCandidate.GroupID != candidate.GroupID || existingCandidate.RecordDigest != candidate.RecordDigest ||
+		existingCandidate.BundleGeneration != candidate.BundleGeneration ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
 	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
 		return false, errors.New("candidate envelope conflicts with terminal candidate authority")

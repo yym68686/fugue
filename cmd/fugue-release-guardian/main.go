@@ -72,7 +72,7 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			startCandidateCanaryProbers(ctx, authorityStore, candidateProbes)
+			startCandidateCanaryProbers(ctx, authorityStore, client, targets[0].Namespace, candidateProbes)
 		}
 		return runCanaryProbers(ctx, store, probes)
 	}

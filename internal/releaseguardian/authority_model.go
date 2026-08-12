@@ -54,6 +54,7 @@ type CandidateAuthority struct {
 	Kind                string                  `json:"kind"`
 	GroupID             string                  `json:"groupId"`
 	RecordDigest        string                  `json:"recordDigest"`
+	BundleGeneration    string                  `json:"bundleGeneration"`
 	WorkerSlot          AuthoritySlot           `json:"workerSlot"`
 	ReleaseRecordDigest string                  `json:"releaseRecordDigest"`
 	State               CandidateAuthorityState `json:"state"`
@@ -73,8 +74,11 @@ func (candidate CandidateAuthority) Validate() error {
 		if candidate.CanaryResultDigest != "" {
 			return errors.New("loaded candidate cannot carry a canary result")
 		}
-	} else if !digestPattern.MatchString(candidate.CanaryResultDigest) {
+	} else if !authorityGenerationPattern.MatchString(candidate.BundleGeneration) || !digestPattern.MatchString(candidate.CanaryResultDigest) {
 		return errors.New("terminal candidate must bind a canary result")
+	}
+	if candidate.BundleGeneration != "" && !authorityGenerationPattern.MatchString(candidate.BundleGeneration) {
+		return errors.New("candidate authority bundle generation is invalid")
 	}
 	return nil
 }
@@ -115,7 +119,11 @@ type CandidateCanaryResult struct {
 	Kind                  string        `json:"kind"`
 	GroupID               string        `json:"groupId"`
 	CandidateRecordDigest string        `json:"candidateRecordDigest"`
+	BundleGeneration      string        `json:"bundleGeneration"`
 	WorkerSlot            AuthoritySlot `json:"workerSlot"`
+	WorkerSourceSHA       string        `json:"workerSourceSha"`
+	WorkerImageDigest     string        `json:"workerImageDigest"`
+	WorkerCohortDigest    string        `json:"workerCohortDigest"`
 	ReleaseRecordDigest   string        `json:"releaseRecordDigest"`
 	RouteState            HealthState   `json:"routeState"`
 	DependencyState       HealthState   `json:"dependencyState"`
@@ -228,6 +236,8 @@ func candidateCanarySigningBytes(result CandidateCanaryResult) ([]byte, error) {
 func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	if result.APIVersion != APIVersion || result.Kind != CandidateCanaryResultKind ||
 		!groupPattern.MatchString(result.GroupID) || !digestPattern.MatchString(result.CandidateRecordDigest) ||
+		!authorityGenerationPattern.MatchString(result.BundleGeneration) || !shaPattern.MatchString(result.WorkerSourceSHA) ||
+		!digestPattern.MatchString(result.WorkerImageDigest) || !digestPattern.MatchString(result.WorkerCohortDigest) ||
 		result.WorkerSlot.Validate() != nil || !digestPattern.MatchString(result.ReleaseRecordDigest) ||
 		(result.RouteState != HealthHealthy && result.RouteState != HealthDegraded) ||
 		(result.DependencyState != HealthHealthy && result.DependencyState != HealthDegraded) ||
@@ -248,6 +258,8 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 }
 
 var candidateCanarySignaturePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{86}$`)
+
+var authorityGenerationPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,255}$`)
 
 const testableSignaturePlaceholder = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 

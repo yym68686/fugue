@@ -179,6 +179,7 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 	var result CandidateCanaryResult
 	if err := decodeStrict([]byte(object.Data["result.json"]), &result); err != nil || result.Validate(now) != nil ||
 		result.ResultDigest != resultDigest || result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
+		result.BundleGeneration != candidate.BundleGeneration ||
 		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
 	}
@@ -215,6 +216,7 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 			return CandidateCanaryResult{}, errors.New("candidate canary object is invalid")
 		}
 		if result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
+			result.BundleGeneration != candidate.BundleGeneration ||
 			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 			continue
 		}
@@ -242,7 +244,7 @@ func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate Candida
 		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil {
 			return errors.New("current candidate authority is invalid")
 		}
-		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.WorkerSlot != candidate.WorkerSlot ||
+		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.BundleGeneration != candidate.BundleGeneration || current.WorkerSlot != candidate.WorkerSlot ||
 			current.ReleaseRecordDigest != candidate.ReleaseRecordDigest || candidate.Generation != current.Generation+1 {
 			return errors.New("candidate authority transition changes immutable identity")
 		}
@@ -264,7 +266,8 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 		var current CandidateAuthority
 		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil || current.State != CandidateAuthorityLoaded ||
 			candidate.Generation != current.Generation+1 || candidate.GroupID != current.GroupID ||
-			(candidate.RecordDigest == current.RecordDigest && candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
+			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration &&
+				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
 		}
 		return nil
