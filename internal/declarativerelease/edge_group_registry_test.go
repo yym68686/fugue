@@ -310,9 +310,9 @@ func TestUSEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US Worker intent: %v close: %v", err, closeErr)
 	}
-	const lkgSHA = "07c1f483253dc0c659bdc7b30ff5d8ec10a67e59"
-	const lkgImage = "sha256:935ef3bc6b4aaa5358367054daf1bb5969e3a5a9983417c875b4604e08fb6807"
-	if intent.Generation != 18 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
+	const lkgSHA = "55d102dca42a95793265291de1b4041c6e26a203"
+	const lkgImage = "sha256:8e195af264a830ed227e2f171a634e7ace7b1df0854541a79c50c3bf43f93fb3"
+	if intent.Generation != 19 || intent.ExpectedPreviousConfigSHA != lkgSHA || intent.ExpectedPreviousManifestSHA != lkgSHA ||
 		intent.ExpectedPreviousOCIRevision != lkgSHA || intent.ExpectedPreviousImageDigest != lkgImage ||
 		intent.SupersedesFailedConfigSHA != "" {
 		t.Fatalf("US Edge Worker intent does not bind the exact live LKG: %+v", intent)
@@ -326,11 +326,11 @@ func TestUSEdgeWorkerGuardianDeliveryBindsExactProductionLKG(t *testing.T) {
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 17
-	prior.ExpectedPreviousConfigSHA = "d2d4bff24ac1e007b6cf4d1c3eeecc3133cad716"
+	prior.Generation = 18
+	prior.ExpectedPreviousConfigSHA = "07c1f483253dc0c659bdc7b30ff5d8ec10a67e59"
 	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
 	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousImageDigest = "sha256:cc21b32a5ff1dbc2ad80cfbbd9bbef8e581a48e556cc613be85cbc340b23b775"
+	prior.ExpectedPreviousImageDigest = "sha256:935ef3bc6b4aaa5358367054daf1bb5969e3a5a9983417c875b4604e08fb6807"
 	bound, err := BindIntents(registry, plan, map[string]Intent{worker.ID: intent}, map[string]Intent{worker.ID: prior}, map[string]string{})
 	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != worker.ID || bound.Releases[0].Delivery == nil ||
 		bound.Releases[0].Delivery.Writer != "guardian" {
