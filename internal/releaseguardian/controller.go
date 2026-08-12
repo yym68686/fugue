@@ -140,6 +140,11 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health,
 		Reason: decision.Reason, ObservedAt: now.Format(time.RFC3339Nano),
 	}
+	if pendingTargetCanaryVerification(snapshot) {
+		status.State = StateVerifying
+		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
+		status.Reason = joinedReason("rollout is verified locally and is waiting for target-bound route evidence", snapshot.Health)
+	}
 	if controller.mode == ModeWrite && snapshot.Managed && pendingUnprovenLKGRecovery(snapshot) {
 		status.State = StateRecoveryRequired
 		status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
@@ -261,6 +266,18 @@ func pendingUnprovenLKGRecovery(snapshot Snapshot) bool {
 	reason := previous.Reason
 	return reason == "lkg-unproven" || strings.HasPrefix(reason, "lkg-unproven: ") ||
 		strings.HasPrefix(reason, "failed candidate is fenced while LKG health awaits complete evidence")
+}
+
+func pendingTargetCanaryVerification(snapshot Snapshot) bool {
+	previous := snapshot.PreviousStatus
+	if previous == nil || previous.State != StateVerifying || previous.Key() != snapshot.Key ||
+		previous.RolloutReceiptDigest == "" || snapshot.CurrentRecordDigest != snapshot.Desired.RecordDigest ||
+		previous.CurrentRecordDigest != snapshot.CurrentRecordDigest || previous.TargetRecordDigest != snapshot.Desired.RecordDigest ||
+		snapshot.Health.Local.State != HealthHealthy || snapshot.Health.Dependency.State != HealthHealthy ||
+		snapshot.Health.Route.State != HealthUnknown {
+		return false
+	}
+	return true
 }
 
 func allLayersHealthy(health HealthSnapshot) bool {

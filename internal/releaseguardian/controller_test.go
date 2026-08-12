@@ -179,6 +179,62 @@ func TestWriteModeReconcilesUnprovenLKGBeforeRetryingCandidate(t *testing.T) {
 	}
 }
 
+func TestWriteModeKeepsVerifiedRolloutPendingUntilTargetCanaryArrives(t *testing.T) {
+	now := time.Unix(24, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthUnknown, now), "")
+	snapshot.CurrentRecordDigest = snapshot.Record.RecordDigest
+	previous, err := (ReleaseStatus{
+		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: StateVerifying,
+		CurrentRecordDigest: snapshot.Record.RecordDigest, TargetRecordDigest: snapshot.Record.RecordDigest,
+		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health, Reason: "rollout verified",
+		RolloutReceiptDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.PreviousStatus = &previous
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, err := NewController(ModeWrite, store, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if executor.rollouts != 0 || executor.repairs != 0 || executor.rollbacks != 0 || store.status.State != StateVerifying ||
+		store.status.RolloutReceiptDigest != testDigest || !strings.Contains(store.status.Reason, "target-bound route evidence") {
+		t.Fatalf("executor=%+v status=%+v", executor, store.status)
+	}
+
+	snapshot.PreviousStatus = &store.status
+	snapshot.Health.Route = testLayer(HealthHealthy, "", now)
+	store.snapshot = snapshot
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if store.status.State != StateStable || executor.rollouts != 0 || executor.rollbacks != 0 {
+		t.Fatalf("healthy target did not converge: executor=%+v status=%+v", executor, store.status)
+	}
+}
+
+func TestWriteModeDoesNotTreatUnrelatedUnknownRouteAsVerification(t *testing.T) {
+	now := time.Unix(24, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthUnknown, now), "")
+	snapshot.CurrentRecordDigest = snapshot.Record.RecordDigest
+	store := &fakeStore{snapshot: snapshot}
+	executor := &fakeExecutor{}
+	controller, _ := NewController(ModeWrite, store, executor)
+	controller.now = func() time.Time { return now }
+	if err := controller.Reconcile(context.Background(), snapshot.Key); err != nil {
+		t.Fatal(err)
+	}
+	if store.status.State != StateRecoveryRequired {
+		t.Fatalf("unbound unknown route was accepted: %+v", store.status)
+	}
+}
+
 func TestWriteModeFencesUnprovenLKGUntilFreshHealth(t *testing.T) {
 	now := time.Unix(26, 0).UTC()
 	snapshot := testSnapshot(t, testHealth(HealthDegraded, HealthHealthy, HealthHealthy, now), otherDigest)
