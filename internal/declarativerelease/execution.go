@@ -332,6 +332,10 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	if !alreadyConverged && !degradedPredecessor && !prewrite.Matches(lkg, release, true) {
 		return ExecutionPlan{}, errors.New("live workload matches neither declared LKG nor immutable target")
 	}
+	prewrite, err = bindForwardOnlyPrewriteCAS(ctx, cluster, release, prewrite, rendered.LKG, rendered.Forward)
+	if err != nil {
+		return ExecutionPlan{}, fmt.Errorf("bind forward-only resource CAS: %w", err)
+	}
 	forwardDryRun, bindErr := BindManifestCAS(rendered.Forward, prewrite)
 	if bindErr != nil {
 		return ExecutionPlan{}, bindErr
@@ -362,6 +366,89 @@ func PrepareExecution(ctx context.Context, cluster Cluster, releasePlan Plan, co
 	}
 	plan.PlanDigest = digestOf(unsigned)
 	return plan, nil
+}
+
+// bindForwardOnlyPrewriteCAS extends a verified predecessor observation with
+// exact absent witnesses for resources introduced by the forward manifest.
+// It never turns an existing object into a forward-owned resource: every
+// forward-only identity must still be absent, while every predecessor object
+// must retain the same UID, generation, desired bytes, and managed-field
+// ownership. ResourceVersions may advance due to status-only writes; the
+// returned fresh CAS becomes the sole precondition used by dry-run and execute.
+func bindForwardOnlyPrewriteCAS(ctx context.Context, cluster Cluster, release PlanRelease, prewrite Observation, lkgManifest, forwardManifest []byte) (Observation, error) {
+	forwardIdentities, err := ResourceSetIdentities(forwardManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	prewriteByIdentity := make(map[ResourceIdentity]ResourceObservation, len(prewrite.Resources))
+	for _, resource := range prewrite.Resources {
+		prewriteByIdentity[resource.Identity] = resource
+	}
+	missing := make([]ResourceIdentity, 0)
+	for _, identity := range forwardIdentities {
+		if _, exists := prewriteByIdentity[identity]; exists {
+			continue
+		}
+		missing = append(missing, identity)
+	}
+	if len(missing) == 0 {
+		return prewrite, nil
+	}
+	lkgIdentities, err := ResourceSetIdentities(lkgManifest)
+	if err != nil {
+		return Observation{}, err
+	}
+	lkgSet := make(map[ResourceIdentity]struct{}, len(lkgIdentities))
+	for _, identity := range lkgIdentities {
+		lkgSet[identity] = struct{}{}
+	}
+	for _, identity := range missing {
+		if _, predecessor := lkgSet[identity]; predecessor {
+			return Observation{}, errors.New("predecessor resource is missing from verified observation")
+		}
+	}
+	fresh, err := cluster.ObserveCAS(ctx, release, forwardManifest)
+	if err != nil {
+		return Observation{}, fmt.Errorf("observe forward resource set: %w", err)
+	}
+	if err := fresh.validateResourceCAS(); err != nil {
+		return Observation{}, err
+	}
+	if fresh.Present != prewrite.Present || fresh.Primary != prewrite.Primary || fresh.UID != prewrite.UID || fresh.Generation != prewrite.Generation {
+		return Observation{}, errors.New("primary workload identity changed while binding forward resources")
+	}
+	freshByIdentity := make(map[ResourceIdentity]ResourceObservation, len(fresh.Resources))
+	for _, resource := range fresh.Resources {
+		freshByIdentity[resource.Identity] = resource
+	}
+	for _, identity := range forwardIdentities {
+		current, exists := freshByIdentity[identity]
+		if !exists {
+			return Observation{}, errors.New("forward resource is missing from fresh CAS observation")
+		}
+		prior, predecessor := prewriteByIdentity[identity]
+		if !predecessor {
+			if current.Present {
+				return Observation{}, errors.New("forward-only resource already exists outside the declared predecessor")
+			}
+			continue
+		}
+		if !sameResourceSpecIdentity(prior, current) {
+			return Observation{}, errors.New("predecessor resource changed while binding forward resources")
+		}
+	}
+	bound := prewrite
+	bound.ResourceVersion = fresh.ResourceVersion
+	bound.Resources = append([]ResourceObservation(nil), fresh.Resources...)
+	return bound, nil
+}
+
+func sameResourceSpecIdentity(left, right ResourceObservation) bool {
+	return left.Identity == right.Identity && left.Present == right.Present && left.UID == right.UID &&
+		left.RetainOnRollback == right.RetainOnRollback && left.Generation == right.Generation &&
+		left.ObjectDigest == right.ObjectDigest && equalStrings(left.FieldManagers, right.FieldManagers) &&
+		left.ReviewedOwnershipApplied == right.ReviewedOwnershipApplied &&
+		left.ReviewedOwnershipExclusive == right.ReviewedOwnershipExclusive
 }
 
 func prepareDegradedPredecessor(ctx context.Context, cluster Cluster, release PlanRelease, lkg TargetIdentity, forwardManifest, lkgManifest []byte) (Observation, error) {

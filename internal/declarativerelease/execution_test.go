@@ -3,6 +3,7 @@ package declarativerelease
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -265,6 +266,71 @@ func TestPrepareObservesTheLivePredecessorAgainstTheLKGManifest(t *testing.T) {
 		if !bytes.Equal(manifest, rendered.LKG) {
 			t.Fatalf("observation %d used the forward manifest to validate the live predecessor", index)
 		}
+	}
+}
+
+func TestPrepareBindsAbsentForwardOnlyResourceWithoutWeakeningPredecessorCAS(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	forwardSet, err := DecodeResourceSet(bytes.NewReader(rendered.Forward))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwardSet.Items = append(forwardSet.Items, map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"name": "fugue-api-extra", "namespace": "fugue-system"},
+		"spec":     map[string]any{"ports": []any{map[string]any{"port": json.Number("443")}}, "selector": map[string]any{"app": "api"}},
+	})
+	rendered.Forward, err = CanonicalJSON(forwardSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered.ForwardDigest = digestOf(rendered.Forward)
+	forwardCAS := casOnlyObservation(lkg)
+	forwardCAS.ResourceVersion = "11"
+	forwardCAS.Resources[0].ResourceVersion = "11"
+	forwardCAS.Resources = append(forwardCAS.Resources, ResourceObservation{
+		Identity: ResourceIdentity{APIVersion: "v1", Kind: "Service", Namespace: "fugue-system", Name: "fugue-api-extra"},
+	})
+	fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, cas: []Observation{forwardCAS}}
+	prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+	if err != nil || fake.dryRuns != 2 || prepared.Prewrite.ResourceVersion != "11" || len(prepared.Prewrite.Resources) != 2 || prepared.Prewrite.Resources[1].Present {
+		t.Fatalf("forward-only absent CAS was not bound: plan=%+v dryRuns=%d err=%v", prepared, fake.dryRuns, err)
+	}
+}
+
+func TestPrepareRejectsExistingOrDriftedForwardOnlyResourceCAS(t *testing.T) {
+	plan, receipt, rendered, lkg, _ := executionFixture(t)
+	forwardSet, err := DecodeResourceSet(bytes.NewReader(rendered.Forward))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extraIdentity := ResourceIdentity{APIVersion: "v1", Kind: "Service", Namespace: "fugue-system", Name: "fugue-api-extra"}
+	forwardSet.Items = append(forwardSet.Items, map[string]any{
+		"apiVersion": "v1", "kind": "Service", "metadata": map[string]any{"name": extraIdentity.Name, "namespace": extraIdentity.Namespace},
+		"spec": map[string]any{"ports": []any{map[string]any{"port": json.Number("443")}}},
+	})
+	rendered.Forward, err = CanonicalJSON(forwardSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered.ForwardDigest = digestOf(rendered.Forward)
+	for name, mutate := range map[string]func(*Observation){
+		"existing": func(observation *Observation) {
+			observation.Resources = append(observation.Resources, ResourceObservation{Identity: extraIdentity, Present: true, UID: "foreign-uid", ResourceVersion: "7", ObjectDigest: testDigest, FieldManagers: []string{"foreign-manager"}})
+		},
+		"predecessor-drift": func(observation *Observation) {
+			observation.Resources[0].ObjectDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+			observation.Resources = append(observation.Resources, ResourceObservation{Identity: extraIdentity})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fresh := casOnlyObservation(lkg)
+			mutate(&fresh)
+			fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}, cas: []Observation{fresh}}
+			if _, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0)); err == nil || fake.dryRuns != 0 {
+				t.Fatalf("unsafe forward-only CAS was accepted: dryRuns=%d err=%v", fake.dryRuns, err)
+			}
+		})
 	}
 }
 
