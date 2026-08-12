@@ -1433,6 +1433,9 @@ func typedPrewritePredecessorHealth(ctx context.Context, release declarativerele
 	if errors.Is(err, errWorkloadOriginatedServiceHealth) {
 		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
 	}
+	if errors.Is(err, errServiceHTTPHealth) {
+		return fmt.Errorf("%w: %v", declarativerelease.ErrDegradedPredecessorHealth, err)
+	}
 	return nil
 }
 
@@ -1686,7 +1689,7 @@ func (cluster *kubectlCluster) verifyProbes(ctx context.Context, release declara
 				if err == nil {
 					err = errors.New("response does not contain the expected marker")
 				}
-				return "", fmt.Errorf("service health probe %q failed: %w", probe.Name, err)
+				return "", fmt.Errorf("service health probe %q failed: %w: %v", probe.Name, errServiceHTTPHealth, err)
 			}
 			evidence = append(evidence, probe.Type+":"+digestBytesLocal(body))
 		case "service-http-via-workload":
@@ -1853,6 +1856,12 @@ func (cluster *kubectlCluster) readServiceHTTPViaWorkload(ctx context.Context, n
 }
 
 var errWorkloadOriginatedServiceHealth = errors.New("workload-originated service health is degraded")
+
+// errServiceHTTPHealth marks an ordinary Service probe failure. It is only
+// promoted to ErrDegradedPredecessorHealth by typedPrewritePredecessorHealth
+// when the target is the exact immutable LKG in the bounded prewrite context.
+// Forward targets and ordinary successors therefore remain fail-closed.
+var errServiceHTTPHealth = errors.New("service-http health is degraded")
 
 func servicePortByName(raw []byte, name string) (int, error) {
 	value, err := decodeJSONObject(raw)
