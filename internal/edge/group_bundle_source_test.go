@@ -354,6 +354,35 @@ func TestCandidatePublicationMayStartAtIndependentRecoveryEpoch(t *testing.T) {
 	}
 }
 
+func TestCandidatePublicationCanPromoteToCurrentOnRecoveryAdvance(t *testing.T) {
+	previousCandidate := routePublicationMetadata{
+		Source:              edgeControlRouteSourceV1,
+		GroupID:             "edge-group-country-de",
+		Generation:          "candidate-generation",
+		PublicationSequence: 11502,
+		RecoveryEpoch:       0,
+		Candidate:           true,
+		CandidateRecord:     "sha256:" + strings.Repeat("a", 64),
+		ReleaseRecord:       "sha256:" + strings.Repeat("b", 64),
+		WorkerSlot:          model.EdgeSlotB,
+	}
+	current := previousCandidate
+	current.Generation = "current-generation"
+	current.PublicationSequence = 11271
+	current.RecoveryEpoch = 41
+	current.Candidate = false
+	current.CandidateRecord = ""
+	current.ReleaseRecord = ""
+	current.WorkerSlot = ""
+	if err := validateRoutePublicationAdvance(previousCandidate, current); err != nil {
+		t.Fatalf("candidate-to-current authority transition was rejected: %v", err)
+	}
+	current.RecoveryEpoch = previousCandidate.RecoveryEpoch
+	if err := validateRoutePublicationAdvance(previousCandidate, current); err == nil {
+		t.Fatal("candidate-to-current transition without recovery advance was accepted")
+	}
+}
+
 func signedEdgeControlTestBundle(groupID, generation string, sequence, recoveryEpoch uint64, keyID string, key []byte) model.EdgeRouteBundle {
 	now := time.Now().UTC()
 	bundle := testBundle(groupPublicationVersion(generation, sequence, recoveryEpoch))

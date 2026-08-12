@@ -392,7 +392,14 @@ func validateRoutePublicationAdvance(current, candidate routePublicationMetadata
 		return nil
 	}
 	if current.Source != candidate.Source || current.GroupID != candidate.GroupID || candidate.PublicationSequence <= current.PublicationSequence {
-		return errors.New("edge-control route publication CAS regressed or replayed")
+		// Candidate and current are separate publication streams. Once the
+		// activation CAS promotes this worker, the first current observation
+		// may legitimately have a lower sequence but must carry a newer
+		// recovery epoch. The activation-bound source selection is validated
+		// by the caller before this transition is accepted.
+		if !(current.Candidate && !candidate.Candidate && candidate.RecoveryEpoch > current.RecoveryEpoch) {
+			return errors.New("edge-control route publication CAS regressed or replayed")
+		}
 	}
 	// Candidate publications are deliberately issued from the candidate ledger
 	// and carry recovery epoch zero.  They are compared against the current
