@@ -1,0 +1,150 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"fugue/internal/model"
+	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+func TestCandidateImporterBootstrapsExactGroupPointersIdempotently(t *testing.T) {
+	now := time.Date(2026, 8, 12, 4, 0, 0, 0, time.UTC)
+	groupID := "edge-pool-a"
+	token := strings.Repeat("t", 48)
+	envelope := candidateImporterEnvelopeFixture(t, groupID, now)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != edgeCandidateEnvelopePathV1 || request.URL.Query().Get("edge_group_id") != groupID ||
+			request.URL.Query().Get("edge_id") != "edge-node-a" || request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "rejected", http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}}
+	client := fake.NewSimpleClientset(pod)
+	store, err := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := candidateImportConfig{GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile}
+	changed, err := importCandidateOnce(context.Background(), store, client, config, now)
+	if err != nil || !changed {
+		t.Fatalf("first import: changed=%v err=%v", changed, err)
+	}
+	objects, err := client.CoreV1().ConfigMaps("fugue-system").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range objects.Items {
+		object := &objects.Items[index]
+		if _, mutableCurrent := object.Data["authority.json"]; !mutableCurrent {
+			if _, mutableCandidate := object.Data["candidate.json"]; !mutableCandidate {
+				continue
+			}
+		}
+		object.UID = types.UID("test-" + object.Name)
+		object.ResourceVersion = "10"
+		if _, err := client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _, _, err := store.LoadCurrent(context.Background(), groupID)
+	if err != nil || current.CurrentRecordDigest != envelope.CurrentRecord.RecordDigest || current.CurrentWorkerSlot != envelope.CurrentWorkerSlot ||
+		current.AuthorityEpoch != envelope.CurrentRecord.Epoch || current.PreviousRecordDigest != "" {
+		t.Fatalf("current authority=%+v err=%v", current, err)
+	}
+	candidate, _, _, err := store.LoadCandidate(context.Background(), groupID)
+	if err != nil || candidate.RecordDigest != envelope.Record.RecordDigest || candidate.WorkerSlot != envelope.WorkerSlot ||
+		candidate.ReleaseRecordDigest != envelope.ReleaseRecordDigest || candidate.State != releaseguardian.CandidateAuthorityLoaded || candidate.Generation != 1 {
+		t.Fatalf("candidate authority=%+v err=%v", candidate, err)
+	}
+	changed, err = importCandidateOnce(context.Background(), store, client, config, now.Add(time.Second))
+	if err != nil || changed {
+		t.Fatalf("idempotent import: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestCandidateImporterRejectsDigestDriftWithoutChangingPointers(t *testing.T) {
+	now := time.Date(2026, 8, 12, 4, 30, 0, 0, time.UTC)
+	groupID := "edge-pool-a"
+	envelope := candidateImporterEnvelopeFixture(t, groupID, now)
+	envelope.Record.BundleDigest = "sha256:" + strings.Repeat("f", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(envelope) }))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(strings.Repeat("t", 48)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}})
+	store, _ := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	config := candidateImportConfig{GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile}
+	if changed, err := importCandidateOnce(context.Background(), store, client, config, now); err == nil || changed {
+		t.Fatalf("digest drift was imported: changed=%v err=%v", changed, err)
+	}
+	objects, err := client.CoreV1().ConfigMaps("fugue-system").List(context.Background(), metav1.ListOptions{})
+	if err != nil || len(objects.Items) != 0 {
+		t.Fatalf("invalid import wrote authority objects: count=%d err=%v", len(objects.Items), err)
+	}
+}
+
+func TestParseCandidateImportsRequiresExactEndpointAndPrivateTokenPath(t *testing.T) {
+	valid := "edge-pool-a,http://edge-control-a.fugue-system.svc:8092/v1/edge/candidate-envelope,/var/run/secrets/fugue-candidate-import-a/token"
+	configs, err := parseCandidateImports(valid)
+	if err != nil || len(configs) != 1 || configs[0].GroupID != "edge-pool-a" {
+		t.Fatalf("valid candidate import rejected: configs=%+v err=%v", configs, err)
+	}
+	for _, invalid := range []string{
+		"edge-pool-a,http://edge-control-a/v1/edge/candidate-routes,/var/run/token",
+		"edge-pool-a,http://edge-control-a/v1/edge/candidate-envelope?slot=a,/var/run/token",
+		"edge-pool-a,http://edge-control-a/v1/edge/candidate-envelope,relative/token",
+		valid + ";" + valid,
+	} {
+		if _, err := parseCandidateImports(invalid); err == nil {
+			t.Fatalf("invalid candidate import accepted: %s", invalid)
+		}
+	}
+}
+
+func candidateImporterEnvelopeFixture(t *testing.T, groupID string, now time.Time) candidateEnvelope {
+	t.Helper()
+	currentBundle := model.EdgeRouteBundle{SchemaVersion: model.BundleSchemaVersionV1, Version: "routes-current-r1-e4", Generation: "routes-current", GeneratedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Issuer: "fugue-edge-control", KeyID: "edge-key-a", Signature: strings.Repeat("A", 43), EdgeGroupID: groupID, Routes: []model.EdgeRouteBinding{}, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}}
+	candidateBundle := currentBundle
+	candidateBundle.Version = "routes-candidate-r2-e5"
+	candidateBundle.Generation = "routes-candidate"
+	candidateBundle.PreviousGeneration = currentBundle.Generation
+	candidateBundle.Signature = strings.Repeat("B", 43)
+	source := strings.Repeat("1", 40)
+	controlImage := "sha256:" + strings.Repeat("2", 64)
+	manifest := "sha256:" + strings.Repeat("3", 64)
+	health := "sha256:" + strings.Repeat("4", 64)
+	current, err := (releaseguardian.RouteBundleRecord{GroupID: groupID, Epoch: 4, BundleDigest: candidateBundleDigest(currentBundle), SourceSHA: source, ControlImageDigest: controlImage, InventoryDigest: "sha256:" + strings.Repeat("5", 64), ManifestDigest: manifest, HealthContractDigest: health, IssuedAt: now.Add(-time.Minute).Format(time.RFC3339Nano), KeyID: currentBundle.KeyID, Signature: currentBundle.Signature}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := (releaseguardian.RouteBundleRecord{GroupID: groupID, Epoch: 5, BundleDigest: candidateBundleDigest(candidateBundle), SourceSHA: source, ControlImageDigest: controlImage, InventoryDigest: "sha256:" + strings.Repeat("6", 64), ManifestDigest: manifest, HealthContractDigest: health, IssuedAt: now.Format(time.RFC3339Nano), KeyID: candidateBundle.KeyID, Signature: candidateBundle.Signature}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return candidateEnvelope{Schema: edgeCandidateEnvelopeSchemaV1, GroupID: groupID, Epoch: 5, CandidateLedgerSequence: 9, RouteIntentGeneration: "route-intent-5", InventoryGeneration: "inventory-5", ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), WorkerSlot: releaseguardian.AuthoritySlotB, PublishedAt: now, CurrentRecord: &current, CurrentBundle: &currentBundle, CurrentWorkerSlot: releaseguardian.AuthoritySlotA, Record: candidate, Bundle: candidateBundle}
+}
