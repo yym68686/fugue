@@ -329,6 +329,31 @@ func TestCandidateRouteSourceRejectsActivationChangeAndCrossSlotRecord(t *testin
 	}
 }
 
+func TestCandidatePublicationMayStartAtIndependentRecoveryEpoch(t *testing.T) {
+	current := routePublicationMetadata{
+		Source:              edgeControlRouteSourceV1,
+		GroupID:             "edge-group-country-de",
+		Generation:          "current-generation",
+		PublicationSequence: 11233,
+		RecoveryEpoch:       3,
+	}
+	candidate := current
+	candidate.Generation = "candidate-generation"
+	candidate.PublicationSequence = 11448
+	candidate.RecoveryEpoch = 0
+	candidate.Candidate = true
+	candidate.CandidateRecord = "sha256:" + strings.Repeat("a", 64)
+	candidate.ReleaseRecord = "sha256:" + strings.Repeat("b", 64)
+	candidate.WorkerSlot = model.EdgeSlotB
+	if err := validateRoutePublicationAdvance(current, candidate); err != nil {
+		t.Fatalf("candidate was rejected solely for independent recovery epoch: %v", err)
+	}
+	candidate.Candidate = false
+	if err := validateRoutePublicationAdvance(current, candidate); err == nil {
+		t.Fatal("ordinary publication regressed recovery epoch was accepted")
+	}
+}
+
 func signedEdgeControlTestBundle(groupID, generation string, sequence, recoveryEpoch uint64, keyID string, key []byte) model.EdgeRouteBundle {
 	now := time.Now().UTC()
 	bundle := testBundle(groupPublicationVersion(generation, sequence, recoveryEpoch))

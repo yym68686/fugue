@@ -391,7 +391,15 @@ func validateRoutePublicationAdvance(current, candidate routePublicationMetadata
 	if current.Source == "" {
 		return nil
 	}
-	if current.Source != candidate.Source || current.GroupID != candidate.GroupID || candidate.PublicationSequence <= current.PublicationSequence || candidate.RecoveryEpoch < current.RecoveryEpoch {
+	if current.Source != candidate.Source || current.GroupID != candidate.GroupID || candidate.PublicationSequence <= current.PublicationSequence {
+		return errors.New("edge-control route publication CAS regressed or replayed")
+	}
+	// Candidate publications are deliberately issued from the candidate ledger
+	// and carry recovery epoch zero.  They are compared against the current
+	// traffic publication only by the monotonic publication sequence; requiring
+	// the current recovery epoch here would reject a valid inactive candidate
+	// whenever the current/LKG had previously undergone compensation.
+	if !candidate.Candidate && candidate.RecoveryEpoch < current.RecoveryEpoch {
 		return errors.New("edge-control route publication CAS regressed or replayed")
 	}
 	return nil
