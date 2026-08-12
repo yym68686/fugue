@@ -236,13 +236,19 @@ func TestCandidateModeRefreshesOnlyTheExactPersistedCurrentLKG(t *testing.T) {
 	}
 	refreshAt := now.Add(16 * time.Minute)
 	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &legacy, Identity: identity, Now: func() time.Time { return refreshAt }}
-	if batch, err := publisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
-		t.Fatalf("candidate publication with LKG refresh: batch=%+v err=%v", batch, err)
+	for refresh := 1; refresh <= 6; refresh++ {
+		publisher.Now = func() time.Time { return refreshAt }
+		if batch, err := publisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+			t.Fatalf("candidate publication with LKG refresh %d: batch=%+v err=%v", refresh, batch, err)
+		}
+		if refresh < 6 {
+			refreshAt = refreshAt.Add(16 * time.Minute)
+		}
 	}
 	after, _ := store.ReadGroupAuthority(ctx, groupID)
 	if after.Published.Bundle.Generation != before.Published.Bundle.Generation ||
 		groupAuthorityCandidateDigest(after.Published.Bundle) != groupAuthorityCandidateDigest(before.Published.Bundle) ||
-		after.Published.PublicationSequence != before.Published.PublicationSequence+1 || after.Published.RecoveryEpoch != before.Published.RecoveryEpoch+1 ||
+		after.Published.PublicationSequence != before.Published.PublicationSequence+6 || after.Published.RecoveryEpoch != before.Published.RecoveryEpoch+6 ||
 		!after.Published.Bundle.ValidUntil.After(before.Published.Bundle.ValidUntil) {
 		t.Fatalf("candidate mode did not refresh only exact current LKG: before=%+v after=%+v", before.Published, after.Published)
 	}

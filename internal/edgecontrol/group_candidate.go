@@ -157,16 +157,16 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	if err != nil {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
+	authority, err := publisher.Store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || !authority.PublishedExists || validateGroupPublishedBundle(groupID, authority.Published) != nil {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
 	if previousExists && previous.CandidateLedgerSequence == head.Sequence && previous.ReleaseRecordDigest == publisher.Identity.ReleaseRecordDigest &&
-		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) {
+		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) && candidateBindsCurrentAuthority(previous, authority) {
 		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
 		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
 			return candidateResult(previous)
 		}
-	}
-	authority, err := publisher.Store.ReadGroupAuthority(ctx, groupID)
-	if err != nil || !authority.PublishedExists || validateGroupPublishedBundle(groupID, authority.Published) != nil {
-		return failed(GroupAuthorityFailureCandidateRead)
 	}
 	history, err := publisher.Store.History(ctx, groupID)
 	if err != nil || authority.Published.CandidateLedgerSequence == 0 || authority.Published.CandidateLedgerSequence > uint64(len(history)) {
@@ -236,6 +236,13 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		return failed(GroupAuthorityFailureCandidateCAS)
 	}
 	return candidateResult(stored)
+}
+
+func candidateBindsCurrentAuthority(candidate GroupCandidateBundle, authority GroupAuthorityState) bool {
+	return authority.LedgerExists && authority.PublishedExists && candidate.CurrentRecord != nil && candidate.CurrentBundle != nil &&
+		candidate.Epoch > authority.Published.PublicationSequence && candidate.CurrentRecord.Epoch == int64(authority.Published.PublicationSequence) &&
+		candidate.CurrentRecord.BundleDigest == authority.Published.Digest && candidate.CurrentBundle.Generation == authority.Published.Bundle.Generation &&
+		signedGroupBundleDigest(*candidate.CurrentBundle) == authority.Published.Digest
 }
 
 func candidateRecordMatchesIdentity(record edgeauthority.RouteBundleRecord, identity CandidateReleaseIdentity) bool {
