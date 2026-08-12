@@ -192,7 +192,8 @@ func (store *PersistentGroupStore) PutGroupCandidateCAS(ctx context.Context, gro
 		if state.Published != nil {
 			currentPublicationSequence = state.Published.PublicationSequence
 		}
-		if currentEpoch != expectedEpoch || candidate.Epoch <= expectedEpoch || candidate.Epoch <= currentPublicationSequence || len(state.Ledger) == 0 ||
+		if currentEpoch != expectedEpoch || candidate.Epoch <= expectedEpoch || candidate.Epoch <= currentPublicationSequence || len(state.Ledger) == 0 || len(state.AuthorityLedger) == 0 ||
+			state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != candidate.AuthorityLedgerSequence ||
 			state.Ledger[len(state.Ledger)-1].Sequence != expectedCandidateSequence || candidate.CandidateLedgerSequence != expectedCandidateSequence {
 			return ErrGroupAuthorityCandidateCAS
 		}
@@ -226,7 +227,8 @@ func (store *PersistentGroupStore) PutGroupCurrentLKGCandidateCAS(ctx context.Co
 		if state.Candidate != nil {
 			currentEpoch = state.Candidate.Epoch
 		}
-		if currentEpoch != expectedEpoch || state.Published == nil || state.Published.PublicationSequence != expectedPublicationSequence ||
+		if currentEpoch != expectedEpoch || state.Published == nil || len(state.AuthorityLedger) == 0 ||
+			state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != candidate.AuthorityLedgerSequence || state.Published.PublicationSequence != expectedPublicationSequence ||
 			state.Published.Digest != expectedPublishedDigest || state.Published.CandidateLedgerSequence != expectedCandidateSequence ||
 			expectedCandidateSequence == 0 || expectedCandidateSequence > uint64(len(state.Ledger)) || len(state.Ledger) == 0 {
 			return ErrGroupAuthorityCandidateCAS
@@ -306,6 +308,40 @@ func (store *PersistentGroupStore) AppendGroupAuthorityCAS(ctx context.Context, 
 		if next != nil {
 			state.Published = next
 		}
+		return nil
+	})
+	return appended, err
+}
+
+func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context, groupID string, request GroupPromotionRequest,
+	entry GroupAuthorityLedgerEntry, signed model.EdgeRouteBundle) (GroupAuthorityLedgerEntry, error) {
+	var appended GroupAuthorityLedgerEntry
+	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
+		if state.Published == nil || state.Candidate == nil || len(state.AuthorityLedger) == 0 ||
+			state.Published.PublicationSequence != request.ExpectedPublicationSequence || state.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch ||
+			state.Published.Digest != request.ExpectedPublishedBundleDigest || state.Candidate.Epoch != request.ExpectedCandidateEpoch ||
+			state.Candidate.Record.RecordDigest != request.CandidateRecordDigest || state.Candidate.WorkerSlot != request.CandidateWorkerSlot ||
+			state.Candidate.Bundle.Generation != request.CandidateBundleGeneration || state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != request.ExpectedPublicationSequence {
+			return ErrGroupAuthorityCASConflict
+		}
+		candidateSequence := state.Candidate.CandidateLedgerSequence
+		if candidateSequence == 0 || candidateSequence > uint64(len(state.Ledger)) {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		candidate := cloneGroupShadowLedgerEntry(state.Ledger[candidateSequence-1])
+		if candidate.Sequence != candidateSequence || candidate.Bundle == nil || candidate.BundleArchived ||
+			groupAuthorityCandidateDigest(*candidate.Bundle) != groupAuthorityCandidateDigest(state.Candidate.Bundle) {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		current := cloneGroupPublishedBundle(*state.Published)
+		var next *GroupPublishedBundle
+		var err error
+		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, request.ExpectedPublicationSequence, state.AuthorityLedger, &current, &candidate, entry, &signed)
+		if err != nil {
+			return err
+		}
+		state.AuthorityLedger = append(state.AuthorityLedger, appended)
+		state.Published = next
 		return nil
 	})
 	return appended, err

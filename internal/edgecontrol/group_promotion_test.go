@@ -1,0 +1,154 @@
+package edgecontrol
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestGroupPromotionAtomicallyReissuesExactCandidateAsCurrent(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, signer, candidate, current := groupPromotionFixture(t, groupID, now)
+	keyDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x71}, 32)
+	writeGroupRecoveryFixture(t, keyDir, groupID, secret, now)
+	handler, err := NewGroupPromotionHandler(GroupPromotionHandlerConfig{Store: store, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyDir, Now: func() time.Time { return now.Add(2 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedPublicationSequence: current.Published.PublicationSequence, ExpectedRecoveryEpoch: current.Published.RecoveryEpoch,
+		ExpectedPublishedBundleDigest: current.Published.Digest, ExpectedCandidateEpoch: candidate.Epoch,
+		CandidateRecordDigest: candidate.Record.RecordDigest, CandidateWorkerSlot: candidate.WorkerSlot,
+		CandidateBundleGeneration: candidate.Bundle.Generation, IssuedAtUnix: now.Add(2 * time.Minute).Unix(),
+		ExpiresAtUnix: now.Add(3 * time.Minute).Unix(), Nonce: "promotion-nonce-00000001", Reason: "promote independently verified candidate"}
+	if err := SignGroupPromotionRequest(&request, secret); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(request)
+	httpRequest := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	httpRequest.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httpRequest)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("promotion status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var receipt GroupPromotionReceipt
+	if json.Unmarshal(recorder.Body.Bytes(), &receipt) != nil || receipt.Schema != GroupPromotionReceiptSchemaV1 ||
+		receipt.PreviousPublicationSequence != current.Published.PublicationSequence ||
+		receipt.PreviousPublishedBundleDigest != current.Published.Digest || receipt.CandidateRecordDigest != candidate.Record.RecordDigest ||
+		receipt.WorkerSlot != candidate.WorkerSlot || receipt.PublicationSequence != current.LedgerHead.Sequence+1 ||
+		receipt.BundleGeneration != candidate.Bundle.Generation || receipt.PublishedBundleDigest == candidate.Record.BundleDigest {
+		t.Fatalf("promotion receipt is not fully bound: %+v", receipt)
+	}
+	after, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil || after.Published.Bundle.Generation != candidate.Bundle.Generation ||
+		after.Published.Bundle.PreviousGeneration != current.Published.Bundle.Generation || after.Published.Digest != receipt.PublishedBundleDigest ||
+		after.Published.Bundle.Version != groupPublicationVersion(candidate.Bundle.Generation, current.LedgerHead.Sequence+1, current.Published.RecoveryEpoch) {
+		t.Fatalf("promoted current=%+v err=%v", after, err)
+	}
+	replay := httptest.NewRecorder()
+	replayRequest := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+	replayRequest.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(replay, replayRequest)
+	if replay.Code != http.StatusConflict {
+		t.Fatalf("promotion replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	history, err := store.AuthorityHistory(ctx, groupID)
+	if err != nil || len(history) != int(current.LedgerHead.Sequence+1) {
+		t.Fatalf("replay changed authority ledger: len=%d err=%v", len(history), err)
+	}
+}
+
+func TestGroupPromotionRejectsCandidateAndCurrentCASDriftWithoutWriting(t *testing.T) {
+	now := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-us"
+	store, signer, candidate, current := groupPromotionFixture(t, groupID, now)
+	keyDir := privateFixtureDir(t)
+	secret := bytes.Repeat([]byte{0x72}, 32)
+	writeGroupRecoveryFixture(t, keyDir, groupID, secret, now)
+	handler, err := NewGroupPromotionHandler(GroupPromotionHandlerConfig{Store: store, Signer: signer,
+		GroupIDs: []string{groupID}, KeyringDir: keyDir, Now: func() time.Time { return now.Add(2 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-us-1", GroupID: groupID,
+		ExpectedPublicationSequence: current.Published.PublicationSequence, ExpectedRecoveryEpoch: current.Published.RecoveryEpoch,
+		ExpectedPublishedBundleDigest: current.Published.Digest, ExpectedCandidateEpoch: candidate.Epoch,
+		CandidateRecordDigest: candidate.Record.RecordDigest, CandidateWorkerSlot: candidate.WorkerSlot,
+		CandidateBundleGeneration: candidate.Bundle.Generation, IssuedAtUnix: now.Add(2 * time.Minute).Unix(),
+		ExpiresAtUnix: now.Add(3 * time.Minute).Unix(), Nonce: "promotion-nonce-00000002", Reason: "reject stale authority witness"}
+	for name, mutate := range map[string]func(*GroupPromotionRequest){
+		"current": func(value *GroupPromotionRequest) {
+			value.ExpectedPublishedBundleDigest = "sha256:" + strings.Repeat("a", 64)
+		},
+		"candidate": func(value *GroupPromotionRequest) { value.CandidateRecordDigest = "sha256:" + strings.Repeat("b", 64) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := base
+			mutate(&request)
+			if err := SignGroupPromotionRequest(&request, secret); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(request)
+			httpRequest := httptest.NewRequest(http.MethodPost, GroupPromotionPathV1, bytes.NewReader(raw))
+			httpRequest.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httpRequest)
+			if recorder.Code != http.StatusConflict {
+				t.Fatalf("drift status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	after, _ := store.ReadGroupAuthority(context.Background(), groupID)
+	if after.LedgerHead.Sequence != current.LedgerHead.Sequence || after.Published.Digest != current.Published.Digest {
+		t.Fatalf("rejected promotion changed current: before=%+v after=%+v", current, after)
+	}
+}
+
+func groupPromotionFixture(t *testing.T, groupID string, now time.Time) (*PersistentGroupStore, *fixtureGroupSigner, GroupCandidateBundle, GroupAuthorityState) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := OpenPersistentGroupStore(privateStateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := groupInventoryFixture(groupID, "a", "epoch-a", "inventory-promotion", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}).Reconcile(ctx, routeIntentFixture(), []string{groupID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := &fixtureGroupSigner{keys: map[string][]byte{groupID: bytes.Repeat([]byte{0x73}, 32)}, validFor: 30 * time.Minute}
+	currentPublisher := GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now }}
+	if batch, err := currentPublisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("seed current publication: batch=%+v err=%v", batch, err)
+	}
+	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
+		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
+	candidatePublisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &currentPublisher, Identity: identity, Now: func() time.Time { return now.Add(time.Minute) }}
+	if batch, err := candidatePublisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
+		t.Fatalf("publish candidate: batch=%+v err=%v", batch, err)
+	}
+	candidate, exists, err := store.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists {
+		t.Fatalf("read candidate: exists=%v err=%v", exists, err)
+	}
+	current, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, signer, candidate, current
+}

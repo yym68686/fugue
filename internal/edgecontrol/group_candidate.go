@@ -51,6 +51,7 @@ type GroupCandidateBundle struct {
 	Schema                  string                           `json:"schema"`
 	GroupID                 string                           `json:"edge_group_id"`
 	Epoch                   uint64                           `json:"epoch"`
+	AuthorityLedgerSequence uint64                           `json:"authority_ledger_sequence"`
 	CandidateLedgerSequence uint64                           `json:"candidate_ledger_sequence"`
 	RouteIntentGeneration   string                           `json:"route_intent_generation"`
 	InventoryGeneration     string                           `json:"inventory_generation"`
@@ -273,6 +274,7 @@ func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Cont
 	}
 	candidate := GroupCandidateBundle{
 		Schema: GroupCandidateBundleSchemaV1, GroupID: groupID, Epoch: epoch,
+		AuthorityLedgerSequence: authority.LedgerHead.Sequence,
 		CandidateLedgerSequence: head.Sequence, RouteIntentGeneration: head.RouteIntentGeneration,
 		InventoryGeneration: head.InventoryGeneration, ReleaseRecordDigest: publisher.Identity.ReleaseRecordDigest, WorkerSlot: workerSlot,
 		PublishedAt: now, CurrentRecord: &currentRecord, CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: currentWorkerSlot, Record: record, Bundle: signed,
@@ -341,6 +343,7 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 
 func candidateBindsCurrentAuthority(candidate GroupCandidateBundle, authority GroupAuthorityState) bool {
 	return authority.LedgerExists && authority.PublishedExists && candidate.CurrentRecord != nil && candidate.CurrentBundle != nil &&
+		candidate.AuthorityLedgerSequence == authority.LedgerHead.Sequence &&
 		candidate.Epoch > authority.Published.PublicationSequence && candidate.CurrentRecord.Epoch == int64(authority.Published.PublicationSequence) &&
 		candidate.CurrentRecord.BundleDigest == authority.Published.Digest && candidate.CurrentBundle.Generation == authority.Published.Bundle.Generation &&
 		signedGroupBundleDigest(*candidate.CurrentBundle) == authority.Published.Digest
@@ -359,7 +362,7 @@ func candidateResult(candidate GroupCandidateBundle) GroupCandidateResult {
 func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle) error {
 	groupID = normalizeGroupID(groupID)
 	if candidate.Schema != GroupCandidateBundleSchemaV1 || candidate.GroupID != groupID || candidate.Epoch == 0 ||
-		candidate.CandidateLedgerSequence == 0 || strings.TrimSpace(candidate.RouteIntentGeneration) == "" ||
+		candidate.AuthorityLedgerSequence == 0 || candidate.CandidateLedgerSequence == 0 || strings.TrimSpace(candidate.RouteIntentGeneration) == "" ||
 		strings.TrimSpace(candidate.InventoryGeneration) == "" || !groupAuthorityDigestPattern.MatchString(candidate.ReleaseRecordDigest) ||
 		candidate.PublishedAt.IsZero() || candidate.Record.Validate() != nil || candidate.Record.GroupID != groupID ||
 		candidate.Record.Epoch != int64(candidate.Epoch) || candidate.Record.BundleDigest != signedGroupBundleDigest(candidate.Bundle) ||

@@ -332,9 +332,12 @@ func authorityGroupReadyPath(groupID string) string {
 	return AuthorityGroupReadyPrefixV1 + normalizeGroupID(groupID) + "/readyz"
 }
 
-func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery http.Handler) (http.Handler, error) {
+func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery http.Handler, promotion ...http.Handler) (http.Handler, error) {
 	if boundary == nil || heartbeat == nil || status == nil || bundles == nil || recovery == nil {
 		return nil, errors.New("edge-control authority HTTP handler dependency is nil")
+	}
+	if len(promotion) > 1 || (len(promotion) == 1 && promotion[0] == nil) {
+		return nil, errors.New("edge-control authority promotion HTTP handler is invalid")
 	}
 	mux := http.NewServeMux()
 	mux.Handle("POST "+GroupAuthorityInventoryHeartbeatPathV1, heartbeat)
@@ -345,6 +348,9 @@ func NewAuthorityControlHandler(boundary, heartbeat, status, bundles, recovery h
 	mux.Handle("GET "+GroupCandidateBundleReadPathV1, bundles)
 	mux.Handle("GET "+GroupCandidateEnvelopeReadPathV1, bundles)
 	mux.Handle("POST "+GroupRecoveryPathV1, recovery)
+	if len(promotion) == 1 {
+		mux.Handle("POST "+GroupPromotionPathV1, promotion[0])
+	}
 	mux.Handle("/", boundary)
 	return mux, nil
 }

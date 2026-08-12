@@ -58,6 +58,7 @@ func TestCandidatePublisherPersistsInactiveBundleWithoutChangingCurrent(t *testi
 	if err != nil || !exists || validateGroupCandidateBundle(groupID, candidate) != nil ||
 		candidate.Record.SourceSHA != identity.SourceSHA || candidate.Record.ControlImageDigest != identity.ControlImageDigest ||
 		candidate.ReleaseRecordDigest != identity.ReleaseRecordDigest || candidate.Epoch <= currentBefore.Published.PublicationSequence ||
+		candidate.AuthorityLedgerSequence != currentBefore.LedgerHead.Sequence ||
 		candidate.CurrentRecord == nil || candidate.CurrentRecord.BundleDigest != currentBefore.Published.Digest ||
 		candidate.CurrentBundle == nil || !reflect.DeepEqual(*candidate.CurrentBundle, currentBefore.Published.Bundle) ||
 		candidate.CurrentRecord.SourceSHA != identity.SourceSHA || candidate.CurrentWorkerSlot != "a" || candidate.WorkerSlot != "b" {
