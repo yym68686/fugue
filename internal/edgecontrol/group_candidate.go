@@ -67,6 +67,7 @@ type GroupCandidateBundle struct {
 type GroupCandidateStore interface {
 	Head(context.Context, string) (GroupShadowLedgerEntry, bool, error)
 	History(context.Context, string) ([]GroupShadowLedgerEntry, error)
+	ReadGroupInventory(context.Context, string) (GroupInventorySnapshot, error)
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
@@ -206,10 +207,10 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	} else if head.ActiveSlot != "b" {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
-	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now, false)
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, "", now, false)
 }
 
-func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Context, groupID string, head GroupShadowLedgerEntry, authority GroupAuthorityState, previous GroupCandidateBundle, previousExists bool, workerSlot string, now time.Time, fromCurrentLKG bool) GroupCandidateResult {
+func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Context, groupID string, head GroupShadowLedgerEntry, authority GroupAuthorityState, previous GroupCandidateBundle, previousExists bool, workerSlot, currentWorkerSlot string, now time.Time, fromCurrentLKG bool) GroupCandidateResult {
 	failed := func(code string) GroupCandidateResult {
 		return GroupCandidateResult{GroupID: groupID, Status: GroupCandidateStatusFailed, FailureCode: code}
 	}
@@ -224,7 +225,13 @@ func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Cont
 	}
 	currentLedger := history[authority.Published.CandidateLedgerSequence-1]
 	if currentLedger.Sequence != authority.Published.CandidateLedgerSequence || !groupAuthorityDigestPattern.MatchString(currentLedger.InventoryDigest) ||
-		(currentLedger.ActiveSlot != "a" && currentLedger.ActiveSlot != "b") || currentLedger.ActiveSlot == workerSlot {
+		(currentLedger.ActiveSlot != "a" && currentLedger.ActiveSlot != "b") {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
+	if currentWorkerSlot == "" {
+		currentWorkerSlot = currentLedger.ActiveSlot
+	}
+	if (currentWorkerSlot != "a" && currentWorkerSlot != "b") || currentWorkerSlot == workerSlot {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
 	bundle.Issuer = groupAuthorityIssuer
@@ -256,14 +263,14 @@ func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Cont
 		HealthContractDigest: publisher.Identity.HealthContractDigest, IssuedAt: now.Format(time.RFC3339Nano),
 		KeyID: authority.Published.Bundle.KeyID, Signature: authority.Published.Bundle.Signature,
 	}).Seal()
-	if err != nil || currentLedger.ActiveSlot == workerSlot {
+	if err != nil {
 		return failed(GroupAuthorityFailureSigning)
 	}
 	candidate := GroupCandidateBundle{
 		Schema: GroupCandidateBundleSchemaV1, GroupID: groupID, Epoch: epoch,
 		CandidateLedgerSequence: head.Sequence, RouteIntentGeneration: head.RouteIntentGeneration,
 		InventoryGeneration: head.InventoryGeneration, ReleaseRecordDigest: publisher.Identity.ReleaseRecordDigest, WorkerSlot: workerSlot,
-		PublishedAt: now, CurrentRecord: &currentRecord, CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: currentLedger.ActiveSlot, Record: record, Bundle: signed,
+		PublishedAt: now, CurrentRecord: &currentRecord, CurrentBundle: &authority.Published.Bundle, CurrentWorkerSlot: currentWorkerSlot, Record: record, Bundle: signed,
 	}
 	expectedEpoch := uint64(0)
 	if previousExists {
@@ -298,11 +305,18 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 		(head.ActiveSlot != "a" && head.ActiveSlot != "b") {
 		return GroupCandidateResult{}, false
 	}
+	inventory, err := publisher.Store.ReadGroupInventory(ctx, groupID)
+	if err != nil || inventory.GroupID != groupID || inventory.Sequence == 0 || strings.TrimSpace(inventory.Generation) == "" ||
+		(inventory.ActiveEpoch.Slot != "a" && inventory.ActiveEpoch.Slot != "b") || inventory.ObservedAt.IsZero() ||
+		inventory.ObservedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) || now.Sub(inventory.ObservedAt) > GroupInventoryHeartbeatMaxAge {
+		return GroupCandidateResult{}, false
+	}
 	previous, previousExists, err := publisher.Store.ReadGroupCandidate(ctx, groupID)
 	if err != nil {
 		return GroupCandidateResult{}, false
 	}
 	if previousExists && previous.CandidateLedgerSequence == head.Sequence && previous.ReleaseRecordDigest == publisher.Identity.ReleaseRecordDigest &&
+		previous.CurrentWorkerSlot == inventory.ActiveEpoch.Slot && previous.WorkerSlot != inventory.ActiveEpoch.Slot &&
 		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) && candidateBindsCurrentAuthority(previous, authority) {
 		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
 		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
@@ -310,10 +324,14 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 		}
 	}
 	workerSlot := "a"
-	if head.ActiveSlot == "a" {
+	if inventory.ActiveEpoch.Slot == "a" {
 		workerSlot = "b"
 	}
-	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now, true), true
+	// The immutable bundle LKG is backed by head, while the ordinary traffic
+	// slot is backed by the latest signed inventory/Front activation epoch.
+	// Keeping those witnesses separate prevents a historical bundle ledger
+	// slot from being mistaken for live CurrentAuthority.
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, inventory.ActiveEpoch.Slot, now, true), true
 }
 
 func candidateBindsCurrentAuthority(candidate GroupCandidateBundle, authority GroupAuthorityState) bool {

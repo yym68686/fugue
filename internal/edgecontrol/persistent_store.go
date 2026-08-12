@@ -233,10 +233,10 @@ func (store *PersistentGroupStore) PutGroupCurrentLKGCandidateCAS(ctx context.Co
 		}
 		head := state.Ledger[expectedCandidateSequence-1]
 		latest := state.Ledger[len(state.Ledger)-1]
-		if latest.Status != GroupShadowStatusFailed || latest.FailureCode != GroupShadowFailureNoHealthyActive ||
+		if state.Inventory == nil || latest.Status != GroupShadowStatusFailed || latest.FailureCode != GroupShadowFailureNoHealthyActive ||
 			head.Sequence != expectedCandidateSequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
-			head.BundleGeneration != state.Published.Bundle.Generation || head.ActiveSlot != candidate.CurrentWorkerSlot ||
-			(head.ActiveSlot != "a" && head.ActiveSlot != "b") || candidate.CandidateLedgerSequence != expectedCandidateSequence ||
+			head.BundleGeneration != state.Published.Bundle.Generation || state.Inventory.ActiveEpoch.Slot != candidate.CurrentWorkerSlot ||
+			(state.Inventory.ActiveEpoch.Slot != "a" && state.Inventory.ActiveEpoch.Slot != "b") || candidate.CandidateLedgerSequence != expectedCandidateSequence ||
 			candidate.Epoch <= currentEpoch || candidate.Epoch <= expectedPublicationSequence || candidate.CurrentRecord == nil ||
 			candidate.CurrentRecord.BundleDigest != expectedPublishedDigest || candidate.CurrentRecord.Epoch != int64(expectedPublicationSequence) ||
 			groupAuthorityCandidateDigest(*head.Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) || candidate.WorkerSlot == candidate.CurrentWorkerSlot {
@@ -692,8 +692,8 @@ func validatePersistentGroupState(state persistentGroupState, groupID string) er
 			state.Ledger[candidate.CandidateLedgerSequence-1].BundleArchived ||
 			state.Ledger[candidate.CandidateLedgerSequence-1].RouteIntentGeneration != candidate.RouteIntentGeneration ||
 			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryGeneration != candidate.InventoryGeneration ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest ||
-			state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot == candidate.WorkerSlot ||
+			state.Ledger[candidate.CandidateLedgerSequence-1].InventoryDigest != candidate.Record.InventoryDigest || state.Inventory == nil ||
+			state.Inventory.ActiveEpoch.Slot != candidate.CurrentWorkerSlot || state.Inventory.ActiveEpoch.Slot == candidate.WorkerSlot ||
 			(state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "a" && state.Ledger[candidate.CandidateLedgerSequence-1].ActiveSlot != "b") ||
 			groupAuthorityCandidateDigest(*state.Ledger[candidate.CandidateLedgerSequence-1].Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) {
 			return errors.New("edge-control persistent candidate is not bound to the group shadow ledger")

@@ -267,7 +267,7 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-current", false)); err != nil {
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "b", "epoch-de-b", "inventory-current", false)); err != nil {
 		t.Fatal(err)
 	}
 	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}
@@ -303,6 +303,9 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 		t.Fatal(err)
 	}
 	state.Ledger = append(state.Ledger, appended)
+	state.Inventory.ActiveEpoch.Slot = "a"
+	state.Inventory.ActiveEpoch.ReleaseEpoch = "epoch-de-a"
+	state.Inventory.ObservedAt = now.Add(31 * time.Minute)
 	state.Revision++
 	if err := store.writeGroupState(statePath, state); err != nil {
 		t.Fatal(err)
@@ -324,6 +327,9 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 		candidate.CurrentRecord.BundleDigest != authority.Published.Digest || candidate.CandidateLedgerSequence != authority.Published.CandidateLedgerSequence ||
 		candidate.Epoch <= authority.Published.PublicationSequence || candidate.WorkerSlot == candidate.CurrentWorkerSlot {
 		t.Fatalf("rebuilt LKG candidate is invalid: candidate=%+v authority=%+v err=%v/%v", candidate, authority, err, authorityErr)
+	}
+	if candidate.CurrentWorkerSlot != "a" || candidate.WorkerSlot != "b" {
+		t.Fatalf("candidate reused historical ledger slot instead of live Front inventory: candidate=%+v", candidate)
 	}
 	if !candidate.CurrentBundle.ValidUntil.After(now.Add(31*time.Minute)) || candidate.CurrentBundle.GeneratedAt.Before(now.Add(31*time.Minute)) ||
 		candidate.CurrentRecord.BundleDigest != authority.Published.Digest {
