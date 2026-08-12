@@ -407,11 +407,15 @@ func inventoryJSONResponse(status int, value any) *http.Response {
 }
 
 func writeInventoryActivationFixture(t *testing.T, now time.Time, groupID, slot, sourceCommit string) string {
+	return writeInventoryActivationFixtureWithBundle(t, now, groupID, slot, sourceCommit, "bundle-generation-1")
+}
+
+func writeInventoryActivationFixtureWithBundle(t *testing.T, now time.Time, groupID, slot, sourceCommit, bundleGeneration string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "activation.json")
 	_, err := edgegroupfront.ApplyActivationCAS(path, edgegroupfront.ActivationCASRequest{
 		GroupID: groupID, ExpectedGeneration: 0, ExpectedSlot: slot, TargetSlot: slot,
-		BundleGeneration: "bundle-generation-1", WorkerSourceCommit: sourceCommit,
+		BundleGeneration: bundleGeneration, WorkerSourceCommit: sourceCommit,
 		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Operation: edgegroupfront.ActivationOperationInit,
 		Reason: "inventory producer test activation",
 	}, now)

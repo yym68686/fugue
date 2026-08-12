@@ -144,6 +144,7 @@ type routeSourceSelection struct {
 	candidate            bool
 	activationGeneration uint64
 	activeSlot           string
+	expectedGeneration   string
 }
 
 func newEdgeRouteBundleHTTPClient(timeout time.Duration) *http.Client {
@@ -195,8 +196,24 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 	if activation.ActiveSlot != slot {
 		selection.candidate = true
 		selection.config.url = cfg.candidateURL
+	} else {
+		// Front activation is the traffic authority. Until Edge Control has
+		// promoted the exact verified candidate into its current stream, an
+		// active worker must retain its already-loaded bundle instead of
+		// accepting an older current publication during the CAS window.
+		selection.expectedGeneration = activation.BundleGeneration
 	}
 	return selection, nil
+}
+
+func validateRouteBundleActivationBinding(selection routeSourceSelection, publication routePublicationMetadata) error {
+	if selection.candidate || selection.expectedGeneration == "" {
+		return nil
+	}
+	if publication.Generation != selection.expectedGeneration {
+		return errors.New("edge-control current publication is not bound to Front activation")
+	}
+	return nil
 }
 
 func (s *Service) validateRouteBundleSourceSelection(selection routeSourceSelection) error {

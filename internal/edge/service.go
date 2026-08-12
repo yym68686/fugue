@@ -643,6 +643,10 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 					return err
 				}
 			}
+			if err = validateRouteBundleActivationBinding(routeSelection, publication); err != nil {
+				s.recordSyncError(err)
+				return err
+			}
 			currentPublication, currentBundle := s.currentRoutePublicationAndBundle()
 			previousBundle = currentBundle
 			if err = validateRoutePublicationAdvance(currentPublication, publication); err != nil {
@@ -711,7 +715,8 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			if routeSelection.candidate {
 				observedPublication, publicationErr = bindCandidatePublication(resp.Header, observedPublication, s.Config.EdgeSlot)
 			}
-			if publicationErr != nil || observedPublication != currentPublication || s.validateRouteBundleSourceSelection(routeSelection) != nil {
+			if publicationErr != nil || validateRouteBundleActivationBinding(routeSelection, observedPublication) != nil ||
+				observedPublication != currentPublication || s.validateRouteBundleSourceSelection(routeSelection) != nil {
 				err := fmt.Errorf("edge-control routes returned 304 with mismatched publication metadata")
 				s.recordSyncError(err)
 				return err

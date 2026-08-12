@@ -203,7 +203,7 @@ func TestInactiveWorkerLoadsCandidateWithoutChangingActiveWorkerOrAuthority(t *t
 	}
 	keyringFile := filepath.Join(root, "verifier-keyring.json")
 	writeEdgeVerifierKeyring(t, keyringFile, groupID, keyID, key)
-	activationFile := writeInventoryActivationFixture(t, now, groupID, model.EdgeSlotA, strings.Repeat("1", 40))
+	activationFile := writeInventoryActivationFixtureWithBundle(t, now, groupID, model.EdgeSlotA, strings.Repeat("1", 40), "generation-current")
 
 	current := signedEdgeControlTestBundle(groupID, "generation-current", 1, 0, keyID, key)
 	canaryRoute := current.Routes[0]
@@ -326,6 +326,25 @@ func TestCandidateRouteSourceRejectsActivationChangeAndCrossSlotRecord(t *testin
 	headers.Set(edgeControlCandidateSlotHeader, model.EdgeSlotA)
 	if _, err := bindCandidatePublication(headers, publication, model.EdgeSlotB); err == nil {
 		t.Fatal("candidate record for another worker slot was accepted")
+	}
+}
+
+func TestActiveWorkerRejectsCurrentPublicationOutsideActivationGeneration(t *testing.T) {
+	selection := routeSourceSelection{candidate: false, activeSlot: model.EdgeSlotB, activationGeneration: 2, expectedGeneration: "verified-candidate-generation"}
+	oldCurrent := routePublicationMetadata{Source: edgeControlRouteSourceV1, GroupID: "edge-group-country-de",
+		Generation: "old-current-generation", PublicationSequence: 40, RecoveryEpoch: 3}
+	if err := validateRouteBundleActivationBinding(selection, oldCurrent); err == nil {
+		t.Fatal("active worker accepted old current during authority CAS window")
+	}
+	promoted := oldCurrent
+	promoted.Generation = selection.expectedGeneration
+	promoted.PublicationSequence++
+	if err := validateRouteBundleActivationBinding(selection, promoted); err != nil {
+		t.Fatalf("active worker rejected activation-bound current: %v", err)
+	}
+	selection.candidate = true
+	if err := validateRouteBundleActivationBinding(selection, oldCurrent); err != nil {
+		t.Fatalf("inactive candidate was incorrectly bound to current generation: %v", err)
 	}
 }
 
