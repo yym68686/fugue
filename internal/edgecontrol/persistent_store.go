@@ -214,6 +214,44 @@ func (store *PersistentGroupStore) PutGroupCandidateCAS(ctx context.Context, gro
 	return cloneGroupCandidateBundle(stored), err
 }
 
+// PutGroupCurrentLKGCandidateCAS replaces only the inactive candidate pointer
+// from the exact immutable ledger entry backing CurrentAuthority. It is used
+// when the newest shadow head is a no-healthy-active observation and therefore
+// cannot safely produce a new route bundle. The current publication itself is
+// byte-bound and is never modified by this transaction.
+func (store *PersistentGroupStore) PutGroupCurrentLKGCandidateCAS(ctx context.Context, groupID string, expectedEpoch, expectedCandidateSequence, expectedPublicationSequence uint64, expectedPublishedDigest string, candidate GroupCandidateBundle) (GroupCandidateBundle, error) {
+	var stored GroupCandidateBundle
+	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
+		currentEpoch := uint64(0)
+		if state.Candidate != nil {
+			currentEpoch = state.Candidate.Epoch
+		}
+		if currentEpoch != expectedEpoch || state.Published == nil || state.Published.PublicationSequence != expectedPublicationSequence ||
+			state.Published.Digest != expectedPublishedDigest || state.Published.CandidateLedgerSequence != expectedCandidateSequence ||
+			expectedCandidateSequence == 0 || expectedCandidateSequence > uint64(len(state.Ledger)) || len(state.Ledger) == 0 {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		head := state.Ledger[expectedCandidateSequence-1]
+		latest := state.Ledger[len(state.Ledger)-1]
+		if latest.Status != GroupShadowStatusFailed || latest.FailureCode != GroupShadowFailureNoHealthyActive ||
+			head.Sequence != expectedCandidateSequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
+			head.BundleGeneration != state.Published.Bundle.Generation || head.ActiveSlot != candidate.CurrentWorkerSlot ||
+			(head.ActiveSlot != "a" && head.ActiveSlot != "b") || candidate.CandidateLedgerSequence != expectedCandidateSequence ||
+			candidate.Epoch <= currentEpoch || candidate.Epoch <= expectedPublicationSequence || candidate.CurrentRecord == nil ||
+			candidate.CurrentRecord.BundleDigest != expectedPublishedDigest || candidate.CurrentRecord.Epoch != int64(expectedPublicationSequence) ||
+			groupAuthorityCandidateDigest(*head.Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) || candidate.WorkerSlot == candidate.CurrentWorkerSlot {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		if err := validateGroupCandidateBundle(state.GroupID, candidate); err != nil {
+			return err
+		}
+		stored = cloneGroupCandidateBundle(candidate)
+		state.Candidate = &stored
+		return nil
+	})
+	return cloneGroupCandidateBundle(stored), err
+}
+
 func (store *PersistentGroupStore) ReadGroupAuthorityStatus(ctx context.Context, groupID string) (AuthorityGroupStoreSnapshot, error) {
 	var snapshot AuthorityGroupStoreSnapshot
 	err := store.withGroupState(ctx, groupID, false, func(state *persistentGroupState) error {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -279,6 +280,33 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 	if batch, err := current.Publish(ctx, compiled); err != nil || batch.Published != 1 {
 		t.Fatalf("seed current publication: batch=%+v err=%v", batch, err)
 	}
+	statePath := store.groupStatePath(groupID)
+	state, err := store.readGroupState(statePath, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := state.Ledger[len(state.Ledger)-1]
+	last.Sequence = 0
+	last.Status = GroupShadowStatusFailed
+	last.Bundle = nil
+	last.BundleGeneration = ""
+	last.FailureCode = GroupShadowFailureNoHealthyActive
+	last.RecordedAt = now.Add(30 * time.Second)
+	last.LastSuccessfulBundleGeneration = state.Published.Bundle.Generation
+	last.ActiveSlot = ""
+	last.ActiveReleaseEpoch = ""
+	last.ActiveFenceSequence = 0
+	last.ActiveHealthyInstances = 0
+	last.ActiveBootstrapInstances = 0
+	appended, err := prepareGroupShadowLedgerAppend(groupID, uint64(len(state.Ledger)), state.Ledger, last)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Ledger = append(state.Ledger, appended)
+	state.Revision++
+	if err := store.writeGroupState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
 	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("6", 40), ControlImageDigest: "sha256:" + strings.Repeat("7", 64),
 		ManifestDigest: "sha256:" + strings.Repeat("8", 64), HealthContractDigest: "sha256:" + strings.Repeat("9", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("a", 64)}
@@ -296,5 +324,9 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 		candidate.CurrentRecord.BundleDigest != authority.Published.Digest || candidate.CandidateLedgerSequence != authority.Published.CandidateLedgerSequence ||
 		candidate.Epoch <= authority.Published.PublicationSequence || candidate.WorkerSlot == candidate.CurrentWorkerSlot {
 		t.Fatalf("rebuilt LKG candidate is invalid: candidate=%+v authority=%+v err=%v/%v", candidate, authority, err, authorityErr)
+	}
+	if _, err := store.PutGroupCurrentLKGCandidateCAS(ctx, groupID, candidate.Epoch, candidate.CandidateLedgerSequence,
+		authority.Published.PublicationSequence+1, authority.Published.Digest, candidate); !errors.Is(err, ErrGroupAuthorityCandidateCAS) {
+		t.Fatalf("candidate CAS accepted a changed CurrentAuthority epoch: %v", err)
 	}
 }

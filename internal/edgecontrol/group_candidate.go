@@ -70,6 +70,7 @@ type GroupCandidateStore interface {
 	ReadGroupAuthority(context.Context, string) (GroupAuthorityState, error)
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
+	PutGroupCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
 }
 
 type GroupCandidatePublisher struct {
@@ -202,10 +203,10 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	} else if head.ActiveSlot != "b" {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
-	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now)
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now, false)
 }
 
-func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Context, groupID string, head GroupShadowLedgerEntry, authority GroupAuthorityState, previous GroupCandidateBundle, previousExists bool, workerSlot string, now time.Time) GroupCandidateResult {
+func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Context, groupID string, head GroupShadowLedgerEntry, authority GroupAuthorityState, previous GroupCandidateBundle, previousExists bool, workerSlot string, now time.Time, fromCurrentLKG bool) GroupCandidateResult {
 	failed := func(code string) GroupCandidateResult {
 		return GroupCandidateResult{GroupID: groupID, Status: GroupCandidateStatusFailed, FailureCode: code}
 	}
@@ -265,7 +266,13 @@ func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Cont
 	if previousExists {
 		expectedEpoch = previous.Epoch
 	}
-	stored, err := publisher.Store.PutGroupCandidateCAS(ctx, groupID, expectedEpoch, head.Sequence, candidate)
+	var stored GroupCandidateBundle
+	if fromCurrentLKG {
+		stored, err = publisher.Store.PutGroupCurrentLKGCandidateCAS(ctx, groupID, expectedEpoch, head.Sequence,
+			authority.Published.PublicationSequence, authority.Published.Digest, candidate)
+	} else {
+		stored, err = publisher.Store.PutGroupCandidateCAS(ctx, groupID, expectedEpoch, head.Sequence, candidate)
+	}
 	if err != nil {
 		return failed(GroupAuthorityFailureCandidateCAS)
 	}
@@ -296,7 +303,7 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 	if head.ActiveSlot == "a" {
 		workerSlot = "b"
 	}
-	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now), true
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, now, true), true
 }
 
 func candidateBindsCurrentAuthority(candidate GroupCandidateBundle, authority GroupAuthorityState) bool {
