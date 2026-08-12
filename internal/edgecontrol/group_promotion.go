@@ -32,6 +32,7 @@ type GroupPromotionRequest struct {
 	Schema                        string `json:"schema"`
 	KeyID                         string `json:"key_id"`
 	GroupID                       string `json:"edge_group_id"`
+	ExpectedAuthoritySequence     uint64 `json:"expected_authority_sequence"`
 	ExpectedPublicationSequence   uint64 `json:"expected_publication_sequence"`
 	ExpectedRecoveryEpoch         uint64 `json:"expected_recovery_epoch"`
 	ExpectedPublishedBundleDigest string `json:"expected_published_bundle_digest"`
@@ -49,6 +50,7 @@ type GroupPromotionRequest struct {
 type GroupPromotionReceipt struct {
 	Schema                        string `json:"schema"`
 	GroupID                       string `json:"edge_group_id"`
+	PreviousAuthoritySequence     uint64 `json:"previous_authority_sequence"`
 	PreviousPublicationSequence   uint64 `json:"previous_publication_sequence"`
 	PreviousRecoveryEpoch         uint64 `json:"previous_recovery_epoch"`
 	PreviousBundleGeneration      string `json:"previous_bundle_generation"`
@@ -140,6 +142,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 	}
 	authority, err := handler.store.ReadGroupAuthority(request.Context(), promotion.GroupID)
 	if err != nil || !authority.PublishedExists || !authority.LedgerExists ||
+		authority.LedgerHead.Sequence != promotion.ExpectedAuthoritySequence ||
 		authority.Published.PublicationSequence != promotion.ExpectedPublicationSequence ||
 		authority.Published.RecoveryEpoch != promotion.ExpectedRecoveryEpoch ||
 		authority.Published.Digest != promotion.ExpectedPublishedBundleDigest {
@@ -150,6 +153,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 	if err != nil || !exists || validateGroupCandidateBundle(promotion.GroupID, candidate) != nil ||
 		candidate.Epoch != promotion.ExpectedCandidateEpoch || candidate.Record.RecordDigest != promotion.CandidateRecordDigest ||
 		candidate.WorkerSlot != promotion.CandidateWorkerSlot || candidate.Bundle.Generation != promotion.CandidateBundleGeneration ||
+		candidate.AuthorityLedgerSequence != promotion.ExpectedAuthoritySequence ||
 		candidate.CurrentRecord == nil || candidate.CurrentRecord.BundleDigest != promotion.ExpectedPublishedBundleDigest ||
 		candidate.CurrentBundle == nil || signedGroupBundleDigest(*candidate.CurrentBundle) != promotion.ExpectedPublishedBundleDigest {
 		writeGroupBundleError(w, http.StatusConflict, "candidate_conflict")
@@ -161,7 +165,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 	bundle.ValidUntil = time.Time{}
 	bundle.KeyID, bundle.Signature, bundle.Signatures = "", "", nil
 	bundle.PreviousGeneration = authority.Published.Bundle.Generation
-	bundle.Version = groupPublicationVersion(bundle.Generation, promotion.ExpectedPublicationSequence+1, promotion.ExpectedRecoveryEpoch)
+	bundle.Version = groupPublicationVersion(bundle.Generation, promotion.ExpectedAuthoritySequence+1, promotion.ExpectedRecoveryEpoch)
 	signed, err := handler.signer.SignGroupBundle(request.Context(), promotion.GroupID, bundle)
 	if err != nil {
 		writeGroupBundleError(w, http.StatusServiceUnavailable, "signing_unavailable")
@@ -182,6 +186,7 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 		return
 	}
 	writeJSON(w, http.StatusOK, GroupPromotionReceipt{Schema: GroupPromotionReceiptSchemaV1, GroupID: promotion.GroupID,
+		PreviousAuthoritySequence:   promotion.ExpectedAuthoritySequence,
 		PreviousPublicationSequence: promotion.ExpectedPublicationSequence, PreviousRecoveryEpoch: promotion.ExpectedRecoveryEpoch,
 		PreviousBundleGeneration: authority.Published.Bundle.Generation, PreviousPublishedBundleDigest: promotion.ExpectedPublishedBundleDigest,
 		PublicationSequence: appended.Sequence, RecoveryEpoch: promotion.ExpectedRecoveryEpoch, BundleGeneration: appended.BundleGeneration,
@@ -191,7 +196,8 @@ func (handler *groupPromotionHandler) ServeHTTP(w http.ResponseWriter, request *
 
 func validateGroupPromotionRequest(request GroupPromotionRequest) error {
 	if request.Schema != GroupPromotionRequestSchemaV1 || request.GroupID != normalizeGroupID(request.GroupID) ||
-		request.ExpectedPublicationSequence == 0 || !groupAuthorityDigestPattern.MatchString(request.ExpectedPublishedBundleDigest) ||
+		request.ExpectedAuthoritySequence == 0 || request.ExpectedPublicationSequence == 0 ||
+		request.ExpectedPublicationSequence > request.ExpectedAuthoritySequence || !groupAuthorityDigestPattern.MatchString(request.ExpectedPublishedBundleDigest) ||
 		request.ExpectedCandidateEpoch == 0 || !groupAuthorityDigestPattern.MatchString(request.CandidateRecordDigest) ||
 		(request.CandidateWorkerSlot != "a" && request.CandidateWorkerSlot != "b") || strings.TrimSpace(request.CandidateBundleGeneration) == "" ||
 		request.Reason != strings.TrimSpace(request.Reason) || len(request.Reason) < 8 || len(request.Reason) > 256 {

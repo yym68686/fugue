@@ -25,6 +25,7 @@ func TestGroupPromotionAtomicallyReissuesExactCandidateAsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-de-1", GroupID: groupID,
+		ExpectedAuthoritySequence:   current.LedgerHead.Sequence,
 		ExpectedPublicationSequence: current.Published.PublicationSequence, ExpectedRecoveryEpoch: current.Published.RecoveryEpoch,
 		ExpectedPublishedBundleDigest: current.Published.Digest, ExpectedCandidateEpoch: candidate.Epoch,
 		CandidateRecordDigest: candidate.Record.RecordDigest, CandidateWorkerSlot: candidate.WorkerSlot,
@@ -43,6 +44,7 @@ func TestGroupPromotionAtomicallyReissuesExactCandidateAsCurrent(t *testing.T) {
 	}
 	var receipt GroupPromotionReceipt
 	if json.Unmarshal(recorder.Body.Bytes(), &receipt) != nil || receipt.Schema != GroupPromotionReceiptSchemaV1 ||
+		receipt.PreviousAuthoritySequence != current.LedgerHead.Sequence ||
 		receipt.PreviousPublicationSequence != current.Published.PublicationSequence ||
 		receipt.PreviousPublishedBundleDigest != current.Published.Digest || receipt.CandidateRecordDigest != candidate.Record.RecordDigest ||
 		receipt.WorkerSlot != candidate.WorkerSlot || receipt.PublicationSequence != current.LedgerHead.Sequence+1 ||
@@ -81,12 +83,14 @@ func TestGroupPromotionRejectsCandidateAndCurrentCASDriftWithoutWriting(t *testi
 		t.Fatal(err)
 	}
 	base := GroupPromotionRequest{Schema: GroupPromotionRequestSchemaV1, KeyID: "recovery-us-1", GroupID: groupID,
+		ExpectedAuthoritySequence:   current.LedgerHead.Sequence,
 		ExpectedPublicationSequence: current.Published.PublicationSequence, ExpectedRecoveryEpoch: current.Published.RecoveryEpoch,
 		ExpectedPublishedBundleDigest: current.Published.Digest, ExpectedCandidateEpoch: candidate.Epoch,
 		CandidateRecordDigest: candidate.Record.RecordDigest, CandidateWorkerSlot: candidate.WorkerSlot,
 		CandidateBundleGeneration: candidate.Bundle.Generation, IssuedAtUnix: now.Add(2 * time.Minute).Unix(),
 		ExpiresAtUnix: now.Add(3 * time.Minute).Unix(), Nonce: "promotion-nonce-00000002", Reason: "reject stale authority witness"}
 	for name, mutate := range map[string]func(*GroupPromotionRequest){
+		"authority": func(value *GroupPromotionRequest) { value.ExpectedAuthoritySequence-- },
 		"current": func(value *GroupPromotionRequest) {
 			value.ExpectedPublishedBundleDigest = "sha256:" + strings.Repeat("a", 64)
 		},
@@ -135,6 +139,17 @@ func groupPromotionFixture(t *testing.T, groupID string, now time.Time) (*Persis
 	if batch, err := currentPublisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
 		t.Fatalf("seed current publication: batch=%+v err=%v", batch, err)
 	}
+	current, err := store.ReadGroupAuthority(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := GroupAuthorityLedgerEntry{Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Status: GroupAuthorityStatusFailed,
+		CandidateLedgerSequence: current.Published.CandidateLedgerSequence, RouteIntentGeneration: "promotion-audit-failure",
+		LastPublishedBundleGeneration: current.Published.Bundle.Generation, FailureCode: GroupAuthorityFailureSigning,
+		Authority: "edge-control", PublicationEnabled: true, RecordedAt: now.Add(30 * time.Second)}
+	if _, err := store.AppendGroupAuthorityCAS(ctx, groupID, current.LedgerHead.Sequence, current.Published.CandidateLedgerSequence, failed, nil); err != nil {
+		t.Fatalf("seed failed authority audit: %v", err)
+	}
 	identity := CandidateReleaseIdentity{SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
 		ManifestDigest: "sha256:" + strings.Repeat("3", 64), HealthContractDigest: "sha256:" + strings.Repeat("4", 64),
 		ReleaseRecordDigest: "sha256:" + strings.Repeat("5", 64)}
@@ -146,9 +161,12 @@ func groupPromotionFixture(t *testing.T, groupID string, now time.Time) (*Persis
 	if err != nil || !exists {
 		t.Fatalf("read candidate: exists=%v err=%v", exists, err)
 	}
-	current, err := store.ReadGroupAuthority(ctx, groupID)
+	current, err = store.ReadGroupAuthority(ctx, groupID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if current.LedgerHead.Sequence == current.Published.PublicationSequence || candidate.AuthorityLedgerSequence != current.LedgerHead.Sequence {
+		t.Fatalf("fixture did not separate authority head from published pointer: candidate=%+v current=%+v", candidate, current)
 	}
 	return store, signer, candidate, current
 }

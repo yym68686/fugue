@@ -318,10 +318,12 @@ func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context,
 	var appended GroupAuthorityLedgerEntry
 	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
 		if state.Published == nil || state.Candidate == nil || len(state.AuthorityLedger) == 0 ||
+			state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != request.ExpectedAuthoritySequence ||
 			state.Published.PublicationSequence != request.ExpectedPublicationSequence || state.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch ||
 			state.Published.Digest != request.ExpectedPublishedBundleDigest || state.Candidate.Epoch != request.ExpectedCandidateEpoch ||
 			state.Candidate.Record.RecordDigest != request.CandidateRecordDigest || state.Candidate.WorkerSlot != request.CandidateWorkerSlot ||
-			state.Candidate.Bundle.Generation != request.CandidateBundleGeneration || state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != request.ExpectedPublicationSequence {
+			state.Candidate.Bundle.Generation != request.CandidateBundleGeneration ||
+			state.Candidate.AuthorityLedgerSequence != request.ExpectedAuthoritySequence {
 			return ErrGroupAuthorityCASConflict
 		}
 		candidateSequence := state.Candidate.CandidateLedgerSequence
@@ -336,7 +338,7 @@ func (store *PersistentGroupStore) PromoteGroupCandidateCAS(ctx context.Context,
 		current := cloneGroupPublishedBundle(*state.Published)
 		var next *GroupPublishedBundle
 		var err error
-		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, request.ExpectedPublicationSequence, state.AuthorityLedger, &current, &candidate, entry, &signed)
+		appended, next, err = prepareGroupAuthorityAppend(state.GroupID, request.ExpectedAuthoritySequence, state.AuthorityLedger, &current, &candidate, entry, &signed)
 		if err != nil {
 			return err
 		}
