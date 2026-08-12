@@ -22,6 +22,7 @@ func TestCandidatePublisherPersistsInactiveBundleWithoutChangingCurrent(t *testi
 		t.Fatal(err)
 	}
 	inventory := groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-de-1", false)
+	inventory.ObservedAt = now
 	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,9 @@ func candidateWithCurrentRecordFixture(t *testing.T, groupID string) GroupCandid
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-current-record", false)); err != nil {
+	inventory := groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-current-record", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
 		t.Fatal(err)
 	}
 	compiled, err := (GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}).Reconcile(ctx, routeIntentFixture(), []string{groupID})
@@ -181,6 +184,16 @@ func candidateWithCurrentRecordFixture(t *testing.T, groupID string) GroupCandid
 	current := GroupAuthorityPublisher{Store: store, Signer: signer, Now: func() time.Time { return now }}
 	if batch, err := current.Publish(ctx, compiled); err != nil || batch.Published != 1 {
 		t.Fatalf("seed current publication: batch=%+v err=%v", batch, err)
+	}
+	statePath := store.groupStatePath(groupID)
+	state, err := store.readGroupState(statePath, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Inventory.ObservedAt = now.Add(31 * time.Minute)
+	state.Revision++
+	if err := store.writeGroupState(statePath, state); err != nil {
+		t.Fatal(err)
 	}
 	identity := CandidateReleaseIdentity{
 		SourceSHA: strings.Repeat("1", 40), ControlImageDigest: "sha256:" + strings.Repeat("2", 64),
@@ -216,7 +229,9 @@ func TestCandidateModeRefreshesOnlyTheExactPersistedCurrentLKG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-de-2", false)); err != nil {
+	inventory := groupInventoryFixture(groupID, "a", "epoch-de-a", "inventory-de-2", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
 		t.Fatal(err)
 	}
 	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}
@@ -238,6 +253,16 @@ func TestCandidateModeRefreshesOnlyTheExactPersistedCurrentLKG(t *testing.T) {
 	refreshAt := now.Add(16 * time.Minute)
 	publisher := GroupCandidatePublisher{Store: store, Signer: signer, CurrentLKG: &legacy, Identity: identity, Now: func() time.Time { return refreshAt }}
 	for refresh := 1; refresh <= 6; refresh++ {
+		statePath := store.groupStatePath(groupID)
+		state, stateErr := store.readGroupState(statePath, groupID)
+		if stateErr != nil {
+			t.Fatal(stateErr)
+		}
+		state.Inventory.ObservedAt = refreshAt
+		state.Revision++
+		if stateErr := store.writeGroupState(statePath, state); stateErr != nil {
+			t.Fatal(stateErr)
+		}
 		publisher.Now = func() time.Time { return refreshAt }
 		if batch, err := publisher.Publish(ctx, compiled); err != nil || batch.Published != 1 {
 			t.Fatalf("candidate publication with LKG refresh %d: batch=%+v err=%v", refresh, batch, err)
@@ -267,7 +292,9 @@ func TestCandidateModeRebuildsInactiveEnvelopeFromExactCurrentLKGWhenWorkersServ
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, groupInventoryFixture(groupID, "b", "epoch-de-b", "inventory-current", false)); err != nil {
+	inventory := groupInventoryFixture(groupID, "b", "epoch-de-b", "inventory-current", false)
+	inventory.ObservedAt = now
+	if err := store.StoreGroupInventoryCAS(ctx, groupID, 0, inventory); err != nil {
 		t.Fatal(err)
 	}
 	compiler := GroupShadowCompiler{Inventory: store, Ledger: store, Now: func() time.Time { return now }}

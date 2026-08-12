@@ -184,7 +184,14 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	if err != nil || !authority.PublishedExists || validateGroupPublishedBundle(groupID, authority.Published) != nil {
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
+	inventory, err := publisher.Store.ReadGroupInventory(ctx, groupID)
+	if err != nil || inventory.GroupID != groupID || inventory.Sequence == 0 || strings.TrimSpace(inventory.Generation) == "" ||
+		(inventory.ActiveEpoch.Slot != "a" && inventory.ActiveEpoch.Slot != "b") || inventory.ObservedAt.IsZero() ||
+		inventory.ObservedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) || now.Sub(inventory.ObservedAt) > GroupInventoryHeartbeatMaxAge {
+		return failed(GroupAuthorityFailureCandidateRead)
+	}
 	if previousExists && previous.CandidateLedgerSequence == head.Sequence && previous.ReleaseRecordDigest == publisher.Identity.ReleaseRecordDigest &&
+		previous.CurrentWorkerSlot == inventory.ActiveEpoch.Slot && previous.WorkerSlot != inventory.ActiveEpoch.Slot &&
 		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) && candidateBindsCurrentAuthority(previous, authority) {
 		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
 		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
@@ -202,12 +209,10 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 		return failed(GroupAuthorityFailureCandidateRead)
 	}
 	workerSlot := "a"
-	if head.ActiveSlot == "a" {
+	if inventory.ActiveEpoch.Slot == "a" {
 		workerSlot = "b"
-	} else if head.ActiveSlot != "b" {
-		return failed(GroupAuthorityFailureCandidateRead)
 	}
-	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, "", now, false)
+	return publisher.publishLedgerCandidate(ctx, groupID, head, authority, previous, previousExists, workerSlot, inventory.ActiveEpoch.Slot, now, false)
 }
 
 func (publisher GroupCandidatePublisher) publishLedgerCandidate(ctx context.Context, groupID string, head GroupShadowLedgerEntry, authority GroupAuthorityState, previous GroupCandidateBundle, previousExists bool, workerSlot, currentWorkerSlot string, now time.Time, fromCurrentLKG bool) GroupCandidateResult {
