@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/edgeauthority"
 	"fugue/internal/model"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
@@ -105,6 +106,21 @@ func TestCandidateImporterRejectsDigestDriftWithoutChangingPointers(t *testing.T
 	objects, err := client.CoreV1().ConfigMaps("fugue-system").List(context.Background(), metav1.ListOptions{})
 	if err != nil || len(objects.Items) != 0 {
 		t.Fatalf("invalid import wrote authority objects: count=%d err=%v", len(objects.Items), err)
+	}
+}
+
+func TestCandidateImporterAcceptsTheSharedEdgeControlRecordIdentity(t *testing.T) {
+	now := time.Date(2026, 8, 12, 5, 0, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	producer, err := (edgeauthority.RouteBundleRecord{
+		GroupID: envelope.Record.GroupID, Epoch: envelope.Record.Epoch, BundleDigest: envelope.Record.BundleDigest,
+		SourceSHA: envelope.Record.SourceSHA, ControlImageDigest: envelope.Record.ControlImageDigest,
+		InventoryDigest: envelope.Record.InventoryDigest, ManifestDigest: envelope.Record.ManifestDigest,
+		HealthContractDigest: envelope.Record.HealthContractDigest, IssuedAt: envelope.Record.IssuedAt,
+		KeyID: envelope.Record.KeyID, Signature: envelope.Record.Signature,
+	}).Seal()
+	if err != nil || producer.RecordDigest != envelope.Record.RecordDigest || envelope.Record.Validate() != nil {
+		t.Fatalf("Guardian diverged from the Edge Control record identity: producer=%+v consumer=%+v err=%v", producer, envelope.Record, err)
 	}
 }
 

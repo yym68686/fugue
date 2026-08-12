@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/edgeauthority"
 )
 
 const (
-	RouteBundleRecordKind        = "RouteBundleRecord"
+	RouteBundleRecordKind        = edgeauthority.RouteBundleRecordKind
 	CandidateAuthorityKind       = "CandidateAuthority"
 	CurrentAuthorityKind         = "CurrentAuthority"
 	CandidateCanaryResultKind    = "CandidateCanaryResult"
@@ -32,68 +33,9 @@ func (slot AuthoritySlot) Validate() error {
 	return nil
 }
 
-// RouteBundleRecord is an immutable, signed description of one candidate
-// route fact. It deliberately does not grant traffic authority.
-type RouteBundleRecord struct {
-	APIVersion           string `json:"apiVersion"`
-	Kind                 string `json:"kind"`
-	GroupID              string `json:"groupId"`
-	Epoch                int64  `json:"epoch"`
-	BundleDigest         string `json:"bundleDigest"`
-	SourceSHA            string `json:"sourceSha"`
-	ControlImageDigest   string `json:"controlImageDigest"`
-	InventoryDigest      string `json:"inventoryDigest"`
-	ManifestDigest       string `json:"manifestDigest"`
-	HealthContractDigest string `json:"healthContractDigest"`
-	IssuedAt             string `json:"issuedAt"`
-	KeyID                string `json:"keyId"`
-	Signature            string `json:"signature"`
-	RecordDigest         string `json:"recordDigest"`
-}
-
-func (record RouteBundleRecord) Seal() (RouteBundleRecord, error) {
-	record.APIVersion = APIVersion
-	record.Kind = RouteBundleRecordKind
-	record.RecordDigest = ""
-	if err := record.validateUnsigned(); err != nil {
-		return RouteBundleRecord{}, err
-	}
-	raw, err := declarativerelease.CanonicalJSON(record)
-	if err != nil {
-		return RouteBundleRecord{}, err
-	}
-	record.RecordDigest = digest(raw)
-	return record, nil
-}
-
-func (record RouteBundleRecord) Validate() error {
-	if !digestPattern.MatchString(record.RecordDigest) || record.validateUnsigned() != nil {
-		return errors.New("route bundle record is invalid")
-	}
-	copy := record
-	copy.RecordDigest = ""
-	raw, err := declarativerelease.CanonicalJSON(copy)
-	if err != nil || digest(raw) != record.RecordDigest {
-		return errors.New("route bundle record digest is invalid")
-	}
-	return nil
-}
-
-func (record RouteBundleRecord) validateUnsigned() error {
-	if record.APIVersion != APIVersion || record.Kind != RouteBundleRecordKind ||
-		!groupPattern.MatchString(record.GroupID) || record.Epoch < 1 ||
-		!digestPattern.MatchString(record.BundleDigest) || !shaPattern.MatchString(record.SourceSHA) ||
-		!digestPattern.MatchString(record.ControlImageDigest) || !digestPattern.MatchString(record.InventoryDigest) ||
-		!digestPattern.MatchString(record.ManifestDigest) || !digestPattern.MatchString(record.HealthContractDigest) ||
-		!componentPattern.MatchString(record.KeyID) || !signaturePattern.MatchString(record.Signature) {
-		return errors.New("route bundle record identity is invalid")
-	}
-	issuedAt, err := time.Parse(time.RFC3339Nano, record.IssuedAt)
-	if err != nil || !issuedAt.Equal(issuedAt.UTC()) {
-		return errors.New("route bundle record issuance time is invalid")
-	}
-	return nil
-}
+// RouteBundleRecord has exactly one producer/consumer wire identity. Keeping a
+// local look-alike caused Guardian to reject byte-valid Edge Control records.
+type RouteBundleRecord = edgeauthority.RouteBundleRecord
 
 type CandidateAuthorityState string
 
