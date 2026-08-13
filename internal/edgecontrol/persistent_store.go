@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"fugue/internal/edgeauthority"
 	"fugue/internal/model"
 )
 
@@ -40,6 +42,40 @@ type persistentGroupState struct {
 	AuthorityLedger   []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
 	Published         *GroupPublishedBundle        `json:"published_bundle,omitempty"`
 	Candidate         *GroupCandidateBundle        `json:"candidate_bundle,omitempty"`
+	Digest            string                       `json:"digest"`
+}
+
+// legacyGroupCandidateBundle is the exact durable shape written before
+// candidates were bound to the authority-ledger head. It exists only so the
+// state reader can verify the old file digest before migrating that one
+// missing witness in memory. No writer or HTTP path emits this shape.
+type legacyGroupCandidateBundle struct {
+	Schema                  string                           `json:"schema"`
+	GroupID                 string                           `json:"edge_group_id"`
+	Epoch                   uint64                           `json:"epoch"`
+	CandidateLedgerSequence uint64                           `json:"candidate_ledger_sequence"`
+	RouteIntentGeneration   string                           `json:"route_intent_generation"`
+	InventoryGeneration     string                           `json:"inventory_generation"`
+	ReleaseRecordDigest     string                           `json:"release_record_digest"`
+	WorkerSlot              string                           `json:"worker_slot"`
+	PublishedAt             time.Time                        `json:"published_at"`
+	CurrentRecord           *edgeauthority.RouteBundleRecord `json:"current_record,omitempty"`
+	CurrentBundle           *model.EdgeRouteBundle           `json:"current_bundle,omitempty"`
+	CurrentWorkerSlot       string                           `json:"current_worker_slot,omitempty"`
+	Record                  edgeauthority.RouteBundleRecord  `json:"record"`
+	Bundle                  model.EdgeRouteBundle            `json:"bundle"`
+}
+
+type legacyCandidatePersistentGroupState struct {
+	Schema            string                       `json:"schema"`
+	GroupID           string                       `json:"edge_group_id"`
+	Revision          uint64                       `json:"revision"`
+	Inventory         *GroupInventorySnapshot      `json:"inventory,omitempty"`
+	InventoryProducer *GroupInventoryProducerState `json:"inventory_producer,omitempty"`
+	Ledger            []GroupShadowLedgerEntry     `json:"ledger,omitempty"`
+	AuthorityLedger   []GroupAuthorityLedgerEntry  `json:"authority_ledger,omitempty"`
+	Published         *GroupPublishedBundle        `json:"published_bundle,omitempty"`
+	Candidate         *legacyGroupCandidateBundle  `json:"candidate_bundle,omitempty"`
 	Digest            string                       `json:"digest"`
 }
 
@@ -525,7 +561,11 @@ func (store *PersistentGroupStore) readGroupState(path, groupID string) (persist
 		return persistentGroupState{}, errors.New("edge-control group state contains trailing data")
 	}
 	if err := validatePersistentGroupState(state, groupID); err != nil {
-		return persistentGroupState{}, err
+		migrated, ok := migrateLegacyCandidateAuthoritySequence(state, groupID)
+		if !ok {
+			return persistentGroupState{}, err
+		}
+		state = migrated
 	}
 	return state, nil
 }
@@ -744,6 +784,46 @@ func persistentGroupStateDigest(state persistentGroupState) string {
 	payload, err := json.Marshal(state)
 	if err != nil {
 		panic(fmt.Sprintf("encode edge-control persistent group digest: %v", err))
+	}
+	digest := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func migrateLegacyCandidateAuthoritySequence(state persistentGroupState, groupID string) (persistentGroupState, bool) {
+	if state.Candidate == nil || state.Candidate.AuthorityLedgerSequence != 0 || len(state.AuthorityLedger) == 0 || state.Published == nil ||
+		state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence == 0 ||
+		state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != state.Published.PublicationSequence ||
+		state.Digest != legacyCandidatePersistentGroupStateDigest(state) {
+		return persistentGroupState{}, false
+	}
+	migrated := clonePersistentGroupState(state)
+	migrated.Candidate.AuthorityLedgerSequence = migrated.AuthorityLedger[len(migrated.AuthorityLedger)-1].Sequence
+	migrated.Digest = persistentGroupStateDigest(migrated)
+	if validatePersistentGroupState(migrated, groupID) != nil {
+		return persistentGroupState{}, false
+	}
+	return migrated, true
+}
+
+func legacyCandidatePersistentGroupStateDigest(state persistentGroupState) string {
+	legacy := legacyCandidatePersistentGroupState{
+		Schema: state.Schema, GroupID: state.GroupID, Revision: state.Revision, Inventory: state.Inventory,
+		InventoryProducer: state.InventoryProducer, Ledger: state.Ledger, AuthorityLedger: state.AuthorityLedger,
+		Published: state.Published,
+	}
+	if state.Candidate != nil {
+		candidate := state.Candidate
+		legacy.Candidate = &legacyGroupCandidateBundle{
+			Schema: candidate.Schema, GroupID: candidate.GroupID, Epoch: candidate.Epoch,
+			CandidateLedgerSequence: candidate.CandidateLedgerSequence, RouteIntentGeneration: candidate.RouteIntentGeneration,
+			InventoryGeneration: candidate.InventoryGeneration, ReleaseRecordDigest: candidate.ReleaseRecordDigest,
+			WorkerSlot: candidate.WorkerSlot, PublishedAt: candidate.PublishedAt, CurrentRecord: candidate.CurrentRecord,
+			CurrentBundle: candidate.CurrentBundle, CurrentWorkerSlot: candidate.CurrentWorkerSlot, Record: candidate.Record, Bundle: candidate.Bundle,
+		}
+	}
+	payload, err := json.Marshal(legacy)
+	if err != nil {
+		panic(fmt.Sprintf("encode legacy edge-control persistent group digest: %v", err))
 	}
 	digest := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(digest[:])

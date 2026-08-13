@@ -2,6 +2,7 @@ package edgecontrol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,88 @@ import (
 
 	"fugue/internal/model"
 )
+
+func TestPersistentGroupStoreMigratesOnlyDigestBoundLegacyCandidateSequence(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 13, 1, 0, 0, 0, time.UTC)
+	groupID := "edge-group-country-de"
+	store, _, candidate, current := groupPromotionFixture(t, groupID, now)
+	path := store.groupStatePath(groupID)
+	state, err := store.readGroupState(path, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AuthorityLedger = state.AuthorityLedger[:state.Published.PublicationSequence]
+	state.Candidate.AuthorityLedgerSequence = 0
+	state.Digest = legacyCandidatePersistentGroupStateDigest(state)
+	legacy := legacyCandidatePersistentGroupState{
+		Schema: state.Schema, GroupID: state.GroupID, Revision: state.Revision, Inventory: state.Inventory,
+		InventoryProducer: state.InventoryProducer, Ledger: state.Ledger, AuthorityLedger: state.AuthorityLedger,
+		Published: state.Published, Digest: state.Digest,
+	}
+	legacyCandidate := state.Candidate
+	legacy.Candidate = &legacyGroupCandidateBundle{
+		Schema: legacyCandidate.Schema, GroupID: legacyCandidate.GroupID, Epoch: legacyCandidate.Epoch,
+		CandidateLedgerSequence: legacyCandidate.CandidateLedgerSequence, RouteIntentGeneration: legacyCandidate.RouteIntentGeneration,
+		InventoryGeneration: legacyCandidate.InventoryGeneration, ReleaseRecordDigest: legacyCandidate.ReleaseRecordDigest,
+		WorkerSlot: legacyCandidate.WorkerSlot, PublishedAt: legacyCandidate.PublishedAt,
+		CurrentRecord: legacyCandidate.CurrentRecord, CurrentBundle: legacyCandidate.CurrentBundle,
+		CurrentWorkerSlot: legacyCandidate.CurrentWorkerSlot, Record: legacyCandidate.Record, Bundle: legacyCandidate.Bundle,
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := OpenPersistentGroupStore(store.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, exists, err := restarted.ReadGroupCandidate(ctx, groupID)
+	if err != nil || !exists || migrated.AuthorityLedgerSequence != current.Published.PublicationSequence ||
+		migrated.Record.RecordDigest != candidate.Record.RecordDigest {
+		t.Fatalf("legacy candidate was not migrated in memory: candidate=%+v exists=%v err=%v", migrated, exists, err)
+	}
+	migratedState, err := restarted.readGroupState(path, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migratedState.Revision++
+	if err := restarted.writeGroupState(path, migratedState); err != nil {
+		t.Fatalf("persist migrated state: %v", err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(persisted), `"authority_ledger_sequence":`) {
+		t.Fatalf("migrated state did not persist the new witness: err=%v", err)
+	}
+
+	for name, mutate := range map[string]func(*legacyCandidatePersistentGroupState){
+		"digest": func(value *legacyCandidatePersistentGroupState) { value.Digest = "sha256:" + strings.Repeat("0", 64) },
+		"authority-head": func(value *legacyCandidatePersistentGroupState) {
+			value.AuthorityLedger = append(value.AuthorityLedger, GroupAuthorityLedgerEntry{
+				Schema: GroupAuthorityLedgerSchemaV1, GroupID: groupID, Sequence: uint64(len(value.AuthorityLedger) + 1),
+				Status: GroupAuthorityStatusFailed, CandidateLedgerSequence: current.Published.CandidateLedgerSequence,
+				RouteIntentGeneration: "legacy-migration-drift", LastPublishedBundleGeneration: current.Published.Bundle.Generation,
+				FailureCode: GroupAuthorityFailureSigning, Authority: "edge-control", PublicationEnabled: true, RecordedAt: now.Add(time.Minute),
+			})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := legacy
+			copy.AuthorityLedger = append([]GroupAuthorityLedgerEntry(nil), legacy.AuthorityLedger...)
+			mutate(&copy)
+			bad, _ := json.Marshal(copy)
+			if err := os.WriteFile(path, bad, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := restarted.ReadGroupCandidate(ctx, groupID); err == nil {
+				t.Fatalf("legacy %s drift was accepted", name)
+			}
+		})
+	}
+}
 
 func TestPersistentGroupStoreCompactsCandidateBundlesWithoutLosingSequence(t *testing.T) {
 	t.Parallel()
