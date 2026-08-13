@@ -66,7 +66,14 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		return AuthorityTransitionReceipt{}, false, err
 	}
 	if journalExists {
-		return controller.resumeTransition(ctx, current, journal)
+		receipt, changed, resumeErr := controller.resumeTransition(ctx, current, journal)
+		if resumeErr != nil && controller.isPrewriteCASChanged(groupID, resumeErr) {
+			if settleErr := controller.settlePrewriteCAS(ctx, groupID); settleErr != nil {
+				return AuthorityTransitionReceipt{}, false, settleErr
+			}
+			return AuthorityTransitionReceipt{}, false, nil
+		}
+		return receipt, changed, resumeErr
 	}
 	if candidate.State == CandidateAuthorityVerified {
 		// A verified candidate can only enter production while its immutable
@@ -87,20 +94,27 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		resultDigest = result.ResultDigest
 	}
 	receipt, err := controller.VerifyAndSwitch(ctx, groupID, resultDigest)
-	if err != nil {
-		if classifier, ok := controller.activators[groupID].(authorityPrewriteCASClassifier); ok && classifier.IsPrewriteCASChanged(err) {
-			journal, exists, loadErr := controller.store.LoadTransitionJournal(ctx, groupID)
-			settledCandidate, _, _, candidateErr := controller.store.LoadCandidate(ctx, groupID)
-			if loadErr != nil || candidateErr != nil || !exists || journal.Phase != AuthorityTransitionPrepared || journal.Candidate != settledCandidate {
-				return AuthorityTransitionReceipt{}, false, errors.New("stale authority prewrite journal is unavailable")
-			}
-			if deleteErr := controller.store.DeleteTransitionJournal(ctx, journal); deleteErr != nil {
-				return AuthorityTransitionReceipt{}, false, deleteErr
-			}
-			return AuthorityTransitionReceipt{}, false, nil
+	if err != nil && controller.isPrewriteCASChanged(groupID, err) {
+		if settleErr := controller.settlePrewriteCAS(ctx, groupID); settleErr != nil {
+			return AuthorityTransitionReceipt{}, false, settleErr
 		}
+		return AuthorityTransitionReceipt{}, false, nil
 	}
 	return receipt, err == nil, err
+}
+
+func (controller *AuthorityController) isPrewriteCASChanged(groupID string, err error) bool {
+	classifier, ok := controller.activators[groupID].(authorityPrewriteCASClassifier)
+	return ok && classifier.IsPrewriteCASChanged(err)
+}
+
+func (controller *AuthorityController) settlePrewriteCAS(ctx context.Context, groupID string) error {
+	journal, exists, loadErr := controller.store.LoadTransitionJournal(ctx, groupID)
+	settledCandidate, _, _, candidateErr := controller.store.LoadCandidate(ctx, groupID)
+	if loadErr != nil || candidateErr != nil || !exists || journal.Phase != AuthorityTransitionPrepared || journal.Candidate != settledCandidate {
+		return errors.New("stale authority prewrite journal is unavailable")
+	}
+	return controller.store.DeleteTransitionJournal(ctx, journal)
 }
 
 func (controller *AuthorityController) resumeTransition(ctx context.Context, current CurrentAuthority, journal AuthorityTransitionJournal) (AuthorityTransitionReceipt, bool, error) {

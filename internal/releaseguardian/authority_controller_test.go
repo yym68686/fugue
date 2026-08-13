@@ -419,6 +419,30 @@ func TestAuthorityControllerDropsPreparedJournalAfterTypedPrewriteCASWithoutTraf
 	}
 }
 
+func TestAuthorityControllerDropsResumedPreparedJournalAfterTypedPrewriteCASWithoutTrafficChange(t *testing.T) {
+	journal := AuthorityTransitionJournal{}
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginErr: errTestAuthorityPrewriteCAS})
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, journal: &journal}
+	if _, err := fixture.controller.VerifyAndSwitch(context.Background(), fixture.group, fixture.result.ResultDigest); !errors.Is(err, errTestAuthorityPrewriteCAS) {
+		t.Fatalf("prepared fixture did not stop at the typed prewrite CAS: %v", err)
+	}
+	if journal.Phase != AuthorityTransitionPrepared || journal.JournalDigest == "" {
+		t.Fatalf("prepared fixture did not retain its journal: %+v", journal)
+	}
+	receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err != nil || changed || receipt.ReceiptDigest != "" || journal.JournalDigest != "" {
+		t.Fatalf("resumed typed prewrite CAS was not settled: receipt=%+v changed=%v journal=%+v err=%v", receipt, changed, journal, err)
+	}
+	current, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
+	if err != nil || current != fixture.current {
+		t.Fatalf("resumed typed prewrite CAS changed traffic authority: current=%+v err=%v", current, err)
+	}
+	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil || candidate.State != CandidateAuthorityVerified {
+		t.Fatalf("resumed typed prewrite CAS did not retain terminal candidate: candidate=%+v err=%v", candidate, err)
+	}
+}
+
 func TestAuthorityControllerRetiresOnlyProvenCompensatedActivatedJournal(t *testing.T) {
 	deleted := 0
 	controller := &AuthorityController{store: testAuthorityDecisionStore{deleteCount: &deleted},
