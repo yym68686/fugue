@@ -29,6 +29,12 @@ func bindCandidatePromotionWitness(candidate CandidateAuthority) CandidateAuthor
 	if candidate.ServingGeneration == "" {
 		candidate.ServingGeneration = candidate.BundleGeneration
 	}
+	if candidate.WorkerSourceSHA == "" {
+		candidate.WorkerSourceSHA = testSHA
+	}
+	if candidate.WorkerImageDigest == "" {
+		candidate.WorkerImageDigest = testDigest
+	}
 	return candidate
 }
 

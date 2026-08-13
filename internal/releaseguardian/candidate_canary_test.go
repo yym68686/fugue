@@ -28,7 +28,7 @@ func candidateWorkerCohortFixture(t *testing.T, candidate CandidateAuthority) Ca
 	t.Helper()
 	cohort, err := (CandidateWorkerCohort{
 		GroupID: candidate.GroupID, WorkerSlot: candidate.WorkerSlot, BundleGeneration: candidate.BundleGeneration,
-		WorkerSourceSHA: strings.Repeat("a", 40), WorkerImageDigest: testDigest,
+		WorkerSourceSHA: candidate.WorkerSourceSHA, WorkerImageDigest: candidate.WorkerImageDigest,
 		Instances: []CandidateWorkerInstance{{NodeName: "edge-node-a", PodUID: "pod-uid-candidate-a"}},
 	}).Seal()
 	if err != nil {

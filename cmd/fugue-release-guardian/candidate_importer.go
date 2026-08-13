@@ -46,6 +46,8 @@ type candidateEnvelope struct {
 	RouteIntentGeneration   string                             `json:"route_intent_generation"`
 	InventoryGeneration     string                             `json:"inventory_generation"`
 	ReleaseRecordDigest     string                             `json:"release_record_digest"`
+	WorkerSourceSHA         string                             `json:"worker_source_sha,omitempty"`
+	WorkerImageDigest       string                             `json:"worker_image_digest,omitempty"`
 	WorkerSlot              releaseguardian.AuthoritySlot      `json:"worker_slot"`
 	PublishedAt             time.Time                          `json:"published_at"`
 	CurrentRecord           *releaseguardian.RouteBundleRecord `json:"current_record"`
@@ -164,7 +166,11 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		CurrentPublicationSequence: currentPublicationSequence, CurrentRecoveryEpoch: currentRecoveryEpoch,
 		CurrentBundleDigest: envelope.CurrentRecord.BundleDigest, CurrentServingGeneration: envelope.CurrentBundle.Generation, CandidateEpoch: envelope.Epoch,
 		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
+		WorkerSourceSHA: envelope.WorkerSourceSHA, WorkerImageDigest: envelope.WorkerImageDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
+	}
+	if !candidate.HasWorkerReleaseIdentity() {
+		return false, errors.New("candidate envelope lacks an explicitly staged Worker release")
 	}
 	existingCandidate, candidateUID, candidateRV, err := store.LoadCandidate(ctx, config.GroupID)
 	candidateMissing := apierrors.IsNotFound(err)
@@ -177,6 +183,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		existingCandidate.CurrentPublicationSequence != candidate.CurrentPublicationSequence || existingCandidate.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
 		existingCandidate.CurrentBundleDigest != candidate.CurrentBundleDigest || existingCandidate.CurrentServingGeneration != candidate.CurrentServingGeneration || existingCandidate.CandidateEpoch != candidate.CandidateEpoch ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
+	candidateChanged = candidateChanged || existingCandidate.WorkerSourceSHA != candidate.WorkerSourceSHA || existingCandidate.WorkerImageDigest != candidate.WorkerImageDigest
 	if candidateMissing {
 		if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 			return false, fmt.Errorf("load candidate authority: %w", err)
@@ -271,6 +278,7 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 		envelope.AuthorityLedgerSequence == 0 || envelope.CandidateLedgerSequence == 0 ||
 		strings.TrimSpace(envelope.RouteIntentGeneration) == "" || strings.TrimSpace(envelope.InventoryGeneration) == "" ||
 		!exactSHA256Digest(envelope.ReleaseRecordDigest) || envelope.PublishedAt.IsZero() || !envelope.PublishedAt.Equal(envelope.PublishedAt.UTC()) ||
+		!exactSourceSHA(envelope.WorkerSourceSHA) || !exactSHA256Digest(envelope.WorkerImageDigest) ||
 		envelope.CurrentRecord == nil || envelope.CurrentBundle == nil || envelope.CurrentRecord.Validate() != nil || envelope.Record.Validate() != nil ||
 		envelope.CurrentRecord.GroupID != groupID || envelope.Record.GroupID != groupID || envelope.Record.Epoch != int64(envelope.Epoch) ||
 		envelope.CurrentRecord.Epoch >= envelope.Record.Epoch || envelope.CurrentWorkerSlot.Validate() != nil || envelope.WorkerSlot.Validate() != nil ||

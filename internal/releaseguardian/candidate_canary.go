@@ -142,7 +142,9 @@ func (sample CandidateRouteSample) healthy() bool {
 // authorize a switch or an unrelated rollback.
 func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthority, cohort CandidateWorkerCohort, candidateSamples, previousSamples []CandidateRouteSample, observedAt time.Time, ttl time.Duration, keyID string, signingKey []byte) (CandidateCanaryResult, error) {
 	if candidate.Validate() != nil || !candidate.HasPromotionWitness() || !authorityGenerationPattern.MatchString(candidate.BundleGeneration) || candidate.State != CandidateAuthorityLoaded || current.Validate() != nil ||
+		!candidate.HasWorkerReleaseIdentity() ||
 		cohort.Validate() != nil || cohort.GroupID != candidate.GroupID || cohort.WorkerSlot != candidate.WorkerSlot || cohort.BundleGeneration != candidate.BundleGeneration ||
+		cohort.WorkerSourceSHA != candidate.WorkerSourceSHA || cohort.WorkerImageDigest != candidate.WorkerImageDigest ||
 		candidate.GroupID != current.GroupID || candidate.RecordDigest == current.CurrentRecordDigest ||
 		candidate.WorkerSlot == current.CurrentWorkerSlot || len(candidateSamples) != CandidateCanaryRequiredSamples ||
 		len(previousSamples) != CandidateCanaryRequiredSamples || ttl <= 0 || ttl > time.Minute ||

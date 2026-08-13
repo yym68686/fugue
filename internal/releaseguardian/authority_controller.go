@@ -37,6 +37,10 @@ type authorityPrewriteCASClassifier interface {
 	IsPrewriteCASChanged(error) bool
 }
 
+type authorityPreparedSettler interface {
+	PreparedSettled(context.Context, AuthorityTransitionJournal) (bool, error)
+}
+
 func (controller *AuthorityController) finalizeTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
 	if finalizer, ok := controller.activators[journal.GroupID].(interface{ Finalize(context.Context) error }); ok {
 		if err := finalizer.Finalize(ctx); err != nil {
@@ -64,6 +68,23 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 	journal, journalExists, err := controller.store.LoadTransitionJournal(ctx, groupID)
 	if err != nil {
 		return AuthorityTransitionReceipt{}, false, err
+	}
+	if !candidate.HasWorkerReleaseIdentity() {
+		if !journalExists {
+			return AuthorityTransitionReceipt{}, false, nil
+		}
+		if journal.Phase != AuthorityTransitionPrepared || journal.Candidate != candidate || journal.Before != current {
+			return AuthorityTransitionReceipt{}, false, errors.New("legacy candidate transition cannot be safely settled")
+		}
+		settler, ok := controller.activators[groupID].(authorityPreparedSettler)
+		if !ok {
+			return AuthorityTransitionReceipt{}, false, errors.New("legacy candidate transition has no settlement observer")
+		}
+		settled, settleErr := settler.PreparedSettled(ctx, journal)
+		if settleErr != nil || !settled {
+			return AuthorityTransitionReceipt{}, false, settleErr
+		}
+		return AuthorityTransitionReceipt{}, false, controller.store.DeleteTransitionJournal(ctx, journal)
 	}
 	if journalExists {
 		receipt, changed, resumeErr := controller.resumeTransition(ctx, current, journal)
@@ -279,6 +300,9 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 	}
 	if !candidate.HasPromotionWitness() {
 		return AuthorityTransitionReceipt{}, errors.New("candidate promotion witness is unavailable")
+	}
+	if !candidate.HasWorkerReleaseIdentity() {
+		return AuthorityTransitionReceipt{}, errors.New("candidate Worker release identity is unavailable")
 	}
 	verificationTime := controller.now().UTC()
 	if candidate.State == CandidateAuthorityVerified || resume != nil {

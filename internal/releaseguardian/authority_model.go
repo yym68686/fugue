@@ -69,6 +69,8 @@ type CandidateAuthority struct {
 	CandidateEpoch             uint64                  `json:"candidateEpoch,omitempty"`
 	WorkerSlot                 AuthoritySlot           `json:"workerSlot"`
 	ReleaseRecordDigest        string                  `json:"releaseRecordDigest"`
+	WorkerSourceSHA            string                  `json:"workerSourceSha,omitempty"`
+	WorkerImageDigest          string                  `json:"workerImageDigest,omitempty"`
 	State                      CandidateAuthorityState `json:"state"`
 	Generation                 int64                   `json:"generation"`
 	CanaryResultDigest         string                  `json:"canaryResultDigest,omitempty"`
@@ -111,7 +113,18 @@ func (candidate CandidateAuthority) Validate() error {
 	if candidate.AuthoritySequence == 0 && (candidate.CurrentPublicationSequence != 0 || candidate.CurrentRecoveryEpoch != 0 || candidate.CurrentBundleDigest != "" || candidate.CurrentServingGeneration != "" || candidate.CandidateEpoch != 0) {
 		return errors.New("candidate promotion CAS witness is incomplete")
 	}
+	if (candidate.WorkerSourceSHA == "") != (candidate.WorkerImageDigest == "") ||
+		(candidate.WorkerSourceSHA != "" && (!shaPattern.MatchString(candidate.WorkerSourceSHA) || !digestPattern.MatchString(candidate.WorkerImageDigest))) {
+		return errors.New("candidate Worker release identity is invalid")
+	}
 	return nil
+}
+
+// HasWorkerReleaseIdentity distinguishes an explicitly staged Worker release
+// from the historical Edge Control self-candidates. Only the former is
+// eligible to acquire ordinary traffic authority.
+func (candidate CandidateAuthority) HasWorkerReleaseIdentity() bool {
+	return shaPattern.MatchString(candidate.WorkerSourceSHA) && digestPattern.MatchString(candidate.WorkerImageDigest)
 }
 
 func (candidate CandidateAuthority) HasPromotionWitness() bool {

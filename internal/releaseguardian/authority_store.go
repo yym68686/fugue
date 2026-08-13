@@ -498,6 +498,7 @@ func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate Candida
 		}
 		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.BundleGeneration != candidate.BundleGeneration ||
 			current.ServingGeneration != candidate.ServingGeneration || current.WorkerSlot != candidate.WorkerSlot ||
+			current.WorkerSourceSHA != candidate.WorkerSourceSHA || current.WorkerImageDigest != candidate.WorkerImageDigest ||
 			current.AuthoritySequence != candidate.AuthoritySequence || current.CandidateSequence != candidate.CandidateSequence ||
 			current.CurrentPublicationSequence != candidate.CurrentPublicationSequence || current.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
 			current.CurrentBundleDigest != candidate.CurrentBundleDigest || current.CurrentServingGeneration != candidate.CurrentServingGeneration || current.CandidateEpoch != candidate.CandidateEpoch ||
@@ -526,7 +527,8 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
 				candidate.CurrentPublicationSequence == current.CurrentPublicationSequence && candidate.CurrentRecoveryEpoch == current.CurrentRecoveryEpoch &&
 				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CurrentServingGeneration == current.CurrentServingGeneration && candidate.CandidateEpoch == current.CandidateEpoch &&
-				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
+				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest &&
+				candidate.WorkerSourceSHA == current.WorkerSourceSHA && candidate.WorkerImageDigest == current.WorkerImageDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
 		}
 		return nil
@@ -551,7 +553,8 @@ func (store *AuthorityStore) ReplaceSettledCandidate(ctx context.Context, candid
 				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
 				candidate.CurrentPublicationSequence == current.CurrentPublicationSequence && candidate.CurrentRecoveryEpoch == current.CurrentRecoveryEpoch &&
 				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CurrentServingGeneration == current.CurrentServingGeneration && candidate.CandidateEpoch == current.CandidateEpoch &&
-				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
+				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest &&
+				candidate.WorkerSourceSHA == current.WorkerSourceSHA && candidate.WorkerImageDigest == current.WorkerImageDigest) {
 			return errors.New("settled candidate replacement changes an ineligible pointer")
 		}
 		return nil

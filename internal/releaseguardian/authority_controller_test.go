@@ -389,6 +389,36 @@ func TestAuthorityControllerDoesNotSwitchWhenProductionActivationFails(t *testin
 	}
 }
 
+func TestAuthorityControllerRejectsLegacyControlSelfCandidateBeforeJournalOrTraffic(t *testing.T) {
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{})
+	candidate, uid, rv, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := candidate
+	legacy.WorkerSourceSHA, legacy.WorkerImageDigest = "", ""
+	object, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), candidateAuthorityName(fixture.group), metav1.GetOptions{})
+	if err != nil || object.UID != uid || object.ResourceVersion != rv {
+		t.Fatal(err)
+	}
+	object.Data["candidate.json"] = mustCanonicalJSON(t, legacy)
+	if _, err := fixture.client.CoreV1().ConfigMaps("fugue-system").Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	before := fixture.current
+	receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err != nil || changed || receipt.ReceiptDigest != "" {
+		t.Fatalf("legacy Control self-candidate was not inert: receipt=%+v changed=%v err=%v", receipt, changed, err)
+	}
+	after, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
+	if err != nil || after != before {
+		t.Fatalf("legacy Control self-candidate changed authority: before=%+v after=%+v err=%v", before, after, err)
+	}
+	if _, exists, err := fixture.store.LoadTransitionJournal(context.Background(), fixture.group); err != nil || exists {
+		t.Fatalf("legacy Control self-candidate created a journal: exists=%v err=%v", exists, err)
+	}
+}
+
 func TestAuthorityControllerPersistsPreparedJournalBeforeTerminalCandidate(t *testing.T) {
 	fixture := newAuthoritySwitchFixture(t, testFrontActivator{})
 	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, createErr: errors.New("journal unavailable")}

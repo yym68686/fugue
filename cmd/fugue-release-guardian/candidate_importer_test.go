@@ -298,5 +298,5 @@ func candidateImporterEnvelopeFixture(t *testing.T, groupID string, now time.Tim
 	if err != nil {
 		t.Fatal(err)
 	}
-	return candidateEnvelope{Schema: edgeCandidateEnvelopeSchemaV1, GroupID: groupID, Epoch: 5, AuthorityLedgerSequence: 7, CandidateLedgerSequence: 9, RouteIntentGeneration: "route-intent-5", InventoryGeneration: "inventory-5", ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), WorkerSlot: releaseguardian.AuthoritySlotB, PublishedAt: now, CurrentRecord: &current, CurrentBundle: &currentBundle, CurrentWorkerSlot: releaseguardian.AuthoritySlotA, Record: candidate, Bundle: candidateBundle}
+	return candidateEnvelope{Schema: edgeCandidateEnvelopeSchemaV1, GroupID: groupID, Epoch: 5, AuthorityLedgerSequence: 7, CandidateLedgerSequence: 9, RouteIntentGeneration: "route-intent-5", InventoryGeneration: "inventory-5", ReleaseRecordDigest: "sha256:" + strings.Repeat("7", 64), WorkerSourceSHA: strings.Repeat("8", 40), WorkerImageDigest: "sha256:" + strings.Repeat("9", 64), WorkerSlot: releaseguardian.AuthoritySlotB, PublishedAt: now, CurrentRecord: &current, CurrentBundle: &currentBundle, CurrentWorkerSlot: releaseguardian.AuthoritySlotA, Record: candidate, Bundle: candidateBundle}
 }
