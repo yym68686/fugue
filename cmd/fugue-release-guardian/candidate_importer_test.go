@@ -200,6 +200,42 @@ func TestCandidateImporterMigratesLoadedPointerToSignedBundleIdentity(t *testing
 	}
 }
 
+func TestCandidateImporterMigratesLoadedPromotionWitnessMissingCurrentGeneration(t *testing.T) {
+	now := time.Date(2026, 8, 12, 5, 45, 0, 0, time.UTC)
+	groupID := "edge-pool-a"
+	token := strings.Repeat("t", 48)
+	envelope := candidateImporterEnvelopeFixture(t, groupID, now)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(envelope) }))
+	defer server.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tokenFile, []byte(token), 0o600)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-a", Namespace: "fugue-system", Labels: map[string]string{
+		"fugue.io/edge-group-id": groupID, "fugue.io/edge-control-client": "true",
+	}}, Spec: corev1.PodSpec{NodeName: "edge-node-a"}}
+	client := fake.NewSimpleClientset(pod)
+	store, _ := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	legacy := releaseguardian.CandidateAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind,
+		GroupID: groupID, RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version, ServingGeneration: envelope.Bundle.Generation,
+		AuthoritySequence: envelope.AuthorityLedgerSequence, CandidateSequence: envelope.CandidateLedgerSequence,
+		CurrentPublicationSequence: uint64(envelope.CurrentRecord.Epoch), CurrentBundleDigest: envelope.CurrentRecord.BundleDigest,
+		CandidateEpoch: envelope.Epoch, WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
+		State: releaseguardian.CandidateAuthorityLoaded, Generation: 19}
+	if _, _, err := store.PutCandidate(context.Background(), legacy, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	setMutableAuthorityFixture(t, client, "fugue-candidate-authority-"+groupID, "legacy-witness", "45")
+	changed, err := importCandidateOnce(context.Background(), store, client, candidateImportConfig{
+		GroupID: groupID, Endpoint: server.URL + edgeCandidateEnvelopePathV1, TokenFile: tokenFile,
+	}, now)
+	if err != nil || !changed {
+		t.Fatalf("promotion witness migration: changed=%v err=%v", changed, err)
+	}
+	migrated, _, _, err := store.LoadCandidate(context.Background(), groupID)
+	if err != nil || migrated.CurrentServingGeneration != envelope.CurrentBundle.Generation || migrated.Generation != 20 || !migrated.HasPromotionWitness() {
+		t.Fatalf("migrated promotion witness=%+v err=%v", migrated, err)
+	}
+}
+
 func setMutableAuthorityFixture(t *testing.T, client *fake.Clientset, name, uid, rv string) {
 	t.Helper()
 	object, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), name, metav1.GetOptions{})

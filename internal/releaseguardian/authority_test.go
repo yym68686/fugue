@@ -24,6 +24,7 @@ func bindCandidatePromotionWitness(candidate CandidateAuthority) CandidateAuthor
 	candidate.CandidateSequence = 9
 	candidate.CurrentPublicationSequence = 6
 	candidate.CurrentBundleDigest = testDigest
+	candidate.CurrentServingGeneration = "current-serving-generation-1"
 	candidate.CandidateEpoch = 8
 	if candidate.ServingGeneration == "" {
 		candidate.ServingGeneration = candidate.BundleGeneration
@@ -36,7 +37,7 @@ func candidateResultFixture(candidate CandidateAuthority, now time.Time, route, 
 		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, BundleGeneration: candidate.BundleGeneration, ServingGeneration: candidate.ServingGeneration,
 		AuthoritySequence: candidate.AuthoritySequence, CandidateSequence: candidate.CandidateSequence,
 		CurrentPublicationSequence: candidate.CurrentPublicationSequence, CurrentRecoveryEpoch: candidate.CurrentRecoveryEpoch,
-		CurrentBundleDigest: candidate.CurrentBundleDigest, CandidateEpoch: candidate.CandidateEpoch,
+		CurrentBundleDigest: candidate.CurrentBundleDigest, CurrentServingGeneration: candidate.CurrentServingGeneration, CandidateEpoch: candidate.CandidateEpoch,
 		WorkerSlot: candidate.WorkerSlot, WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: route, DependencyState: dependency,
 		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),
@@ -342,5 +343,46 @@ func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 	}
 	if _, _, err := store.ReplaceLoadedCandidate(ctx, candidate, terminalUID, terminalRV); err == nil {
 		t.Fatal("terminal candidate was replaceable by importer")
+	}
+}
+
+func TestAuthorityTransitionJournalAdvancesImmutablePhasesAndDeletesByCAS(t *testing.T) {
+	ctx := context.Background()
+	client := fake.NewSimpleClientset()
+	store, _ := NewAuthorityStore(client, "fugue-system")
+	now := time.Unix(8_000, 0).UTC()
+	candidate := bindCandidatePromotionWitness(CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
+		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
+		State: CandidateAuthorityLoaded, Generation: 1})
+	candidate.State, candidate.Generation, candidate.CanaryResultDigest = CandidateAuthorityVerified, 2, testDigest
+	before := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: candidate.GroupID,
+		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 1}
+	prepared, err := (AuthorityTransitionJournal{GroupID: candidate.GroupID, Phase: AuthorityTransitionPrepared,
+		CurrentUID: "current-uid", CurrentRV: "20", Before: before, Candidate: candidate, CanaryResultDigest: testDigest,
+		PreviousNodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-uid", FrontResourceVersion: "10",
+			WorkerPodUID: "worker-pod-uid", WorkerResourceVersion: "11", ActivationGeneration: 7, BundleGeneration: "previous-bundle-7",
+			ServingGeneration: "previous-serving-7", WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		CreatedAt: now.Format(time.RFC3339Nano)}).Seal()
+	if err != nil || store.CreateTransitionJournal(ctx, prepared) != nil {
+		t.Fatalf("create prepared journal: %v", err)
+	}
+	activation := FrontAuthorityReceipt{GroupID: candidate.GroupID, PreviousSlot: AuthoritySlotA, PreviousGeneration: 7,
+		PreviousBundleGeneration: "previous-bundle-7", PreviousWorkerSourceSHA: testSHA, PreviousWorkerImageDigest: testDigest,
+		TargetSlot: AuthoritySlotB, TargetGeneration: 8, TargetBundleGeneration: "candidate-serving.p8.r0",
+		TargetWorkerSourceSHA: testSHA, TargetWorkerImageDigest: otherDigest}
+	activated := prepared
+	activated.Phase, activated.Activation = AuthorityTransitionActivated, &activation
+	activated, err = activated.Seal()
+	if err != nil || store.UpdateTransitionJournal(ctx, prepared, activated) != nil {
+		t.Fatalf("activate journal: %v", err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, transitionJournalName(candidate.GroupID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatal("prepared journal remained after activated witness")
+	}
+	if err := store.DeleteTransitionJournal(ctx, activated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, transitionActivatedJournalName(candidate.GroupID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatal("activated journal remained after terminal delete")
 	}
 }

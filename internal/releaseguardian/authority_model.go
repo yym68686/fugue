@@ -1,6 +1,7 @@
 package releaseguardian
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -63,6 +64,7 @@ type CandidateAuthority struct {
 	CurrentPublicationSequence uint64                  `json:"currentPublicationSequence,omitempty"`
 	CurrentRecoveryEpoch       uint64                  `json:"currentRecoveryEpoch,omitempty"`
 	CurrentBundleDigest        string                  `json:"currentBundleDigest,omitempty"`
+	CurrentServingGeneration   string                  `json:"currentServingGeneration,omitempty"`
 	CandidateEpoch             uint64                  `json:"candidateEpoch,omitempty"`
 	WorkerSlot                 AuthoritySlot           `json:"workerSlot"`
 	ReleaseRecordDigest        string                  `json:"releaseRecordDigest"`
@@ -97,12 +99,15 @@ func (candidate CandidateAuthority) Validate() error {
 		return errors.New("candidate promotion witness is incomplete")
 	}
 	legacyLoadedWitness := candidate.State == CandidateAuthorityLoaded && candidate.AuthoritySequence > 0 && candidate.CandidateSequence > 0 &&
-		candidate.CurrentPublicationSequence == 0 && candidate.CurrentRecoveryEpoch == 0 && candidate.CurrentBundleDigest == "" && candidate.CandidateEpoch == 0
+		((candidate.CurrentPublicationSequence == 0 && candidate.CurrentRecoveryEpoch == 0 && candidate.CurrentBundleDigest == "" && candidate.CurrentServingGeneration == "" && candidate.CandidateEpoch == 0) ||
+			(candidate.CurrentPublicationSequence > 0 && candidate.CurrentPublicationSequence <= candidate.AuthoritySequence &&
+				digestPattern.MatchString(candidate.CurrentBundleDigest) && candidate.CurrentServingGeneration == "" && candidate.CandidateEpoch > candidate.CurrentPublicationSequence))
 	if candidate.AuthoritySequence != 0 && !legacyLoadedWitness && (candidate.CurrentPublicationSequence == 0 || candidate.CurrentPublicationSequence > candidate.AuthoritySequence ||
-		!digestPattern.MatchString(candidate.CurrentBundleDigest) || candidate.CandidateEpoch == 0 || candidate.CandidateEpoch <= candidate.CurrentPublicationSequence) {
+		!digestPattern.MatchString(candidate.CurrentBundleDigest) || !authorityGenerationPattern.MatchString(candidate.CurrentServingGeneration) ||
+		candidate.CandidateEpoch == 0 || candidate.CandidateEpoch <= candidate.CurrentPublicationSequence) {
 		return errors.New("candidate promotion CAS witness is invalid")
 	}
-	if candidate.AuthoritySequence == 0 && (candidate.CurrentPublicationSequence != 0 || candidate.CurrentRecoveryEpoch != 0 || candidate.CurrentBundleDigest != "" || candidate.CandidateEpoch != 0) {
+	if candidate.AuthoritySequence == 0 && (candidate.CurrentPublicationSequence != 0 || candidate.CurrentRecoveryEpoch != 0 || candidate.CurrentBundleDigest != "" || candidate.CurrentServingGeneration != "" || candidate.CandidateEpoch != 0) {
 		return errors.New("candidate promotion CAS witness is incomplete")
 	}
 	return nil
@@ -110,21 +115,30 @@ func (candidate CandidateAuthority) Validate() error {
 
 func (candidate CandidateAuthority) HasPromotionWitness() bool {
 	return candidate.AuthoritySequence > 0 && candidate.CandidateSequence > 0 && candidate.CurrentPublicationSequence > 0 &&
-		digestPattern.MatchString(candidate.CurrentBundleDigest) && candidate.CandidateEpoch > candidate.CurrentPublicationSequence
+		digestPattern.MatchString(candidate.CurrentBundleDigest) && authorityGenerationPattern.MatchString(candidate.CurrentServingGeneration) &&
+		candidate.CandidateEpoch > candidate.CurrentPublicationSequence
 }
 
 // CurrentAuthority is the only pointer that grants ordinary user traffic for
 // a group. The previous fields are the immediately reversible LKG authority.
 type CurrentAuthority struct {
-	APIVersion            string        `json:"apiVersion"`
-	Kind                  string        `json:"kind"`
-	GroupID               string        `json:"groupId"`
-	CurrentRecordDigest   string        `json:"currentRecordDigest"`
-	CurrentWorkerSlot     AuthoritySlot `json:"currentWorkerSlot"`
-	PreviousRecordDigest  string        `json:"previousRecordDigest,omitempty"`
-	PreviousWorkerSlot    AuthoritySlot `json:"previousWorkerSlot,omitempty"`
-	AuthorityEpoch        int64         `json:"authorityEpoch"`
-	BaselineReceiptDigest string        `json:"baselineReceiptDigest,omitempty"`
+	APIVersion                string        `json:"apiVersion"`
+	Kind                      string        `json:"kind"`
+	GroupID                   string        `json:"groupId"`
+	CurrentRecordDigest       string        `json:"currentRecordDigest"`
+	CurrentWorkerSlot         AuthoritySlot `json:"currentWorkerSlot"`
+	CurrentFrontGeneration    uint64        `json:"currentFrontGeneration,omitempty"`
+	CurrentBundleGeneration   string        `json:"currentBundleGeneration,omitempty"`
+	CurrentWorkerSourceSHA    string        `json:"currentWorkerSourceSha,omitempty"`
+	CurrentWorkerImageDigest  string        `json:"currentWorkerImageDigest,omitempty"`
+	PreviousRecordDigest      string        `json:"previousRecordDigest,omitempty"`
+	PreviousWorkerSlot        AuthoritySlot `json:"previousWorkerSlot,omitempty"`
+	PreviousFrontGeneration   uint64        `json:"previousFrontGeneration,omitempty"`
+	PreviousBundleGeneration  string        `json:"previousBundleGeneration,omitempty"`
+	PreviousWorkerSourceSHA   string        `json:"previousWorkerSourceSha,omitempty"`
+	PreviousWorkerImageDigest string        `json:"previousWorkerImageDigest,omitempty"`
+	AuthorityEpoch            int64         `json:"authorityEpoch"`
+	BaselineReceiptDigest     string        `json:"baselineReceiptDigest,omitempty"`
 }
 
 func (authority CurrentAuthority) Validate() error {
@@ -136,11 +150,27 @@ func (authority CurrentAuthority) Validate() error {
 	if authority.BaselineReceiptDigest != "" && !digestPattern.MatchString(authority.BaselineReceiptDigest) {
 		return errors.New("current authority baseline receipt is invalid")
 	}
+	currentFrontEmpty := authority.CurrentFrontGeneration == 0 && authority.CurrentBundleGeneration == "" && authority.CurrentWorkerSourceSHA == "" && authority.CurrentWorkerImageDigest == ""
+	currentFrontValid := authority.CurrentFrontGeneration > 0 && authorityGenerationPattern.MatchString(authority.CurrentBundleGeneration) &&
+		shaPattern.MatchString(authority.CurrentWorkerSourceSHA) && digestPattern.MatchString(authority.CurrentWorkerImageDigest)
+	if !currentFrontEmpty && !currentFrontValid {
+		return errors.New("current authority Front identity is invalid")
+	}
 	if authority.PreviousRecordDigest == "" && authority.PreviousWorkerSlot == "" {
+		if authority.PreviousFrontGeneration != 0 || authority.PreviousBundleGeneration != "" || authority.PreviousWorkerSourceSHA != "" || authority.PreviousWorkerImageDigest != "" {
+			return errors.New("current authority has an unbound Front LKG")
+		}
+		return nil
+	}
+	previousFrontEmpty := authority.PreviousFrontGeneration == 0 && authority.PreviousBundleGeneration == "" && authority.PreviousWorkerSourceSHA == "" && authority.PreviousWorkerImageDigest == ""
+	if currentFrontEmpty && previousFrontEmpty && digestPattern.MatchString(authority.PreviousRecordDigest) && authority.PreviousWorkerSlot.Validate() == nil &&
+		authority.PreviousRecordDigest != authority.CurrentRecordDigest && authority.PreviousWorkerSlot != authority.CurrentWorkerSlot {
 		return nil
 	}
 	if !digestPattern.MatchString(authority.PreviousRecordDigest) || authority.PreviousWorkerSlot.Validate() != nil ||
-		authority.PreviousRecordDigest == authority.CurrentRecordDigest || authority.PreviousWorkerSlot == authority.CurrentWorkerSlot {
+		authority.PreviousRecordDigest == authority.CurrentRecordDigest || authority.PreviousWorkerSlot == authority.CurrentWorkerSlot ||
+		!currentFrontValid || authority.PreviousFrontGeneration == 0 || !authorityGenerationPattern.MatchString(authority.PreviousBundleGeneration) ||
+		!shaPattern.MatchString(authority.PreviousWorkerSourceSHA) || !digestPattern.MatchString(authority.PreviousWorkerImageDigest) {
 		return errors.New("current authority LKG is invalid")
 	}
 	return nil
@@ -158,6 +188,7 @@ type CandidateCanaryResult struct {
 	CurrentPublicationSequence uint64        `json:"currentPublicationSequence"`
 	CurrentRecoveryEpoch       uint64        `json:"currentRecoveryEpoch"`
 	CurrentBundleDigest        string        `json:"currentBundleDigest"`
+	CurrentServingGeneration   string        `json:"currentServingGeneration"`
 	CandidateEpoch             uint64        `json:"candidateEpoch"`
 	BundleGeneration           string        `json:"bundleGeneration"`
 	ServingGeneration          string        `json:"servingGeneration"`
@@ -279,6 +310,7 @@ func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 		!groupPattern.MatchString(result.GroupID) || !digestPattern.MatchString(result.CandidateRecordDigest) ||
 		result.AuthoritySequence == 0 || result.CandidateSequence == 0 || result.CurrentPublicationSequence == 0 ||
 		result.CurrentPublicationSequence > result.AuthoritySequence || !digestPattern.MatchString(result.CurrentBundleDigest) ||
+		!authorityGenerationPattern.MatchString(result.CurrentServingGeneration) ||
 		result.CandidateEpoch <= result.CurrentPublicationSequence ||
 		!authorityGenerationPattern.MatchString(result.BundleGeneration) || !authorityGenerationPattern.MatchString(result.ServingGeneration) ||
 		!shaPattern.MatchString(result.WorkerSourceSHA) ||
@@ -408,6 +440,149 @@ type AuthorityTransitionReceipt struct {
 	After              CurrentAuthority          `json:"after"`
 	ObservedAt         string                    `json:"observedAt"`
 	ReceiptDigest      string                    `json:"receiptDigest"`
+}
+
+const AuthorityTransitionJournalKind = "AuthorityTransitionJournal"
+
+type AuthorityTransitionPhase string
+
+const (
+	AuthorityTransitionPrepared  AuthorityTransitionPhase = "prepared"
+	AuthorityTransitionActivated AuthorityTransitionPhase = "activated"
+)
+
+// AuthorityTransitionJournal is the durable group-local witness written before
+// the first external authority mutation. It lets a restarted Guardian replay
+// an idempotent Edge Control promotion and resume/compensate a partial Front CAS
+// without accepting a new candidate or a new LKG.
+type AuthorityTransitionJournal struct {
+	APIVersion         string                         `json:"apiVersion"`
+	Kind               string                         `json:"kind"`
+	GroupID            string                         `json:"groupId"`
+	Phase              AuthorityTransitionPhase       `json:"phase"`
+	CurrentUID         string                         `json:"currentUid"`
+	CurrentRV          string                         `json:"currentResourceVersion"`
+	Before             CurrentAuthority               `json:"before"`
+	Candidate          CandidateAuthority             `json:"candidate"`
+	CanaryResultDigest string                         `json:"canaryResultDigest"`
+	PreviousNodes      []AuthorityBaselineNodeWitness `json:"previousNodes"`
+	Activation         *FrontAuthorityReceipt         `json:"activation,omitempty"`
+	CreatedAt          string                         `json:"createdAt"`
+	JournalDigest      string                         `json:"journalDigest"`
+}
+
+func (journal AuthorityTransitionJournal) Seal() (AuthorityTransitionJournal, error) {
+	journal.APIVersion, journal.Kind, journal.JournalDigest = APIVersion, AuthorityTransitionJournalKind, ""
+	if err := journal.validateUnsigned(); err != nil {
+		return AuthorityTransitionJournal{}, err
+	}
+	raw, err := declarativerelease.CanonicalJSON(journal)
+	if err != nil {
+		return AuthorityTransitionJournal{}, err
+	}
+	journal.JournalDigest = digest(raw)
+	return journal, nil
+}
+
+func (journal AuthorityTransitionJournal) Validate() error {
+	if !digestPattern.MatchString(journal.JournalDigest) || journal.validateUnsigned() != nil {
+		return errors.New("authority transition journal is invalid")
+	}
+	copy := journal
+	copy.JournalDigest = ""
+	raw, err := declarativerelease.CanonicalJSON(copy)
+	if err != nil || digest(raw) != journal.JournalDigest {
+		return errors.New("authority transition journal digest is invalid")
+	}
+	return nil
+}
+
+func (journal AuthorityTransitionJournal) validateUnsigned() error {
+	if journal.APIVersion != APIVersion || journal.Kind != AuthorityTransitionJournalKind || !groupPattern.MatchString(journal.GroupID) ||
+		journal.Before.Validate() != nil || journal.Candidate.Validate() != nil || journal.Before.GroupID != journal.GroupID ||
+		journal.Candidate.GroupID != journal.GroupID || journal.Candidate.State != CandidateAuthorityVerified ||
+		journal.Candidate.CanaryResultDigest != journal.CanaryResultDigest || !digestPattern.MatchString(journal.CanaryResultDigest) ||
+		strings.TrimSpace(journal.CurrentUID) == "" || strings.TrimSpace(journal.CurrentRV) == "" || len(journal.PreviousNodes) < 1 || len(journal.PreviousNodes) > 100 {
+		return errors.New("authority transition journal identity is invalid")
+	}
+	seenNodes := map[string]bool{}
+	for _, node := range journal.PreviousNodes {
+		if !componentPattern.MatchString(node.NodeName) || seenNodes[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
+			strings.TrimSpace(node.FrontResourceVersion) == "" || strings.TrimSpace(node.WorkerResourceVersion) == "" ||
+			node.ActivationGeneration < 1 || !authorityGenerationPattern.MatchString(node.BundleGeneration) ||
+			!authorityGenerationPattern.MatchString(node.ServingGeneration) || !shaPattern.MatchString(node.WorkerSourceSHA) ||
+			!digestPattern.MatchString(node.WorkerImageDigest) {
+			return errors.New("authority transition journal previous witness is invalid")
+		}
+		seenNodes[node.NodeName] = true
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, journal.CreatedAt)
+	if err != nil || !createdAt.Equal(createdAt.UTC()) {
+		return errors.New("authority transition journal time is invalid")
+	}
+	if journal.Phase == AuthorityTransitionPrepared {
+		if journal.Activation != nil {
+			return errors.New("prepared authority journal carries activation")
+		}
+	} else if journal.Phase != AuthorityTransitionActivated || journal.Activation == nil || journal.Activation.GroupID != journal.GroupID {
+		return errors.New("authority transition journal phase is invalid")
+	}
+	return nil
+}
+
+// FrontAuthorityTarget carries only the exact candidate identity authorized by
+// a signed canary. The runtime adapter owns all resource names and commands.
+type FrontAuthorityTarget struct {
+	GroupID                   string
+	TargetSlot                AuthoritySlot
+	CandidateBundleGeneration string
+	ServingGeneration         string
+	FrontBundleGeneration     string
+	AuthoritySequence         uint64
+	PublicationSequence       uint64
+	RecoveryEpoch             uint64
+	PublishedBundleDigest     string
+	PreviousServingGeneration string
+	PreviousSlot              AuthoritySlot
+	PreviousFrontGeneration   uint64
+	PreviousBundleGeneration  string
+	PreviousWorkerSourceSHA   string
+	PreviousWorkerImageDigest string
+	CandidateEpoch            uint64
+	WorkerSourceSHA           string
+	WorkerImageDigest         string
+	WorkerCohortDigest        string
+	CandidateRecordDigest     string
+	CanaryResultDigest        string
+	PreviousNodes             []AuthorityBaselineNodeWitness
+}
+
+type FrontAuthorityReceipt struct {
+	GroupID                   string
+	PreviousSlot              AuthoritySlot
+	PreviousGeneration        uint64
+	PreviousBundleGeneration  string
+	PreviousWorkerSourceSHA   string
+	PreviousWorkerImageDigest string
+	TargetSlot                AuthoritySlot
+	TargetGeneration          uint64
+	TargetBundleGeneration    string
+	TargetWorkerSourceSHA     string
+	TargetWorkerImageDigest   string
+}
+
+// FrontAuthorityActivator is a group-local transaction. Implementations keep
+// the group Lease until CurrentAuthority CAS is either committed or rolled
+// back, so another group remains independent throughout the switch.
+type FrontAuthorityActivator interface {
+	BeginPromote(context.Context, FrontAuthorityTarget) (FrontAuthorityTransaction, error)
+	BeginRestore(context.Context, CurrentAuthority) (FrontAuthorityTransaction, error)
+}
+
+type FrontAuthorityTransaction interface {
+	Receipt() FrontAuthorityReceipt
+	Commit(context.Context) error
+	Rollback(context.Context) error
 }
 
 func (receipt AuthorityTransitionReceipt) Seal() (AuthorityTransitionReceipt, error) {

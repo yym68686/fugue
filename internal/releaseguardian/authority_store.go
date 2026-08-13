@@ -81,6 +81,76 @@ func (store *AuthorityStore) CreateCandidateCanaryResult(ctx context.Context, re
 		map[string]string{"fugue.pro/candidate-record": candidateRecordLabel(result.CandidateRecordDigest)})
 }
 
+func (store *AuthorityStore) CreateTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
+	if journal.Validate() != nil || journal.Phase != AuthorityTransitionPrepared {
+		return errors.New("authority transition journal create is invalid")
+	}
+	return store.createImmutable(ctx, transitionJournalName(journal.GroupID), journal.GroupID, "transition-journal", "journal.json", journal)
+}
+
+func (store *AuthorityStore) LoadTransitionJournal(ctx context.Context, groupID string) (AuthorityTransitionJournal, bool, error) {
+	if !groupPattern.MatchString(groupID) {
+		return AuthorityTransitionJournal{}, false, errors.New("authority transition group is invalid")
+	}
+	for _, name := range []string{transitionActivatedJournalName(groupID), transitionJournalName(groupID)} {
+		object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return AuthorityTransitionJournal{}, false, err
+		}
+		var journal AuthorityTransitionJournal
+		if object.Immutable == nil || !*object.Immutable || object.Labels["fugue.pro/group"] != groupID ||
+			object.Labels["fugue.pro/authority-kind"] != "transition-journal" || len(object.Data) != 1 ||
+			decodeStrict([]byte(object.Data["journal.json"]), &journal) != nil || journal.Validate() != nil || journal.GroupID != groupID {
+			return AuthorityTransitionJournal{}, false, errors.New("authority transition journal object is invalid")
+		}
+		return journal, true, nil
+	}
+	return AuthorityTransitionJournal{}, false, nil
+}
+
+func (store *AuthorityStore) UpdateTransitionJournal(ctx context.Context, before, after AuthorityTransitionJournal) error {
+	if before.Validate() != nil || after.Validate() != nil || before.Phase != AuthorityTransitionPrepared || after.Phase != AuthorityTransitionActivated ||
+		before.GroupID != after.GroupID || before.CurrentUID != after.CurrentUID || before.CurrentRV != after.CurrentRV ||
+		before.Candidate.RecordDigest != after.Candidate.RecordDigest || before.CanaryResultDigest != after.CanaryResultDigest {
+		return errors.New("authority transition journal update is invalid")
+	}
+	// Immutable journals are phase-addressed. The prepared witness remains for
+	// crash forensics until the activated witness exists, then is CAS-deleted.
+	if err := store.createImmutable(ctx, transitionActivatedJournalName(after.GroupID), after.GroupID, "transition-journal", "journal.json", after); err != nil {
+		return err
+	}
+	return store.deleteImmutableJournal(ctx, transitionJournalName(before.GroupID), before)
+}
+
+func (store *AuthorityStore) DeleteTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
+	if journal.Validate() != nil {
+		return errors.New("authority transition journal delete is invalid")
+	}
+	name := transitionJournalName(journal.GroupID)
+	if journal.Phase == AuthorityTransitionActivated {
+		name = transitionActivatedJournalName(journal.GroupID)
+	}
+	return store.deleteImmutableJournal(ctx, name, journal)
+}
+
+func (store *AuthorityStore) deleteImmutableJournal(ctx context.Context, name string, journal AuthorityTransitionJournal) error {
+	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
+	object, err := configMaps.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	raw, err := declarativerelease.CanonicalJSON(journal)
+	if err != nil || object.Immutable == nil || !*object.Immutable || object.Data["journal.json"] != string(raw) ||
+		object.Labels["fugue.pro/group"] != journal.GroupID || object.Labels["fugue.pro/authority-kind"] != "transition-journal" {
+		return errors.New("authority transition journal CAS changed")
+	}
+	uid, rv := object.UID, object.ResourceVersion
+	return configMaps.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv}})
+}
+
 func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Context, groupID string, now time.Time) error {
 	if !groupPattern.MatchString(groupID) || now.IsZero() || !now.Equal(now.UTC()) {
 		return errors.New("candidate canary prune request is invalid")
@@ -190,6 +260,25 @@ func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (C
 	return authority, object.UID, object.ResourceVersion, nil
 }
 
+func (store *AuthorityStore) LoadBaselineReceipt(ctx context.Context, groupID string) (AuthorityBaselineReceipt, error) {
+	if !groupPattern.MatchString(groupID) {
+		return AuthorityBaselineReceipt{}, errors.New("authority group identity is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, currentAuthorityName(groupID), metav1.GetOptions{})
+	if err != nil {
+		return AuthorityBaselineReceipt{}, err
+	}
+	var authority CurrentAuthority
+	var receipt AuthorityBaselineReceipt
+	if object.UID == "" || object.ResourceVersion == "" || object.Labels["fugue.pro/group"] != groupID ||
+		decodeStrict([]byte(object.Data["authority.json"]), &authority) != nil || authority.Validate() != nil ||
+		decodeStrict([]byte(object.Data["baseline-receipt.json"]), &receipt) != nil || receipt.Validate() != nil ||
+		receipt.GroupID != groupID || authority.BaselineReceiptDigest != receipt.ReceiptDigest {
+		return AuthorityBaselineReceipt{}, errors.New("authority baseline receipt is invalid")
+	}
+	return receipt, nil
+}
+
 func (store *AuthorityStore) loadMutable(ctx context.Context, name, groupID, key string, destination any) (types.UID, string, error) {
 	if !groupPattern.MatchString(groupID) {
 		return "", "", errors.New("authority group identity is invalid")
@@ -263,7 +352,7 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 		result.ResultDigest != resultDigest || result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
 		result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
 		result.CurrentPublicationSequence != candidate.CurrentPublicationSequence || result.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
-		result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CandidateEpoch != candidate.CandidateEpoch ||
+		result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CurrentServingGeneration != candidate.CurrentServingGeneration || result.CandidateEpoch != candidate.CandidateEpoch ||
 		result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
 		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
@@ -303,7 +392,7 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 		if result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
 			result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
 			result.CurrentPublicationSequence != candidate.CurrentPublicationSequence || result.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
-			result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CandidateEpoch != candidate.CandidateEpoch ||
+			result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CurrentServingGeneration != candidate.CurrentServingGeneration || result.CandidateEpoch != candidate.CandidateEpoch ||
 			result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
 			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 			continue
@@ -336,7 +425,7 @@ func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate Candida
 			current.ServingGeneration != candidate.ServingGeneration || current.WorkerSlot != candidate.WorkerSlot ||
 			current.AuthoritySequence != candidate.AuthoritySequence || current.CandidateSequence != candidate.CandidateSequence ||
 			current.CurrentPublicationSequence != candidate.CurrentPublicationSequence || current.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
-			current.CurrentBundleDigest != candidate.CurrentBundleDigest || current.CandidateEpoch != candidate.CandidateEpoch ||
+			current.CurrentBundleDigest != candidate.CurrentBundleDigest || current.CurrentServingGeneration != candidate.CurrentServingGeneration || current.CandidateEpoch != candidate.CandidateEpoch ||
 			current.ReleaseRecordDigest != candidate.ReleaseRecordDigest || candidate.Generation != current.Generation+1 {
 			return errors.New("candidate authority transition changes immutable identity")
 		}
@@ -361,7 +450,7 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration && candidate.ServingGeneration == current.ServingGeneration &&
 				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
 				candidate.CurrentPublicationSequence == current.CurrentPublicationSequence && candidate.CurrentRecoveryEpoch == current.CurrentRecoveryEpoch &&
-				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CandidateEpoch == current.CandidateEpoch &&
+				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CurrentServingGeneration == current.CurrentServingGeneration && candidate.CandidateEpoch == current.CandidateEpoch &&
 				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
 		}
@@ -394,6 +483,12 @@ func (store *AuthorityStore) AdoptCurrentBaseline(ctx context.Context, authority
 		authority.AuthorityEpoch != receipt.AuthorityEpoch || authority.BaselineReceiptDigest != receipt.ReceiptDigest ||
 		authority.PreviousRecordDigest != "" || authority.PreviousWorkerSlot != "" || expectedUID == "" || strings.TrimSpace(expectedResourceVersion) == "" {
 		return "", "", errors.New("authority baseline adoption is invalid")
+	}
+	for _, node := range receipt.Nodes {
+		if node.ActivationGeneration != authority.CurrentFrontGeneration || node.BundleGeneration != authority.CurrentBundleGeneration ||
+			node.WorkerSourceSHA != authority.CurrentWorkerSourceSHA || node.WorkerImageDigest != authority.CurrentWorkerImageDigest {
+			return "", "", errors.New("authority baseline workload identity is mixed")
+		}
 	}
 	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
 	current, err := configMaps.Get(ctx, currentAuthorityName(authority.GroupID), metav1.GetOptions{})
@@ -485,6 +580,12 @@ func candidateRecordLabel(recordDigest string) string {
 
 func candidateAuthorityName(groupID string) string { return "fugue-candidate-authority-" + groupID }
 func currentAuthorityName(groupID string) string   { return "fugue-current-authority-" + groupID }
+func transitionJournalName(groupID string) string {
+	return "fugue-authority-transition-prepared-" + groupID
+}
+func transitionActivatedJournalName(groupID string) string {
+	return "fugue-authority-transition-activated-" + groupID
+}
 
 func authorityImmutableName(prefix, groupID, valueDigest string) string {
 	suffix := strings.TrimPrefix(valueDigest, "sha256:")

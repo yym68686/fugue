@@ -1,0 +1,104 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"fugue/internal/edgecontrol"
+	"fugue/internal/releaseguardian"
+)
+
+func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 0, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	requests := 0
+	var firstRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests++
+		raw := make([]byte, request.ContentLength)
+		_, _ = request.Body.Read(raw)
+		if requests == 1 {
+			firstRaw = append([]byte(nil), raw...)
+			panic(http.ErrAbortHandler)
+		}
+		if !bytes.Equal(raw, firstRaw) {
+			t.Fatal("unknown promotion did not replay exact signed bytes")
+		}
+		_ = json.NewEncoder(w).Encode(edgecontrol.GroupPromotionReceipt{Schema: edgecontrol.GroupPromotionReceiptSchemaV1,
+			GroupID: target.GroupID, PreviousAuthoritySequence: target.AuthoritySequence,
+			PreviousPublicationSequence: target.PublicationSequence, PreviousRecoveryEpoch: target.RecoveryEpoch,
+			PreviousBundleGeneration: target.PreviousServingGeneration, PreviousPublishedBundleDigest: target.PublishedBundleDigest,
+			PublicationSequence: target.AuthoritySequence + 1, RecoveryEpoch: target.RecoveryEpoch,
+			BundleGeneration: target.ServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("9", 64),
+			CandidateRecordDigest: target.CandidateRecordDigest, WorkerSlot: string(target.TargetSlot), Authority: "edge-control"})
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	receipt, err := activator.promoteControl(context.Background(), target)
+	if err != nil || requests != 2 || receipt.PublicationSequence != target.AuthoritySequence+1 {
+		t.Fatalf("promotion replay requests=%d receipt=%+v err=%v", requests, receipt, err)
+	}
+}
+
+func TestGroupAuthorityRecoveryUnknownUsesReadOnlyReconcile(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 30, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	promotion := edgecontrol.GroupPromotionReceipt{GroupID: target.GroupID, PublicationSequence: target.AuthoritySequence + 1,
+		RecoveryEpoch: target.RecoveryEpoch, PreviousBundleGeneration: target.PreviousServingGeneration}
+	posts, gets := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodPost:
+			posts++
+			panic(http.ErrAbortHandler)
+		case http.MethodGet:
+			gets++
+			_ = json.NewEncoder(w).Encode(edgecontrol.AuthorityGroupStatus{GroupID: target.GroupID,
+				PublicationSequence: promotion.PublicationSequence + 1, RecoveryEpoch: promotion.RecoveryEpoch + 1,
+				BundleGeneration: target.PreviousServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("8", 64)})
+		}
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	if err := activator.recoverControl(context.Background(), promotion, target.PreviousServingGeneration); err != nil || posts != 1 || gets != 1 {
+		t.Fatalf("recovery reconcile posts=%d gets=%d err=%v", posts, gets, err)
+	}
+}
+
+func groupAuthorityTargetFixture() releaseguardian.FrontAuthorityTarget {
+	return releaseguardian.FrontAuthorityTarget{GroupID: "edge-group-country-de", TargetSlot: releaseguardian.AuthoritySlotA,
+		CandidateBundleGeneration: "candidate-full.p20.r0", ServingGeneration: "candidate-base", FrontBundleGeneration: "candidate-base.p12.r3",
+		AuthoritySequence: 11, PublicationSequence: 10, RecoveryEpoch: 3, PublishedBundleDigest: "sha256:" + strings.Repeat("1", 64),
+		PreviousServingGeneration: "previous-base", CandidateEpoch: 20, WorkerSourceSHA: strings.Repeat("2", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("3", 64), WorkerCohortDigest: "sha256:" + strings.Repeat("4", 64),
+		CandidateRecordDigest: "sha256:" + strings.Repeat("5", 64), CanaryResultDigest: "sha256:" + strings.Repeat("6", 64)}
+}
+
+func groupAuthorityActivatorFixture(t *testing.T, endpoint, group string, now time.Time) *groupAuthorityActivator {
+	t.Helper()
+	directory := t.TempDir()
+	keyring := authorityRecoveryKeyring{Schema: edgecontrol.GroupRecoveryKeyringSchemaV1, Generation: 1, GroupID: group,
+		Keys: []authorityRecoveryKey{{KeyID: "recovery-de-1", Secret: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
+			NotBeforeUnix: now.Add(-time.Hour).Unix(), NotAfterUnix: now.Add(time.Hour).Unix()}}}
+	raw, _ := json.Marshal(keyring)
+	path := filepath.Join(directory, "keyring.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activator := &groupAuthorityActivator{config: groupAuthorityConfig{GroupID: group, Endpoint: endpoint, KeyringFile: path},
+		client: &http.Client{Timeout: time.Second}, now: func() time.Time { return now }}
+	if _, _, err := activator.activeKey(now); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return activator
+}

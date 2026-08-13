@@ -161,7 +161,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version, ServingGeneration: envelope.Bundle.Generation,
 		AuthoritySequence: envelope.AuthorityLedgerSequence, CandidateSequence: envelope.CandidateLedgerSequence,
 		CurrentPublicationSequence: currentPublicationSequence, CurrentRecoveryEpoch: currentRecoveryEpoch,
-		CurrentBundleDigest: envelope.CurrentRecord.BundleDigest, CandidateEpoch: envelope.Epoch,
+		CurrentBundleDigest: envelope.CurrentRecord.BundleDigest, CurrentServingGeneration: envelope.CurrentBundle.Generation, CandidateEpoch: envelope.Epoch,
 		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
@@ -174,7 +174,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		existingCandidate.BundleGeneration != candidate.BundleGeneration || existingCandidate.ServingGeneration != candidate.ServingGeneration ||
 		existingCandidate.AuthoritySequence != candidate.AuthoritySequence || existingCandidate.CandidateSequence != candidate.CandidateSequence ||
 		existingCandidate.CurrentPublicationSequence != candidate.CurrentPublicationSequence || existingCandidate.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
-		existingCandidate.CurrentBundleDigest != candidate.CurrentBundleDigest || existingCandidate.CandidateEpoch != candidate.CandidateEpoch ||
+		existingCandidate.CurrentBundleDigest != candidate.CurrentBundleDigest || existingCandidate.CurrentServingGeneration != candidate.CurrentServingGeneration || existingCandidate.CandidateEpoch != candidate.CandidateEpoch ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
 	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
 		return false, errors.New("candidate envelope conflicts with terminal candidate authority")

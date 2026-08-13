@@ -174,7 +174,10 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 		return false, err
 	}
 	after := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
-		GroupID: config.GroupID, CurrentRecordDigest: recordDigest, CurrentWorkerSlot: activeSlot, AuthorityEpoch: epoch, BaselineReceiptDigest: receipt.ReceiptDigest}
+		GroupID: config.GroupID, CurrentRecordDigest: recordDigest, CurrentWorkerSlot: activeSlot,
+		CurrentFrontGeneration: witnesses[0].ActivationGeneration, CurrentBundleGeneration: witnesses[0].BundleGeneration,
+		CurrentWorkerSourceSHA: witnesses[0].WorkerSourceSHA, CurrentWorkerImageDigest: witnesses[0].WorkerImageDigest,
+		AuthorityEpoch: epoch, BaselineReceiptDigest: receipt.ReceiptDigest}
 	if _, _, err := store.AdoptCurrentBaseline(ctx, after, receipt, uid, rv); err != nil {
 		return false, err
 	}

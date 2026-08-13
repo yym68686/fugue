@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -12,10 +13,24 @@ import (
 type authorityDecisionStore interface {
 	LoadCandidate(context.Context, string) (CandidateAuthority, types.UID, string, error)
 	LoadCurrent(context.Context, string) (CurrentAuthority, types.UID, string, error)
+	LoadBaselineReceipt(context.Context, string) (AuthorityBaselineReceipt, error)
+	LoadTransitionJournal(context.Context, string) (AuthorityTransitionJournal, bool, error)
 	LoadCandidateCanaryResult(context.Context, CandidateAuthority, string, time.Time) (CandidateCanaryResult, error)
 	LoadLatestCandidateCanaryResult(context.Context, CandidateAuthority, time.Time) (CandidateCanaryResult, error)
 	PutCandidate(context.Context, CandidateAuthority, types.UID, string) (types.UID, string, error)
 	SwitchCurrent(context.Context, CurrentAuthority, types.UID, string) (types.UID, string, error)
+	CreateTransitionJournal(context.Context, AuthorityTransitionJournal) error
+	UpdateTransitionJournal(context.Context, AuthorityTransitionJournal, AuthorityTransitionJournal) error
+	DeleteTransitionJournal(context.Context, AuthorityTransitionJournal) error
+}
+
+func (controller *AuthorityController) finalizeTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
+	if finalizer, ok := controller.activators[journal.GroupID].(interface{ Finalize(context.Context) error }); ok {
+		if err := finalizer.Finalize(ctx); err != nil {
+			return err
+		}
+	}
+	return controller.store.DeleteTransitionJournal(ctx, journal)
 }
 
 func (controller *AuthorityController) Reconcile(ctx context.Context, groupID string) (AuthorityTransitionReceipt, bool, error) {
@@ -32,6 +47,13 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 	current, _, _, err := controller.store.LoadCurrent(ctx, groupID)
 	if err != nil {
 		return AuthorityTransitionReceipt{}, false, err
+	}
+	journal, journalExists, err := controller.store.LoadTransitionJournal(ctx, groupID)
+	if err != nil {
+		return AuthorityTransitionReceipt{}, false, err
+	}
+	if journalExists {
+		return controller.resumeTransition(ctx, current, journal)
 	}
 	if candidate.State == CandidateAuthorityVerified && current.CurrentRecordDigest == candidate.RecordDigest && current.CurrentWorkerSlot == candidate.WorkerSlot {
 		return AuthorityTransitionReceipt{}, false, nil
@@ -51,10 +73,35 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 	return receipt, err == nil, err
 }
 
+func (controller *AuthorityController) resumeTransition(ctx context.Context, current CurrentAuthority, journal AuthorityTransitionJournal) (AuthorityTransitionReceipt, bool, error) {
+	if journal.Validate() != nil || journal.Before.GroupID != current.GroupID {
+		return AuthorityTransitionReceipt{}, false, errors.New("authority transition journal cannot be resumed")
+	}
+	if current.CurrentRecordDigest == journal.Candidate.RecordDigest && current.CurrentWorkerSlot == journal.Candidate.WorkerSlot {
+		if journal.Phase != AuthorityTransitionActivated || journal.Activation == nil ||
+			current.CurrentFrontGeneration != journal.Activation.TargetGeneration || current.CurrentBundleGeneration != journal.Activation.TargetBundleGeneration {
+			return AuthorityTransitionReceipt{}, false, errors.New("completed authority transition does not match its journal")
+		}
+		if err := controller.finalizeTransitionJournal(ctx, journal); err != nil {
+			return AuthorityTransitionReceipt{}, false, err
+		}
+		return AuthorityTransitionReceipt{}, false, nil
+	}
+	if current != journal.Before {
+		return AuthorityTransitionReceipt{}, false, errors.New("authority transition predecessor changed while journal was active")
+	}
+	// Prepared and activated journals resume the same immutable candidate and
+	// canary. The production activator's idempotent Control replay and exact
+	// Front state observation settle any zero/partial/full external mutation.
+	receipt, err := controller.verifyAndSwitch(ctx, journal.GroupID, journal.CanaryResultDigest, &journal)
+	return receipt, err == nil, err
+}
+
 type AuthorityController struct {
-	store     authorityDecisionStore
-	verifiers map[string]CandidateCanaryVerifier
-	now       func() time.Time
+	store      authorityDecisionStore
+	verifiers  map[string]CandidateCanaryVerifier
+	activators map[string]FrontAuthorityActivator
+	now        func() time.Time
 }
 
 type CandidateCanaryVerifier struct {
@@ -77,7 +124,27 @@ func NewAuthorityController(store authorityDecisionStore, verifiers map[string]C
 	return &AuthorityController{store: store, verifiers: values, now: time.Now}, nil
 }
 
+func NewAuthorityControllerWithActivators(store authorityDecisionStore, verifiers map[string]CandidateCanaryVerifier, activators map[string]FrontAuthorityActivator) (*AuthorityController, error) {
+	controller, err := NewAuthorityController(store, verifiers)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]FrontAuthorityActivator, len(activators))
+	for group, activator := range activators {
+		if !groupPattern.MatchString(group) || activator == nil {
+			return nil, errors.New("authority activator configuration is invalid")
+		}
+		values[group] = activator
+	}
+	controller.activators = values
+	return controller, nil
+}
+
 func (controller *AuthorityController) VerifyAndSwitch(ctx context.Context, groupID, resultDigest string) (AuthorityTransitionReceipt, error) {
+	return controller.verifyAndSwitch(ctx, groupID, resultDigest, nil)
+}
+
+func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, groupID, resultDigest string, resume *AuthorityTransitionJournal) (AuthorityTransitionReceipt, error) {
 	if controller == nil || !digestPattern.MatchString(resultDigest) {
 		return AuthorityTransitionReceipt{}, errors.New("authority switch request is invalid")
 	}
@@ -92,7 +159,11 @@ func (controller *AuthorityController) VerifyAndSwitch(ctx context.Context, grou
 	if !candidate.HasPromotionWitness() {
 		return AuthorityTransitionReceipt{}, errors.New("candidate promotion witness is unavailable")
 	}
-	result, err := controller.store.LoadCandidateCanaryResult(ctx, candidate, resultDigest, controller.now().UTC())
+	verificationTime := controller.now().UTC()
+	if candidate.State == CandidateAuthorityVerified {
+		verificationTime = time.Time{}
+	}
+	result, err := controller.store.LoadCandidateCanaryResult(ctx, candidate, resultDigest, verificationTime)
 	if err != nil || result.KeyID != verifier.KeyID || result.VerifySignature(verifier.Key) != nil {
 		return AuthorityTransitionReceipt{}, errors.New("candidate canary attestation is invalid")
 	}
@@ -132,14 +203,110 @@ func (controller *AuthorityController) VerifyAndSwitch(ctx context.Context, grou
 	if current.CurrentRecordDigest == candidate.RecordDigest || current.CurrentWorkerSlot == candidate.WorkerSlot {
 		return AuthorityTransitionReceipt{}, errors.New("candidate is not an inactive distinct authority")
 	}
+	baseline, err := controller.store.LoadBaselineReceipt(ctx, groupID)
+	if err != nil || baseline.ReceiptDigest != current.BaselineReceiptDigest || baseline.WorkerSlot != current.CurrentWorkerSlot {
+		return AuthorityTransitionReceipt{}, errors.New("current Front baseline is unavailable")
+	}
+	currentFrontGeneration, currentBundleGeneration := current.CurrentFrontGeneration, current.CurrentBundleGeneration
+	currentWorkerSourceSHA, currentWorkerImageDigest := current.CurrentWorkerSourceSHA, current.CurrentWorkerImageDigest
+	if currentFrontGeneration == 0 {
+		if len(baseline.Nodes) == 0 {
+			return AuthorityTransitionReceipt{}, errors.New("current Front baseline is empty")
+		}
+		first := baseline.Nodes[0]
+		currentFrontGeneration, currentBundleGeneration = first.ActivationGeneration, first.BundleGeneration
+		currentWorkerSourceSHA, currentWorkerImageDigest = first.WorkerSourceSHA, first.WorkerImageDigest
+		for _, node := range baseline.Nodes[1:] {
+			if node.ActivationGeneration != currentFrontGeneration || node.BundleGeneration != currentBundleGeneration ||
+				node.WorkerSourceSHA != currentWorkerSourceSHA || node.WorkerImageDigest != currentWorkerImageDigest {
+				return AuthorityTransitionReceipt{}, errors.New("current Front baseline is mixed")
+			}
+		}
+	}
+	var journal AuthorityTransitionJournal
+	if resume == nil {
+		journal, err = (AuthorityTransitionJournal{GroupID: groupID, Phase: AuthorityTransitionPrepared,
+			CurrentUID: string(currentUID), CurrentRV: currentRV, Before: current, Candidate: candidate,
+			CanaryResultDigest: result.ResultDigest, PreviousNodes: append([]AuthorityBaselineNodeWitness(nil), baseline.Nodes...),
+			CreatedAt: controller.now().UTC().Format(time.RFC3339Nano)}).Seal()
+		if err != nil {
+			return AuthorityTransitionReceipt{}, err
+		}
+		if err := controller.store.CreateTransitionJournal(ctx, journal); err != nil {
+			return AuthorityTransitionReceipt{}, err
+		}
+	} else {
+		journal = *resume
+		if journal.Validate() != nil || journal.GroupID != groupID || journal.CurrentUID != string(currentUID) || journal.CurrentRV != currentRV ||
+			journal.Before != current || journal.Candidate != candidate || journal.CanaryResultDigest != result.ResultDigest {
+			return AuthorityTransitionReceipt{}, errors.New("authority transition resume witness changed")
+		}
+	}
 	next := CurrentAuthority{
 		APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
 		CurrentRecordDigest: candidate.RecordDigest, CurrentWorkerSlot: candidate.WorkerSlot,
 		PreviousRecordDigest: current.CurrentRecordDigest, PreviousWorkerSlot: current.CurrentWorkerSlot,
 		AuthorityEpoch: current.AuthorityEpoch + 1, BaselineReceiptDigest: current.BaselineReceiptDigest,
 	}
+	activator, exists := controller.activators[groupID]
+	if !exists {
+		return AuthorityTransitionReceipt{}, errors.New("authority group has no production activator")
+	}
+	transaction, err := activator.BeginPromote(ctx, FrontAuthorityTarget{
+		GroupID: groupID, TargetSlot: candidate.WorkerSlot, CandidateBundleGeneration: candidate.BundleGeneration,
+		ServingGeneration: candidate.ServingGeneration,
+		AuthoritySequence: candidate.AuthoritySequence, PublicationSequence: candidate.CurrentPublicationSequence,
+		RecoveryEpoch: candidate.CurrentRecoveryEpoch, PublishedBundleDigest: candidate.CurrentBundleDigest,
+		PreviousServingGeneration: candidate.CurrentServingGeneration, CandidateEpoch: candidate.CandidateEpoch,
+		PreviousSlot: current.CurrentWorkerSlot, PreviousFrontGeneration: currentFrontGeneration, PreviousBundleGeneration: currentBundleGeneration,
+		PreviousWorkerSourceSHA: currentWorkerSourceSHA, PreviousWorkerImageDigest: currentWorkerImageDigest,
+		WorkerSourceSHA: result.WorkerSourceSHA, WorkerImageDigest: result.WorkerImageDigest,
+		WorkerCohortDigest: result.WorkerCohortDigest, CandidateRecordDigest: candidate.RecordDigest,
+		CanaryResultDigest: result.ResultDigest, PreviousNodes: append([]AuthorityBaselineNodeWitness(nil), baseline.Nodes...),
+	})
+	if err != nil {
+		return AuthorityTransitionReceipt{}, fmt.Errorf("activate verified group authority: %w", err)
+	}
+	activation := transaction.Receipt()
+	if journal.Phase == AuthorityTransitionPrepared {
+		activatedJournal := journal
+		activatedJournal.Phase, activatedJournal.Activation = AuthorityTransitionActivated, &activation
+		activatedJournal, err = activatedJournal.Seal()
+		if err != nil || controller.store.UpdateTransitionJournal(ctx, journal, activatedJournal) != nil {
+			if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+				return AuthorityTransitionReceipt{}, errors.Join(errors.New("persist authority activation witness"), rollbackErr)
+			}
+			_ = controller.store.DeleteTransitionJournal(context.WithoutCancel(ctx), journal)
+			return AuthorityTransitionReceipt{}, errors.New("persist authority activation witness")
+		}
+		journal = activatedJournal
+	} else if journal.Activation == nil || *journal.Activation != activation {
+		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+			return AuthorityTransitionReceipt{}, errors.Join(errors.New("resumed authority activation changed"), rollbackErr)
+		}
+		return AuthorityTransitionReceipt{}, errors.New("resumed authority activation changed")
+	}
+	next.CurrentFrontGeneration, next.CurrentBundleGeneration = activation.TargetGeneration, activation.TargetBundleGeneration
+	next.CurrentWorkerSourceSHA, next.CurrentWorkerImageDigest = activation.TargetWorkerSourceSHA, activation.TargetWorkerImageDigest
+	next.PreviousFrontGeneration, next.PreviousBundleGeneration = activation.PreviousGeneration, activation.PreviousBundleGeneration
+	next.PreviousWorkerSourceSHA, next.PreviousWorkerImageDigest = activation.PreviousWorkerSourceSHA, activation.PreviousWorkerImageDigest
+	if next.Validate() != nil {
+		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+			return AuthorityTransitionReceipt{}, errors.Join(errors.New("authority activation receipt is invalid"), rollbackErr)
+		}
+		return AuthorityTransitionReceipt{}, errors.New("authority activation receipt is invalid")
+	}
 	if _, _, err := controller.store.SwitchCurrent(ctx, next, currentUID, currentRV); err != nil {
+		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+			return AuthorityTransitionReceipt{}, errors.Join(err, fmt.Errorf("authority compensation is unknown: %w", rollbackErr))
+		}
 		return AuthorityTransitionReceipt{}, err
+	}
+	if err := transaction.Commit(context.WithoutCancel(ctx)); err != nil {
+		return AuthorityTransitionReceipt{}, fmt.Errorf("finalize authority transaction: %w", err)
+	}
+	if err := controller.store.DeleteTransitionJournal(context.WithoutCancel(ctx), journal); err != nil {
+		return AuthorityTransitionReceipt{}, fmt.Errorf("delete completed authority transaction journal: %w", err)
 	}
 	return (AuthorityTransitionReceipt{
 		GroupID: groupID, Action: AuthorityCurrentSwitched, CandidateDigest: candidate.RecordDigest,
@@ -162,11 +329,29 @@ func (controller *AuthorityController) Revert(ctx context.Context, groupID, fail
 	reverted := CurrentAuthority{
 		APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: groupID,
 		CurrentRecordDigest: current.PreviousRecordDigest, CurrentWorkerSlot: current.PreviousWorkerSlot,
+		CurrentFrontGeneration: current.PreviousFrontGeneration, CurrentBundleGeneration: current.PreviousBundleGeneration,
+		CurrentWorkerSourceSHA: current.PreviousWorkerSourceSHA, CurrentWorkerImageDigest: current.PreviousWorkerImageDigest,
 		PreviousRecordDigest: current.CurrentRecordDigest, PreviousWorkerSlot: current.CurrentWorkerSlot,
+		PreviousFrontGeneration: current.CurrentFrontGeneration, PreviousBundleGeneration: current.CurrentBundleGeneration,
+		PreviousWorkerSourceSHA: current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: current.CurrentWorkerImageDigest,
 		AuthorityEpoch: current.AuthorityEpoch + 1, BaselineReceiptDigest: current.BaselineReceiptDigest,
 	}
+	activator, exists := controller.activators[groupID]
+	if !exists {
+		return AuthorityTransitionReceipt{}, errors.New("authority group has no production activator")
+	}
+	transaction, err := activator.BeginRestore(ctx, current)
+	if err != nil {
+		return AuthorityTransitionReceipt{}, fmt.Errorf("restore group authority: %w", err)
+	}
 	if _, _, err := controller.store.SwitchCurrent(ctx, reverted, uid, rv); err != nil {
+		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
+			return AuthorityTransitionReceipt{}, errors.Join(err, fmt.Errorf("authority revert compensation is unknown: %w", rollbackErr))
+		}
 		return AuthorityTransitionReceipt{}, err
+	}
+	if err := transaction.Commit(context.WithoutCancel(ctx)); err != nil {
+		return AuthorityTransitionReceipt{}, fmt.Errorf("finalize authority revert: %w", err)
 	}
 	return (AuthorityTransitionReceipt{
 		GroupID: groupID, Action: AuthorityCurrentReverted, CandidateDigest: failedRecordDigest,

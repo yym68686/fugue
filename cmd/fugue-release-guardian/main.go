@@ -76,10 +76,10 @@ func run() error {
 		}
 		return runCanaryProbers(ctx, store, probes)
 	}
-	return runGuardian(ctx, client, store, targets)
+	return runGuardian(ctx, config, client, store, targets)
 }
 
-func runGuardian(ctx context.Context, client kubernetes.Interface, store *releaseguardian.KubeStore, targets []releaseguardian.TargetConfig) error {
+func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes.Interface, store *releaseguardian.KubeStore, targets []releaseguardian.TargetConfig) error {
 	mode := releaseguardian.Mode(strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_MODE")))
 	if mode == "" {
 		mode = releaseguardian.ModeShadow
@@ -112,7 +112,8 @@ func runGuardian(ctx context.Context, client kubernetes.Interface, store *releas
 		return err
 	}
 	startAuthorityBaselineAdopters(ctx, authorityStore, client, targets[0].Namespace, baselines)
-	authority, err := newAuthorityRuntime(authorityStore, os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"))
+	authority, err := newAuthorityRuntimeWithActivators(authorityStore, client, kubeConfig, targets[0].Namespace,
+		os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"), os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS"))
 	if err != nil {
 		return err
 	}
