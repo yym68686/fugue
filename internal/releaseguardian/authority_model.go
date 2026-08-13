@@ -52,19 +52,23 @@ const (
 // UID/ResourceVersion is its external CAS token; Generation orders state
 // transitions without granting user traffic.
 type CandidateAuthority struct {
-	APIVersion          string                  `json:"apiVersion"`
-	Kind                string                  `json:"kind"`
-	GroupID             string                  `json:"groupId"`
-	RecordDigest        string                  `json:"recordDigest"`
-	BundleGeneration    string                  `json:"bundleGeneration"`
-	ServingGeneration   string                  `json:"servingGeneration,omitempty"`
-	AuthoritySequence   uint64                  `json:"authoritySequence,omitempty"`
-	CandidateSequence   uint64                  `json:"candidateSequence,omitempty"`
-	WorkerSlot          AuthoritySlot           `json:"workerSlot"`
-	ReleaseRecordDigest string                  `json:"releaseRecordDigest"`
-	State               CandidateAuthorityState `json:"state"`
-	Generation          int64                   `json:"generation"`
-	CanaryResultDigest  string                  `json:"canaryResultDigest,omitempty"`
+	APIVersion                 string                  `json:"apiVersion"`
+	Kind                       string                  `json:"kind"`
+	GroupID                    string                  `json:"groupId"`
+	RecordDigest               string                  `json:"recordDigest"`
+	BundleGeneration           string                  `json:"bundleGeneration"`
+	ServingGeneration          string                  `json:"servingGeneration,omitempty"`
+	AuthoritySequence          uint64                  `json:"authoritySequence,omitempty"`
+	CandidateSequence          uint64                  `json:"candidateSequence,omitempty"`
+	CurrentPublicationSequence uint64                  `json:"currentPublicationSequence,omitempty"`
+	CurrentRecoveryEpoch       uint64                  `json:"currentRecoveryEpoch,omitempty"`
+	CurrentBundleDigest        string                  `json:"currentBundleDigest,omitempty"`
+	CandidateEpoch             uint64                  `json:"candidateEpoch,omitempty"`
+	WorkerSlot                 AuthoritySlot           `json:"workerSlot"`
+	ReleaseRecordDigest        string                  `json:"releaseRecordDigest"`
+	State                      CandidateAuthorityState `json:"state"`
+	Generation                 int64                   `json:"generation"`
+	CanaryResultDigest         string                  `json:"canaryResultDigest,omitempty"`
 }
 
 func (candidate CandidateAuthority) Validate() error {
@@ -92,11 +96,21 @@ func (candidate CandidateAuthority) Validate() error {
 	if (candidate.AuthoritySequence == 0) != (candidate.CandidateSequence == 0) {
 		return errors.New("candidate promotion witness is incomplete")
 	}
+	legacyLoadedWitness := candidate.State == CandidateAuthorityLoaded && candidate.AuthoritySequence > 0 && candidate.CandidateSequence > 0 &&
+		candidate.CurrentPublicationSequence == 0 && candidate.CurrentRecoveryEpoch == 0 && candidate.CurrentBundleDigest == "" && candidate.CandidateEpoch == 0
+	if candidate.AuthoritySequence != 0 && !legacyLoadedWitness && (candidate.CurrentPublicationSequence == 0 || candidate.CurrentPublicationSequence > candidate.AuthoritySequence ||
+		!digestPattern.MatchString(candidate.CurrentBundleDigest) || candidate.CandidateEpoch == 0 || candidate.CandidateEpoch <= candidate.CurrentPublicationSequence) {
+		return errors.New("candidate promotion CAS witness is invalid")
+	}
+	if candidate.AuthoritySequence == 0 && (candidate.CurrentPublicationSequence != 0 || candidate.CurrentRecoveryEpoch != 0 || candidate.CurrentBundleDigest != "" || candidate.CandidateEpoch != 0) {
+		return errors.New("candidate promotion CAS witness is incomplete")
+	}
 	return nil
 }
 
 func (candidate CandidateAuthority) HasPromotionWitness() bool {
-	return candidate.AuthoritySequence > 0 && candidate.CandidateSequence > 0
+	return candidate.AuthoritySequence > 0 && candidate.CandidateSequence > 0 && candidate.CurrentPublicationSequence > 0 &&
+		digestPattern.MatchString(candidate.CurrentBundleDigest) && candidate.CandidateEpoch > candidate.CurrentPublicationSequence
 }
 
 // CurrentAuthority is the only pointer that grants ordinary user traffic for
@@ -135,27 +149,31 @@ func (authority CurrentAuthority) Validate() error {
 // CandidateCanaryResult is immutable and candidate-bound. A canary result for
 // one record, slot, release, or group cannot authorize another candidate.
 type CandidateCanaryResult struct {
-	APIVersion            string        `json:"apiVersion"`
-	Kind                  string        `json:"kind"`
-	GroupID               string        `json:"groupId"`
-	CandidateRecordDigest string        `json:"candidateRecordDigest"`
-	AuthoritySequence     uint64        `json:"authoritySequence"`
-	CandidateSequence     uint64        `json:"candidateSequence"`
-	BundleGeneration      string        `json:"bundleGeneration"`
-	ServingGeneration     string        `json:"servingGeneration"`
-	WorkerSlot            AuthoritySlot `json:"workerSlot"`
-	WorkerSourceSHA       string        `json:"workerSourceSha"`
-	WorkerImageDigest     string        `json:"workerImageDigest"`
-	WorkerCohortDigest    string        `json:"workerCohortDigest"`
-	ReleaseRecordDigest   string        `json:"releaseRecordDigest"`
-	RouteState            HealthState   `json:"routeState"`
-	DependencyState       HealthState   `json:"dependencyState"`
-	EvidenceDigest        string        `json:"evidenceDigest"`
-	ObservedAt            string        `json:"observedAt"`
-	ExpiresAt             string        `json:"expiresAt"`
-	KeyID                 string        `json:"keyId"`
-	Signature             string        `json:"signature"`
-	ResultDigest          string        `json:"resultDigest"`
+	APIVersion                 string        `json:"apiVersion"`
+	Kind                       string        `json:"kind"`
+	GroupID                    string        `json:"groupId"`
+	CandidateRecordDigest      string        `json:"candidateRecordDigest"`
+	AuthoritySequence          uint64        `json:"authoritySequence"`
+	CandidateSequence          uint64        `json:"candidateSequence"`
+	CurrentPublicationSequence uint64        `json:"currentPublicationSequence"`
+	CurrentRecoveryEpoch       uint64        `json:"currentRecoveryEpoch"`
+	CurrentBundleDigest        string        `json:"currentBundleDigest"`
+	CandidateEpoch             uint64        `json:"candidateEpoch"`
+	BundleGeneration           string        `json:"bundleGeneration"`
+	ServingGeneration          string        `json:"servingGeneration"`
+	WorkerSlot                 AuthoritySlot `json:"workerSlot"`
+	WorkerSourceSHA            string        `json:"workerSourceSha"`
+	WorkerImageDigest          string        `json:"workerImageDigest"`
+	WorkerCohortDigest         string        `json:"workerCohortDigest"`
+	ReleaseRecordDigest        string        `json:"releaseRecordDigest"`
+	RouteState                 HealthState   `json:"routeState"`
+	DependencyState            HealthState   `json:"dependencyState"`
+	EvidenceDigest             string        `json:"evidenceDigest"`
+	ObservedAt                 string        `json:"observedAt"`
+	ExpiresAt                  string        `json:"expiresAt"`
+	KeyID                      string        `json:"keyId"`
+	Signature                  string        `json:"signature"`
+	ResultDigest               string        `json:"resultDigest"`
 }
 
 func (result CandidateCanaryResult) Seal() (CandidateCanaryResult, error) {
@@ -259,7 +277,9 @@ func candidateCanarySigningBytes(result CandidateCanaryResult) ([]byte, error) {
 func (result CandidateCanaryResult) validateUnsigned(now time.Time) error {
 	if result.APIVersion != APIVersion || result.Kind != CandidateCanaryResultKind ||
 		!groupPattern.MatchString(result.GroupID) || !digestPattern.MatchString(result.CandidateRecordDigest) ||
-		result.AuthoritySequence == 0 || result.CandidateSequence == 0 ||
+		result.AuthoritySequence == 0 || result.CandidateSequence == 0 || result.CurrentPublicationSequence == 0 ||
+		result.CurrentPublicationSequence > result.AuthoritySequence || !digestPattern.MatchString(result.CurrentBundleDigest) ||
+		result.CandidateEpoch <= result.CurrentPublicationSequence ||
 		!authorityGenerationPattern.MatchString(result.BundleGeneration) || !authorityGenerationPattern.MatchString(result.ServingGeneration) ||
 		!shaPattern.MatchString(result.WorkerSourceSHA) ||
 		!digestPattern.MatchString(result.WorkerImageDigest) || !digestPattern.MatchString(result.WorkerCohortDigest) ||

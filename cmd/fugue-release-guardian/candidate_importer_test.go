@@ -77,6 +77,8 @@ func TestCandidateImporterBootstrapsExactGroupPointersIdempotently(t *testing.T)
 	if err != nil || candidate.RecordDigest != envelope.Record.RecordDigest || candidate.WorkerSlot != envelope.WorkerSlot ||
 		candidate.BundleGeneration != envelope.Bundle.Version ||
 		candidate.AuthoritySequence != envelope.AuthorityLedgerSequence || candidate.CandidateSequence != envelope.CandidateLedgerSequence ||
+		candidate.CurrentPublicationSequence != uint64(envelope.CurrentRecord.Epoch) || candidate.CurrentRecoveryEpoch != 0 ||
+		candidate.CurrentBundleDigest != envelope.CurrentRecord.BundleDigest || candidate.CandidateEpoch != envelope.Epoch ||
 		candidate.ReleaseRecordDigest != envelope.ReleaseRecordDigest || candidate.State != releaseguardian.CandidateAuthorityLoaded || candidate.Generation != 1 {
 		t.Fatalf("candidate authority=%+v err=%v", candidate, err)
 	}
@@ -228,11 +230,23 @@ func TestParseCandidateImportsRequiresExactEndpointAndPrivateTokenPath(t *testin
 	}
 }
 
+func TestParseAuthorityBundleVersionBindsPublicationAndRecovery(t *testing.T) {
+	sequence, recovery, err := parseAuthorityBundleVersion("edgegroupbundle_abc", "edgegroupbundle_abc.p11314.r79")
+	if err != nil || sequence != 11314 || recovery != 79 {
+		t.Fatalf("authority version parsed as sequence=%d recovery=%d err=%v", sequence, recovery, err)
+	}
+	for _, invalid := range []string{"edgegroupbundle_abc.p0.r1", "edgegroupbundle_other.p1.r0", "edgegroupbundle_abc.p1", "edgegroupbundle_abc.px.r0"} {
+		if _, _, err := parseAuthorityBundleVersion("edgegroupbundle_abc", invalid); err == nil {
+			t.Fatalf("invalid authority version accepted: %s", invalid)
+		}
+	}
+}
+
 func candidateImporterEnvelopeFixture(t *testing.T, groupID string, now time.Time) candidateEnvelope {
 	t.Helper()
-	currentBundle := model.EdgeRouteBundle{SchemaVersion: model.BundleSchemaVersionV1, Version: "routes-current-r1-e4", Generation: "routes-current", GeneratedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Issuer: "fugue-edge-control", KeyID: "edge-key-a", Signature: strings.Repeat("A", 43), EdgeGroupID: groupID, Routes: []model.EdgeRouteBinding{}, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}}
+	currentBundle := model.EdgeRouteBundle{SchemaVersion: model.BundleSchemaVersionV1, Version: "routes-current.p4.r0", Generation: "routes-current", GeneratedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour), Issuer: "fugue-edge-control", KeyID: "edge-key-a", Signature: strings.Repeat("A", 43), EdgeGroupID: groupID, Routes: []model.EdgeRouteBinding{}, TLSAllowlist: []model.EdgeTLSAllowlistEntry{}}
 	candidateBundle := currentBundle
-	candidateBundle.Version = "routes-candidate-r2-e5"
+	candidateBundle.Version = "routes-candidate.p5.r0"
 	candidateBundle.Generation = "routes-candidate"
 	candidateBundle.PreviousGeneration = currentBundle.Generation
 	candidateBundle.Signature = strings.Repeat("B", 43)

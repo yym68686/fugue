@@ -22,6 +22,9 @@ const testCandidateBundle = "candidate-bundle-generation-1"
 func bindCandidatePromotionWitness(candidate CandidateAuthority) CandidateAuthority {
 	candidate.AuthoritySequence = 7
 	candidate.CandidateSequence = 9
+	candidate.CurrentPublicationSequence = 6
+	candidate.CurrentBundleDigest = testDigest
+	candidate.CandidateEpoch = 8
 	if candidate.ServingGeneration == "" {
 		candidate.ServingGeneration = candidate.BundleGeneration
 	}
@@ -32,6 +35,8 @@ func candidateResultFixture(candidate CandidateAuthority, now time.Time, route, 
 	return CandidateCanaryResult{
 		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, BundleGeneration: candidate.BundleGeneration, ServingGeneration: candidate.ServingGeneration,
 		AuthoritySequence: candidate.AuthoritySequence, CandidateSequence: candidate.CandidateSequence,
+		CurrentPublicationSequence: candidate.CurrentPublicationSequence, CurrentRecoveryEpoch: candidate.CurrentRecoveryEpoch,
+		CurrentBundleDigest: candidate.CurrentBundleDigest, CandidateEpoch: candidate.CandidateEpoch,
 		WorkerSlot: candidate.WorkerSlot, WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: route, DependencyState: dependency,
 		EvidenceDigest: testDigest, ObservedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(30 * time.Second).Format(time.RFC3339Nano),

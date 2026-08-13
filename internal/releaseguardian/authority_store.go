@@ -262,6 +262,8 @@ func (store *AuthorityStore) LoadCandidateCanaryResult(ctx context.Context, cand
 	if err := decodeStrict([]byte(object.Data["result.json"]), &result); err != nil || result.Validate(now) != nil ||
 		result.ResultDigest != resultDigest || result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
 		result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
+		result.CurrentPublicationSequence != candidate.CurrentPublicationSequence || result.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
+		result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CandidateEpoch != candidate.CandidateEpoch ||
 		result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
 		result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 		return CandidateCanaryResult{}, errors.New("candidate canary object binding is invalid")
@@ -300,6 +302,8 @@ func (store *AuthorityStore) LoadLatestCandidateCanaryResult(ctx context.Context
 		}
 		if result.GroupID != candidate.GroupID || result.CandidateRecordDigest != candidate.RecordDigest ||
 			result.AuthoritySequence != candidate.AuthoritySequence || result.CandidateSequence != candidate.CandidateSequence ||
+			result.CurrentPublicationSequence != candidate.CurrentPublicationSequence || result.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
+			result.CurrentBundleDigest != candidate.CurrentBundleDigest || result.CandidateEpoch != candidate.CandidateEpoch ||
 			result.BundleGeneration != candidate.BundleGeneration || result.ServingGeneration != candidate.ServingGeneration ||
 			result.WorkerSlot != candidate.WorkerSlot || result.ReleaseRecordDigest != candidate.ReleaseRecordDigest {
 			continue
@@ -331,6 +335,8 @@ func (store *AuthorityStore) PutCandidate(ctx context.Context, candidate Candida
 		if current.GroupID != candidate.GroupID || current.RecordDigest != candidate.RecordDigest || current.BundleGeneration != candidate.BundleGeneration ||
 			current.ServingGeneration != candidate.ServingGeneration || current.WorkerSlot != candidate.WorkerSlot ||
 			current.AuthoritySequence != candidate.AuthoritySequence || current.CandidateSequence != candidate.CandidateSequence ||
+			current.CurrentPublicationSequence != candidate.CurrentPublicationSequence || current.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
+			current.CurrentBundleDigest != candidate.CurrentBundleDigest || current.CandidateEpoch != candidate.CandidateEpoch ||
 			current.ReleaseRecordDigest != candidate.ReleaseRecordDigest || candidate.Generation != current.Generation+1 {
 			return errors.New("candidate authority transition changes immutable identity")
 		}
@@ -354,6 +360,8 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 			candidate.Generation != current.Generation+1 || candidate.GroupID != current.GroupID ||
 			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration && candidate.ServingGeneration == current.ServingGeneration &&
 				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
+				candidate.CurrentPublicationSequence == current.CurrentPublicationSequence && candidate.CurrentRecoveryEpoch == current.CurrentRecoveryEpoch &&
+				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CandidateEpoch == current.CandidateEpoch &&
 				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
 		}

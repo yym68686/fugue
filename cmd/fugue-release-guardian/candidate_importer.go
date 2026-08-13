@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,6 +135,7 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	if err := validateCandidateEnvelope(config.GroupID, envelope, now.UTC()); err != nil {
 		return false, err
 	}
+	currentPublicationSequence, currentRecoveryEpoch, _ := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
 	// Immutable records are idempotent. Persist both sides before creating the
 	// mutable pointers, so an invalid envelope can never create a partial
 	// authority state.
@@ -158,6 +160,8 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind, GroupID: config.GroupID,
 		RecordDigest: envelope.Record.RecordDigest, BundleGeneration: envelope.Bundle.Version, ServingGeneration: envelope.Bundle.Generation,
 		AuthoritySequence: envelope.AuthorityLedgerSequence, CandidateSequence: envelope.CandidateLedgerSequence,
+		CurrentPublicationSequence: currentPublicationSequence, CurrentRecoveryEpoch: currentRecoveryEpoch,
+		CurrentBundleDigest: envelope.CurrentRecord.BundleDigest, CandidateEpoch: envelope.Epoch,
 		WorkerSlot: envelope.WorkerSlot, ReleaseRecordDigest: envelope.ReleaseRecordDigest,
 		State: releaseguardian.CandidateAuthorityLoaded, Generation: 1,
 	}
@@ -169,6 +173,8 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 	candidateChanged := !candidateMissing && (existingCandidate.GroupID != candidate.GroupID || existingCandidate.RecordDigest != candidate.RecordDigest ||
 		existingCandidate.BundleGeneration != candidate.BundleGeneration || existingCandidate.ServingGeneration != candidate.ServingGeneration ||
 		existingCandidate.AuthoritySequence != candidate.AuthoritySequence || existingCandidate.CandidateSequence != candidate.CandidateSequence ||
+		existingCandidate.CurrentPublicationSequence != candidate.CurrentPublicationSequence || existingCandidate.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
+		existingCandidate.CurrentBundleDigest != candidate.CurrentBundleDigest || existingCandidate.CandidateEpoch != candidate.CandidateEpoch ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
 	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
 		return false, errors.New("candidate envelope conflicts with terminal candidate authority")
@@ -255,6 +261,8 @@ func fetchCandidateEnvelope(ctx context.Context, config candidateImportConfig, e
 }
 
 func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now time.Time) error {
+	currentPublicationSequence, _, currentVersionErr := parseAuthorityBundleVersion(envelope.CurrentBundle.Generation, envelope.CurrentBundle.Version)
+	candidatePublicationSequence, candidateRecoveryEpoch, candidateVersionErr := parseAuthorityBundleVersion(envelope.Bundle.Generation, envelope.Bundle.Version)
 	if envelope.Schema != edgeCandidateEnvelopeSchemaV1 || envelope.GroupID != groupID || envelope.Epoch == 0 ||
 		envelope.AuthorityLedgerSequence == 0 || envelope.CandidateLedgerSequence == 0 ||
 		strings.TrimSpace(envelope.RouteIntentGeneration) == "" || strings.TrimSpace(envelope.InventoryGeneration) == "" ||
@@ -266,7 +274,9 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 		envelope.CurrentRecord.SourceSHA != envelope.Record.SourceSHA || envelope.CurrentRecord.ControlImageDigest != envelope.Record.ControlImageDigest ||
 		envelope.CurrentRecord.ManifestDigest != envelope.Record.ManifestDigest || envelope.CurrentRecord.HealthContractDigest != envelope.Record.HealthContractDigest ||
 		envelope.CurrentRecord.KeyID != envelope.CurrentBundle.KeyID || envelope.CurrentRecord.Signature != envelope.CurrentBundle.Signature ||
-		envelope.Record.KeyID != envelope.Bundle.KeyID || envelope.Record.Signature != envelope.Bundle.Signature {
+		envelope.Record.KeyID != envelope.Bundle.KeyID || envelope.Record.Signature != envelope.Bundle.Signature ||
+		currentVersionErr != nil || candidateVersionErr != nil || currentPublicationSequence != uint64(envelope.CurrentRecord.Epoch) ||
+		candidatePublicationSequence != envelope.Epoch || candidateRecoveryEpoch != 0 {
 		return errors.New("candidate envelope identity is invalid")
 	}
 	if candidateBundleDigest(*envelope.CurrentBundle) != envelope.CurrentRecord.BundleDigest || candidateBundleDigest(envelope.Bundle) != envelope.Record.BundleDigest ||
@@ -276,6 +286,24 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 		return errors.New("candidate envelope bundle binding is invalid")
 	}
 	return nil
+}
+
+func parseAuthorityBundleVersion(generation, version string) (uint64, uint64, error) {
+	prefix := strings.TrimSpace(generation) + ".p"
+	if strings.TrimSpace(generation) == "" || !strings.HasPrefix(version, prefix) {
+		return 0, 0, errors.New("authority bundle version is invalid")
+	}
+	remainder := strings.TrimPrefix(version, prefix)
+	separator := strings.LastIndex(remainder, ".r")
+	if separator < 1 || separator == len(remainder)-2 {
+		return 0, 0, errors.New("authority bundle version is invalid")
+	}
+	sequence, sequenceErr := strconv.ParseUint(remainder[:separator], 10, 64)
+	recoveryEpoch, recoveryErr := strconv.ParseUint(remainder[separator+2:], 10, 64)
+	if sequenceErr != nil || recoveryErr != nil || sequence == 0 {
+		return 0, 0, errors.New("authority bundle version is invalid")
+	}
+	return sequence, recoveryEpoch, nil
 }
 
 func candidateBundleDigest(bundle model.EdgeRouteBundle) string {

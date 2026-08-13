@@ -206,6 +206,8 @@ func EvaluateCandidateCanary(candidate CandidateAuthority, current CurrentAuthor
 	return SignCandidateCanaryResult(CandidateCanaryResult{
 		GroupID: candidate.GroupID, CandidateRecordDigest: candidate.RecordDigest, WorkerSlot: candidate.WorkerSlot,
 		AuthoritySequence: candidate.AuthoritySequence, CandidateSequence: candidate.CandidateSequence,
+		CurrentPublicationSequence: candidate.CurrentPublicationSequence, CurrentRecoveryEpoch: candidate.CurrentRecoveryEpoch,
+		CurrentBundleDigest: candidate.CurrentBundleDigest, CandidateEpoch: candidate.CandidateEpoch,
 		BundleGeneration: candidate.BundleGeneration, ServingGeneration: candidate.ServingGeneration, WorkerSourceSHA: cohort.WorkerSourceSHA,
 		WorkerImageDigest: cohort.WorkerImageDigest, WorkerCohortDigest: cohort.CohortDigest,
 		ReleaseRecordDigest: candidate.ReleaseRecordDigest, RouteState: routeState, DependencyState: dependencyState,
