@@ -78,6 +78,22 @@ func TestWorkerCandidateStageBindsExactReleaseAndPreservesCurrentAuthority(t *te
 		staged.WorkerSlot != "b" || staged.CurrentWorkerSlot != "a" || staged.Bundle.Generation != authority.Published.Bundle.Generation {
 		t.Fatalf("staged candidate=%+v exists=%v err=%v", staged, exists, err)
 	}
+	readerDir, readerToken := privateFixtureDir(t), strings.Repeat("q", 48)
+	writeGroupReaderFixture(t, readerDir, groupID, readerToken, now.Add(time.Minute))
+	reader, err := NewGroupBundleHandler(GroupBundleHandlerConfig{Store: store, GroupIDs: []string{groupID}, KeyringDir: readerDir, Now: func() time.Time { return now.Add(time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readRequest := httptest.NewRequest(http.MethodGet, GroupCandidateEnvelopeReadPathV1+"?edge_group_id="+groupID+"&edge_id=edge-de-1", nil)
+	readRequest.Header.Set("Authorization", "Bearer "+readerToken)
+	readRecorder := httptest.NewRecorder()
+	reader.ServeHTTP(readRecorder, readRequest)
+	var exposed GroupCandidateBundle
+	if readRecorder.Code != http.StatusOK || json.Unmarshal(readRecorder.Body.Bytes(), &exposed) != nil ||
+		exposed.WorkerSourceSHA != request.WorkerSourceSHA || exposed.WorkerImageDigest != request.WorkerImageDigest ||
+		exposed.ReleaseRecordDigest != request.ReleaseRecordDigest || exposed.Record.RecordDigest != staged.Record.RecordDigest {
+		t.Fatalf("explicit Worker candidate was not exposed exactly: status=%d candidate=%+v body=%s", readRecorder.Code, exposed, readRecorder.Body.String())
+	}
 	// Exact replay is receipt-idempotent and cannot advance either pointer.
 	request.ExpectedCandidateEpoch = staged.Epoch
 	request.Nonce = strings.Repeat("r", 24)

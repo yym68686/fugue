@@ -129,7 +129,7 @@ func (handler *groupBundleHandler) ServeHTTP(w http.ResponseWriter, request *htt
 			return
 		}
 		candidate, exists, err := reader.ReadGroupCandidate(request.Context(), groupID)
-		if err != nil || !exists || validateGroupCandidateBundle(groupID, candidate) != nil || !candidate.Bundle.ValidUntil.After(handler.now()) {
+		if err != nil || !exists || !candidateHasStagedWorkerIdentity(candidate) || validateGroupCandidateBundle(groupID, candidate) != nil || !candidate.Bundle.ValidUntil.After(handler.now()) {
 			writeGroupBundleError(w, http.StatusServiceUnavailable, "candidate_bundle_unavailable")
 			return
 		}

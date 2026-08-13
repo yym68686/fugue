@@ -195,7 +195,7 @@
                     "value": "30m"
                   },
                   {
-                    "name": "FUGUE_EDGE_CONTROL_CANDIDATE_PUBLISHER_ENABLED",
+                    "name": "FUGUE_EDGE_CONTROL_WORKER_CANDIDATE_STAGING_ENABLED",
                     "value": "true"
                   },
                   {

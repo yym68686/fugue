@@ -10,7 +10,6 @@ type AuthorityRuntime struct {
 	RouteIntents RouteIntentSource
 	Compiler     GroupShadowCompiler
 	Publisher    GroupAuthorityPublisher
-	Candidate    *GroupCandidatePublisher
 	GroupIDs     []string
 	Status       *AuthorityRuntimeState
 }
@@ -32,13 +31,6 @@ func (runtime AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeBa
 	compiled, err := runtime.Compiler.Reconcile(ctx, snapshot, runtime.GroupIDs)
 	if err != nil {
 		return AuthorityRuntimeBatch{}, err
-	}
-	if runtime.Candidate != nil {
-		candidate, err := runtime.Candidate.Publish(ctx, compiled)
-		if err != nil {
-			return AuthorityRuntimeBatch{}, err
-		}
-		return AuthorityRuntimeBatch{Compiled: compiled, Candidate: candidate}, nil
 	}
 	published, err := runtime.Publisher.Publish(ctx, compiled)
 	if err != nil {
@@ -76,15 +68,9 @@ func (runtime AuthorityRuntime) Run(ctx context.Context, interval time.Duration,
 		if err != nil {
 			observation.FailureCode = RouteIntentFailureCode(err)
 		} else {
-			if runtime.Candidate != nil {
-				observation.RouteIntentGeneration = batch.Candidate.RouteIntentGeneration
-				observation.CandidatePublished = batch.Candidate.Published
-				observation.Failed = batch.Candidate.Failed
-			} else {
-				observation.RouteIntentGeneration = batch.Published.RouteIntentGeneration
-				observation.Published = batch.Published.Published
-				observation.Failed = batch.Published.Failed
-			}
+			observation.RouteIntentGeneration = batch.Published.RouteIntentGeneration
+			observation.Published = batch.Published.Published
+			observation.Failed = batch.Published.Failed
 		}
 		if runtime.Status != nil {
 			runtime.Status.Observe(observation)

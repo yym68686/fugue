@@ -37,33 +37,33 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 
 	root := t.TempDir()
 	values := map[string]string{
-		"FUGUE_EDGE_CONTROL_ENABLED":                       "true",
-		"FUGUE_EDGE_CONTROL_AUTHORITY_RUNTIME_ENABLED":     "true",
-		"FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR":           filepath.Join(root, "state"),
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL":              "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE":      "/var/run/secrets/fugue-edge-control/route-intent/token",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID": "edge-control-test",
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE":          writeRouteIntentCAFixture(t),
-		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME":      "fugue-api-tls.fugue-system.svc",
-		"FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_DIR":  filepath.Join(root, "inventory"),
-		"FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS":           "edge-group-country-us",
-		"FUGUE_EDGE_CONTROL_AUTHORITY_RECONCILE_INTERVAL":  "30s",
-		"FUGUE_EDGE_CONTROL_GROUP_SIGNING_KEYRING_DIR":     filepath.Join(root, "signing"),
-		"FUGUE_EDGE_CONTROL_GROUP_READER_KEYRING_DIR":      filepath.Join(root, "readers"),
-		"FUGUE_EDGE_CONTROL_GROUP_RECOVERY_KEYRING_DIR":    filepath.Join(root, "recovery"),
-		"FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY":         "30m",
-		"FUGUE_EDGE_CONTROL_CANDIDATE_PUBLISHER_ENABLED":   "true",
-		"FUGUE_EDGE_CONTROL_SOURCE_SHA":                    strings.Repeat("1", 40),
-		"FUGUE_EDGE_CONTROL_SELF_IMAGE_REF":                "ghcr.io/example/fugue-edge-control@sha256:" + strings.Repeat("2", 64),
-		"FUGUE_EDGE_CONTROL_MANIFEST_DIGEST":               "sha256:" + strings.Repeat("3", 64),
-		"FUGUE_EDGE_CONTROL_HEALTH_CONTRACT_DIGEST":        "sha256:" + strings.Repeat("4", 64),
-		"FUGUE_EDGE_CONTROL_RELEASE_RECORD_DIGEST":         "sha256:" + strings.Repeat("5", 64),
+		"FUGUE_EDGE_CONTROL_ENABLED":                          "true",
+		"FUGUE_EDGE_CONTROL_AUTHORITY_RUNTIME_ENABLED":        "true",
+		"FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR":              filepath.Join(root, "state"),
+		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_URL":                 "https://fugue-api-tls.fugue-system.svc:8443/v1/edge/route-intents",
+		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_ISSUER_FILE":         "/var/run/secrets/fugue-edge-control/route-intent/token",
+		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_IDENTITY_NODE_ID":    "edge-control-test",
+		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_CA_FILE":             writeRouteIntentCAFixture(t),
+		"FUGUE_EDGE_CONTROL_ROUTE_INTENT_SERVER_NAME":         "fugue-api-tls.fugue-system.svc",
+		"FUGUE_EDGE_CONTROL_INVENTORY_WRITER_KEYRING_DIR":     filepath.Join(root, "inventory"),
+		"FUGUE_EDGE_CONTROL_AUTHORITY_GROUP_IDS":              "edge-group-country-us",
+		"FUGUE_EDGE_CONTROL_AUTHORITY_RECONCILE_INTERVAL":     "30s",
+		"FUGUE_EDGE_CONTROL_GROUP_SIGNING_KEYRING_DIR":        filepath.Join(root, "signing"),
+		"FUGUE_EDGE_CONTROL_GROUP_READER_KEYRING_DIR":         filepath.Join(root, "readers"),
+		"FUGUE_EDGE_CONTROL_GROUP_RECOVERY_KEYRING_DIR":       filepath.Join(root, "recovery"),
+		"FUGUE_EDGE_CONTROL_GROUP_BUNDLE_VALIDITY":            "30m",
+		"FUGUE_EDGE_CONTROL_WORKER_CANDIDATE_STAGING_ENABLED": "true",
+		"FUGUE_EDGE_CONTROL_SOURCE_SHA":                       strings.Repeat("1", 40),
+		"FUGUE_EDGE_CONTROL_SELF_IMAGE_REF":                   "ghcr.io/example/fugue-edge-control@sha256:" + strings.Repeat("2", 64),
+		"FUGUE_EDGE_CONTROL_MANIFEST_DIGEST":                  "sha256:" + strings.Repeat("3", 64),
+		"FUGUE_EDGE_CONTROL_HEALTH_CONTRACT_DIGEST":           "sha256:" + strings.Repeat("4", 64),
+		"FUGUE_EDGE_CONTROL_RELEASE_RECORD_DIGEST":            "sha256:" + strings.Repeat("5", 64),
 	}
 	cfg, err := configFromEnv(func(key string) string { return values[key] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.AuthorityRuntimeEnabled || !cfg.CandidatePublisher || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
+	if !cfg.AuthorityRuntimeEnabled || !cfg.CandidateStaging || cfg.CandidateIdentity.SourceSHA != strings.Repeat("1", 40) ||
 		cfg.AuthorityStateDir != values["FUGUE_EDGE_CONTROL_AUTHORITY_STATE_DIR"] ||
 		cfg.AuthorityPollInterval != 30*time.Second || cfg.GroupBundleValidity != 30*time.Minute ||
 		!reflect.DeepEqual(cfg.AuthorityGroupIDs, []string{"edge-group-country-us"}) {
@@ -73,7 +73,7 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime == nil || handler == nil || len(runtime.GroupIDs) != 1 || runtime.Status == nil || runtime.Candidate == nil {
+	if runtime == nil || handler == nil || len(runtime.GroupIDs) != 1 || runtime.Status == nil {
 		t.Fatalf("incomplete authority process: runtime=%+v handler=%v", runtime, handler)
 	}
 	for path, wantCode := range map[string]int{
