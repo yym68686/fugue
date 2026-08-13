@@ -98,15 +98,15 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(receipt["checks"]["affected-vet"]["status"], "pass")
         self.assertEqual(receipt["checks"]["declarative-release-tests"]["status"], "pass")
 
-    def test_data_only_declarative_change_warms_compile_before_full_tests(self) -> None:
+    def test_data_only_declarative_change_warms_compile_before_focused_contracts(self) -> None:
         order = []
 
         def fake_run(command, _timeout):
             if command == ["go", "build", "-p", "4", "./..."]:
                 order.append("compile")
             elif command == [
-                "go", "test", "./internal/declarativerelease",
-                "./cmd/fugue-declarative-release",
+                "go", "test", "./internal/declarativerelease", "-run",
+                prepush.DECLARATIVE_DATA_TEST_PATTERN,
             ]:
                 order.append("test")
             return 0, ""
@@ -118,6 +118,24 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertLess(order.index("compile"), order.index("test"))
         self.assertEqual(receipt["checks"]["declarative-release-tests"]["status"], "pass")
+
+    def test_prepush_implementation_change_does_not_run_declarative_engine_suite(self) -> None:
+        commands = []
+
+        def fake_run(command, _timeout):
+            commands.append(command)
+            return 0, ""
+
+        result, receipt = self.run_main_with_fake(
+            fake_run,
+            paths=["scripts/prepush.py", "scripts/test_prepush.py"],
+        )
+        self.assertEqual(result, 0)
+        self.assertNotIn("declarative-release-tests", receipt["checks"])
+        self.assertNotIn(
+            ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release"],
+            commands,
+        )
 
     def test_compile_and_affected_tests_overlap(self) -> None:
         barrier = threading.Barrier(2)

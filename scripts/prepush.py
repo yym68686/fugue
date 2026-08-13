@@ -27,6 +27,11 @@ DECLARATIVE_TEST_PACKAGES = {
     "./cmd/fugue-declarative-release",
     "./internal/declarativerelease",
 }
+DECLARATIVE_DATA_TEST_PATTERN = (
+    "^(TestProductionRegistryNamesEveryRuntimeLane|"
+    "TestThirdEdgeGroupIsPureDataAndPlansIndependently|"
+    "TestSharedEdgeWorkerManifestRollsOneGroupPerIntent)$"
+)
 TEST_HUNK_RE = re.compile(
     r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ func "
     r"(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\("
@@ -368,22 +373,21 @@ def main() -> int:
     paths = changed_files(base)
     packages = affected_packages(paths)
     test_commands = affected_test_commands(base, paths)
-    declarative_release_changed = any(
+    declarative_engine_changed = any(
         name == ".github/workflows/ci.yml"
         or name.startswith(".github/actions/deploy-declarative-component/")
         or name == "deploy/releases/components.json"
-        or name.startswith("deploy/releases/")
+        or name == "deploy/releases/edge-groups.json"
         or name.startswith("cmd/fugue-declarative-release/")
         or name.startswith("internal/declarativerelease/")
-        or name in {
-            "scripts/prepush.py",
-            "scripts/test_prepush.py",
-            "scripts/test_verify_registry_image.py",
-            "scripts/verify_registry_image.py",
-        }
         for name in paths
     )
-    if declarative_release_changed:
+    declarative_data_changed = any(
+        name.startswith("deploy/releases/")
+        and name not in {"deploy/releases/components.json", "deploy/releases/edge-groups.json"}
+        for name in paths
+    )
+    if declarative_engine_changed:
         test_commands = without_dedicated_declarative_tests(test_commands)
     checks: dict[str, dict[str, object]] = {}
     go_slots = threading.BoundedSemaphore(GO_TASK_CONCURRENCY)
@@ -400,7 +404,7 @@ def main() -> int:
     non_go_tasks: dict[str, list[str] | None] = {}
     if packages:
         vet_task = ["go", "vet", *packages]
-        if declarative_release_changed:
+        if declarative_engine_changed:
             non_go_tasks["affected-vet"] = vet_task
         else:
             go_dependent_tasks["affected-vet"] = vet_task
@@ -411,9 +415,13 @@ def main() -> int:
             "python3", "-m", "unittest", "scripts.test_verify_registry_image",
         ]
 
-    if declarative_release_changed:
+    if declarative_engine_changed:
         non_go_tasks["declarative-release-tests"] = [
             "go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release",
+        ]
+    elif declarative_data_changed:
+        non_go_tasks["declarative-release-tests"] = [
+            "go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN,
         ]
 
     local_checks = {
@@ -433,11 +441,11 @@ def main() -> int:
 
     def execute(name: str, command: list[str] | None) -> tuple[int, str, float]:
         before = time.monotonic()
-        if name == "affected-vet" and declarative_release_changed:
+        if name == "affected-vet" and declarative_engine_changed:
             remaining = deadline - before
             if remaining <= 0 or not declarative_compile_finished.wait(remaining):
                 return 124, "pre-push deadline exceeded before declarative compile completed", before
-        if name == "declarative-release-tests" and declarative_release_changed:
+        if name == "declarative-release-tests" and (declarative_engine_changed or declarative_data_changed):
             remaining = deadline - before
             if remaining <= 0 or not declarative_compile_finished.wait(remaining):
                 return 124, "pre-push deadline exceeded before declarative compile completed", before
@@ -461,9 +469,9 @@ def main() -> int:
                         status, output = run(command, task_timeout_seconds(name, remaining))
             else:
                 status, output = run(command, task_timeout_seconds(name, deadline - before))
-        if name == "affected-vet" and declarative_release_changed:
+        if name == "affected-vet" and declarative_engine_changed:
             declarative_vet_finished.set()
-        if name == "compile-all" and declarative_release_changed:
+        if name == "compile-all" and (declarative_engine_changed or declarative_data_changed):
             declarative_compile_finished.set()
         return status, output, before
 
