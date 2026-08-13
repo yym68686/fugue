@@ -140,7 +140,7 @@ func TestGroupAuthorityPromotionTypesOnlyExplicitConflictAsPrewriteCAS(t *testin
 	}
 }
 
-func TestGroupAuthorityRecoveryUnknownUsesReadOnlyReconcile(t *testing.T) {
+func TestGroupAuthorityRecoveryUsesReadOnlyReconcileBeforePosting(t *testing.T) {
 	now := time.Date(2026, 8, 13, 5, 30, 0, 0, time.UTC)
 	target := groupAuthorityTargetFixture()
 	promotion := edgecontrol.GroupPromotionReceipt{GroupID: target.GroupID, PublicationSequence: target.AuthoritySequence + 1,
@@ -160,7 +160,7 @@ func TestGroupAuthorityRecoveryUnknownUsesReadOnlyReconcile(t *testing.T) {
 	}))
 	defer server.Close()
 	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
-	if err := activator.recoverControl(context.Background(), promotion, target.PreviousServingGeneration); err != nil || posts != 1 || gets != 1 {
+	if err := activator.recoverControl(context.Background(), promotion, target.PreviousServingGeneration); err != nil || posts != 0 || gets != 1 {
 		t.Fatalf("recovery reconcile posts=%d gets=%d err=%v", posts, gets, err)
 	}
 }

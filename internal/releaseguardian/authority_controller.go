@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -511,8 +513,9 @@ func (controller *AuthorityController) Revert(ctx context.Context, groupID, fail
 	}
 	restore := transaction.Receipt()
 	if restore.GroupID != groupID || restore.PreviousSlot != current.CurrentWorkerSlot || restore.TargetSlot != current.PreviousWorkerSlot ||
-		restore.PreviousGeneration != current.CurrentFrontGeneration || restore.TargetGeneration != current.CurrentFrontGeneration+1 ||
-		restore.PreviousBundleGeneration != current.CurrentBundleGeneration || restore.TargetBundleGeneration != current.PreviousBundleGeneration ||
+		restore.PreviousGeneration < current.CurrentFrontGeneration || (restore.PreviousGeneration-current.CurrentFrontGeneration)%2 != 0 ||
+		restore.TargetGeneration != restore.PreviousGeneration+1 || restore.PreviousBundleGeneration != current.CurrentBundleGeneration ||
+		!restoredBundleGenerationMatches(restore.TargetBundleGeneration, current.PreviousBundleGeneration) ||
 		restore.PreviousWorkerSourceSHA != current.CurrentWorkerSourceSHA || restore.PreviousWorkerImageDigest != current.CurrentWorkerImageDigest ||
 		restore.TargetWorkerSourceSHA != current.PreviousWorkerSourceSHA || restore.TargetWorkerImageDigest != current.PreviousWorkerImageDigest {
 		if rollbackErr := transaction.Rollback(context.WithoutCancel(ctx)); rollbackErr != nil {
@@ -544,4 +547,25 @@ func (controller *AuthorityController) Revert(ctx context.Context, groupID, fail
 		CanaryResultDigest: canaryResultDigest, Before: current, After: reverted,
 		ObservedAt: controller.now().UTC().Format(time.RFC3339Nano),
 	}).Seal()
+}
+
+func restoredBundleGenerationMatches(observed, previous string) bool {
+	if strings.TrimSpace(observed) == strings.TrimSpace(previous) && strings.TrimSpace(observed) != "" {
+		return true
+	}
+	observedBase, observedPublication, observedRecovery, observedOK := splitAuthorityBundleGeneration(observed)
+	previousBase, previousPublication, previousRecovery, previousOK := splitAuthorityBundleGeneration(previous)
+	return observedOK && previousOK && observedBase == previousBase && observedPublication > previousPublication && observedRecovery > previousRecovery
+}
+
+func splitAuthorityBundleGeneration(value string) (string, uint64, uint64, bool) {
+	value = strings.TrimSpace(value)
+	separator := strings.LastIndex(value, ".p")
+	recoverySeparator := strings.LastIndex(value, ".r")
+	if separator < 1 || recoverySeparator <= separator+2 || recoverySeparator+2 >= len(value) {
+		return "", 0, 0, false
+	}
+	publication, publicationErr := strconv.ParseUint(value[separator+2:recoverySeparator], 10, 64)
+	recovery, recoveryErr := strconv.ParseUint(value[recoverySeparator+2:], 10, 64)
+	return value[:separator], publication, recovery, publicationErr == nil && recoveryErr == nil && publication > 0
 }

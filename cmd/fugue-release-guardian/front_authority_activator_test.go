@@ -35,8 +35,30 @@ func TestFrontLKGGenerationAcceptsOnlyExactCompensationChain(t *testing.T) {
 			}
 		})
 	}
-	if frontLKGGenerationMatches(compensated, base, edgegroupfront.ActivationOperationRollback) {
-		t.Fatal("restore path accepted promotion-only compensation relaxation")
+	if !frontLKGGenerationMatches(compensated, base, edgegroupfront.ActivationOperationRollback) {
+		t.Fatal("restore retry rejected exact compensation chain")
+	}
+}
+
+func TestFrontRestoreGenerationAcceptsOnlyExactRetryChain(t *testing.T) {
+	base := uint64(95)
+	if !frontTargetGenerationMatches(edgegroupfront.ActivationState{Generation: base + 1}, base, edgegroupfront.ActivationOperationRollback) {
+		t.Fatal("first restore generation was rejected")
+	}
+	retry := edgegroupfront.ActivationState{Generation: base + 3, Operation: edgegroupfront.ActivationOperationRollback, RollbackOfGeneration: base + 2}
+	if !frontTargetGenerationMatches(retry, base, edgegroupfront.ActivationOperationRollback) {
+		t.Fatal("exact compensated restore retry was rejected")
+	}
+	for name, state := range map[string]edgegroupfront.ActivationState{
+		"even target":  {Generation: base + 2, Operation: edgegroupfront.ActivationOperationRollback, RollbackOfGeneration: base + 1},
+		"wrong link":   {Generation: base + 3, Operation: edgegroupfront.ActivationOperationRollback, RollbackOfGeneration: base + 1},
+		"not rollback": {Generation: base + 3, Operation: edgegroupfront.ActivationOperationPromote},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if frontTargetGenerationMatches(state, base, edgegroupfront.ActivationOperationRollback) {
+				t.Fatal("invalid restore retry generation was accepted")
+			}
+		})
 	}
 }
 

@@ -220,18 +220,20 @@ func (activator *groupAuthorityActivator) BeginRestore(ctx context.Context, curr
 			_ = lease.release(context.WithoutCancel(ctx))
 		}
 	}()
-	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationRollback)
-	if err != nil {
-		return nil, err
-	}
 	recovered, err := activator.recoverControlReceipt(ctx, edgecontrol.GroupPromotionReceipt{
 		GroupID: current.GroupID, PublicationSequence: currentSequence, RecoveryEpoch: currentRecovery,
 	}, previousGeneration)
 	if err != nil {
 		return nil, err
 	}
+	recoveredVersion := promotedBundleVersion(previousGeneration, recovered.PublicationSequence, recovered.RecoveryEpoch)
+	target.CandidateBundleGeneration, target.FrontBundleGeneration = recoveredVersion, recoveredVersion
+	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationRollback)
+	if err != nil {
+		return nil, err
+	}
 	frontTx, err := activator.front.applyWithLease(ctx, target, lease, preflight, edgegroupfront.ActivationOperationRollback,
-		current.CurrentFrontGeneration, "restore Guardian group authority LKG")
+		preflight.previousGeneration, "restore Guardian group authority LKG")
 	if err != nil {
 		compensation := edgecontrol.GroupPromotionReceipt{GroupID: current.GroupID, PublicationSequence: recovered.PublicationSequence,
 			RecoveryEpoch: recovered.RecoveryEpoch}
@@ -453,6 +455,9 @@ func (activator *groupAuthorityActivator) recoverControl(ctx context.Context, pr
 }
 
 func (activator *groupAuthorityActivator) recoverControlReceipt(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) (edgecontrol.GroupRecoveryReceipt, error) {
+	if receipt, err := activator.reconcileRecoveryReceipt(ctx, promotion, targetGeneration); err == nil {
+		return receipt, nil
+	}
 	keyID, secret, err := activator.activeKey(activator.now().UTC())
 	if err != nil {
 		return edgecontrol.GroupRecoveryReceipt{}, err
@@ -510,7 +515,7 @@ func (activator *groupAuthorityActivator) reconcileRecoveryReceipt(ctx context.C
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&status) != nil || !decodeEOF(decoder) || status.GroupID != promotion.GroupID ||
-		status.PublicationSequence <= promotion.PublicationSequence || status.RecoveryEpoch != promotion.RecoveryEpoch+1 ||
+		status.PublicationSequence <= promotion.PublicationSequence || status.RecoveryEpoch <= promotion.RecoveryEpoch ||
 		status.BundleGeneration != targetGeneration || !exactSHA256Digest(status.PublishedBundleDigest) {
 		return edgecontrol.GroupRecoveryReceipt{}, errAuthorityMutationUnknown
 	}

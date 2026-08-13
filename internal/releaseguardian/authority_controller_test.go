@@ -3,6 +3,7 @@ package releaseguardian
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,9 +107,13 @@ func (testFrontActivator) IsPrewriteCASChanged(err error) bool {
 	return errors.Is(err, errTestAuthorityPrewriteCAS)
 }
 func (testFrontActivator) BeginRestore(_ context.Context, current CurrentAuthority) (FrontAuthorityTransaction, error) {
+	targetBundle := current.PreviousBundleGeneration
+	if base, publication, recovery, ok := splitAuthorityBundleGeneration(targetBundle); ok {
+		targetBundle = base + ".p" + strconv.FormatUint(publication+1, 10) + ".r" + strconv.FormatUint(recovery+1, 10)
+	}
 	return &testFrontTransaction{receipt: FrontAuthorityReceipt{GroupID: current.GroupID, PreviousSlot: current.CurrentWorkerSlot, PreviousGeneration: current.CurrentFrontGeneration,
 		PreviousBundleGeneration: current.CurrentBundleGeneration, PreviousWorkerSourceSHA: current.CurrentWorkerSourceSHA, PreviousWorkerImageDigest: current.CurrentWorkerImageDigest,
-		TargetSlot: current.PreviousWorkerSlot, TargetGeneration: current.CurrentFrontGeneration + 1, TargetBundleGeneration: current.PreviousBundleGeneration,
+		TargetSlot: current.PreviousWorkerSlot, TargetGeneration: current.CurrentFrontGeneration + 1, TargetBundleGeneration: targetBundle,
 		TargetWorkerSourceSHA: current.PreviousWorkerSourceSHA, TargetWorkerImageDigest: current.PreviousWorkerImageDigest}}, nil
 }
 func (transaction *testFrontTransaction) Receipt() FrontAuthorityReceipt { return transaction.receipt }
@@ -262,6 +267,27 @@ func TestAuthorityControllerDoesNotRevertSharedDependencyFailure(t *testing.T) {
 	live, _, _, _ := store.LoadCurrent(ctx, group)
 	if live != current {
 		t.Fatalf("shared dependency failure changed current authority: %+v", live)
+	}
+}
+
+func TestRestoredBundleGenerationRequiresSameMonotonicLKG(t *testing.T) {
+	previous := "route-generation.p11377.r127"
+	if !restoredBundleGenerationMatches("route-generation.p11486.r131", previous) {
+		t.Fatal("monotonically refreshed exact LKG was rejected")
+	}
+	if !restoredBundleGenerationMatches(previous, previous) {
+		t.Fatal("unchanged exact LKG was rejected")
+	}
+	for name, value := range map[string]string{
+		"wrong base":        "other-generation.p11486.r131",
+		"stale publication": "route-generation.p11376.r131", "stale recovery": "route-generation.p11486.r127",
+		"malformed": "route-generation",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if restoredBundleGenerationMatches(value, previous) {
+				t.Fatal("invalid restored LKG generation was accepted")
+			}
+		})
 	}
 }
 

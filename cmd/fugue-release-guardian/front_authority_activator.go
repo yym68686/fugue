@@ -215,10 +215,16 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 			return frontAuthorityPreflight{}, errors.New("Front readiness does not match activation prewrite state")
 		}
 		if state.ActiveSlot == string(target.TargetSlot) {
-			if state.Generation != target.PreviousFrontGeneration+1 || state.PreviousSlot != string(target.PreviousSlot) ||
+			if !frontTargetGenerationMatches(state, target.PreviousFrontGeneration, operation) || state.PreviousSlot != string(target.PreviousSlot) ||
 				state.BundleGeneration != target.FrontBundleGeneration || state.WorkerSourceCommit != target.WorkerSourceSHA ||
 				state.WorkerImageDigest != target.WorkerImageDigest || state.Operation != operation {
 				return frontAuthorityPreflight{}, errors.New("Front activation replay state is not target-bound")
+			}
+			candidatePrevious := state.Generation - 1
+			if previousGeneration == 0 {
+				previousGeneration = candidatePrevious
+			} else if previousGeneration != candidatePrevious {
+				return frontAuthorityPreflight{}, errors.New("Front activation replay generations are mixed")
 			}
 		} else {
 			alreadyAtNew = false
@@ -235,9 +241,6 @@ func (activator *frontAuthorityActivator) preflightForOperation(ctx context.Cont
 		}
 		states[node] = state
 	}
-	if alreadyAtNew {
-		previousGeneration = target.PreviousFrontGeneration
-	}
 	return frontAuthorityPreflight{workers: workers, states: states, previousGeneration: previousGeneration, alreadyAtNew: alreadyAtNew}, nil
 }
 
@@ -250,8 +253,17 @@ func frontLKGGenerationMatches(state edgegroupfront.ActivationState, expected ui
 	// one such compensated attempt, so accept the latest even generation only
 	// when it is itself an exact rollback of its immediately preceding write.
 	// The caller separately binds slot, bundle, source and image to the LKG.
-	return operation == edgegroupfront.ActivationOperationPromote && state.Operation == edgegroupfront.ActivationOperationRollback &&
+	return (operation == edgegroupfront.ActivationOperationPromote || operation == edgegroupfront.ActivationOperationRollback) &&
+		state.Operation == edgegroupfront.ActivationOperationRollback &&
 		state.Generation > expected && (state.Generation-expected)%2 == 0 && state.RollbackOfGeneration == state.Generation-1
+}
+
+func frontTargetGenerationMatches(state edgegroupfront.ActivationState, expected uint64, operation string) bool {
+	if state.Generation == expected+1 {
+		return true
+	}
+	return operation == edgegroupfront.ActivationOperationRollback && state.Operation == edgegroupfront.ActivationOperationRollback &&
+		state.Generation > expected && (state.Generation-expected)%2 == 1 && state.RollbackOfGeneration == state.Generation-1
 }
 
 func (activator *frontAuthorityActivator) promoteWithLease(ctx context.Context, target releaseguardian.FrontAuthorityTarget, lease *heldAuthorityLease, preflight frontAuthorityPreflight) (releaseguardian.FrontAuthorityTransaction, error) {
@@ -316,7 +328,7 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 		return nil, err
 	}
 	if activator.config.RouteAddress != "" {
-		if err := activator.verifyPublicRoute(ctx, target); err != nil {
+		if err := activator.verifyPublicRoute(ctx, target, operation == edgegroupfront.ActivationOperationRollback); err != nil {
 			if rollbackErr := activator.rollbackReceipts(context.WithoutCancel(ctx), workers, changed); rollbackErr != nil {
 				return nil, errors.Join(errors.New("post-activation public route canary failed"), fmt.Errorf("%w: %v", errFrontCompensationUnknown, rollbackErr))
 			}
@@ -344,15 +356,14 @@ func (activator *frontAuthorityActivator) applyWithLease(ctx context.Context, ta
 	return &frontAuthorityTransaction{activator: activator, lease: lease, receipt: receipt}, nil
 }
 
-func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context, target releaseguardian.FrontAuthorityTarget) error {
+func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context, target releaseguardian.FrontAuthorityTarget, allowUnattestedLKG bool) error {
 	if activator.config.RouteAddress == "" {
 		return nil
 	}
 	probe := canaryProbe{Address: activator.config.RouteAddress, Host: activator.config.RouteHost, Path: activator.config.RoutePath}
 	status, body, headers, routeErr := requestPublicRouteWithHeaders(ctx, probe)
-	if routeErr != nil || status != http.StatusOK || shaDigest(body) != activator.config.RouteBodyDigest ||
-		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) != target.CandidateRecordDigest ||
-		releaseguardian.AuthoritySlot(strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))) != target.TargetSlot {
+	if !authorityRouteMatches(status, body, headers, routeErr, activator.config.RouteBodyDigest,
+		target.CandidateRecordDigest, target.TargetSlot, allowUnattestedLKG) {
 		return errors.New("public route does not attest the activated authority")
 	}
 	return nil
@@ -648,7 +659,7 @@ func (activator *frontAuthorityActivator) waitFront(ctx context.Context, target 
 				matched = matched && front.ActiveSlot == string(target.TargetSlot) && front.BundleGeneration == target.FrontBundleGeneration &&
 					front.WorkerSourceCommit == target.WorkerSourceSHA && front.WorkerImageDigest == target.WorkerImageDigest
 			}
-			if matched {
+			if matched && activator.targetWorkersLoaded(ctx, target) {
 				return nil
 			}
 		}
@@ -661,6 +672,24 @@ func (activator *frontAuthorityActivator) waitFront(ctx context.Context, target 
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+func (activator *frontAuthorityActivator) targetWorkersLoaded(ctx context.Context, target releaseguardian.FrontAuthorityTarget) bool {
+	workers, _, err := activator.observeWorkers(ctx, target)
+	if err != nil {
+		return false
+	}
+	for _, worker := range workers {
+		if worker.Status.PodIP == "" {
+			return false
+		}
+		var health baselineWorkerHealth
+		if readAuthorityBaselineJSON(ctx, "http://"+worker.Status.PodIP+":"+strconv.Itoa(workerHealthPort)+"/healthz", &health) != nil ||
+			!authorityWorkerHealthMatches(health, target.GroupID, target.FrontBundleGeneration) {
+			return false
+		}
+	}
+	return true
 }
 
 func (activator *frontAuthorityActivator) rollbackReceipts(ctx context.Context, workers map[string]corev1.Pod, receipts map[string]edgegroupfront.ActivationReceipt) error {
