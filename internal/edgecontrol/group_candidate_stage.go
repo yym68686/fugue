@@ -153,6 +153,10 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 		authority.Published.RecoveryEpoch != request.ExpectedRecoveryEpoch || authority.Published.Digest != request.ExpectedPublishedBundleDigest {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
+	bootstrapEligible, _ := groupPublishedBootstrapEligibility(authority.Published, now)
+	if !bootstrapEligible {
+		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
+	}
 	currentCandidate, exists := snapshot.Candidate, snapshot.CandidateExists
 	currentEpoch := uint64(0)
 	if exists {
@@ -164,17 +168,14 @@ func (publisher GroupCandidatePublisher) stageWorkerCurrentLKG(ctx context.Conte
 	if currentEpoch != request.ExpectedCandidateEpoch {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	inventory := snapshot.Inventory
-	if !snapshot.InventoryExists || inventory.ActiveEpoch.Slot != request.ExpectedCurrentWorkerSlot ||
-		inventory.ObservedAt.IsZero() || inventory.ObservedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) ||
-		now.Sub(inventory.ObservedAt) > GroupInventoryHeartbeatMaxAge {
+	head := snapshot.PublishedCandidate
+	if head.ActiveSlot != request.ExpectedCurrentWorkerSlot {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
 	sequence := authority.Published.CandidateLedgerSequence
 	if sequence == 0 {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS
 	}
-	head := snapshot.PublishedCandidate
 	if head.Sequence != sequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
 		head.BundleGeneration != authority.Published.Bundle.Generation || !groupAuthorityDigestPattern.MatchString(head.InventoryDigest) {
 		return GroupCandidateBundle{}, ErrGroupAuthorityCandidateCAS

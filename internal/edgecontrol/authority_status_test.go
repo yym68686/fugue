@@ -54,8 +54,41 @@ func TestAuthorityStatusExposesExactWorkerCandidateStageCAS(t *testing.T) {
 	group := status.Groups[0]
 	if group.AuthoritySequence != authority.LedgerHead.Sequence || group.PublicationSequence != authority.LedgerHead.Sequence ||
 		group.CurrentPublicationSequence != authority.Published.PublicationSequence || group.CandidateEpoch != candidate.Epoch ||
-		group.PublishedBundleDigest != authority.Published.Digest || group.RecoveryEpoch != authority.Published.RecoveryEpoch {
+		group.PublishedBundleDigest != authority.Published.Digest || group.RecoveryEpoch != authority.Published.RecoveryEpoch || !group.BootstrapEligible {
 		t.Fatalf("stage CAS status=%+v authority=%+v candidate=%+v", group, authority, candidate)
+	}
+}
+
+func TestAuthorityStatusSeparatesPreservedPublicationFromServingHealth(t *testing.T) {
+	t.Parallel()
+	created := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	now := created.Add(2 * time.Hour)
+	groupID := "edge-group-region-test"
+	store, _, _, authority := groupPromotionFixture(t, groupID, created)
+	state, err := store.readGroupState(store.groupStatePath(groupID), groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Published.Bundle.ValidUntil = created.Add(time.Hour)
+	state.Published.Digest = signedGroupBundleDigest(state.Published.Bundle)
+	state.AuthorityLedger[state.Published.PublicationSequence-1].PublishedBundleDigest = state.Published.Digest
+	state.Digest = persistentGroupStateDigest(state)
+	if err := validatePersistentGroupState(state, groupID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.writeGroupState(store.groupStatePath(groupID), state); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewAuthorityStatusHandler(store, []string{groupID}, NewAuthorityRuntimeState(func() time.Time { return now }), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, authorityGroupReadyPath(groupID), nil))
+	var group AuthorityGroupStatus
+	if recorder.Code != http.StatusServiceUnavailable || json.Unmarshal(recorder.Body.Bytes(), &group) != nil || group.Ready || group.ServingHealthy ||
+		!group.BootstrapEligible || group.CurrentPublicationSequence != authority.Published.PublicationSequence || group.PublishedBundleDigest == "" {
+		t.Fatalf("expired bootstrap status=%d group=%+v", recorder.Code, group)
 	}
 }
 

@@ -47,6 +47,9 @@ type AuthorityGroupStatus struct {
 	GroupID                     string     `json:"edge_group_id"`
 	Status                      string     `json:"status"`
 	Ready                       bool       `json:"ready"`
+	ServingHealthy              bool       `json:"serving_healthy"`
+	BootstrapEligible           bool       `json:"bootstrap_eligible"`
+	BootstrapValidUntil         *time.Time `json:"bootstrap_valid_until,omitempty"`
 	InventorySequence           uint64     `json:"inventory_sequence,omitempty"`
 	InventoryGeneration         string     `json:"inventory_generation,omitempty"`
 	InventoryProducerGeneration uint64     `json:"inventory_producer_generation,omitempty"`
@@ -279,20 +282,29 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 		group.PublicationDecision = authority.LedgerHead.Status
 		group.FailureCode = authority.LedgerHead.FailureCode
 	}
-	if authorityErr == nil && authority.PublishedExists && validateGroupPublishedBundle(groupID, authority.Published) == nil && authority.Published.Bundle.ValidUntil.After(now) {
+	if authorityErr == nil && authority.PublishedExists && validateGroupPublishedBundle(groupID, authority.Published) == nil {
 		validUntil := authority.Published.Bundle.ValidUntil
 		group.BundleGeneration = authority.Published.Bundle.Generation
 		group.CurrentPublicationSequence = authority.Published.PublicationSequence
 		group.PublishedBundleDigest = authority.Published.Digest
 		group.RecoveryEpoch = authority.Published.RecoveryEpoch
 		group.BundleValidUntil = &validUntil
-		group.Status = GroupAuthorityHealthPublication
-		group.LKGState = GroupAuthorityLKGCurrent
-		if !authority.LedgerExists || authority.LedgerHead.Status != GroupAuthorityStatusPublished || authority.LedgerHead.BundleGeneration != authority.Published.Bundle.Generation {
-			group.LKGState = GroupAuthorityLKGPreserved
+		group.LKGState = GroupAuthorityLKGPreserved
+		if eligible, bootstrapUntil := groupPublishedBootstrapEligibility(authority.Published, now); eligible {
+			group.BootstrapEligible = true
+			group.BootstrapValidUntil = &bootstrapUntil
 		}
-		if servingHealthy {
+		publicationCurrent := authority.LedgerExists && authority.LedgerHead.Status == GroupAuthorityStatusPublished &&
+			authority.LedgerHead.BundleGeneration == authority.Published.Bundle.Generation
+		if publicationCurrent {
+			group.LKGState = GroupAuthorityLKGCurrent
+		}
+		if authority.Published.Bundle.ValidUntil.After(now) {
+			group.Status = GroupAuthorityHealthPublication
+		}
+		if servingHealthy && authority.Published.Bundle.ValidUntil.After(now) {
 			group.Ready = true
+			group.ServingHealthy = true
 			group.Status = GroupAuthorityHealthReady
 			if group.LKGState == GroupAuthorityLKGPreserved {
 				group.Status = GroupAuthorityHealthServingLKG
@@ -316,6 +328,14 @@ func (handler *authorityStatusHandler) snapshotGroup(ctx context.Context, groupI
 		group.FailureCode = GroupAuthorityFailurePublicationCAS
 	}
 	return group
+}
+
+func groupPublishedBootstrapEligibility(published GroupPublishedBundle, now time.Time) (bool, time.Time) {
+	if published.PublishedAt.IsZero() || published.PublishedAt.After(now.Add(maxInventoryHeartbeatClockSkew)) {
+		return false, time.Time{}
+	}
+	validUntil := published.PublishedAt.Add(maxGroupBundleValidity)
+	return now.Before(validUntil), validUntil
 }
 
 func (handler *authorityStatusHandler) processReadySnapshot() AuthorityStatusSnapshot {
