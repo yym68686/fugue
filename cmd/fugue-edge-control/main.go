@@ -336,7 +336,16 @@ func buildAuthorityProcess(cfg config) (*edgecontrol.AuthorityRuntime, http.Hand
 	if err != nil {
 		return nil, nil, err
 	}
-	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundary(cfg.Enabled).Handler(), heartbeat, status, bundles, recovery, promotion)
+	if runtime.Candidate == nil {
+		return nil, nil, errors.New("authority runtime requires the inactive candidate publisher")
+	}
+	staging, err := edgecontrol.NewGroupCandidateStageHandler(edgecontrol.GroupCandidateStageHandlerConfig{
+		Publisher: *runtime.Candidate, GroupIDs: cfg.AuthorityGroupIDs, KeyringDir: cfg.GroupRecoveryKeyringDir,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	handler, err := edgecontrol.NewAuthorityControlHandler(edgecontrol.NewAuthorityBoundary(cfg.Enabled).Handler(), heartbeat, status, bundles, recovery, promotion, staging)
 	if err != nil {
 		return nil, nil, err
 	}

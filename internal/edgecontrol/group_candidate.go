@@ -56,6 +56,8 @@ type GroupCandidateBundle struct {
 	RouteIntentGeneration   string                           `json:"route_intent_generation"`
 	InventoryGeneration     string                           `json:"inventory_generation"`
 	ReleaseRecordDigest     string                           `json:"release_record_digest"`
+	WorkerSourceSHA         string                           `json:"worker_source_sha,omitempty"`
+	WorkerImageDigest       string                           `json:"worker_image_digest,omitempty"`
 	WorkerSlot              string                           `json:"worker_slot"`
 	PublishedAt             time.Time                        `json:"published_at"`
 	CurrentRecord           *edgeauthority.RouteBundleRecord `json:"current_record,omitempty"`
@@ -73,6 +75,7 @@ type GroupCandidateStore interface {
 	ReadGroupCandidate(context.Context, string) (GroupCandidateBundle, bool, error)
 	PutGroupCandidateCAS(context.Context, string, uint64, uint64, GroupCandidateBundle) (GroupCandidateBundle, error)
 	PutGroupCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
+	PutGroupStagedCurrentLKGCandidateCAS(context.Context, string, uint64, uint64, uint64, uint64, string, GroupCandidateBundle) (GroupCandidateBundle, error)
 }
 
 type GroupCandidatePublisher struct {
@@ -194,6 +197,13 @@ func (publisher GroupCandidatePublisher) publishGroup(ctx context.Context, compi
 	if previousExists && previous.CandidateLedgerSequence == head.Sequence && previous.ReleaseRecordDigest == publisher.Identity.ReleaseRecordDigest &&
 		previous.CurrentWorkerSlot == inventory.ActiveEpoch.Slot && previous.WorkerSlot != inventory.ActiveEpoch.Slot &&
 		candidateRecordMatchesIdentity(previous.Record, publisher.Identity) && candidateBindsCurrentAuthority(previous, authority) {
+		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
+		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
+			return candidateResult(previous)
+		}
+	}
+	if previousExists && candidateHasStagedWorkerIdentity(previous) && candidateBindsCurrentAuthority(previous, authority) &&
+		previous.CurrentWorkerSlot == inventory.ActiveEpoch.Slot && previous.WorkerSlot != inventory.ActiveEpoch.Slot {
 		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
 		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
 			return candidateResult(previous)
@@ -330,6 +340,13 @@ func (publisher GroupCandidatePublisher) publishCurrentLKGCandidate(ctx context.
 			return candidateResult(previous), true
 		}
 	}
+	if previousExists && candidateHasStagedWorkerIdentity(previous) && candidateBindsCurrentAuthority(previous, authority) &&
+		previous.CurrentWorkerSlot == inventory.ActiveEpoch.Slot && previous.WorkerSlot != inventory.ActiveEpoch.Slot {
+		lifetime := previous.Bundle.ValidUntil.Sub(previous.Bundle.GeneratedAt)
+		if lifetime > 0 && previous.Bundle.ValidUntil.Sub(now) > lifetime/3 {
+			return candidateResult(previous), true
+		}
+	}
 	workerSlot := "a"
 	if inventory.ActiveEpoch.Slot == "a" {
 		workerSlot = "b"
@@ -354,6 +371,11 @@ func candidateRecordMatchesIdentity(record edgeauthority.RouteBundleRecord, iden
 		record.ManifestDigest == identity.ManifestDigest && record.HealthContractDigest == identity.HealthContractDigest
 }
 
+func candidateHasStagedWorkerIdentity(candidate GroupCandidateBundle) bool {
+	return groupCandidateSourcePattern.MatchString(candidate.WorkerSourceSHA) &&
+		groupAuthorityDigestPattern.MatchString(candidate.WorkerImageDigest)
+}
+
 func candidateResult(candidate GroupCandidateBundle) GroupCandidateResult {
 	return GroupCandidateResult{GroupID: candidate.GroupID, Status: GroupCandidateStatusPublished, Epoch: candidate.Epoch,
 		CandidateLedgerSequence: candidate.CandidateLedgerSequence, RecordDigest: candidate.Record.RecordDigest}
@@ -371,6 +393,10 @@ func validateGroupCandidateBundle(groupID string, candidate GroupCandidateBundle
 		candidate.Bundle.Issuer != groupAuthorityIssuer || strings.TrimSpace(candidate.Bundle.KeyID) == "" || strings.TrimSpace(candidate.Bundle.Signature) == "" ||
 		candidate.Bundle.GeneratedAt.IsZero() || !candidate.Bundle.ValidUntil.After(candidate.Bundle.GeneratedAt) {
 		return errors.New("edge-control group candidate bundle is invalid")
+	}
+	if (candidate.WorkerSourceSHA == "") != (candidate.WorkerImageDigest == "") ||
+		(candidate.WorkerSourceSHA != "" && !candidateHasStagedWorkerIdentity(candidate)) {
+		return errors.New("edge-control group candidate worker release identity is invalid")
 	}
 	if candidate.CurrentRecord == nil && candidate.CurrentBundle == nil && candidate.CurrentWorkerSlot == "" {
 		return nil

@@ -116,6 +116,11 @@ func TestConfigAndProcessWireGroupAuthority(t *testing.T) {
 	if recoveryRecorder.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("unauthenticated recovery status=%d body=%s", recoveryRecorder.Code, recoveryRecorder.Body.String())
 	}
+	stageRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(stageRecorder, httptest.NewRequest(http.MethodPost, "/v1/authority/group-worker-candidates", strings.NewReader("{}")))
+	if stageRecorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("unauthenticated Worker candidate stage status=%d body=%s", stageRecorder.Code, stageRecorder.Body.String())
+	}
 }
 
 func TestConfigRejectsAmbiguousOrUnsafeAuthorityRuntime(t *testing.T) {

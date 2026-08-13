@@ -315,6 +315,47 @@ func (store *PersistentGroupStore) PutGroupCurrentLKGCandidateCAS(ctx context.Co
 	return cloneGroupCandidateBundle(stored), err
 }
 
+// PutGroupStagedCurrentLKGCandidateCAS binds an exact Worker release to an
+// inactive slot while preserving the currently published route LKG. It cannot
+// advance publication or select ordinary traffic; those are separate Guardian
+// CAS transactions after a candidate-bound route canary succeeds.
+func (store *PersistentGroupStore) PutGroupStagedCurrentLKGCandidateCAS(ctx context.Context, groupID string, expectedEpoch, expectedAuthoritySequence, expectedPublicationSequence, expectedRecoveryEpoch uint64, expectedPublishedDigest string, candidate GroupCandidateBundle) (GroupCandidateBundle, error) {
+	var stored GroupCandidateBundle
+	err := store.withGroupState(ctx, groupID, true, func(state *persistentGroupState) error {
+		currentEpoch := uint64(0)
+		if state.Candidate != nil {
+			currentEpoch = state.Candidate.Epoch
+		}
+		if currentEpoch != expectedEpoch || state.Published == nil || len(state.AuthorityLedger) == 0 ||
+			state.AuthorityLedger[len(state.AuthorityLedger)-1].Sequence != expectedAuthoritySequence ||
+			state.Published.PublicationSequence != expectedPublicationSequence || state.Published.RecoveryEpoch != expectedRecoveryEpoch ||
+			state.Published.Digest != expectedPublishedDigest || state.Published.CandidateLedgerSequence == 0 ||
+			state.Published.CandidateLedgerSequence > uint64(len(state.Ledger)) || candidate.AuthorityLedgerSequence != expectedAuthoritySequence ||
+			candidate.CandidateLedgerSequence != state.Published.CandidateLedgerSequence || candidate.Epoch <= currentEpoch ||
+			candidate.Epoch <= expectedPublicationSequence || candidate.CurrentRecord == nil || candidate.CurrentBundle == nil ||
+			candidate.CurrentRecord.BundleDigest != expectedPublishedDigest || candidate.CurrentRecord.Epoch != int64(expectedPublicationSequence) ||
+			candidate.CurrentWorkerSlot == candidate.WorkerSlot || !candidateHasStagedWorkerIdentity(candidate) {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		head := state.Ledger[state.Published.CandidateLedgerSequence-1]
+		if head.Sequence != candidate.CandidateLedgerSequence || head.Status != GroupShadowStatusCompiled || head.Bundle == nil || head.BundleArchived ||
+			head.BundleGeneration != state.Published.Bundle.Generation || head.RouteIntentGeneration != candidate.RouteIntentGeneration ||
+			head.InventoryGeneration != candidate.InventoryGeneration || head.InventoryDigest != candidate.Record.InventoryDigest ||
+			groupAuthorityCandidateDigest(*head.Bundle) != groupAuthorityCandidateDigest(candidate.Bundle) ||
+			signedGroupBundleDigest(*candidate.CurrentBundle) != expectedPublishedDigest {
+			return ErrGroupAuthorityCandidateCAS
+		}
+		if err := validateGroupCandidateBundle(state.GroupID, candidate); err != nil {
+			return err
+		}
+		stored = cloneGroupCandidateBundle(candidate)
+		retainReplacedCandidate(state, stored.Epoch)
+		state.Candidate = &stored
+		return nil
+	})
+	return cloneGroupCandidateBundle(stored), err
+}
+
 func retainReplacedCandidate(state *persistentGroupState, nextEpoch uint64) {
 	if state == nil || state.Candidate == nil || state.Candidate.Epoch == nextEpoch {
 		return
