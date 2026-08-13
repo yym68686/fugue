@@ -19,6 +19,7 @@ type fakeEdgeGroupRuntime struct {
 	requests        []edgeActivationRequest
 	rollAuthority   []bool
 	activationState *edgeActivationState
+	declared        map[string]declarativerelease.TargetIdentity
 }
 
 func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, error) {
@@ -31,9 +32,24 @@ func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, err
 	return value, nil
 }
 
-func (fake *fakeEdgeGroupRuntime) ApplyResources(context.Context) error {
-	fake.calls = append(fake.calls, "apply")
+func (fake *fakeEdgeGroupRuntime) ApplyCandidateResources(_ context.Context, selector string) error {
+	fake.calls = append(fake.calls, "apply:"+selector)
 	return nil
+}
+
+func (fake *fakeEdgeGroupRuntime) StageCandidate(_ context.Context, before edgeGroupState, inactive string, target declarativerelease.TargetIdentity) (edgeCandidateStageReceipt, error) {
+	fake.calls = append(fake.calls, "stage:"+inactive)
+	digest, _ := immutableDigestFromRef(target.ImageRef)
+	return edgeCandidateStageReceipt{Schema: edgeCandidateReceiptSchema,
+		WorkerSlot: inactive, CurrentWorkerSlot: before.ActiveSlot, WorkerSourceSHA: target.ConfigSHA, WorkerImageDigest: digest}, nil
+}
+
+func (fake *fakeEdgeGroupRuntime) DeclaredTarget(name string) (declarativerelease.TargetIdentity, error) {
+	target, exists := fake.declared[name]
+	if !exists {
+		return declarativerelease.TargetIdentity{}, fmt.Errorf("undeclared target %s", name)
+	}
+	return target, nil
 }
 
 func (fake *fakeEdgeGroupRuntime) Roll(_ context.Context, name string, _ declarativerelease.TargetIdentity, requireGroupAuthority bool) (map[string]edgeGroupPod, error) {
@@ -157,6 +173,7 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	target := edgeTargetFixture("2", "b")
 	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
 	final := edgeStateFixture("b", target, edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 2, WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority})
+	final.WorkerA = before.WorkerA
 	runtime := &fakeEdgeGroupRuntime{
 		snapshots: []edgeGroupState{before, final},
 		rolls: map[string]map[string]edgeGroupPod{
@@ -164,10 +181,8 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 			transition.FrontName:   final.Front,
 			transition.WorkerAName: final.WorkerA,
 		},
-		waits: []map[string]edgeFrontHealth{
-			{"node-1": {ActiveSlot: "a", ActivationPresent: true, Generation: 1, WorkerSourceCommit: old.ConfigSHA, WorkerImageDigest: digestFromTarget(t, old), RouteAuthority: edgeActivationAuthority}},
-			{"node-1": final.FrontHealth["node-1"]},
-		},
+		waits:    []map[string]edgeFrontHealth{{"node-1": final.FrontHealth["node-1"]}},
+		declared: map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
 	}
 	release := declarativerelease.PlanRelease{
 		ExpectedPreviousConfigSHA: old.ConfigSHA,
@@ -176,25 +191,26 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply", "roll:" + transition.WorkerBName, "read-activation", "cas:initialize:a", "roll:" + transition.FrontName, "wait-front:a", "select-cas", "cas:promote:b", "wait-front:b", "roll:" + transition.WorkerAName, "wait-worker-authority:" + transition.WorkerBName, "snapshot"}
+	want := []string{"snapshot", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
-	if len(runtime.requests) != 2 || runtime.requests[1].WorkerSourceCommit != target.ConfigSHA || runtime.requests[1].Operation != edgeActivationPromote {
-		t.Fatalf("edge forward CAS requests are not target-bound: %+v", runtime.requests)
+	if len(runtime.requests) != 0 {
+		t.Fatalf("edge forward performed a direct Front activation CAS: %+v", runtime.requests)
 	}
-	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true]"; got != want {
 		t.Fatalf("edge authority gates=%s want=%s", got, want)
 	}
 }
 
-func TestExecuteEdgeGroupABContinuesFromExistingGroupBoundActivation(t *testing.T) {
+func TestExecuteEdgeGroupABKeepsPreviousAuthoritySlotAtExactLKG(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
 	target := edgeTargetFixture("2", "b")
 	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
 	finalHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 4, WorkerSourceCommit: target.ConfigSHA, WorkerImageDigest: digestFromTarget(t, target), RouteAuthority: edgeActivationAuthority}
 	final := edgeStateFixture("b", target, finalHealth)
+	final.WorkerA = before.WorkerA
 	runtime := &fakeEdgeGroupRuntime{
 		snapshots: []edgeGroupState{before, final},
 		rolls: map[string]map[string]edgeGroupPod{
@@ -202,18 +218,15 @@ func TestExecuteEdgeGroupABContinuesFromExistingGroupBoundActivation(t *testing.
 			transition.FrontName:   final.Front,
 			transition.WorkerAName: final.WorkerA,
 		},
-		waits:           []map[string]edgeFrontHealth{{"node-1": finalHealth}},
-		activationState: &edgeActivationState{Schema: edgeActivationStateSchema, GroupID: transition.GroupID, Generation: 3, ActiveSlot: "a", Authority: edgeActivationAuthority},
+		waits:    []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		declared: map[string]declarativerelease.TargetIdentity{transition.WorkerAName: old, transition.WorkerBName: target, transition.FrontName: target},
 	}
 	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: old.ConfigSHA, Transition: &declarativerelease.Transition{Type: "edge-group-ab", EdgeGroupAB: &transition}}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationPromote || runtime.requests[0].ExpectedGeneration != 3 {
-		t.Fatalf("existing activation was not continued by exact CAS: %+v", runtime.requests)
-	}
-	if strings.Contains(strings.Join(runtime.calls, "\n"), "wait-front:a") {
-		t.Fatalf("existing exact activation performed redundant pre-CAS wait: %v", runtime.calls)
+	if got := final.WorkerA["node-1"].SourceCommit; got != old.ConfigSHA {
+		t.Fatalf("previous authority slot changed from LKG: %s", got)
 	}
 }
 
@@ -224,26 +237,25 @@ func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T
 	currentHealth := edgeFrontHealth{ActiveSlot: "b", ActivationPresent: true, Generation: 4, WorkerSourceCommit: current.ConfigSHA, WorkerImageDigest: digestFromTarget(t, current), RouteAuthority: edgeActivationAuthority}
 	before := edgeStateFixture("b", current, currentHealth)
 	finalHealth := edgeFrontHealth{ActiveSlot: "a", ActivationPresent: true, Generation: 5, WorkerSourceCommit: lkg.ConfigSHA, WorkerImageDigest: digestFromTarget(t, lkg), RouteAuthority: edgeActivationAuthority}
-	final := edgeStateFixture("a", lkg, finalHealth)
 	runtime := &fakeEdgeGroupRuntime{
-		snapshots: []edgeGroupState{before, final},
+		snapshots: []edgeGroupState{before},
 		rolls: map[string]map[string]edgeGroupPod{
-			transition.WorkerAName: final.WorkerA,
-			transition.WorkerBName: final.WorkerB,
-			transition.FrontName:   final.Front,
+			transition.WorkerAName: edgeStateFixture("a", lkg, finalHealth).WorkerA,
+			transition.WorkerBName: edgeStateFixture("a", lkg, finalHealth).WorkerB,
+			transition.FrontName:   edgeStateFixture("a", lkg, finalHealth).Front,
 		},
-		waits: []map[string]edgeFrontHealth{{"node-1": finalHealth}},
+		declared: map[string]declarativerelease.TargetIdentity{transition.WorkerAName: lkg, transition.WorkerBName: lkg, transition.FrontName: lkg},
 	}
 	release := declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: lkg.ConfigSHA}
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, lkg); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply", "roll:" + transition.WorkerAName, "select-cas", "cas:rollback:a", "wait-front:a", "roll:" + transition.WorkerBName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply:", "roll:" + transition.WorkerAName, "roll:" + transition.WorkerBName, "roll:" + transition.FrontName}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge compensation order=%v want=%v", runtime.calls, want)
 	}
-	if len(runtime.requests) != 1 || runtime.requests[0].Operation != edgeActivationRollback || runtime.requests[0].RollbackOfGeneration != 4 {
-		t.Fatalf("edge compensation CAS is not generation-bound: %+v", runtime.requests)
+	if len(runtime.requests) != 0 {
+		t.Fatalf("exact LKG compensation performed direct authority CAS: %+v", runtime.requests)
 	}
 }
 
@@ -323,7 +335,7 @@ func edgeGroupPodFixture(name, uid, node, group, source, digest string) map[stri
 }
 
 func edgeTransitionFixture() declarativerelease.EdgeGroupABTransition {
-	return declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-us", FrontName: "front", WorkerAName: "worker-a", WorkerBName: "worker-b", WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}
+	return declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-country-us", CandidateStageURL: "http://edge-control-us:8092/v1/authority/group-worker-candidates", CandidateKeyring: "/var/run/secrets/fugue-authority-recovery-us/keyring.json", FrontName: "front", WorkerAName: "worker-a", WorkerBName: "worker-b", WorkerContainer: "edge", ActivationStatePath: "/var/lib/fugue-edge-front/activation.json", CASBinary: "/usr/local/bin/fugue-edge-front-cas", ExpectedNodes: 1, SoakSeconds: 180}
 }
 
 func edgeTargetFixture(sourceDigit, digestDigit string) declarativerelease.TargetIdentity {

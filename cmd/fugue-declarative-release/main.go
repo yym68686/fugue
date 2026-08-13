@@ -301,6 +301,19 @@ func addProductionRuntimeChanges(registry declarativerelease.Registry, headSHA s
 			}
 		}
 	}
+	// Runtime-diff expansion is intentionally scoped to the selected component.
+	// A shared Go package can be linked into several independently deployed
+	// binaries; adding its historical diff as another component's manifest
+	// change would either co-deploy that component or make a safe single-lane
+	// atom impossible. BuildPlan still classifies the actual commit paths
+	// against every expanded dependency graph and rejects any non-shared path.
+	for _, component := range registry.Components {
+		if component.ID == selected.ID {
+			continue
+		}
+		delete(merged, component.ManifestPath)
+		delete(merged, component.IntentPath)
+	}
 	result := make([]string, 0, len(merged))
 	for path := range merged {
 		result = append(result, path)
@@ -653,6 +666,16 @@ func runPrepare(args []string, output io.Writer) error {
 	cluster, err := newKubectlCluster()
 	if err != nil {
 		return err
+	}
+	if release.Transition != nil && release.Transition.EdgeGroupAB != nil && release.Delivery != nil && release.Delivery.Writer == "guardian" {
+		state, stateErr := cluster.readEdgeGroupState(context.Background(), release, *release.Transition.EdgeGroupAB)
+		if stateErr != nil {
+			return fmt.Errorf("read edge candidate active slot: %w", stateErr)
+		}
+		rendered, err = declarativerelease.BindEdgeCandidateForward(plan, args[2], state.ActiveSlot, rendered)
+		if err != nil {
+			return err
+		}
 	}
 	prepareTimeout := 3 * time.Minute
 	if release.Transition != nil && release.Transition.EdgeGroupAB != nil {

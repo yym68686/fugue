@@ -126,6 +126,8 @@ type Transition struct {
 // and verified independently on every declared group node.
 type EdgeGroupABTransition struct {
 	GroupID             string `json:"groupId"`
+	CandidateStageURL   string `json:"candidateStageUrl,omitempty"`
+	CandidateKeyring    string `json:"candidateKeyring,omitempty"`
 	FrontName           string `json:"frontName"`
 	WorkerAName         string `json:"workerAName"`
 	WorkerBName         string `json:"workerBName"`
@@ -376,7 +378,9 @@ func (transition *Transition) validate(component Component) error {
 	if !strings.HasPrefix(component.ID, "edge-worker-") || component.Workload.Kind != "DaemonSet" || component.Workload.RolloutMode != "on-delete" {
 		return fmt.Errorf("component %q edge-group-ab transition requires an on-delete edge worker", component.ID)
 	}
+	stageConfigured := edge.CandidateStageURL != "" || edge.CandidateKeyring != ""
 	if !edgeGroupIDPattern.MatchString(edge.GroupID) ||
+		(stageConfigured && (!validEdgeCandidateStageURL(edge.CandidateStageURL) || !validEdgeCandidateKeyring(edge.CandidateKeyring))) ||
 		!componentIDPattern.MatchString(edge.FrontName) || !componentIDPattern.MatchString(edge.WorkerAName) ||
 		!componentIDPattern.MatchString(edge.WorkerBName) || !componentIDPattern.MatchString(edge.WorkerContainer) ||
 		edge.ExpectedNodes < 1 || edge.ExpectedNodes > 100 || edge.CASBinary != "/usr/local/bin/fugue-edge-front-cas" ||
@@ -399,6 +403,19 @@ func (transition *Transition) validate(component Component) error {
 		}
 	}
 	return nil
+}
+
+func validEdgeCandidateStageURL(value string) bool {
+	const prefix = "http://"
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, "/v1/authority/group-worker-candidates") || strings.ContainsAny(value, "\r\n?#") {
+		return false
+	}
+	host := strings.TrimSuffix(strings.TrimPrefix(value, prefix), "/v1/authority/group-worker-candidates")
+	return strings.HasSuffix(host, ":8092") && len(host) > len(":8092")
+}
+
+func validEdgeCandidateKeyring(value string) bool {
+	return strings.HasPrefix(value, "/var/run/secrets/") && strings.HasSuffix(value, "/keyring.json") && !strings.Contains(value, "..")
 }
 
 func validateArtifactTargets(component Component) error {

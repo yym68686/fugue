@@ -66,14 +66,80 @@ func BindGuardianLKG(plan Plan, componentID string, rendered RenderedManifests, 
 	return rendered, nil
 }
 
+// BindEdgeCandidateForward records the exact stable production shape for an
+// A/B Worker candidate: Front and the inactive slot carry the candidate
+// artifact, while the current active slot remains the byte-exact LKG. The
+// executor applies only the inactive slot before the authority CAS; Front is
+// applied only after the independent canary has promoted that slot.
+func BindEdgeCandidateForward(plan Plan, componentID, activeSlot string, rendered RenderedManifests) (RenderedManifests, error) {
+	if err := plan.ValidateBound(); err != nil {
+		return RenderedManifests{}, err
+	}
+	release, err := releaseByID(plan, componentID)
+	if err != nil {
+		return RenderedManifests{}, err
+	}
+	if release.Delivery == nil || release.Delivery.Writer != "guardian" || release.Transition == nil || release.Transition.EdgeGroupAB == nil ||
+		(activeSlot != "a" && activeSlot != "b") {
+		return RenderedManifests{}, errors.New("edge candidate forward binding is invalid")
+	}
+	forward, err := DecodeResourceSet(bytes.NewReader(rendered.Forward))
+	if err != nil {
+		return RenderedManifests{}, err
+	}
+	lkg, err := DecodeResourceSet(bytes.NewReader(rendered.LKG))
+	if err != nil {
+		return RenderedManifests{}, err
+	}
+	activeName := release.Transition.EdgeGroupAB.WorkerAName
+	if activeSlot == "b" {
+		activeName = release.Transition.EdgeGroupAB.WorkerBName
+	}
+	replaceNames := map[string]bool{activeName: true}
+	lkgItems := map[string]map[string]any{}
+	for _, item := range lkg.Items {
+		metadata, _ := objectField(item, "metadata")
+		name := stringField(metadata, "name")
+		if replaceNames[name] {
+			lkgItems[name] = item
+			break
+		}
+	}
+	if len(lkgItems) != len(replaceNames) {
+		return RenderedManifests{}, errors.New("edge candidate LKG lacks the current active slot")
+	}
+	replaced := map[string]bool{}
+	for index, item := range forward.Items {
+		metadata, _ := objectField(item, "metadata")
+		name := stringField(metadata, "name")
+		if lkgItem := lkgItems[name]; lkgItem != nil {
+			forward.Items[index] = deepCopyMap(lkgItem)
+			replaced[name] = true
+		}
+	}
+	if len(replaced) != len(replaceNames) {
+		return RenderedManifests{}, errors.New("edge candidate forward lacks the current active slot")
+	}
+	encoded, err := CanonicalJSON(forward)
+	if err != nil {
+		return RenderedManifests{}, err
+	}
+	rendered.Forward = encoded
+	sum := sha256.Sum256(encoded)
+	rendered.ForwardDigest = fmt.Sprintf("sha256:%x", sum)
+	return rendered, nil
+}
+
 func validateGuardianLKGIdentity(set ResourceSet, release PlanRelease) error {
+	edgeMixedLKG := release.Transition != nil && release.Transition.EdgeGroupAB != nil
 	for _, item := range set.Items {
 		metadata, err := objectField(item, "metadata")
 		if err != nil {
 			return err
 		}
 		annotations := ensureStringMap(metadata, "annotations")
-		if stringField(annotations, "fugue.pro/production-config-sha") != release.ExpectedPreviousConfigSHA ||
+		config := stringField(annotations, "fugue.pro/production-config-sha")
+		if ((!edgeMixedLKG && config != release.ExpectedPreviousConfigSHA) || (edgeMixedLKG && !shaPattern.MatchString(config))) ||
 			!digestPattern.MatchString(stringField(annotations, "fugue.pro/release-plan-digest")) ||
 			!digestPattern.MatchString(stringField(annotations, "fugue.pro/artifact-receipt-digest")) {
 			return errors.New("exact Guardian LKG provenance is invalid")
@@ -88,6 +154,7 @@ func validateGuardianLKGIdentity(set ResourceSet, release PlanRelease) error {
 		}}
 	}
 	wantImage := release.Artifact.Repository + "@" + release.ExpectedPreviousImageDigest
+	edgeExpectedWorkers := 0
 	seenWorkloads := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
 		item, err := resourceSetTarget(&set, target)
@@ -95,7 +162,7 @@ func validateGuardianLKGIdentity(set ResourceSet, release PlanRelease) error {
 			return err
 		}
 		image, err := workloadContainerImage(item, target.Container, target.ContainerType)
-		if err != nil || image != wantImage {
+		if err != nil || (!edgeMixedLKG && image != wantImage) || (edgeMixedLKG && !strings.HasPrefix(image, release.Artifact.Repository+"@sha256:")) {
 			return errors.New("exact Guardian LKG artifact identity is invalid")
 		}
 		key := target.APIVersion + "\x00" + target.Kind + "\x00" + target.Namespace + "\x00" + target.Name
@@ -116,11 +183,21 @@ func validateGuardianLKGIdentity(set ResourceSet, release PlanRelease) error {
 			return err
 		}
 		annotations := ensureStringMap(templateMetadata, "annotations")
-		if stringField(annotations, "fugue.pro/source-commit") != release.ExpectedPreviousManifestSHA ||
-			stringField(annotations, "fugue.pro/oci-revision") != release.ExpectedPreviousOCIRevision ||
-			stringField(annotations, "fugue.pro/production-config-sha") != release.ExpectedPreviousConfigSHA {
+		source := stringField(annotations, "fugue.pro/source-commit")
+		oci := stringField(annotations, "fugue.pro/oci-revision")
+		config := stringField(annotations, "fugue.pro/production-config-sha")
+		expected := image == wantImage && source == release.ExpectedPreviousManifestSHA && oci == release.ExpectedPreviousOCIRevision && config == release.ExpectedPreviousConfigSHA
+		if edgeMixedLKG && (target.Name == release.Transition.EdgeGroupAB.WorkerAName || target.Name == release.Transition.EdgeGroupAB.WorkerBName) && expected {
+			edgeExpectedWorkers++
+		}
+		if (!edgeMixedLKG && !expected) || (edgeMixedLKG && target.Name == release.Transition.EdgeGroupAB.FrontName && !expected) ||
+			(edgeMixedLKG && target.Name != release.Transition.EdgeGroupAB.FrontName && target.Name != release.Transition.EdgeGroupAB.WorkerAName && target.Name != release.Transition.EdgeGroupAB.WorkerBName && !expected) ||
+			(edgeMixedLKG && (!shaPattern.MatchString(source) || !shaPattern.MatchString(oci) || !shaPattern.MatchString(config))) {
 			return errors.New("exact Guardian LKG workload identity is invalid")
 		}
+	}
+	if edgeMixedLKG && edgeExpectedWorkers != 1 {
+		return errors.New("exact Guardian LKG must bind one current and one previous Worker slot")
 	}
 	return nil
 }

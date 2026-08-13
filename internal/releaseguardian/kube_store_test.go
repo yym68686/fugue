@@ -183,7 +183,7 @@ func TestLocalHealthCoversEveryDeclaredDaemonSetArtifact(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(objects...)
 	store := &KubeStore{client: client}
-	if health := store.localHealth(context.Background(), release, target, now); health.State != HealthHealthy {
+	if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthHealthy {
 		t.Fatalf("healthy component classified as %+v", health)
 	}
 	worker, err := client.AppsV1().DaemonSets("fugue-system").Get(context.Background(), "worker-b", metav1.GetOptions{})
@@ -194,7 +194,7 @@ func TestLocalHealthCoversEveryDeclaredDaemonSetArtifact(t *testing.T) {
 	if _, err := client.AppsV1().DaemonSets("fugue-system").UpdateStatus(context.Background(), worker, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	health := store.localHealth(context.Background(), release, target, now)
+	health := store.localHealth(context.Background(), release, target, nil, now)
 	if health.State != HealthDegraded || !strings.Contains(health.Reason, "worker-b") {
 		t.Fatalf("unhealthy auxiliary worker was not attributed: %+v", health)
 	}
@@ -238,13 +238,13 @@ func TestLocalHealthUsesPodTemplateLabelsForBroadDeploymentSelector(t *testing.T
 		readyPod("controller-1", controllerLabels, "controller"),
 	)
 	store := &KubeStore{client: client}
-	if health := store.localHealth(context.Background(), release, target, now); health.State != HealthHealthy {
+	if health := store.localHealth(context.Background(), release, target, nil, now); health.State != HealthHealthy {
 		t.Fatalf("broad workload selector included another component: %+v", health)
 	}
 	if _, err := client.CoreV1().Pods("fugue-system").Create(context.Background(), readyPod("api-collision", apiLabels, "api"), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	health := store.localHealth(context.Background(), release, target, now)
+	health := store.localHealth(context.Background(), release, target, nil, now)
 	if health.State != HealthDegraded || !strings.Contains(health.Reason, "inventory") {
 		t.Fatalf("same-template label collision was not rejected: %+v", health)
 	}

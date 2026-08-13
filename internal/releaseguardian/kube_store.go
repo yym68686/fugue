@@ -98,7 +98,7 @@ func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	now := store.now().UTC()
-	local := store.localHealth(ctx, stored.currentBundle.Release, stored.currentBundle.Prepared.Forward, now)
+	local := store.localHealth(ctx, stored.currentBundle.Release, stored.currentBundle.Prepared.Forward, stored.currentBundle.Forward, now)
 	dependency := store.dependencyHealth(ctx, target, now)
 	route := store.routeHealth(ctx, target, stored.currentRecordDigest, now)
 	return Snapshot{
@@ -326,7 +326,7 @@ func decodeStableRecord(data map[string]string) (declarativerelease.Plan, declar
 	return plan, artifact, prepared, monitor, bytes.TrimSpace(forward), bytes.TrimSpace(lkg), nil
 }
 
-func (store *KubeStore) localHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, now time.Time) LayerHealth {
+func (store *KubeStore) localHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, now time.Time) LayerHealth {
 	healthy := func(evidence any) LayerHealth {
 		raw, _ := declarativerelease.CanonicalJSON(evidence)
 		return LayerHealth{State: HealthHealthy, EvidenceDigest: digest(raw), ObservedAt: now.Format(time.RFC3339Nano)}
@@ -387,7 +387,7 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 			}
 		}
 	}
-	componentWorkloads, err := store.componentWorkloadHealth(ctx, release, target)
+	componentWorkloads, err := store.componentWorkloadHealth(ctx, release, target, manifest)
 	if err != nil {
 		return degraded(err.Error())
 	}
@@ -412,7 +412,7 @@ type workloadHealthEvidence struct {
 // contract must have converged to the same target identity.  This matters for
 // multi-workload components such as an Edge worker group, where the primary
 // front can remain Ready while one inactive worker slot has crashed or drifted.
-func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity) ([]workloadHealthEvidence, error) {
+func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) ([]workloadHealthEvidence, error) {
 	seen := map[string]bool{}
 	result := make([]workloadHealthEvidence, 0, len(release.Health))
 	for _, probe := range release.Health {
@@ -424,7 +424,11 @@ func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release dec
 			continue
 		}
 		seen[key] = true
-		evidence, err := store.oneWorkloadHealth(ctx, release, target, probe.Type, probe.Name)
+		desiredTarget, err := guardianDeclaredWorkloadTarget(release, target, manifest, probe.Type, probe.Name)
+		if err != nil {
+			return nil, err
+		}
+		evidence, err := store.oneWorkloadHealth(ctx, release, desiredTarget, probe.Type, probe.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -434,6 +438,62 @@ func (store *KubeStore) componentWorkloadHealth(ctx context.Context, release dec
 		return nil, errors.New("component health contract has no workload probe")
 	}
 	return result, nil
+}
+
+func guardianDeclaredWorkloadTarget(release declarativerelease.PlanRelease, fallback declarativerelease.TargetIdentity, manifest []byte, probeType, name string) (declarativerelease.TargetIdentity, error) {
+	if len(manifest) == 0 || release.Transition == nil || release.Transition.EdgeGroupAB == nil {
+		return fallback, nil
+	}
+	kind := "DaemonSet"
+	apiVersion := "apps/v1"
+	if probeType == "deployment" {
+		kind = "Deployment"
+	}
+	identity := declarativerelease.ResourceIdentity{APIVersion: apiVersion, Kind: kind, Namespace: release.Workload.Namespace, Name: name}
+	item, err := declarativerelease.ResourceSetItem(manifest, identity)
+	if err != nil {
+		return declarativerelease.TargetIdentity{}, fmt.Errorf("read stable health workload %s/%s: %w", probeType, name, err)
+	}
+	metadata, _ := item["metadata"].(map[string]any)
+	spec, _ := item["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	templateMetadata, _ := template["metadata"].(map[string]any)
+	annotations := stringInterfaceMap(metadata["annotations"])
+	templateAnnotations := stringInterfaceMap(templateMetadata["annotations"])
+	containerName := release.Workload.Container
+	if name == release.Transition.EdgeGroupAB.WorkerAName || name == release.Transition.EdgeGroupAB.WorkerBName {
+		containerName = release.Transition.EdgeGroupAB.WorkerContainer
+	} else if name == release.Transition.EdgeGroupAB.FrontName {
+		containerName = "edge-front"
+	}
+	image := ""
+	templateSpec, _ := template["spec"].(map[string]any)
+	for _, raw := range interfaceSlice(templateSpec["containers"]) {
+		container, _ := raw.(map[string]any)
+		if fmt.Sprint(container["name"]) == containerName {
+			image = fmt.Sprint(container["image"])
+		}
+	}
+	result := declarativerelease.TargetIdentity{Present: true, ConfigSHA: annotations["fugue.pro/production-config-sha"],
+		OCIRevision: templateAnnotations["fugue.pro/oci-revision"], ImageRef: image}
+	if result.ConfigSHA == "" || result.OCIRevision == "" || result.ImageRef == "" {
+		return declarativerelease.TargetIdentity{}, fmt.Errorf("stable health workload %s/%s lacks immutable identity", probeType, name)
+	}
+	return result, nil
+}
+
+func stringInterfaceMap(value any) map[string]string {
+	result := map[string]string{}
+	raw, _ := value.(map[string]any)
+	for key, item := range raw {
+		result[key] = fmt.Sprint(item)
+	}
+	return result
+}
+
+func interfaceSlice(value any) []any {
+	result, _ := value.([]any)
+	return result
 }
 
 func (store *KubeStore) oneWorkloadHealth(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, probeType, name string) (workloadHealthEvidence, error) {

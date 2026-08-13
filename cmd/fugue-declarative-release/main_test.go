@@ -120,6 +120,57 @@ func TestComponentDependencyGraphIncludesTransitiveRepositoryPackages(t *testing
 	}
 }
 
+func TestProductionRuntimeDiffDoesNotImportAnotherComponentIntent(t *testing.T) {
+	root := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	runGit(t, "init", "--initial-branch=main")
+	runGit(t, "config", "user.email", "release@example.test")
+	runGit(t, "config", "user.name", "Release Test")
+	writeFile(t, "go.mod", []byte("module example.test/release\n\ngo 1.22\n"))
+	writeFile(t, "shared/value.go", []byte("package shared\nconst Value = 1\n"))
+	writeFile(t, "cmd/a/main.go", []byte("package main\nimport _ \"example.test/release/shared\"\nfunc main(){}\n"))
+	writeFile(t, "cmd/b/main.go", []byte("package main\nimport _ \"example.test/release/shared\"\nfunc main(){}\n"))
+	registry := declarativerelease.Registry{APIVersion: declarativerelease.RegistryAPIVersion, Kind: declarativerelease.RegistryKind}
+	for _, id := range []string{"a", "b"} {
+		registry.Components = append(registry.Components, declarativerelease.Component{ID: id, Family: "test", IntentPath: "deploy/" + id + "/intent.json", ManifestPath: "deploy/" + id + "/resources.json",
+			SourceRoots: []string{"cmd/" + id}, Artifact: declarativerelease.Artifact{Repository: "ghcr.io/example/" + id, Dockerfile: "Dockerfile." + id, Context: ".", BuildPackage: "./cmd/" + id},
+			Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "test", Name: id, Container: id, FieldManager: id, Replicas: 1, RolloutMode: "rolling"},
+			Health:   []declarativerelease.HealthProbe{{Type: "deployment", Name: id}}, Concurrency: "fugue-production-" + id})
+		writeFile(t, "Dockerfile."+id, []byte("FROM scratch\n"))
+		writeFile(t, "deploy/"+id+"/resources.json", []byte("{}\n"))
+	}
+	writeJSON(t, "deploy/releases/components.json", registry)
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "base")
+	base := runGit(t, "rev-parse", "HEAD")
+	writeFile(t, "shared/value.go", []byte("package shared\nconst Value = 2\n"))
+	writeJSON(t, "deploy/a/intent.json", declarativerelease.Intent{APIVersion: declarativerelease.IntentAPIVersion, Kind: declarativerelease.IntentKind, Component: "a", Generation: 1,
+		ExpectedPreviousPresent: true, ExpectedPreviousConfigSHA: base, ExpectedPreviousManifestSHA: base, ExpectedPreviousOCIRevision: base,
+		ExpectedPreviousImageDigest: "sha256:" + strings.Repeat("a", 64), Rollback: "previous-git-lkg"})
+	writeFile(t, "deploy/b/intent.json", []byte("old unrelated intent\n"))
+	runGit(t, "add", ".")
+	runGit(t, "commit", "-m", "release a")
+	head := runGit(t, "rev-parse", "HEAD")
+	expanded, err := expandComponentDependencyRoots(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := addProductionRuntimeChanges(expanded, head, []string{"shared/value.go", "deploy/a/intent.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(paths, "deploy/b/intent.json") || containsPath(paths, "deploy/b/resources.json") {
+		t.Fatalf("selected component runtime diff imported another lane: %v", paths)
+	}
+}
+
 func TestReconcileRefusesToReplaceAnExistingCanonicalTerminalReceipt(t *testing.T) {
 	result := declarativerelease.ExecutionResult{
 		APIVersion: declarativerelease.ExecutionPlanAPIVersion, Kind: declarativerelease.ExecutionResultKind,

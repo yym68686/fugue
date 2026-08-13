@@ -1916,6 +1916,7 @@ func readyWorkloadPods(raw []byte, container string) ([]string, error) {
 }
 
 func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte, kind, name string) (declarativerelease.Observation, error) {
+	_ = target
 	apiVersion := "apps/v1"
 	if kind == "Job" {
 		apiVersion = "batch/v1"
@@ -1935,11 +1936,15 @@ func (cluster *kubectlCluster) verifyAuxiliaryWorkload(ctx context.Context, rele
 	}
 	auxiliaryRelease := release
 	auxiliaryRelease.Workload = workload
-	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, target.OCIRevision, manifest)
+	desiredTarget, err := targetIdentityFromDeclaredWorkload(desired, workload)
+	if err != nil {
+		return declarativerelease.Observation{}, err
+	}
+	auxiliary, err := cluster.observeExpected(ctx, auxiliaryRelease, desiredTarget.OCIRevision, manifest)
 	if err != nil {
 		return declarativerelease.Observation{}, fmt.Errorf("observe health workload %s/%s: %w", kind, name, err)
 	}
-	if !auxiliary.Matches(target, auxiliaryRelease, false) {
+	if !auxiliary.Matches(desiredTarget, auxiliaryRelease, false) {
 		return declarativerelease.Observation{}, fmt.Errorf("health workload %s/%s has not converged to the immutable target", kind, name)
 	}
 	return auxiliary, nil
