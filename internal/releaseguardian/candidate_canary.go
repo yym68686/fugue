@@ -43,8 +43,13 @@ func (sample CandidateRouteSample) validate(candidate CandidateAuthority, requir
 			sample.ObservedReleaseDigest != candidate.ReleaseRecordDigest || sample.ObservedWorkerSlot != candidate.WorkerSlot {
 			return errors.New("candidate route sample attestation is invalid")
 		}
-	} else if sample.Attested || sample.ObservedRecordDigest != "" || sample.ObservedReleaseDigest != "" || sample.ObservedWorkerSlot != "" {
-		return errors.New("previous authority control unexpectedly emitted candidate attestation")
+	} else if sample.Attested {
+		if sample.ObservedRecordDigest != candidate.RecordDigest || sample.ObservedWorkerSlot != candidate.WorkerSlot ||
+			!digestPattern.MatchString(sample.ObservedReleaseDigest) {
+			return errors.New("previous authority control attestation is invalid")
+		}
+	} else if sample.ObservedRecordDigest != "" || sample.ObservedReleaseDigest != "" || sample.ObservedWorkerSlot != "" {
+		return errors.New("previous authority control has a partial attestation")
 	}
 	observed, err := time.Parse(time.RFC3339Nano, sample.ObservedAt)
 	if err != nil || !observed.Equal(observed.UTC()) {

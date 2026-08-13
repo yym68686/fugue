@@ -88,6 +88,30 @@ func TestCandidateCanaryRequiresThreeCandidateBoundRouteSuccesses(t *testing.T) 
 	}
 }
 
+func TestCandidateCanaryAcceptsAnExactAttestedPreviousControlAndRejectsReplay(t *testing.T) {
+	candidate, current, now := candidateCanaryFixture(t)
+	previous := candidate
+	previous.RecordDigest, previous.WorkerSlot = current.CurrentRecordDigest, current.CurrentWorkerSlot
+	previousSamples := routeSamples(previous, now, true, true)
+	for index := range previousSamples {
+		previousSamples[index].ObservedReleaseDigest = otherDigest
+	}
+	if _, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), previousSamples, now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err != nil {
+		t.Fatalf("exact previous attestation rejected: %v", err)
+	}
+	for _, mutate := range []func(*CandidateRouteSample){
+		func(sample *CandidateRouteSample) { sample.ObservedRecordDigest = candidate.RecordDigest },
+		func(sample *CandidateRouteSample) { sample.ObservedWorkerSlot = candidate.WorkerSlot },
+		func(sample *CandidateRouteSample) { sample.ObservedReleaseDigest = "bad" },
+	} {
+		drifted := append([]CandidateRouteSample(nil), previousSamples...)
+		mutate(&drifted[0])
+		if _, err := EvaluateCandidateCanary(candidate, current, candidateWorkerCohortFixture(t, candidate), routeSamples(candidate, now, true, true), drifted, now, 30*time.Second, "candidate-canary-v1", candidateCanaryTestKey); err == nil {
+			t.Fatal("replayed previous attestation was accepted")
+		}
+	}
+}
+
 func TestCandidateCanaryAttributesMissingRouteToCandidateWhenPreviousIsHealthy(t *testing.T) {
 	candidate, current, now := candidateCanaryFixture(t)
 	previous := candidate
