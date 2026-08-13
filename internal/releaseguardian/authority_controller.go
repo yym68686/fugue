@@ -318,7 +318,7 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 		return AuthorityTransitionReceipt{}, errors.New("candidate is not an inactive distinct authority")
 	}
 	baseline, err := controller.store.LoadBaselineReceipt(ctx, groupID)
-	if err != nil || baseline.ReceiptDigest != current.BaselineReceiptDigest || baseline.WorkerSlot != current.CurrentWorkerSlot {
+	if err != nil || baseline.ReceiptDigest != current.BaselineReceiptDigest {
 		return AuthorityTransitionReceipt{}, errors.New("current Front baseline is unavailable")
 	}
 	currentFrontGeneration, currentBundleGeneration := current.CurrentFrontGeneration, current.CurrentBundleGeneration

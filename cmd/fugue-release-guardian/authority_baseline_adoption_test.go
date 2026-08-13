@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -83,6 +84,91 @@ func TestAuthorityBaselineAdoptsExactServingFrontWithoutChangingWorkloads(t *tes
 	workerAfter, _ := client.CoreV1().Pods("fugue-system").Get(context.Background(), worker.Name, metav1.GetOptions{})
 	if frontAfter.ResourceVersion != front.ResourceVersion || workerAfter.ResourceVersion != worker.ResourceVersion {
 		t.Fatal("baseline adoption changed a workload")
+	}
+}
+
+func TestAuthorityBaselineNormalizesOneLegacySwitchWithoutChangingWorkloads(t *testing.T) {
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	group := "edge-pool-a"
+	oldRecord := "sha256:" + strings.Repeat("a", 64)
+	olderRecord := "sha256:" + strings.Repeat("b", 64)
+	newSource := strings.Repeat("c", 40)
+	newImage := "sha256:" + strings.Repeat("d", 64)
+	newRecord, err := (releaseguardian.RouteBundleRecord{GroupID: group, Epoch: 11, BundleDigest: "sha256:" + strings.Repeat("e", 64),
+		SourceSHA: newSource, ControlImageDigest: "sha256:" + strings.Repeat("f", 64), InventoryDigest: "sha256:" + strings.Repeat("1", 64),
+		ManifestDigest: "sha256:" + strings.Repeat("2", 64), HealthContractDigest: "sha256:" + strings.Repeat("3", 64),
+		IssuedAt: now.Add(-time.Minute).Format(time.RFC3339Nano), KeyID: "key-a", Signature: strings.Repeat("A", 43)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "front-b", Namespace: "fugue-system", UID: types.UID("front-pod-uid-b"), ResourceVersion: "51",
+		Labels: map[string]string{"fugue.io/edge-group-id": group, "app.kubernetes.io/component": "edge-front-a"}, Annotations: map[string]string{"fugue.pro/source-commit": newSource}},
+		Spec: corev1.PodSpec{NodeName: "edge-node-a"}, Status: readyPodStatus("10.0.0.11", "edge-front", newImage)}
+	worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-b", Namespace: "fugue-system", UID: types.UID("worker-pod-uid-b"), ResourceVersion: "52",
+		Labels: map[string]string{"fugue.io/edge-group-id": group, "fugue.io/edge-slot": "b"}, Annotations: map[string]string{"fugue.pro/source-commit": newSource}},
+		Spec: corev1.PodSpec{NodeName: "edge-node-a"}, Status: readyPodStatus("10.0.0.12", "edge", newImage)}
+	client := fake.NewSimpleClientset(front, worker)
+	store, _ := releaseguardian.NewAuthorityStore(client, "fugue-system")
+	if err := store.CreateRouteBundleRecord(context.Background(), newRecord); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := (releaseguardian.AuthorityBaselineReceipt{GroupID: group, BeforeRecordDigest: olderRecord, BeforeWorkerSlot: releaseguardian.AuthoritySlotB,
+		BeforeAuthorityEpoch: 5, RecordDigest: oldRecord, WorkerSlot: releaseguardian.AuthoritySlotA, AuthorityEpoch: 6,
+		Nodes: []releaseguardian.AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-old-uid", FrontResourceVersion: "31",
+			WorkerPodUID: "worker-old-uid", WorkerResourceVersion: "32", ActivationGeneration: 7, BundleGeneration: "old.p6.r0",
+			ServingGeneration: "old", WorkerSourceSHA: strings.Repeat("4", 40), WorkerImageDigest: "sha256:" + strings.Repeat("5", 64)}},
+		ObservedAt: now.Add(-time.Hour).Format(time.RFC3339Nano)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+		GroupID: group, CurrentRecordDigest: oldRecord, CurrentWorkerSlot: releaseguardian.AuthoritySlotA,
+		CurrentFrontGeneration: 8, CurrentBundleGeneration: "old.p7.r1", CurrentWorkerSourceSHA: strings.Repeat("4", 40), CurrentWorkerImageDigest: "sha256:" + strings.Repeat("5", 64),
+		PreviousRecordDigest: olderRecord, PreviousWorkerSlot: releaseguardian.AuthoritySlotB, PreviousFrontGeneration: 7,
+		PreviousBundleGeneration: "older.p5.r0", PreviousWorkerSourceSHA: strings.Repeat("6", 40), PreviousWorkerImageDigest: "sha256:" + strings.Repeat("7", 64),
+		AuthorityEpoch: 7, BaselineReceiptDigest: baseline.ReceiptDigest}
+	authorityRaw, _ := declarativerelease.CanonicalJSON(before)
+	baselineRaw, _ := declarativerelease.CanonicalJSON(baseline)
+	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "fugue-current-authority-" + group, Namespace: "fugue-system",
+		UID: types.UID("current-authority-uid"), ResourceVersion: "60", Labels: map[string]string{"fugue.pro/group": group, "fugue.pro/authority-store": "true"}},
+		Data: map[string]string{"authority.json": string(authorityRaw), "baseline-receipt.json": string(baselineRaw)}}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Create(context.Background(), object, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	oldRead, oldRoute := readAuthorityBaselineJSON, requestAuthorityBaselineRoute
+	defer func() { readAuthorityBaselineJSON, requestAuthorityBaselineRoute = oldRead, oldRoute }()
+	readAuthorityBaselineJSON = func(_ context.Context, _ string, destination any) error {
+		switch value := destination.(type) {
+		case *baselineFrontHealth:
+			*value = baselineFrontHealth{Status: "ok", ActiveSlot: "b", Generation: 9, BundleGeneration: "new.p11.r0",
+				WorkerSourceCommit: newSource, WorkerImageDigest: newImage, RouteAuthority: "edge-control"}
+		case *baselineWorkerHealth:
+			*value = baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: "new.p11.r0", PublicationSequence: 11,
+				ServingGeneration: "new", CandidateBundleLoaded: true, CandidateRecordDigest: newRecord.RecordDigest, CandidateWorkerSlot: "b"}
+		}
+		return nil
+	}
+	requestAuthorityBaselineRoute = func(context.Context, string, string, string) (int, []byte, http.Header, error) {
+		headers := http.Header{}
+		headers.Set("X-Fugue-Candidate-Record-Digest", newRecord.RecordDigest)
+		headers.Set("X-Fugue-Candidate-Worker-Slot", "b")
+		return http.StatusOK, []byte("ok"), headers, nil
+	}
+	config := authorityBaselineConfig{GroupID: group, ExpectedRecordDigest: baseline.BeforeRecordDigest, ExpectedWorkerSlot: baseline.BeforeWorkerSlot,
+		ExpectedEpoch: baseline.BeforeAuthorityEpoch, FrontComponent: "edge-front-a", ExpectedNodes: 1,
+		SlotAddresses: map[releaseguardian.AuthoritySlot]string{releaseguardian.AuthoritySlotA: "127.0.0.1:18443", releaseguardian.AuthoritySlotB: "127.0.0.1:28443"},
+		Host:          "route.example.test", Path: "/", ExpectedBodyDigest: shaDigest([]byte("ok"))}
+	done, err := adoptAuthorityBaselineOnce(context.Background(), store, client, "fugue-system", config, now)
+	if err != nil || !done {
+		t.Fatalf("normalization done=%v err=%v", done, err)
+	}
+	after, _, _, err := store.LoadCurrent(context.Background(), group)
+	if err != nil || after.CurrentRecordDigest != newRecord.RecordDigest || after.CurrentWorkerSlot != releaseguardian.AuthoritySlotB ||
+		after.PreviousRecordDigest != "" || after.PreviousWorkerSlot != "" || after.BaselineReceiptDigest != baseline.ReceiptDigest {
+		t.Fatalf("normalized authority=%+v err=%v", after, err)
+	}
+	if next, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), object.Name, metav1.GetOptions{}); err != nil || next.Data["normalization-receipt.json"] == "" {
+		t.Fatalf("normalization receipt missing: %v", err)
 	}
 }
 

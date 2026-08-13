@@ -309,7 +309,7 @@ func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (C
 		return CurrentAuthority{}, "", "", err
 	}
 	if object.Immutable != nil && *object.Immutable || object.UID == "" || strings.TrimSpace(object.ResourceVersion) == "" ||
-		object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-store"] != "true" || len(object.Data) < 1 || len(object.Data) > 2 {
+		object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-store"] != "true" || len(object.Data) < 1 || len(object.Data) > 3 {
 		return CurrentAuthority{}, "", "", errors.New("mutable authority object metadata is invalid")
 	}
 	var authority CurrentAuthority
@@ -324,6 +324,13 @@ func (store *AuthorityStore) LoadCurrent(ctx context.Context, groupID string) (C
 		}
 	} else if authority.BaselineReceiptDigest != "" {
 		return CurrentAuthority{}, "", "", errors.New("authority baseline receipt is missing")
+	}
+	if raw, exists := object.Data["normalization-receipt.json"]; exists {
+		var receipt AuthorityNormalizationReceipt
+		if decodeStrict([]byte(raw), &receipt) != nil || receipt.Validate() != nil || receipt.GroupID != groupID ||
+			receipt.BaselineReceiptDigest != authority.BaselineReceiptDigest || authority.AuthorityEpoch < receipt.After.AuthorityEpoch {
+			return CurrentAuthority{}, "", "", errors.New("authority normalization receipt binding is invalid")
+		}
 	}
 	return authority, object.UID, object.ResourceVersion, nil
 }
@@ -612,6 +619,46 @@ func (store *AuthorityStore) AdoptCurrentBaseline(ctx context.Context, authority
 	return result.UID, result.ResourceVersion, nil
 }
 
+func (store *AuthorityStore) NormalizeCurrentBaseline(ctx context.Context, authority CurrentAuthority, receipt AuthorityNormalizationReceipt, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
+	if authority.Validate() != nil || receipt.Validate() != nil || authority != receipt.After || receipt.Before.GroupID != authority.GroupID ||
+		expectedUID == "" || strings.TrimSpace(expectedResourceVersion) == "" {
+		return "", "", errors.New("authority normalization is invalid")
+	}
+	configMaps := store.client.CoreV1().ConfigMaps(store.namespace)
+	current, err := configMaps.Get(ctx, currentAuthorityName(authority.GroupID), metav1.GetOptions{})
+	if err != nil || current.UID != expectedUID || current.ResourceVersion != expectedResourceVersion ||
+		current.Labels["fugue.pro/group"] != authority.GroupID || len(current.Data) != 2 {
+		return "", "", errors.New("authority normalization CAS changed")
+	}
+	var before CurrentAuthority
+	var baseline AuthorityBaselineReceipt
+	if decodeStrict([]byte(current.Data["authority.json"]), &before) != nil || before != receipt.Before || before.Validate() != nil ||
+		decodeStrict([]byte(current.Data["baseline-receipt.json"]), &baseline) != nil || baseline.Validate() != nil ||
+		baseline.ReceiptDigest != receipt.BaselineReceiptDigest || before.BaselineReceiptDigest != baseline.ReceiptDigest ||
+		before.PreviousRecordDigest == "" || before.PreviousWorkerSlot == "" {
+		return "", "", errors.New("authority normalization predecessor changed")
+	}
+	authorityRaw, err := declarativerelease.CanonicalJSON(authority)
+	if err != nil {
+		return "", "", err
+	}
+	receiptRaw, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return "", "", err
+	}
+	updated := current.DeepCopy()
+	updated.Data = map[string]string{
+		"authority.json": string(authorityRaw), "baseline-receipt.json": current.Data["baseline-receipt.json"],
+		"normalization-receipt.json": string(receiptRaw),
+	}
+	updated.Labels = authorityLabels(authority.GroupID)
+	result, err := configMaps.Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	return result.UID, result.ResourceVersion, nil
+}
+
 type mutableTransitionCheck func(currentPayload string) error
 
 func (store *AuthorityStore) putMutable(ctx context.Context, name, groupID, key string, value any, expectedUID types.UID, expectedResourceVersion string, check mutableTransitionCheck) (types.UID, string, error) {
@@ -645,6 +692,9 @@ func (store *AuthorityStore) putMutable(ctx context.Context, name, groupID, key 
 	if key == "authority.json" {
 		if receipt, exists := current.Data["baseline-receipt.json"]; exists {
 			updated.Data["baseline-receipt.json"] = receipt
+		}
+		if receipt, exists := current.Data["normalization-receipt.json"]; exists {
+			updated.Data["normalization-receipt.json"] = receipt
 		}
 	}
 	updated.Labels = authorityLabels(groupID)

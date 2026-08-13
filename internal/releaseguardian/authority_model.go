@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	RouteBundleRecordKind        = edgeauthority.RouteBundleRecordKind
-	CandidateAuthorityKind       = "CandidateAuthority"
-	CurrentAuthorityKind         = "CurrentAuthority"
-	CandidateCanaryResultKind    = "CandidateCanaryResult"
-	GroupQualificationRecordKind = "GroupQualificationRecord"
+	RouteBundleRecordKind             = edgeauthority.RouteBundleRecordKind
+	CandidateAuthorityKind            = "CandidateAuthority"
+	CurrentAuthorityKind              = "CurrentAuthority"
+	CandidateCanaryResultKind         = "CandidateCanaryResult"
+	GroupQualificationRecordKind      = "GroupQualificationRecord"
+	AuthorityNormalizationReceiptKind = "AuthorityNormalizationReceipt"
 )
 
 type AuthoritySlot string
@@ -366,6 +367,77 @@ type AuthorityBaselineReceipt struct {
 	Nodes                []AuthorityBaselineNodeWitness `json:"nodes"`
 	ObservedAt           string                         `json:"observedAt"`
 	ReceiptDigest        string                         `json:"receiptDigest"`
+}
+
+// AuthorityNormalizationReceipt is the one-time witness used when a legacy
+// writer switched the real Front before CurrentAuthority became the sole
+// traffic pointer. It deliberately records no executable previous authority:
+// the inactive slot must pass a fresh canary before it can become the next LKG.
+type AuthorityNormalizationReceipt struct {
+	APIVersion            string                         `json:"apiVersion"`
+	Kind                  string                         `json:"kind"`
+	GroupID               string                         `json:"groupId"`
+	BaselineReceiptDigest string                         `json:"baselineReceiptDigest"`
+	Before                CurrentAuthority               `json:"before"`
+	After                 CurrentAuthority               `json:"after"`
+	Nodes                 []AuthorityBaselineNodeWitness `json:"nodes"`
+	ObservedAt            string                         `json:"observedAt"`
+	ReceiptDigest         string                         `json:"receiptDigest"`
+}
+
+func (receipt AuthorityNormalizationReceipt) Seal() (AuthorityNormalizationReceipt, error) {
+	receipt.APIVersion, receipt.Kind, receipt.ReceiptDigest = APIVersion, AuthorityNormalizationReceiptKind, ""
+	sort.Slice(receipt.Nodes, func(i, j int) bool { return receipt.Nodes[i].NodeName < receipt.Nodes[j].NodeName })
+	if err := receipt.validateUnsigned(); err != nil {
+		return AuthorityNormalizationReceipt{}, err
+	}
+	raw, err := declarativerelease.CanonicalJSON(receipt)
+	if err != nil {
+		return AuthorityNormalizationReceipt{}, err
+	}
+	receipt.ReceiptDigest = digest(raw)
+	return receipt, nil
+}
+
+func (receipt AuthorityNormalizationReceipt) Validate() error {
+	if !digestPattern.MatchString(receipt.ReceiptDigest) || receipt.validateUnsigned() != nil {
+		return errors.New("authority normalization receipt is invalid")
+	}
+	copy := receipt
+	copy.ReceiptDigest = ""
+	raw, err := declarativerelease.CanonicalJSON(copy)
+	if err != nil || digest(raw) != receipt.ReceiptDigest {
+		return errors.New("authority normalization receipt digest is invalid")
+	}
+	return nil
+}
+
+func (receipt AuthorityNormalizationReceipt) validateUnsigned() error {
+	if receipt.APIVersion != APIVersion || receipt.Kind != AuthorityNormalizationReceiptKind ||
+		!groupPattern.MatchString(receipt.GroupID) || !digestPattern.MatchString(receipt.BaselineReceiptDigest) ||
+		receipt.Before.Validate() != nil || receipt.After.Validate() != nil || receipt.Before.GroupID != receipt.GroupID || receipt.After.GroupID != receipt.GroupID ||
+		receipt.Before.BaselineReceiptDigest != receipt.BaselineReceiptDigest || receipt.After.BaselineReceiptDigest != receipt.BaselineReceiptDigest ||
+		receipt.After.AuthorityEpoch <= receipt.Before.AuthorityEpoch || receipt.After.CurrentRecordDigest == receipt.Before.CurrentRecordDigest ||
+		receipt.After.CurrentWorkerSlot == receipt.Before.CurrentWorkerSlot || receipt.After.PreviousRecordDigest != "" || receipt.After.PreviousWorkerSlot != "" ||
+		len(receipt.Nodes) < 1 || len(receipt.Nodes) > 100 {
+		return errors.New("authority normalization receipt identity is invalid")
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
+	if err != nil || !observedAt.Equal(observedAt.UTC()) {
+		return errors.New("authority normalization receipt time is invalid")
+	}
+	seen := map[string]bool{}
+	for _, node := range receipt.Nodes {
+		if !componentPattern.MatchString(node.NodeName) || seen[node.NodeName] || len(node.FrontPodUID) < 8 || len(node.WorkerPodUID) < 8 ||
+			strings.TrimSpace(node.FrontResourceVersion) == "" || strings.TrimSpace(node.WorkerResourceVersion) == "" ||
+			node.ActivationGeneration != receipt.After.CurrentFrontGeneration || node.BundleGeneration != receipt.After.CurrentBundleGeneration ||
+			node.WorkerSourceSHA != receipt.After.CurrentWorkerSourceSHA || node.WorkerImageDigest != receipt.After.CurrentWorkerImageDigest ||
+			!authorityGenerationPattern.MatchString(node.ServingGeneration) {
+			return errors.New("authority normalization node witness is invalid")
+		}
+		seen[node.NodeName] = true
+	}
+	return nil
 }
 
 func (receipt AuthorityBaselineReceipt) Seal() (AuthorityBaselineReceipt, error) {

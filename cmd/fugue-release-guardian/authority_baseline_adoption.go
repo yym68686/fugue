@@ -40,8 +40,10 @@ type authorityBaselineConfig struct {
 
 type authorityBaselineStore interface {
 	LoadCurrent(context.Context, string) (releaseguardian.CurrentAuthority, types.UID, string, error)
+	LoadBaselineReceipt(context.Context, string) (releaseguardian.AuthorityBaselineReceipt, error)
 	LoadRouteBundleRecord(context.Context, string, string) (releaseguardian.RouteBundleRecord, error)
 	AdoptCurrentBaseline(context.Context, releaseguardian.CurrentAuthority, releaseguardian.AuthorityBaselineReceipt, types.UID, string) (types.UID, string, error)
+	NormalizeCurrentBaseline(context.Context, releaseguardian.CurrentAuthority, releaseguardian.AuthorityNormalizationReceipt, types.UID, string) (types.UID, string, error)
 }
 
 type baselineFrontHealth struct {
@@ -129,12 +131,18 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 	if err != nil {
 		return false, err
 	}
-	if before.BaselineReceiptDigest != "" {
-		return true, nil
-	}
-	if before.CurrentRecordDigest != config.ExpectedRecordDigest || before.CurrentWorkerSlot != config.ExpectedWorkerSlot || before.AuthorityEpoch != config.ExpectedEpoch ||
-		before.PreviousRecordDigest != "" || before.PreviousWorkerSlot != "" {
-		return false, errors.New("authority baseline predecessor does not match the one-time authorization")
+	var baseline releaseguardian.AuthorityBaselineReceipt
+	if before.BaselineReceiptDigest == "" {
+		if before.CurrentRecordDigest != config.ExpectedRecordDigest || before.CurrentWorkerSlot != config.ExpectedWorkerSlot || before.AuthorityEpoch != config.ExpectedEpoch ||
+			before.PreviousRecordDigest != "" || before.PreviousWorkerSlot != "" {
+			return false, errors.New("authority baseline predecessor does not match the one-time authorization")
+		}
+	} else {
+		baseline, err = store.LoadBaselineReceipt(ctx, config.GroupID)
+		if err != nil || baseline.ReceiptDigest != before.BaselineReceiptDigest || baseline.BeforeRecordDigest != config.ExpectedRecordDigest ||
+			baseline.BeforeWorkerSlot != config.ExpectedWorkerSlot || baseline.BeforeAuthorityEpoch != config.ExpectedEpoch {
+			return false, errors.New("authority normalization is not bound to the original one-time authorization")
+		}
 	}
 	fronts, err := observeBaselineFronts(ctx, client, namespace, config)
 	if err != nil {
@@ -148,8 +156,8 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 			return false, errors.New("Front baseline contains mixed active slots")
 		}
 	}
-	if activeSlot.Validate() != nil || activeSlot == before.CurrentWorkerSlot {
-		return false, errors.New("Front baseline is not a distinct active authority")
+	if activeSlot.Validate() != nil {
+		return false, errors.New("Front baseline has an invalid active authority")
 	}
 	workers, recordDigest, epoch, witnesses, err := observeBaselineWorkers(ctx, client, namespace, config, activeSlot, fronts)
 	if err != nil {
@@ -165,6 +173,31 @@ func adoptAuthorityBaselineOnce(ctx context.Context, store authorityBaselineStor
 		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest")) != recordDigest ||
 		strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot")) != string(activeSlot) {
 		return false, errors.New("active Front route does not attest the baseline record")
+	}
+	if before.BaselineReceiptDigest != "" && activeSlot == before.CurrentWorkerSlot && recordDigest == before.CurrentRecordDigest &&
+		witnesses[0].ActivationGeneration == before.CurrentFrontGeneration && witnesses[0].BundleGeneration == before.CurrentBundleGeneration &&
+		witnesses[0].WorkerSourceSHA == before.CurrentWorkerSourceSHA && witnesses[0].WorkerImageDigest == before.CurrentWorkerImageDigest {
+		return true, nil
+	}
+	if before.BaselineReceiptDigest != "" {
+		if activeSlot == before.CurrentWorkerSlot || before.PreviousRecordDigest == "" || before.PreviousWorkerSlot == "" || epoch <= before.AuthorityEpoch {
+			return false, errors.New("authority normalization live state is not a single forward legacy switch")
+		}
+		after := releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CurrentAuthorityKind,
+			GroupID: config.GroupID, CurrentRecordDigest: recordDigest, CurrentWorkerSlot: activeSlot,
+			CurrentFrontGeneration: witnesses[0].ActivationGeneration, CurrentBundleGeneration: witnesses[0].BundleGeneration,
+			CurrentWorkerSourceSHA: witnesses[0].WorkerSourceSHA, CurrentWorkerImageDigest: witnesses[0].WorkerImageDigest,
+			AuthorityEpoch: int64(epoch), BaselineReceiptDigest: before.BaselineReceiptDigest}
+		normalization, sealErr := (releaseguardian.AuthorityNormalizationReceipt{GroupID: config.GroupID,
+			BaselineReceiptDigest: before.BaselineReceiptDigest, Before: before, After: after,
+			Nodes: witnesses, ObservedAt: now.Format(time.RFC3339Nano)}).Seal()
+		if sealErr != nil {
+			return false, sealErr
+		}
+		if _, _, err := store.NormalizeCurrentBaseline(ctx, after, normalization, uid, rv); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	receipt, err := (releaseguardian.AuthorityBaselineReceipt{
 		GroupID: config.GroupID, BeforeRecordDigest: before.CurrentRecordDigest, BeforeWorkerSlot: before.CurrentWorkerSlot, BeforeAuthorityEpoch: before.AuthorityEpoch,
