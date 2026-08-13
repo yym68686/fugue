@@ -62,6 +62,7 @@ type candidateImportStore interface {
 	PutCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
 	SwitchCurrent(context.Context, releaseguardian.CurrentAuthority, types.UID, string) (types.UID, string, error)
 	ReplaceLoadedCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
+	ReplaceSettledCandidate(context.Context, releaseguardian.CandidateAuthority, types.UID, string) (types.UID, string, error)
 }
 
 func parseCandidateImports(value string) ([]candidateImportConfig, error) {
@@ -176,9 +177,6 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		existingCandidate.CurrentPublicationSequence != candidate.CurrentPublicationSequence || existingCandidate.CurrentRecoveryEpoch != candidate.CurrentRecoveryEpoch ||
 		existingCandidate.CurrentBundleDigest != candidate.CurrentBundleDigest || existingCandidate.CurrentServingGeneration != candidate.CurrentServingGeneration || existingCandidate.CandidateEpoch != candidate.CandidateEpoch ||
 		existingCandidate.WorkerSlot != candidate.WorkerSlot || existingCandidate.ReleaseRecordDigest != candidate.ReleaseRecordDigest)
-	if candidateChanged && existingCandidate.State != releaseguardian.CandidateAuthorityLoaded {
-		return false, errors.New("candidate envelope conflicts with terminal candidate authority")
-	}
 	if candidateMissing {
 		if _, _, err := store.PutCandidate(ctx, candidate, "", ""); err != nil {
 			return false, fmt.Errorf("load candidate authority: %w", err)
@@ -186,8 +184,14 @@ func importCandidateOnce(ctx context.Context, store candidateImportStore, client
 		changed = true
 	} else if candidateChanged {
 		candidate.Generation = existingCandidate.Generation + 1
-		if _, _, err := store.ReplaceLoadedCandidate(ctx, candidate, candidateUID, candidateRV); err != nil {
-			return false, fmt.Errorf("replace imported candidate authority: %w", err)
+		var replaceErr error
+		if existingCandidate.State == releaseguardian.CandidateAuthorityLoaded {
+			_, _, replaceErr = store.ReplaceLoadedCandidate(ctx, candidate, candidateUID, candidateRV)
+		} else {
+			_, _, replaceErr = store.ReplaceSettledCandidate(ctx, candidate, candidateUID, candidateRV)
+		}
+		if replaceErr != nil {
+			return false, fmt.Errorf("replace imported candidate authority: %w", replaceErr)
 		}
 		changed = true
 	}

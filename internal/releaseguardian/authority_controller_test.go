@@ -16,6 +16,8 @@ import (
 type testFrontActivator struct {
 	beginErr    error
 	transaction *testFrontTransaction
+	settled     bool
+	settleErr   error
 }
 type testAuthorityHealthObserver struct {
 	currentHealthy bool
@@ -37,8 +39,10 @@ type testFrontTransaction struct {
 }
 type testAuthorityDecisionStore struct {
 	*AuthorityStore
-	baseline  AuthorityBaselineReceipt
-	switchErr error
+	baseline    AuthorityBaselineReceipt
+	switchErr   error
+	createErr   error
+	deleteCount *int
 }
 
 func (store testAuthorityDecisionStore) LoadBaselineReceipt(context.Context, string) (AuthorityBaselineReceipt, error) {
@@ -55,12 +59,15 @@ func (store testAuthorityDecisionStore) SwitchCurrent(ctx context.Context, autho
 	return store.AuthorityStore.SwitchCurrent(ctx, authority, uid, rv)
 }
 func (store testAuthorityDecisionStore) CreateTransitionJournal(context.Context, AuthorityTransitionJournal) error {
-	return nil
+	return store.createErr
 }
 func (store testAuthorityDecisionStore) UpdateTransitionJournal(context.Context, AuthorityTransitionJournal, AuthorityTransitionJournal) error {
 	return nil
 }
 func (store testAuthorityDecisionStore) DeleteTransitionJournal(context.Context, AuthorityTransitionJournal) error {
+	if store.deleteCount != nil {
+		*store.deleteCount++
+	}
 	return nil
 }
 
@@ -77,6 +84,9 @@ func (activator testFrontActivator) BeginPromote(_ context.Context, target Front
 		TargetSlot: target.TargetSlot, TargetGeneration: 8, TargetBundleGeneration: target.ServingGeneration + ".p8.r0",
 		TargetWorkerSourceSHA: target.WorkerSourceSHA, TargetWorkerImageDigest: target.WorkerImageDigest}
 	return transaction, nil
+}
+func (activator testFrontActivator) CompensationSettled(context.Context, AuthorityTransitionJournal) (bool, error) {
+	return activator.settled, activator.settleErr
 }
 func (testFrontActivator) BeginRestore(_ context.Context, current CurrentAuthority) (FrontAuthorityTransaction, error) {
 	return &testFrontTransaction{receipt: FrontAuthorityReceipt{GroupID: current.GroupID, PreviousSlot: current.CurrentWorkerSlot, PreviousGeneration: current.CurrentFrontGeneration,
@@ -359,6 +369,50 @@ func TestAuthorityControllerDoesNotSwitchWhenProductionActivationFails(t *testin
 	current, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
 	if err != nil || current != fixture.current {
 		t.Fatalf("activation failure changed current: %+v err=%v", current, err)
+	}
+}
+
+func TestAuthorityControllerPersistsPreparedJournalBeforeTerminalCandidate(t *testing.T) {
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{})
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, createErr: errors.New("journal unavailable")}
+	if _, err := fixture.controller.VerifyAndSwitch(context.Background(), fixture.group, fixture.result.ResultDigest); err == nil || !strings.Contains(err.Error(), "journal unavailable") {
+		t.Fatalf("missing journal error=%v", err)
+	}
+	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil || candidate.State != CandidateAuthorityLoaded || candidate.CanaryResultDigest != "" {
+		t.Fatalf("journal failure terminalized candidate: %+v err=%v", candidate, err)
+	}
+}
+
+func TestAuthorityControllerRetiresOnlyProvenCompensatedActivatedJournal(t *testing.T) {
+	deleted := 0
+	controller := &AuthorityController{store: testAuthorityDecisionStore{deleteCount: &deleted},
+		activators: map[string]FrontAuthorityActivator{"edge-pool-a": testFrontActivator{settled: true}}, now: time.Now}
+	current := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: "edge-pool-a",
+		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 7}
+	candidate := bindCandidatePromotionWitness(CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: current.GroupID,
+		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
+		State: CandidateAuthorityLoaded, Generation: 1})
+	candidate.State, candidate.Generation, candidate.CanaryResultDigest = CandidateAuthorityVerified, 2, testDigest
+	journal, err := (AuthorityTransitionJournal{GroupID: current.GroupID, Phase: AuthorityTransitionActivated,
+		CurrentUID: "current-uid", CurrentRV: "20", Before: current, Candidate: candidate, CanaryResultDigest: testDigest,
+		PreviousNodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-uid", FrontResourceVersion: "10",
+			WorkerPodUID: "worker-pod-uid", WorkerResourceVersion: "11", ActivationGeneration: 7, BundleGeneration: "previous-bundle-7",
+			ServingGeneration: "previous-serving-7", WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		Activation: &FrontAuthorityReceipt{GroupID: current.GroupID, PreviousSlot: AuthoritySlotA, PreviousGeneration: 7,
+			PreviousBundleGeneration: "previous-bundle-7", PreviousWorkerSourceSHA: testSHA, PreviousWorkerImageDigest: testDigest,
+			TargetSlot: AuthoritySlotB, TargetGeneration: 8, TargetBundleGeneration: "candidate-serving.p8.r0",
+			TargetWorkerSourceSHA: testSHA, TargetWorkerImageDigest: otherDigest},
+		CreatedAt: time.Unix(8_000, 0).UTC().Format(time.RFC3339Nano)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := controller.resumeTransition(context.Background(), current, journal); err != nil || changed || deleted != 1 {
+		t.Fatalf("settled journal changed=%v deleted=%d err=%v", changed, deleted, err)
+	}
+	controller.activators[current.GroupID] = testFrontActivator{settled: false}
+	if _, _, err := controller.resumeTransition(context.Background(), current, journal); err == nil || deleted != 1 {
+		t.Fatalf("unproven journal was retired: deleted=%d err=%v", deleted, err)
 	}
 }
 

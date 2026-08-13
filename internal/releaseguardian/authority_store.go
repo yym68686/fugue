@@ -145,23 +145,35 @@ func (store *AuthorityStore) UpdateTransitionJournal(ctx context.Context, before
 		before.Candidate.RecordDigest != after.Candidate.RecordDigest || before.CanaryResultDigest != after.CanaryResultDigest {
 		return errors.New("authority transition journal update is invalid")
 	}
-	// Immutable journals are phase-addressed. The prepared witness remains for
-	// crash forensics until the activated witness exists, then is CAS-deleted.
+	// Immutable journals are phase-addressed. Once the activated witness exists
+	// it is the durable recovery authority. Failure to garbage-collect the
+	// prepared witness must not be misreported as failure to persist activation
+	// (and must never trigger compensation of an otherwise resumable change).
 	if err := store.createImmutable(ctx, transitionActivatedJournalName(after.GroupID), after.GroupID, "transition-journal", "journal.json", after); err != nil {
 		return err
 	}
-	return store.deleteImmutableJournal(ctx, transitionJournalName(before.GroupID), before)
+	_ = store.deleteImmutableJournal(ctx, transitionJournalName(before.GroupID), before)
+	return nil
 }
 
 func (store *AuthorityStore) DeleteTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
 	if journal.Validate() != nil {
 		return errors.New("authority transition journal delete is invalid")
 	}
-	name := transitionJournalName(journal.GroupID)
 	if journal.Phase == AuthorityTransitionActivated {
-		name = transitionActivatedJournalName(journal.GroupID)
+		prepared := journal
+		prepared.Phase, prepared.Activation, prepared.JournalDigest = AuthorityTransitionPrepared, nil, ""
+		var err error
+		prepared, err = prepared.Seal()
+		if err != nil {
+			return err
+		}
+		if err := store.deleteImmutableJournal(ctx, transitionJournalName(journal.GroupID), prepared); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return store.deleteImmutableJournal(ctx, transitionActivatedJournalName(journal.GroupID), journal)
 	}
-	return store.deleteImmutableJournal(ctx, name, journal)
+	return store.deleteImmutableJournal(ctx, transitionJournalName(journal.GroupID), journal)
 }
 
 func (store *AuthorityStore) deleteImmutableJournal(ctx context.Context, name string, journal AuthorityTransitionJournal) error {
@@ -183,6 +195,12 @@ func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Cont
 	if !groupPattern.MatchString(groupID) || now.IsZero() || !now.Equal(now.UTC()) {
 		return errors.New("candidate canary prune request is invalid")
 	}
+	protectedDigest := ""
+	if journal, exists, err := store.LoadTransitionJournal(ctx, groupID); err != nil {
+		return err
+	} else if exists {
+		protectedDigest = journal.CanaryResultDigest
+	}
 	selector := labels.Set{"fugue.pro/group": groupID, "fugue.pro/authority-kind": "candidate-canary"}.AsSelector().String()
 	objects, err := store.client.CoreV1().ConfigMaps(store.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 257})
 	if err != nil {
@@ -202,7 +220,7 @@ func (store *AuthorityStore) PruneExpiredCandidateCanaryResults(ctx context.Cont
 			return errors.New("candidate canary cleanup encountered an invalid object")
 		}
 		expiresAt, _ := time.Parse(time.RFC3339Nano, result.ExpiresAt)
-		if now.Before(expiresAt) {
+		if now.Before(expiresAt) || result.ResultDigest == protectedDigest {
 			continue
 		}
 		uid := object.UID
@@ -503,6 +521,31 @@ func (store *AuthorityStore) ReplaceLoadedCandidate(ctx context.Context, candida
 				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CurrentServingGeneration == current.CurrentServingGeneration && candidate.CandidateEpoch == current.CandidateEpoch &&
 				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
 			return errors.New("loaded candidate replacement changes an ineligible pointer")
+		}
+		return nil
+	})
+}
+
+// ReplaceSettledCandidate advances a terminal pointer only after no immutable
+// transition journal remains. Reconcile never starts a verified candidate
+// without such a journal, so this CAS cannot race a production activation.
+func (store *AuthorityStore) ReplaceSettledCandidate(ctx context.Context, candidate CandidateAuthority, expectedUID types.UID, expectedResourceVersion string) (types.UID, string, error) {
+	if err := candidate.Validate(); err != nil || candidate.State != CandidateAuthorityLoaded {
+		return "", "", errors.New("settled candidate replacement is invalid")
+	}
+	if _, exists, err := store.LoadTransitionJournal(ctx, candidate.GroupID); err != nil || exists {
+		return "", "", errors.New("settled candidate still has an active transition")
+	}
+	return store.putMutable(ctx, candidateAuthorityName(candidate.GroupID), candidate.GroupID, "candidate.json", candidate, expectedUID, expectedResourceVersion, func(raw string) error {
+		var current CandidateAuthority
+		if err := decodeStrict([]byte(raw), &current); err != nil || current.Validate() != nil || current.State == CandidateAuthorityLoaded ||
+			candidate.Generation != current.Generation+1 || candidate.GroupID != current.GroupID ||
+			(candidate.RecordDigest == current.RecordDigest && candidate.BundleGeneration == current.BundleGeneration && candidate.ServingGeneration == current.ServingGeneration &&
+				candidate.AuthoritySequence == current.AuthoritySequence && candidate.CandidateSequence == current.CandidateSequence &&
+				candidate.CurrentPublicationSequence == current.CurrentPublicationSequence && candidate.CurrentRecoveryEpoch == current.CurrentRecoveryEpoch &&
+				candidate.CurrentBundleDigest == current.CurrentBundleDigest && candidate.CurrentServingGeneration == current.CurrentServingGeneration && candidate.CandidateEpoch == current.CandidateEpoch &&
+				candidate.WorkerSlot == current.WorkerSlot && candidate.ReleaseRecordDigest == current.ReleaseRecordDigest) {
+			return errors.New("settled candidate replacement changes an ineligible pointer")
 		}
 		return nil
 	})

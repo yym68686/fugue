@@ -389,6 +389,11 @@ func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 	if _, _, err := store.ReplaceLoadedCandidate(ctx, candidate, terminalUID, terminalRV); err == nil {
 		t.Fatal("terminal candidate was replaceable by importer")
 	}
+	settledReplacement := candidate
+	settledReplacement.RecordDigest, settledReplacement.WorkerSlot, settledReplacement.Generation = testDigest, AuthoritySlotB, terminal.Generation+1
+	if _, _, err := store.ReplaceSettledCandidate(ctx, settledReplacement, terminalUID, terminalRV); err != nil {
+		t.Fatalf("settled terminal candidate was not replaceable: %v", err)
+	}
 }
 
 func TestAuthorityTransitionJournalAdvancesImmutablePhasesAndDeletesByCAS(t *testing.T) {
@@ -429,5 +434,47 @@ func TestAuthorityTransitionJournalAdvancesImmutablePhasesAndDeletesByCAS(t *tes
 	}
 	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, transitionActivatedJournalName(candidate.GroupID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatal("activated journal remained after terminal delete")
+	}
+}
+
+func TestExpiredCanaryReferencedByActiveJournalIsNotPruned(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(9_000, 0).UTC()
+	client := fake.NewSimpleClientset()
+	store, _ := NewAuthorityStore(client, "fugue-system")
+	candidate := bindCandidatePromotionWitness(CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
+		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
+		State: CandidateAuthorityLoaded, Generation: 1})
+	result, err := SignCandidateCanaryResult(candidateResultFixture(candidate, now, HealthHealthy, HealthHealthy), candidateCanaryTestKey)
+	if err != nil || store.CreateCandidateCanaryResult(ctx, result, now) != nil {
+		t.Fatal(err)
+	}
+	candidate.State, candidate.Generation, candidate.CanaryResultDigest = CandidateAuthorityVerified, 2, result.ResultDigest
+	before := CurrentAuthority{APIVersion: APIVersion, Kind: CurrentAuthorityKind, GroupID: candidate.GroupID,
+		CurrentRecordDigest: testDigest, CurrentWorkerSlot: AuthoritySlotA, AuthorityEpoch: 1}
+	journal, err := (AuthorityTransitionJournal{GroupID: candidate.GroupID, Phase: AuthorityTransitionPrepared,
+		CurrentUID: "current-uid", CurrentRV: "20", Before: before, Candidate: candidate, CanaryResultDigest: result.ResultDigest,
+		PreviousNodes: []AuthorityBaselineNodeWitness{{NodeName: "edge-node-a", FrontPodUID: "front-pod-uid", FrontResourceVersion: "10",
+			WorkerPodUID: "worker-pod-uid", WorkerResourceVersion: "11", ActivationGeneration: 7, BundleGeneration: "previous-bundle-7",
+			ServingGeneration: "previous-serving-7", WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest}},
+		CreatedAt: now.Format(time.RFC3339Nano)}).Seal()
+	if err != nil || store.CreateTransitionJournal(ctx, journal) != nil {
+		t.Fatal(err)
+	}
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, candidate.GroupID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	name := candidateCanaryResultName(candidate.GroupID, result.ResultDigest)
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("journal canary was pruned: %v", err)
+	}
+	if err := store.DeleteTransitionJournal(ctx, journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, candidate.GroupID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("unreferenced expired canary remains: %v", err)
 	}
 }

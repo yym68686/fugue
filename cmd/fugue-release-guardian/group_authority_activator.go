@@ -221,6 +221,76 @@ func (activator *groupAuthorityActivator) Finalize(ctx context.Context) error {
 	return lease.release(ctx)
 }
 
+// CompensationSettled proves both sides of an activated-but-uncommitted
+// transaction are back at their exact LKG. It performs no mutation: the
+// Edge Control status endpoint and Front activation files are read-only CAS
+// witnesses. A mismatch leaves the immutable journal in place.
+func (activator *groupAuthorityActivator) CompensationSettled(ctx context.Context, journal releaseguardian.AuthorityTransitionJournal) (bool, error) {
+	if activator == nil || journal.Validate() != nil || journal.Phase != releaseguardian.AuthorityTransitionActivated ||
+		journal.GroupID != activator.config.GroupID || journal.Activation == nil {
+		return false, errors.New("authority compensation settlement input is invalid")
+	}
+	activation := *journal.Activation
+	target := releaseguardian.FrontAuthorityTarget{
+		GroupID: journal.GroupID, TargetSlot: activation.PreviousSlot,
+		CandidateBundleGeneration: activation.PreviousBundleGeneration,
+		ServingGeneration:         activation.PreviousBundleGeneration,
+		FrontBundleGeneration:     activation.PreviousBundleGeneration,
+		WorkerSourceSHA:           activation.PreviousWorkerSourceSHA,
+		WorkerImageDigest:         activation.PreviousWorkerImageDigest,
+		PreviousSlot:              activation.TargetSlot,
+		PreviousFrontGeneration:   activation.TargetGeneration,
+		PreviousBundleGeneration:  activation.TargetBundleGeneration,
+		PreviousWorkerSourceSHA:   activation.TargetWorkerSourceSHA,
+		PreviousWorkerImageDigest: activation.TargetWorkerImageDigest,
+	}
+	preflight, err := activator.front.preflightForOperation(ctx, target, edgegroupfront.ActivationOperationRollback)
+	if err != nil || !preflight.alreadyAtNew {
+		return false, err
+	}
+	status, err := activator.groupStatus(ctx, journal.GroupID)
+	if err != nil || !edgeControlCompensationSettled(status, journal) {
+		if err == nil {
+			err = errors.New("Edge Control LKG recovery witness is invalid")
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func edgeControlCompensationSettled(status edgecontrol.AuthorityGroupStatus, journal releaseguardian.AuthorityTransitionJournal) bool {
+	return journal.Validate() == nil && journal.Phase == releaseguardian.AuthorityTransitionActivated &&
+		status.GroupID == journal.GroupID && status.PublicationSequence >= journal.Candidate.AuthoritySequence+2 &&
+		status.RecoveryEpoch >= journal.Candidate.CurrentRecoveryEpoch+1 &&
+		status.BundleGeneration == journal.Candidate.CurrentServingGeneration &&
+		(status.LKGState == edgecontrol.GroupAuthorityLKGCurrent || status.LKGState == edgecontrol.GroupAuthorityLKGPreserved) &&
+		exactSHA256Digest(status.PublishedBundleDigest)
+}
+
+func (activator *groupAuthorityActivator) groupStatus(ctx context.Context, groupID string) (edgecontrol.AuthorityGroupStatus, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(activator.config.Endpoint, "/")+
+		edgecontrol.AuthorityGroupReadyPrefixV1+url.PathEscape(groupID)+"/readyz", nil)
+	if err != nil {
+		return edgecontrol.AuthorityGroupStatus{}, err
+	}
+	response, err := activator.client.Do(request)
+	if err != nil {
+		return edgecontrol.AuthorityGroupStatus{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+		return edgecontrol.AuthorityGroupStatus{}, errors.New("Edge Control group status is unavailable")
+	}
+	var status edgecontrol.AuthorityGroupStatus
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&status) != nil || !decodeEOF(decoder) || status.GroupID != groupID {
+		return edgecontrol.AuthorityGroupStatus{}, errors.New("Edge Control group status is invalid")
+	}
+	return status, nil
+}
+
 func (transaction *groupAuthorityTransaction) Receipt() releaseguardian.FrontAuthorityReceipt {
 	return transaction.front.Receipt()
 }

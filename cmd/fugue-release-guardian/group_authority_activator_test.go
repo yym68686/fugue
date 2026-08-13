@@ -75,6 +75,55 @@ func TestGroupAuthorityRecoveryUnknownUsesReadOnlyReconcile(t *testing.T) {
 	}
 }
 
+func TestEdgeControlCompensationSettlementRequiresExactLKGAndMonotonicRecovery(t *testing.T) {
+	target := groupAuthorityTargetFixture()
+	candidate := releaseguardian.CandidateAuthority{APIVersion: releaseguardian.APIVersion, Kind: releaseguardian.CandidateAuthorityKind,
+		GroupID: target.GroupID, RecordDigest: target.CandidateRecordDigest, BundleGeneration: target.CandidateBundleGeneration,
+		ServingGeneration: target.ServingGeneration, AuthoritySequence: target.AuthoritySequence, CandidateSequence: 9,
+		CurrentPublicationSequence: target.PublicationSequence, CurrentRecoveryEpoch: target.RecoveryEpoch,
+		CurrentBundleDigest: target.PublishedBundleDigest, CurrentServingGeneration: target.PreviousServingGeneration,
+		CandidateEpoch: target.CandidateEpoch, WorkerSlot: target.TargetSlot, ReleaseRecordDigest: target.CanaryResultDigest,
+		State: releaseguardian.CandidateAuthorityVerified, Generation: 2, CanaryResultDigest: target.CanaryResultDigest}
+	journal, err := (releaseguardian.AuthorityTransitionJournal{GroupID: target.GroupID, Phase: releaseguardian.AuthorityTransitionActivated,
+		CurrentUID: "current-uid", CurrentRV: "20", Before: releaseguardian.CurrentAuthority{APIVersion: releaseguardian.APIVersion,
+			Kind: releaseguardian.CurrentAuthorityKind, GroupID: target.GroupID, CurrentRecordDigest: target.PublishedBundleDigest,
+			CurrentWorkerSlot: releaseguardian.AuthoritySlotB, AuthorityEpoch: 7}, Candidate: candidate,
+		CanaryResultDigest: target.CanaryResultDigest, PreviousNodes: []releaseguardian.AuthorityBaselineNodeWitness{{NodeName: "edge-node-a",
+			FrontPodUID: "front-pod-uid", FrontResourceVersion: "10", WorkerPodUID: "worker-pod-uid", WorkerResourceVersion: "11",
+			ActivationGeneration: 7, BundleGeneration: "previous-bundle-7", ServingGeneration: "previous-serving-7",
+			WorkerSourceSHA: target.WorkerSourceSHA, WorkerImageDigest: target.WorkerImageDigest}},
+		Activation: &releaseguardian.FrontAuthorityReceipt{GroupID: target.GroupID, PreviousSlot: releaseguardian.AuthoritySlotB,
+			PreviousGeneration: 7, PreviousBundleGeneration: "previous-bundle-7", PreviousWorkerSourceSHA: target.WorkerSourceSHA,
+			PreviousWorkerImageDigest: target.WorkerImageDigest, TargetSlot: target.TargetSlot, TargetGeneration: 8,
+			TargetBundleGeneration: target.ServingGeneration + ".p12.r3", TargetWorkerSourceSHA: target.WorkerSourceSHA,
+			TargetWorkerImageDigest: target.WorkerImageDigest}, CreatedAt: time.Date(2026, 8, 13, 5, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := edgecontrol.AuthorityGroupStatus{GroupID: target.GroupID, PublicationSequence: target.AuthoritySequence + 3,
+		RecoveryEpoch: target.RecoveryEpoch + 2, BundleGeneration: target.PreviousServingGeneration,
+		PublishedBundleDigest: "sha256:" + strings.Repeat("8", 64), LKGState: edgecontrol.GroupAuthorityLKGCurrent}
+	if !edgeControlCompensationSettled(status, journal) {
+		t.Fatal("monotonically refreshed exact LKG was not settled")
+	}
+	for name, mutate := range map[string]func(*edgecontrol.AuthorityGroupStatus){
+		"stale publication": func(value *edgecontrol.AuthorityGroupStatus) {
+			value.PublicationSequence = target.AuthoritySequence + 1
+		},
+		"stale recovery":   func(value *edgecontrol.AuthorityGroupStatus) { value.RecoveryEpoch = target.RecoveryEpoch },
+		"wrong generation": func(value *edgecontrol.AuthorityGroupStatus) { value.BundleGeneration = target.ServingGeneration },
+		"missing lkg":      func(value *edgecontrol.AuthorityGroupStatus) { value.LKGState = edgecontrol.GroupAuthorityLKGMissing },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := status
+			mutate(&changed)
+			if edgeControlCompensationSettled(changed, journal) {
+				t.Fatal("invalid recovery witness was settled")
+			}
+		})
+	}
+}
+
 func groupAuthorityTargetFixture() releaseguardian.FrontAuthorityTarget {
 	return releaseguardian.FrontAuthorityTarget{GroupID: "edge-group-country-de", TargetSlot: releaseguardian.AuthoritySlotA,
 		CandidateBundleGeneration: "candidate-full.p20.r0", ServingGeneration: "candidate-base", FrontBundleGeneration: "candidate-base.p12.r3",

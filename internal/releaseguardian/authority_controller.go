@@ -25,6 +25,14 @@ type authorityDecisionStore interface {
 	DeleteTransitionJournal(context.Context, AuthorityTransitionJournal) error
 }
 
+// authorityCompensationSettler is deliberately optional. Production
+// activators can prove that an activated external transaction was fully
+// compensated before its immutable journal is retired. The controller never
+// infers compensation from CurrentAuthority alone.
+type authorityCompensationSettler interface {
+	CompensationSettled(context.Context, AuthorityTransitionJournal) (bool, error)
+}
+
 func (controller *AuthorityController) finalizeTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
 	if finalizer, ok := controller.activators[journal.GroupID].(interface{ Finalize(context.Context) error }); ok {
 		if err := finalizer.Finalize(ctx); err != nil {
@@ -56,7 +64,11 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 	if journalExists {
 		return controller.resumeTransition(ctx, current, journal)
 	}
-	if candidate.State == CandidateAuthorityVerified && current.CurrentRecordDigest == candidate.RecordDigest && current.CurrentWorkerSlot == candidate.WorkerSlot {
+	if candidate.State == CandidateAuthorityVerified {
+		// A verified candidate can only enter production while its immutable
+		// transition journal exists. With no journal it is either already
+		// current or a settled failed attempt awaiting importer replacement.
+		// Never reconstruct a production transaction from an expired canary.
 		return AuthorityTransitionReceipt{}, false, nil
 	}
 	resultDigest := candidate.CanaryResultDigest
@@ -90,6 +102,20 @@ func (controller *AuthorityController) resumeTransition(ctx context.Context, cur
 	}
 	if current != journal.Before {
 		return AuthorityTransitionReceipt{}, false, errors.New("authority transition predecessor changed while journal was active")
+	}
+	if journal.Phase == AuthorityTransitionActivated {
+		if settler, ok := controller.activators[journal.GroupID].(authorityCompensationSettler); ok {
+			settled, settleErr := settler.CompensationSettled(ctx, journal)
+			if settleErr != nil {
+				return AuthorityTransitionReceipt{}, false, fmt.Errorf("reconcile compensated authority transition: %w", settleErr)
+			}
+			if settled {
+				if err := controller.finalizeTransitionJournal(ctx, journal); err != nil {
+					return AuthorityTransitionReceipt{}, false, err
+				}
+				return AuthorityTransitionReceipt{}, false, nil
+			}
+		}
 	}
 	// Prepared and activated journals resume the same immutable candidate and
 	// canary. The production activator's idempotent Control replay and exact
@@ -224,7 +250,7 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 		return AuthorityTransitionReceipt{}, errors.New("candidate promotion witness is unavailable")
 	}
 	verificationTime := controller.now().UTC()
-	if candidate.State == CandidateAuthorityVerified {
+	if candidate.State == CandidateAuthorityVerified || resume != nil {
 		verificationTime = time.Time{}
 	}
 	result, err := controller.store.LoadCandidateCanaryResult(ctx, candidate, resultDigest, verificationTime)
@@ -250,14 +276,7 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 			ObservedAt: controller.now().UTC().Format(time.RFC3339Nano),
 		}).Seal()
 	}
-	if candidate.State == CandidateAuthorityLoaded {
-		verified := candidate
-		verified.State, verified.Generation, verified.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, result.ResultDigest
-		if _, _, err := controller.store.PutCandidate(ctx, verified, candidateUID, candidateRV); err != nil {
-			return AuthorityTransitionReceipt{}, err
-		}
-		candidate = verified
-	} else if candidate.State != CandidateAuthorityVerified || candidate.CanaryResultDigest != result.ResultDigest {
+	if candidate.State != CandidateAuthorityLoaded && (candidate.State != CandidateAuthorityVerified || candidate.CanaryResultDigest != result.ResultDigest) {
 		return AuthorityTransitionReceipt{}, errors.New("candidate terminal state does not bind the canary result")
 	}
 	current, currentUID, currentRV, err := controller.store.LoadCurrent(ctx, groupID)
@@ -287,10 +306,14 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 			}
 		}
 	}
+	verifiedCandidate := candidate
+	if verifiedCandidate.State == CandidateAuthorityLoaded {
+		verifiedCandidate.State, verifiedCandidate.Generation, verifiedCandidate.CanaryResultDigest = CandidateAuthorityVerified, candidate.Generation+1, result.ResultDigest
+	}
 	var journal AuthorityTransitionJournal
 	if resume == nil {
 		journal, err = (AuthorityTransitionJournal{GroupID: groupID, Phase: AuthorityTransitionPrepared,
-			CurrentUID: string(currentUID), CurrentRV: currentRV, Before: current, Candidate: candidate,
+			CurrentUID: string(currentUID), CurrentRV: currentRV, Before: current, Candidate: verifiedCandidate,
 			CanaryResultDigest: result.ResultDigest, PreviousNodes: append([]AuthorityBaselineNodeWitness(nil), baseline.Nodes...),
 			CreatedAt: controller.now().UTC().Format(time.RFC3339Nano)}).Seal()
 		if err != nil {
@@ -299,8 +322,21 @@ func (controller *AuthorityController) verifyAndSwitch(ctx context.Context, grou
 		if err := controller.store.CreateTransitionJournal(ctx, journal); err != nil {
 			return AuthorityTransitionReceipt{}, err
 		}
+		if candidate.State == CandidateAuthorityLoaded {
+			if _, _, err := controller.store.PutCandidate(ctx, verifiedCandidate, candidateUID, candidateRV); err != nil {
+				_ = controller.store.DeleteTransitionJournal(context.WithoutCancel(ctx), journal)
+				return AuthorityTransitionReceipt{}, err
+			}
+			candidate = verifiedCandidate
+		}
 	} else {
 		journal = *resume
+		if candidate.State == CandidateAuthorityLoaded && journal.Candidate == verifiedCandidate {
+			if _, _, err := controller.store.PutCandidate(ctx, verifiedCandidate, candidateUID, candidateRV); err != nil {
+				return AuthorityTransitionReceipt{}, err
+			}
+			candidate = verifiedCandidate
+		}
 		if journal.Validate() != nil || journal.GroupID != groupID || journal.CurrentUID != string(currentUID) || journal.CurrentRV != currentRV ||
 			journal.Before != current || journal.Candidate != candidate || journal.CanaryResultDigest != result.ResultDigest {
 			return AuthorityTransitionReceipt{}, errors.New("authority transition resume witness changed")
