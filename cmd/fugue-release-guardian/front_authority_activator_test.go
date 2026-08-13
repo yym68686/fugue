@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -9,6 +12,61 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestPostActivationRouteRequiresConsecutiveExactAttestations(t *testing.T) {
+	body := []byte("ok")
+	bodyDigest := shaDigest(body)
+	record := "sha256:" + strings.Repeat("1", 64)
+	matching := http.Header{
+		"X-Fugue-Candidate-Record-Digest": []string{record},
+		"X-Fugue-Candidate-Worker-Slot":   []string{"a"},
+	}
+	responses := []struct {
+		status  int
+		headers http.Header
+		err     error
+	}{
+		{status: http.StatusServiceUnavailable},
+		{status: http.StatusOK, headers: matching},
+		{status: http.StatusOK, headers: matching},
+		{status: http.StatusBadGateway},
+		{status: http.StatusOK, headers: matching},
+		{status: http.StatusOK, headers: matching},
+		{status: http.StatusOK, headers: matching},
+	}
+	calls := 0
+	err := waitForAuthorityRoute(context.Background(), canaryProbe{}, bodyDigest, record, releaseguardian.AuthoritySlotA,
+		false, len(responses), 3, 0, func(context.Context, canaryProbe) (int, []byte, http.Header, error) {
+			response := responses[calls]
+			calls++
+			return response.status, body, response.headers, response.err
+		})
+	if err != nil || calls != len(responses) {
+		t.Fatalf("exact route did not converge after transient failures: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestPostActivationRouteFailsClosedWithoutExactAttestation(t *testing.T) {
+	body := []byte("ok")
+	bodyDigest := shaDigest(body)
+	record := "sha256:" + strings.Repeat("1", 64)
+	wrong := http.Header{
+		"X-Fugue-Candidate-Record-Digest": []string{"sha256:" + strings.Repeat("2", 64)},
+		"X-Fugue-Candidate-Worker-Slot":   []string{"a"},
+	}
+	calls := 0
+	err := waitForAuthorityRoute(context.Background(), canaryProbe{}, bodyDigest, record, releaseguardian.AuthoritySlotA,
+		false, 4, 2, 0, func(context.Context, canaryProbe) (int, []byte, http.Header, error) {
+			calls++
+			if calls == 2 {
+				return 0, nil, nil, errors.New("transient transport failure")
+			}
+			return http.StatusOK, body, wrong, nil
+		})
+	if err == nil || calls != 4 {
+		t.Fatalf("wrong route attestation was accepted: calls=%d err=%v", calls, err)
+	}
+}
 
 func TestFrontLKGGenerationAcceptsOnlyExactCompensationChain(t *testing.T) {
 	base := uint64(34)

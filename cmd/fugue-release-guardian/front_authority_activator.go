@@ -27,10 +27,14 @@ import (
 )
 
 const (
-	frontActivationStatePath = "/var/lib/fugue-edge-front/activation.json"
-	frontActivationCASBinary = "/usr/local/bin/fugue-edge-front-cas"
-	frontHealthPort          = 7831
-	authorityLeaseSeconds    = int32(120)
+	frontActivationStatePath     = "/var/lib/fugue-edge-front/activation.json"
+	frontActivationCASBinary     = "/usr/local/bin/fugue-edge-front-cas"
+	frontHealthPort              = 7831
+	authorityLeaseSeconds        = int32(120)
+	postActivationRouteAttempts  = 12
+	postActivationRouteSuccesses = 3
+	postActivationRouteInterval  = time.Second
+	postActivationRouteTimeout   = 20 * time.Second
 )
 
 var errFrontCompensationUnknown = errors.New("Front compensation is unknown")
@@ -361,12 +365,50 @@ func (activator *frontAuthorityActivator) verifyPublicRoute(ctx context.Context,
 		return nil
 	}
 	probe := canaryProbe{Address: activator.config.RouteAddress, Host: activator.config.RouteHost, Path: activator.config.RoutePath}
-	status, body, headers, routeErr := requestPublicRouteWithHeaders(ctx, probe)
-	if !authorityRouteMatches(status, body, headers, routeErr, activator.config.RouteBodyDigest,
-		target.CandidateRecordDigest, target.TargetSlot, allowUnattestedLKG) {
-		return errors.New("public route does not attest the activated authority")
+	verifyCtx, cancel := context.WithTimeout(ctx, postActivationRouteTimeout)
+	defer cancel()
+	return waitForAuthorityRoute(verifyCtx, probe, activator.config.RouteBodyDigest, target.CandidateRecordDigest,
+		target.TargetSlot, allowUnattestedLKG, postActivationRouteAttempts, postActivationRouteSuccesses,
+		postActivationRouteInterval, requestPublicRouteWithHeaders)
+}
+
+type authorityRouteRequest func(context.Context, canaryProbe) (int, []byte, http.Header, error)
+
+// waitForAuthorityRoute allows the Front process and its in-memory proxy
+// configuration to converge after the activation CAS. It never weakens the
+// route witness: every accepted sample must bind the exact body, record and
+// worker slot, and a transient failure resets the consecutive-success count.
+func waitForAuthorityRoute(ctx context.Context, probe canaryProbe, bodyDigest, recordDigest string,
+	slot releaseguardian.AuthoritySlot, allowUnattestedLKG bool, attempts, requiredSuccesses int,
+	interval time.Duration, request authorityRouteRequest) error {
+	if request == nil || attempts < 1 || requiredSuccesses < 1 || requiredSuccesses > attempts || interval < 0 {
+		return errors.New("post-activation route verification is invalid")
 	}
-	return nil
+	consecutive := 0
+	for attempt := 0; attempt < attempts; attempt++ {
+		status, body, headers, routeErr := request(ctx, probe)
+		if authorityRouteMatches(status, body, headers, routeErr, bodyDigest, recordDigest, slot, allowUnattestedLKG) {
+			consecutive++
+			if consecutive == requiredSuccesses {
+				return nil
+			}
+		} else {
+			consecutive = 0
+		}
+		if attempt+1 == attempts {
+			break
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.New("public route did not converge on the activated authority")
+		case <-timer.C:
+		}
+	}
+	return errors.New("public route did not converge on the activated authority")
 }
 
 func (transaction *frontAuthorityTransaction) Receipt() releaseguardian.FrontAuthorityReceipt {
