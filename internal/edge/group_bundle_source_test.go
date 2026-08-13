@@ -358,13 +358,14 @@ func TestActiveWorkerAcceptsOnlyActivationBoundCurrentRefresh(t *testing.T) {
 	}
 	refreshed := current
 	refreshed.PublicationSequence++
+	refreshed.RecoveryEpoch++
 	if err := validateRouteBundleActivationBinding(selection, refreshed); err != nil {
 		t.Fatalf("same-authority current refresh was rejected: %v", err)
 	}
 	for name, mutate := range map[string]func(*routePublicationMetadata){
-		"old sequence":     func(value *routePublicationMetadata) { value.PublicationSequence = 11340 },
-		"wrong recovery":   func(value *routePublicationMetadata) { value.RecoveryEpoch = 110 },
-		"wrong generation": func(value *routePublicationMetadata) { value.Generation = "routes-other" },
+		"old sequence":        func(value *routePublicationMetadata) { value.PublicationSequence = 11340 },
+		"recovery regression": func(value *routePublicationMetadata) { value.RecoveryEpoch = 108 },
+		"wrong generation":    func(value *routePublicationMetadata) { value.Generation = "routes-other" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			changed := current

@@ -221,7 +221,7 @@ func validateRouteBundleActivationBinding(selection routeSourceSelection, public
 		return errors.New("edge-control current publication is not bound to Front activation")
 	}
 	if selection.expectedPublicationSequence > 0 &&
-		(publication.PublicationSequence < selection.expectedPublicationSequence || publication.RecoveryEpoch != selection.expectedRecoveryEpoch) {
+		(publication.PublicationSequence < selection.expectedPublicationSequence || publication.RecoveryEpoch < selection.expectedRecoveryEpoch) {
 		return errors.New("edge-control current publication is not bound to Front activation")
 	}
 	return nil
