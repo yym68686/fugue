@@ -86,9 +86,9 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 	if err != nil || closeErr != nil {
 		t.Fatalf("decode US intent: %v close: %v", err, closeErr)
 	}
-	if intent.Generation != 18 || intent.ExpectedPreviousConfigSHA != "a4da8224f757869510fbf704fa15c5a1c17222cf" ||
+	if intent.Generation != 19 || intent.ExpectedPreviousConfigSHA != "23993124ea413c578706392c8f7afb7251cbbc2d" ||
 		intent.ExpectedPreviousManifestSHA != intent.ExpectedPreviousConfigSHA || intent.ExpectedPreviousOCIRevision != intent.ExpectedPreviousConfigSHA ||
-		intent.ExpectedPreviousImageDigest != "sha256:6d614215f6fe3f6b859e6a7ad212b4304326cfde3e47c401b37b0eef149b7070" ||
+		intent.ExpectedPreviousImageDigest != "sha256:a227c5b1a5b204412d6221628cf4250e19c6659ce343bd343f81112c324d9c3c" ||
 		intent.SupersedesFailedConfigSHA != "" || us.Control.Delivery.Writer != "guardian" || us.Control.Delivery.Group != "us" || us.Control.Delivery.DependencyService != "fugue-fugue" {
 		t.Fatalf("US Edge Control intent does not bind the exact live predecessor: %+v", intent)
 	}
@@ -101,12 +101,12 @@ func TestEdgeControlUSNetworkPolicyAddsOnlyExactAPIAuthorityReader(t *testing.T)
 		t.Fatal(err)
 	}
 	prior := intent
-	prior.Generation = 17
-	prior.ExpectedPreviousConfigSHA = "546958c18232758e30520115e511588081fd72fc"
+	prior.Generation = 18
+	prior.ExpectedPreviousConfigSHA = "a4da8224f757869510fbf704fa15c5a1c17222cf"
 	prior.ExpectedPreviousManifestSHA = prior.ExpectedPreviousConfigSHA
 	prior.ExpectedPreviousOCIRevision = prior.ExpectedPreviousConfigSHA
-	prior.ExpectedPreviousImageDigest = "sha256:94367a7a8f18b4b2fe0570e7dde15862856a5565b8fe4e28fae3c88e8f512c41"
-	prior.SupersedesFailedConfigSHA = "a42ad747471d8a276c23c5763f84f746590dcbdb"
+	prior.ExpectedPreviousImageDigest = "sha256:6d614215f6fe3f6b859e6a7ad212b4304326cfde3e47c401b37b0eef149b7070"
+	prior.SupersedesFailedConfigSHA = ""
 	bound, err := BindIntents(registry, plan, map[string]Intent{us.Control.ID: intent}, map[string]Intent{us.Control.ID: prior},
 		map[string]string{})
 	if err != nil || len(bound.Releases) != 1 || bound.Releases[0].ComponentID != "edge-control-us" {
