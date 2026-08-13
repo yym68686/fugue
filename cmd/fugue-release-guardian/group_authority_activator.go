@@ -120,7 +120,6 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 		!exactSHA256Digest(target.PublishedBundleDigest) || strings.TrimSpace(target.PreviousServingGeneration) == "" {
 		return nil, errors.New("group authority promotion target is invalid")
 	}
-	target.FrontBundleGeneration = promotedBundleVersion(target.ServingGeneration, target.AuthoritySequence+1, target.RecoveryEpoch)
 	lease, err := activator.front.acquireLease(ctx)
 	if err != nil {
 		return nil, err
@@ -131,16 +130,27 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 			_ = lease.release(context.WithoutCancel(ctx))
 		}
 	}()
-	preflight, err := activator.front.preflight(ctx, target)
-	if err != nil {
-		return nil, err
-	}
 	promotion, err := activator.promoteControl(ctx, target)
 	if err != nil {
 		return nil, err
 	}
-	if target.FrontBundleGeneration != promotedBundleVersion(target.ServingGeneration, promotion.PublicationSequence, promotion.RecoveryEpoch) {
+	frontBundleGeneration := promotedBundleVersion(target.ServingGeneration, promotion.PublicationSequence, promotion.RecoveryEpoch)
+	if target.FrontBundleGeneration != "" && target.FrontBundleGeneration != frontBundleGeneration {
+		if recoveryErr := activator.recoverControl(context.WithoutCancel(ctx), promotion, target.PreviousServingGeneration); recoveryErr != nil {
+			releaseOnError = false
+			return nil, errors.Join(errors.New("Edge Control promotion version is not target-bound"),
+				fmt.Errorf("Edge Control compensation is unknown: %w", recoveryErr))
+		}
 		return nil, errors.New("Edge Control promotion version is not target-bound")
+	}
+	target.FrontBundleGeneration = frontBundleGeneration
+	preflight, err := activator.front.preflight(ctx, target)
+	if err != nil {
+		if recoveryErr := activator.recoverControl(context.WithoutCancel(ctx), promotion, target.PreviousServingGeneration); recoveryErr != nil {
+			releaseOnError = false
+			return nil, errors.Join(err, fmt.Errorf("Edge Control compensation is unknown: %w", recoveryErr))
+		}
+		return nil, err
 	}
 	frontTx, err := activator.front.promoteWithLease(ctx, target, lease, preflight)
 	if err != nil {
@@ -404,9 +414,9 @@ func (activator *groupAuthorityActivator) promoteControl(ctx context.Context, ta
 		}
 	}
 	if receipt.Schema != edgecontrol.GroupPromotionReceiptSchemaV1 || receipt.GroupID != target.GroupID ||
-		receipt.PreviousAuthoritySequence != target.AuthoritySequence || receipt.PreviousPublicationSequence != target.PublicationSequence ||
+		receipt.PreviousAuthoritySequence < target.AuthoritySequence || receipt.PreviousPublicationSequence != target.PublicationSequence ||
 		receipt.PreviousRecoveryEpoch != target.RecoveryEpoch || receipt.PreviousBundleGeneration != target.PreviousServingGeneration ||
-		receipt.PreviousPublishedBundleDigest != target.PublishedBundleDigest || receipt.PublicationSequence != target.AuthoritySequence+1 ||
+		receipt.PreviousPublishedBundleDigest != target.PublishedBundleDigest || receipt.PublicationSequence != receipt.PreviousAuthoritySequence+1 ||
 		receipt.RecoveryEpoch != target.RecoveryEpoch || receipt.BundleGeneration != target.ServingGeneration ||
 		receipt.CandidateRecordDigest != target.CandidateRecordDigest || receipt.WorkerSlot != string(target.TargetSlot) || receipt.Authority != "edge-control" ||
 		!exactSHA256Digest(receipt.PublishedBundleDigest) {

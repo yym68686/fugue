@@ -50,6 +50,27 @@ func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
 	}
 }
 
+func TestGroupAuthorityPromotionAcceptsFailedAuditTailReceipt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 5, 15, 0, 0, time.UTC)
+	target := groupAuthorityTargetFixture()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(edgecontrol.GroupPromotionReceipt{Schema: edgecontrol.GroupPromotionReceiptSchemaV1,
+			GroupID: target.GroupID, PreviousAuthoritySequence: target.AuthoritySequence + 3,
+			PreviousPublicationSequence: target.PublicationSequence, PreviousRecoveryEpoch: target.RecoveryEpoch,
+			PreviousBundleGeneration: target.PreviousServingGeneration, PreviousPublishedBundleDigest: target.PublishedBundleDigest,
+			PublicationSequence: target.AuthoritySequence + 4, RecoveryEpoch: target.RecoveryEpoch,
+			BundleGeneration: target.ServingGeneration, PublishedBundleDigest: "sha256:" + strings.Repeat("9", 64),
+			CandidateRecordDigest: target.CandidateRecordDigest, WorkerSlot: string(target.TargetSlot), Authority: "edge-control"})
+	}))
+	defer server.Close()
+	activator := groupAuthorityActivatorFixture(t, server.URL, target.GroupID, now)
+	receipt, err := activator.promoteControl(context.Background(), target)
+	if err != nil || receipt.PreviousAuthoritySequence != target.AuthoritySequence+3 ||
+		receipt.PublicationSequence != target.AuthoritySequence+4 {
+		t.Fatalf("audit-tail receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestGroupAuthorityPromotionTypesOnlyExplicitConflictAsPrewriteCAS(t *testing.T) {
 	for name, status := range map[string]int{"sequence_conflict": http.StatusConflict, "candidate_conflict": http.StatusConflict, "unavailable": http.StatusServiceUnavailable} {
 		t.Run(name, func(t *testing.T) {
