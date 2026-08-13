@@ -198,6 +198,51 @@ func TestLegacyCandidateCanaryCanOnlyBeRecognizedForBoundedExpiryCleanup(t *test
 	}
 }
 
+func TestPreviousPromotionWitnessCanaryCanOnlyBeRecognizedForBoundedExpiryCleanup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(2_500, 0).UTC()
+	groupID := "edge-pool-a"
+	previous := legacyCandidateCanaryResultV2{
+		APIVersion: APIVersion, Kind: CandidateCanaryResultKind, GroupID: groupID,
+		CandidateRecordDigest: testDigest, WorkerSlot: AuthoritySlotB, AuthoritySequence: 12, CandidateSequence: 9,
+		CurrentPublicationSequence: 11, CurrentRecoveryEpoch: 2, CurrentBundleDigest: otherDigest, CandidateEpoch: 13,
+		BundleGeneration: "candidate-bundle.p13.r0", ServingGeneration: "candidate-bundle",
+		WorkerSourceSHA: testSHA, WorkerImageDigest: testDigest, WorkerCohortDigest: otherDigest,
+		ReleaseRecordDigest: otherDigest, RouteState: HealthHealthy, DependencyState: HealthHealthy,
+		EvidenceDigest: testDigest, ObservedAt: now.Add(-40 * time.Second).Format(time.RFC3339Nano),
+		ExpiresAt: now.Add(-10 * time.Second).Format(time.RFC3339Nano), KeyID: "candidate-canary-v1",
+		Signature: testableSignaturePlaceholder,
+	}
+	raw, _ := declarativerelease.CanonicalJSON(previous)
+	previous.ResultDigest = digest(raw)
+	raw, _ = declarativerelease.CanonicalJSON(previous)
+	immutable := true
+	name := candidateCanaryResultName(groupID, previous.ResultDigest)
+	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "fugue-system", UID: "previous-result", ResourceVersion: "11", Labels: map[string]string{
+		"fugue.pro/group": groupID, "fugue.pro/authority-kind": "candidate-canary", "fugue.pro/candidate-record": candidateRecordLabel(previous.CandidateRecordDigest),
+	}}, Immutable: &immutable, Data: map[string]string{"result.json": string(raw)}}
+	client := fake.NewSimpleClientset(object)
+	store, _ := NewAuthorityStore(client, "fugue-system")
+	candidate := bindCandidatePromotionWitness(CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: groupID,
+		RecordDigest: previous.CandidateRecordDigest, BundleGeneration: testCandidateBundle, WorkerSlot: previous.WorkerSlot,
+		ReleaseRecordDigest: previous.ReleaseRecordDigest, State: CandidateAuthorityLoaded, Generation: 1})
+	if _, err := store.LoadLatestCandidateCanaryResult(ctx, candidate, now); err == nil {
+		t.Fatal("previous witness result was accepted as authority evidence")
+	}
+	if err := store.PruneExpiredCandidateCanaryResults(ctx, groupID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expired previous witness remains: %v", err)
+	}
+	tampered := previous
+	tampered.CurrentBundleDigest = testDigest
+	tamperedRaw, _ := declarativerelease.CanonicalJSON(tampered)
+	if _, err := decodeCandidateCanaryForCleanup(string(tamperedRaw)); err == nil {
+		t.Fatal("tampered previous witness was eligible for cleanup")
+	}
+}
+
 func TestAuthorityStoreKeepsGroupsImmutableAndCASIsolated(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()

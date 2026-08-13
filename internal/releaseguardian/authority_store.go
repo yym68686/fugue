@@ -35,6 +35,34 @@ type legacyCandidateCanaryResultV1 struct {
 	ResultDigest          string        `json:"resultDigest"`
 }
 
+type legacyCandidateCanaryResultV2 struct {
+	APIVersion                 string        `json:"apiVersion"`
+	Kind                       string        `json:"kind"`
+	GroupID                    string        `json:"groupId"`
+	CandidateRecordDigest      string        `json:"candidateRecordDigest"`
+	WorkerSlot                 AuthoritySlot `json:"workerSlot"`
+	AuthoritySequence          uint64        `json:"authoritySequence"`
+	CandidateSequence          uint64        `json:"candidateSequence"`
+	CurrentPublicationSequence uint64        `json:"currentPublicationSequence"`
+	CurrentRecoveryEpoch       uint64        `json:"currentRecoveryEpoch"`
+	CurrentBundleDigest        string        `json:"currentBundleDigest"`
+	CandidateEpoch             uint64        `json:"candidateEpoch"`
+	BundleGeneration           string        `json:"bundleGeneration"`
+	ServingGeneration          string        `json:"servingGeneration"`
+	WorkerSourceSHA            string        `json:"workerSourceSha"`
+	WorkerImageDigest          string        `json:"workerImageDigest"`
+	WorkerCohortDigest         string        `json:"workerCohortDigest"`
+	ReleaseRecordDigest        string        `json:"releaseRecordDigest"`
+	RouteState                 HealthState   `json:"routeState"`
+	DependencyState            HealthState   `json:"dependencyState"`
+	EvidenceDigest             string        `json:"evidenceDigest"`
+	ObservedAt                 string        `json:"observedAt"`
+	ExpiresAt                  string        `json:"expiresAt"`
+	KeyID                      string        `json:"keyId"`
+	Signature                  string        `json:"signature"`
+	ResultDigest               string        `json:"resultDigest"`
+}
+
 // AuthorityStore persists only group-local authority records. It is not wired
 // into the rollout controller until the inactive candidate path is proven.
 type AuthorityStore struct {
@@ -195,6 +223,28 @@ func decodeCandidateCanaryForCleanup(raw string) (CandidateCanaryResult, error) 
 	var current CandidateCanaryResult
 	if decodeStrict([]byte(raw), &current) == nil && current.Validate(time.Time{}) == nil {
 		return current, nil
+	}
+	var previous legacyCandidateCanaryResultV2
+	if decodeStrict([]byte(raw), &previous) == nil && previous.APIVersion == APIVersion && previous.Kind == CandidateCanaryResultKind &&
+		groupPattern.MatchString(previous.GroupID) && digestPattern.MatchString(previous.CandidateRecordDigest) && previous.WorkerSlot.Validate() == nil &&
+		previous.AuthoritySequence > 0 && previous.CandidateSequence > 0 && previous.CurrentPublicationSequence > 0 &&
+		previous.CurrentPublicationSequence <= previous.AuthoritySequence && digestPattern.MatchString(previous.CurrentBundleDigest) &&
+		previous.CandidateEpoch > previous.CurrentPublicationSequence && authorityGenerationPattern.MatchString(previous.BundleGeneration) &&
+		authorityGenerationPattern.MatchString(previous.ServingGeneration) && shaPattern.MatchString(previous.WorkerSourceSHA) &&
+		digestPattern.MatchString(previous.WorkerImageDigest) && digestPattern.MatchString(previous.WorkerCohortDigest) &&
+		digestPattern.MatchString(previous.ReleaseRecordDigest) && (previous.RouteState == HealthHealthy || previous.RouteState == HealthDegraded) &&
+		(previous.DependencyState == HealthHealthy || previous.DependencyState == HealthDegraded) && digestPattern.MatchString(previous.EvidenceDigest) &&
+		componentPattern.MatchString(previous.KeyID) && candidateCanarySignaturePattern.MatchString(previous.Signature) && digestPattern.MatchString(previous.ResultDigest) {
+		observedAt, observedErr := time.Parse(time.RFC3339Nano, previous.ObservedAt)
+		expiresAt, expiresErr := time.Parse(time.RFC3339Nano, previous.ExpiresAt)
+		copy := previous
+		copy.ResultDigest = ""
+		encoded, encodeErr := declarativerelease.CanonicalJSON(copy)
+		if observedErr == nil && expiresErr == nil && observedAt.Equal(observedAt.UTC()) && expiresAt.Equal(expiresAt.UTC()) &&
+			expiresAt.After(observedAt) && expiresAt.Sub(observedAt) <= time.Minute && encodeErr == nil && digest(encoded) == previous.ResultDigest {
+			return CandidateCanaryResult{GroupID: previous.GroupID, CandidateRecordDigest: previous.CandidateRecordDigest,
+				ResultDigest: previous.ResultDigest, ExpiresAt: previous.ExpiresAt}, nil
+		}
 	}
 	var legacy legacyCandidateCanaryResultV1
 	if decodeStrict([]byte(raw), &legacy) != nil || legacy.APIVersion != APIVersion || legacy.Kind != CandidateCanaryResultKind ||
