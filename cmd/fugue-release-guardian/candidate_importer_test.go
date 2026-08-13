@@ -146,6 +146,35 @@ func TestCandidateImporterRejectsDigestDriftWithoutChangingPointers(t *testing.T
 	}
 }
 
+func TestCandidateImporterAcceptsExpiredSignedCurrentLKGButRejectsExpiredCandidate(t *testing.T) {
+	now := time.Date(2026, 8, 13, 19, 0, 0, 0, time.UTC)
+	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)
+	// Current authority is an immutable rollback anchor. Its routing TTL may
+	// expire while Edge Control serves the persisted LKG and stages a fresh,
+	// non-traffic candidate. The candidate itself must remain fresh.
+	envelope.CurrentBundle.GeneratedAt = now.Add(-5 * time.Hour)
+	envelope.CurrentBundle.ValidUntil = now.Add(-4 * time.Hour)
+	envelope.CurrentRecord.BundleDigest = candidateBundleDigest(*envelope.CurrentBundle)
+	current, err := envelope.CurrentRecord.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.CurrentRecord = &current
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err != nil {
+		t.Fatalf("signed expired current LKG was rejected: %v", err)
+	}
+	envelope.Bundle.ValidUntil = now.Add(-time.Second)
+	envelope.Record.BundleDigest = candidateBundleDigest(envelope.Bundle)
+	candidate, err := envelope.Record.Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Record = candidate
+	if err := validateCandidateEnvelope(envelope.GroupID, envelope, now); err == nil {
+		t.Fatal("expired candidate authority was accepted")
+	}
+}
+
 func TestCandidateImporterAcceptsTheSharedEdgeControlRecordIdentity(t *testing.T) {
 	now := time.Date(2026, 8, 12, 5, 0, 0, 0, time.UTC)
 	envelope := candidateImporterEnvelopeFixture(t, "edge-pool-a", now)

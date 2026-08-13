@@ -293,7 +293,8 @@ func validateCandidateEnvelope(groupID string, envelope candidateEnvelope, now t
 	}
 	if candidateBundleDigest(*envelope.CurrentBundle) != envelope.CurrentRecord.BundleDigest || candidateBundleDigest(envelope.Bundle) != envelope.Record.BundleDigest ||
 		envelope.CurrentBundle.EdgeGroupID != groupID || envelope.Bundle.EdgeGroupID != groupID ||
-		!envelope.CurrentBundle.ValidUntil.After(now) || !envelope.Bundle.ValidUntil.After(now) || envelope.CurrentBundle.GeneratedAt.IsZero() || envelope.Bundle.GeneratedAt.IsZero() ||
+		!envelope.Bundle.ValidUntil.After(now) || envelope.CurrentBundle.GeneratedAt.IsZero() || envelope.Bundle.GeneratedAt.IsZero() ||
+		envelope.CurrentBundle.GeneratedAt.After(now) || envelope.Bundle.GeneratedAt.After(now) ||
 		!envelope.CurrentBundle.ValidUntil.After(envelope.CurrentBundle.GeneratedAt) || !envelope.Bundle.ValidUntil.After(envelope.Bundle.GeneratedAt) {
 		return errors.New("candidate envelope bundle binding is invalid")
 	}
