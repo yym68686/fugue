@@ -66,6 +66,13 @@ func TestPostActivationRouteFailsClosedWithoutExactAttestation(t *testing.T) {
 	if err == nil || calls != 4 {
 		t.Fatalf("wrong route attestation was accepted: calls=%d err=%v", calls, err)
 	}
+	message := err.Error()
+	for _, want := range []string{"attempts=4", "status=200", "bodyDigest=" + bodyDigest,
+		"recordDigest=sha256:" + strings.Repeat("2", 64), "slot=a", "transport=none"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("typed route failure omits %q: %s", want, message)
+		}
+	}
 }
 
 func TestFrontLKGGenerationAcceptsOnlyExactCompensationChain(t *testing.T) {

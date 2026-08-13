@@ -385,8 +385,16 @@ func waitForAuthorityRoute(ctx context.Context, probe canaryProbe, bodyDigest, r
 		return errors.New("post-activation route verification is invalid")
 	}
 	consecutive := 0
+	lastStatus, lastBodyDigest, lastRecordDigest, lastSlot, lastErrorClass := 0, shaDigest(nil), "", "", "none"
 	for attempt := 0; attempt < attempts; attempt++ {
 		status, body, headers, routeErr := request(ctx, probe)
+		lastStatus, lastBodyDigest = status, shaDigest(body)
+		lastRecordDigest = strings.TrimSpace(headers.Get("X-Fugue-Candidate-Record-Digest"))
+		lastSlot = strings.TrimSpace(headers.Get("X-Fugue-Candidate-Worker-Slot"))
+		lastErrorClass = errorClass(routeErr)
+		if lastErrorClass == "" {
+			lastErrorClass = "none"
+		}
 		if authorityRouteMatches(status, body, headers, routeErr, bodyDigest, recordDigest, slot, allowUnattestedLKG) {
 			consecutive++
 			if consecutive == requiredSuccesses {
@@ -404,11 +412,16 @@ func waitForAuthorityRoute(ctx context.Context, probe canaryProbe, bodyDigest, r
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return errors.New("public route did not converge on the activated authority")
+			return authorityRouteConvergenceError(attempt+1, lastStatus, lastBodyDigest, lastRecordDigest, lastSlot, lastErrorClass)
 		case <-timer.C:
 		}
 	}
-	return errors.New("public route did not converge on the activated authority")
+	return authorityRouteConvergenceError(attempts, lastStatus, lastBodyDigest, lastRecordDigest, lastSlot, lastErrorClass)
+}
+
+func authorityRouteConvergenceError(attempts, status int, bodyDigest, recordDigest, slot, transportClass string) error {
+	return fmt.Errorf("public route did not converge on the activated authority: attempts=%d status=%d bodyDigest=%s recordDigest=%s slot=%s transport=%s",
+		attempts, status, bodyDigest, recordDigest, slot, transportClass)
 }
 
 func (transaction *frontAuthorityTransaction) Receipt() releaseguardian.FrontAuthorityReceipt {
