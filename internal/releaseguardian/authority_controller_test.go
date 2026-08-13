@@ -19,6 +19,9 @@ type testFrontActivator struct {
 	settled     bool
 	settleErr   error
 }
+
+var errTestAuthorityPrewriteCAS = errors.New("test authority prewrite CAS changed")
+
 type testAuthorityHealthObserver struct {
 	currentHealthy bool
 	lkgHealthy     bool
@@ -43,12 +46,17 @@ type testAuthorityDecisionStore struct {
 	switchErr   error
 	createErr   error
 	deleteCount *int
+	journal     *AuthorityTransitionJournal
 }
 
 func (store testAuthorityDecisionStore) LoadBaselineReceipt(context.Context, string) (AuthorityBaselineReceipt, error) {
 	return store.baseline, nil
 }
+
 func (store testAuthorityDecisionStore) LoadTransitionJournal(context.Context, string) (AuthorityTransitionJournal, bool, error) {
+	if store.journal != nil && store.journal.JournalDigest != "" {
+		return *store.journal, true, nil
+	}
 	return AuthorityTransitionJournal{}, false, nil
 }
 
@@ -58,15 +66,21 @@ func (store testAuthorityDecisionStore) SwitchCurrent(ctx context.Context, autho
 	}
 	return store.AuthorityStore.SwitchCurrent(ctx, authority, uid, rv)
 }
-func (store testAuthorityDecisionStore) CreateTransitionJournal(context.Context, AuthorityTransitionJournal) error {
+func (store testAuthorityDecisionStore) CreateTransitionJournal(_ context.Context, journal AuthorityTransitionJournal) error {
+	if store.journal != nil {
+		*store.journal = journal
+	}
 	return store.createErr
 }
 func (store testAuthorityDecisionStore) UpdateTransitionJournal(context.Context, AuthorityTransitionJournal, AuthorityTransitionJournal) error {
 	return nil
 }
-func (store testAuthorityDecisionStore) DeleteTransitionJournal(context.Context, AuthorityTransitionJournal) error {
+func (store testAuthorityDecisionStore) DeleteTransitionJournal(_ context.Context, journal AuthorityTransitionJournal) error {
 	if store.deleteCount != nil {
 		*store.deleteCount++
+	}
+	if store.journal != nil && store.journal.JournalDigest == journal.JournalDigest {
+		*store.journal = AuthorityTransitionJournal{}
 	}
 	return nil
 }
@@ -87,6 +101,9 @@ func (activator testFrontActivator) BeginPromote(_ context.Context, target Front
 }
 func (activator testFrontActivator) CompensationSettled(context.Context, AuthorityTransitionJournal) (bool, error) {
 	return activator.settled, activator.settleErr
+}
+func (testFrontActivator) IsPrewriteCASChanged(err error) bool {
+	return errors.Is(err, errTestAuthorityPrewriteCAS)
 }
 func (testFrontActivator) BeginRestore(_ context.Context, current CurrentAuthority) (FrontAuthorityTransaction, error) {
 	return &testFrontTransaction{receipt: FrontAuthorityReceipt{GroupID: current.GroupID, PreviousSlot: current.CurrentWorkerSlot, PreviousGeneration: current.CurrentFrontGeneration,
@@ -381,6 +398,24 @@ func TestAuthorityControllerPersistsPreparedJournalBeforeTerminalCandidate(t *te
 	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
 	if err != nil || candidate.State != CandidateAuthorityLoaded || candidate.CanaryResultDigest != "" {
 		t.Fatalf("journal failure terminalized candidate: %+v err=%v", candidate, err)
+	}
+}
+
+func TestAuthorityControllerDropsPreparedJournalAfterTypedPrewriteCASWithoutTrafficChange(t *testing.T) {
+	journal := AuthorityTransitionJournal{}
+	fixture := newAuthoritySwitchFixture(t, testFrontActivator{beginErr: errTestAuthorityPrewriteCAS})
+	fixture.controller.store = testAuthorityDecisionStore{AuthorityStore: fixture.store, baseline: fixture.baseline, journal: &journal}
+	receipt, changed, err := fixture.controller.Reconcile(context.Background(), fixture.group)
+	if err != nil || changed || receipt.ReceiptDigest != "" || journal.JournalDigest != "" {
+		t.Fatalf("typed prewrite CAS was not settled: receipt=%+v changed=%v journal=%+v err=%v", receipt, changed, journal, err)
+	}
+	current, _, _, err := fixture.store.LoadCurrent(context.Background(), fixture.group)
+	if err != nil || current != fixture.current {
+		t.Fatalf("typed prewrite CAS changed traffic authority: current=%+v err=%v", current, err)
+	}
+	candidate, _, _, err := fixture.store.LoadCandidate(context.Background(), fixture.group)
+	if err != nil || candidate.State != CandidateAuthorityVerified {
+		t.Fatalf("typed prewrite CAS did not retain terminal candidate: candidate=%+v err=%v", candidate, err)
 	}
 }
 

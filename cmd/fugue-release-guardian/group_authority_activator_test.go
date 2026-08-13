@@ -50,6 +50,23 @@ func TestGroupAuthorityPromotionReplaysOnlyUnknownExactRequest(t *testing.T) {
 	}
 }
 
+func TestGroupAuthorityPromotionTypesOnlyExplicitConflictAsPrewriteCAS(t *testing.T) {
+	for name, status := range map[string]int{"sequence_conflict": http.StatusConflict, "candidate_conflict": http.StatusConflict, "unavailable": http.StatusServiceUnavailable} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": name})
+			}))
+			defer server.Close()
+			activator := &groupAuthorityActivator{config: groupAuthorityConfig{Endpoint: server.URL}, client: server.Client()}
+			err := activator.post(context.Background(), edgecontrol.GroupPromotionPathV1, map[string]string{"value": "test"}, &struct{}{})
+			if (name != "unavailable") != errors.Is(err, errAuthorityPrewriteCASChanged) {
+				t.Fatalf("status=%d error=%v", status, err)
+			}
+		})
+	}
+}
+
 func TestGroupAuthorityRecoveryUnknownUsesReadOnlyReconcile(t *testing.T) {
 	now := time.Date(2026, 8, 13, 5, 30, 0, 0, time.UTC)
 	target := groupAuthorityTargetFixture()

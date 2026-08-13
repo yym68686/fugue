@@ -28,6 +28,7 @@ import (
 const authorityRequestTTL = 45 * time.Second
 
 var errAuthorityMutationUnknown = errors.New("Edge Control mutation result is unknown")
+var errAuthorityPrewriteCASChanged = errors.New("Edge Control prewrite CAS changed")
 
 type groupAuthorityConfig struct {
 	GroupID     string
@@ -219,6 +220,10 @@ func (activator *groupAuthorityActivator) Finalize(ctx context.Context) error {
 		return err
 	}
 	return lease.release(ctx)
+}
+
+func (*groupAuthorityActivator) IsPrewriteCASChanged(err error) bool {
+	return errors.Is(err, errAuthorityPrewriteCASChanged)
 }
 
 // CompensationSettled proves both sides of an activated-but-uncommitted
@@ -456,7 +461,10 @@ func (activator *groupAuthorityActivator) post(ctx context.Context, path string,
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		if response.StatusCode == http.StatusConflict && (bytes.Contains(raw, []byte(`"error":"sequence_conflict"`)) || bytes.Contains(raw, []byte(`"error":"candidate_conflict"`))) {
+			return errAuthorityPrewriteCASChanged
+		}
 		return fmt.Errorf("Edge Control mutation was rejected: status=%d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))

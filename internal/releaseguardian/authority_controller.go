@@ -33,6 +33,10 @@ type authorityCompensationSettler interface {
 	CompensationSettled(context.Context, AuthorityTransitionJournal) (bool, error)
 }
 
+type authorityPrewriteCASClassifier interface {
+	IsPrewriteCASChanged(error) bool
+}
+
 func (controller *AuthorityController) finalizeTransitionJournal(ctx context.Context, journal AuthorityTransitionJournal) error {
 	if finalizer, ok := controller.activators[journal.GroupID].(interface{ Finalize(context.Context) error }); ok {
 		if err := finalizer.Finalize(ctx); err != nil {
@@ -83,6 +87,19 @@ func (controller *AuthorityController) Reconcile(ctx context.Context, groupID st
 		resultDigest = result.ResultDigest
 	}
 	receipt, err := controller.VerifyAndSwitch(ctx, groupID, resultDigest)
+	if err != nil {
+		if classifier, ok := controller.activators[groupID].(authorityPrewriteCASClassifier); ok && classifier.IsPrewriteCASChanged(err) {
+			journal, exists, loadErr := controller.store.LoadTransitionJournal(ctx, groupID)
+			settledCandidate, _, _, candidateErr := controller.store.LoadCandidate(ctx, groupID)
+			if loadErr != nil || candidateErr != nil || !exists || journal.Phase != AuthorityTransitionPrepared || journal.Candidate != settledCandidate {
+				return AuthorityTransitionReceipt{}, false, errors.New("stale authority prewrite journal is unavailable")
+			}
+			if deleteErr := controller.store.DeleteTransitionJournal(ctx, journal); deleteErr != nil {
+				return AuthorityTransitionReceipt{}, false, deleteErr
+			}
+			return AuthorityTransitionReceipt{}, false, nil
+		}
+	}
 	return receipt, err == nil, err
 }
 
