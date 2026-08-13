@@ -47,7 +47,6 @@ type authorityBaselineStore interface {
 type baselineFrontHealth struct {
 	Status             string `json:"status"`
 	ActiveSlot         string `json:"active_slot"`
-	ActivationPresent  bool   `json:"activation_present"`
 	Generation         uint64 `json:"activation_generation"`
 	BundleGeneration   string `json:"bundle_generation"`
 	WorkerSourceCommit string `json:"worker_source_commit"`
@@ -201,7 +200,7 @@ func observeBaselineFronts(ctx context.Context, client kubernetes.Interface, nam
 		}
 		var health baselineFrontHealth
 		if err := readAuthorityBaselineJSON(ctx, "http://"+pod.Status.PodIP+":"+strconv.Itoa(frontReadyPort)+"/readyz", &health); err != nil || health.Status != "ok" ||
-			!health.ActivationPresent || health.Generation < 1 || releaseguardian.AuthoritySlot(health.ActiveSlot).Validate() != nil || health.RouteAuthority != "edge-control" ||
+			health.Generation < 1 || releaseguardian.AuthoritySlot(health.ActiveSlot).Validate() != nil || health.RouteAuthority != "edge-control" ||
 			!exactSourceSHA(health.WorkerSourceCommit) || !exactSHA256Digest(health.WorkerImageDigest) {
 			return nil, errors.New("Front baseline readiness is invalid")
 		}

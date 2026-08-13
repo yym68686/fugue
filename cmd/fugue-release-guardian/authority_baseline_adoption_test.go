@@ -50,7 +50,7 @@ func TestAuthorityBaselineAdoptsExactServingFrontWithoutChangingWorkloads(t *tes
 	readAuthorityBaselineJSON = func(_ context.Context, endpoint string, destination any) error {
 		switch value := destination.(type) {
 		case *baselineFrontHealth:
-			*value = baselineFrontHealth{Status: "ok", ActiveSlot: "b", ActivationPresent: true, Generation: 34,
+			*value = baselineFrontHealth{Status: "ok", ActiveSlot: "b", Generation: 34,
 				BundleGeneration: "routes-serving.p41.r0", WorkerSourceCommit: source, WorkerImageDigest: image, RouteAuthority: "edge-control"}
 		case *baselineWorkerHealth:
 			*value = baselineWorkerHealth{Healthy: true, EdgeGroupID: group, BundleVersion: "routes-serving.p41.r0", PublicationSequence: 41,
